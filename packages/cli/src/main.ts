@@ -1873,6 +1873,19 @@ async function audit(args: string[]): Promise<void> {
 }
 
 /** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
+/**
+ * An Owner's acceptance that audit entries `<from>` to `<to>` are lost for
+ * good: the audit watch's anchor goes on past them, and its finding, with
+ * the acceptance, stays in the log.
+ */
+async function acceptLoss(args: string[]): Promise<void> {
+  const [from, to, ...rest] = args;
+  const entry = (value: string | undefined) => (value !== undefined && /^[0-9]{1,15}$/.test(value) ? Number(value) : null);
+  if (entry(from) === null || entry(to) === null || rest.length > 0) fail('usage: coffre audit accept-loss <from> <to>');
+  const { resumes } = await client().audit.acceptLoss({ from: entry(from)!, to: entry(to)! });
+  process.stdout.write(`entries ${from} to ${to} accepted as lost: the audit watch goes on from entry ${resumes ?? 0}\n`);
+}
+
 async function verify(args: string[]): Promise<void> {
   const [named, ...more] = args;
   if (named === '--help' || named === '-h') {
@@ -2042,6 +2055,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   unfreeze,
   serve: (args) => serve(args, sessionFlags.url),
   audit,
+  'audit accept-loss': acceptLoss,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),
   'verify keys': (args) => verify(['keys', ...args]),

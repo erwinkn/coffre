@@ -5,6 +5,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import type { WatchContext, Watcher } from '../watch.ts';
 import { liveEnvironmentSlugs, wayInStands } from '../db/queries.ts';
 import { can, newestPolicySeq, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
@@ -66,6 +67,12 @@ export type ApiContext = {
   credentialExpiresAt: string | null;
   /** Days a value may go unchanged before it is flagged for rotation (`rotateAfterDays`), or null for no flag. */
   rotateAfterDays: number | null;
+  /**
+   * The deployment's audit watch, if it added one (plugins/audit-watch.ts):
+   * its hooks, and a context for them, in the name of the request's caller
+   * when `asCaller`.
+   */
+  watch?: { hooks: Watcher; context: (asCaller?: boolean) => WatchContext } | null;
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */

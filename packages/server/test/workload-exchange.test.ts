@@ -21,6 +21,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
+import { auditWatch } from '../src/plugins/audit-watch.ts';
 import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
@@ -134,6 +135,7 @@ beforeEach(async () => {
     vault: deps.vault,
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: { perSource: { limit: (o) => limits.perSource.limit(o) }, total: { limit: (o) => limits.total.limit(o) } } } }),
     auditChainKey: deps.chainKey.toString('base64'),
+    plugins: [auditWatch({ anchor: deps.anchor })],
   });
   runtime = createRuntime(config, deps.db, deps.vault, transport);
   for (const [principal, owner] of [[`user:${DEV}`, false], [MEMBER, false]] as const) {

@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 
 import { github, signin, type Principal } from '@coffre/core/identity';
 import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
-import { sql, type SQL } from 'drizzle-orm';
+import { asc, sql, type SQL } from 'drizzle-orm';
 
 import { coffreRoute, respond, runScheduled } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { openTestDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { appendAudit } from '../src/db/audit.ts';
+import { auditLog } from './db/tables.ts';
 
 const ORIGIN = 'https://coffre.test';
 
@@ -167,4 +169,17 @@ test('only a database that cannot be reached is an outage the door lets through;
   assert.equal(isUnreachable(Object.assign(new Error('relation "drizzle.__drizzle_migrations" does not exist'), { code: '42P01' })), false);
   assert.equal(isUnreachable(Object.assign(new Error('permission denied for schema drizzle'), { code: '42501' })), false);
   assert.equal(isUnreachable(new Error('no such table: __drizzle_migrations')), false);
+});
+
+test('without an audit watch, the scheduled run asks the vault to checkpoint and writes no beat, and readiness is the database migrated', async () => {
+  await resetDatabase(db.owner);
+  const runtime = { ...freshRuntime(), schema: { migrated: true } };
+  const written = () => db.owner.select({ action: auditLog.action }).from(auditLog).orderBy(asc(auditLog.seq));
+  await runScheduled(runtime);
+  await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ actorType: 'system', actorId: 'test', action: 'secret.read', decision: 'allow' }]));
+  await runScheduled(runtime);
+  const actions = (await written()).map((row) => row.action);
+  assert.deepEqual([actions.includes('audit.heartbeat'), actions.at(-1)], [false, 'audit.checkpoint']);
+  const ready = await ask(runtime, '/readyz');
+  assert.deepEqual([ready.status, JSON.parse(ready.body)], [200, { ok: true }]);
 });

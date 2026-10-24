@@ -36,12 +36,16 @@
   "durable_objects": {
     "bindings": [
       { "name": "SOCKETS", "class_name": "CoffreSockets" },
-      { "name": "GATES", "class_name": "CoffreGates" }
+      { "name": "GATES", "class_name": "CoffreGates" },
+      // The audit log's anchor, one object for the instance: what the
+      // heartbeat last verified, kept where whoever writes the database cannot.
+      { "name": "ANCHOR", "class_name": "CoffreAnchor" }
     ]
   },
   "migrations": [
     { "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] },
-    { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] }
+    { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] },
+    { "tag": "anchor", "new_sqlite_classes": ["CoffreAnchor"] }
   ],
   // The heartbeat and audit checkpoints.
   "triggers": { "crons": ["*/5 * * * *"] },

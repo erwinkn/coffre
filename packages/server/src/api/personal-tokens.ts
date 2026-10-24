@@ -91,4 +91,5 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /audit': true,
   'GET /audit/verification': false,
   'GET /audit/keys': false,
+  'POST /audit/loss': false,
 };

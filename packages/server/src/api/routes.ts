@@ -6,7 +6,7 @@ import { POLICY_REVISION } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { auditKeys, listAudit, verifyAudit } from './audit.ts';
+import { acceptAuditLoss, auditKeys, listAudit, verifyAudit } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -743,6 +743,11 @@ export const routes = {
   }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.
   ...route('GET /audit/keys', { run: (ctx) => auditKeys(ctx) }),
+  // An Owner accepts that a range of the log is lost for good: the audit watch's anchor goes on past it.
+  ...route('POST /audit/loss', {
+    input: z.object({ from: z.number().int().min(0), to: z.number().int().min(0) }).refine(({ from, to }) => from <= to, 'from comes no later than to'),
+    run: (ctx, { input }) => acceptAuditLoss(ctx, input),
+  }),
 };
 
 export type Routes = typeof routes;

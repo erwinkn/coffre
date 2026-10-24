@@ -837,6 +837,107 @@ for a new nonce at every turn. That fails loudly, never unsafely. The
 gate's counts also start over when the process does, a day's limit
 included.
 
+## The audit watch
+
+coffre's audit log is tamper-evident on its own: every entry hashed into
+one chain and MACed by its author, and the vault's signed checkpoint of it
+every five minutes. Someone who can write the database without the keys
+cannot change it unseen, but without the audit watch nothing looks until
+someone verifies the log (`coffre verify log`, or the audit page from the
+newest checkpoint), and `/readyz` says only that the database is migrated.
+
+The audit watch, a plugin of coffre's own, looks for you: every five
+minutes it writes a heartbeat, walks the log from what it last verified,
+and keeps what it verified outside the database, where whoever writes the
+database cannot reach it: the anchor ([architecture](architecture.md#one-log-two-authors)).
+`/readyz` then turns red on anything it finds, within a beat. `coffre
+init` writes it into both kinds of deployment; remove the line to go
+without.
+
+```ts
+// Workers: app/src/coffre.ts
+import { durableAnchor } from '@coffre/server/cloudflare';
+import { auditWatch } from '@coffre/server/plugins/audit-watch';
+plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) })],
+
+// Node: app/src/coffre.ts
+import { fileAnchor } from '@coffre/server/node';
+plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) })],
+```
+
+On Workers the anchor is a Durable Object, one for the instance, whose
+alarm also walks a backlog between beats. An older deployment adds, in
+`app/wrangler.jsonc`, a binding beside `GATES` and a migration after its
+own:
+
+```jsonc
+"durable_objects": {
+  "bindings": [
+    { "name": "SOCKETS", "class_name": "CoffreSockets" },
+    { "name": "GATES", "class_name": "CoffreGates" },
+    { "name": "ANCHOR", "class_name": "CoffreAnchor" }
+  ]
+},
+"migrations": [
+  { "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] },
+  { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] },
+  { "tag": "anchor", "new_sqlite_classes": ["CoffreAnchor"] }
+],
+```
+
+and, in `app/src/server.ts`:
+
+```ts
+export const CoffreAnchor = coffre.Anchor;
+```
+
+Not Workers KV: a KV read may be a minute stale, and KV has no
+compare-and-set, so two beats could each write over the other's record,
+and an older record put back would go unseen for as long. A Durable
+Object reads its own writes, and runs one request at a time between its
+storage's read and write.
+
+On Node the anchor is a file, written whole and renamed into place, mode
+0600 (`AUDIT_ANCHOR` in the example's `.env`). **Put it on a persistent
+volume** that only the server's user writes. On a disk that goes with the
+container, every restart finds the store empty: the watch walks the log
+whole again and alerts, and a cut made while it was down goes unseen.
+One file suits one server process. Several, coffre on Kubernetes with
+more than one replica included, want a store they share with a
+compare-and-set of its own, any object with `read()` and `write(prev,
+next)` (`AnchorStore`): an S3 object written with `If-Match` on the ETag
+read before (`If-None-Match: *` for the first), a Redis key set by a
+script that compares first, or a row in a small database coffre's own
+logins cannot reach. A store's `write` refuses a record that moves the
+checkpoint or the app's progress back (`admits`), whoever calls it.
+
+**An empty store is re-anchored by itself.** The first beat after the
+watch is added, and the first after its store was lost, find no anchor:
+they walk the log whole, 10,000 entries a beat and, between beats, a
+walk a second (the Durable Object's alarm on Workers, the scheduled job on
+Node), with `/readyz` green meanwhile, since an empty store is no evidence
+of tampering. A clean walk writes the anchor, logs `audit.reanchor` and
+sends one alert on the deployment's alert channel (`signin({ workloads: {
+alert } })`, as a workload's alerts). A walk that finds the log broken
+keeps that as a finding: red, and nothing anchored past it. A cut made
+before the store emptied cannot be seen: the alert says when to look.
+
+**A finding clears by itself once the entry it names verifies again**,
+restored from a backup or after a verifier fix; each finding and each
+clearing is logged. The one case it cannot is entries lost for good, a
+tail cut with no backup: an Owner of the whole instance accepts the loss,
+
+```sh
+coffre audit accept-loss 9400 9411
+```
+
+a range that must hold the entry the finding names. It is logged in their
+name with the finding, which stays in the log, and alerted; the watch goes
+on past the range, and finds tampering anywhere else as before.
+
+If the store cannot be reached, the beat fails and readiness is red, and
+both recover by themselves once it answers: what it holds was not lost.
+
 ## MCP clients
 
 Claude and other MCP clients connect at `<PUBLIC_URL>/mcp` as the people
@@ -961,9 +1062,10 @@ the runbook, for PlanetScale Postgres and plain Postgres, with the checks to
 run before reopening traffic.
 
 Point an external monitor at `/readyz`, so that someone is paged when it
-turns red: it does when the log stops taking writes, the vault stops
-signing checkpoints, a checkpoint finds the log cut or rewritten, or the
-vault finds its key wrong. `/livez` only says the process answers.
+turns red, with the audit watch: it does when the log stops taking
+writes, the vault stops signing checkpoints, a beat finds the log cut or
+rewritten, the vault finds its key wrong, or the anchor cannot be reached
+([The audit watch](#the-audit-watch)). `/livez` only says the process answers.
 
 ## Conformance
 

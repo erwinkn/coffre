@@ -41,6 +41,19 @@
   - On Workers, a refused stream shows in the logs as an uncaught
     exception (workerd reports the subrequest body's error), beside the
     400 the app gets.
+- **The audit watch, a plugin (prototype, W173).** What the heartbeat did
+  is now `auditWatch`, which `coffre init` writes into both kinds of
+  deployment: every five minutes it walks the log from what it last
+  verified, kept outside the database (a Durable Object on Workers,
+  `durableAnchor(env.ANCHOR)`; a file on Node, `fileAnchor`, on a
+  persistent volume), and `/readyz` reads that, a constant cost. An empty
+  store re-anchors itself after a walk of the whole log, logged and
+  alerted; an Owner accepts entries lost for good with `coffre audit
+  accept-loss`. The heartbeat rows' resume cursor, its 1,000-beat lookback
+  and its clearing rule are gone; old `audit.heartbeat` entries verify as
+  any other. Without the plugin, `/readyz` says the database is migrated,
+  and the log is verified only when asked. A deployment adds the binding
+  and the plugin ([deploy.md](docs/deploy.md#the-audit-watch)).
 
 ## 0.12.0 (2026-10-24)
 

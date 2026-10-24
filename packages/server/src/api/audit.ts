@@ -1,9 +1,9 @@
-import { readsWholeLog, runsInstance } from '@coffre/core/access';
+import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
 import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry } from '@coffre/db/log';
 
-import { actorParts, appLogKey, CHAIN_START, CHAIN_WALK, resumePoint, walkChain, type ChainPoint } from '../db/audit.ts';
+import { actorParts, appLogKey, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
 import {
   auditActionCounts,
   auditHashAt,
@@ -356,7 +356,7 @@ export async function auditKeys(ctx: ApiContext): Promise<AuditKeys> {
 /**
  * Check the log from where the last checks left off: the app here, every
  * link and hash and its own entries' MACs, from the newest point both its
- * heartbeats and the vault's checkpoints vouch for, to the head, in one
+ * anchor and the vault's checkpoints vouch for, to the head, in one
  * read-only snapshot so appends made meanwhile cannot look like tampering;
  * then the vault, its own entries by its key over the same entries, every
  * checkpoint among them against the prefix it signed, its key batches
@@ -391,6 +391,12 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
     reason,
   });
 
+  // Where the app last verified to, the audit watch's anchor's, outside the database and read before its
+  // transaction. Without a watch nobody walked the app's MACs since the checkpoints: the check goes on from the
+  // newest, and only the walk from the first entry reads what came before.
+  const watched = query.from === undefined && ctx.watch ? await ctx.watch.hooks.verified(ctx.watch.context()) : undefined;
+  const own: ChainPoint | null =
+    watched === undefined ? null : watched === null ? CHAIN_START : { seq: BigInt(watched.seq), hash: Buffer.from(watched.hash, 'hex') };
   const chain = await ctx.db.transaction(
     async (tx) => {
       const head = await auditHead(tx);
@@ -401,14 +407,14 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
       let to: { entry: bigint; at: ChainPoint; hash: string } | null = null;
       if (query.from === undefined) {
         // From the older of where the app's MACs and the vault's tally were last verified to.
-        const [own, tallied] = await Promise.all([resumePoint(tx, ctx.chainKey), latestTallied(tx)]);
+        const tallied = await latestTallied(tx);
         if (tallied !== null && tallied.checkpoint === null) return failed('vault', tallied.entry, UNREADABLE, tallied.entry - 1n);
         const signed = tallied === null ? CHAIN_START : pointOf(tallied.checkpoint!);
         // The prefix it says it signed still there, or the checkpoint is what is wrong, not the entry it names.
         if (tallied !== null && (await auditHashAt(tx, signed.seq)) !== tallied.checkpoint!.hash) {
           return failed('vault', tallied.entry, `the log up to entry ${signed.seq} is not the prefix this checkpoint signed`, signed.seq - 1n);
         }
-        start = own.seq <= signed.seq ? own : signed;
+        start = own !== null && own.seq <= signed.seq ? own : signed;
         vaultFrom = tallied === null ? 'start' : Number(tallied.entry);
       } else {
         // The checkpoint the stretch before ended at, as it was then, by its entry's hash: what it held to the log
@@ -505,6 +511,26 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
     ...(verified.pending === undefined ? {} : { pending: verified.pending }),
   };
+}
+
+/**
+ * An Owner of the whole instance accepts that entries `from` to `to` are
+ * lost for good (plugins/audit-watch.ts, `acceptLoss`): the finding the
+ * watch's anchor holds, of a tail cut with no backup, say, is inside the
+ * range, and stays in the log; the anchor goes on past it. A person's,
+ * never a token's or a service's.
+ */
+export async function acceptAuditLoss(ctx: ApiContext, range: { from: number; to: number }): Promise<{ resumes: number | null }> {
+  if (ctx.caller.principal.type !== 'user' || !runsInstance(ctx.caller) || !ownsInstance(ctx.caller)) {
+    throw forbidden('only an owner of the whole instance, as a person, may accept the loss of audit entries');
+  }
+  if (!ctx.watch) throw badRequest('this deployment watches no audit log: there is no anchor to move (docs/deploy.md, "The audit watch")');
+  try {
+    return await ctx.watch.hooks.acceptLoss(ctx.watch.context(true), range);
+  } catch (error) {
+    if (error instanceof RangeError) throw badRequest(error.message);
+    throw error;
+  }
 }
 
 /** Why a check stops at a checkpoint whose entry names no prefix: the vault never wrote it so. */

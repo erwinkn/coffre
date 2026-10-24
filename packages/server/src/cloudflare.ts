@@ -11,6 +11,7 @@
  *     vault: env.VAULT,
  *     auth: signin({ providers: [github({ clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET })] }),
  *     auditChainKey: env.APP_KEY,
+ *     plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) })],
  *   }));
  *
  * and the Worker, Start's server entry, which hands Start coffre as each
@@ -41,4 +42,6 @@ export {
   type WorkersConfig,
 } from './cloudflare-handler.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
+/** The audit watch's anchor, its Durable Object: `auditWatch({ anchor: durableAnchor(env.ANCHOR) })`. */
+export { durableAnchor, type AnchorNamespace } from './cloudflare-anchor.ts';
 export * from './index.ts';

@@ -3,11 +3,12 @@
 // OpenID Connect provider, so both provider kinds run without a network.
 //
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
-import { createCoffre, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
+import { createCoffre, durableAnchor, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
-import type { GatesNamespace, RateLimiter, SocketsNamespace, Vault } from '@coffre/server/cloudflare';
+import type { AnchorNamespace, GatesNamespace, RateLimiter, SocketsNamespace, Vault } from '@coffre/server/cloudflare';
 import { credentialProxy, postgres as tunnel } from '@coffre/server/plugins/credential-proxy';
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
+import { auditWatch } from '@coffre/server/plugins/audit-watch';
 
 export type Env = {
   HYPERDRIVE: { connectionString: string };
@@ -29,6 +30,8 @@ export type Env = {
   SOCKETS: SocketsNamespace;
   /** The Durable Object that holds each workload's gate, `CoffreGates` (src/server.ts). */
   GATES: GatesNamespace;
+  /** The Durable Object that keeps the audit log's anchor, `CoffreAnchor` (src/server.ts). */
+  ANCHOR: AnchorNamespace;
 };
 
 // Behind a tunnel, the dev IdP is known by its public URL, as its issuer and in
@@ -96,7 +99,7 @@ export const coffre = createCoffre((env: Env) => {
     // The credential proxy's database tunnel at /use (routes/use.$.ts), its WebSockets in the SOCKETS Durable Object:
     // `coffre run market/dev -- psql "$DATABASE_URL"`. Local databases are plain TCP on loopback, which only
     // insecureUpstreams reaches.
-    plugins: [vaultKv(), credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true })],
+    plugins: [vaultKv(), credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true }), auditWatch({ anchor: durableAnchor(env.ANCHOR) })],
     sockets: env.SOCKETS,
     gates: env.GATES,
   };

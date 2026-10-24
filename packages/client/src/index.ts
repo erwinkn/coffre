@@ -479,6 +479,12 @@ export function createClient(options: ClientOptions) {
       },
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
+      /**
+       * Accept that entries `from` to `to` are lost for good, as an Owner of
+       * the whole instance: the audit watch's finding, inside the range, stays
+       * in the log, and its anchor goes on past them.
+       */
+      acceptLoss: (range: RouteInput<'POST /audit/loss'>) => call('POST /audit/loss', {}, range),
     },
   };
 }

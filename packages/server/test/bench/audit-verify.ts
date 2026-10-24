@@ -15,7 +15,7 @@ import { deriveLogKey } from '@coffre/core/audit';
 import { appendEntries } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../../src/db/audit.ts';
-import { writeAuditHeartbeat } from '../../src/heartbeat.ts';
+import { writeAuditHeartbeat } from '../watch-fixture.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 
 const { values } = parseArgs({
@@ -49,7 +49,7 @@ const started = Date.now();
 for (let written = 0; values.measure !== true && written < target; written += 12) {
   await db.owner.transaction((tx) => appendEntries(tx, vaultKey, Array.from({ length: 6 }, (_, i) => read(written + i))));
   await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [write, write, write, write]));
-  if (!(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet))) throw new Error('a beat failed');
+  if (!(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet))) throw new Error('a beat failed');
   if (written % 12_000 === 0) process.stderr.write(`${written} entries, ${Math.round((Date.now() - started) / 1000)}s\n`);
 }
 
@@ -78,7 +78,7 @@ for (let i = 0; i < runs; i++) {
 const beat: { cpuMs: number; wallMs: number }[] = [];
 for (let i = 0; i < runs; i++) {
   await db.owner.transaction((tx) => appendEntries(tx, vaultKey, Array.from({ length: 6 }, (_, k) => read(k))));
-  const { result, ...took } = await cpu(() => writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, quiet));
+  const { result, ...took } = await cpu(() => writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet));
   if (result !== true) throw new Error('a beat failed');
   beat.push(took);
 }

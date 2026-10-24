@@ -6,7 +6,7 @@ import { assignableToEnvironment, ROLES } from '@coffre/core/access';
 import { and, asc, eq } from 'drizzle-orm';
 
 import { members } from '../src/db/queries.ts';
-import { writeAuditHeartbeat } from '../src/heartbeat.ts';
+import { writeAuditHeartbeat } from './watch-fixture.ts';
 import { auditLog, vaultMembers } from './db/tables.ts';
 import {
   clientFor,
@@ -71,7 +71,7 @@ test('an auditor reads audit data without being able to read secrets', async () 
 
 test('a page says what it hides, as far as its reader may see', async () => {
   await root.access.set(AUDITOR, { market: 'auditor' });
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, { warn: () => assert.fail('the heartbeat warned') }), true);
+  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, { warn: () => assert.fail('the heartbeat warned') }), true);
   // The write's key.wrap is in market; the heartbeat and its checkpoint are in no place, so owners' alone.
   assert.deepEqual((await auditor.audit.list()).hidden, [{ action: 'key.wrap', count: 1 }]);
   assert.deepEqual((await root.audit.list()).hidden, [

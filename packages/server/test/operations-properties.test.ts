@@ -8,7 +8,7 @@ import { defineSignin, github } from '@coffre/core/identity';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, openTestDatabase, resetDatabase, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -71,7 +71,7 @@ async function scenario(operations: readonly Operation[]) {
   await resetDatabase(database.owner);
   // Fake deployment keys are fixed so randomness cannot change any verdict.
   const vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 17) });
-  const deps: FixtureDeps = { db: database.runtime, vault, chainKey: Buffer.alloc(32, 23) };
+  const deps: FixtureDeps = { db: database.runtime, vault, chainKey: Buffer.alloc(32, 23), anchor: testAnchor() };
   const signinConfig = defineSignin({ publicUrl: 'https://coffre.test', providers: [github({ clientId: 'property', clientSecret: 'property' })] });
   const signin = new SigninService({ ...deps, signin: signinConfig });
   deps.signin = signin;

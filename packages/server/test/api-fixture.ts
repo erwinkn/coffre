@@ -7,6 +7,9 @@ import { tablesOf, type Database } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
+import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
+import { auditWatch } from '../src/plugins/audit-watch.ts';
+import { watchContext, watcherOf } from '../src/watch.ts';
 import { loadCaller, type Caller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
@@ -20,6 +23,8 @@ export type FixtureDeps = {
   db: Database;
   vault: TestVault;
   chainKey: Buffer;
+  /** The audit anchor, in memory: `resetDatabase` forgets it with the log. */
+  anchor: AnchorStore;
   waitUntil?: ApiContext['waitUntil'];
   signin?: SigninService;
   workloads?: WorkloadService;
@@ -161,6 +166,11 @@ export async function contextFor(
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
+    // The audit watch over the deps' anchor, as a deployment that added it has.
+    watch: {
+      hooks: watcherOf(auditWatch({ anchor: deps.anchor }))!,
+      context: (asCaller) => watchContext({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, actor: asCaller ? { actorType: type, actorId: id } : undefined }),
+    },
     waitUntil: (promise) => {
       // A custom observer must not bypass the fixture's lifetime tracking.
       if (deps.waitUntil) {
@@ -214,12 +224,22 @@ export function clientFor(
 
 export { openTestDatabase } from './db/engine.ts';
 
+const anchors: (() => void)[] = [];
+
+/** An audit anchor in memory that `resetDatabase` forgets, as it empties the log it anchors. */
+export function testAnchor(): AnchorStore {
+  let store = memoryAnchor();
+  anchors.push(() => (store = memoryAnchor()));
+  return { read: () => store.read(), write: (prev, next) => store.write(prev, next) };
+}
+
 /** Deps for a fresh instance with these Owners (`testVault`), over the restricted role. */
 export function testDeps(db: Database, owners: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {
   return {
     db,
     vault: testVault(owners),
     chainKey: randomBytes(32),
+    anchor: testAnchor(),
     ...extra,
   };
 }
@@ -232,6 +252,7 @@ export function testDeps(db: Database, owners: readonly string[], extra: Partial
 export async function resetDatabase(owner: Database): Promise<void> {
   await drainBackgroundTasks();
   for (const vault of vaults) await vault.reset();
+  for (const reset of anchors) reset();
   const {
     credentials,
     deviceAuthorizations,

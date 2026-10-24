@@ -18,6 +18,25 @@ import { claimAlert } from './db/workloads.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
+/**
+ * The audit's own alerts, on a workload's alerts' channel: the deployment's
+ * `alert` (`signin({ workloads: { alert } })`), after the response. The
+ * entry in the log is the caller's own, `audit.reanchor` or
+ * `audit.loss_accepted`. Never throws.
+ */
+export function auditAlerter(runtime: Pick<CoffreRuntime, 'auth' | 'waitUntil'>): (text: string) => void {
+  const deliver = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads?.alert ?? null : null;
+  return (text) => {
+    if (deliver === null) return;
+    const alert: WorkloadAlert = { kind: 'audit', service: 'system:coffre-scheduler', binding: null, session: null, ip: null, text };
+    runtime.waitUntil(
+      Promise.resolve()
+        .then(() => deliver(alert))
+        .then(() => undefined, (error: unknown) => console.error(`delivering an audit alert failed: ${text}`, logged(error))),
+    );
+  };
+}
+
 /** How often a service's `unknown_key` alerts at most, whatever key its tokens name: anyone may send one. */
 export const UNKNOWN_KEY_ALERT_MS = 60 * 60 * 1000;
 

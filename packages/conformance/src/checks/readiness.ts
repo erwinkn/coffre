@@ -1,5 +1,6 @@
-// Readiness needs both halves of the Cron's work: a recent heartbeat, and a
-// checkpoint the vault signed over it. Either missing turns /readyz red.
+// Readiness needs both halves of the Cron's work: a recent anchor, and in it
+// a checkpoint the vault signed over the beat, which the app verified to.
+// Either missing turns /readyz red.
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, until } from '../report.ts';
@@ -35,13 +36,16 @@ export async function missingCheckpoint(deployment: Deployment): Promise<string>
     expect(rows.length > 0, 'no checkpoints to remove');
     await sql.exec("DELETE FROM audit_log WHERE action = 'audit.checkpoint'");
     try {
+      // Readiness vouches for the prefix the anchor holds, which the deletions leave: the next beat finds them gone.
+      await deployment.scheduled({ allowFailure: true });
       await red(deployment);
     } finally {
       for (const row of rows) await insertRow(sql, 'audit_log', row);
     }
   }));
+  await deployment.scheduled();
   await until('readiness recovered', async () => (await fetch(`${deployment.origin}/readyz`)).ok, 20);
-  return 'a recent heartbeat without a checkpoint is red; restoring the checkpoint recovers';
+  return 'checkpoints deleted: the next beat finds them gone and readiness is red; restored, the next beat recovers';
 }
 
 /** A hole before the latest signed prefix must stop the next scheduled checkpoint. */

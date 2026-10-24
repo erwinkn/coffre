@@ -1,16 +1,17 @@
 -------------------------------- MODULE Audit --------------------------------
 (***************************************************************************)
 (* The audit chain's verification: heartbeats that walk it, checkpoints    *)
-(* the vault signs over it, and readiness, which says whether both hold,   *)
-(* against someone who can write the database but holds no key: they edit  *)
-(* an entry in place, or rewrite one and chain everything after it again.  *)
-(* docs/formal.md says what this covers, what it abstracts and what it     *)
-(* does not prove.                                                         *)
+(* the vault signs over it, the anchor that keeps what the beats verified  *)
+(* outside the database, and readiness, which reads the anchor, against    *)
+(* someone who can write the database but holds no key and cannot reach    *)
+(* the anchor: they edit an entry in place, or rewrite one and chain       *)
+(* everything after it again. docs/formal.md says what this covers, what   *)
+(* it abstracts and what it does not prove.                                *)
 (*                                                                         *)
 (* Each walk runs in a snapshot of its own (REPEATABLE READ, read only:     *)
 (* db dialect.ts, SNAPSHOT), so it is one step here, reading the log as    *)
 (* that step finds it. Appends take the log's head; the vault's checkpoint *)
-(* decides under it.                                                       *)
+(* decides under it. The anchor's store is one compare-and-set a step.     *)
 (*                                                                         *)
 (* An entry's hash is abstracted to the chain's version where it is: a     *)
 (* rewrite from an entry moves every entry from there on to a new version, *)
@@ -18,18 +19,14 @@
 (* binds its content and the hash before it: one rewritten, or after one,  *)
 (* fails it, unless it was appended after the rewrite. An edit in place    *)
 (* changes the content and leaves the stored hash: only recomputing the    *)
-(* hash finds it.                                                          *)
-(*                                                                         *)
-(* A heartbeat row is the heartbeat's memory, and they can write it too:   *)
-(* hide it (change it so no read of beats finds it), forge it (make it     *)
-(* claim a clean walk to the head), and put it back, at any step, as often *)
-(* as their budget allows. Either change leaves the row's stored hash, so  *)
-(* a walk over it finds it, as it finds any edit in place.                 *)
+(* hash finds it. A heartbeat row is an entry like any other: nothing      *)
+(* reads what it says, so editing it is an edit like any other.            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
     InitLog,        \* the log at the start
+    InitAnchor,     \* the anchor at the start
     Procs,          \* concurrent processes
     Ops,            \* Ops[p]: what p may do
     Budget,         \* Budget[p]: how many times
@@ -56,34 +53,16 @@ CONSTANTS
     \* The scrub recomputes each hash of the prefixes signed before, a
     \* stretch a call (vault.ts, #scrub, relink).
     Scrubs,
-    \* Readiness reads the newest heartbeat and the newest checkpoint in one
-    \* snapshot (server db/queries.ts, readiness).
-    ReadinessInOneSnapshot,
-    \* A beat reads where to resume in the snapshot it walks in (server
-    \* heartbeat.ts, writeAuditHeartbeat): every beat row past that point is
-    \* one the walk reads, so one hidden or forged there is a fault it finds.
-    OneSnapshot,
-    \* Where to resume is read only from a beat whose MAC verifies, which
-    \* covers what it says it verified, and only a point before its own row
-    \* (db audit.ts, resumePoint).
-    CursorByMac,
-    \* And no further than where the walk of any beat after that point began,
-    \* if it found the chain broken: a beat that walked the chain as it was
-    \* before, and committed after the finder, never moves past its finding
-    \* (resumePoint).
-    NoResumePastFinding,
-    \* Readiness runs the next beat's walk, from where it would resume to
-    \* the head, in its snapshot (server heartbeat.ts, auditReadiness).
-    ReadinessWalks,
-    \* A broken beat past the point lowers it no more once a clean beat
-    \* cleared it (resumePoint, `clears`): without it, a finder whose row
-    \* lies more than a walk past where its walk began brings every walk
-    \* back there, once the entry is put back, and none gets past it.
-    Clears,
-    \* Cleared only by a walk that went over the entry found, from before
-    \* it, in a snapshot that held the finder (`head`); without it, by any
-    \* clean beat whose snapshot held the finder, as #296's review proposed.
-    ClearsOverFault
+    \* A beat's walk checks first that the log still holds the prefix the
+    \* anchor's checkpoint signed, and that the vault signed no shorter one
+    \* (server heartbeat.ts, walkToCheckpoint).
+    AnchorHeld,
+    \* Readiness checks that the log still holds the prefix the anchor's
+    \* checkpoint signed (server heartbeat.ts, auditReadiness, `holds`).
+    ReadinessChecksHeld,
+    \* A beat writes the anchor only over the record it read before its
+    \* checkpoint (anchor.ts, AnchorStore.write, `admits`).
+    AnchorCas
 
 None == "none"
 AppKinds == {"app", "beat"}
@@ -92,20 +71,19 @@ VaultKinds == {"vault", "ckpt", "deny"}
 VARIABLES
     log,            \* the entries, in seq order
     head,           \* the process holding the log's head, or None
-    tampered,       \* what was done to the log, once: [kind, at], kind "none" before
+    tampered,       \* what was done to the log, last: [kind, at, n]
+    anchor,         \* the anchor, outside the database (anchor.ts)
     pc, op, l, left,
-    history         \* [signedBad, greens]: what the invariants read
+    history         \* what the invariants read
 
 procs == <<pc, op, l, left>>
-vars == <<log, head, tampered, procs, history>>
+vars == <<log, head, tampered, anchor, procs, history>>
 
 -----------------------------------------------------------------------------
 (* The chain *)
 
-E(kind) == [kind |-> kind, wver |-> 0, ver |-> 0, forged |-> FALSE, edited |-> 0, fEdit |-> 0,
-            verified |-> 0, vver |-> 0, broken |-> FALSE, short |-> FALSE, walked |-> FALSE,
-            at |-> 0, atVer |-> 0, lap |-> 0, lapEnd |-> 0, lapVer |-> 0, fault |-> 0,
-            hidden |-> FALSE, claims |-> 0, claimsVer |-> 0, bfrom |-> 0, bfromVer |-> 0, head |-> 0, calm |-> FALSE]
+E(kind) == [kind |-> kind, wver |-> 0, ver |-> 0, forged |-> FALSE, edited |-> 0,
+            at |-> 0, atVer |-> 0, lap |-> 0, lapEnd |-> 0, lapVer |-> 0]
 
 Ver == IF log = <<>> THEN 0 ELSE log[Len(log)].ver
 
@@ -142,85 +120,55 @@ Carries(seq, ver) == seq = 0 \/ (seq <= Len(log) /\ log[seq].ver = ver)
 VaultWalkOk(a, b) == \A i \in Seqs(a, b) : HashOk(i) /\ (CheckpointChecksVault /\ log[i].kind \in VaultKinds => MacOk(i))
 
 \* The app's: the same, each app entry's MAC and not the vault's.
-AppWalkOk(a, b) == \A i \in Seqs(a, b) : HashOk(i) /\ (WalkChecksAppMacs /\ log[i].kind \in AppKinds => MacOk(i))
+AppFault(i) == ~HashOk(i) \/ (WalkChecksAppMacs /\ log[i].kind \in AppKinds /\ ~MacOk(i))
 
------------------------------------------------------------------------------
-(* Heartbeats, as a read of them finds them *)
-
-\* A row a read of beats finds: one hidden is not.
-IsBeat(i) == log[i].kind = "beat" /\ ~log[i].hidden
-
-NewestBeat == LET s == {i \in 1..Len(log) : IsBeat(i)} IN IF s = {} THEN 0 ELSE CHOOSE i \in s : \A j \in s : j <= i
-
-\* What a beat says, as its row says it now: one forged claims a clean
-\* walk to where the log was then.
-Forged(i) == log[i].edited # 0 /\ log[i].claims > 0
-SaysBroken(i) == log[i].broken /\ ~Forged(i)
-Point(i) == IF Forged(i) THEN [at |-> log[i].claims, ver |-> log[i].claimsVer] ELSE [at |-> log[i].verified, ver |-> log[i].vver]
-
-First == [at |-> 0, ver |-> 0]
-
-\* Where a beat resumes (db audit.ts, resumePoint): what the newest beat
-\* that is the app's says it verified, a broken one where its walk began;
-\* and no further than where the walk of any broken one after that began.
-\* A beat before the newest is not read again: the newest walked past it,
-\* or began where a broken one did.
-\* Beat b cleared what beat j found: a clean walk, in a snapshot that held
-\* j's row, over the entry j found, from before it; or, j having found the
-\* entry its walk began from changed, from there, its hash found again.
-ClearedBy(b, j) ==
-    /\ ~log[b].broken /\ log[b].head >= j
-    /\ ClearsOverFault =>
-         IF log[j].fault = log[j].verified
-           THEN log[b].bfrom = log[j].verified /\ log[b].bfromVer = log[j].vver
-           ELSE log[b].bfrom < log[j].fault /\ log[j].fault <= log[b].verified
-
-\* No entry edited in place: the model's, for `Repair`'s progress, which
-\* marks a beat that walked so (`calm`).
+\* No entry edited in place: the model's, for `RepairGoesGreen`.
 Calm == \A i \in 1..Len(log) : log[i].edited = 0
 
-Own == {i \in 1..Len(log) : IsBeat(i) /\ (CursorByMac => MacOk(i) /\ Point(i).at < i)}
+-----------------------------------------------------------------------------
+(* The anchor (anchor.ts): the newest checkpoint a beat saw, where its      *)
+(* prefix ends and its hash (`at`, `ver`); how far the app verified         *)
+(* (`verified`, `vver`); the entry a walk found (`found`, 0 for none); a    *)
+(* vault that refused (`vfound`); the beat that wrote it; and the record's  *)
+(* revision, which the compare-and-set compares.                            *)
 
-\* The newest beat that is the app's, 0 for none.
-NewestOwn == IF Own = {} THEN 0 ELSE CHOOSE i \in Own : \A j \in Own : j <= i
+NoAnchor == [exists |-> FALSE, rev |-> 0, at |-> 0, ver |-> 0, verified |-> 0, vver |-> 0, found |-> 0, vfound |-> FALSE, beat |-> 0]
 
-Resume ==
-    LET own == Own
-        b == NewestOwn
-        c == IF b = 0 THEN First ELSE Point(b)
-        finders == IF NoResumePastFinding THEN {j \in own : j > c.at /\ SaysBroken(j) /\ ~(Clears /\ \E k \in own : ClearedBy(k, j))} ELSE {}
-        lowest == {Point(j) : j \in finders} \cup {c}
-    IN CHOOSE r \in lowest : \A q \in lowest : r.at <= q.at
+\* What readiness answers (server heartbeat.ts, auditReadiness): an anchor,
+\* no finding, caught up to its checkpoint, which covers the beat that
+\* wrote it, and whose prefix the log still holds. Its age, the
+\* signature and the key are left out.
+ReadyWith(a) ==
+    /\ a.exists /\ a.at > 0
+    /\ a.found = 0 /\ ~a.vfound
+    /\ a.verified = a.at /\ a.vver = a.ver
+    /\ a.at >= a.beat
+    /\ ReadinessChecksHeld => Carries(a.at, a.ver)
+ReadyNow == ReadyWith(anchor)
 
-\* A walk from a point, as a heartbeat's (db audit.ts, walkChain): at most
-\* Walk entries, each link and hash, and the app's MACs; where it got to,
-\* and the first fault.
-WalkFrom(r) ==
-    LET to == IF Len(log) - r.at > Walk THEN r.at + Walk ELSE Len(log)
-        ok == (WalkChecksFrom => Carries(r.at, r.ver)) /\ AppWalkOk(r.at, to)
-        faults == {i \in Seqs(r.at, to) : ~HashOk(i) \/ (WalkChecksAppMacs /\ log[i].kind \in AppKinds /\ ~MacOk(i))}
+\* The entry a finding names verifies again, alone (heartbeat.ts, `repaired`):
+\* a point the anchor holds by its hash, any other by its own.
+Repaired(a) ==
+    IF a.found = a.verified THEN Carries(a.verified, a.vver)
+    ELSE IF a.found = a.at THEN Carries(a.at, a.ver)
+    ELSE a.found <= Len(log) /\ ~AppFault(a.found)
+
+\* The app's walk from a point toward the prefix ending at c, at most Walk
+\* entries (walkChain, `to`): where it got to, and the first fault.
+WalkTo(r, c) ==
+    LET to == IF c - r.at > Walk THEN r.at + Walk ELSE c
+        faults == {i \in Seqs(r.at, to) : AppFault(i)}
         fault == IF WalkChecksFrom /\ ~Carries(r.at, r.ver) THEN r.at
                  ELSE IF faults = {} THEN 0 ELSE CHOOSE i \in faults : \A j \in faults : i <= j
-    IN [ok |-> ok, to |-> to, done |-> to = Len(log), fault |-> fault]
-
-\* Readiness as the rows say now (server heartbeat.ts, auditReadiness):
-\* the newest beat the app's, saying the chain verified, and a checkpoint
-\* after it; and the next beat's walk, run now, finds nothing and reaches
-\* the head. A heartbeat's age is left out.
-ReadyWith(b, c) ==
-    /\ b > 0 /\ c > 0
-    /\ MacOk(b) /\ ~log[b].broken /\ ~log[b].short
-    /\ log[c].at >= b
-DryRunOk == ReadinessWalks => LET w == WalkFrom(Resume) IN w.ok /\ w.done
-ReadyNow == ReadyWith(NewestBeat, Signed) /\ DryRunOk
+    IN [ok |-> fault = 0 /\ r.at <= c, to |-> to, done |-> to = c, fault |-> fault]
 
 -----------------------------------------------------------------------------
 (* Processes *)
 
 NoOp == [kind |-> "none", at |-> 0]
-L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0, bhead |-> 0, calm |-> FALSE,
-       sfrom |-> 0, slap |-> 0, slapEnd |-> 0, slapVer |-> 0, sok |-> TRUE, beat |-> 0, ready |-> FALSE,
-       done |-> TRUE, after |-> FALSE, fault |-> 0, fEdit |-> 0]
+L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0,
+       sfrom |-> 0, slap |-> 0, slapEnd |-> 0, slapVer |-> 0, sok |-> TRUE, done |-> TRUE,
+       beat |-> 0, prev |-> NoAnchor, next |-> NoAnchor, signed |-> FALSE, c |-> 0, cVer |-> 0, read |-> NoAnchor, fEdit |-> 0]
 
 Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 
@@ -234,22 +182,22 @@ Begin(p) ==
          /\ l' = [l EXCEPT ![p] = L0]
          /\ Goto(p, CASE o.kind = "app" -> "append.head"
                       [] o.kind = "vault" -> "append.head"
-                      [] o.kind \in {"beat", "beatonly"} -> "beat.attest"
-                      [] o.kind = "probe" -> "probe.beat"
-                      [] o.kind \in {"rewrite", "edit", "hide", "forge", "revert"} -> "tamper")
+                      [] o.kind = "beat" -> "beat.head"
+                      [] o.kind = "probe" -> "probe.anchor"
+                      [] o.kind \in {"rewrite", "edit", "revert"} -> "tamper")
     /\ left' = [left EXCEPT ![p] = @ - 1]
-    /\ UNCHANGED <<log, head, tampered, history>>
+    /\ UNCHANGED <<log, head, tampered, anchor, history>>
 
 TakeHead(p, then) ==
     /\ head \in {None, p}
     /\ head' = p
     /\ Goto(p, then)
-    /\ UNCHANGED <<log, tampered, op, l, left, history>>
+    /\ UNCHANGED <<log, tampered, anchor, op, l, left, history>>
 
 Read(p, then, locals) ==
     /\ Goto(p, then)
     /\ l' = [l EXCEPT ![p] = locals]
-    /\ UNCHANGED <<log, head, tampered, op, left, history>>
+    /\ UNCHANGED <<log, head, tampered, anchor, op, left, history>>
 
 -----------------------------------------------------------------------------
 (* Requests append the app's entries and the vault's, under the head. *)
@@ -261,85 +209,95 @@ AppendCommit(p) ==
     /\ IF Len(log) < MaxLen THEN Add(E(op[p].kind)) ELSE UNCHANGED log
     /\ head' = None
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<tampered, op, l, left, history>>
+    /\ UNCHANGED <<tampered, anchor, op, l, left, history>>
 
 -----------------------------------------------------------------------------
-(* Someone who writes the database: an entry edited in place, a heartbeat
-   row hidden or forged, and put back, as often as they like; or once, one
-   rewritten and the chain after it, and the head row, hashed again. *)
+(* Someone who writes the database: an entry edited in place, any entry, a
+   heartbeat row among them, and put back, as often as they like; or once,
+   one rewritten and the chain after it, and the head row, hashed again.
+   The anchor is out of their reach. *)
 
 Tamper(p) ==
     /\ pc[p] = "tamper"
-    /\ (op[p].kind = "rewrite" => tampered.kind = "none")
-    /\ LET targets == {i \in (IF op[p].at = 0 THEN 1..Len(log) ELSE {op[p].at}) :
-                          i <= Len(log) /\ (op[p].kind \in {"hide", "forge"} => log[i].kind = "beat")}
+    /\ (op[p].kind = "rewrite" => tampered.kind # "rewrite")
+    /\ LET targets == {i \in (IF op[p].at = 0 THEN 1..Len(log) ELSE {op[p].at}) : i <= Len(log)}
        IN \/ targets = {} /\ UNCHANGED <<log, tampered>>
           \/ \E i \in targets :
                 /\ CASE op[p].kind = "edit" -> log' = [log EXCEPT ![i].edited = tampered.n + 1]
-                     [] op[p].kind = "hide" -> log' = [log EXCEPT ![i].edited = tampered.n + 1, ![i].hidden = TRUE]
-                     [] op[p].kind = "forge" -> log' = [log EXCEPT ![i].edited = tampered.n + 1, ![i].claims = Len(log), ![i].claimsVer = Ver]
-                     [] op[p].kind = "revert" -> log' = [log EXCEPT ![i].edited = 0, ![i].hidden = FALSE, ![i].claims = 0]
+                     [] op[p].kind = "revert" -> log' = [log EXCEPT ![i].edited = 0]
                      [] OTHER -> log' = [j \in 1..Len(log) |-> IF j < i THEN log[j]
                                                         ELSE [log[j] EXCEPT !.ver = @ + 1, !.forged = (j = i) \/ @]]
-                /\ tampered' = IF op[p].kind = "revert" THEN tampered ELSE [kind |-> IF op[p].kind = "rewrite" THEN "rewrite" ELSE "edit", at |-> i, n |-> tampered.n + 1]
+                /\ tampered' = IF op[p].kind = "revert" THEN tampered ELSE [kind |-> op[p].kind, at |-> i, n |-> tampered.n + 1]
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<head, op, l, left, history>>
+    /\ UNCHANGED <<head, anchor, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* A heartbeat (server heartbeat.ts, writeAuditHeartbeat): where the app   *)
-(* verified the chain to, the walk from there, the beat, then the vault's  *)
-(* checkpoint.                                                             *)
+(* A heartbeat (server heartbeat.ts, writeAuditHeartbeat): the beat, the   *)
+(* anchor read, the vault's checkpoint, the walk from the anchor to the    *)
+(* prefix it signed, then the anchor written over the record it read.      *)
 (***************************************************************************)
-
-\* Where to resume, and the walk from there, in one snapshot; or, without
-\* it, where to resume in one and the walk in the next.
-BeatAttest(p) ==
-    /\ pc[p] = "beat.attest"
-    /\ LET r == Resume
-           w == WalkFrom(r)
-       IN IF OneSnapshot
-            THEN Read(p, "beat.head", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver, !.ok = w.ok, !.fault = w.fault,
-                                                    !.bhead = IF w.ok /\ w.to > NewestOwn THEN w.to ELSE NewestOwn, !.calm = Calm,
-                                                    !.fEdit = IF w.fault = 0 THEN 0 ELSE log[w.fault].edited,
-                                                    !.to = w.to, !.toVer = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.done = w.done,
-                                                    !.after = tampered.kind = "rewrite"])
-            ELSE Read(p, "beat.walk", [l[p] EXCEPT !.from = r.at, !.fromVer = r.ver, !.bhead = NewestOwn])
-
-BeatWalk(p) ==
-    /\ pc[p] = "beat.walk"
-    /\ LET w == WalkFrom([at |-> l[p].from, ver |-> l[p].fromVer])
-       IN Read(p, "beat.head", [l[p] EXCEPT !.ok = w.ok, !.fault = w.fault, !.fEdit = IF w.fault = 0 THEN 0 ELSE log[w.fault].edited,
-                                             !.bhead = IF w.ok /\ w.to > l[p].bhead THEN w.to ELSE l[p].bhead, !.calm = Calm,
-                                             !.to = w.to, !.toVer = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.done = w.done,
-                                             !.after = tampered.kind = "rewrite"])
 
 BeatHead(p) == pc[p] = "beat.head" /\ TakeHead(p, "beat.commit")
 
-\* The beat: how far it verified, or, if the walk found the chain broken,
-\* where it began and what it found; or that it stopped short of the head
-\* (`unverified`). Readiness reads either as red. Whether a rewrite came
-\* before its walk is the model's, for the invariants, and so is what it
-\* found (`found`). A beat whose checkpoint is left out ("beatonly") keeps
-\* the scenarios small.
 BeatCommit(p) ==
     /\ pc[p] = "beat.commit"
     /\ Len(log) < MaxLen
-    /\ Add([E("beat") EXCEPT !.verified = IF l[p].ok THEN l[p].to ELSE l[p].from,
-                             !.vver = IF l[p].ok THEN l[p].toVer ELSE l[p].fromVer,
-                             !.fault = IF l[p].ok THEN 0 ELSE l[p].fault, !.fEdit = IF l[p].ok THEN 0 ELSE l[p].fEdit,
-                             !.broken = ~l[p].ok, !.short = l[p].ok /\ ~l[p].done, !.walked = l[p].after,
-                             !.bfrom = l[p].from, !.bfromVer = l[p].fromVer, !.head = l[p].bhead, !.calm = l[p].calm])
-    /\ history' = [history EXCEPT !.found = @ \cup (IF ~l[p].ok /\ l[p].fEdit # 0 THEN {<<l[p].fault, l[p].fEdit>>} ELSE {})]
+    /\ Add(E("beat"))
+    /\ l' = [l EXCEPT ![p].beat = Len(log) + 1]
     /\ head' = None
-    /\ Goto(p, IF op[p].kind = "beatonly" THEN "idle" ELSE "ckpt.snapshot")
-    /\ UNCHANGED <<tampered, op, l, left>>
+    /\ Goto(p, "beat.read")
+    /\ UNCHANGED <<tampered, anchor, op, left, history>>
+
+\* Before the vault signs: a beat beside it that anchors a later checkpoint
+\* first wins the compare-and-set.
+BeatRead(p) == pc[p] = "beat.read" /\ Read(p, "ckpt.snapshot", [l[p] EXCEPT !.prev = anchor])
+
+\* In one snapshot: the anchor's prefix still there, then the walk from
+\* where the app verified to, toward the prefix the vault just signed. A
+\* finding stands until its entry verifies again; a refusal, until the
+\* vault signs.
+BeatWalk(p) ==
+    /\ pc[p] = "beat.walk"
+    /\ LET a == l[p].prev
+           c == l[p].c
+           held == ~AnchorHeld \/ (Carries(a.at, a.ver) /\ c >= a.at)
+           w == WalkTo([at |-> a.verified, ver |-> a.vver], c)
+           \* The vault signed the hash the app computes there.
+           ends == ~w.done \/ Carries(c, l[p].cVer)
+           Found(e) == [a EXCEPT !.found = e, !.vfound = FALSE]
+           next == CASE ~l[p].signed -> IF a.found > 0 THEN a ELSE [a EXCEPT !.vfound = TRUE]
+                     [] a.found > 0 /\ ~Repaired(a) -> a
+                     [] ~held -> Found(a.at)
+                     [] ~w.ok -> Found(w.fault)
+                     [] ~ends -> Found(c)
+                     [] OTHER -> [a EXCEPT !.exists = TRUE, !.at = c, !.ver = l[p].cVer, !.verified = w.to,
+                                           !.vver = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.found = 0, !.vfound = FALSE]
+       IN /\ l' = [l EXCEPT ![p].next = [next EXCEPT !.beat = l[p].beat],
+                             ![p].fEdit = IF next.found > 0 /\ next.found <= Len(log) THEN log[next.found].edited ELSE 0]
+          /\ history' = [history EXCEPT !.calmWalks = IF Calm THEN @ + 1 ELSE 0]
+    /\ Goto(p, "beat.cas")
+    /\ UNCHANGED <<log, head, tampered, anchor, op, left>>
+
+\* The store: the new record only over the one the beat read, unless the
+\* write is blind. One that moves a point back is the model's to see.
+BeatCas(p) ==
+    /\ pc[p] = "beat.cas"
+    /\ LET next == [l[p].next EXCEPT !.rev = anchor.rev + 1]
+       IN IF ~AnchorCas \/ anchor.rev = l[p].prev.rev
+            THEN /\ anchor' = next
+                 \* What it found, once it is the anchor's: the edit, as it was then.
+                 /\ history' = [history EXCEPT !.back = @ \/ (anchor.exists /\ (next.at < anchor.at \/ next.verified < anchor.verified)),
+                                               !.found = @ \cup (IF l[p].fEdit # 0 THEN {<<next.found, l[p].fEdit>>} ELSE {})]
+            ELSE UNCHANGED <<anchor, history>>
+    /\ Goto(p, "idle")
+    /\ UNCHANGED <<log, head, tampered, op, l, left>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* A checkpoint (vault vault.ts, checkpoint): a walk from the newest one in *)
 (* a snapshot, a stretch of the scrub in another, then, under the head,    *)
-(* the rest and the signature.                                             *)
+(* the rest and the signature. What it returns, the beat walks to.         *)
 (***************************************************************************)
 
 \* The newest checkpoint entry, signed or refused, the newest signed one,
@@ -369,6 +327,10 @@ CkptScrub(p) ==
 
 CkptHead(p) == pc[p] = "ckpt.head" /\ TakeHead(p, "ckpt.commit")
 
+\* After the checkpoint, a beat walks: to the prefix it signed, or the newest one.
+After(p) == IF op[p].kind = "beat" THEN "beat.walk" ELSE "idle"
+Returned(p, s) == [l[p] EXCEPT !.signed = s > 0, !.c = IF s = 0 THEN 0 ELSE log[s].at, !.cVer = IF s = 0 THEN 0 ELSE log[s].atVer]
+
 \* Under the head. A refusal rolls back, and its entry commits in a
 \* transaction of its own (`ckpt.deny`).
 CkptCommit(p) ==
@@ -383,8 +345,10 @@ CkptCommit(p) ==
            sign == [E("ckpt") EXCEPT !.at = at, !.atVer = log[at].ver, !.lap = l[p].sfrom,
                                      !.lapEnd = IF l[p].sfrom = 0 THEN 0 ELSE l[p].slapEnd,
                                      !.lapVer = IF l[p].sfrom = 0 THEN 0 ELSE l[p].slapVer]
-           Idle == /\ head' = None /\ Goto(p, "idle") /\ UNCHANGED <<log, tampered, op, l, left, history>>
-           Deny == /\ head' = None /\ Goto(p, "ckpt.deny") /\ UNCHANGED <<log, tampered, op, l, left, history>>
+           \* Returns the newest checkpoint, signed by another call or before.
+           Idle == /\ head' = None /\ Goto(p, After(p)) /\ l' = [l EXCEPT ![p] = Returned(p, s)]
+                   /\ UNCHANGED <<log, tampered, anchor, op, left, history>>
+           Deny == /\ head' = None /\ Goto(p, "ckpt.deny") /\ UNCHANGED <<log, tampered, anchor, op, l, left, history>>
        IN CASE ~l[p].ok \/ ~l[p].sok -> Deny
             [] SeenRecheckUnderHead /\ newest # l[p].seen -> IF standing THEN Deny ELSE Idle
             \* Nothing since the newest, which signed all before its own.
@@ -399,8 +363,9 @@ CkptCommit(p) ==
                                                       !.signedAfterDeny = @ \/ (Newest({"deny"}) > 0 /\ VaultSees),
                                                       !.signedAfterEdit = @ + (IF tampered.kind = "edit" THEN 1 ELSE 0)]
                         /\ head' = None
-                        /\ Goto(p, "idle")
-                        /\ UNCHANGED <<tampered, op, l, left>>
+                        /\ Goto(p, After(p))
+                        /\ l' = [l EXCEPT ![p].signed = TRUE, ![p].c = at, ![p].cVer = log[at].ver]
+                        /\ UNCHANGED <<tampered, anchor, op, left>>
 
 \* The refusal's entry, `log_broken`, in a transaction of its own.
 CkptDenyHead(p) == pc[p] = "ckpt.deny" /\ TakeHead(p, "ckpt.denied")
@@ -409,35 +374,26 @@ CkptDenied(p) ==
     /\ pc[p] = "ckpt.denied"
     /\ IF Len(log) < MaxLen THEN Add(E("deny")) ELSE UNCHANGED log
     /\ head' = None
-    /\ Goto(p, "idle")
-    /\ UNCHANGED <<tampered, op, l, left, history>>
+    /\ Goto(p, After(p))
+    /\ l' = [l EXCEPT ![p].signed = FALSE]
+    /\ UNCHANGED <<tampered, anchor, op, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* Readiness, as a monitor asks it (server heartbeat.ts, auditReadiness;   *)
-(* db queries.ts, readiness): the newest beat, then the newest checkpoint. *)
+(* Readiness, as a monitor asks it (server heartbeat.ts, auditReadiness):  *)
+(* the anchor, then, in another read, the log at its checkpoint.           *)
 (***************************************************************************)
 
-ProbeBeat(p) ==
-    /\ pc[p] = "probe.beat"
-    /\ IF ReadinessInOneSnapshot
-         THEN /\ history' = [history EXCEPT !.greens = @ \cup (IF ReadyNow THEN {[real |-> TRUE]} ELSE {})]
-              /\ Goto(p, "idle")
-              /\ UNCHANGED <<log, head, tampered, op, l, left>>
-         ELSE Read(p, "probe.ckpt", [l[p] EXCEPT !.beat = NewestBeat, !.ready = ReadyNow])
+ProbeAnchor(p) == pc[p] = "probe.anchor" /\ Read(p, "probe.log", [l[p] EXCEPT !.read = anchor])
 
-\* Green on the beat it read, and the checkpoint and the walk it reads now;
-\* real if the rows said so, together, at either read, or as that
-\* checkpoint was signed, after the first read: with the newest beat then.
-ProbeCkpt(p) ==
-    /\ pc[p] = "probe.ckpt"
-    /\ LET then == {i \in 1..Signed : log[i].kind = "beat"}
-           beatThen == IF then = {} THEN 0 ELSE CHOOSE i \in then : \A j \in then : j <= i
-       IN history' = [history EXCEPT !.greens = @ \cup (IF ReadyWith(l[p].beat, Signed) /\ DryRunOk
-                                                        THEN {[real |-> l[p].ready \/ ReadyNow \/ (ReadyWith(beatThen, Signed) /\ DryRunOk)]}
-                                                        ELSE {})]
+\* Green on the anchor it read and the log as it is now; real if no entry
+\* of the prefix it vouches for is rewritten, or chained after a rewrite.
+ProbeLog(p) ==
+    /\ pc[p] = "probe.log"
+    /\ LET a == l[p].read
+       IN history' = [history EXCEPT !.greens = @ \cup (IF ReadyWith(a) THEN {[real |-> \A i \in 1..a.at : i <= Len(log) /\ Chained(i)]} ELSE {})]
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<log, head, tampered, op, l, left>>
+    /\ UNCHANGED <<log, head, tampered, anchor, op, l, left>>
 
 -----------------------------------------------------------------------------
 
@@ -445,19 +401,20 @@ Init ==
     /\ log = InitLog
     /\ head = None
     /\ tampered = [kind |-> "none", at |-> 0, n |-> 0]
+    /\ anchor = InitAnchor
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
     /\ left = Budget
-    /\ history = [signedBad |-> FALSE, signedAfterDeny |-> FALSE, signedAfterEdit |-> 0, greens |-> {},
-                   \* What the beats the log starts with found, and still holds.
-                   found |-> {<<InitLog[i].fault, InitLog[i].fEdit>> : i \in {j \in 1..Len(InitLog) : InitLog[j].kind = "beat" /\ InitLog[j].broken /\ InitLog[j].fEdit # 0}}]
+    /\ history = [signedBad |-> FALSE, signedAfterDeny |-> FALSE, signedAfterEdit |-> 0, greens |-> {}, back |-> FALSE, calmWalks |-> 0,
+                   \* What the anchor the run starts with found, and still holds.
+                   found |-> IF InitAnchor.found > 0 /\ InitLog[InitAnchor.found].edited # 0 THEN {<<InitAnchor.found, InitLog[InitAnchor.found].edited>>} ELSE {}]
 
 Step(p) ==
     \/ Begin(p) \/ AppendHead(p) \/ AppendCommit(p) \/ Tamper(p)
-    \/ BeatAttest(p) \/ BeatWalk(p) \/ BeatHead(p) \/ BeatCommit(p)
+    \/ BeatHead(p) \/ BeatCommit(p) \/ BeatRead(p) \/ BeatWalk(p) \/ BeatCas(p)
     \/ CkptSnapshot(p) \/ CkptScrub(p) \/ CkptHead(p) \/ CkptCommit(p) \/ CkptDenyHead(p) \/ CkptDenied(p)
-    \/ ProbeBeat(p) \/ ProbeCkpt(p)
+    \/ ProbeAnchor(p) \/ ProbeLog(p)
 
 \* A beat past the log's bound ends the run there.
 Stuck(p) == pc[p] = "beat.commit" /\ Len(log) >= MaxLen
@@ -470,7 +427,7 @@ Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
 
-TypeOK == head \in Procs \cup {None}
+TypeOK == head \in Procs \cup {None} /\ anchor.found \in 0..MaxLen
 
 \* The vault never signs a prefix holding an entry of its own rewritten, or
 \* chained after a rewrite. One edited in place between its walk and its
@@ -480,27 +437,15 @@ SignsNoForgedVault == ~history.signedBad
 \* Once a checkpoint was refused for a broken log, none is signed while
 \* the vault could find the tamper: each call finds it again, or sees the
 \* refusal stand. One it cannot find, the app's, it signs over; the app's
-\* walk keeps readiness red (`FoundStaysRed`).
+\* walk keeps readiness red (`FoundEditStaysRed`).
 StaysUnsignedOnceFound == ~history.signedAfterDeny
 
-\* Once a heartbeat found the chain broken, readiness is red from then on,
-\* against someone who writes once: the tamper stays, and every beat after
-\* finds it again. A refusal of the vault's stands only until it signs
-\* again, over an app entry it cannot check: then the next beat finds it.
-FoundStaysRed ==
-    (\E i \in 1..Len(log) : log[i].kind = "beat" /\ MacOk(i) /\ log[i].broken) => ~ReadyNow
-
-\* And against someone who writes again, edits, hides, forges and puts
-\* back: while an edit any beat found is still in place, readiness is red,
-\* whatever has become of that beat's row since. Edited again after a
-\* revert, it is a new edit behind every cursor, which the scrub finds
-\* (`EditFoundByNextScrub`).
+\* While an edit a beat found is still in place, readiness is red, against
+\* someone who edits, reverts and edits again, any entry, heartbeat rows
+\* among them. Edited again after a revert, it is a new edit behind the
+\* anchor, which the scrub finds (`EditFoundByNextScrub`).
 FoundEditStaysRed ==
-    (\E f \in history.found : log[f[1]].edited = f[2]) => ~ReadyNow
-
-\* A heartbeat whose walk came after a rewrite is never green: it finds the
-\* rewrite, or the vault refuses to sign past it.
-RewriteNeverGreen == (ReadyNow => ~log[NewestBeat].walked)
+    (\E f \in history.found : f[1] <= Len(log) /\ log[f[1]].edited = f[2]) => ~ReadyNow
 
 \* An entry edited in place is found by the next checkpoint whose scrub
 \* starts after it: one in flight may still sign, none after. With a
@@ -508,7 +453,16 @@ RewriteNeverGreen == (ReadyNow => ~log[NewestBeat].walked)
 \* `walks.scrub` entries a call, within two laps (docs/formal.md).
 EditFoundByNextScrub == history.signedAfterEdit <= 1
 
-\* Readiness answers green only on rows that said so together.
+\* Readiness never vouches for a prefix holding an entry rewritten, or
+\* chained after a rewrite: it is the vault's and the app's, as they wrote it.
 GreenIsReal == \A g \in history.greens : g.real
+
+\* The anchor never moves back: neither its checkpoint nor how far the app verified.
+AnchorNeverBack == ~history.back
+
+\* Once the edit is put back, readiness is green after five beats have
+\* walked with no edit in place: the vault's refusal and the app's finding
+\* cleared, and the walks caught up with a backlog of three walks.
+RepairGoesGreen == (Finished /\ Calm /\ history.calmWalks >= 5) => ReadyNow
 
 =============================================================================

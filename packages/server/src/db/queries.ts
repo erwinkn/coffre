@@ -2249,16 +2249,18 @@ function talliedCheckpoints(db: Queryable, where?: SQL) {
   return db.select({ seq: auditLog.seq, metadata: auditLog.metadata, hash: auditLog.hash }).from(auditLog).where(and(...talliedWhere(db), where));
 }
 
-/** Up to `limit` of the app's newest heartbeats, whole, newest first, with the database's clock: what each says the app had verified. */
-export async function newestHeartbeats(db: Queryable, limit: number, after: bigint | null = null) {
+/** The app's newest entry of `action`, by its MAC: null if there is none the app wrote. */
+export async function newestAppEntry(db: Queryable, appKey: LogKey, action: string) {
   const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash, now: clockMillis(db) })
+  const [row] = await db
+    .select({ ...auditColumns(auditLog), prevHash: auditLog.prevHash, mac: auditLog.mac, hash: auditLog.hash })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'audit.heartbeat'), eq(auditLog.decision, 'allow'), after === null ? undefined : gt(auditLog.seq, after)))
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
     .orderBy(desc(auditLog.seq))
-    .limit(limit);
-  return rows.map((row) => ({ ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' }));
+    .limit(1);
+  if (row === undefined) return null;
+  const entry = { ...row, author: row.author as Author, decision: row.decision as 'allow' | 'deny' };
+  return verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [appKey] }).ok ? entry : null;
 }
 
 /**
@@ -2287,21 +2289,4 @@ export async function auditActionCounts(
       ),
     )
     .groupBy(auditLog.action);
-}
-
-/**
- * What readiness reads: the newest heartbeat, with its age by the
- * database's clock, so a skewed application server cannot hide a stale
- * one; and the newest checkpoint the vault signed. Read in one snapshot
- * (`auditReadiness`), so that both are of the same instant.
- */
-export async function readiness(db: Queryable, appKey: LogKey): Promise<{
-  beat: { seq: bigint; ageSeconds: number; metadata: string; authentic: boolean } | null;
-  checkpoint: Checkpoint | null;
-}> {
-  const [[beat], checkpoint] = await Promise.all([newestHeartbeats(db, 1), latestCheckpoint(db)]);
-  if (beat === undefined) return { beat: null, checkpoint };
-  // Whether the app wrote it, by its MAC: what it says of the chain counts only then.
-  const authentic = verifyEntries([beat], { startSeq: beat.seq, startPrevHash: beat.prevHash, keys: [appKey] }).ok;
-  return { beat: { seq: beat.seq, ageSeconds: (beat.now - beat.occurredAt) / 1000, metadata: beat.metadata, authentic }, checkpoint };
 }

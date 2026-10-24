@@ -35,7 +35,7 @@ function deployment(t: { after: (fn: () => void) => void }): string {
   chmodSync(join(dir, 'node_modules', '.bin', 'wrangler'), 0o755);
   mkdirSync(join(dir, 'empty'));
   // A Worker in place of the build, with the Durable Object classes the app's config binds.
-  writeFileSync(join(dir, 'stub.js'), 'export default { fetch: () => new Response("ok") };\nexport class CoffreSockets {}\nexport class CoffreGates {}\n');
+  writeFileSync(join(dir, 'stub.js'), 'export default { fetch: () => new Response("ok") };\nexport class CoffreSockets {}\nexport class CoffreGates {}\nexport class CoffreAnchor {}\n');
   return dir;
 }
 
