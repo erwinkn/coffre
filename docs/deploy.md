@@ -890,6 +890,21 @@ name, and the URL says `sslmode=disable`: the binding carries plaintext
 TCP, so the last leg, from the connector to the database, stays inside
 that network. A binding the Worker lacks fails the configuration.
 
+What to expect of it on Cloudflare, measured with a database behind a
+tunnel: about 20 MB/s each way for one connection (1 MiB uncounted at
+most, each way, a round trip to the object at a time), a query's round
+trip 50 to 80 ms from Europe, a run's first connection 2 to 3 seconds and
+the next ones under one. A run may open 32 connections at once. A
+Durable Object is reset now and then, and Cloudflare resets a connection
+whose app has read nothing for two minutes: the app's driver sees the
+connection drop, and a pool opens another. A run writes three entries to
+the app's audit log as it starts (its handle, its plan, its first
+connection's use), each under the log's one lock, so an instance admits a
+burst of runs at the pace of its database: on that setup, about one and a
+half runs a second. 64 runs started at once were all admitted within 45
+seconds but a few; past that, some fail with 500 or 503 while the lock is
+waited on, and a run started again gets in.
+
 ## Backups, restores and monitoring
 
 Back up the one database, and keep the escrowed keys apart from it: the

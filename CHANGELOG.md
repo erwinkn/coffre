@@ -77,6 +77,18 @@
 - **A cancel request reaches only a session of the same tunnel.** It
   already needed the same handle; now its key must also name a session of
   the tunnel it came on, so it is sent the way that tunnel dials.
+- **The tunnel, tested on Cloudflare (#285).** A cancel request through a
+  network binding reaches the database (it sent nothing), and an app that
+  stops reading for a while keeps its connection (the listener ended it
+  after 30 to 60 seconds). A pool's 32 connections opened at once are all
+  let in: an object admits them in order, a few at a time, each with 45
+  seconds from its turn, where a burst of 17 or more ran out of its 15
+  together. A long result no longer fills the object: some 4.7 GB from the
+  database outgrew its 128 MB. `coffre run` leaves a terminal's Ctrl-C to
+  its command and keeps its tunnels for it, where it ended with them,
+  passes a SIGTERM on, and revokes its handle when its command ends. A
+  SIGINT sent to the run alone, with no terminal, is left to the command
+  too: stop a run with SIGTERM.
 
 - **Only an Owner hands a service account sensitive values** (R32).
   Anyone may set up a service account where the instance lets them, and

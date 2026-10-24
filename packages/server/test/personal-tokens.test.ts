@@ -290,6 +290,24 @@ test('a person lists and revokes their own tokens, and whoever runs the instance
   assert.equal(revoked.tokens, 1);
 });
 
+test("a run ends its own handle, on a personal token too: a handle of the caller's only, never another credential nor another person's", async () => {
+  const pat = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  const agent = bearer(pat.token);
+  const revokedAt = async (id: string) => (await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, id)))[0]!.revokedAt;
+  // Made with the token, as `coffre run` makes one, and ended with it once the run's command ends.
+  const ran = await agent.handles.create({ label: 'coffre run', paths: ['market/dev'] });
+  await agent.handles.revoke(ran.id);
+  assert.notEqual(await revokedAt(ran.id), null);
+  // Only a handle: not the token itself, a session or any other credential, which stays with the person.
+  assert.equal(await status(agent.handles.revoke(pat.id)), 404);
+  assert.equal(await status(agent.tokens.revoke(ADA, pat.id)), 403);
+  // Only the caller's own: whoever runs the instance ends another's handle as a token, not here.
+  const other = await ada.handles.create({ label: 'coffre run', paths: ['market/dev'] });
+  assert.equal(await status(root.handles.revoke(other.id)), 404);
+  assert.equal(await revokedAt(other.id), null);
+  assert.equal(await revokedAt(pat.id), null);
+});
+
 test('a personal token is a bearer token alone: planted in the session cookie it is no session, and it links no sign-in account', async () => {
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   const cookie = createClient({

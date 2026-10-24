@@ -50,6 +50,7 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'DELETE /members/:member/tokens/:id': true,
   // A handle is a person's app's placeholder: a service reads its values.
   'POST /handles': false,
+  'DELETE /handles/:id': false,
   'GET /members/:member/bindings': true,
   'POST /members/:member/bindings': true,
   'POST /members/:member/bindings/keys': true,

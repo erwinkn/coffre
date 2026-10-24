@@ -1154,7 +1154,7 @@ function readOrEnd(paths: readonly string[]): Promise<[string, string][]> {
  * environment, what the proxy left out, and what this run made of the
  * person's own, by personal config.
  */
-type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; given: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][] };
+type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; given: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][]; revoke: () => Promise<void> };
 
 /** A plan, `GET /use/<project>/<env>`: what the app gets, and what this run is to make of the person's own. */
 type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string; sensitivity?: 'secret' }> };
@@ -1227,6 +1227,9 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
     handle: handle.token,
     made,
+    // A run's handle ends with its command (`run`): no app it started holds it after. Asked quietly: a refusal, or an
+    // instance out of reach, leaves the handle to end by itself.
+    revoke: async () => void (await createClient({ url: to.origin, headers: () => headersFor(to), transport: once }).handles.revoke(handle.id)),
   };
 }
 
@@ -1299,11 +1302,24 @@ async function run(args: string[]): Promise<void> {
     stdio: 'inherit',
   });
 
-  child.on('error', (error) => fail(`failed to run ${command[0]}: ${error.message}`));
-  child.on('exit', (code, signal) => {
-    if (signal) process.kill(process.pid, signal);
-    process.exit(code ?? 0);
-  });
+  // The command's to answer: a terminal's Ctrl-C reaches it as it reaches this run, which keeps its tunnels' listeners
+  // for it (a psql's cancel request goes through them), and a SIGTERM or SIGHUP sent to this run is passed on to it.
+  const passOn = (signal: NodeJS.Signals) => () => void child.kill(signal);
+  const handlers = { SIGINT: () => undefined, SIGTERM: passOn('SIGTERM'), SIGHUP: passOn('SIGHUP') } as const;
+  for (const [signal, handler] of Object.entries(handlers)) process.on(signal, handler);
+  /** Its handle revoked, a few seconds at most, and then `then`: offline, the handle ends by itself, at `expiresAt`. */
+  const ended = (then: () => void) => {
+    for (const [name, handler] of Object.entries(handlers)) process.off(name, handler);
+    const revoked = placed === null ? Promise.resolve() : Promise.race([placed.revoke().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
+    void revoked.then(then);
+  };
+  child.on('error', (error) => ended(() => fail(`failed to run ${command[0]}: ${error.message}`)));
+  child.on('exit', (code, signal) =>
+    ended(() => {
+      if (signal) process.kill(process.pid, signal);
+      process.exit(code ?? 0);
+    }),
+  );
 }
 
 /**

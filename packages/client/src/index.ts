@@ -318,6 +318,8 @@ export function createClient(options: ClientOptions) {
      */
     handles: {
       create: (input: RouteInput<'POST /handles'>) => call('POST /handles', {}, input),
+      /** Ends a handle of the caller's own, as `coffre run` does once its command ends. */
+      revoke: (id: string) => call('DELETE /handles/:id', { id }),
     },
 
     /** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
