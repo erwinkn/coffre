@@ -14,8 +14,9 @@ nothing refused yet, so every theorem here holds whatever it answers.
 - `service_reads_sensitive_only_owner_issued`: a service is handed one back
   only on a credential an Owner of the value's own project issued it for
   (R32), the source's project for a reference.
-- `copy_keeps_sensitive`: a fork copies a sensitive value, for anyone, only
-  where it keeps it sensitive.
+- `copy_keeps_sensitive`, `copy_never_through_reference`: a fork copies a
+  sensitive value, for anyone, only where it keeps it sensitive, and never
+  one read through a reference.
 - `personal_owner_only`: a personal config's key opens for its owner alone,
   and never through a reference.
 - `reference_made_by_reader`: making a reference takes reading its source,
@@ -118,12 +119,12 @@ inductive Action where
 
 /-- `sensitiveRefusals`, for one key. -/
 def sensitiveRefusal (code : Code) (r : Reader) (action : Action) (principal : String)
-    (purpose : Option String) (keepsSensitive : Bool) (project : String) (sensitive : Bool) : Code :=
+    (purpose : Option String) (keepsSensitive : Bool) (project : String) (sensitive : Bool) (viaReference : Bool) : Code :=
   let copying := action == .read && purpose == some "copy"
   let handedBack := action == .read && handsBack (purpose.getD "") keepsSensitive
   let person := principal.startsWith "user:"
   if code.isSome || !sensitive then code
-  else if (copying && !keepsSensitive) || (handedBack && person) then some "sensitive"
+  else if (copying && !keepsSensitive) || (copying && viaReference) || (handedBack && person) then some "sensitive"
   else if handedBack && !readsSensitive r.live project then some "not_owner_issued"
   else none
 
@@ -139,26 +140,28 @@ structure KeyRead where
   envs : Table EnvRow
   /-- The secret's nature, as the version read says: a reference's, its source's now (R23). -/
   sensitive : Bool
+  /-- Whether it is read through a reference. -/
+  viaReference : Bool
 
 /-- The permission a read checks: the proxy's use, or read (`unwrap`). -/
 def KeyRead.permission (k : KeyRead) : Permission := if k.purpose == some "use" then .use else .read
 
 def KeyRead.decide (k : KeyRead) (vet : Code) : Code :=
   sensitiveRefusal ((keyRefusal k.reader k.principal k.permission k.secret k.held k.envs none false).orElse fun _ => vet)
-    k.reader .read k.principal k.purpose k.keepsSensitive k.secret.project k.sensitive
+    k.reader .read k.principal k.purpose k.keepsSensitive k.secret.project k.sensitive k.viaReference
 
 /-! ## Sensitive values -/
 
-theorem sensitiveRefusal_some {code r a pr pu ks proj s} (h : code.isSome = true) :
-    (sensitiveRefusal code r a pr pu ks proj s).isSome = true := by
+theorem sensitiveRefusal_some {code r a pr pu ks proj s via} (h : code.isSome = true) :
+    (sensitiveRefusal code r a pr pu ks proj s via).isSome = true := by
   simp [sensitiveRefusal, h]
 
-theorem sensitiveRefusal_person {c r pr pu ks proj} (hperson : pr.startsWith "user:" = true)
-    (hb : handsBack (pu.getD "") ks = true) : (sensitiveRefusal c r .read pr pu ks proj true).isSome = true := by
+theorem sensitiveRefusal_person {c r pr pu ks proj via} (hperson : pr.startsWith "user:" = true)
+    (hb : handsBack (pu.getD "") ks = true) : (sensitiveRefusal c r .read pr pu ks proj true via).isSome = true := by
   cases c <;> simp [sensitiveRefusal, hperson, hb]
 
-theorem sensitiveRefusal_service {c r pr pu ks proj} (hb : handsBack (pu.getD "") ks = true)
-    (h : sensitiveRefusal c r .read pr pu ks proj true = none) : readsSensitive r.live proj = true := by
+theorem sensitiveRefusal_service {c r pr pu ks proj via} (hb : handsBack (pu.getD "") ks = true)
+    (h : sensitiveRefusal c r .read pr pu ks proj true via = none) : readsSensitive r.live proj = true := by
   cases c with
   | some c => simp [sensitiveRefusal] at h
   | none =>
@@ -168,9 +171,13 @@ theorem sensitiveRefusal_service {c r pr pu ks proj} (hb : handsBack (pu.getD ""
       split at h <;> simp at h
     · rfl
 
-theorem sensitiveRefusal_copy {c r pr ks proj} (hkeep : ks = false) :
-    (sensitiveRefusal c r .read pr (some "copy") ks proj true).isSome = true := by
+theorem sensitiveRefusal_copy {c r pr ks proj via} (hkeep : ks = false) :
+    (sensitiveRefusal c r .read pr (some "copy") ks proj true via).isSome = true := by
   cases c <;> simp [sensitiveRefusal, hkeep]
+
+theorem sensitiveRefusal_copy_reference {c r pr ks proj} :
+    (sensitiveRefusal c r .read pr (some "copy") ks proj true true).isSome = true := by
+  cases c <;> simp [sensitiveRefusal]
 
 /--
 **No person reads a sensitive value.** A read whose principal is a person
@@ -208,6 +215,11 @@ theorem service_sensitive_from_owner (k : KeyRead) (vet : Code) {s : List ScopeG
 theorem copy_keeps_sensitive (k : KeyRead) (vet : Code) (hs : k.sensitive = true)
     (hcopy : k.purpose = some "copy") (hkeep : k.keepsSensitive = false) : (k.decide vet).isSome = true := by
   unfold KeyRead.decide; rw [hs, hcopy]; exact sensitiveRefusal_copy hkeep
+
+/-- Nor does a fork ever copy a sensitive value read through a reference, kept sensitive or not: it keeps a reference, so the value stays in its own project. -/
+theorem copy_never_through_reference (k : KeyRead) (vet : Code) (hs : k.sensitive = true)
+    (hcopy : k.purpose = some "copy") (hvia : k.viaReference = true) : (k.decide vet).isSome = true := by
+  unfold KeyRead.decide; rw [hs, hcopy, hvia]; exact sensitiveRefusal_copy_reference
 
 /-! ## Personal configs -/
 
@@ -302,7 +314,7 @@ theorem reference_shares_by_design :
     let envs : Table EnvRow := [("web-dev", ⟨"web", "dev", none, none, false⟩), ("api-dev", ⟨"api", "dev", none, none, false⟩)]
     let bo : Holdings := ⟨"member", EVERYWHERE, [⟨⟨some "web", some "web-dev"⟩, "viewer"⟩], none, defaultPolicy, false⟩
     let r : Reader := ⟨.active, bo, bo⟩
-    let read : KeyRead := ⟨r, "user:bo", some "reveal", false, ⟨"api", "api-dev"⟩, ⟨"web", "web-dev"⟩, envs, false⟩
+    let read : KeyRead := ⟨r, "user:bo", some "reveal", false, ⟨"api", "api-dev"⟩, ⟨"web", "web-dev"⟩, envs, false, true⟩
     read.decide none = none ∧ refuses r .read (placeIn (⟨"api", "api-dev"⟩ : SecretPlace) envs) false = some "no_grant" := by
   decide
 

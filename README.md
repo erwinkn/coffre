@@ -71,6 +71,9 @@ values into Cloudflare, Vercel and other deploy pipelines.
 [Read coffre from tools that speak Vault](docs/vault.md) covers External
 Secrets Operator, the `vault` CLI, vals and Terraform, through an optional,
 read-only Vault KV v2 API.
+[Workload access](docs/design/workload-access.md) is the design for apps
+in production that hold no secret at all: platform identity, key-bound
+sessions, and use through coffre.
 
 ## Running it locally
 
@@ -102,7 +105,7 @@ pnpm test:sqlite       # the same suite on SQLite
 pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/property-tests.md)
 pnpm test:properties:server  # modeled server operations; --long for 40 sequences
 pnpm test:schema       # what the restricted logins may and may not do
-pnpm formal            # the locking protocol, model-checked over every interleaving (docs/formal.md)
+pnpm formal            # the locking, credential and bulk-limit protocols, model-checked over every interleaving (docs/formal.md)
 pnpm formal:lean       # the Lean proofs of the access rules, envelopes and log, and their model held to the code
 pnpm build             # every package
 pnpm typecheck         # every package, the examples and dev/ (after pnpm build)

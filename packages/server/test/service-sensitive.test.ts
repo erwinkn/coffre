@@ -202,6 +202,52 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   ]);
 });
 
+/** Run `meanwhile` once, as the vault is next asked about `principal`: before it answers, or with `after`, once it has. */
+function onNextAccess(principal: string, meanwhile: () => Promise<unknown>, { after = false } = {}): void {
+  const access = deps.vault.access;
+  deps.vault.access = async (asked, ...rest) => {
+    if (asked !== principal) return access(asked, ...rest);
+    deps.vault.access = access;
+    if (!after) await meanwhile();
+    const answer = await access(asked, ...rest);
+    if (after) await meanwhile();
+    return answer;
+  };
+}
+
+test('an Owner demoted while issuing a token gives it no sensitive value: weighed as the vault answered, committed only while still so (formal/Issuing.tla)', async () => {
+  // Owen is an Owner of backend as his request is checked, and as the vault answers for his token; demoted before it commits.
+  onNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
+  await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 409, reason: 'access_changed' });
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+  // Asked again, he is weighed as he is now: a Developer's token, which reads none.
+  const issued = await owen.tokens.issue(CI, { expiresInDays: 30 });
+  assert.deepEqual(await stored(credentials, issued.id), [{ role: 'viewer', sensitive: false }, { role: 'viewer', sensitive: false }]);
+  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+});
+
+test('an issuer removed and admitted again while issuing issues nothing: the request came in as a membership that ended', async () => {
+  // Owen's request is checked, and then, before issuing asks the vault about him again, he is removed and admitted again.
+  onNextAccess(`user:${OWEN}`, async () => {
+    await root.members.remove(`user:${OWEN}`);
+    await root.members.add(`user:${OWEN}`);
+    await root.access.set(`user:${OWEN}`, { backend: 'owner' });
+  }, { after: true });
+  await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 401 });
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+  const [refused] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'deny')));
+  assert.equal((JSON.parse(refused!.metadata) as { reason: string }).reason, 'credential_ended');
+});
+
+test('a trust binding is weighed the same: an Owner demoted while binding a workload binds nothing', async () => {
+  onNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
+  await assert.rejects(owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } }), { status: 409, reason: 'access_changed' });
+  assert.deepEqual(await db.owner.select().from(serviceBindings), []);
+  const theirs = await owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } });
+  assert.deepEqual(await stored(serviceBindings, theirs.binding.id), [{ role: 'viewer', sensitive: false }]);
+});
+
 test("an Owner's personal token issues no service token: what it made would outlive it, and its scope makes it no Owner", async () => {
   const personal = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { backend: 'maintainer' } });
   await assert.rejects(bearer(personal.token).tokens.issue(CI, { expiresInDays: 30 }), { status: 403 });
@@ -238,6 +284,40 @@ test("a reference into another project lends its sensitive value only on a crede
   const narrow = await root.tokens.issue('token:bo-ci', { expiresInDays: 30, scope: { 'billing/dev': 'viewer' } });
   assert.deepEqual(narrow.withheld, ['billing/dev']);
   assert.equal(await read(narrow.token, 'billing/dev/LEAK'), '403 not_owner_issued');
+});
+
+test("forking a reference to another project's sensitive value keeps it a reference: a copy would move it into the fork's project, past R16/R32", async () => {
+  // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key (R24), then forks.
+  await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  const made = await bo.environments.create('billing/dev2', { from: 'dev' });
+  // A copy would have made billing/dev2/LEAK billing's own sensitive value; instead it stays a reference to backend.
+  assert.equal(made.forked?.references, 1, 'the sensitive reference is carried as a reference, not copied by value');
+  // R16: Bo cannot loosen it in place (it is a reference, its nature is its source's, R23) and cannot reveal it as a person.
+  await assert.rejects(bo.secrets.set('billing/dev2', { LEAK: { sensitivity: 'secret' } }), /reference/);
+  await assert.rejects(bo.secrets.reveal('billing/dev2/LEAK'), { status: 403 });
+  // R32: a service token of billing's, issued by Bo, does not read it: the value is still backend's.
+  await bo.members.add('token:bo-ci');
+  await bo.access.set('token:bo-ci', { 'billing/dev2': 'viewer' });
+  const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
+  assert.deepEqual(his.withheld, ['billing/dev2']);
+  assert.equal(await read(his.token, 'billing/dev2/LEAK'), '403 not_owner_issued');
+  // The value is still backend's: a credential an Owner of backend issued, with backend in scope, reads it through the reference.
+  await root.access.set('token:bo-ci', { 'billing/dev2': 'viewer', 'backend/dev': 'viewer' });
+  const owners = await root.tokens.issue('token:bo-ci', { expiresInDays: 30 });
+  assert.equal(await read(owners.token, 'billing/dev2/LEAK'), STRIPE);
+});
+
+test("forking cannot copy a sensitive value out of a reference the forker cannot read at its source", async () => {
+  // Carla owns billing, and cannot read backend at all. Bo makes the reference; Carla forks the environment.
+  await root.members.add(`user:carla@acme.example`);
+  await root.access.set(`user:carla@acme.example`, { billing: 'owner' });
+  const carla = clientFor(deps, 'carla@acme.example');
+  await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  // The fork would carry LEAK as a reference to backend, which Carla cannot read: refused, never copied by value.
+  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
+  // Refused before anything is made: no half-made environment is left behind, so the message stays the same on a retry.
+  await assert.rejects(carla.secrets.list('billing/dev2'), { status: 404 });
+  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
 });
 
 test("a fork's inherited sensitive value is decided where it is held, its parent: an Owner's token there reads it, a Developer's does not", async () => {
@@ -345,4 +425,22 @@ test('tokens and bindings issued before 0.11 are sealed once by who issued them:
     ['system:app', [binding.id, owners.id].sort(), [true]],
     ['system:app', [theirs.id], [false]],
   ]);
+});
+
+test('an Owner demoted while their older token is sealed seals it reading nothing sensitive: the seal is weighed as the vault answered, committed only while still so', async () => {
+  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
+  const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
+  const token = generateToken('service');
+  const row = {
+    id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
+    principal: CI, identityId: null, label: '0.10', createdBy: OWEN, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope,
+  };
+  await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
+  // The seal asks the vault about Owen, an Owner of backend; he is demoted before it commits.
+  onNextAccess(`user:${OWEN}`, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }), { after: true });
+  assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '503');
+  // The next use seals it as he is now: a Developer's, which reads none.
+  assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.deepEqual(await stored(credentials, row.id), [{ role: 'viewer', sensitive: false }]);
 });

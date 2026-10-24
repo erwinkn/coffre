@@ -149,15 +149,16 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
  * connection and the vault's, and the vault's calls.
  *
  * A reveal: the credential, with the newest policy change; the path; the
- * environment's rows. The vault's `access`: one statement. Its `unwrap`:
+ * environment's rows; once the vault has released, the credential and its
+ * member again (`credentialStill`). The vault's `access`: one statement. Its `unwrap`:
  * the versions, then BEGIN, its lock timeout, the reader's row locked,
  * the head locked with everything the decision reads, the entries and the
  * head in one statement, COMMIT.
  */
 const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 3, vault: 8, vaultCalls: 2 } },
-  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 3, vault: 8, vaultCalls: 2 } },
-  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 3, vault: 8, vaultCalls: 2 } },
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
+  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
+  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
 };
 

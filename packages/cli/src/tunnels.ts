@@ -55,18 +55,22 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
     /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
     let uncounted = 0;
     let taken = 0;
+    /** Bytes coffre sent that the listener has not counted back: a coffre that paces keeps them under a window. */
+    let owed = 0;
     let answered = true;
     const held = () => ws.bufferedAmount >= HIGH_WATER || (pacing !== false && uncounted >= WINDOW);
     const count = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(String(taken), () => undefined);
+      owed -= taken;
       taken = 0;
     };
     ws.on('open', () => socket.resume());
     ws.on('pong', () => (answered = true));
     const keepalive = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      if (!answered) return ws.terminate();
+      // A WebSocket paused for its app reads no pong: its silence says nothing of the network.
+      if (!answered && !ws.isPaused) return ws.terminate();
       answered = false;
       ws.ping();
       count();
@@ -114,11 +118,16 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
         pacing = false;
         if (!held()) socket.resume();
       }
+      // A coffre that said it paces and sends past two windows uncounted is held to it, as the object holds the listener.
+      owed += data.length;
+      if (pacing === true && owed > 2 * WINDOW) return ws.terminate();
       const flushed = socket.write(data, () => {
         taken += data.length;
         if (taken >= COUNT_EVERY) count();
       });
-      if (!flushed) ws.pause();
+      // Paced, coffre sends no more than a window the app has not taken: the WebSocket need not wait for the app, and goes
+      // on reading pongs and counts while it reads nothing (a psql in its pager). A coffre that does not pace (Node) waits.
+      if (!flushed && pacing === false) ws.pause();
     });
     socket.on('drain', () => ws.resume());
     ws.on('close', () => {

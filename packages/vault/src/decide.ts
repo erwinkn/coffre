@@ -121,8 +121,8 @@ export function keyRefusals(
  * only on a credential an Owner of its own project issued, a reference's
  * source's too, whose value it is (`readsSensitive`, R32). And a fork
  * copies one, for anyone, a service account too, only where its app says
- * it keeps it sensitive: an app of 0.9, mid-deploy, would write the copy as
- * a secret its people read.
+ * it keeps it sensitive (an app of 0.9, mid-deploy, would write the copy as
+ * a secret its people read), and never one read through a reference.
  */
 export function sensitiveRefusals(
   codes: readonly (RefusalCode | null)[],
@@ -133,6 +133,8 @@ export function sensitiveRefusals(
     purpose?: string;
     keepsSensitive?: boolean;
     secrets: readonly { projectId: string; sensitive?: boolean }[];
+    /** Each secret read through a reference. */
+    viaReference?: readonly boolean[];
   },
 ): (RefusalCode | null)[] {
   const copying = call.action === 'secret.read' && call.purpose === 'copy';
@@ -141,7 +143,9 @@ export function sensitiveRefusals(
   return call.secrets.map((secret, i) => {
     const code = codes[i] ?? null;
     if (code !== null || secret.sensitive !== true) return code;
-    if ((copying && call.keepsSensitive !== true) || (handedBack && person)) return 'sensitive';
+    // A sensitive value read through a reference is never copied: a fork keeps it a reference to its source, so the
+    // value stays in its own project, where R16/R32 decide who reads it. Copying it would move it to the fork's.
+    if ((copying && call.keepsSensitive !== true) || (copying && call.viaReference?.[i] === true) || (handedBack && person)) return 'sensitive';
     if (handedBack && !readsSensitive(reader.live, secret.projectId)) return 'not_owner_issued';
     return null;
   });

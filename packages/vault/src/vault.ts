@@ -954,6 +954,8 @@ class VaultService implements Vault {
         secrets: items.map((item) => item.secret),
         // Through a reference, the reader's grants on the holder's environment decide.
         places: sealed.map((seal, i) => seal?.holder ?? items[i]!.secret),
+        // Which items are read through a reference: a sensitive one is never copied, which would move it out of its project.
+        viaReference: sealed.map((seal) => seal !== null),
         references: ends,
         vet: ends.length === 0 ? undefined : async (_, reads) => sealed.map((seal) => (seal !== null && reads.ended.has(seal.seq) ? 'ended' : null)),
         remote,
@@ -1167,6 +1169,8 @@ class VaultService implements Vault {
       needs?: (db: Queryable) => Promise<(readonly Permission[] | null)[]>;
       /** Each secret that takes besides its reader being an Owner of its project (`ownsProject`): a sensitive value made a secret. */
       owns?: readonly boolean[];
+      /** Which secrets are read through a reference, by index: a sensitive one of these is never copied (it would leave its project). */
+      viaReference?: readonly boolean[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
@@ -1202,7 +1206,9 @@ class VaultService implements Vault {
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
       let codes = keyRefusals(reader, { principal, permission: call.permission, secrets, at, environments, needs, owns: call.owns });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) codes = await call.vet(d.tx, d.reads);
-      codes = sensitiveRefusals(codes, reader, { action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive, secrets });
+      codes = sensitiveRefusals(codes, reader, {
+        action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive, secrets, viaReference: call.viaReference,
+      });
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
       if (first !== null) {

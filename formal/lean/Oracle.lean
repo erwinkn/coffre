@@ -221,9 +221,10 @@ def answer (j : Json) : Parse Json := do
     let keeps ← flag (field j "keepsSensitive")
     let codes ← (← list (← req j "codes")).mapM optStr
     let secrets ← (← list (← req j "secrets")).mapM fun s => do pure (← str (field s "projectId"), ← flag (field s "sensitive"))
+    let via ← (if (field j "viaReference").isNull then pure [] else list (field j "viaReference")) >>= (·.mapM flag)
     let out := (List.range secrets.length).map fun i =>
       let (project, sensitive) := secrets.getD i ("", false)
-      sensitiveRefusal (codes.getD i none) r a principal purpose keeps project sensitive
+      sensitiveRefusal (codes.getD i none) r a principal purpose keeps project sensitive (via.getD i false)
     pure (Json.arr (out.map code).toArray)
   | "referenceRefusal" =>
     pure (code (referenceRefusal (← reader (← req j "reader")) (← secretPlace (← req j "holder")) (← secretPlace (← req j "source"))
