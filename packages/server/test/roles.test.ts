@@ -334,24 +334,17 @@ test("a credential keeps what its role held when it was issued, both columns: a 
  * caller, and before it commits.
  */
 function meanwhileOn(method: 'access' | 'unwrap' | 'changePolicy', when: (input: unknown) => boolean, meanwhile: () => Promise<unknown>): void {
-  const vault = deps.vault;
-  let done = false;
-  deps.vault = new Proxy(vault, {
-    get(target, key) {
-      const value = Reflect.get(target, key, target) as unknown;
-      if (typeof value !== 'function') return value;
-      if (key !== method) return value.bind(target);
-      return async (input: unknown) => {
-        const answer = await (value as (input: unknown) => Promise<unknown>).call(target, input);
-        if (!done && when(input)) {
-          done = true;
-          deps.vault = vault;
-          await meanwhile();
-        }
-        return answer;
-      };
-    },
-  });
+  // On the vault itself, which the request's context and the services it calls (`SigninService`) share.
+  const vault = deps.vault as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+  const value = vault[method]!;
+  vault[method] = async (input: unknown) => {
+    const answer = await value(input);
+    if (when(input)) {
+      vault[method] = value;
+      await meanwhile();
+    }
+    return answer;
+  };
 }
 
 test('a fork of a protected environment refused for its row protects nothing first: no id kept, no change for requests in flight', async () => {
@@ -383,7 +376,8 @@ test('a fork decided while its source was not protected, which commits once it i
 
 test("a service token weighed before prod was protected, issued once it is, is refused: it would read prod for a Developer who only uses it", async () => {
   await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
-  meanwhileOn('access', (asked) => asked === ADA, () => maya.environments.protect('market/prod'));
+  // Once the vault has answered for Ada, as she issues it, and for the account: what the token is weighed on.
+  meanwhileOn('access', (asked) => asked === 'token:ci-all', () => maya.environments.protect('market/prod'));
   assert.equal(await status(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), 409);
   assert.deepEqual((await root.tokens.list('token:ci-all')).tokens, []);
   // Asked again, it is decided as the policy is now: Ada no longer manages a Viewer of all of market.
@@ -695,7 +689,7 @@ for (const { change, by, make } of CHANGES) {
     await root.environments.protect('billing/prod');
     await root.members.add(ADA, { role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } });
     await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
-    meanwhileOn('access', (asked) => asked === ADA, make);
+    meanwhileOn('access', (asked) => asked === 'token:ci-all', make);
     const issued = await refusal(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 }));
     assert.deepEqual(issued, by === 'nothing' ? { status: 200 } : { status: 409, reason: 'policy_changed' });
   });
@@ -705,7 +699,7 @@ test('rule 2: a protected environment renamed while a token is given, out of the
   await maya.environments.protect('market/prod');
   await root.members.add(ADA, { role: 'owner', scope: { projects: 'all', environments: { only: ['prod'] } } });
   await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
-  meanwhileOn('access', (asked) => asked === ADA, () => root.environments.update('market/prod', { slug: 'staging' }));
+  meanwhileOn('access', (asked) => asked === 'token:ci-all', () => root.environments.update('market/prod', { slug: 'staging' }));
   assert.deepEqual(await refusal(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), { status: 409, reason: 'policy_changed' });
   assert.deepEqual((await root.tokens.list('token:ci-all')).tokens, []);
   // Asked again: staging, protected, is not prod, and Ada, a Developer there, only uses it.

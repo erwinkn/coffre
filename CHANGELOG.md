@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **A credential revoked while its read is under way gets nothing.** A
+  read checked its token, handle or MCP connection, then asked the vault,
+  which decides on the member and is only told the credential: a token
+  revoked between the two, or a member removed and added again, still got
+  the values. Now, once the vault has released them, the app reads the
+  credential and the member's generation again before it answers, under
+  the head when it commits entries of its own, and answers 401. A reveal
+  runs one more statement. Found by `formal/Credentials.tla`.
+- **An Owner demoted while issuing a service account a token gives it no
+  sensitive value (R32).** A token, a trust binding, a binding's new keys
+  and an older release's credential sealed at its first use are weighed
+  on the vault's answer about their issuer, asked again when issuing
+  starts, and committed only while it is still theirs; demoted meanwhile,
+  the request answers 409 `access_changed`, and asked again it is weighed
+  as they are now; removed and admitted again since the request came in,
+  401. Before, a token was weighed on the answer the request's
+  authentication got, which nothing fenced: a demotion is no change to
+  the policy. Found by `formal/Issuing.tla`.
+- **`pnpm formal` checks three more protocols**: a CI run's ID token
+  exchanged for a credential and every way one ends, who may hand a
+  service account sensitive values, and the vault's bulk limit, each
+  failing as it must without each of the code's protections
+  ([formal.md](docs/formal.md#credentials-issuing-and-the-bulk-limit)).
+
 - **The database tunnel runs on Workers.** `coffre run market/dev -- psql
   "$DATABASE_URL"` now works against a Workers deployment as it does on
   Node: each run's connections to a database go to a Durable Object of

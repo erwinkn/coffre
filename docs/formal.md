@@ -1,4 +1,4 @@
-# A model of the locking protocol
+# Models of the protocols
 
 coffre's app and vault share one database. The vault decides every access,
 and the audit log's head row serialises appends and decisions
@@ -10,14 +10,24 @@ written as a TLA+ specification, and TLC checks it over every interleaving
 of a few concurrent requests:
 
 ```sh
-pnpm formal                  # every scenario, about a minute
+pnpm formal                  # every scenario, about a minute and a half
 scripts/formal.sh Deletion   # one, with its runs without a protection
 ```
 
-- [`formal/Coffre.tla`](../formal/Coffre.tla) is the model: the state, one
-  step per SQL statement, and the invariants.
-- [`formal/MC.tla`](../formal/MC.tla) holds the scenarios: who runs what, and
+- [`formal/Coffre.tla`](../formal/Coffre.tla) is the model of the locking
+  protocol: the state, one step per SQL statement, and the invariants.
+- [`formal/MC.tla`](../formal/MC.tla) holds its scenarios: who runs what, and
   from which state. Each one has a configuration, `formal/<Name>.cfg`.
+- Three smaller models, each with its scenarios beside it, hold other
+  protocols to the same discipline ([below](#credentials-issuing-and-the-bulk-limit)):
+  - [`formal/Credentials.tla`](../formal/Credentials.tla), a CI run's ID
+    token exchanged for a credential, and every way a credential ends;
+  - [`formal/Issuing.tla`](../formal/Issuing.tla), who may hand a service
+    account sensitive values (R32);
+  - [`formal/Bulk.tla`](../formal/Bulk.tla), the vault's bulk limit (R28).
+
+  A configuration names the module of its scenarios on its second line,
+  `\* model MCCredentials`; one that names none is `MC.tla`'s.
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -28,10 +38,11 @@ CI runs it in the *Formal model* job of `validate.yml`.
 ## What it checks
 
 Every scenario must hold. Then each one runs again with one of the code's
-protections turned off, and must fail on the invariant that protection
-keeps. If a change to the model ever stopped it seeing a race it once
+protections turned off, or two that each cover for the other, and must
+fail on the invariant they keep. If a change to the model ever stopped it seeing a race it once
 caught, that run would pass, and the script fails. Each of these
-counterexamples is printed in CI's log.
+counterexamples is printed in CI's log. Coffre.tla's are these; the other
+models' are [below](#credentials-issuing-and-the-bulk-limit).
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
@@ -262,7 +273,9 @@ reference to that secret in `References`, and none yet elsewhere.
   each step names the function it stands for. Nothing checks that they stay
   alike. A change to the order of locks or re-checks in `vault.ts`,
   `projects.ts`, `secrets.ts`, `references.ts` or `signin.ts` should change
-  `Coffre.tla` in the same pull request.
+  `Coffre.tla` in the same pull request; one in `workloads.ts`, `signin.ts`,
+  `services.ts` or `context.ts`, `Credentials.tla` or `Issuing.tla`; one in
+  the vault's count, `Bulk.tla`.
 - **Beyond the bounds.** The bounds are three places, a few members, and three
   or four requests of one to three operations each. Races that need more are
   not explored. The races found so far needed two requests, or three for
@@ -273,6 +286,202 @@ reference to that secret in `References`, and none yet elsewhere.
   behave as documented. It does not cover SQLite, where every transaction
   holds the whole file and so nothing interleaves.
 - **Security outside concurrency:** MACs, the chain, the database's owner.
+
+## Credentials, issuing and the bulk limit
+
+Three protocols outside the locking one, each modelled on its own, with the
+same steps (one SQL statement each, READ COMMITTED), the same two locks
+(members' rows, then the head) and the same discipline: every scenario
+holds, and fails without each protection.
+
+### Credentials.tla
+
+A service account with one trust binding and a token someone issued it.
+Each CI run holds an ID token, good for one credential.
+
+- **Exchanging** (`workloads.ts`, `#exchange`):
+  1. the live bindings, unlocked;
+  2. whether the token is spent, a read;
+  3. the vault's answer about the account;
+  4. then, under the head, the account and the binding again, the
+     binding's rate, the token spent, the credential issued and
+     `token.exchange` logged.
+- **Using a credential** (`signin.ts`, `verify`; `secrets.ts`, `reveal`;
+  `context.ts`, `recorded`):
+  1. its row, unlocked;
+  2. the vault's answer;
+  3. the vault's decision, under the account's row and the head;
+  4. through the credential proxy, `credential.use` under the head;
+  5. the value answered.
+- **Ending one:**
+  - revoking it (`revokeCredential`);
+  - untrusting its binding or replacing the issuer's keys (`unbind`,
+    `replaceKeys`, `#revoke`);
+  - removing the account, the vault's step then the app's sweep
+    (`removeMember`), and admitting it again.
+
+| Protection, in the code | Turned off, TLC finds | Found by |
+|---|---|---|
+| The exchange spends the ID token in the transaction that issues its credential, a primary key on its hash (`consumeToken`) | one ID token bought two credentials (`SingleUse`) | |
+| It reads its binding again under the head (`standingBinding`) | a credential issued after its binding's `token.unbind` (`NoExchangeAfterUnbind`) | |
+| And the account (`stillMember`) | a credential at a generation a removal had moved past (`ExchangedAtCurrentGeneration`) | |
+| The binding's rate is counted under the head (`exchangesSince`) | more credentials in the minute than the rate (`RateHeld`) | |
+| Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head through the proxy | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
+| And with no lock for an export, which commits nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
+| Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
+| That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
+
+The race this model found, as the script prints it with the export's fence off. A
+run's token is checked (step 5), its revocation commits (6), and the vault,
+which decides on the account and is only told the credential, releases
+the value (10). Removed and admitted again meanwhile, the account is
+active to the vault too, at a generation the token was not issued at.
+
+```
+  3. owner     RevokeHead        revoke cred tok            -> revoke.commit   head none -> owner
+  5. reader    UseVerify         use cred tok               -> use.access
+  6. owner     RevokeCommit      revoke cred tok            -> idle            log +token.revoke cred <<tok, 0>> gen 0 (owner); head owner -> none
+  8. reader    UseLock           use cred tok               -> use.head        rowLock none -> reader
+ 10. reader    UseDecide         use cred tok               -> use.fence       log +secret.read cred <<tok, 0>> gen 0 (reader); rowLock reader -> none; head reader -> none
+ 12. reader    UseAnswer         use cred tok               -> idle
+```
+
+### Issuing.tla
+
+Olga and Omar are Owners of a project, where a service account holds a
+grant. A token an older release issued the account, by Olga, is not
+sealed yet.
+
+- **Issuing a token** (`signin.ts`, `issueServiceToken`; a binding is made
+  the same way, `bind`, `replaceKeys`):
+  1. the newest entry about the issuer's access, before the vault is asked;
+  2. the vault's answers about the issuer and the account;
+  3. under the head, both again, then the token.
+- **Sealing the older token at its first use** (`services.ts`,
+  `sealCredentials`):
+  1. the row;
+  2. the vault's answer about its issuer;
+  3. under the head, the issuer again, then the row, only as read.
+- **Changing access, in the vault:** demoting Olga, removing her and
+  admitting her again, an Owner again, at a new generation, removing the
+  account.
+
+| Protection, in the code | Turned off, TLC finds | Found by |
+|---|---|---|
+| The issuer is weighed from the vault's answer, read after the newest entry about their access, and committed only while that entry is still the newest (`issuerNow`, `issuerStill`) | a token reading sensitive values issued by someone demoted before it committed (`SensitiveOnlyFromOwners`) | this model, fixed with it |
+| And so is a seal's (`sealCredentials`) | the older token sealed reading them, for someone demoted meanwhile (`SensitiveOnlyFromOwners`) | this model, fixed with it |
+| Issuing reads the account's standing again under the head (`#stillMember`) | a token at a generation a removal had moved past (`TokensAtCurrentGeneration`) | |
+| A seal updates the row only as it read it (`updateAuth`, matched on its scope) | the older token sealed twice (`SealedOnce`) | |
+| The vault's answer about the issuer counts only at the generation the request came in at (`issuerNow`), and under the head the request's credential and member still stand at it (`credentialStill`): each covers for the other | a token issued by a membership the request did not come in as, Olga removed and admitted again meanwhile, with what she holds now (`IssuedAsAuthenticated`) | #292's review |
+
+The race it found, with the fence off. Olga's request is weighed as an
+Owner's (steps 3 and 4), Omar demotes her (9), and her token commits
+reading the project's sensitive values (11). A demotion is no
+`policy.change`, so `policyStill` let it through. Before the fix the
+request was weighed on the answer its authentication got; the same held
+for a binding, and for a seal, where the code said so and let it be.
+
+```
+  3. olga      IssueLoad         issue actor olga who svc   -> issue.access
+  4. olga      IssueAccess       issue actor olga who svc   -> issue.head
+  9. omar      DemoteCommit      demote actor omar who olga -> idle            owners -olga; log +member.role who olga (omar); head omar -> none
+ 10. olga      IssueHead         issue actor olga who svc   -> issue.commit    head none -> olga
+ 11. olga      IssueCommit       issue actor olga who svc   -> idle            log +token.create who olga sensitive true (olga); head olga -> none
+```
+
+### Bulk.tla
+
+One principal reads, on two credentials at once, with a local key or a
+key service, while a clock runs. Each decision counts the distinct keys
+of the principal's `secret.read` entries stamped inside the window, with
+those it would release (`snapshot.postgres.ts`).
+
+- **With a local key**, the vault takes the head in the statement that
+  counts, right after the row.
+- **With a key service**, it counts under the row, opens the keys, then
+  counts again in the statement that takes the head.
+- **Either way**, that last count is the decision, at its statement's
+  clock, which stamps the entries; the commit, and the keys handed over,
+  come after it, while the clock runs on.
+
+| Protection, in the code | Turned off, TLC finds |
+|---|---|
+| A read decides under the reader's row (`lockMembers`), and with a key service counts again under the head (`#keys`, `late`): each covers for the other | two reads, each counted before the other's entries, together past the limit (`CapHolds`) |
+| The count takes in the keys the read would release | one read past the limit on its own (`CapHolds`) |
+| The count is the principal's, all their credentials' together | two credentials of one principal each up to the limit (`CapHolds`) |
+| The entries are stamped with the clock of the statement that counted last | keys released later than their entries say, which leave the window early (`CapHolds`) |
+
+`CapHolds` reads when each decision was, not what its entries say: so a
+stamp older than the decision is caught. It holds of decisions. A key
+reaches its caller at the commit after its decision, a transaction later,
+so a window of releases rather than decisions may hold one more read's
+keys at its edge, by that transaction's length: milliseconds, against a
+window of fifteen minutes. #292's review.
+
+### Their invariants
+
+| Invariant | What must hold in every state |
+|---|---|
+| `SingleUse` | An ID token buys one credential, however many runs present it at once |
+| `NoExchangeAfterUnbind` | No exchange through a binding follows its `token.unbind` in the log |
+| `ExchangedAtCurrentGeneration`, `TokensAtCurrentGeneration` | A credential is issued to an active account, at its generation when it commits |
+| `IssuedAsAuthenticated` | And by the membership its request came in as |
+| `RateHeld` | A binding issues no more than its rate |
+| `NoReleaseAfterEnd` | No value reaches a caller through a credential whose release, the vault's `secret.read`, follows the entry that ended it: its `token.revoke`, its binding's `token.unbind`, or a removal past its generation |
+| `UnboundStayUnusable` | A credential an untrusted or replaced binding issued never verifies again |
+| `SensitiveOnlyFromOwners` | A scope reads a project's sensitive values only if whoever issued it is an Owner of the project when it commits |
+| `SealedOnce` | The older release's token is sealed once, however many first uses race |
+| `CapHolds` | At most the limit's keys decided for the principal in any window |
+
+### Their scenarios
+
+| Scenario | Who runs what | States |
+|---|---|---|
+| `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
+| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 83 thousand |
+| `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
+| `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
+
+### What they abstract
+
+- **Credentials.tla:**
+  - The token's signature, audience, times and claims, which decide
+    nothing about concurrency.
+  - A binding's tombstone, its `token.unbind` entry, which commits with
+    its `revoked_at`: the model reads the latter.
+  - The credential's expiry. An exchanged one lasts five minutes, and
+    `#revoke` revokes only those not expired by the app's clock. Two
+    isolates' clocks apart by more than the time left could leave one
+    unrevoked that a use still finds live, which the binding check at use
+    refuses. The fence reads `revoked_at` and the generation alone.
+  - The credential proxy's cache, which serves a handle's values for up to
+    `cacheSeconds` with no check at all (docs/design/credential-proxy.md).
+    The model is a use that asks the vault.
+- **Issuing.tla:**
+  - Who counts as an Owner of the project, a pure function
+    (`ownsProject`) of the vault's answer.
+  - The policy, which `policyStill` already fences (Coffre.tla's
+    discipline, and the roles tests).
+  - A grant that lapses by its end time, with no entry, between the
+    answer and the commit.
+- **Bulk.tla:**
+  - The intent a key service's read logs first, which counts the same way
+    and releases nothing.
+  - The database clock moving backwards, or the window's test offset.
+
+### What they do not prove
+
+- **A write in flight.** A request writes with a credential checked before
+  it was revoked, as a read did before the fence. Writes release nothing,
+  and the fence is on reads, and on issuing a service account a credential.
+- **What a read tells without the vault.** A dry run's comparison of a
+  value, and a listing that shows plain values, do not go through
+  `recorded`: a credential revoked while one is under way still gets its
+  answer, an equality or a plain value.
+- **The credential proxy's caches and tunnels.** A revoked handle keeps
+  working for `cacheSeconds` from the cache, and a tunnel until its next
+  check, as docs/design/credential-proxy.md says: by design, and not
+  modelled.
 
 ## TLC
 
