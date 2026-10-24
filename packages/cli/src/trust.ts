@@ -491,6 +491,11 @@ function claimsFrom(flags: TrustFlags): BindingClaims {
 
 const ROLE_ARN = /^arn:aws:iam::(\d{12}):role\/(?:[\w+=,.@-]+\/)*([\w+=,.@-]{1,64})$/;
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+/** A Kubernetes service account's name, a DNS subdomain, as its tokens' `sub` names it. */
+const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
+/** A Google service account's email: none begins with `-`, which gcloud would read as a flag. */
+const GOOGLE_ACCOUNT = /^[a-z0-9][a-z0-9-]*@[a-z0-9][a-z0-9.-]*\.gserviceaccount\.com$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A workload's binding, by its platform's flags: IDs given, or looked up with its CLI. */
 async function platformBinding(platform: Platform, flags: TrustFlags, lookup: PlatformLookup): Promise<BindingRequest> {
@@ -524,7 +529,7 @@ async function platformBinding(platform: Platform, flags: TrustFlags, lookup: Pl
     }
     case 'kubernetes': {
       const [namespace, name, ...rest] = flags.kubernetes!.split('/');
-      if (!namespace || !name || rest.length > 0 || !DNS_LABEL.test(namespace)) {
+      if (!namespace || !name || rest.length > 0 || !DNS_LABEL.test(namespace) || !DNS_SUBDOMAIN.test(name)) {
         throw new Error(`--kubernetes takes <namespace>/<service-account>, not ${flags.kubernetes}`);
       }
       const issuer = flags.issuer ?? (await lookup.kubernetesIssuer());
@@ -533,7 +538,7 @@ async function platformBinding(platform: Platform, flags: TrustFlags, lookup: Pl
     }
     case 'gcp': {
       const account = flags.gcp!;
-      const sub = /^\d+$/.test(account) ? account : account.includes('@') ? await lookup.gcpUniqueId(account) : null;
+      const sub = /^\d+$/.test(account) ? account : GOOGLE_ACCOUNT.test(account) ? await lookup.gcpUniqueId(account) : null;
       if (sub === null) throw new Error(`--gcp takes a service account's email or unique ID, not ${account}`);
       return { profile: 'gcp', issuer: GOOGLE_ISSUER, claims: claimed({ sub }) };
     }
@@ -568,8 +573,8 @@ export function platformLookup(): PlatformLookup {
   return {
     async awsRole(name) {
       const instead = 'add --role-id <AROA…>';
-      const [roleId, arn] = parsed(await run('aws', ['iam', 'get-role', '--role-name', name, '--query', 'Role.[RoleId,Arn]', '--output', 'json'], instead), 'aws iam get-role', instead) as unknown[];
-      if (typeof roleId !== 'string' || typeof arn !== 'string') throw new Error(`aws iam get-role answered no role ID and ARN; ${instead}`);
+      const [roleId, arn] = parsed(await run('aws', ['iam', 'get-role', `--role-name=${name}`, '--query', 'Role.[RoleId,Arn]', '--output', 'json'], instead), 'aws iam get-role', instead) as unknown[];
+      if (typeof roleId !== 'string' || !/^AROA[A-Z0-9]+$/.test(roleId) || typeof arn !== 'string') throw new Error(`aws iam get-role answered no role ID and ARN; ${instead}`);
       return { roleId, arn };
     },
     async kubernetesIssuer() {
@@ -579,10 +584,16 @@ export function platformLookup(): PlatformLookup {
       return issuer;
     },
     async kubernetesUid(namespace, name) {
-      return (await run('kubectl', ['get', 'serviceaccount', name, '--namespace', namespace, '--output', 'jsonpath={.metadata.uid}'], 'add --uid <uid>')).trim();
+      const instead = 'add --uid <uid>';
+      const uid = (await run('kubectl', ['get', 'serviceaccount', name, '--namespace', namespace, '--output', 'jsonpath={.metadata.uid}'], instead)).trim();
+      if (!UUID.test(uid)) throw new Error(`kubectl answered no service account UID; ${instead}`);
+      return uid;
     },
     async gcpUniqueId(email) {
-      return (await run('gcloud', ['iam', 'service-accounts', 'describe', email, '--format=value(uniqueId)'], 'name it by its unique ID: --gcp <digits>')).trim();
+      const instead = 'name it by its unique ID: --gcp <digits>';
+      const id = (await run('gcloud', ['iam', 'service-accounts', 'describe', email, '--format=value(uniqueId)'], instead)).trim();
+      if (!/^\d+$/.test(id)) throw new Error(`gcloud answered no unique ID; ${instead}`);
+      return id;
     },
   };
 }

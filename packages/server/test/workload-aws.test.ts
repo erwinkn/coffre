@@ -251,7 +251,8 @@ test('a proof for another host, URL or body, or with another header, is refused 
     await refused(await signed(ROLE, { body }), 'malformed', /signs a POST of Action=GetCallerIdentity/);
   }
   // A header outside the allowlist, signed or not.
-  await refused(await signed(ROLE, { headers: { 'x-forwarded-for': '10.0.0.1' } }), 'malformed', /does not forward: x-forwarded-for/);
+  await refused(await signed(ROLE, { headers: { 'x-forwarded-for': '10.0.0.1' } }), 'malformed', /does not forward: "x-forwarded-for"/);
+  await refused({ ...good, headers: { ...good.headers, 'x-evil\nforged: 1': 'x' } }, 'malformed', /does not forward: "x-evil\\nforged: 1"/);
   await refused({ ...good, headers: { ...good.headers, 'x-amz-target': 'AWSSecurityTokenServiceV20110615.AssumeRole' } }, 'malformed', /does not forward/);
   await refused({ ...good, headers: { ...good.headers, 'X-Coffre-Key': JKT } }, 'malformed', /names x-coffre-key twice/);
   await refused({ ...good, headers: { ...good.headers, host: 'evil.example' } }, 'malformed', /says host evil.example/);

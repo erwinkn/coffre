@@ -47,6 +47,9 @@ const STS_URL = /^https:\/\/sts(?:\.([a-z]{2}(?:-[a-z]+)+-\d))?\.amazonaws\.com\
  * The headers coffre forwards, each signed. `host` and `content-length` are
  * the URL's and the body's, which the fetch sets, as an SDK may sign them;
  * `x-amz-content-sha256`, which an SDK may sign, must be the body's digest.
+ * So the proof is made with a bare SigV4 signer: an STS client's middleware
+ * adds and signs headers of its own (`amz-sdk-invocation-id`,
+ * `x-amz-user-agent`), which are refused.
  */
 const FORWARDED = ['authorization', 'content-length', 'content-type', 'host', 'x-amz-content-sha256', 'x-amz-date', 'x-amz-security-token', 'x-coffre-audience', 'x-coffre-key'] as const;
 /** Those its signature must cover, whatever else it does: without `content-type`, the fetch would send its own, and STS would not read the form. */
@@ -86,7 +89,7 @@ export function checkAwsRequest(input: unknown, expected: { publicUrl: string; j
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(given)) {
     const lower = name.toLowerCase();
-    if (!(FORWARDED as readonly string[]).includes(lower)) return malformed(`has a header coffre does not forward: ${name.slice(0, 64)}`);
+    if (!(FORWARDED as readonly string[]).includes(lower)) return malformed(`has a header coffre does not forward: ${JSON.stringify(name.slice(0, 64))}`);
     if (Object.hasOwn(headers, lower)) return malformed(`names ${lower} twice`);
     if (typeof value !== 'string' || value.length > MAX_HEADER_BYTES || !HEADER_VALUE.test(value)) {
       return malformed(`has a ${lower} that is no header value`);

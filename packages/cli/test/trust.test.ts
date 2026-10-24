@@ -394,6 +394,9 @@ test("each workload platform's flag binds it by the IDs its platform never reuse
   assert.equal(given.claims['kubernetes.io.namespace'], 'ingest');
   assert.deepEqual(asked, []);
   await assert.rejects(workload({ kubernetes: 'api' }), /--kubernetes takes <namespace>\/<service-account>/);
+  // A name a platform's CLI would read as one of its flags is no name.
+  await assert.rejects(workload({ kubernetes: 'ingest/-o' }), /--kubernetes takes <namespace>\/<service-account>/);
+  await assert.rejects(workload({ gcp: '--impersonate-service-account=x@y.iam.gserviceaccount.com' }), /email or unique ID/);
 
   assert.deepEqual((await workload({ gcp: 'web@acme-prod.iam.gserviceaccount.com' })).claims, { sub: '104729384756102938475' });
   assert.deepEqual(asked, ['gcloud web@acme-prod.iam.gserviceaccount.com']);

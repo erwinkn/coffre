@@ -357,7 +357,10 @@ signed headers: content-type: application/x-www-form-urlencoded; charset=utf-8,
                 x-coffre-audience: <publicUrl>, x-coffre-key: <jkt>
 ```
 
-It sends Coffre the URL, headers and body, never the credentials.
+It sends Coffre the URL, headers and body, never the credentials. It signs
+with a bare SigV4 signer, not an STS client: the AWS SDKs' STS clients add
+and sign headers of their own (`amz-sdk-invocation-id`, `amz-sdk-request`,
+`x-amz-user-agent`), which Coffre refuses.
 
 **What Coffre checks:**
 
