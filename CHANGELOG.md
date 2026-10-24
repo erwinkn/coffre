@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Upgrading to 0.11, in short.** Run `coffre migrate` before you deploy,
+  as always: it applies `0015_workload_access` and `0016_spent_tokens`, both
+  additive, so the release before keeps serving on them until the deploy.
+  Then:
+  - **Service accounts need an Owner to issue their sensitive reads (R32).**
+    A token or trust binding reads a sensitive value only where an Owner
+    covering the place issued it; any other is refused `not_owner_issued`
+    (403) for those values. Tokens and bindings made before 0.11 are sealed
+    on first use, by their issuer's standing then; `coffre migrate` lists
+    them. Reissue any whose issuer is not an Owner of the project (or has
+    left) and whose CI reads sensitive values.
+  - **A tunnel with no `hosts` dials only an address** (breaking, below):
+    add `hosts: ['db.acme.example']` to each `postgres(…)` tunnel that
+    names its database by host.
+  - **Do not roll back to 0.10.x once credentials are sealed.** The seal
+    and the owner-issued rule are 0.11's; 0.10 does not read them, so the
+    tokens and bindings 0.11 issued or sealed reach nothing there. Deploy
+    0.11 once you mean to keep it.
+  - A Workers deployment adds the `GATES` and `SOCKETS` Durable Objects by
+    hand, as `coffre init` writes them (below); until it does, neither
+    key-bound sessions nor the tunnel run, and nothing else changes.
+
 - **The credential proxy takes a workload** ([workload-access.md](docs/design/workload-access.md),
   its PR 1d). A key-bound session uses credentials, signers and tunnels
   through `/use` as a handle does, with its proof in place of a
