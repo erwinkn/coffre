@@ -241,11 +241,12 @@ test(`a context is refused unless its ids are lowercase UUIDs, its owner a lower
   assert.equal(kms.contexts.length, 0);
 }, validation));
 
-type Step = { kind: 'seal'; context: number; value: Uint8Array } | { kind: 'rotate' | 'retire'; kek: number };
+/** A seal; a new primary; a key dropped, unless primary; or a new primary and the old one dropped, as a rotation ends. */
+type Step = { kind: 'seal'; context: number; value: Uint8Array } | { kind: 'rotate' | 'retire' | 'replace'; kek: number };
 const KEKS = 4;
 const step = gs.oneOf<Step>(
   gs.record({ kind: gs.just('seal' as const), context: gs.integers({ minValue: 0, maxValue: 1 }), value: gs.binary({ maxSize: 24 }) }),
-  gs.record({ kind: gs.sampledFrom(['rotate', 'retire'] as const), kek: gs.integers({ minValue: 0, maxValue: KEKS - 1 }) }),
+  gs.record({ kind: gs.sampledFrom(['rotate', 'retire', 'replace'] as const), kek: gs.integers({ minValue: 0, maxValue: KEKS - 1 }) }),
 );
 
 const rotation = propertySettings(24);
@@ -270,7 +271,8 @@ test(`through any rotations, an envelope opens while its vault key is configured
       const envelope = await seal(value, ctx, keks());
       assert.equal(envelope.kekId, `kek-${primary}`);
       sealed.push({ envelope, kek: primary, ctx, value });
-    } else if (each.kind === 'rotate') {
+    } else if (each.kind === 'rotate' || each.kind === 'replace') {
+      if (each.kind === 'replace' && each.kek !== primary) configured.delete(primary);
       configured.add(each.kek);
       primary = each.kek;
     } else if (each.kek !== primary) {

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import test, { after, before } from 'node:test';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
+import { errors as jose } from 'jose';
 
 import {
   AccessIdentityVerifier,
@@ -843,7 +844,13 @@ test(`an Access assertion names a caller exactly when signed by the team's key w
     const expected = signed && claims.iss === ACCESS_ISSUER && timely && (aud === ACCESS_AUDIENCE || (Array.isArray(aud) && aud.includes(ACCESS_AUDIENCE)))
       ? principalOf(claims)
       : null;
-    const got = await verifiers[which]!.verify(token).catch(() => null);
+    // A refusal is the verifier's: a JOSE verdict on the token, or a token that names no one. A bug, or a key set it could
+    // not fetch, is not one, and fails the test.
+    const got = await verifiers[which]!.verify(token).catch((error: unknown) => {
+      const fetching = error instanceof jose.JWKSTimeout || error instanceof jose.JWKSInvalid;
+      if (fetching || !(error instanceof Error) || error instanceof TypeError || error instanceof RangeError || error instanceof ReferenceError) throw error;
+      return null;
+    });
     assert.deepEqual(got, expected);
   }, accessSettings);
 });

@@ -223,7 +223,8 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
   for (const { request } of Object.values(requests)) await request();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
-  // Places made so far: names from a counter, since the instance keeps what every case made.
+  // Places made so far: names from a counter, since the instance keeps what every case made. So Hegel's replay of a
+  // failing case runs on a larger instance, and may pass, which it reports as flaky: the first failure is printed whole.
   const made = { projects: [] as string[], environments: ['market/busy', 'market/prod'], keys: [] as string[] };
   let n = 0;
   await hegel.testAsync(async (tc) => {
@@ -290,7 +291,10 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
       }
     }
     for (const [name, { request }] of Object.entries(requests)) {
-      assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}`);
+      const spent = await cost(request);
+      const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;
+      if (JSON.stringify(spent) !== JSON.stringify(small[name])) console.error(why);
+      assert.deepEqual(spent, small[name], why);
     }
   }, growthSettings);
 });

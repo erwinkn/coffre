@@ -5,14 +5,17 @@
 - **Fixes found by property tests** (docs/property-tests.md):
   - The credential proxy refuses a path with a dot segment hidden behind a
     `;` parameter, `/use/market/dev/api/..;/admin`, which Tomcat and Spring
-    read as a step up past the credential's base path and its `paths`.
+    read as a step up past the credential's base path and its `paths`, and
+    one encoded twice (`%252e%252e`), which a server behind another decodes
+    twice.
   - A host spelled with a trailing dot, `localhost.`, is private, as
     `localhost` is: an upstream or a tunnel's database URL naming it needs
     `insecureUpstreams`, as any other loopback address does.
-  - A plain value made a secret in place, then rolled back to its plain
-    version while the key still holds it, comes back a secret: a
-    Contributor, who reads no secret, can no longer read it by restoring it
-    (R24).
+  - A restored version comes back as its value was made last: the plain
+    version of a value made a secret or sensitive in place since comes back
+    so, whatever was written after, and only whoever reads it as such may
+    restore it. A Contributor, who reads no secret, could read one by
+    restoring its plain version (R24); an Owner's loosening (R30) is kept.
   - A value holding a lone UTF-16 surrogate is refused with 400, rather than
     stored as U+FFFD, a value other than the one written.
   - A fork's key with neither a value nor a reference, written around the

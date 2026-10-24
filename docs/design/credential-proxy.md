@@ -533,8 +533,9 @@ request sent on:
    stay under `upstream`'s origin and path. A dot segment is resolved
    before coffre sees it, so it climbs out of the credential altogether,
    and an encoded slash or backslash is refused, as is a dot segment with
-   path parameters, which Tomcat and Spring read as one (`/..;/`). A
-   credential's `methods` and `paths` narrow it further.
+   path parameters, which Tomcat and Spring read as one (`/..;/`), and any
+   of these encoded twice (`%252e%252e`), which a server behind another
+   decodes twice. A credential's `methods` and `paths` narrow it further.
 2. **Who.** The handle, from `x-coffre-handle` if present, else from
    where the rule puts the key: the header, the query parameter, or
    Basic's user or password. A shaped placeholder's slot must be that shape

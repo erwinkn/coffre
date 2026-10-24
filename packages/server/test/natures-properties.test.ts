@@ -82,7 +82,7 @@ const CUSTOM_ROLES = ['release-manager', 'reader', 'on-call'] as const;
 const READ: Permission = 'secret.read';
 const USE: Permission = 'secret.use';
 const WRITE: Permission = 'secret.write';
-const settings = propertySettings(3, 10);
+const settings = propertySettings(8, 10);
 
 /** Who acts: the instance's first Owner, or a person of the world. */
 const ACTORS = [ROOT, ...PEOPLE] as const;
@@ -178,7 +178,7 @@ before(async () => {
 after(async () => { await db.close(); });
 
 /** What each reader received and was allowed, for a fixed scenario's own assertions. */
-type Outcome = { received: Map<string, Set<string>>; texts: Map<string, string> };
+type Outcome = { received: Map<string, Set<string>>; texts: Map<string, string>; applied: number };
 
 async function scenario(world: World, policy: Policy, ops: readonly Op[], note: (text: string) => void = () => {}): Promise<Outcome> {
   await resetDatabase(db.owner);
@@ -631,6 +631,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
 
   // What every session and credential reads, against what the model allows it.
   const received = new Map<string, Set<string>>();
+  let applied = 0;
   const describe = (text: string, all: Serving[]) => `${text} (${texts.get(text)}), served ${JSON.stringify(all.filter((serving) => serving.text === text).map((serving) => `${pathOf(serving.env)}/${serving.key} as ${serving.nature}${serving.holder === serving.env ? '' : ` from ${pathOf(serving.holder)}`}`))}`;
   async function readEverything(reader: Reader, client: CoffreClient, quiet: CoffreClient, got: Set<string>) {
     for (const env of envs) {
@@ -680,6 +681,9 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
       const may = allowed(reader, all);
       const leaked = [...got].filter((text) => !may.has(text));
       assert.deepEqual(leaked.map((text) => describe(text, all)), [], `${reader.label} received only what the rules give it`);
+      // And at least what they give it: every value held where it is read, but a sensitive one, which only a use hands on.
+      const owed = all.filter((serving) => serving.env === serving.holder && serving.nature !== 'sensitive' && receives(reader, serving) && !got.has(serving.text));
+      assert.deepEqual(owed.map((serving) => describe(serving.text, all)), [], `${reader.label} received all the rules give it`);
       const total = received.get(reader.label) ?? received.set(reader.label, new Set()).get(reader.label)!;
       for (const text of got) total.add(text);
       if (reader.credential !== null && !reader.credential.live) reader.credential.buried = true;
@@ -754,11 +758,11 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const { env, key, row } = at;
         const version = op.index % row.versions.length + 1;
         const target = row.versions[version - 1]!;
-        // It comes back as it was, plain or a secret, and sensitive while the key is, or its newest version (credential-proxy.md);
-        // a plain value made stricter since, in place, a secret.
+        // It comes back as the newest version of that very value holds it, a mark in place or an Owner's loosening since
+        // included (R24, R30), and sensitive while the key is, or its newest version (credential-proxy.md).
         const now = resolve(env, key)?.nature;
-        const tightened = target.nature === 'plain' && row.versions.slice(version).some((later) => later.text === target.text && later.nature !== 'plain');
-        const nature = now === 'sensitive' || row.versions.at(-1)!.nature === 'sensitive' ? 'sensitive' : tightened ? 'secret' : target.nature;
+        const held = row.versions.findLast((later) => later.text === target.text)!.nature;
+        const nature = now === 'sensitive' || row.versions.at(-1)!.nature === 'sensitive' ? 'sensitive' : held;
         if (await attempt(() => clientOf(actor).secrets.restore(`${writePath(env)}/${key}`, version)) === null) return null;
         written(env, key, { text: target.text, nature });
         return 'value';
@@ -902,7 +906,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
       const reach = new Map(readers().map((reader) => [reader.label, allowed(reader, before)]));
       const kind = await apply(op, actor);
       note(`operation ${index}: ${op.kind} by ${actor}: ${kind ?? 'refused or skipped'}`);
-      if (process.env.NATURES_DEBUG) console.error(`operation ${index}: ${op.kind} by ${actor}: ${kind ?? 'refused or skipped'}`);
+      if (kind !== null) applied++;
       if (kind === 'value') {
         const all = servings();
         for (const reader of readers()) {
@@ -918,8 +922,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
       throw new Error(`after operation ${index}, ${JSON.stringify(op)}: ${(error as Error).message}`, { cause: error });
     }
   }
-  if (process.env.NATURES_DEBUG) console.error(JSON.stringify({ envs: envs.length, rows: [...rows.values()].reduce((n, each) => n + each.size, 0), credentials: credentials.map((each) => each.label), received: Object.fromEntries([...received].map(([label, got]) => [label, got.size])), ops: ops.length }));
-  return { received, texts };
+  return { received, texts, applied };
 }
 
 /** A world, its policy and the changes after it, all drawn up front so Hegel shrinks them. */
@@ -930,13 +933,21 @@ function drawn(tc: hegel.TestCase) {
   return { world, policy, ops };
 }
 
-test(`no value reaches a person or a credential the rules forbid it to, by any read, after any change, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
-  const { world, policy, ops } = drawn(tc);
-  tc.note(`world: ${JSON.stringify(world)}`);
-  tc.note(`policy: ${JSON.stringify(policy)}`);
-  tc.note(`operations: ${JSON.stringify(ops)}`);
-  await scenario(world, policy, ops, (text) => tc.note(text));
-}, settings));
+test(`no value reaches a person or a credential the rules forbid it to, by any read, after any change, seed ${settings.seed}`, async () => {
+  // What the cases did, together: a run whose changes are all refused, or that hands nobody anything, proves nothing.
+  const did = { ops: 0, applied: 0, received: 0 };
+  await hegel.testAsync(async (tc) => {
+    const { world, policy, ops } = drawn(tc);
+    tc.note(`world: ${JSON.stringify(world)}`);
+    tc.note(`policy: ${JSON.stringify(policy)}`);
+    tc.note(`operations: ${JSON.stringify(ops)}`);
+    const outcome = await scenario(world, policy, ops, (text) => tc.note(text));
+    did.ops += ops.length;
+    did.applied += outcome.applied;
+    did.received += [...outcome.received.values()].reduce((n, got) => n + got.size, 0);
+  }, settings);
+  assert.ok(did.applied * 3 >= did.ops && did.received > 0, `the cases did too little to show anything: ${JSON.stringify(did)}`);
+});
 
 const [ADA, BO, CY] = PEOPLE;
 const [CI, DEPLOY] = SERVICES;
@@ -1010,7 +1021,7 @@ test('a fixed world: who receives each nature of value, on each credential, and 
   assert.deepEqual(got(label(`personal token 3 of ${ADA}`)), [database, stripe, region, mine]);
 });
 
-test('a value made a secret in place stays one: a writer who never read it brings back its plain version as a secret', async () => {
+test('a value made a secret in place stays one: a writer who never read it brings back no plain version of it, even over a value of their own', async () => {
   const world: World = {
     projects: [{ id: 'market', slug: 'market', environments: [{ id: 'dev', projectId: 'market', slug: 'dev', parentId: null, owner: null }] }],
     secrets: [{ id: 's1', environmentId: 'dev', key: 'REGION', nature: 'plain', reference: null, archived: false }],
@@ -1023,14 +1034,8 @@ test('a value made a secret in place stays one: a writer who never read it bring
     { ...CHANGE, kind: 'mark', nature: 'secret', target: { env: 'dev', key: 'REGION' } },
     { ...CHANGE, kind: 'grant', member: memberOf(BO), role: 'contributor', target: { env: 'dev' } },
     { ...CHANGE, kind: 'restore', actor: actorOf(BO), index: 0, target: { env: 'dev', key: 'REGION' } },
+    // Their own value written over it first, so that the secret is no longer the newest version.
+    { ...CHANGE, kind: 'write', actor: actorOf(BO), target: { env: 'dev', key: 'REGION' } },
+    { ...CHANGE, kind: 'restore', actor: actorOf(BO), index: 0, target: { env: 'dev', key: 'REGION' } },
   ]);
 });
-
-// TEMPORARY replay
-if (process.env.NATURES_REPLAY) {
-  test('replay', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { world, policy, ops } = JSON.parse(readFileSync(process.env.NATURES_REPLAY!, 'utf8'));
-    await scenario(world, policy, ops, (text) => console.error(text));
-  });
-}

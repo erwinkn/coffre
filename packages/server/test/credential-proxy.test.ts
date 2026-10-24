@@ -520,8 +520,9 @@ test('the proxy sends nothing outside the upstream, follows no redirect, redacts
 
   // A dot segment, encoded or not, is resolved before coffre sees it, out of the credential's path altogether; an encoded slash is refused.
   for (const path of ['/../admin', '/%2e%2e/admin', '/.%2E/admin']) assert.equal((await call(path)).headers.get('coffre-proxy'), 'refused', path);
-  // As is a dot segment with path parameters, which Tomcat and Spring read as one (`/..;/`), however it is encoded.
-  for (const path of ['/a%2Fb', '/a%5Cb', '/a%2fb%2f..%2f..', '/..;/admin', '/companies/%2e%2e;x/admin', '/companies/..%3B']) {
+  // As is a dot segment with path parameters, which Tomcat and Spring read as one (`/..;/`), however it is encoded, and
+  // one encoded twice, which a server behind another decodes twice.
+  for (const path of ['/a%2Fb', '/a%5Cb', '/a%2fb%2f..%2f..', '/..;/admin', '/companies/%2e%2e;x/admin', '/companies/..%3B', '/companies/%252e%252e/%252e%252e/admin', '/a%252Fb', '/companies/..%253b']) {
     const climbed = await call(path);
     assert.equal(climbed.status, 400, path);
     assert.equal(climbed.headers.get('coffre-proxy'), 'refused');

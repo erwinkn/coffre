@@ -44,7 +44,7 @@ import {
   grants as grantsIn, policy as policyOf, scope as scopeOf, world as worldOf,
   type Columns, type Environment, type Filter, type Grant, type InstanceRole, type Policy, type Scope, type World,
 } from '../../../scripts/properties/domain.ts';
-import { DETAIL_ACTIONS, listAudit, type AuditQuery } from '../src/api/audit.ts';
+import { listAudit, type AuditQuery } from '../src/api/audit.ts';
 import { callerFrom, type Caller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { ApiError } from '../src/api/errors.ts';
@@ -85,7 +85,14 @@ const PLACE_DETAILS = ['key.wrap', 'reference.create', 'mcp.read'] as const;
 const INSTANCE_ACTIONS = ['sign_in', 'member.add', 'settings.change', 'token.create'] as const;
 const ACTORS = ['user:ada@acme.example', 'user:bo@acme.example', 'token:ci', 'system:coffre-scheduler', 'system:ci'] as const;
 const ASKED_ACTORS = ['user:ada@acme.example', 'user:ADA@acme.example', 'token:ci', 'coffre-scheduler', 'ci', 'bo@acme.example'] as const;
-const DETAIL = new Set<string>(DETAIL_ACTIONS);
+/**
+ * Of the actions drawn, the detail ones a page hides unless asked, from the
+ * docs rather than the code under test: sign-ins and tokens made, and the
+ * vault's key seals (docs/design/single-database.md, its table and "Detail
+ * entries"); a read-only MCP call (mcp.md, rule 4); and the vault's seal of a
+ * reference, which the app's `secret.reference` says in words (environments.md).
+ */
+const DETAIL = new Set<string>(['key.wrap', 'reference.create', 'mcp.read', 'sign_in', 'token.create']);
 const NO_SECRET = '00000000-0000-4000-8000-00000000dead';
 
 /** A personal config's own slug, as the app makes one (`dev-p-3f9c2a1b`), never shown: `dev@me` names it to its owner. */

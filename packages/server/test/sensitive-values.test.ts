@@ -186,12 +186,13 @@ test('a rollback brings an old value back as it was held, and sensitive while th
   const [restored] = (await entries('secret.restore')).filter((entry) => entry.decision === 'allow');
   assert.deepEqual(restored!.metadata, { key: 'REGION', version: 4, from: 1, sensitive: true });
 
-  // Written again as a secret, the key takes back the plain value as plain, and the sensitive one as sensitive.
+  // Written again as a secret, the key takes back the plain version as that value was made last, sensitive, never plain:
+  // no person is shown a value once made sensitive (R16), and the sensitive version as sensitive.
   await root.secrets.set('market/dev', { REGION: { value: 'eu-west-1', sensitivity: 'secret' } });
   await root.secrets.restore('market/dev/REGION', 1);
-  assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, 'eu-west-3');
+  assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, null);
   await root.secrets.restore('market/dev/REGION', 3);
-  assert.deepEqual((await history('market/dev/REGION')).slice(0, 3), [[7, 'sensitive'], [6, 'plain'], [5, 'secret']]);
+  assert.deepEqual((await history('market/dev/REGION')).slice(0, 3), [[7, 'sensitive'], [6, 'sensitive'], [5, 'secret']]);
   assert.deepEqual((await ci.secrets.reveal('market/dev/REGION')).values, { REGION: 'eu-west-3' });
 });
 

@@ -361,6 +361,8 @@ async function run(operations: Operation[], { honest }: { honest: boolean }) {
     }
   };
   await drain();
+  // An honest run nobody ended is still open, so that what it owes is checked below, not skipped.
+  if (honest && !operations.some((op) => (endings as readonly string[]).includes(op.kind))) assert.ok(!done(), 'an honest tunnel nobody ended has ended');
   if (!done()) {
     if (honest) {
       // Liveness: both ways, every byte written arrived, once and in order, and nobody waits on credit.

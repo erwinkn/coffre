@@ -783,8 +783,12 @@ async function boundedText(request: Request, max: number): Promise<string | null
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
   // Nothing the app writes leaves the credential's upstream: no slash or backslash smuggled in a segment, and no dot
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
-  const climbs = (read: string) => /[/\\]/.test(read) || /^\.{1,2}$/.test(read.split(';')[0]!);
-  if (rest.some((segment) => climbs(bytesOf(segment)))) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it.
+  const climbs = (segment: string): boolean => {
+    const read = bytesOf(segment);
+    return /[/\\]/.test(read) || /^\.{1,2}$/.test(read.split(';')[0]!) || (read !== segment && climbs(read));
+  };
+  if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
   const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
   const under = credential.base.pathname.replace(/\/$/, '');

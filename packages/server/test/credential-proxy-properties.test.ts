@@ -67,23 +67,27 @@ const utf8 = (text: string) => binary(new TextEncoder().encode(text));
 
 /** What a path segment can be: dot segments in every spelling, encoded slashes, path parameters, and the rest. */
 const segment = gs.oneOf(
-  gs.sampledFrom(['..', '.', '%2e%2e', '%2E%2e', '.%2E', '%2e', '%2f', '%2F', '%5c', '%5C', '\\', '..;', '..;x=1', '.;', '%2e%2e;', '..%3b', '%2e%2e%3B', '%3b', ';a=b', '%252e%252e', '%252f', '．．', '%EF%BC%8E%EF%BC%8E', '', '@', '@evil.example', '%40evil.example', '%23', '%3F', ':', 'http:', '%00', '%0d%0a', '%e9', '%']),
+  gs.sampledFrom(['..', '.', '%2e%2e', '%2E%2e', '.%2E', '%2e', '%2f', '%2F', '%5c', '%5C', '\\', '..;', '..;x=1', '.;', '%2e%2e;', '..%3b', '%2e%2e%3B', '%3b', ';a=b', '%252e%252e', '%252E%252e', '%25252e%25252e', '%252f', '%255c', '..%253b', '．．', '%EF%BC%8E%EF%BC%8E', '', '@', '@evil.example', '%40evil.example', '%23', '%3F', ':', 'http:', '%00', '%0d%0a', '%e9', '%']),
   gs.sampledFrom(['v1', 'v2', 'companies', 'x', 'y', 'admin', 'a', 'b%20c']),
   gs.text({ maxSize: 4, excludeCategories: ['Cs'] }).map((text) => text.replace(/[/?#]/g, '')),
 );
 const BASES = ['https://api.example', 'https://api.example/v1', 'https://api.example/v1/', 'https://api.example/a/b%20c'] as const;
 
 /**
- * The path as a server reads it: each segment percent-decoded once and its
- * `;` parameters dropped, as Tomcat, Jetty and Spring do (Orange Tsai,
+ * The path as a server reads it: each segment percent-decoded until it no
+ * longer changes, as one behind another decodes it twice, and its `;`
+ * parameters dropped, as Tomcat, Jetty and Spring do (Orange Tsai,
  * "Breaking Parser Logic", Black Hat 2018: `/..;/`), then dot segments
  * resolved. Null for a segment that decodes to a slash or a backslash,
  * which some servers split on.
  */
+const decode = (text: string) => text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 function serverView(pathname: string): string[] | null {
   const segments: string[] = [];
   for (const raw of pathname.split('/').slice(1)) {
-    const decoded = raw.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
+    // As a server reads it, however many times it decodes: one behind another decodes twice.
+    let decoded = raw;
+    for (let again = decode(decoded); again !== decoded; again = decode(decoded)) decoded = again;
     if (/[/\\]/.test(decoded)) return null;
     const bare = decoded.split(';')[0];
     if (bare === '.') continue;
@@ -200,12 +204,13 @@ test(`no header reaches the upstream with a line break or NUL, nor one about the
  */
 const ALPHABET = 'ABx1é日"<&/%\\ ';
 const secrets = gs.composite((tc) => {
-  const source = tc.draw(gs.text({ alphabet: ALPHABET, minSize: 1, maxSize: 24 }));
-  const cut = () => {
-    const from = tc.draw(gs.integers({ minValue: 0, maxValue: source.length - 1 }));
-    return source.slice(from, tc.draw(gs.integers({ minValue: from + 1, maxValue: source.length })));
+  const source = tc.draw(gs.text({ alphabet: ALPHABET, minSize: MIN_REDACTED, maxSize: 24 }));
+  const cut = (least: number) => {
+    const from = tc.draw(gs.integers({ minValue: 0, maxValue: source.length - least }));
+    return source.slice(from, tc.draw(gs.integers({ minValue: from + least, maxValue: source.length })));
   };
-  return [cut(), cut(), tc.draw(gs.text({ alphabet: ALPHABET, minSize: 1, maxSize: 12 }))];
+  // The first long enough to be redacted, always: what is left of it is what the property is about.
+  return [cut(MIN_REDACTED), cut(1), tc.draw(gs.text({ alphabet: ALPHABET, minSize: 1, maxSize: 12 }))];
 });
 /** The forms an honest upstream quotes a value in (the design's closed list), and the bytes they travel as. */
 const forms = (value: string) => {
@@ -228,6 +233,8 @@ test(`an answer redacted as it streams, however it is split, is the whole answer
     gs.sampledFrom([a!, b!, c!]).flatMap((value) => gs.sampledFrom(forms(value))).flatMap((form) => gs.integers({ minValue: 1, maxValue: form.length }).map((end) => [form, form.slice(0, end), form.slice(-end)][end % 3]!)),
     gs.text({ alphabet: `${ALPHABET}yz`, maxSize: 6 }).map(utf8),
   ), { maxSize: 12 }));
+  // One of the first secret's forms whole, somewhere among them.
+  pieces.splice(tc.draw(gs.integers({ minValue: 0, maxValue: pieces.length })), 0, tc.draw(gs.sampledFrom(forms(a!))));
   const body = pieces.join('');
   const cuts = [...new Set(tc.draw(gs.arrays(gs.integers({ minValue: 0, maxValue: body.length }), { maxSize: 8 })))].sort((x, y) => x - y);
   const type = tc.draw(gs.sampledFrom(['text/plain', 'application/json; charset=utf-8', 'application/xml', 'text/event-stream']));

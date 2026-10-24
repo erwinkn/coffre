@@ -256,8 +256,10 @@ test(`a service credential its issuer may issue reaches nothing its account lack
   const { projects, policy, person, service, places } = tc.draw(setting);
   const issuer = holdings(projects, person);
   const account = { grants: service.grants.map((grant) => ({ role: grant.role, place: grantPlace(projects, grant) })), admittedBy: null };
-  // Mostly what the account holds, which is all a credential for it may name.
-  const wanted = (tc.draw(gs.booleans()) ? service.grants.filter(() => tc.draw(gs.booleans())) : tc.draw(domain.grants(projects, policy.roles, 3)))
+  // Mostly what the account holds, which is all a credential for it may name; never nothing, which reaches nothing.
+  const held = service.grants.filter(() => tc.draw(gs.booleans()));
+  const named = held.length > 0 && tc.draw(gs.booleans()) ? held : [tc.draw(domain.grant(projects, policy.roles)), ...tc.draw(domain.grants(projects, policy.roles, 2))];
+  const wanted = [...new Map(named.map((grant) => [`${grant.projectId}/${grant.environmentId ?? ''}`, grant])).values()]
     .map((grant) => ({ role: grant.role, place: grantPlace(projects, grant) }));
   const everywhere = { projects: 'all' as const, environments: 'all' as const };
   if (!issuesCredential(issuer, everywhere, person.principal, account, wanted)) return;
@@ -268,7 +270,9 @@ test(`a service credential its issuer may issue reaches nothing its account lack
     for (const permission of domain.PERMISSIONS) {
       if (!allows(through, permission, place)) continue;
       assert.ok(allows(holdings(projects, service), permission, place));
-      if (!runsInstance(issuer) && !wanted.some((grant) => mayManageAccess(issuer, grant.place))) {
+      // Past what the issuer holds only through a grant of the scope given where they manage access, which gives anything.
+      const reaching = wanted.filter((grant) => grant.place.projectId === place.projectId && (grant.place.environmentId == null || grant.place.environmentId === place.environmentId));
+      if (!runsInstance(issuer) && !reaching.some((grant) => mayManageAccess(issuer, grant.place))) {
         assert.ok(allows(issuer, permission, place), JSON.stringify({ person, wanted, permission, place, protected: policy.protected }));
       }
     }

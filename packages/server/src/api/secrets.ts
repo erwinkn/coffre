@@ -1573,16 +1573,14 @@ export async function restoreVersion(
     };
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
-    // A plain value the key holds stricter now, made a secret in place (its newest version, of the very same ciphertext, no
-    // longer plain), comes back a secret: making a secret plain takes reading it, which a restore does not. One another
-    // value replaced since comes back plain, as it was held and shown. A value written meanwhile makes this attempt
-    // prepare again, so `versions` is the history the restore commits on.
-    const newest = versions[0]!;
-    const tightened = target.plaintext !== null && newest.plaintext === null
-      && newest.envelope.iv.equals(target.envelope.iv) && newest.envelope.ciphertext.equals(target.envelope.ciphertext);
-    const level = foundSensitive ? 'sensitive' : tightened ? 'secret' : sensitivityOf(target);
-    // An old value is made live only by whoever could have read it (`madeLive`), as the vault decides again.
-    if (target.id !== prepared.currentVersionId) madeLive(ctx, place, sensitivityOf(target), 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
+    // A value is held as the newest version of its very ciphertext holds it: one made a secret, or sensitive, in place
+    // since, or loosened by an Owner (R30), comes back as it was made last, whatever was written after. Its plain version
+    // brings back no secret: making a secret plain takes reading it, which a restore does not (R24). A value written
+    // meanwhile makes this attempt prepare again, so `versions` is the history the restore commits on.
+    const held = sensitivityOf(versions.find((each) => each.envelope.iv.equals(target.envelope.iv) && each.envelope.ciphertext.equals(target.envelope.ciphertext))!);
+    const level = foundSensitive ? 'sensitive' : held;
+    // An old value is made live only by whoever could read it as it is held (`madeLive`), as the vault decides again.
+    if (target.id !== prepared.currentVersionId) madeLive(ctx, place, held, 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);
     if (!rewrapped.ok) {
       throw vaultRefusal(ctx, rewrapped.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });

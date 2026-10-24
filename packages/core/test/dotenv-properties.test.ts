@@ -69,7 +69,9 @@ const SHELLS = [['sh'], ['dash'], ['bash'], ['bash', '--posix'], ['busybox', 'sh
 const shellSettings = propertySettings(25, 20);
 
 test(`each POSIX shell's eval of formatShellExports sets exactly the values, byte for byte, and runs none of them, seed ${shellSettings.seed}`, (t) => {
-  assert.ok(SHELLS.length > 0, 'no POSIX shell to run');
+  // sh and bash are on every machine that runs this; dash and busybox where installed.
+  for (const needed of ['sh', 'bash']) assert.ok(SHELLS.some(([program]) => program === needed), `no ${needed} to run the exports in`);
+  t.diagnostic(`shells: ${SHELLS.map((shell) => shell.join(' ')).join(', ')}`);
   const directory = mkdtempSync(join(tmpdir(), 'coffre-shell-properties-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const canary = join(directory, 'ran');
