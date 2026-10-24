@@ -16,6 +16,9 @@
  *     "hdr": "content-type idempotency-key", "req": "kq9V…" }
  */
 
+/** The longest proof, in characters, which the verifier refuses past and the signer never makes. */
+export const MAX_PROOF_LENGTH = 2048;
+
 /** A P-256 public key, as a proof carries it: these four members and nothing else. */
 export type PublicJwk = { kty: 'EC'; crv: 'P-256'; x: string; y: string };
 
@@ -182,23 +185,33 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 /**
  * What `req` signs, one line each:
  *
+ *   <the path as sent, as the WHATWG parser writes it: every slash and escape kept>
  *   <the raw query string as sent, without "?", or empty>
  *   <name>:<value>    for each header `hdr` names, in its order, its value as received
  *   <the body's SHA-256, in lower-case hex>
  *
- * The body's line is its buffered bytes' digest (`bodyDigest`), or, for a
- * streamed upload through a credential `sigv4` signs, the 64 hex digits its
- * `x-amz-content-sha256` declares, which S3 checks against the bytes; any
- * other declared value is `UNSIGNED_BODY`. A header sent several times is
- * one value, joined by `, `, as `Headers` gives it. Neither a query nor a
- * header value holds a line break, so no two requests read as one; throws
- * on one that does, or on a body line that is neither.
+ * `htu` signs the path as a zone normalizes it, so a proof still holds
+ * behind one; this line signs it as it goes upstream, so `/use/s3/a/b` and
+ * `/use/s3/a//b`, one object and another to S3, are two requests. A path a
+ * zone changed fails closed. The body's line is its buffered bytes' digest
+ * (`bodyDigest`), or, for a streamed upload through a credential `sigv4`
+ * signs, the 64 hex digits its `x-amz-content-sha256` declares, which S3
+ * checks against the bytes; any other declared value is `UNSIGNED_BODY`. A
+ * header sent several times is one value, joined by `, `, as `Headers`
+ * gives it. No line holds a line break, so no two requests read as one;
+ * throws on one that does, or on a body line that is neither.
  */
-export function canonicalRequest(request: { query: string; headers: readonly (readonly [string, string])[]; body: string }): string {
-  const lines = [request.query, ...request.headers.map(([name, value]) => `${name}:${value}`)];
-  if (lines.some((line) => /[\r\n]/.test(line))) throw new TypeError('a signed request holds no line break in its query or headers');
+export function canonicalRequest(request: { path: string; query: string; headers: readonly (readonly [string, string])[]; body: string }): string {
+  const lines = [request.path, request.query, ...request.headers.map(([name, value]) => `${name}:${value}`)];
+  if (lines.some((line) => /[\r\n]/.test(line))) throw new TypeError('a signed request holds no line break in its path, query or headers');
   if (!SHA256_HEX.test(request.body) && request.body !== UNSIGNED_BODY) throw new TypeError('a signed request\'s body is a SHA-256 in hex, or UNSIGNED_BODY');
   return `${lines.map((line) => `${line}\n`).join('')}${request.body}`;
+}
+
+/** The path and the query a URL sends, as `canonicalRequest` signs them. */
+export function sentTarget(url: string | URL): { path: string; query: string } {
+  const parsed = new URL(String(url));
+  return { path: parsed.pathname, query: parsed.search.slice(1) };
 }
 
 /** `req`: base64url SHA-256 of the canonical request. */
@@ -246,9 +259,11 @@ export async function createProof(
   if (request.content !== undefined) {
     const headers = signedHeaders(request.content.headers);
     claims.hdr = headers.map(([name]) => name).join(' ');
-    claims.req = await requestDigest({ query: new URL(String(request.url)).search.slice(1), headers, body: request.content.body });
+    claims.req = await requestDigest({ ...sentTarget(request.url), headers, body: request.content.body });
   }
   const input = `${base64url(ENCODER.encode(JSON.stringify(header)))}.${base64url(ENCODER.encode(JSON.stringify(claims)))}`;
+  // 86 characters of signature and its dot: a proof the verifier would refuse for its size is never made.
+  if (input.length + 87 > MAX_PROOF_LENGTH) throw new TypeError(`a proof is at most ${MAX_PROOF_LENGTH} characters: this request's URL or headers are too long to sign`);
   const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key.privateKey, ENCODER.encode(input));
   return `${input}.${base64url(new Uint8Array(signature))}`;
 }

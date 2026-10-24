@@ -22,7 +22,9 @@ import {
   canonicalHtu,
   fetchMethod,
   fromBase64url,
+  MAX_PROOF_LENGTH,
   requestDigest,
+  sentTarget,
   thumbprint,
   tokenDigest,
   UNSIGNED_HEADERS,
@@ -30,10 +32,8 @@ import {
   type PublicJwk,
 } from '@coffre/client/dpop';
 
-export { canonicalHtu, canonicalRequest, fetchMethod, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
+export { canonicalHtu, canonicalRequest, fetchMethod, MAX_PROOF_LENGTH, sentTarget, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
 
-/** The longest proof, in characters. */
-export const MAX_PROOF_LENGTH = 2048;
 /** The most headers one proof signs. */
 export const MAX_SIGNED_HEADERS = 32;
 /** How far a proof's `iat` may be from now: the nonce, not the clock, is what makes a proof fresh. */
@@ -126,7 +126,7 @@ export function parseProof(proof: string): ParsedProof | ProofRefusal {
   if (claims === null || Object.keys(claims).some((name) => !CLAIMS.has(name))) return refuse('malformed', "a proof's claims are jti, htm, htu, iat, and ath, nonce, hdr, req where they apply");
   if (typeof claims.jti !== 'string' || fromBase64url(claims.jti)?.length !== 16) return refuse('malformed', 'jti is 16 random bytes, in base64url');
   if (typeof claims.htm !== 'string' || !METHOD.test(claims.htm)) return refuse('malformed', 'htm is the request\'s method');
-  if (typeof claims.htu !== 'string' || claims.htu.length > 1024) return refuse('malformed', 'htu is the request\'s URL');
+  if (typeof claims.htu !== 'string') return refuse('malformed', 'htu is the request\'s URL');
   if (!Number.isSafeInteger(claims.iat)) return refuse('malformed', 'iat is an integer, in seconds');
   if (claims.ath !== undefined && !isDigest(claims.ath)) return refuse('malformed', 'ath is a SHA-256, in base64url');
   if (claims.nonce !== undefined && (typeof claims.nonce !== 'string' || !/^[\x21-\x7e]{1,128}$/.test(claims.nonce))) {
@@ -193,11 +193,11 @@ export async function verifyProof(proof: string | ParsedProof, expect: ProofExpe
     }
     let digest: string;
     try {
-      digest = await requestDigest({ query: new URL(String(expect.url)).search.slice(1), headers, body: expect.content.body });
+      digest = await requestDigest({ ...sentTarget(expect.url), headers, body: expect.content.body });
     } catch {
-      return refuse('req', 'the request cannot be signed: a line break in its query or headers');
+      return refuse('req', 'the request cannot be signed: a line break in its path, query or headers');
     }
-    if (claims.req !== digest) return refuse('req', 'the proof signs another query, header or body');
+    if (claims.req !== digest) return refuse('req', 'the proof signs another path as sent, query, header or body');
   }
   const skew = expect.skewSeconds ?? PROOF_SKEW_SECONDS;
   const now = Math.floor((expect.now ?? Date.now()) / 1000);

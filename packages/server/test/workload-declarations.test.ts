@@ -1,6 +1,8 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
+import { createHmac } from 'node:crypto';
+
+import { deriveKey, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { eq } from 'drizzle-orm';
 
 import { credentials, enrollments, serviceBindings } from './db/tables.ts';
@@ -16,6 +18,11 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+
+/** A sign-in row's MAC as section 11 and auth-rows.ts's tuple say it, computed apart from `authMac`. */
+function independentMac(kind: string, values: unknown[]): Buffer {
+  return createHmac('sha256', deriveKey(deps.chainKey, 'signin-rows/v1')).update(JSON.stringify(['coffre.auth.v2', kind, ...values])).digest();
+}
 
 // What docs/design/workload-access.md's PR 0 declares, before the changes
 // that serve it: every route answers 501 past sign-in, the new tokens are
@@ -92,10 +99,11 @@ test("each route of the design is declared in the API and answers 501, naming th
     assert.equal(PERSONAL_TOKEN_ROUTES[key], false, key);
     assert.equal(ROUTE_SCOPES[key], null, key);
   }
-  // A session mints and promotes for the service a binding's mintedBy names; it makes no other credential, and lifts no freeze.
-  assert.equal(WORKLOAD_ROUTES['POST /members/:member/bindings/:id/enrollments'], true);
-  assert.equal(WORKLOAD_ROUTES['POST /members/:member/bindings/:id/enrollments/:enrollment/promote'], true);
-  for (const key of ['POST /members/:member/tokens', 'POST /handles', 'POST /members/:member/bindings', 'DELETE /freezes/:target', 'PATCH /access/:member'] as const) {
+  // A session reaches what a service token does, its handlers deciding, and mints and promotes codes; what a person does stays theirs.
+  for (const key of ['POST /members/:member/bindings/:id/enrollments', 'POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'PATCH /access/:member', 'GET /personal/:project', 'PATCH /secrets/:project/:environment'] as const) {
+    assert.equal(WORKLOAD_ROUTES[key], true, key);
+  }
+  for (const key of ['POST /handles', 'POST /members/:member/tokens/:id/approve', 'POST /freezes', 'DELETE /freezes/:target', 'POST /oauth/authorizations'] as const) {
     assert.equal(WORKLOAD_ROUTES[key], false, key);
   }
   assert.deepEqual(PROOFS, {});
@@ -138,6 +146,8 @@ test("a workload's session is a MAC kind of its own, over what binds it; a bindi
   await db.owner.insert(enrollments).values({ ...enrollment, authMac: authMac(deps.chainKey, 'enrollments', enrollment) });
   const [stored] = await db.owner.select().from(enrollments);
   assert.ok(checkAuthRow(deps.chainKey, 'enrollments', stored!));
+  // The tuple as section 11 spells it, encoded here on its own: kind `enrollments`, its seven fields once each.
+  assert.deepEqual(stored!.authMac, independentMac('enrollments', [enrollment.id, bindingId, enrollment.codeHash.toString('hex'), '[]', `user:${ROOT}`, null, enrollment.expiresAt.getTime()]));
   for (const [field, value] of [['scope', '[{"projectId":"p","environmentId":null,"role":"owner"}]'], ['expiresAt', new Date(Date.now() + 90 * 86_400_000)], ['bindingId', crypto.randomUUID()], ['createdWith', crypto.randomUUID()]] as const) {
     assert.ok(!checkAuthRow(deps.chainKey, 'enrollments', { ...stored!, [field]: value }), `an enrollment's ${field} is under its MAC`);
   }
@@ -155,6 +165,11 @@ test("a workload's session is a MAC kind of its own, over what binds it; a bindi
   await db.owner.insert(credentials).values({ ...session, authMac: authMac(deps.chainKey, 'credentials', session) });
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, session.id));
   assert.ok(checkAuthRow(deps.chainKey, 'credentials', row!));
+  // Today's credential fields, then createdBy, scope, places, jkt, notAfter, ancestors, constraints, enrollmentId, approvedAt, approvedBy.
+  assert.deepEqual(row!.authMac, independentMac('workload_credentials', [
+    session.id, session.tokenHash.toString('hex'), 'workload', MEMBER, 1, null, session.expiresAt.getTime(), null,
+    session.createdBy, null, null, session.jkt, session.notAfter.getTime(), null, null, enrollment.id, null, null,
+  ]));
   const changes: [string, unknown][] = [
     ['jkt', 'AAAAXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs'], ['notAfter', new Date(Date.now() + 7 * 86_400_000)], ['ancestors', `["${ID}"]`],
     ['constraints', '{}'], ['enrollmentId', null], ['approvedAt', new Date()], ['approvedBy', `user:${ROOT}`], ['scope', '[]'], ['places', '[]'],

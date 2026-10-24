@@ -76,13 +76,16 @@ const WORKLOAD_FIELDS = [
  * app seals them with one (`sealScopes`); a scope cleared or changed fails
  * either way. A handle's places do the same, and a binding's policy, last:
  * a binding that carries one never checks as one `/api/auth/oidc` takes.
- * A workload's session is its own kind first, whatever else it carries.
+ * A workload's session is its own kind first, whatever else it carries,
+ * and so is an enrollment code.
  */
 function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
   const { kind: credentialKind, createdBy, scope, jwks, places, policy } = row as {
     kind?: unknown; createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown; policy?: unknown;
   };
   if (table === 'credentials' && credentialKind === 'workload') return { kind: 'workload_credentials', fields: WORKLOAD_FIELDS };
+  // An enrollment code always has a scope, in its own fields: one kind, which composes with none.
+  if (table === 'enrollments') return { kind: 'enrollments', fields: FIELDS.enrollments };
   const exchanged = table === 'credentials' && issuingBinding(createdBy) !== null;
   const uploaded = table === 'service_bindings' && jwks != null;
   const kind = exchanged ? 'exchanged_credentials' : uploaded ? 'uploaded_service_bindings' : table;

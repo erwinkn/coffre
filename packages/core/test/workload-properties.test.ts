@@ -47,7 +47,7 @@ async function check(key: ProofKey, proof: string, r: Request) {
   return verifyProof(proof, { method: r.method, url: r.url, jkt: await thumbprint(key.jwk), token: r.token, content: { headers: new Headers(r.headers), body: await bodyDigest(r.body) }, now: NOW * 1000 });
 }
 
-const MUTATIONS = ['method', 'path', 'query', 'header', 'body', 'token', 'claim', 'signature'] as const;
+const MUTATIONS = ['method', 'path', 'slash', 'query', 'header', 'body', 'token', 'claim', 'signature'] as const;
 
 const settings = propertySettings(48);
 let key: ProofKey;
@@ -77,6 +77,10 @@ test(`a proof verifies for its request, its signature twin with the same jti, an
       break;
     case 'path':
       changed.url = r.url.replace('/use/', '/use/x');
+      break;
+    case 'slash':
+      // The same htu, another path upstream.
+      changed.url = r.url.replace('/use/', '/use//');
       break;
     case 'query': {
       const url = new URL(r.url);
@@ -265,7 +269,7 @@ const constraints = gs.composite((tc): Constraints => {
   return result;
 });
 
-const tricky = gs.sampledFrom(['refunds', 're_1', 'charges', 'v1', 'v2', '..', '.', '%2e%2e', '%2E', '.%2e', '%2f', '%2F', '%5c', '%252e', ';', '..;', 're%5F1', 'refundsX', '', '%7e']);
+const tricky = gs.sampledFrom(['refunds', 're_1', 'charges', 'v1', 'v2', '..', '.', '%2e%2e', '%2E', '.%2e', '%2f', '%2F', '%5c', '%252e', ';', '..;', '%3b', '..%3b', '..%3B', 're%5F1', 'refundsX', '', '%7e']);
 const upstream = gs.composite((tc) => `https://api.stripe.com/${tc.draw(gs.arrays(tricky, { maxSize: 5 })).join('/')}`);
 
 const operation = gs.composite((tc) => ({
@@ -288,7 +292,7 @@ test(`a child's intersection allows nothing either side does not, seed ${setting
  */
 function reference(paths: readonly string[], url: string): boolean {
   const segments = new URL(url).pathname.split('/').slice(1);
-  if (segments.some((part) => /%2e|%2f|%5c|%25|;/i.test(part))) return false;
+  if (segments.some((part) => /%2e|%2f|%5c|%25|%3b|;/i.test(part))) return false;
   return paths.some((prefix) => {
     const want = prefix === '/' ? [] : prefix.split('/').slice(1);
     return want.every((part, i) => segments[i] === part);

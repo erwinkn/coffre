@@ -163,6 +163,8 @@ test("a child's constraints are checked and canonical, and its operations held t
   assert.ok(!at('https://api.stripe.com/v1/refundsX'));
   assert.ok(!at('https://api.stripe.com/v1/refunds/%2e%2e/charges'));
   assert.ok(!at('https://api.stripe.com/v1/refunds/..;/charges'));
+  assert.ok(!at('https://api.stripe.com/v1/refunds/..%3b/charges'));
+  assert.ok(!at('https://api.stripe.com/v1/refunds/re_1%3B'));
   assert.ok(!at('https://api.stripe.com/v1/refunds/re%2F1'));
   assert.ok(!at('https://api.stripe.com/v1/refunds/re%252e'));
   assert.ok(!at('https://api.stripe.com/v1/refunds', 'GET'));

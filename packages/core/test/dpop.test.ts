@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { base64url, bodyDigest, createProof, generateProofKey, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
 
-import { canonicalHtu, canonicalRequest, parseProof, thumbprint, verifyProof, type ProofExpectation } from '../src/identity/dpop.ts';
+import { canonicalHtu, canonicalRequest, MAX_PROOF_LENGTH, parseProof, thumbprint, verifyProof, type ProofExpectation } from '../src/identity/dpop.ts';
 
 const URL_ = 'https://secrets.acme.example/use/stripe/v1/charges?expand[]=balance_transaction';
 const TOKEN = `coffre_wl_${'A'.repeat(43)}`;
@@ -201,11 +201,31 @@ test('htu is the URL as Cloudflare normalizes its path, and canonicalHtu is idem
 
 test('a canonical request is one line each, and holds no line break nor a body that is no digest', () => {
   const digest = 'a'.repeat(64);
-  assert.equal(canonicalRequest({ query: 'a=1', headers: [['content-type', 'text/plain'], ['x-a', 'b, c']], body: digest }), `a=1\ncontent-type:text/plain\nx-a:b, c\n${digest}`);
-  assert.equal(canonicalRequest({ query: '', headers: [], body: UNSIGNED_BODY }), `\n${UNSIGNED_BODY}`);
-  assert.throws(() => canonicalRequest({ query: 'a\n', headers: [], body: digest }), TypeError);
-  assert.throws(() => canonicalRequest({ query: '', headers: [['x', 'a\r\nb']], body: digest }), TypeError);
+  assert.equal(canonicalRequest({ path: '/use/s3/a//b', query: 'a=1', headers: [['content-type', 'text/plain'], ['x-a', 'b, c']], body: digest }), `/use/s3/a//b\na=1\ncontent-type:text/plain\nx-a:b, c\n${digest}`);
+  assert.equal(canonicalRequest({ path: '/', query: '', headers: [], body: UNSIGNED_BODY }), `/\n\n${UNSIGNED_BODY}`);
+  assert.throws(() => canonicalRequest({ path: '/', query: 'a\n', headers: [], body: digest }), TypeError);
+  assert.throws(() => canonicalRequest({ path: '/a\nb', query: '', headers: [], body: digest }), TypeError);
+  assert.throws(() => canonicalRequest({ path: '/', query: '', headers: [['x', 'a\r\nb']], body: digest }), TypeError);
   for (const body of ['A'.repeat(64), 'a'.repeat(63), 'STREAMING-UNSIGNED-PAYLOAD-TRAILER', '']) {
-    assert.throws(() => canonicalRequest({ query: '', headers: [], body }), TypeError, body);
+    assert.throws(() => canonicalRequest({ path: '/', query: '', headers: [], body }), TypeError, body);
   }
+});
+
+test('a proof signs the path as it goes upstream: one object and another to S3 are two requests, under one htu', async () => {
+  const key = await generateProofKey();
+  const at = (path: string) => `https://secrets.acme.example/use/s3/${path}`;
+  const proof = await signed(key, { url: at('a/b'), method: 'PUT' });
+  assert.equal(canonicalHtu(at('a/b')), canonicalHtu(at('a//b')));
+  assert.equal(reason(await verifyProof(proof, await expectation(key, { url: at('a/b'), method: 'PUT' }))), 'ok');
+  assert.equal(reason(await verifyProof(proof, await expectation(key, { url: at('a//b'), method: 'PUT' }))), 'req');
+  assert.equal(reason(await verifyProof(proof, await expectation(key, { url: at('a/%62'), method: 'PUT' }))), 'req', 'an escape upstream may read otherwise');
+});
+
+test('the signer makes no proof the verifier would refuse for its size', async () => {
+  const key = await generateProofKey();
+  const long = `https://secrets.acme.example/use/x/${'a'.repeat(900)}`;
+  const proof = await createProof(key, { method: 'GET', url: long, token: TOKEN, iat: NOW });
+  assert.ok(proof.length <= MAX_PROOF_LENGTH);
+  assert.equal(reason(await verifyProof(proof, { method: 'GET', url: long, token: TOKEN, now: NOW * 1000 })), 'ok');
+  await assert.rejects(createProof(key, { method: 'GET', url: `${long}${'a'.repeat(700)}`, token: TOKEN, iat: NOW }), /at most 2048 characters/);
 });

@@ -1,16 +1,17 @@
 // Which API routes a workload's key-bound session reaches
-// (docs/design/workload-access.md, section 6.1). A session acts as its
-// service, within its scope: what a service token reaches today, the
-// writes of CI included, and a code minted and promoted for the service a
-// binding's `mintedBy` names. It makes nothing that outlives it or holds
-// more than it does: no token, handle or trust binding, and no change to
-// who holds access, which stays with people; nor does it lift or set a
-// freeze. Its own sign-in (renew, narrow, logout) is under `/api/auth`,
-// outside this table. Typed over the route table, so a route added to the
-// API fails the typecheck here until it says whether a session may reach
-// it. A `narrow` child reaches none of them: only `/use`, narrow and
-// logout. Enforced by that design's PR 1a; any other route answers 403
-// `workload`.
+// (docs/design/workload-access.md, section 6.1): every route a service
+// token reaches today, whose handler decides as it does for a service, so
+// CI keeps its writes, its grants where it manages access, and its log;
+// and the enrollment codes it mints and promotes for the service a
+// binding's `mintedBy` names. What only a person does stays theirs: a
+// handle, their own sign-in, connected apps and approvals, approving a
+// session, and setting or lifting a freeze. A session's own sign-in
+// (renew, narrow, logout) is under `/api/auth`, outside this table. Typed
+// over the route table, so a route added to the API fails the typecheck
+// here until it says whether a session may reach it. A `narrow` child
+// reaches none of them: only `/use`, narrow and logout. Enforced by that
+// design's PR 1a; any other route answers 403 `workload`. Routes that
+// answer values answer only plain keys and those its binding lists.
 import type { RouteKey } from './routes.ts';
 
 /** Whether a workload's session reaches a route. */
@@ -19,14 +20,12 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /projects': true,
   'PUT /projects/:project': true,
   'PATCH /projects/:project': true,
-  // Permanent deletion stays with people.
-  'DELETE /projects/:project': false,
+  'DELETE /projects/:project': true,
   'PUT /projects/:project/:environment': true,
   'PATCH /projects/:project/:environment': true,
-  'DELETE /projects/:project/:environment': false,
+  'DELETE /projects/:project/:environment': true,
   'GET /projects/:project/:environment/missing': true,
-  // Whose personal configs a project holds names people.
-  'GET /personal/:project': false,
+  'GET /personal/:project': true,
   'GET /projects/:project/:environment/version': true,
   'PATCH /projects/:project/:environment/dismissals': true,
   'GET /secrets/:project/:environment': true,
@@ -40,43 +39,40 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'PATCH /folders/:project/:environment/:folder': true,
   'DELETE /folders/:project/:environment/:folder': true,
   'GET /references': true,
-  // It answers only plain keys and those its binding lists in `reads`.
   'POST /reveals': true,
-  // Who holds what, as a service token reads it where its account may.
   'GET /members': true,
   'GET /members/:member': true,
   'GET /members/:member/access': true,
-  'PUT /members/:member': false,
-  'DELETE /members/:member': false,
+  'PUT /members/:member': true,
+  'DELETE /members/:member': true,
   'GET /members/:member/tokens': true,
-  // A bearer token, a handle or a binding would outlive the session, or read where it uses.
-  'POST /members/:member/tokens': false,
-  'DELETE /members/:member/tokens/:id': false,
+  'POST /members/:member/tokens': true,
+  'DELETE /members/:member/tokens/:id': true,
+  // A handle is a person's app's placeholder: a service reads its values.
   'POST /handles': false,
   'GET /members/:member/bindings': true,
-  'POST /members/:member/bindings': false,
-  'POST /members/:member/bindings/keys': false,
-  'DELETE /members/:member/bindings/:id': false,
-  'GET /workloads/lookup': false,
-  'GET /workloads/repositories': false,
-  // CI's deploy: a code for the app it deploys, and the one it makes current once the deploy is up. Never from a session an
-  // enrollment made, nor a child: the route refuses those, which would otherwise outlive every deploy.
+  'POST /members/:member/bindings': true,
+  'POST /members/:member/bindings/keys': true,
+  'DELETE /members/:member/bindings/:id': true,
+  'GET /workloads/lookup': true,
+  'GET /workloads/repositories': true,
   'GET /members/:member/bindings/:id/enrollments': true,
   'POST /members/:member/bindings/:id/enrollments': true,
   'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': true,
   // Approving a session is a person's check of it.
   'POST /members/:member/tokens/:id/approve': false,
   'GET /freezes': true,
+  // Freezing and lifting stay with people, as the pages' and the CLI's buttons.
   'POST /freezes': false,
   'DELETE /freezes/:target': false,
-  'PATCH /access/:member': false,
+  'PATCH /access/:member': true,
   'GET /roles': true,
-  'PUT /roles/:role': false,
-  'DELETE /roles/:role': false,
-  'PUT /instance-roles/:role': false,
-  'DELETE /instance-roles/:role': false,
-  'GET /settings': false,
-  'PUT /settings': false,
+  'PUT /roles/:role': true,
+  'DELETE /roles/:role': true,
+  'PUT /instance-roles/:role': true,
+  'DELETE /instance-roles/:role': true,
+  'GET /settings': true,
+  'PUT /settings': true,
   // A person's own sign-in, connected apps and approvals.
   'GET /sessions': false,
   'DELETE /sessions/:id': false,
@@ -90,8 +86,7 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'POST /approvals/:id': false,
   'GET /apps': false,
   'DELETE /apps/:id': false,
-  // The log where its account may read it; verifying the whole log is the instance's.
   'GET /audit': true,
-  'GET /audit/verification': false,
-  'GET /audit/keys': false,
+  'GET /audit/verification': true,
+  'GET /audit/keys': true,
 };

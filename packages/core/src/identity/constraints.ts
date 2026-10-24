@@ -45,10 +45,11 @@ const SEGMENT = /^[A-Za-z0-9\-_~!$&'()*+,=:@.]+$/;
 /**
  * What a path may not hold for a constrained session, since an upstream
  * might read a segment otherwise than coffre: an escaped `.`, `/` or `\`,
- * a `%25` (double encoding), or a `;` (`/v1/refunds/..;/charges` is
+ * a `%25` (double encoding), or a `;`, raw or escaped
+ * (`/v1/refunds/..;/charges` and `/v1/refunds/..%3b/charges` are
  * `/v1/charges` to Tomcat).
  */
-const AMBIGUOUS = /%2e|%2f|%5c|%25|;/i;
+const AMBIGUOUS = /%2e|%2f|%5c|%25|%3b|;/i;
 
 function list(value: unknown, what: string, valid: (item: string) => boolean): string[] | undefined {
   if (value === undefined) return undefined;
