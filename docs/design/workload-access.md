@@ -547,7 +547,10 @@ code's sessions end and a deploy must enroll again. The binding's page warns
      database alone: no gate, and no state that a restart could lose.
      Contention freezes the binding (`workload.freeze`,
      `reason: 'contention'`) and alerts. `onContention: 'alert'` only
-     alerts.
+     alerts. The freeze commits under the log head only while the
+     binding's newest freeze or lift is still the one its count started
+     from, so a run that counted before a lift cannot undo it (PR 8's
+     model).
 
    | What happens, `replicas: 2` | Contention? |
    |---|---|
@@ -935,7 +938,8 @@ the proxy caches a handle's today. So:
   Renewal has no entry of its own: the session's last use shows it, through
   the same throttled `last_used_at` and `last_used_ip` write that
   credentials have today (at most every 5 minutes), kept outside 5.3's one
-  statement.
+  statement. Renewal uses nothing, so its statement leaves out 5.3's freeze
+  clause: a freeze keeps the sessions it stops (8.2).
   - The SDK renews at half-life, or every 30 seconds for an enrollment
     session, whose expiry is its liveness (4.4).
   - A process that died stops renewing, and its session ends, so "live

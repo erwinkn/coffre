@@ -47,6 +47,12 @@ CONSTANTS
     \* `full` answers are no signal. Off, review r2's rule: a run of two
     \* `full` in a row freezes the code.
     BusyIsNoSignal,
+    \* A tripwire run reads the rows and appends its freeze in two steps,
+    \* outside the exchange's and the renewal's transactions (scenario).
+    TripLags,
+    \* A run's freeze commits under the head only while the binding's
+    \* newest freeze or lift is still the one its count started from.
+    TripFencedOnLift,
     \* Assumed: the deployment never leaves a slot free.
     ReplicasFull,
     \* Assumed: a thief, once in, stays.
@@ -68,13 +74,14 @@ VARIABLES
     started,        \* when the redeploy started
     thief,          \* the thief's session, or NoId
     counts,         \* counts[kind]: the events of each kind so far
-    log,            \* `workload.freeze`, once the rule fires
+    log,            \* the binding's `workload.freeze` and `workload.unfreeze` entries
+    pending,        \* the tripwire runs that found it contended, not yet committed
     fenced,         \* the roots r1's rule fenced
     busy,           \* the `full` answers in a row
     pc, op, l, left
 
 procs == <<pc, op, l, left>>
-vars == <<now, roots, running, old, started, thief, counts, log, fenced, busy, procs>>
+vars == <<now, roots, running, old, started, thief, counts, log, pending, fenced, busy, procs>>
 
 -----------------------------------------------------------------------------
 (* The rule, over a set of rows, at a time                                 *)
@@ -87,8 +94,16 @@ Counted(rows) == IF RootsOnly THEN {r \in rows : ~r.child} ELSE rows
 \* The excess over the tick from u to u + 1.
 Over(rows, u) == Max(0, Cardinality(LiveIn(Counted(rows), u)) - Replicas)
 
+\* The binding is frozen while its newest entry is a freeze (8.2). The rule
+\* counts only since the newest lift: its index (0: none), and its time.
+Frozen == log # <<>> /\ log[Len(log)].kind = "workload.freeze"
+LiftBefore(n) == LET is == {i \in 1..(n - 1) : log[i].kind = "workload.unfreeze"}
+                 IN IF is = {} THEN 0 ELSE CHOOSE i \in is : \A j \in is : j <= i
+Since == LiftBefore(Len(log) + 1)
+From == IF Since = 0 THEN 0 ELSE log[Since].time
+
 RECURSIVE ExcessTo(_, _)
-ExcessTo(rows, t) == IF t = 0 THEN 0 ELSE ExcessTo(rows, t - 1) + Over(rows, t - 1)
+ExcessTo(rows, t) == IF t <= From THEN 0 ELSE ExcessTo(rows, t - 1) + Over(rows, t - 1)
 
 \* Review r3's rule: a live root beyond the `replicas` oldest, older than
 \* the threshold.
@@ -99,13 +114,25 @@ AgedExtra(rows, t) ==
 
 Contended(rows, t) ==
     \/ IF ExcessIntegral THEN ExcessTo(rows, t) > Threshold ELSE AgedExtra(rows, t)
-    \/ ChurnCounted /\ Cardinality(Counted(rows)) > 4 * Replicas
+    \/ ChurnCounted /\ Cardinality({r \in Counted(rows) : r.created >= From}) > 4 * Replicas
 
-Frozen == log # <<>>
+Freeze(since, t) == [kind |-> "workload.freeze", time |-> t, since |-> since]
 
-\* The rule runs after an exchange or a renewal (the tick), from the rows.
+\* The rule runs after an exchange or a renewal (the tick), from the rows:
+\* at once, or, with TripLags, as a run whose freeze commits later.
 Trip(rows, t) ==
-    log' = IF ~Frozen /\ Contended(rows, t) THEN Append(log, [kind |-> "workload.freeze", time |-> t]) ELSE log
+    LET hit == ~Frozen /\ Contended(rows, t) IN
+    IF hit /\ TripLags
+      THEN pending' = pending \cup {[since |-> Since, at |-> t]} /\ UNCHANGED log
+      ELSE log' = (IF hit THEN Append(log, Freeze(Since, t)) ELSE log) /\ UNCHANGED pending
+
+\* A run's freeze commits, fenced on the lift its count started from.
+TripCommit ==
+    /\ \E run \in pending :
+         /\ pending' = pending \ {run}
+         /\ log' = IF ~Frozen /\ (TripFencedOnLift => run.since = Since)
+                     THEN Append(log, Freeze(run.since, now)) ELSE log
+    /\ UNCHANGED <<now, roots, running, old, started, thief, counts, fenced, busy, procs>>
 
 \* How many slots an exchange of n roots lacks: past `2 × replicas` live
 \* roots.
@@ -132,8 +159,8 @@ Exchange(new, admit) ==
               /\ admit
          ELSE /\ busy' = IF Frozen THEN busy ELSE busy + 1
               /\ log' = IF ~Frozen /\ ~BusyIsNoSignal /\ busy + 1 >= 2
-                          THEN Append(log, [kind |-> "workload.freeze", time |-> now]) ELSE log
-              /\ UNCHANGED <<roots, fenced, running, old, started, thief>>
+                          THEN Append(log, Freeze(Since, now)) ELSE log
+              /\ UNCHANGED <<roots, fenced, running, old, started, thief, pending>>
 
 -----------------------------------------------------------------------------
 (* Events *)
@@ -153,7 +180,7 @@ Begin(p) ==
          /\ Goto(p, o.kind)
          /\ counts' = [counts EXCEPT ![o.kind] = @ + 1]
     /\ left' = [left EXCEPT ![p] = @ - 1]
-    /\ UNCHANGED <<now, roots, running, old, started, thief, log, fenced, busy>>
+    /\ UNCHANGED <<now, roots, running, old, started, thief, log, pending, fenced, busy>>
 
 Done(p) == Goto(p, "idle") /\ UNCHANGED <<op, l, left, counts>>
 
@@ -172,7 +199,7 @@ Crash(p) ==
                 /\ running' = running \ {i}
                 /\ old' = old \ {i}
     /\ Done(p)
-    /\ UNCHANGED <<now, started, thief, log, fenced, busy>>
+    /\ UNCHANGED <<now, started, thief, log, pending, fenced, busy>>
 
 \* An instance stops for long, a slot left free, but only without
 \* ReplicasFull: it logs out.
@@ -184,7 +211,7 @@ Down(p) ==
                 /\ roots' = Ended(i, now)
                 /\ running' = running \ {i}
     /\ Done(p)
-    /\ UNCHANGED <<now, old, started, thief, log, fenced, busy>>
+    /\ UNCHANGED <<now, old, started, thief, log, pending, fenced, busy>>
 
 \* A stopped instance starts again and enrolls.
 Restart(p) ==
@@ -192,7 +219,7 @@ Restart(p) ==
     /\ LET r == Root(p, "dep", FALSE) IN
        IF Cardinality(running) < Replicas
          THEN Exchange({r}, running' = running \cup {r.id} /\ UNCHANGED <<old, started, thief>>)
-         ELSE UNCHANGED <<roots, running, old, started, thief, log, fenced, busy>>
+         ELSE UNCHANGED <<roots, running, old, started, thief, log, pending, fenced, busy>>
     /\ Done(p)
     /\ UNCHANGED now
 
@@ -207,7 +234,7 @@ Redeploy(p) ==
                                     /\ old' = running
                                     /\ started' = now
                                     /\ UNCHANGED thief)
-         ELSE UNCHANGED <<roots, running, old, started, thief, log, fenced, busy>>
+         ELSE UNCHANGED <<roots, running, old, started, thief, log, pending, fenced, busy>>
     /\ Done(p)
     /\ UNCHANGED now
 
@@ -215,14 +242,14 @@ Finish ==
     /\ old # {}
     /\ roots' = {IF r.id \in old THEN [r EXCEPT !.ends = Min(r.ends, now)] ELSE r : r \in roots}
     /\ old' = {}
-    /\ UNCHANGED <<now, running, started, thief, counts, log, fenced, busy, procs>>
+    /\ UNCHANGED <<now, running, started, thief, counts, log, pending, fenced, busy, procs>>
 
 \* An instance narrows its session for a tool: a child, which lives `Life`.
 Narrow(p) ==
     /\ pc[p] = "narrow"
     /\ roots' = IF running = {} THEN roots ELSE roots \cup {Root(p, "dep", TRUE)}
     /\ Done(p)
-    /\ UNCHANGED <<now, running, old, started, thief, log, fenced, busy>>
+    /\ UNCHANGED <<now, running, old, started, thief, log, pending, fenced, busy>>
 
 \* The thief enrolls with its copy, and renews from then on.
 Enroll(p) ==
@@ -230,7 +257,7 @@ Enroll(p) ==
     /\ LET r == Root(p, "thief", FALSE) IN
        IF thief = NoId \/ Row(thief).ends <= now
          THEN Exchange({r}, thief' = r.id /\ UNCHANGED <<running, old, started>>)
-         ELSE UNCHANGED <<roots, running, old, started, thief, log, fenced, busy>>
+         ELSE UNCHANGED <<roots, running, old, started, thief, log, pending, fenced, busy>>
     /\ Done(p)
     /\ UNCHANGED now
 
@@ -239,7 +266,14 @@ Leave(p) ==
     /\ pc[p] = "leave"
     /\ roots' = IF thief = NoId \/ ThiefStays THEN roots ELSE Ended(thief, now)
     /\ Done(p)
-    /\ UNCHANGED <<now, running, old, started, thief, log, fenced, busy>>
+    /\ UNCHANGED <<now, running, old, started, thief, log, pending, fenced, busy>>
+
+\* A person lifts the freeze: `workload.unfreeze`.
+Lift(p) ==
+    /\ pc[p] = "lift"
+    /\ log' = IF Frozen THEN Append(log, [kind |-> "workload.unfreeze", time |-> now, since |-> 0]) ELSE log
+    /\ Done(p)
+    /\ UNCHANGED <<now, roots, running, old, started, thief, pending, fenced, busy>>
 
 \* The clock runs, renewing every running session; a redeploy finishes in
 \* time. The rule runs after the renewals.
@@ -259,6 +293,7 @@ Init ==
     /\ thief = NoId
     /\ counts = [k \in DOMAIN Most |-> 0]
     /\ log = <<>>
+    /\ pending = {}
     /\ fenced = {}
     /\ busy = 0
     /\ pc = [p \in Procs |-> "idle"]
@@ -269,9 +304,9 @@ Init ==
 Step(p) ==
     \/ Begin(p)
     \/ Crash(p) \/ Down(p) \/ Restart(p) \/ Redeploy(p) \/ Narrow(p)
-    \/ Enroll(p) \/ Leave(p)
+    \/ Enroll(p) \/ Leave(p) \/ Lift(p)
 
-Next == (\E p \in Procs : Step(p)) \/ Finish \/ Tick \/ (now = MaxTime /\ UNCHANGED vars)
+Next == (\E p \in Procs : Step(p)) \/ Finish \/ TripCommit \/ Tick \/ (now = MaxTime /\ UNCHANGED vars)
 
 Spec == Init /\ [][Next]_vars
 
@@ -314,6 +349,10 @@ NoFalseContention == ~Frozen /\ fenced \cap (running \cup old) = {}
 \* roots, has frozen the code.
 TripwireFires ==
     (ForeignTo(now) > Threshold \/ Cardinality({r \in roots : r.who = "thief"}) > 4 * Replicas) => Frozen
+
+\* A lift is not undone by the history before it: every freeze counted from
+\* the newest lift before it.
+LiftHolds == \A i \in 1..Len(log) : log[i].kind = "workload.freeze" => log[i].since = LiftBefore(i)
 
 \* Every copy that enrolls is frozen out once it has been in for longer than
 \* the threshold. Not a guarantee: it holds only while the deployment
