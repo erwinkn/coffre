@@ -184,6 +184,27 @@ else is needed.
 - `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
   out, on Node through `createCoffre(…).upgrade`.
 
+**Added since, for workload access** ([workload-access.md](workload-access.md), its PR 1a):
+
+- `workload(request, { place, credential, body?, counts? })`: the request
+  as a workload's, checked as section 5.3 says: its key-bound session in
+  one statement with its binding, its ancestors and every freeze that
+  names it, the credential it uses among them; its DPoP proof, and with
+  `body` the content coffre forwards; then its gate, `counts` in the same
+  call. No vault call. It returns the caller, the gate's nonce to send
+  back, and the environments it reaches. A refusal throws a
+  `WorkloadRefused`, whose `response` is forwarded as it is.
+- `use(caller, …)` takes what `workload` returned for this request in
+  place of a handle: its service's grants within its scope, reading only
+  plain keys and those its binding lists. A caller a plugin built itself
+  is refused: only those coffre made are kept beside it.
+- `bindingRoute(request, runtime, principal)`, exported, not on the
+  context: coffre's own Cloudflare entrypoint routes a call another Worker
+  made through a service binding to the plugin, as the service its
+  `props` name. That context's `workload` answers from the service's
+  `cloudflare` binding (`workloadFromBinding`), and it takes no handle,
+  token or session. No plugin can name a principal.
+
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):
 

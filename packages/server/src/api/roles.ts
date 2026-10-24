@@ -28,7 +28,7 @@ import { policyRevision, type PolicyChange } from '@coffre/core/vault';
 import { memberHoldings, places, roleHolders, type ResolvedPath } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { placeOf } from './caller.ts';
-import { type ApiContext, denied, POLICY_CHANGED, Refusal, through, withRefusals } from './context.ts';
+import { type ApiContext, denied, POLICY_CHANGED, refuse, Refusal, through, withRefusals } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 
@@ -335,8 +335,24 @@ function impactSentence(weighed: readonly { impact: ImpactLine; only: string | n
 export async function protectEnvironment(ctx: ApiContext, place: ResolvedPath, on: boolean): Promise<ApiContext> {
   const { project, environment } = place;
   if (environment === null) throw notFound('no such environment');
+  await refuseWorkloadAccessChange(ctx, { projectId: project.id, environmentId: environment.id });
   if (environment.owner !== null) throw badRequest('a personal config is protected as the environment it is a config of is');
   return protectIds(ctx, project.id, [environment.id], on);
+}
+
+/**
+ * A workload's session changes no one's access (docs/design/workload-access.md,
+ * D15): protecting or unprotecting an environment that exists decides what
+ * every role reads there. A fork it makes may still be protected as its
+ * source is: a new place, which nobody reached before.
+ */
+export async function refuseWorkloadAccessChange(ctx: ApiContext, place: { projectId: string; environmentId: string | null }): Promise<void> {
+  if (ctx.caller.kind !== 'workload') return;
+  // Logged, as the router logs a workload's refused route.
+  await refuse(ctx, new Refusal(
+    new ApiError('forbidden', "a workload's session issues no credential and changes no one's access", 'workload_cannot_issue'),
+    denied(ctx, 'environment.update', 'workload_cannot_issue', { metadata: { projectId: place.projectId, ...(place.environmentId === null ? {} : { environmentId: place.environmentId }) } }),
+  ));
 }
 
 /**

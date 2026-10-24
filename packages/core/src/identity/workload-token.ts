@@ -99,12 +99,15 @@ export function decodeWorkloadToken(token: string): DecodedToken {
  * the issuer exactly; `exp`, `nbf` and `iat` within the tolerance, `iat` at
  * most an hour old; and the audience, this instance's public URL alone.
  * With `maxLifetime`, in seconds, a token whose `exp` is further than that
- * from its `iat` is refused too. Returns the verified claims.
+ * from its `iat` is refused too. With `maxAge: null`, its `iat` may be any
+ * age, and its own `exp` alone ends it: a token its platform hands out
+ * again for hours, a managed identity's (docs/design/workload-access.md,
+ * section 4.2). Returns the verified claims.
  */
 export async function verifyWorkloadToken(
   token: string,
   keys: JSONWebKeySet,
-  expected: { issuer: string; audience: string; now: Date; maxLifetime?: number },
+  expected: { issuer: string; audience: string; now: Date; maxLifetime?: number; maxAge?: null },
 ): Promise<JWTPayload & DecodedToken['claims']> {
   const options = {
     algorithms: [...WORKLOAD_ALGORITHMS],
@@ -121,7 +124,7 @@ export async function verifyWorkloadToken(
     if (!(error instanceof errors.JWKSMultipleMatchingKeys)) throw refusalOf(error);
     payload = await anyKey(token, error, options);
   }
-  const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000);
+  const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000, expected.maxAge === null ? Infinity : MAX_TOKEN_AGE_SECONDS);
   if (issued !== null) throw issued;
   if (expected.maxLifetime !== undefined && payload.exp! - payload.iat! > expected.maxLifetime) {
     throw new WorkloadTokenRefused('too_long', `the token lives longer than ${expected.maxLifetime / 60} minutes, from its iat to its exp: ask for a shorter one`);
@@ -135,13 +138,13 @@ export async function verifyWorkloadToken(
 
 /**
  * Why a token issued at `iat` may not be exchanged at `now`, both in
- * seconds, or null: issued an hour ago at most, exactly, and no further
- * ahead than the clock tolerance. Verification and the exchange's commit
- * both ask it.
+ * seconds, or null: issued `maxAge` seconds ago at most, an hour unless
+ * said, exactly, and no further ahead than the clock tolerance.
+ * Verification and the exchange's commit both ask it.
  */
-export function issuedRefusal(iat: number, now: number): WorkloadTokenRefused | null {
-  if (now - iat > MAX_TOKEN_AGE_SECONDS) {
-    return new WorkloadTokenRefused('too_old', `the token was issued more than ${MAX_TOKEN_AGE_SECONDS / 60} minutes ago`);
+export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_SECONDS): WorkloadTokenRefused | null {
+  if (now - iat > maxAge) {
+    return new WorkloadTokenRefused('too_old', `the token was issued more than ${maxAge / 60} minutes ago`);
   }
   if (iat - now > CLOCK_TOLERANCE_SECONDS) return new WorkloadTokenRefused('too_old', 'the token says it was issued in the future');
   return null;

@@ -467,6 +467,10 @@ coffre trust api-prod --enrollment --replicas 2 --source 162.220.232.0/24 --mint
     every service-account route);
   - the service that `mintedBy` names, on a workload session proven by
     `oidc` or `aws`. CI's own, in practice.
+
+  *Superseded by D15 (PR 1a):* a workload session issues no credential,
+  enrollment codes included, so the second bullet does not hold as
+  written. PR 3 settles how a deploy mints its code under D15.
 - **Who may not.** `checkPolicy` refuses a `mintedBy` that names the
   binding's own service. The mint and promote routes refuse a session proven
   by `enrollment`, and every `narrow` child. Otherwise, a thief inside the
@@ -1004,9 +1008,11 @@ precedence, for a session whose binding gives `viewer` on `market/prod`:
   - **The API a session reaches** is `WORKLOAD_ROUTES`, typed over the
     route table as `PERSONAL_TOKEN_ROUTES` is, so a new route must say:
     - every route a service token reaches today (writes such as `coffre set`
-      from CI, folders, archive, deploy-on-push, audit where granted);
-    - `POST …/bindings/:id/enrollments` and `…/promote`, for the service a
-      binding's `mintedBy` names;
+      from CI, folders, archive, deploy-on-push, audit where granted),
+      but those that issue a credential or change access (`ISSUING_ROUTES`:
+      service tokens, bindings, enrollment codes, members, grants, roles,
+      and who sets up service accounts), refused with 403
+      `workload_cannot_issue` in every mode (D15);
     - renew, narrow and logout.
 
     Routes that answer values (`POST /reveals`, a version's value, the plan)
@@ -1043,6 +1049,10 @@ precedence, for a session whose binding gives `viewer` on `market/prod`:
   - **Stored by ID.** `reads` is stored in the binding's policy by
     environment ID and key ID, and shown by name:
     `{ "reads": { "<environment uuid>": { "keys": ["<secret uuid>", …] } } }`.
+    The API takes and shows them by path and name only,
+    `{ "reads": { "market/prod": ["STRIPE_WEBHOOK_SECRET"] } }` or `"*"`,
+    each found in the binding's own transaction, and refused by name when
+    it is not there (D16).
     A rename therefore moves nothing. Renaming `STRIPE_SECRET_KEY` onto the
     listed name `STRIPE_WEBHOOK_SECRET` leaves the listed ID with the key
     that was listed. A key deleted and made again is a new ID, and not
@@ -1789,6 +1799,42 @@ line of registration after the owner has merged:
 **Docs.** Each PR updates the docs for what it builds. PR 5 writes
 `docs/workloads.md`, the per-platform guide (9.4 and the playbook in 7.3).
 
+**As PR 1a built it**, where the design left a choice:
+
+- **The gate is the runtime's**, `CoffreRuntime.gates(principal)`, which
+  PR 1b passes to `createRuntime`. A deployment without one takes no
+  session: 503, since nothing would stop a replay.
+- **A session's `places`** are kept in its row, under its MAC, as a
+  handle's are, so `/use/<credential>` finds its one environment inside
+  the one statement, `credential:` freeze included.
+- **`reads` attach by ID with nothing to look up.** Binding creation gives
+  each environment `reads` lists a grant of its own, its project grant's
+  share there; each request copies the list onto that grant
+  (`sessionScope`).
+- **Renewal and logout ask no vault, and no freeze stops them.** They run
+  the one statement, the proof and the gate, which already see a removed
+  member. A freeze stops a session's use and keeps it (8.2): a renewal it
+  refused would end the session, and lifting the freeze would restore
+  nothing (PR 8's model).
+- **Every API answer to a session carries the gate's nonce** (`DPoP-Nonce`),
+  so the SDK always holds the newest.
+- **A repeating token's age is its own `exp`.** `verifyWorkloadToken`
+  takes `maxAge: null` for `REPEATING_PROFILES`; every other token still
+  dates from at most an hour ago.
+- **`PluginContext.workload(request, { place, credential, body?, counts? })`**
+  takes the body line `req` signs, for a request coffre forwards, and the
+  gate's counts, so a proxied request costs one gate call. It returns
+  the caller, the nonce, the session's places and the one it used. A
+  Cloudflare call reaches the same `workload` through `bindingRoute`,
+  which only coffre's entrypoint calls, never a method any plugin could
+  call with any principal.
+- **`coffre init` and the examples write no `useOnly` yet.** Conformance
+  and the Action still sign services in with bearer credentials; the PR
+  that moves them to key-bound sessions, after PR 5, writes it back (D8).
+- **A service's sessions are listed with its tokens**
+  (`GET /members/:member/tokens`, each with `session`), and its managers
+  revoke one there.
+
 ### 12.1 Verification
 
 **Model checking**, `formal/Workload.tla`, TLC as `pnpm formal` runs it. The
@@ -1881,7 +1927,10 @@ worker, deleted and then verified gone through the provider's API:
    *Alternative:* a `freezes` table under MAC, one more place that holds the
    same fact.
 8. **Bearer paths stay until `useOnly`.** `coffre init` writes
-   `useOnly: true`. The contract step, removing `/api/auth/oidc` and the
+   `useOnly: true`, once a later PR, after PR 5, moves conformance (its
+   people, sign-in, CLI, access and workload checks) and the Action to
+   key-bound sessions: until then it writes bearer-compatible config
+   (coordinator, during PR 1a). The contract step, removing `/api/auth/oidc` and the
    issuing of service tokens, is one release after Equisafe has run on
    `useOnly`. Erwin decides that release.
 9. **Delivered minting is a listed read.** A child credential with a
@@ -1917,6 +1966,21 @@ worker, deleted and then verified gone through the provider's API:
     exchange until its `exp` (note 5 of section 3). *Alternative:* keep
     Vercel's fixed audience, which would leave every token Coffre receives a
     bearer for any key.
+
+15. **A workload session issues no credential and changes no access, in
+    every mode** (coordinator, during PR 1a). A service token, a binding
+    or an enrollment code is scoped by role columns, not by keys, so one a
+    session made, or a grant or role it changed for another service, could
+    read keys the session may only use. So service-token issuance, binding
+    creation, replacement and removal, enrollment codes, members, grants,
+    roles and service-account settings answer 403
+    `workload_cannot_issue`; writes, use and deploy-on-push stay.
+    *Reversible:* capping what a session issues to its own `reads`.
+16. **`reads` on the wire are paths and names** (coordinator, during PR
+    1a): `{ "market/prod": ["STRIPE_WEBHOOK_SECRET"] }` or `"*"`, resolved
+    to IDs in the binding's transaction, stored by ID only, shown back by
+    path and name. Nothing on the wire takes the ID form, which no client
+    could produce.
 
 ## 14. Later
 

@@ -10,6 +10,7 @@ import { CredentialUncheckable, type HandlePlace, type PersonalToken } from './a
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
+import { dpopToken, SessionRefused, sessionScope, standingSession, type StandingSession } from './workload-sessions.ts';
 
 /** A verified caller, loaded once with everything they hold. */
 export type AuthenticatedIdentity = {
@@ -30,11 +31,13 @@ export type AuthenticatedIdentity = {
   handlePlaces: readonly HandlePlace[] | null;
   /** The MCP connection a tool's call came through; null for every other request. */
   via: McpVia | null;
+  /** The workload's key-bound session the request came in on, its proof checked and its nonce the gate's; none for anything else. */
+  workload?: StandingSession | null;
 };
 
 type AuthenticationRuntime = Pick<
   CoffreRuntime,
-  'auth' | 'verifier' | 'vault' | 'db'
+  'auth' | 'verifier' | 'vault' | 'db' | 'chainKey' | 'publicUrl' | 'gates' | 'waitUntil'
 >;
 
 function cookieValue(request: Request, name: string): string | null {
@@ -83,6 +86,11 @@ export function sessionCookie(request: Request, auth: AuthConfig): string | null
 export function bearerToken(request: Request): string | null {
   const match = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
   return match === null ? null : match[1];
+}
+
+/** The token a request's `Authorization` carries: a bearer's, or a workload's session, sent with its key's proof (`DPoP`). */
+export function headerToken(request: Request): string | null {
+  return bearerToken(request) ?? dpopToken(request);
 }
 
 export function accessTokenForRequest(request: Request, auth: AuthConfig): string | null {
@@ -143,7 +151,11 @@ export async function authenticateRequest(
   // An enrollment code buys a workload's session and is no credential; a session is used with its key's proof, never
   // as a bearer: its hash covers its prefix, so neither is ever looked up as one (docs/design/workload-access.md).
   if (kind === 'enrollment') return errorResponse(new ApiError('unauthenticated', 'an enrollment code is no credential: a workload exchanges it at /api/auth/workload', 'enrollment'));
-  if (kind === 'workload') return errorResponse(new ApiError('unauthenticated', "a workload's session is sent with its key's proof, Authorization: DPoP, never as a bearer token", 'workload'));
+  if (kind === 'workload') return authenticateWorkload(request, runtime, requestId, token, sourceIp);
+  // A strict instance leaves services nothing but key-bound sessions (section 6.3): a bearer service token, kept or exchanged, reads nothing.
+  if (kind === 'service' && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true) {
+    return errorResponse(new ApiError('unauthenticated', 'this instance takes no service token (useOnly): sign the service in at /api/auth/workload, with its key', 'use_only'));
+  }
 
   let principal: Principal;
   let credentialId: string | null = null;
@@ -206,9 +218,60 @@ export async function authenticateRequest(
       personalToken,
       handlePlaces,
       via: null,
+      workload: null,
     };
   } catch (error) {
     // Logged, so a bug of ours is not read as an outage of the vault or the database.
+    console.error('checking who called failed', { requestId, error: logged(error) });
+    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+  }
+}
+
+/**
+ * A workload's session at the API (docs/design/workload-access.md, section
+ * 5.3): its one statement, its proof and its gate (`standingSession`), then
+ * the vault's answer about its service, as for any credential. It holds
+ * what its scope and the account hold, each grant with its binding's
+ * `reads` (`sessionScope`), and reaches the routes `WORKLOAD_ROUTES` lists;
+ * a `narrow` child reaches none of them. Every entry it writes names it.
+ */
+async function authenticateWorkload(
+  request: Request,
+  runtime: AuthenticationRuntime,
+  requestId: string,
+  token: string,
+  sourceIp: string | null,
+): Promise<AuthenticatedIdentity | Response> {
+  let session: StandingSession;
+  try {
+    session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null });
+  } catch (error) {
+    if (error instanceof SessionRefused) return error.response;
+    console.error('checking a workload session failed', { requestId, error: logged(error) });
+    return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+  }
+  const { row, binding, policy } = session;
+  const id = row.principal.slice('token:'.length);
+  try {
+    const access = await runtime.vault.access(row.principal);
+    const caller = callerFrom({ type: 'service', id }, access, session.policySeq, sessionScope(row, binding, policy), 'workload');
+    // Removal may have raced the statement.
+    if (caller.generation !== row.generation) return unauthenticated(runtime.auth);
+    return {
+      principal: { type: 'service', id, commonName: id },
+      registered: caller.registered,
+      caller,
+      requestId,
+      sourceIp,
+      credentialId: row.id,
+      credentialExpiresAt: row.expiresAt.toISOString(),
+      provenance: row.id,
+      personalToken: null,
+      handlePlaces: null,
+      via: null,
+      workload: session,
+    };
+  } catch (error) {
     console.error('checking who called failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }

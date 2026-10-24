@@ -1126,7 +1126,7 @@ function namedBinding(db: Queryable): SQL<string> {
 }
 
 /** Whether the binding `id` (a column or a value) has a tombstone: an allowed app `token.unbind` naming it. */
-function hasTombstone(db: Queryable, id: SQL | string): SQL {
+export function hasTombstone(db: Queryable, id: SQL | string): SQL {
   const { auditLog } = tablesOf(db);
   return sql`EXISTS (SELECT 1 FROM ${auditLog} WHERE ${auditLog.author} = 'app' AND ${auditLog.action} = 'token.unbind'
     AND ${auditLog.decision} = 'allow' AND ${namedBinding(db)} = ${id})`;

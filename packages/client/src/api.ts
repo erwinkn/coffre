@@ -566,6 +566,9 @@ export type Api = {
         scope: null | {
           [key: string]: string;
         };
+        session?: {
+          bindingId: string | null;
+        };
       }[];
       references: {
         id: string;
@@ -708,6 +711,9 @@ export type Api = {
           scope: null | {
             [key: string]: string;
           };
+          session?: {
+            bindingId: string | null;
+          };
         }[];
         references: {
           id: string;
@@ -742,6 +748,9 @@ export type Api = {
         lastUsedIp: string | null;
         scope: null | {
           [key: string]: string;
+        };
+        session?: {
+          bindingId: string | null;
         };
       }[];
     };
@@ -795,6 +804,22 @@ export type Api = {
         scope: null | {
           [key: string]: string;
         };
+        policy: null | {
+          sources?: string[];
+          audience?: string;
+          keyAudience?: true;
+          sessionHours?: number;
+          replicas?: number;
+          sessionDays?: number;
+          overlapMinutes?: number;
+          mintedBy?: string;
+          approve?: true;
+          onContention?: "alert";
+          unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
+        };
         label: string | null;
         createdAt: string;
         createdBy: string;
@@ -804,7 +829,7 @@ export type Api = {
   };
   "POST /members/:member/bindings": {
     input: {
-      profile: "custom" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab";
+      profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
       claims: {
         [key: string]: string | string[];
       };
@@ -818,6 +843,9 @@ export type Api = {
         keys: {
           [key: string]: unknown;
         }[];
+      };
+      policy?: {
+        [key: string]: unknown;
       };
     };
     output: {
@@ -834,6 +862,22 @@ export type Api = {
       };
       scope: {
         [key: string]: string;
+      };
+      policy: null | {
+        sources?: string[];
+        audience?: string;
+        keyAudience?: true;
+        sessionHours?: number;
+        replicas?: number;
+        sessionDays?: number;
+        overlapMinutes?: number;
+        mintedBy?: string;
+        approve?: true;
+        onContention?: "alert";
+        unsignedUploads?: true;
+        reads?: {
+          [key: string]: "*" | string[];
+        };
       };
       withheld: string[];
       replaces: {
@@ -856,6 +900,22 @@ export type Api = {
         };
         scope: null | {
           [key: string]: string;
+        };
+        policy: null | {
+          sources?: string[];
+          audience?: string;
+          keyAudience?: true;
+          sessionHours?: number;
+          replicas?: number;
+          sessionDays?: number;
+          overlapMinutes?: number;
+          mintedBy?: string;
+          approve?: true;
+          onContention?: "alert";
+          unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
         };
         label: string | null;
         createdAt: string;
@@ -1362,6 +1422,22 @@ export type Api = {
         scope: null | {
           [key: string]: string;
         };
+        policy: null | {
+          sources?: string[];
+          audience?: string;
+          keyAudience?: true;
+          sessionHours?: number;
+          replicas?: number;
+          sessionDays?: number;
+          overlapMinutes?: number;
+          mintedBy?: string;
+          approve?: true;
+          onContention?: "alert";
+          unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
+        };
         label: string | null;
         createdAt: string;
         createdBy: string;
@@ -1771,6 +1847,22 @@ export type BindingPlan = {
   scope: {
     [key: string]: string;
   };
+  policy: null | {
+    sources?: string[];
+    audience?: string;
+    keyAudience?: true;
+    sessionHours?: number;
+    replicas?: number;
+    sessionDays?: number;
+    overlapMinutes?: number;
+    mintedBy?: string;
+    approve?: true;
+    onContention?: "alert";
+    unsignedUploads?: true;
+    reads?: {
+      [key: string]: "*" | string[];
+    };
+  };
   withheld: string[];
   replaces: {
     id: string;
@@ -1793,6 +1885,22 @@ export type BindingView = {
   };
   scope: null | {
     [key: string]: string;
+  };
+  policy: null | {
+    sources?: string[];
+    audience?: string;
+    keyAudience?: true;
+    sessionHours?: number;
+    replicas?: number;
+    sessionDays?: number;
+    overlapMinutes?: number;
+    mintedBy?: string;
+    approve?: true;
+    onContention?: "alert";
+    unsignedUploads?: true;
+    reads?: {
+      [key: string]: "*" | string[];
+    };
   };
   label: string | null;
   createdAt: string;
@@ -2134,6 +2242,9 @@ export type OffboardingReport = {
     scope: null | {
       [key: string]: string;
     };
+    session?: {
+      bindingId: string | null;
+    };
   }[];
   references: {
     id: string;
@@ -2404,5 +2515,8 @@ export type TokenRow = {
   lastUsedIp: string | null;
   scope: null | {
     [key: string]: string;
+  };
+  session?: {
+    bindingId: string | null;
   };
 };

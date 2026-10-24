@@ -229,8 +229,13 @@ export type TokenRow = {
   expiresAt: string;
   lastUsedAt: string | null;
   lastUsedIp: string | null;
-  /** What it reaches, of what its account or person holds, by path; null for one 0.4 made and the app has not sealed yet, which reaches all of it. */
+  /**
+   * What it reaches, of what its account or person holds, by path; null for one 0.4 made and the app has not sealed
+   * yet, which reaches all of it, or for a workload's session (`session`), which holds its binding's.
+   */
   scope: ScopeByPath | null;
+  /** A workload's key-bound session (docs/design/workload-access.md): the binding it signed in through, whose scope it holds when its own is null. */
+  session?: { bindingId: string | null };
 };
 
 export type DeviceStart = {
@@ -283,10 +288,14 @@ function isToken(row: { kind: string }): boolean {
 
 type HeldCredential = NonNullable<Awaited<ReturnType<typeof members>>[number]>['credentials'][number];
 
-/** A member's live tokens, as their list shows them, newest first: never a session, nor what a trust binding issued a CI run for five minutes. */
+/**
+ * A member's live tokens, as their list shows them, newest first: never a
+ * person's session, nor what a trust binding issued a CI run for five
+ * minutes; a service's workload sessions, each with its binding.
+ */
 export function tokenRows(held: readonly HeldCredential[], known: readonly PlaceRow[]): TokenRow[] {
   return held
-    .filter((row) => isToken(row) && issuingBinding(row.createdBy) === null)
+    .filter((row) => (isToken(row) && issuingBinding(row.createdBy) === null) || row.kind === 'workload')
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
     .map((row) => ({
       id: row.id,
@@ -298,6 +307,7 @@ export function tokenRows(held: readonly HeldCredential[], known: readonly Place
       lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
       lastUsedIp: row.lastUsedIp,
       scope: scopeByPath(readScope(row.scope), known),
+      ...(row.kind === 'workload' ? { session: { bindingId: issuingBinding(row.createdBy) } } : {}),
     }));
 }
 
@@ -761,7 +771,8 @@ export class SigninService {
       if (row === null || row.revokedAt !== null) throw unknown();
       const { principal } = ctx.caller;
       const own = row.principal === principalOf(principal);
-      if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !isToken(row))) throw unknown();
+      // Of a service it manages: one of its tokens, or a workload's key-bound session, which its managers end as they revoke its tokens.
+      if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
       if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
       const revoked = await updateAuth(
         tx,
@@ -880,6 +891,7 @@ export class SigninService {
     serviceId: string,
     input: { label: string | null; expiresInDays: number; scope?: ScopeByPath },
   ): Promise<IssuedToken> {
+    this.#bearersIssued();
     if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > MAX_SERVICE_TOKEN_DAYS) {
       throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
     }
@@ -912,8 +924,20 @@ export class SigninService {
     });
   }
 
+  /**
+   * A strict instance issues a service no bearer token (`useOnly`,
+   * docs/design/workload-access.md, section 6.3): its workloads sign in
+   * with a key, and the tokens it holds already are refused at use.
+   */
+  #bearersIssued(): void {
+    if (this.#deps.signin.workloads?.useOnly === true) {
+      throw new ApiError('forbidden', 'this instance issues no service token (useOnly): trust the workload with a binding, and it signs in with its key', 'use_only');
+    }
+  }
+
   /** What a token issued now would reach, checked as issuing one is (`issueServiceToken`); issues nothing. */
   async planServiceToken(ctx: Asker, serviceId: string, input: { label: string | null; scope?: ScopeByPath }): Promise<TokenPlan> {
+    this.#bearersIssued();
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const { byPath, withheld } = await this.#tokenScope(ctx, serviceId, input.scope, details);

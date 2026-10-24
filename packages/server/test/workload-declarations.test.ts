@@ -10,7 +10,7 @@ import { authMac, checkAuthRow } from '../src/auth-rows.ts';
 import { serveApi } from '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
 import { PERSONAL_TOKEN_ROUTES } from '../src/api/personal-tokens.ts';
-import { WORKLOAD_ROUTES } from '../src/api/workload-routes.ts';
+import { ISSUING_ROUTES, WORKLOAD_ROUTES } from '../src/api/workload-routes.ts';
 import { PROOFS } from '../src/api/workloads.ts';
 import { ROUTE_SCOPES } from '../src/mcp/scopes.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -99,18 +99,22 @@ test("each route of the design is declared in the API and answers 501, naming th
     assert.equal(PERSONAL_TOKEN_ROUTES[key], false, key);
     assert.equal(ROUTE_SCOPES[key], null, key);
   }
-  // A session reaches what a service token does, its handlers deciding, and mints and promotes codes; what a person does stays theirs.
-  for (const key of ['POST /members/:member/bindings/:id/enrollments', 'POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'PATCH /access/:member', 'GET /personal/:project', 'PATCH /secrets/:project/:environment'] as const) {
+  // A session reaches what a service token does, its handlers deciding, but issues nothing and changes no access; what a person does stays theirs.
+  for (const key of ['GET /personal/:project', 'PATCH /secrets/:project/:environment', 'DELETE /members/:member/tokens/:id'] as const) {
     assert.equal(WORKLOAD_ROUTES[key], true, key);
   }
-  for (const key of ['POST /handles', 'POST /members/:member/tokens/:id/approve', 'POST /freezes', 'DELETE /freezes/:target', 'POST /oauth/authorizations'] as const) {
+  for (const key of [
+    'POST /handles', 'POST /members/:member/tokens/:id/approve', 'POST /freezes', 'DELETE /freezes/:target', 'POST /oauth/authorizations',
+    'POST /members/:member/tokens', 'POST /members/:member/bindings', 'POST /members/:member/bindings/:id/enrollments', 'PATCH /access/:member',
+  ] as const) {
     assert.equal(WORKLOAD_ROUTES[key], false, key);
   }
-  assert.deepEqual(PROOFS, {});
+  for (const key of ISSUING_ROUTES) assert.equal(WORKLOAD_ROUTES[key], false, key);
+  assert.deepEqual(Object.keys(PROOFS), ['oidc', 'aws']);
 });
 
-test("a workload's sign-in, renewal and narrowing are declared beside /api/auth/oidc, and answer 501", async () => {
-  for (const [path, change] of [['/api/auth/workload', /PR 1a/], ['/api/auth/workload/renew', /PR 1a/], ['/api/auth/workload/narrow', /PR 4/]] as const) {
+test("a workload's narrowing is declared beside /api/auth/oidc, and answers 501", async () => {
+  for (const [path, change] of [['/api/auth/workload/narrow', /PR 4/]] as const) {
     const response = await answer(new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }), runtime, ui, '203.0.113.9');
     assert.equal(response.status, 501, path);
     assert.match(((await response.json()) as { message: string }).message, change);

@@ -10,7 +10,7 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import type { PluginContext, UseAsked } from '../src/plugins.ts';
+import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { basic, credentialProxy, header, postgres, query, type CredentialProxyOptions, type Inject } from '../src/plugins/credential-proxy.ts';
 import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
 
@@ -29,8 +29,10 @@ function coffre(values: Record<string, string>, plain: readonly string[] = []): 
     api: unused,
     exchange: unused,
     signOut: unused,
+    // A handle's request is no workload's.
+    workload: async () => null,
     handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
-    use: async (_handle: string, asked: UseAsked) => {
+    use: async (_handle: string | WorkloadUse, asked: UseAsked) => {
       const keys = Array.isArray(asked.keys) ? asked.keys : Object.keys(values);
       return {
         values: Object.fromEntries(keys.filter((key) => key in values).map((key) => [key, values[key]!])),

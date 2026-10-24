@@ -5,7 +5,7 @@ import { ApiError } from './api/errors.ts';
 import { routeParts, serveApi } from './api/router.ts';
 import {
   authenticateRequest,
-  bearerToken,
+  headerToken,
   readCookie,
   accessTampered,
   registrationRequired,
@@ -42,7 +42,8 @@ export function apiCredential(request: Request, auth: AuthConfig): ApiCredential
     const token = nonEmpty(request.headers.get(ACCESS_JWT_HEADER));
     return token === null ? null : { token, ambient: readCookie(request, ACCESS_COOKIE) !== null };
   }
-  const header = bearerToken(request);
+  // A bearer token, or a workload's session with its key's proof (`Authorization: DPoP`).
+  const header = headerToken(request);
   if (header !== null) return { token: header, ambient: false };
   const cookie = sessionCookie(request, auth);
   return cookie === null ? null : { token: cookie, ambient: true };
@@ -185,7 +186,12 @@ export async function fetchApi(
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
-    return await serveApi(request, apiContext(runtime, identity));
+    const response = await serveApi(request, apiContext(runtime, identity));
+    if (identity.workload == null) return response;
+    // A workload's every answer carries the gate's current nonce, which its next proof signs (section 5.1): on a copy, whose headers are its own.
+    const answered = new Response(response.body, response);
+    answered.headers.set('dpop-nonce', identity.workload.nonce);
+    return answered;
   } catch (error) {
     return errorResponse(error);
   }

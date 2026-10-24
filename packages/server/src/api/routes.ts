@@ -1,5 +1,5 @@
 import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, PERMISSIONS, protects, type Permission } from '@coffre/core/access';
-import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, BEARER_PROFILES, type JSONWebKeySet } from '@coffre/core/identity';
+import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet, type WorkloadProfile } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
 import { displayName, environmentSlug, folderName, instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { POLICY_REVISION } from '@coffre/core/vault';
@@ -542,7 +542,7 @@ export const routes = {
   }),
   ...route('POST /members/:member/bindings', {
     input: z.object({
-      profile: z.enum(BEARER_PROFILES),
+      profile: z.enum(WORKLOAD_PROFILES as [WorkloadProfile, ...WorkloadProfile[]]),
       // github.com's or gitlab.com's when left out; a custom binding names its own.
       issuer: z.string().max(400).nullable().default(null),
       // A value, or for what started the run (event_name, pipeline_source), a list of them.
@@ -554,6 +554,8 @@ export const routes = {
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
       // The issuer's keys, for one coffre asks nothing: then the issuer is any string its tokens name.
       jwks: keySet.optional(),
+      // A workload's binding's policy (docs/design/workload-access.md, section 11), checked by its profile (`checkPolicy`).
+      policy: z.record(z.string().max(32), z.unknown()).optional(),
     }).strict(),
     // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
     query: dryRunFlag,

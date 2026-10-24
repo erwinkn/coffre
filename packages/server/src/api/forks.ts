@@ -8,7 +8,7 @@ import { asking, audited, denied, need, Refusal, withRefusals, type ApiContext }
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
-import { protectedFor, protectIds, rowWritten } from './roles.ts';
+import { protectedFor, protectIds, refuseWorkloadAccessChange, rowWritten } from './roles.ts';
 import { readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
@@ -188,6 +188,8 @@ async function inheritFrom(
  */
 async function protectedFork(ctx: ApiContext, place: ResolvedPath, source: ResolvedPath, slug: string, inherits: boolean): Promise<{ ctx: ApiContext; id?: string; protectedAt?: number }> {
   if (!protectedFor(ctx.caller, source.environment!)) return { ctx };
+  // Protecting one that exists changes what its readers read: never a workload's to do.
+  if (place.environment !== null) await refuseWorkloadAccessChange(ctx, { projectId: place.project.id, environmentId: place.environment.id });
   if (place.environment === null) {
     if ((await resolvePath(ctx.db, { project: place.project.slug, environment: slug }))?.environment != null) throw conflict(`an environment named "${slug}" already exists`);
     if (place.project.archivedAt !== null) throw conflict(`${place.project.slug} is archived; restore it before adding environments`);

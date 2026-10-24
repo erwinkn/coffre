@@ -1,10 +1,10 @@
-import { SigninError, type SigninProfile } from '@coffre/core/identity';
+import { SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
-import { ApiError, notBuilt, notFound } from './api/errors.ts';
+import { ApiError, notFound } from './api/errors.ts';
 import type { SignedInAccount } from './api/signin.ts';
-import { ExchangeRefused } from './api/workloads.ts';
+import { ExchangeRefused, type WorkloadService } from './api/workloads.ts';
 import {
   accessTokenForRequest,
   authenticateRequest,
@@ -13,6 +13,7 @@ import {
   sessionCookieName,
   type AuthenticatedIdentity,
 } from './auth.ts';
+import { dpopToken, SessionRefused, signedUrl, standingSession } from './workload-sessions.ts';
 import { apiCaller } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson, readLimitedJson } from './http.ts';
 import { logged } from './logged.ts';
@@ -115,6 +116,39 @@ const exchangeBody = z.object({ service: z.string().max(120), token: z.string().
 
 const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'unavailable' } as const;
 
+/** An exchange refused, as its client reads it: 401 with the reason, or 429 and 503 with when to come back (`Retry-After`). */
+function refuseExchange(error: ExchangeRefused, headers: Record<string, string> = {}): Response {
+  const later = error.reason === 'full' ? '30' : '60';
+  return jsonResponse(
+    { error: REFUSED_CODE[error.status], reason: error.reason, message: error.message },
+    error.status,
+    error.status === 401 ? headers : { ...headers, 'retry-after': later },
+  );
+}
+
+/**
+ * Both exchanges' admission, before anything else: one limit per source
+ * address and one for all. A limiter that fails refuses, and never lets a
+ * request through. Null when admitted.
+ */
+async function admission(workloads: WorkloadService, sourceIp: string | null): Promise<Response | null> {
+  try {
+    const [source, total] = await Promise.all([
+      workloads.limits.perSource.limit({ key: `source:${sourceIp ?? 'unknown'}` }),
+      workloads.limits.total.limit({ key: 'total' }),
+    ]);
+    return source.success && total.success ? null : refuseExchange(new ExchangeRefused('busy', 'too many exchanges: try again in a minute', 429));
+  } catch (error) {
+    console.error('workload limiter failed', logged(error));
+    return refuseExchange(new ExchangeRefused('busy', 'coffre cannot count exchanges right now: try again shortly', 503));
+  }
+}
+
+/** Whether this instance leaves services nothing but key-bound sessions (`useOnly`, docs/design/workload-access.md, section 6.3). */
+function useOnly(runtime: CoffreRuntime): boolean {
+  return runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true;
+}
+
 /**
  * POST /api/auth/oidc: a CI run's ID token, for a five-minute credential of
  * the service it names (docs/design/oidc.md). `{ service, token }` answers
@@ -135,48 +169,116 @@ export async function exchangeWorkloadToken(
 ) {
   const workloads = runtime.workloads;
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
-  const refuse = (error: ExchangeRefused) =>
-    jsonResponse(
-      { error: REFUSED_CODE[error.status], reason: error.reason, message: error.message },
-      error.status,
-      error.status === 401 ? {} : { 'retry-after': '60' },
-    );
-  try {
-    const [source, total] = await Promise.all([
-      workloads.limits.perSource.limit({ key: `source:${sourceIp ?? 'unknown'}` }),
-      workloads.limits.total.limit({ key: 'total' }),
-    ]);
-    if (!source.success || !total.success) return refuse(new ExchangeRefused('busy', 'too many exchanges: try again in a minute', 429));
-  } catch (error) {
-    console.error('workload limiter failed', logged(error));
-    return refuse(new ExchangeRefused('busy', 'coffre cannot count exchanges right now: try again shortly', 503));
+  // A strict instance issues no bearer credential to a service: its workloads sign in with a key.
+  if (useOnly(runtime)) {
+    return jsonResponse({ error: 'gone', reason: 'use_only', message: 'this instance signs services in at /api/auth/workload, with a key (useOnly): it issues no bearer credential' }, 410);
   }
+  const refused = await admission(workloads, sourceIp);
+  if (refused !== null) return refused;
   try {
     const body = exchangeBody.parse(asked(await readLimitedJson(request, EXCHANGE_BODY_BYTES)));
     return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
   } catch (error) {
-    if (error instanceof ExchangeRefused) return refuse(error);
+    if (error instanceof ExchangeRefused) return refuseExchange(error);
     return errorResponse(error);
   }
 }
+
+/** A workload's sign-in body: the service, and one proof by its kind, in at most this many bytes. */
+const sessionBody = z.object({
+  service: z.string().max(120),
+  proof: z.record(z.string().max(32), z.unknown()).refine((proof) => Object.keys(proof).length === 1, 'a proof names one kind: { "oidc": "<token>" }'),
+}).strict();
+
+/** How far a sign-in's proof's `iat` may be from now: it carries no nonce, so its clock bounds it (section 4.1). */
+const EXCHANGE_SKEW_SECONDS = 60;
 
 /**
  * POST /api/auth/workload: a workload's proof, an ID token, a signed
  * `GetCallerIdentity` or an enrollment code, for a session bound to the
  * key its DPoP proof names (docs/design/workload-access.md, section 4.1).
- * Declared by that design's PR 0; PR 1a serves it, through `PROOFS`.
+ * `{ service, proof: { <kind>: … } }` answers `{ token, tokenType: 'DPoP',
+ * expiresAt, notAfter, places }`, or 202 `{ pending, approve }` for a
+ * session that waits for a person's approval, with the gate's nonce.
+ *
+ * Admission first, as for `/api/auth/oidc`; then the body, read only to
+ * its limit; its shape; and its `DPoP` header: signed by the key, for this
+ * method and URL, within a minute. No nonce, no `ath`: the platform proof
+ * is spent or names the key, and the key is the caller's own. Then the
+ * proof, by its kind (`WorkloadService.signIn`).
  */
-export async function exchangeWorkloadSession(_request: Request, _runtime: CoffreRuntime, _sourceIp: string | null) {
-  return errorResponse(notBuilt("a workload's sign-in", 'PR 1a'));
+export async function exchangeWorkloadSession(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
+  const workloads = runtime.workloads;
+  if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
+  // No gate, no session that could be used: nothing is spent for one.
+  if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
+  const refused = await admission(workloads, sourceIp);
+  if (refused !== null) return refused;
+  try {
+    const body = sessionBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
+    const header = request.headers.get('dpop');
+    if (header === null) return refuseExchange(new ExchangeRefused('dpop', "a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in"));
+    const proof = await verifyProof(header, { method: request.method, url: signedUrl(request, runtime.publicUrl), skewSeconds: EXCHANGE_SKEW_SECONDS });
+    if (!proof.ok) return refuseExchange(new ExchangeRefused('dpop', `the DPoP proof does not hold: ${proof.message}`));
+    const made = await workloads.signIn(body, { requestId: crypto.randomUUID(), sourceIp, jkt: proof.jkt });
+    const nonce = await gateNonce(runtime, body.service);
+    return jsonResponse(made, 'pending' in made ? 202 : 200, nonce === null ? {} : { 'dpop-nonce': nonce });
+  } catch (error) {
+    if (error instanceof ExchangeRefused) return refuseExchange(error);
+    return errorResponse(error);
+  }
 }
 
-/** POST /api/auth/workload/renew: a session's expiry moved on, by a proof of its key (section 5.4). PR 1a serves it. */
-export async function renewWorkloadSession(_request: Request, _runtime: CoffreRuntime, _sourceIp: string | null) {
-  return errorResponse(notBuilt("renewing a workload's session", 'PR 1a'));
+/** The gate's current nonce for a service, for an answer that admits no proof; null when it cannot say, which costs the workload one retry. */
+async function gateNonce(runtime: CoffreRuntime, service: string): Promise<string | null> {
+  if (runtime.gates === undefined) return null;
+  try {
+    return await runtime.gates(service.startsWith('token:') ? service : `token:${service}`).nonce();
+  } catch (error) {
+    console.error('the workload gate failed', logged(error));
+    return null;
+  }
 }
 
-/** POST /api/auth/logout: revoke the bearer token this request carries, `coffre logout`. */
+/**
+ * POST /api/auth/workload/renew: a session's expiry moved on, by a proof
+ * of its key, `{ expiresAt }` (section 5.4). Its session as every request
+ * checks it, in one statement and with no vault call; never a `narrow`
+ * child's, which ends with its parent or its own expiry.
+ */
+export async function renewWorkloadSession(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
+  const workloads = runtime.workloads;
+  const token = dpopToken(request);
+  if (workloads === null || token === null) return errorResponse(new ApiError('unauthenticated', "this takes a workload's session, Authorization: DPoP coffre_wl_…, with its key's proof"));
+  try {
+    // A frozen session renews: the freeze stops its use, and lifting it restores the session (section 8.2).
+    const session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null, freezes: false });
+    return jsonResponse(await workloads.renew(session, { requestId: crypto.randomUUID(), sourceIp }), 200, { 'dpop-nonce': session.nonce });
+  } catch (error) {
+    if (error instanceof SessionRefused) return error.response;
+    if (error instanceof ExchangeRefused) return refuseExchange(error);
+    return errorResponse(error);
+  }
+}
+
+/**
+ * POST /api/auth/logout: revoke the credential this request carries, `coffre
+ * logout`: a bearer token, or a workload's session with its key's proof (a
+ * `narrow` child's too), which its SDK sends on `SIGTERM`.
+ */
 export async function logout(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
+  const session = dpopToken(request);
+  if (session !== null) {
+    try {
+      // Its key's proof is all it takes to end one's own session: no freeze, pending approval or moved address keeps it alive.
+      await standingSession(request, runtime, session, sourceIp, { place: null, credential: null, children: true, ending: true });
+      if (runtime.signin !== null) await runtime.signin.signOut(session, { requestId: crypto.randomUUID(), sourceIp });
+      return jsonResponse({ signedOut: true });
+    } catch (error) {
+      if (error instanceof SessionRefused) return error.response;
+      return errorResponse(error);
+    }
+  }
   try {
     const identity = await apiCaller(request, runtime, sourceIp);
     if (identity instanceof Response) return identity;
