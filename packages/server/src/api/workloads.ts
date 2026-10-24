@@ -35,7 +35,6 @@ import {
   WorkloadTokenRefused,
   type BindingClaims,
   type BindingPolicy,
-  type CheckedBinding,
   type DecodedToken,
   type GitHubAppRepositories,
   type JSONWebKeySet,
@@ -69,7 +68,9 @@ import {
   type PlaceRow,
 } from '../db/queries.ts';
 import { databaseNow, frozenTargets, insertSession, keyNames, renewSession, workloadCandidates } from '../db/workloads.ts';
+import { awsProof } from '../workloads/aws.ts';
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
+import { expectedAudiences, PROFILE_RULES } from '../workloads/profiles.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { newestPolicySeq } from './caller.ts';
@@ -227,17 +228,6 @@ export type ProofKind = {
 /** How long a session lives past each renewal, unless its proof says less: an hour (section 5.4). */
 export const SESSION_MS = 60 * 60 * 1000;
 
-/**
- * The audiences a token may name for a binding (section 4.2): the one its
- * platform fixes, the key's where the caller picks it (`keyAudience`, in
- * either spelling the SDK asks for), or else the instance's alone.
- */
-function audiencesFor(policy: BindingPolicy, publicUrl: string, jkt: string): readonly string[] {
-  if (policy.audience !== undefined) return [policy.audience];
-  if (policy.keyAudience === true) return [`${publicUrl}#jkt=${jkt}`, `${publicUrl}?jkt=${jkt}`];
-  return [publicUrl];
-}
-
 /** The audience a token names, alone; null for none, or several. */
 function soleAudience(aud: unknown): string | null {
   if (typeof aud === 'string') return aud;
@@ -272,7 +262,7 @@ const OIDC: ProofKind = {
     // The bindings first, so that a token none can take costs this one read.
     const candidates = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
     if (candidates.length === 0) return unbound;
-    const accepted = (binding: BindingRow) => audiencesFor(JSON.parse(binding.policy!) as BindingPolicy, ctx.publicUrl, ctx.jkt);
+    const accepted = (binding: BindingRow) => expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
     // The audience the token names, if a binding takes it; else the instance's, which verifying it then refuses.
     const named = soleAudience(decoded.claims.aud);
     const audience = named !== null && candidates.some((binding) => accepted(binding).includes(named)) ? named : ctx.publicUrl;
@@ -323,27 +313,17 @@ const OIDC: ProofKind = {
 };
 
 /**
- * What one profile holds its bindings and tokens to beyond its required
- * claims (PR 2's `workloads/profiles.ts` registers them, one line each):
- * `binding` at creation, after `checkBinding` and `checkPolicy`, throwing
- * `BindingInvalid`; `token` at the exchange, after the signature, the
- * audience and the claims, a refusal's message or null.
- */
-export type ProfileRules = {
-  binding(binding: CheckedBinding, policy: BindingPolicy): void;
-  token(claims: Record<string, unknown>, binding: { issuer: string; claims: BindingClaims; policy: BindingPolicy }): string | null;
-};
-
-/** Each profile's own rules, by profile. */
-export const PROFILE_RULES: Partial<Record<WorkloadProfile, ProfileRules>> = {};
-
-/**
  * The proofs the exchange takes, one line each: PR 1a registers `oidc`, PR
  * 2 `aws` and PR 3 `enrollment`.
  */
 export const PROOFS: { readonly [K in ProofName]?: ProofKind } = {
   oidc: OIDC,
+  // Made at its first use: `workloads/aws.ts` imports this module, so neither may need the other while it loads.
+  get aws() {
+    return (aws ??= awsProof());
+  },
 };
+let aws: ProofKind | undefined;
 
 /** The proof a binding's sessions are made by: the one whose profiles hold its profile. */
 export function proofOf(profile: string): { name: ProofName; kind: ProofKind } | null {
