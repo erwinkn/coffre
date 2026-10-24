@@ -269,6 +269,9 @@ test("forking cannot copy a sensitive value out of a reference the forker cannot
   await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
   // The fork would carry LEAK as a reference to backend, which Carla cannot read: refused, never copied by value.
   await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
+  // Refused before anything is made: no half-made environment is left behind, so the message stays the same on a retry.
+  await assert.rejects(carla.secrets.list('billing/dev2'), { status: 404 });
+  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
 });
 
 test("a fork's inherited sensitive value is decided where it is held, its parent: an Owner's token there reads it, a Developer's does not", async () => {
