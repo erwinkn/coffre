@@ -1671,9 +1671,12 @@ export async function reveal(
    * only, opened to `use` them for the caller or to `expose` them to their
    * app (docs/design/credential-proxy.md), with `logged` in the app's own
    * entry of it, `credential.use`. A key the environment does not hold is
-   * left out, not refused: the proxy says which it needs.
+   * left out, not refused: the proxy says which it needs. `environmentId`,
+   * a workload's: the environment its request was checked for, freezes and
+   * all; a path that resolves to another (renamed meanwhile) is refused
+   * before anything is logged or opened.
    */
-  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string },
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence, at) => {
@@ -1689,6 +1692,9 @@ export async function reveal(
           metadata: { path: formatPath(path) },
         }),
       );
+    }
+    if (use?.environmentId !== undefined && environment.environmentId !== use.environmentId) {
+      throw new ApiError('conflict', `${formatPath(path)} is not the environment this request was checked for: it was renamed meanwhile, so send it again`);
     }
     at({ ...environment, operationId });
     // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.

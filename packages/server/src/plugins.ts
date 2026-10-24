@@ -497,11 +497,9 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
           if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
           ({ identity: caller, expiresAt } = made);
         }
-        const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), asked);
-        // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since then reads nothing.
-        if (typeof handle !== 'string' && handle.place !== null && read.environment.id !== handle.place) {
-          throw new ApiError('conflict', `${asked.path} is not the environment this request was checked for: it was renamed meanwhile, so send it again`);
-        }
+        // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
+        const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
+        const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
         return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;

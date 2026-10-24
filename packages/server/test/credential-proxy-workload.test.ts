@@ -93,13 +93,13 @@ function proxy(options: { recheckSeconds?: number } = {}) {
   });
 }
 
-function makeRuntime(options: { recheckSeconds?: number } = {}): CoffreRuntime {
+function makeRuntime(options: { recheckSeconds?: number; plugins?: ReturnType<typeof checkPlugins> } = {}): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }), alert: (alert) => void alerts.push(alert) } }),
     auditChainKey: deps.chainKey.toString('base64'),
-    plugins: checkPlugins([proxy(options)]),
+    plugins: options.plugins ?? checkPlugins([proxy(options)]),
   });
   return createRuntime(config, deps.db, deps.vault, transport, (promise) => void background.push(promise), gates);
 }
@@ -193,7 +193,7 @@ async function read(response: Response): Promise<Sent> {
  * request changed on the way), and `added` headers join it afterwards, as
  * a library or a proxy on the way adds them.
  */
-async function use(held: Session, method: string, path: string, init: { headers?: Record<string, string>; body?: string; signed?: { url?: string; headers?: Record<string, string>; body?: string }; added?: Record<string, string> } = {}): Promise<Sent> {
+async function use(held: Session, method: string, path: string, init: { headers?: Record<string, string>; body?: string; signed?: { url?: string; headers?: Record<string, string>; body?: string; line?: string }; added?: Record<string, string> } = {}): Promise<Sent> {
   const url = `${ORIGIN}${path}`;
   const headers = init.headers ?? {};
   const proof = await createProof(held.key, {
@@ -201,7 +201,7 @@ async function use(held: Session, method: string, path: string, init: { headers?
     url: init.signed?.url ?? url,
     token: held.token,
     nonce: await gates(MEMBER).nonce(),
-    content: { headers: init.signed?.headers ?? headers, body: await bodyDigest(init.signed?.body ?? init.body ?? '') },
+    content: { headers: init.signed?.headers ?? headers, body: init.signed?.line ?? (await bodyDigest(init.signed?.body ?? init.body ?? '')) },
   });
   const request = new Request(url, { method, headers: { ...headers, ...init.added, authorization: `DPoP ${held.token}`, dpop: proof }, ...(init.body === undefined ? {} : { body: init.body }) });
   return read((await pluginRoute(request, runtime, IP))!);
@@ -311,15 +311,18 @@ test('a streamed SigV4 upload is bound by the payload hash it declares; UNSIGNED
   assert.equal(buffered.status, 200, JSON.stringify(buffered.body));
   assert.equal(reached.at(-1)!.sha256, hash);
   assert.equal(reached.length, 3);
-  // A copier adds the hash of the signed body to a buffered request, with other bytes: coffre signs the hash the proof
-  // bound, never the bytes that came, so the upstream refuses them.
+  // A copier adds the hash of the signed body to a buffered request, with other bytes: the bytes are not that hash.
   const good = 'the body the app signed';
   const evil = 'the bytes a copier sent';
   const goodHash = createHash('sha256').update(good).digest('hex');
-  const added = await use(held, 'PUT', '/use/s3/bucket/swapped', { body: evil, signed: { body: good }, added: { 'x-amz-content-sha256': goodHash } });
-  assert.equal(added.status, 200, JSON.stringify(added.body));
-  assert.equal(reached.at(-1)!.headers['x-amz-content-sha256'], goodHash, 'the bound hash is signed, which the bytes do not match');
-  assert.notEqual(reached.at(-1)!.sha256, goodHash);
+  assert.equal((await use(held, 'PUT', '/use/s3/bucket/swapped', { body: evil, signed: { body: good }, added: { 'x-amz-content-sha256': goodHash } })).status, 400);
+  // Nor may it add the header to choose the line, streamed or not: the proof must sign the header that does.
+  const evilHash = createHash('sha256').update(evil).digest('hex');
+  const chosen = await use(held, 'PUT', '/use/s3/bucket/swapped', { body: evil, signed: { line: evilHash }, added: { 'x-amz-content-sha256': evilHash } });
+  assert.equal(chosen.status, 400, JSON.stringify(chosen.body));
+  assert.match(chosen.body.message as string, /name it in hdr/);
+  // Signed, the header and the bytes it declares go through.
+  assert.equal((await use(held, 'PUT', '/use/s3/bucket/declared', { headers: { 'x-amz-content-sha256': goodHash }, body: good, signed: { line: goodHash } })).status, 200);
   // An empty body is no body, whatever its header says, on every platform.
   assert.equal((await use(held, 'PUT', '/use/s3/bucket/empty', { headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }, body: '' })).status, 200);
   assert.equal(reached.length, 5);
@@ -475,5 +478,44 @@ test('a workload tunnel ends within one recheck of a freeze, and stands while no
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    // A recheck or a last use still being written would meet the next test's reset: let them land first.
+    await sleep(1000);
+    await Promise.all(background);
   }
+});
+
+test("a workload's use reads the environment its statement checked: a path that resolves elsewhere is refused before anything is logged or opened", async () => {
+  // A plugin that asks for market/prod's place, then reads another path with the caller it got: a rename in between, in effect.
+  runtime = makeRuntime({
+    plugins: checkPlugins([{
+      name: 'probe',
+      routes: {
+        prefix: '/use',
+        fetch: async (request, coffre) => {
+          const caller = (await coffre.workload(request, { place: 'market/prod', credential: 'stripe', body: await bodyDigest('') }))!;
+          const read = await coffre.use(caller, { path: 'market/staging', keys: ['STRIPE_KEY'], purpose: 'use', logged: {} }).then(() => 200, (error: { status: number }) => error.status);
+          return new Response(null, { status: read });
+        },
+      },
+    }]),
+  });
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/staging', { name: 'staging' });
+  await root.secrets.set('market/staging', { STRIPE_KEY: 'sk_live_staging_0123456789' });
+  await root.access.set(MEMBER, { 'market/prod': 'viewer', 'market/staging': 'viewer' });
+  await bind();
+  const held = await session();
+  let unwraps = 0;
+  const unwrap = deps.vault.unwrap.bind(deps.vault);
+  deps.vault.unwrap = async (...args: Parameters<typeof unwrap>) => {
+    unwraps++;
+    return unwrap(...args);
+  };
+  const used = (await entries('credential.use')).length;
+  const url = `${ORIGIN}/use/market/prod/stripe`;
+  const proof = await createProof(held.key, { method: 'GET', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: {}, body: await bodyDigest('') } });
+  const answered = await pluginRoute(new Request(url, { headers: { authorization: `DPoP ${held.token}`, dpop: proof } }), runtime, IP);
+  assert.equal(answered!.status, 409);
+  assert.equal((await entries('credential.use')).length, used, 'nothing logged');
+  assert.equal(unwraps, 0, 'nothing opened');
 });

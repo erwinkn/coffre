@@ -1078,19 +1078,26 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   // the proof bound. Through a sigv4 credential, a body of any bytes signs the hash its `x-amz-content-sha256` declares,
   // which the upstream checks against them, streamed or not (any other value binds nothing); every other request, an
   // empty body's included whatever its header says, the bytes' own digest.
+  // The header that chose the line must be one the proof signs, and a buffered body must be what it declares: neither is
+  // left for a copier to pick.
   let payload: string | undefined;
+  let declaring = false;
   if (token !== null) {
     const declared = request.headers.get('x-amz-content-sha256');
     const bytes = content.streamed ? content.declared !== '0' : (content.body?.byteLength ?? 0) > 0;
-    const body = credential.inject.kind === 'sigv4' && declared !== null && bytes
-      ? (/^[0-9a-f]{64}$/.test(declared) ? declared : UNSIGNED_BODY)
-      : await bodyDigest(content.body ?? new Uint8Array(0));
+    declaring = credential.inject.kind === 'sigv4' && declared !== null && bytes;
+    const digest = content.streamed ? null : await bodyDigest(content.body ?? new Uint8Array(0));
+    const body = declaring ? (/^[0-9a-f]{64}$/.test(declared!) ? declared! : UNSIGNED_BODY) : digest!;
+    if (declaring && !content.streamed && body !== UNSIGNED_BODY && body !== digest) return failure(400, 'the body is not what its x-amz-content-sha256 says');
     payload = body === UNSIGNED_BODY ? 'UNSIGNED-PAYLOAD' : body;
     caller = await workloadOf(request, coffre, { ...at, body });
     if (caller instanceof Response) return caller;
   }
   const workload = caller!;
   return answering(workload, async () => {
+    if (declaring && workload.hdr !== null && !workload.hdr.includes('x-amz-content-sha256')) {
+      return failure(400, 'x-amz-content-sha256 says what binds the body, so the proof signs it: name it in hdr');
+    }
     if (workload.path === null) return failure(409, 'the environment this session reaches is gone');
     if (!constraintsAllow(workload.constraints, { place: workload.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');

@@ -1855,7 +1855,8 @@ line of registration after the owner has merged:
   `places` are checked with no read of their own, and a warm request
   still costs one statement. A path that names no environment is 404 once
   the proof holds. `use` refuses (409) when the path it reads resolves to
-  another environment than the statement checked, a rename in between.
+  another environment than the statement checked, a rename in between,
+  inside `reveal` before anything is logged or opened.
   A Cloudflare call's bindings statement resolves the place the same way.
 - **The body's line** (D19). Through a `sigv4` credential, a request with
   a body and an `x-amz-content-sha256` signs the hash it declares (64 hex)
@@ -1867,7 +1868,10 @@ line of registration after the owner has merged:
   POST, a streamed `content-length: 0`) signs `bodyDigest('')` whatever its
   header says, on every platform, so it needs no `unsignedUploads`. Every
   other request signs its bytes' digest. The payload hash coffre signs
-  again is that same line, never re-read from the headers it forwards. `standingSession` holds the `unsignedUploads`
+  again is that same line, never re-read from the headers it forwards. A
+  copier may not choose the declared form: the header that chose it must
+  be one the proof signs (`hdr`), and a buffered body must be the hash it
+  declares (400 otherwise). `standingSession` holds the `unsignedUploads`
   clause, beside the binding's other policy checks.
 - **Every HTTP request under `/use` signs its content**: forwarding, the
   plan (an empty body) and `POST /use…`. A sign or presign body is
