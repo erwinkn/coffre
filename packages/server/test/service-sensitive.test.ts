@@ -240,6 +240,40 @@ test("a reference into another project lends its sensitive value only on a crede
   assert.equal(await read(narrow.token, 'billing/dev/LEAK'), '403 not_owner_issued');
 });
 
+test("forking a reference to another project's sensitive value keeps it a reference: a copy would move it into the fork's project, past R16/R32", async () => {
+  // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key (R24), then forks.
+  await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  const made = await bo.environments.create('billing/dev2', { from: 'dev' });
+  // A copy would have made billing/dev2/LEAK billing's own sensitive value; instead it stays a reference to backend.
+  assert.equal(made.forked?.references, 1, 'the sensitive reference is carried as a reference, not copied by value');
+  // R16: Bo cannot loosen it in place (it is a reference, its nature is its source's, R23) and cannot reveal it as a person.
+  await assert.rejects(bo.secrets.set('billing/dev2', { LEAK: { sensitivity: 'secret' } }), /reference/);
+  await assert.rejects(bo.secrets.reveal('billing/dev2/LEAK'), { status: 403 });
+  // R32: a service token of billing's, issued by Bo, does not read it: the value is still backend's.
+  await bo.members.add('token:bo-ci');
+  await bo.access.set('token:bo-ci', { 'billing/dev2': 'viewer' });
+  const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
+  assert.deepEqual(his.withheld, ['billing/dev2']);
+  assert.equal(await read(his.token, 'billing/dev2/LEAK'), '403 not_owner_issued');
+  // The value is still backend's: a credential an Owner of backend issued, with backend in scope, reads it through the reference.
+  await root.access.set('token:bo-ci', { 'billing/dev2': 'viewer', 'backend/dev': 'viewer' });
+  const owners = await root.tokens.issue('token:bo-ci', { expiresInDays: 30 });
+  assert.equal(await read(owners.token, 'billing/dev2/LEAK'), STRIPE);
+});
+
+test("forking cannot copy a sensitive value out of a reference the forker cannot read at its source", async () => {
+  // Carla owns billing, and cannot read backend at all. Bo makes the reference; Carla forks the environment.
+  await root.members.add(`user:carla@acme.example`);
+  await root.access.set(`user:carla@acme.example`, { billing: 'owner' });
+  const carla = clientFor(deps, 'carla@acme.example');
+  await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  // The fork would carry LEAK as a reference to backend, which Carla cannot read: refused, never copied by value.
+  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
+  // Refused before anything is made: no half-made environment is left behind, so the message stays the same on a retry.
+  await assert.rejects(carla.secrets.list('billing/dev2'), { status: 404 });
+  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
+});
+
 test("a fork's inherited sensitive value is decided where it is held, its parent: an Owner's token there reads it, a Developer's does not", async () => {
   await root.environments.create('backend/dev-eu', { from: 'dev', inherit: true });
   await root.access.set(CI, { 'backend/dev-eu': 'viewer' });

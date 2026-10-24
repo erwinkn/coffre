@@ -956,6 +956,8 @@ class VaultService implements Vault {
         secrets: items.map((item) => item.secret),
         // Through a reference, the reader's grants on the holder's environment decide.
         places: sealed.map((seal, i) => seal?.holder ?? items[i]!.secret),
+        // Which items are read through a reference: a sensitive one is never copied, which would move it out of its project.
+        viaReference: sealed.map((seal) => seal !== null),
         references: ends,
         vet: ends.length === 0 ? undefined : async (_, reads) => sealed.map((seal) => (seal !== null && reads.ended.has(seal.seq) ? 'ended' : null)),
         remote,
@@ -1169,6 +1171,8 @@ class VaultService implements Vault {
       needs?: (db: Queryable) => Promise<(readonly Permission[] | null)[]>;
       /** Each secret that takes besides its reader being an Owner of its project (`ownsProject`): a sensitive value made a secret. */
       owns?: readonly boolean[];
+      /** Which secrets are read through a reference, by index: a sensitive one of these is never copied (it would leave its project). */
+      viaReference?: readonly boolean[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
@@ -1234,7 +1238,9 @@ class VaultService implements Vault {
       const person = principal.startsWith('user:');
       secrets.forEach((secret, i) => {
         if (codes[i] !== null || secret.sensitive !== true) return;
-        if ((copying && call.input.keepsSensitive !== true) || (handedBack && person)) codes[i] = 'sensitive';
+        // A sensitive value read through a reference is never copied: a fork keeps it a reference to its source, so the
+        // value stays in its own project, where R16/R32 decide who reads it. Copying it would move it to the fork's.
+        if ((copying && call.input.keepsSensitive !== true) || (copying && call.viaReference?.[i] === true) || (handedBack && person)) codes[i] = 'sensitive';
         else if (handedBack && !readsSensitive(reader.live, secret.projectId)) codes[i] = 'not_owner_issued';
       });
       let first = codes.find((code) => code !== null) ?? null;
