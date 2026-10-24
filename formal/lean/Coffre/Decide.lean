@@ -19,8 +19,12 @@ nothing refused yet, so every theorem here holds whatever it answers.
   one read through a reference.
 - `personal_owner_only`: a personal config's key opens for its owner alone,
   and never through a reference.
+- `no_laundering`: a workload is handed back, for any purpose but the
+  proxy's use, only a value its scope lists, by key ID, where the value is
+  held: a reference's source, a fork's parent, never where it is read.
 - `reference_made_by_reader`: making a reference takes reading its source,
-  and using it too if it is sensitive (R24).
+  and using it too if it is sensitive (R24); a workload's, listing it too
+  unless it is plain.
 - `reference_shares_by_design`: a reference does let someone read what they
   could not at its source: that is what it is for (R20), and the theorem
   shows it, so the model cannot be read as promising otherwise.
@@ -128,13 +132,21 @@ def sensitiveRefusal (code : Code) (r : Reader) (action : Action) (principal : S
   else if handedBack && !readsSensitive r.live project then some "not_owner_issued"
   else none
 
-/-- One key of a read, decided: by where it is, by `vet`, which the vault asks only when nothing refused it yet, and by its sensitivity. -/
+/-- `useOnlyRefusals`, for one key: `secret` and `secretId` are where its value is held, and its key. -/
+def useOnlyRefusal (code : Code) (r : Reader) (action : Action) (purpose : Option String) (secret : SecretPlace) (secretId : String) : Code :=
+  if code.isSome then code
+  else if action == .read && purpose != some "use" && useOnly r.live secret.project secret.env secretId then some "use_only"
+  else none
+
+/-- One key of a read, decided: by where it is, by `vet`, which the vault asks only when nothing refused it yet, by a workload's list, and by its sensitivity. -/
 structure KeyRead where
   reader : Reader
   principal : String
   purpose : Option String
   keepsSensitive : Bool
+  /-- Where its value is held: the secret, a reference's source, a fork's parent. -/
   secret : SecretPlace
+  secretId : String
   /-- Where the permission is checked: a reference's holder, or the secret itself. -/
   held : SecretPlace
   envs : Table EnvRow
@@ -147,8 +159,52 @@ structure KeyRead where
 def KeyRead.permission (k : KeyRead) : Permission := if k.purpose == some "use" then .use else .read
 
 def KeyRead.decide (k : KeyRead) (vet : Code) : Code :=
-  sensitiveRefusal ((keyRefusal k.reader k.principal k.permission k.secret k.held k.envs none false).orElse fun _ => vet)
+  sensitiveRefusal
+    (useOnlyRefusal ((keyRefusal k.reader k.principal k.permission k.secret k.held k.envs none false).orElse fun _ => vet)
+      k.reader .read k.purpose k.secret k.secretId)
     k.reader .read k.principal k.purpose k.keepsSensitive k.secret.project k.sensitive k.viaReference
+
+/-! ## A workload's list -/
+
+theorem sensitiveRefusal_none {c r a pr pu ks proj s via} (h : sensitiveRefusal c r a pr pu ks proj s via = none) : c = none := by
+  cases c with
+  | none => rfl
+  | some _ => simp [sensitiveRefusal] at h
+
+/-- A value handed back, for any purpose but the proxy's use, is use-only to nobody who reads it. -/
+theorem handed_back_not_use_only (k : KeyRead) (vet : Code)
+    (hp : k.purpose ≠ some "use") (h : k.decide vet = none) :
+    useOnly k.reader.live k.secret.project k.secret.env k.secretId = false := by
+  unfold KeyRead.decide at h
+  have hu := sensitiveRefusal_none h
+  generalize ((keyRefusal k.reader k.principal k.permission k.secret k.held k.envs none false).orElse fun _ => vet) = c at hu
+  cases c with
+  | some _ => simp [useOnlyRefusal] at hu
+  | none =>
+    cases ho : useOnly k.reader.live k.secret.project k.secret.env k.secretId
+    · rfl
+    · simp [useOnlyRefusal, ho, hp] at hu
+
+/--
+**No laundering.** A workload is handed back a value, for any purpose but the
+proxy's use, a copy kept sensitive included, only if its scope lists the key,
+by ID, on a grant covering where the value is held: the secret's own place, a
+reference's source, a fork's parent. Never by the place it was read at
+(`held`), so neither a reference into a listed place, nor a fork of one, nor
+a rename hands it a value it only uses.
+-/
+theorem no_laundering (k : KeyRead) (vet : Code) (hw : k.reader.live.workload = true)
+    (hp : k.purpose ≠ some "use") (h : k.decide vet = none) :
+    (k.reader.live.cred.getD []).any (fun g => covers g.place ⟨k.secret.project, some (k.secret.env, none)⟩ && Reads.lists g.reads k.secretId) = true := by
+  have := handed_back_not_use_only k vet hp h
+  simpa [useOnly, hw] using this
+
+/-- And nobody else is held to one: a read refused `use_only` is a workload's. -/
+theorem use_only_is_workload {c r a pu secret id} (h : useOnlyRefusal c r a pu secret id = some "use_only") (hc : c = none) :
+    r.live.workload = true := by
+  subst hc
+  unfold useOnlyRefusal useOnly at h
+  cases hw : r.live.workload <;> simp_all
 
 /-! ## Sensitive values -/
 
@@ -263,16 +319,22 @@ read through it is decided where it is held, by its source's nature (R20,
 R23): a share, by someone who could read the value, to whoever reads where
 it lands. -/
 
+/-- A source's nature, its current version's: plain, a secret, or sensitive. -/
+inductive Nature where
+  | plain | secret | sensitive
+  deriving DecidableEq, Repr, Inhabited
+
 /-- `referenceRefusal`: `reference`'s check of one reference, past what only the database settles (`bad_claim`, `invalid`). -/
-def referenceRefusal (r : Reader) (holder source : SecretPlace) (envs : Table EnvRow)
-    (sourceSensitive : Bool) : Code :=
+def referenceRefusal (r : Reader) (holder source : SecretPlace) (sourceId : String) (envs : Table EnvRow)
+    (nature : Nature) : Code :=
   let ownerOf (s : SecretPlace) := (envs.get? s.env).bind (·.owner)
   if (ownerOf holder).isSome || (ownerOf source).isSome then some "personal"
   else
     let src := placeIn source envs
     (refuses r .write (placeIn holder envs) (gone envs holder)).orElse fun _ =>
       (refuses r .read src (gone envs source)).orElse fun _ =>
-        if sourceSensitive then refuses r .use src (gone envs source) else none
+        (if nature == .sensitive then refuses r .use src (gone envs source) else none).orElse fun _ =>
+          if nature != .plain && useOnly r.live source.project source.env sourceId then some "use_only" else none
 
 theorem refuses_none {r p x d} (h : refuses r p x d = none) : allows r.live p x = true := by
   unfold refuses at h
@@ -289,19 +351,24 @@ sensitive, and writes where it is held.
 theorem orElse_none {a b : Code} (h : (a.orElse fun _ => b) = none) : a = none ∧ b = none := by
   cases a <;> simp_all [Option.orElse]
 
-theorem reference_made_by_reader {r holder source envs sens}
-    (h : referenceRefusal r holder source envs sens = none) :
+theorem reference_made_by_reader {r holder source sourceId envs nature}
+    (h : referenceRefusal r holder source sourceId envs nature = none) :
     allows r.live .write (placeIn holder envs) = true ∧ allows r.live .read (placeIn source envs) = true ∧
-      (sens = true → allows r.live .use (placeIn source envs) = true) := by
+      (nature = .sensitive → allows r.live .use (placeIn source envs) = true) ∧
+      (nature ≠ .plain → useOnly r.live source.project source.env sourceId = false) := by
   unfold referenceRefusal at h
   dsimp only at h
   split at h
   · cases h
   · obtain ⟨hw, h⟩ := orElse_none h
-    obtain ⟨hr, hu⟩ := orElse_none h
-    refine ⟨refuses_none hw, refuses_none hr, fun hs => ?_⟩
-    simp only [hs, ↓reduceIte] at hu
-    exact refuses_none hu
+    obtain ⟨hr, h⟩ := orElse_none h
+    obtain ⟨hu, hl⟩ := orElse_none h
+    refine ⟨refuses_none hw, refuses_none hr, fun hs => ?_, fun hn => ?_⟩
+    · simp only [hs] at hu
+      exact refuses_none hu
+    · cases ho : useOnly r.live source.project source.env sourceId
+      · rfl
+      · simp [hn, ho] at hl
 
 /--
 **A reference shares, by design.** Bo, a Viewer of `web/dev` alone, reads
@@ -312,9 +379,9 @@ and its permissions from where it lives. The guarantee is
 -/
 theorem reference_shares_by_design :
     let envs : Table EnvRow := [("web-dev", ⟨"web", "dev", none, none, false⟩), ("api-dev", ⟨"api", "dev", none, none, false⟩)]
-    let bo : Holdings := ⟨"member", EVERYWHERE, [⟨⟨some "web", some "web-dev"⟩, "viewer"⟩], none, defaultPolicy, false⟩
+    let bo : Holdings := ⟨"member", EVERYWHERE, [⟨⟨some "web", some "web-dev"⟩, "viewer"⟩], none, defaultPolicy, false, false⟩
     let r : Reader := ⟨.active, bo, bo⟩
-    let read : KeyRead := ⟨r, "user:bo", some "reveal", false, ⟨"api", "api-dev"⟩, ⟨"web", "web-dev"⟩, envs, false, true⟩
+    let read : KeyRead := ⟨r, "user:bo", some "reveal", false, ⟨"api", "api-dev"⟩, "key", ⟨"web", "web-dev"⟩, envs, false, true⟩
     read.decide none = none ∧ refuses r .read (placeIn (⟨"api", "api-dev"⟩ : SecretPlace) envs) false = some "no_grant" := by
   decide
 

@@ -297,7 +297,7 @@ theorem allowed_own_config {k : KeyRead} {vet : Code} (h : k.decide vet = none) 
       ho (by simp [hown]) (Or.inl hp)
     unfold KeyRead.decide at h
     rw [this] at h
-    simp [sensitiveRefusal, Option.orElse] at h
+    simp [sensitiveRefusal, useOnlyRefusal, Option.orElse] at h
 
 /--
 **No person opens a sensitive value, nor another's personal config, whatever

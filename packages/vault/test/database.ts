@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 
-import type { SecretRef, WrappedKey } from '@coffre/core/vault';
+import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import pg from 'pg';
+
+import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
 
 /**
  * The suite's database, as the vault's tests use it: the one the server's
@@ -21,6 +23,43 @@ const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 export const OWNER_URL = url('coffre_owner:local-dev-only');
 export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
+
+/** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
+type Spoken<I> = I extends Through ? Omit<I, 'caller'> & Partial<Through> : I;
+
+/** A vault whose calls may leave `caller` out (`speaking`). */
+export type SpeakingVault<V> = { [K in keyof V]: V[K] extends (input: infer I) => infer R ? (I extends Through ? (input: Spoken<I>) => R : V[K]) : V[K] };
+
+/**
+ * `vault`, spoken to as the app does by a test about something other than
+ * who asks: a call that leaves its `caller` out says the kind its acting
+ * principal is, a person for `user:`, a bearer for `token:`. One about a
+ * workload says so itself.
+ */
+export function speaking<V extends object>(vault: V): SpeakingVault<V> {
+  return new Proxy(vault, {
+    get(target, name) {
+      const value: unknown = Reflect.get(target, name);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => value.apply(target, [said(args[0]), ...args.slice(1)]);
+    },
+  }) as unknown as SpeakingVault<V>;
+}
+
+function said(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || 'caller' in input) return input;
+  const { actor, principal } = input as { actor?: unknown; principal?: unknown };
+  const asking = typeof actor === 'string' ? actor : principal;
+  return typeof asking === 'string' ? { ...input, caller: asking.startsWith('user:') ? 'person' : 'bearer' } : input;
+}
+
+/** The vault in this process, as the tests speak to it (`speaking`). */
+export type LocalVault = SpeakingVault<RawLocalVault>;
+
+/** `openLocalVault`, spoken to as the app does (`speaking`). */
+export async function openLocalVault(...args: Parameters<typeof openRawVault>): Promise<LocalVault> {
+  return speaking(await openRawVault(...args));
+}
 
 export type TestDatabase = { owner: Database; vault: Database; connect(): Promise<Database>; close(): Promise<void> };
 

@@ -522,7 +522,8 @@ pnpm formal:lean --seed=42     # another reproducible set
 - [`Decide.lean`](../formal/lean/Coffre/Decide.lean) is how the vault decides
   each key of a read, and each reference one makes,
   [`packages/vault/src/decide.ts`](../packages/vault/src/decide.ts):
-  personal configs, references, deleted places, sensitive values.
+  personal configs, references, deleted places, sensitive values, and what
+  a workload's scope lists.
 - [`Envelope.lean`](../formal/lean/Coffre/Envelope.lean) is the AAD and the
   envelope, and [`Audit.lean`](../formal/lean/Coffre/Audit.lean) the chain
   and its checkpoints.
@@ -550,7 +551,8 @@ the code.
 | `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the value's own project, the source's for a reference, whose issuer owned that project. |
 | `copy_keeps_sensitive`, `copy_never_through_reference` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive, and never one read through a reference: it keeps the reference. |
 | `personal_owner_only`, `personal_holds_no_reference` | A personal config's key opens for its owner alone, and no reference reads into or out of one. |
-| `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24). |
+| `no_laundering` | A workload is handed back a value, for any purpose but the proxy's use, a fork's copy included, only if its scope lists the key, by ID, on a grant covering where the value is held: a reference's source, a fork's parent, never the place the read names (docs/design/workload-access.md, section 6.1). |
+| `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24); by a workload, only to a plain source or one its scope lists. |
 | `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |
 | `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
@@ -610,7 +612,8 @@ They run a batch of 20,000 at a time.
 | `allows`, `withinCredential` | 20,000 each | `@coffre/core/access` |
 | `givesService`, `managesService`, `issuesCredential` | about 6,500, 6,000, 6,000 | `@coffre/core/access` |
 | `heldColumns`, `issuedGrant`, `readsSensitive`, `ownsProject`, `mayManageAccess`, `runsInstance`, `readsWholeLog`, `makesProjects` | 4,000 each | `@coffre/core/access` |
-| `keyRefusals`, `sensitiveRefusals`, `referenceRefusal` | 13,000, 10,000, 6,000 | `packages/vault/src/decide.ts` |
+| `useOnly` | 6,000 | `@coffre/core/access` |
+| `keyRefusals`, `sensitiveRefusals`, `useOnlyRefusals`, `referenceRefusal` | 13,000, 10,000, 10,000, 6,000 | `packages/vault/src/decide.ts` |
 | `encodeAad` | 2,000 | `@coffre/core/envelope` |
 | `verifyEntries` | 2,000 | `@coffre/core/audit`, real keys and hashes |
 
@@ -621,6 +624,7 @@ by throwing: `holds` ignoring protection, `heldColumns` asking at the
 project, `readsSensitive` across projects, `ownsProject` for a service, a
 personal config's owner past their credential, a person handed a sensitive
 value, a reference made to a sensitive source without using it there,
+a workload's copy let through, a workload's reference to a plain source refused,
 `verifyEntries` letting a gap through, a lookup by an inherited name.
 Changing the model the same way breaks the proofs first.
 
