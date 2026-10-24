@@ -3,7 +3,7 @@ import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
-import { appendAudit, appLogKey, CHAIN_START, resume, walkChain, type ChainPoint } from './db/audit.ts';
+import { appendAudit, appLogKey, CHAIN_START, CHAIN_WALK, resume, walkChain, type ChainPoint } from './db/audit.ts';
 import { auditHashAt, readiness } from './db/queries.ts';
 
 export type HeartbeatLogger = {
@@ -155,10 +155,12 @@ export async function auditReadiness(db: Database, vault: Vault, chainKey: Buffe
       const rows = await readiness(tx, appLogKey(chainKey));
       const said = rows.beat === null ? null : (JSON.parse(rows.beat.metadata) as { broken?: unknown; unverified?: unknown } | null);
       const clean = rows.beat !== null && rows.beat.authentic && said?.broken === undefined && said?.unverified === undefined;
-      // Too many beats past where it would resume, it would walk from the first entry, which a probe cannot afford:
-      // the next beat does that, and readiness is red until then.
+      // A walk that cannot reach the head says red, and costs a probe a walk for nothing: too many beats past where
+      // it would resume, which sends it to the first entry, or the newest beat more than a walk past it. The next
+      // beat walks there, and readiness is red until it catches up.
       const from = clean ? await resume(tx, chainKey) : null;
-      const walk = from !== null && !from.closed ? await walkChain(tx, chainKey, from.from) : null;
+      const reaches = from !== null && !from.closed && rows.beat!.seq - from.from.seq <= BigInt(CHAIN_WALK);
+      const walk = reaches ? await walkChain(tx, chainKey, from.from) : null;
       // The prefix the checkpoint signed still there as it signed it, as a verification holds it (`verifyAudit`):
       // the vault's rows after it are the vault's to check, and a row made one of them since, and chained again,
       // changes the hash it signed.

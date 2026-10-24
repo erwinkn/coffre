@@ -445,6 +445,26 @@ test('a finding put back is cleared, however far the finder\'s row lies past whe
   assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, true);
 });
 
+test('a finding of the entry a walk began from, its hash put back, is cleared by a walk that begins there (formal/Audit.tla, Clears)', async () => {
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
+  const cursor = BigInt(said((await beats()).at(-1)!).verified!.seq);
+  await backlog();
+  await signAll();
+  // The entry the next walk begins from given another hash: beat F finds it there, and its row lands more than a
+  // walk past it.
+  const hash = (await entries()).find((row) => row.seq === cursor)!.hash;
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash: Buffer.alloc(32, 7) }).where(eq(auditLog.seq, cursor)));
+  await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  const finder = (await beats()).at(-1)!;
+  assert.deepEqual([said(finder).broken?.seq, said(finder).verified?.seq], [Number(cursor), Number(cursor)]);
+  // Its hash put back: the next beat begins there, finds the hash F expected, and clears it; the one after goes on.
+  await withLogUnlocked(db.owner, (owner) => owner.update(auditLog).set({ hash }).where(eq(auditLog.seq, cursor)));
+  for (let i = 0; i < 3; i++) await writeAuditHeartbeat(db.runtime, chainKey, slow, { warn: () => undefined });
+  assert.ok((await db.runtime.transaction((tx) => resumePoint(tx, chainKey))).seq > finder.seq);
+  assert.equal((await auditReadiness(db.runtime, slow, chainKey)).ok, true);
+});
+
 test('a walk that did not go over the entry found clears nothing, though it began after the finder committed (formal/Audit.tla, ClearsOverFault)', async () => {
   await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
   await writeAuditHeartbeat(db.runtime, chainKey, slow, quiet);
