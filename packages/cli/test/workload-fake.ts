@@ -215,7 +215,8 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       const path = new URL(req.url!, publicUrl).pathname;
       if (path.slice('/use/'.length).split('/').length !== 3) {
         log.push(`GET ${path} 404`);
-        socket.end('HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n');
+        const body = JSON.stringify({ error: 'credential_proxy', message: 'a tunnel is /use/<project>/<environment>/<name>' });
+        socket.end(`HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
         return;
       }
       const session = await authenticate(req, null);
