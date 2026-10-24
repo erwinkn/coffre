@@ -37,6 +37,16 @@
       "types": "./dist/dpop.d.ts",
       "default": "./dist/dpop.js"
     },
+    "./workload": {
+      "coffre:source": "./src/workload.ts",
+      "types": "./dist/workload.d.ts",
+      "default": "./dist/workload.js"
+    },
+    "./workload/postgres": {
+      "coffre:source": "./src/workload-postgres.ts",
+      "types": "./dist/workload-postgres.d.ts",
+      "default": "./dist/workload-postgres.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

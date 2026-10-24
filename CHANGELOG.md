@@ -191,6 +191,19 @@
   `--replicas`, `--minted-by`, `--approve`, `--session-days`,
   `--overlap-minutes` and `--on-contention`. They sign in once
   `/api/auth/workload` is served. No database migration.
+- **Workloads sign in key-bound, from any platform**
+  ([workloads.md](docs/workloads.md), workload access's PR 5). In Node,
+  Bun and Deno, `@coffre/client/workload` proves who the app is with its
+  platform's own proof (`kubernetes()`, `aws()`, `gcp()`, `azure()`,
+  `fly()`, `vercel()`, `github()`, `oidc()`, `enrollment()`), holds a
+  session bound to a key that never leaves memory, and signs every request
+  it sends through coffre: `coffre.fetch` for any SDK that takes one,
+  `credential(name)`, `fromCoffre` for the AWS SDK, and
+  `@coffre/client/workload/postgres` for node-postgres through the tunnel.
+  Any other language runs `coffre serve`, a sidecar that forwards what the
+  app sends its local listener, signed, or `coffre --service <name> run
+  --proof <proof>`, which does the same for one command and falls back to
+  the bearer exchange on an instance without key-bound sessions.
 - **The database tunnel runs on Workers.** `coffre run market/dev -- psql
   "$DATABASE_URL"` now works against a Workers deployment as it does on
   Node: each run's connections to a database go to a Durable Object of

@@ -44,10 +44,10 @@ const TAKES: Record<string, readonly SessionName[]> = {
 /**
  * A command's own flags that share a session flag's name: `coffre grant …
  * --service` names a service's grant, `coffre login <url> --service <name>`
- * the service a CI run signs in as, `coffre serve --service <name>` the
- * workload its sidecar holds a session of.
+ * the service a CI run signs in as, `coffre serve --service <name> --url
+ * <url>` the workload its sidecar holds a session of, and where.
  */
-const OWN: Record<string, readonly string[]> = { access: ['service'], admit: ['service'], grant: ['service'], revoke: ['service'], offboard: ['service'], login: ['service'], serve: ['service'] };
+const OWN: Record<string, readonly string[]> = { access: ['service'], admit: ['service'], grant: ['service'], revoke: ['service'], offboard: ['service'], login: ['service'], serve: ['service', 'url'] };
 
 /**
  * The commands that refuse any flag but theirs themselves, and say more: that
