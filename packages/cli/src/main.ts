@@ -1108,6 +1108,12 @@ async function listKeys(paths: readonly string[], list: CoffreClient, patterns: 
       throw new Error(`${path}: ${error instanceof CoffreError ? error.message : String(error)}. Nothing was read`);
     });
     const live = listed.keys.filter(({ key, archived }) => !archived && (patterns === null || patterns.some((pattern) => keyNamed(pattern, key))));
+    // A parent's key, listed by name only to whoever cannot list that parent: held here, and never readable by them.
+    const hidden = live.filter(({ version, reference, parent }) => version === null && reference === null && parent?.state === 'inherited');
+    if (hidden.length > 0) {
+      const which = [...new Set(hidden.map(({ parent }) => parent!.from))].map((from) => `${hidden.filter(({ parent }) => parent!.from === from).map(({ key }) => key).join(', ')} from ${path.split('/')[0]}/${from}`);
+      throw new Error(`${path} inherits ${which.join('; ')}, which you cannot read. Nothing was read`);
+    }
     // A key without a value of its own reads through its reference, which reveal refuses for the whole environment when it cannot.
     const stuck = live.find(({ version, reference }) => version === null && reference !== null && reference.state !== 'live');
     if (stuck !== undefined) {
@@ -1136,8 +1142,10 @@ async function readEnvironments(
   paths: readonly string[],
   api: { read: CoffreClient; list: CoffreClient },
   only: Map<string, string[]> | null = null,
-): Promise<{ entries: [string, string][]; version: string; sensitive: string[] }> {
+): Promise<{ entries: [string, string][]; version: string; sensitive: string[]; useOnly: string[] }> {
   if (only === null && paths.length > 1) await listKeys(paths, api.list, null);
+  // The keys named that a workload's read left out, as it only uses them: said, as a person's sensitive ones are.
+  const useOnly: string[] = [];
   const read: [string, { values: Record<string, string>; version: string | null; sensitive?: string[] }][] = [];
   for (const path of paths) {
     const keys = only?.get(path);
@@ -1155,6 +1163,7 @@ async function readEnvironments(
     const values = Object.fromEntries(Object.entries(answer.values).filter(([key]) => wanted.has(key)));
     const gone = keys.filter((key) => !Object.hasOwn(values, key) && !(answer.sensitive ?? []).includes(key) && !(answer.useOnly ?? []).includes(key));
     if (gone.length > 0) throw new Error(`${path} no longer holds ${listOf(gone)}, as read just now. No value was used, and the read is in the audit log`);
+    useOnly.push(...keys.filter((key) => (answer.useOnly ?? []).includes(key)));
     read.push([path, { ...answer, values }]);
   }
   const shared = clash(read.map(([path, { values }]) => [path, Object.keys(values)]));
@@ -1162,13 +1171,13 @@ async function readEnvironments(
   // The environments' versions, of what was read: as `coffre version` answers them, together.
   // A person's read leaves its sensitive values out, by name; an instance before 0.10 says nothing.
   const sensitive = read.flatMap(([, answer]) => answer.sensitive ?? []).sort();
-  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' '), sensitive };
+  return { entries: read.flatMap(([, { values }]) => Object.entries(values)), version: read.map(([, answer]) => answer.version).join(' '), sensitive, useOnly: useOnly.sort() };
 }
 
-/** What a person's read left out, on stderr: its sensitive keys, which nobody is handed. */
-function sayLeftOut(sensitive: readonly string[]): void {
-  if (sensitive.length === 0) return;
-  process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
+/** What a read left out, on stderr: a person's sensitive keys, which nobody is handed, and the keys --keys named that a workload only uses. */
+function sayLeftOut(sensitive: readonly string[], useOnly: readonly string[] = []): void {
+  if (sensitive.length > 0) process.stderr.write(`coffre: left out, sensitive, which nobody is handed: ${sensitive.join(', ')} (the credential proxy uses them, and a service account reads them)\n`);
+  if (useOnly.length > 0) process.stderr.write(`coffre: left out, which this workload only uses through coffre: ${useOnly.join(', ')} (its binding's reads do not list them)\n`);
 }
 
 /** `readEnvironments` for a command that ends on what stops it, said in `send`'s words for a failed request. */
@@ -1176,7 +1185,7 @@ function readOrEnd(paths: readonly string[], only: Map<string, string[]> | null 
   const api = { read: reader(), list: reader([403, 404]) };
   return readEnvironments(paths, api, only).then(
     (read) => {
-      sayLeftOut(read.sensitive);
+      sayLeftOut(read.sensitive, read.useOnly);
       return read.entries;
     },
     (error: unknown) => fail(error instanceof Error ? error.message : String(error)),

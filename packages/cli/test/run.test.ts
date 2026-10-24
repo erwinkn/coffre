@@ -304,6 +304,38 @@ test('export --keys stops before anything is read on a name none of the environm
   assert.deepEqual(clashing.requests, ['list deploy/prod', 'list auth/prod']);
 });
 
+test("export --keys says a parent's key the caller cannot read is inherited, not missing, and says a named key a workload only uses was left out", async (t) => {
+  const fork = await instance(t, {
+    'market/prod-eu': { values: {}, listed: [{ key: 'EU_REGION', version: 1 }, { key: 'STRIPE_KEY', version: null, parent: { from: 'prod', state: 'inherited', changed: false, reset: false, held: true } }] },
+  });
+  const hidden = await fork.coffre(['export', 'market/prod-eu', '--keys', 'EU_REGION STRIPE_*']);
+  assert.equal(hidden.code, 1);
+  assert.equal(hidden.stderr, 'coffre: market/prod-eu inherits STRIPE_KEY from market/prod, which you cannot read. Nothing was read\n');
+  assert.deepEqual(fork.requests, ['list market/prod-eu']);
+
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const server = createServer((req, res) => {
+    const send = (value: unknown) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.method === 'GET') return send({ keys: ['TOKEN', 'SIGNER'].map((key) => ({ key, version: 1, archived: false, reference: null })) });
+    send({ operationId: 'op', values: { TOKEN: 't' }, sensitive: [], useOnly: ['SIGNER'], version: 'v' });
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  signedInWithToken(home, `http://127.0.0.1:${(server.address() as { port: number }).port}`, TOKEN);
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'deploy/prod', '--keys', 'TOKEN SIGNER', '--format', 'json'], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(JSON.parse(stdout), { TOKEN: 't' });
+  assert.equal(stderr, "coffre: left out, which this workload only uses through coffre: SIGNER (its binding's reads do not list them)\n");
+});
+
 test('export --keys refuses every key, a malformed name and --watch before any request', async (t) => {
   const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 't' } } });
   const cases: [string[], RegExp, number][] = [
