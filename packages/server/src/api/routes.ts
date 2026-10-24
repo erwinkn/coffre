@@ -120,7 +120,9 @@ function roleChange(query: z.infer<typeof roleChangeQuery>): { dryRun: boolean; 
 const secretValue = z
   .string()
   .max(64 * 1024)
-  .refine((value) => !value.includes('\0'), 'a value cannot contain NUL bytes');
+  .refine((value) => !value.includes('\0'), 'a value cannot contain NUL bytes')
+  // A lone UTF-16 surrogate has no UTF-8: stored, it would come back as U+FFFD, a value other than the one written.
+  .refine((value) => !/[\uD800-\uDFFF]/u.test(value), 'a value must be well-formed Unicode: it holds a lone surrogate');
 
 /**
  * A value a client generated, and how: the server checks the recipe's shape

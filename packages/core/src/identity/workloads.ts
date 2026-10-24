@@ -185,7 +185,8 @@ export function checkBinding(
   const event = EVENT_CLAIM[profile];
   const claims: BindingClaims = {};
   for (const [name, value] of entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    if (!CLAIM_NAME.test(name)) throw new BindingInvalid(`"${name}" is not a claim name a binding can match`);
+    // `__proto__` too: assigned below, it would set the object's prototype, and the binding would silently lose the claim.
+    if (!CLAIM_NAME.test(name) || name === '__proto__') throw new BindingInvalid(`"${name}" is not a claim name a binding can match`);
     if (RESERVED.has(name)) throw new BindingInvalid(`a binding never names "${name}": the exchange checks it`);
     if (name === event?.name) {
       // Stored once each, in the profile's order, and a single one as a plain value.
@@ -351,7 +352,7 @@ function atBaseBranch(claims: Record<string, unknown>): Record<string, unknown> 
   const { event_name: event, ref, base_ref: base, workflow_ref: workflow } = claims;
   if (event !== 'pull_request' || typeof ref !== 'string' || typeof base !== 'string' || base === '') return claims;
   const at = `refs/heads/${base}`;
-  const file = typeof workflow === 'string' && workflow.endsWith(`@${ref}`) ? `${workflow.slice(0, -ref.length)}${at}` : workflow;
+  const file = typeof workflow === 'string' && workflow.endsWith(`@${ref}`) ? `${workflow.slice(0, workflow.length - ref.length)}${at}` : workflow;
   return { ...claims, ref: at, workflow_ref: file };
 }
 

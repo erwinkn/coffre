@@ -151,6 +151,27 @@ test('a connection whose ping goes unanswered until the next is gone: the app se
   close();
 });
 
+test("once the app has closed, the listener's WebSocket closes at once, however much coffre was still sending", async () => {
+  const stand = await coffre(true);
+  const { url, close } = await listen({ key: 'DATABASE_URL', url: stand.url }, HANDLE);
+  const socket = await app(url);
+  const { ws } = await stand.next();
+  // coffre's bytes still come, for an app that is gone: writing them to its socket must not pause the WebSocket,
+  // or coffre's answer to the listener's close waits unread until ws's close timeout, 30 seconds.
+  socket.destroy();
+  const closed = once(ws, 'close');
+  const sending = setInterval(() => ws.readyState === ws.OPEN && ws.send(Buffer.alloc(64 * 1024)), 1);
+  try {
+    const started = Date.now();
+    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 3000))]);
+    assert.ok(Date.now() - started < 3000, "the listener's WebSocket is still open");
+  } finally {
+    clearInterval(sending);
+    ws.terminate();
+    close();
+  }
+});
+
 test("a count that is none, or for bytes coffre was never sent, ends the connection", async () => {
   for (const said of ['soon', '5']) {
     const stand = await coffre(true);

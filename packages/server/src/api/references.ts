@@ -391,7 +391,12 @@ async function valuesIn(
       continue;
     }
     const reference = references.get(row.id);
-    if (reference === undefined) continue;
+    // A live key with neither a value nor a reference the vault sealed, written around the app, still settles its
+    // key, as the list and the missing keys count it: a read refuses rather than run without it, or a parent's instead.
+    if (reference === undefined) {
+      refused.push({ key: row.key, reason: `${project}/${environment.slug}/${row.key} has no value: set one, or archive it` });
+      continue;
+    }
     const source = reference.source!;
     const opened = reference.state === 'live' ? envelopes.get(source.currentVersionId!) : undefined;
     if (opened === undefined) {

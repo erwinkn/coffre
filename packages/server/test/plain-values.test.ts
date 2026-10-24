@@ -122,6 +122,23 @@ test('a write says it is plain, in its version and in the log; written again wit
   assert.equal((await valuesIn(root, 'market/dev')).TWILIO_SID, SID);
 });
 
+test('a plain value made a secret in place stays one: rolled back to its plain version, it comes back a secret, which a writer who never read it does not see', async () => {
+  // REGION's value, shown so far, is made a secret, kept; then a Contributor of dev, who reads no secret, rolls it back.
+  await root.secrets.set('market/dev', { REGION: { sensitivity: 'secret' } });
+  await root.access.set(`user:${FORKER}`, { 'market/dev': 'contributor' });
+  const contributor = clientFor(deps, FORKER);
+  assert.equal((await valuesIn(contributor, 'market/dev')).REGION, null);
+  await contributor.secrets.restore('market/dev/REGION', 1);
+  assert.equal((await valuesIn(contributor, 'market/dev')).REGION, null, 'making a secret plain takes reading it, which a restore does not');
+  assert.deepEqual((await root.secrets.history('market/dev/REGION')).versions.map(({ version, sensitivity }) => [version, sensitivity]), [[3, 'secret'], [2, 'secret'], [1, 'plain']]);
+  assert.deepEqual((await clientFor(deps, DEV).secrets.reveal('market/dev/REGION')).values, { REGION: 'eu-west-3' });
+  // Made sensitive in place, and loosened by an Owner to a secret, it comes back no looser than a secret either.
+  await root.secrets.set('market/dev', { TWILIO_SID: { sensitivity: 'sensitive' } });
+  await root.secrets.set('market/dev', { TWILIO_SID: { sensitivity: 'secret' } });
+  await contributor.secrets.restore('market/dev/TWILIO_SID', 1);
+  assert.equal((await valuesIn(contributor, 'market/dev')).TWILIO_SID, null);
+});
+
 test('making a sensitive value plain is a reveal first, which no person has; a stale one is refused', async () => {
   // The client reveals the value, then writes it plain: no person reveals a sensitive one, an Owner included, so none publishes it.
   assert.equal((await refusal(root.secrets.reveal('market/dev/TWILIO_TOKEN'))).reason, 'sensitive');

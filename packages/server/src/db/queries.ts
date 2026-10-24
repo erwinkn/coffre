@@ -322,10 +322,13 @@ export type PlaceRow = {
 /**
  * Every project with its environments and their live secret counts, by
  * slug. Deleted ones are left out, unless asked for their `tombstones`, to
- * name an id the log holds.
+ * name an id the log holds. `within` reads only the projects of these ids,
+ * for a request whose caller reaches no others: it reads as many rows, and
+ * counts as many secrets, however many projects there are beside them.
  */
-export async function places(db: Queryable, { tombstones = false }: { tombstones?: boolean } = {}): Promise<PlaceRow[]> {
-  const rows = tombstones ? await everyPlace(db) : await livePlaces(db);
+export async function places(db: Queryable, { tombstones = false, within }: { tombstones?: boolean; within?: readonly string[] } = {}): Promise<PlaceRow[]> {
+  if (within?.length === 0) return [];
+  const rows = within !== undefined ? await placeRows(db, tombstones, within) : tombstones ? await everyPlace(db) : await livePlaces(db);
   const found: PlaceRow[] = [];
   for (const { project, environment, secretCount } of rows) {
     let place = found.at(-1);
@@ -352,7 +355,7 @@ export async function places(db: Queryable, { tombstones = false }: { tombstones
   return found;
 }
 
-function placeRows(db: Queryable, tombstones: boolean) {
+function placeRows(db: Queryable, tombstones: boolean, within?: readonly string[]) {
   const { projects, environments, secrets } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
   return db
@@ -364,7 +367,7 @@ function placeRows(db: Queryable, tombstones: boolean) {
     .from(projects)
     .leftJoin(environments, and(eq(environments.projectId, projects.id), alive(environments.slug)))
     .leftJoin(secrets, and(eq(secrets.environmentId, environments.id), isNull(secrets.archivedAt)))
-    .where(alive(projects.slug))
+    .where(and(alive(projects.slug), within === undefined ? undefined : inArray(projects.id, [...within])))
     .groupBy(projects.id, environments.id)
     .orderBy(asc(projects.slug), asc(environments.slug));
 }

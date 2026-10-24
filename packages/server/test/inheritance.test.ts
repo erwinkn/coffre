@@ -1,5 +1,6 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
 import { and, asc, eq, gte } from 'drizzle-orm';
@@ -316,6 +317,33 @@ test('no copy goes into an empty environment that inherits, and a chain made aro
   await assert.rejects(db.owner.update(environments).set({ parentId: eu }).where(eq(environments.id, eu)));
   await db.owner.update(environments).set({ parentId: eu }).where(eq(environments.id, prod));
   await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: /parents loop or run past 3/ });
+});
+
+test("a fork's key of its own with neither a value nor a reference, written around the app, refuses a read rather than serve the parent's", async () => {
+  await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
+  const [market] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
+  await db.owner.insert(secrets).values({ id: randomUUID(), projectId: market.id, environmentId: await environmentId('prod-eu'), key: 'STRIPE_KEY' });
+  // The list and the missing keys count it as prod-eu's own: a read settles it there too, and cannot open it.
+  const hollow = /market\/prod-eu\/STRIPE_KEY has no value: set one, or archive it/;
+  await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: hollow });
+  await assert.rejects(maintainer.secrets.reveal('market/prod-eu/STRIPE_KEY'), { status: 409, message: hollow });
+  await maintainer.secrets.update('market/prod-eu/STRIPE_KEY', { archived: true });
+  assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, 'sk_live_1');
+});
+
+test('a chain made around the app past three parents counts no key from beyond them, whichever environment is resolved first', async () => {
+  await maintainer.environments.create('market/eu', { from: 'prod', inherit: true });
+  await maintainer.environments.create('market/eu-canary', { from: 'eu', inherit: true });
+  await maintainer.environments.create('market/eu-canary-a', { from: 'eu-canary', inherit: true });
+  await root.environments.create('market/top', { name: 'Top' });
+  await root.secrets.set('market/top', { TOP_KEY: 'top' });
+  // prod given a parent: eu and eu-canary reach top within three, eu-canary-a would be the fourth.
+  await db.owner.update(environments).set({ parentId: await environmentId('top') }).where(eq(environments.id, await environmentId('prod')));
+  const market = (await root.projects.list()).projects.find((project) => project.slug === 'market')!;
+  assert.deepEqual(market.environments.map((environment) => [environment.slug, environment.details?.secretCount]), [
+    ['eu', 4], ['eu-canary', 4], ['eu-canary-a', 3], ['prod', 4], ['top', 1],
+  ]);
+  await assert.rejects(maintainer.secrets.reveal('market/eu-canary-a'), { status: 409, message: /parents loop or run past 3/ });
 });
 
 test('a reset override is overridden again by a write, and a write over a removal ends it', async () => {

@@ -1573,7 +1573,14 @@ export async function restoreVersion(
     };
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
     if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
-    const level = foundSensitive ? 'sensitive' : sensitivityOf(target);
+    // A plain value the key holds stricter now, made a secret in place (its newest version, of the very same ciphertext, no
+    // longer plain), comes back a secret: making a secret plain takes reading it, which a restore does not. One another
+    // value replaced since comes back plain, as it was held and shown. A value written meanwhile makes this attempt
+    // prepare again, so `versions` is the history the restore commits on.
+    const newest = versions[0]!;
+    const tightened = target.plaintext !== null && newest.plaintext === null
+      && newest.envelope.iv.equals(target.envelope.iv) && newest.envelope.ciphertext.equals(target.envelope.ciphertext);
+    const level = foundSensitive ? 'sensitive' : tightened ? 'secret' : sensitivityOf(target);
     // An old value is made live only by whoever could have read it (`madeLive`), as the vault decides again.
     if (target.id !== prepared.currentVersionId) madeLive(ctx, place, sensitivityOf(target), 'secret.restore', { operationId, metadata: { key: secret.key, from: toVersion } });
     const rewrapped = await rewrapValue(ctx.vault, asking(ctx, operationId), { ...secretRef(place, environment, prepared, version), sensitive: level === 'sensitive' }, target);

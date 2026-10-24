@@ -61,7 +61,7 @@ export function parseDotenv(input: string): ParseResult {
 
     const key = withoutExport.slice(0, equals).trim();
     if (!KEY_RE.test(key)) {
-      problems.push({ line: lineNumber, reason: 'key must match ^[A-Za-z_][A-Za-z0-9_]*$' });
+      problems.push({ line: lineNumber, reason: 'key must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$' });
       continue;
     }
 

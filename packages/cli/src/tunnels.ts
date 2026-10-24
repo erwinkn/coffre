@@ -45,33 +45,11 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
   const said = new Set<string>();
   const server = createServer((socket) => {
     sockets.add(socket);
-    // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
-    socket.pause();
+    socket.on('close', () => sockets.delete(socket));
     // A coffre that does not answer the upgrade in time is gone: both ends close, rather than wait forever on it. Longer
     // than coffre's own 15 s to admit (socket-admission.ts), so that its refusal for taking too long is the one said.
     const ws = new WebSocket(tunnel.url, { headers: { authorization: `Bearer ${handle}`, [FLOW]: 'credit' }, handshakeTimeout: 20_000 });
-    /** Whether coffre paces: unknown until its first message says. */
-    let pacing: boolean | null = null;
-    /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
-    let uncounted = 0;
-    let taken = 0;
-    let answered = true;
-    const held = () => ws.bufferedAmount >= HIGH_WATER || (pacing !== false && uncounted >= WINDOW);
-    const count = () => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      ws.send(String(taken), () => undefined);
-      taken = 0;
-    };
-    ws.on('open', () => socket.resume());
-    ws.on('pong', () => (answered = true));
-    const keepalive = setInterval(() => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      if (!answered) return ws.terminate();
-      answered = false;
-      ws.ping();
-      count();
-    }, keepaliveMs);
-    keepalive.unref();
+    carry(socket, ws, keepaliveMs);
     ws.on('unexpected-response', (request, response) => {
       // coffre's refusal, said once for each reason: the app sees its connection close, and a driver may retry it at once.
       let body = '';
@@ -91,47 +69,6 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
         socket.destroy();
       });
     });
-    socket.on('data', (chunk: Buffer) => {
-      uncounted += chunk.length;
-      ws.send(chunk, { binary: true }, () => {
-        if (!held()) socket.resume();
-      });
-      if (held()) socket.pause();
-    });
-    ws.on('message', (data: Buffer, binary: boolean) => {
-      if (!binary) {
-        // coffre's count of what it took, the first saying that it paces: one that is no count of bytes it was sent ends the connection.
-        const text = data.toString();
-        const counted = Number(text);
-        if (pacing === false || !/^\d{1,10}$/.test(text) || counted > uncounted) return ws.terminate();
-        pacing = true;
-        uncounted -= counted;
-        if (!held()) socket.resume();
-        return;
-      }
-      if (pacing === null) {
-        // A byte first: coffre paces nothing, and the app is held to the window no longer.
-        pacing = false;
-        if (!held()) socket.resume();
-      }
-      const flushed = socket.write(data, () => {
-        taken += data.length;
-        if (taken >= COUNT_EVERY) count();
-      });
-      if (!flushed) ws.pause();
-    });
-    socket.on('drain', () => ws.resume());
-    ws.on('close', () => {
-      clearInterval(keepalive);
-      socket.destroy();
-    });
-    ws.on('error', () => socket.destroy());
-    socket.on('close', () => {
-      sockets.delete(socket);
-      clearInterval(keepalive);
-      ws.close();
-    });
-    socket.on('error', () => ws.terminate());
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -148,4 +85,78 @@ export async function listen(tunnel: Tunnel, handle: string, { keepaliveMs = KEE
       server.close();
     },
   };
+}
+
+/**
+ * One app connection, carried over its WebSocket to coffre: each side reads
+ * only as fast as the other takes, by credit with a coffre that paces, and
+ * the keepalive. Exported for its properties (tunnel-properties.test.ts).
+ */
+export function carry(socket: Socket, ws: WebSocket, keepaliveMs: number): void {
+  // Nothing read from the app until coffre's end is open: then each side reads only as fast as the other takes.
+  socket.pause();
+  /** Whether coffre paces: unknown until its first message says. */
+  let pacing: boolean | null = null;
+  /** Bytes sent that coffre has not counted, and bytes the app took that the listener has not. */
+  let uncounted = 0;
+  let taken = 0;
+  let answered = true;
+  const held = () => ws.bufferedAmount >= HIGH_WATER || (pacing !== false && uncounted >= WINDOW);
+  const count = () => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(String(taken), () => undefined);
+    taken = 0;
+  };
+  ws.on('open', () => socket.resume());
+  ws.on('pong', () => (answered = true));
+  const keepalive = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!answered) return ws.terminate();
+    answered = false;
+    ws.ping();
+    count();
+  }, keepaliveMs);
+  keepalive.unref();
+  socket.on('data', (chunk: Buffer) => {
+    uncounted += chunk.length;
+    ws.send(chunk, { binary: true }, () => {
+      if (!held()) socket.resume();
+    });
+    if (held()) socket.pause();
+  });
+  ws.on('message', (data: Buffer, binary: boolean) => {
+    if (!binary) {
+      // coffre's count of what it took, the first saying that it paces: one that is no count of bytes it was sent ends the connection.
+      const text = data.toString();
+      const counted = Number(text);
+      if (pacing === false || !/^\d{1,10}$/.test(text) || counted > uncounted) return ws.terminate();
+      pacing = true;
+      uncounted -= counted;
+      if (!held()) socket.resume();
+      return;
+    }
+    if (pacing === null) {
+      // A byte first: coffre paces nothing, and the app is held to the window no longer.
+      pacing = false;
+      if (!held()) socket.resume();
+    }
+    // Nothing for an app that has gone: a write there fails, and would pause the WebSocket with coffre's answer to its close unread.
+    if (socket.destroyed) return;
+    const flushed = socket.write(data, () => {
+      taken += data.length;
+      if (taken >= COUNT_EVERY) count();
+    });
+    if (!flushed) ws.pause();
+  });
+  socket.on('drain', () => ws.resume());
+  ws.on('close', () => {
+    clearInterval(keepalive);
+    socket.destroy();
+  });
+  ws.on('error', () => socket.destroy());
+  socket.on('close', () => {
+    clearInterval(keepalive);
+    ws.close();
+  });
+  socket.on('error', () => ws.terminate());
 }

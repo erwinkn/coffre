@@ -1,9 +1,12 @@
 # Property tests
 
 `pnpm test` includes the bounded Hegel properties under `node --test`.
-`pnpm test:properties` runs just the properties, without Postgres.
-`pnpm test:properties --long` runs 100 times as many generated cases.
+`pnpm test:properties` runs just the properties that need no database: core's,
+the CLI's and the server's pure ones (about 7 seconds).
+`pnpm test:properties --long` runs 100 times as many generated cases (about 6 minutes).
 `pnpm test:properties --long --seed=42` explores a different reproducible seed.
+`pnpm test:properties:server` runs the database-backed ones (below), and
+`pnpm test:properties:long` runs both sets long.
 
 The default seed is 20261003. Each generated property's Node test name prints its seed.
 Pass that exact number to `--seed` to replay it. Hegel prints the shrunk draws and
@@ -39,9 +42,100 @@ the conversion names: a role it put on a project's environments instead,
 on the project itself, and a role it says is lost.
 Credential validity is checked before that boundary, not by core's `allows`.
 
+## The shared domain
+
+`scripts/properties/domain.ts` is Coffre's domain as Hegel generators, for
+every package's properties: projects, environments, forks to three deep and
+`@me` overlays, keys of each nature, references, a fork's removals, the role
+tables as the README has them, a policy an Owner edited (roles, custom roles,
+instance roles, protected environments), scopes, grants, personal tokens,
+service tokens and trust bindings. It is an independent model, transcribed
+from the README and docs/design, and imports nothing of Coffre's, so a test
+that compares the two compares two readings of the rules. Ids within a world
+never repeat, though Hegel shrinks each towards zeros.
+`packages/core/test/domain-properties.test.ts` holds every world it makes to
+the database's keys and checks (`packages/db/src/schema.ts`), so a world the
+database would refuse fails there first.
+
+## More targets
+
+Each file names its model and its sources in its header.
+
+- **Access rules under any policy** (`access-rules-properties.test.ts`): every
+  permission at every place, under edited and custom roles, protected
+  environments and credentials of any kept columns, against the model;
+  protecting an environment, losing a grant or narrowing a scope never widens
+  anything; a personal token never holds more than its person now, nor more
+  than they held when they issued it, in the column the place uses now (R15);
+  a service token, no more than its account now and its role at issue; a
+  person who does not manage access gives a service account nothing they do
+  not hold, nor issues a credential reaching past themselves; who owns a
+  project, that they hold everything in it, and that only a service
+  credential reads sensitive values (R16, R30, R32); role definitions.
+- **Envelopes and keys** (`envelope-properties.test.ts`): round trips; any
+  change to the IV, tag, ciphertext, wrapped key, its claimed key or version
+  fails to open; a value opened under another project, environment, secret,
+  owner or sensitivity fails, the ids at the value's own AAD and the owner and
+  sensitivity at the wrap's; the AAD is injective; rotation; the KMS
+  encryption context; sign-in's sealed values, expiry to the millisecond.
+- **Parsers and exports** (`dotenv-properties.test.ts`,
+  `packages/cli/test/export-properties.test.ts`): dotenv round trips any
+  value; shell exports evaluated by sh, dash, bash and busybox give back each
+  value byte for byte and run nothing; `$GITHUB_ENV` and its masks as the
+  runner parses them; a parse problem never carries a value; the key-name
+  patterns all agree; `coffre.json` and instance resolution.
+- **Workload tokens** (`workload-token-properties.test.ts`): a token is
+  accepted exactly when an oracle written from docs/oidc.md and the JOSE RFCs
+  accepts it, through alg confusion, kid games, embedded keys, respelled
+  signatures and every time bound; uploaded key sets; binding claims; the
+  Cloudflare Access verifier on a local JWKS.
+- **SigV4 and the credential proxy** (`sigv4-properties.test.ts`,
+  `credential-proxy-properties.test.ts`): the proxy's signer and presigner,
+  and core's KMS signer, byte for byte against `@smithy/signature-v4`; the
+  path an upstream is asked stays under the credential's base and `paths`
+  whatever the encoding (`..;`, `%2e`, double encoding); redirects never
+  followed or leaked; no CR, LF or NUL in a header; redaction the same
+  however the body is split; private addresses in every spelling refused.
+- **The Postgres tunnel** (`packages/server/test/tunnel-properties.test.ts`,
+  `packages/cli/test/tunnel-properties.test.ts`): each real end, the Durable
+  Object's `fromWebSocket` and the listener's `carry`, against a model of
+  the other written from the design, over a simulated WebSocket whose
+  schedule Hegel draws: every byte once and in order, nothing held past its
+  bound, both ends finish, and a cheating peer gets its 1008 at the frame
+  that cheats. Two files, as a server test may not import the CLI.
+
+## Database-backed properties
+
+`pnpm test:properties:server` runs these on one random scratch database,
+Postgres unless `COFFRE_TEST_ENGINE=sqlite`; `pnpm test` runs each on its
+private clone too.
+
+- **Operation sequences** (`operations-properties.test.ts`): below.
+- **Forks** (`forks-properties.test.ts`): random worlds written as rows,
+  around the app too (a parent archived or deleted under a live fork, a chain
+  that loops or runs past three, a key with neither value nor reference),
+  resolve to the same keys by name (`resolveKeys`), row by row
+  (`inheritedRows`) and as read (`readableValues`), each from the nearest
+  environment that holds or removed it.
+- **Audit visibility** (`audit-visibility-properties.test.ts`): the log a
+  caller pages through is exactly the entries about the places they read,
+  both sides of a reference's, less a protected environment's their role
+  leaves out, with no gaps or repeats and the hidden counts right.
+- **Natures** (`natures-properties.test.ts`): a random world built through
+  the API, then a random list of changes; after each, every session and
+  credential reads every environment every way the API offers, and no value
+  reaches anyone the rules forbid it to (R8, R15, R16, R20, R23, R24, R30,
+  R32). Every value is a unique token, so a scan of each answer finds it
+  wherever it is.
+- **Request cost** (`request-cost.test.ts`): after any growth Hegel draws
+  (writes elsewhere, other projects and forks, members, the reader's role
+  flipped, protection, roles, references in, sensitivity, tokens), each hot
+  request runs the same statements and reads the same rows. Postgres only.
+
 ## Native dependencies
 
-Hegel 0.4.7 is an exact development dependency of core and server. Tests load it under
+Hegel 0.4.7 is an exact development dependency of core, server, the CLI and the
+root, whose `scripts/properties/domain.ts` imports it. Tests load it under
 `coffre:source`; shipped source and build entry points never import it.
 No Vitest is used and install scripts stay disabled.
 

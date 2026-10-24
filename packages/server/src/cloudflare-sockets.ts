@@ -165,7 +165,7 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
 }
 
 /** A Workers WebSocket, as far as a pipe needs it. */
-type WorkersWebSocket = {
+export type WorkersWebSocket = {
   accept(): void;
   binaryType: 'blob' | 'arraybuffer';
   send(data: Uint8Array | string): void;
@@ -179,9 +179,9 @@ type WorkersWebSocket = {
  * credit (`FLOW`): what the app sent waits here until the session takes it,
  * a window at most, and what the session sends waits for the app's count
  * once a window of it is uncounted, so the session stops reading the
- * database until then.
+ * database until then. Exported for its properties (tunnel-properties.test.ts).
  */
-function fromWebSocket(ws: WorkersWebSocket): Pipe {
+export function fromWebSocket(ws: WorkersWebSocket): Pipe {
   let ended!: () => void;
   const closed = new Promise<void>((resolve) => (ended = resolve));
   let done = false;

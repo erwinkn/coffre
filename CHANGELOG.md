@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Fixes found by property tests** (docs/property-tests.md):
+  - The credential proxy refuses a path with a dot segment hidden behind a
+    `;` parameter, `/use/market/dev/api/..;/admin`, which Tomcat and Spring
+    read as a step up past the credential's base path and its `paths`.
+  - A host spelled with a trailing dot, `localhost.`, is private, as
+    `localhost` is: an upstream or a tunnel's database URL naming it needs
+    `insecureUpstreams`, as any other loopback address does.
+  - A plain value made a secret in place, then rolled back to its plain
+    version while the key still holds it, comes back a secret: a
+    Contributor, who reads no secret, can no longer read it by restoring it
+    (R24).
+  - A value holding a lone UTF-16 surrogate is refused with 400, rather than
+    stored as U+FFFD, a value other than the one written.
+  - A fork's key with neither a value nor a reference, written around the
+    app, refuses a read rather than serve its parent's; a fork chain written
+    around the app past three parents counts the same keys whichever
+    environment is listed first.
+  - `GET /api/me`, which every page asks, reads only the projects its caller
+    reaches, rather than every environment and secret of the instance.
+  - An upstream's `Location` that does not parse is a 502, not a 500;
+    SASLprep judges right-to-left passwords as Postgres does; the listener
+    no longer leaves a tunnel half-closed for 30 seconds when the app
+    closes while the database still sends; a trust binding naming a
+    `__proto__` claim is refused, rather than stored without it; an
+    envelope claiming another version of its vault key, and a sealed
+    sign-in value spelled another way, no longer open.
+
 - **The database tunnel runs on Workers.** `coffre run market/dev -- psql
   "$DATABASE_URL"` now works against a Workers deployment as it does on
   Node: each run's connections to a database go to a Durable Object of
