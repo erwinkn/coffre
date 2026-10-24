@@ -24,7 +24,8 @@ import { SigninService } from '../src/api/signin.ts';
 import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { checkPlugins, pluginRoute } from '../src/plugins.ts';
+import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
+import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -85,6 +86,8 @@ let reader: CoffreClient;
 let service: CoffreClient;
 /** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
 let workload: () => Promise<void>;
+/** The same through a Cloudflare service binding, its caller the binding's `props`. */
+let bound: () => Promise<void>;
 
 /** A client that calls the API as a CLI or a CI run does, its token checked on each request. */
 function bearer(runtime: CoffreRuntime, token: string): CoffreClient {
@@ -165,16 +168,10 @@ before(async () => {
     waitUntil: (promise: Promise<unknown>) => void background.push(promise),
     auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10, total: 10 }) } }).resolve(ORIGIN),
     gates: () => gate,
-    plugins: checkPlugins([{
-      name: 'proxy',
-      routes: {
-        prefix: '/use',
-        fetch: async (request, coffre) => {
-          await coffre.workload(request, { place: null, credential: 'stripe', body: await bodyDigest(new Uint8Array(await request.arrayBuffer())) });
-          return new Response(null, { status: 204 });
-        },
-      },
-    }]),
+    // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
+    plugins: checkPlugins([credentialProxy({
+      credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } },
+    })]),
   } satisfies CoffreRuntime;
   workload = async () => {
     const url = `${ORIGIN}/use/stripe/v1/charges`;
@@ -183,6 +180,15 @@ before(async () => {
     const proof = await createProof(key, { method: 'POST', url, token, nonce: 'g1.cost', content: { headers, body: await bodyDigest(body) } });
     const answered = await pluginRoute(new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${token}`, dpop: proof }, body }), proxied, null);
     if (answered?.status !== 204) throw new Error(`the proxy's workload was refused: ${await answered?.text()}`);
+    await Promise.all(background.splice(0));
+  };
+  await insertBinding(deps.db, deps.chainKey, {
+    id: randomUUID(), principal: SERVICE, generation: standing.generation, profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
+    jwks: null, claims: '{}', scope: null, policy: '{}', label: null, createdBy: ROOT,
+  });
+  bound = async () => {
+    const answered = await bindingRoute(new Request(`${ORIGIN}/use/market/dev/stripe/v1/charges`, { method: 'POST', body: 'amount=2000' }), proxied, SERVICE);
+    if (answered?.status !== 204) throw new Error(`the binding's call was refused: ${await answered?.text()}`);
     await Promise.all(background.splice(0));
   };
 });
@@ -217,8 +223,11 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
   'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
-  // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked.
+  // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked, its
+  // decision warm in the proxy's cache.
   "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
+  // A Cloudflare call naming its environment: its binding, member, place and freezes in one statement; the vault's decision warm.
+  "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
 
 test('each hot request runs exactly its budget of statements, on as many connections', POSTGRES, async () => {

@@ -161,8 +161,12 @@ function parameters(body: Uint8Array): Map<string, string> {
 
 /** What a session needs from coffre: the handle checked and the database's URL opened, and the handle checked again later. */
 export type TunnelSession = {
-  /** The handle this tunnel was opened with, which the app must give as its password. */
-  handle: string;
+  /**
+   * The handle this tunnel was opened with, which the app must give as its
+   * password; null for a workload's, whose signed upgrade authenticated it,
+   * and whose app is asked for no password (docs/design/workload-access.md, section 9.3).
+   */
+  handle: string | null;
   /** Which tunnel of the handle's this is, and so how it dials, `<handle>\0<project>/<env>\0<tunnel>`: a cancel reaches its own tunnel's sessions only. */
   group: string;
   /** The real database. */
@@ -258,11 +262,13 @@ export async function tunnel(client: Pipe, session: TunnelSession): Promise<void
       startup = parameters(body.slice(4));
     }
     // The app logs in with the handle as its password, which only who holds it knows: any process on the machine reaches the listener.
-    await to.message('R', int32(3));
-    const password = await step(from.message(MAX_STARTUP));
-    if (password.type !== 'p' || decoder.decode(password.body).replace(/\0$/, '') !== session.handle) {
-      await to.write(errorResponse('28P01', 'coffre: the password is the handle `coffre run` gave your app, in DATABASE_URL'));
-      return;
+    if (session.handle !== null) {
+      await to.message('R', int32(3));
+      const password = await step(from.message(MAX_STARTUP));
+      if (password.type !== 'p' || decoder.decode(password.body).replace(/\0$/, '') !== session.handle) {
+        await to.write(errorResponse('28P01', 'coffre: the password is the handle `coffre run` gave your app, in DATABASE_URL'));
+        return;
+      }
     }
     // Asked again now, whatever the last check said: a connection held at the prompt logs in only while its handle stands.
     if (!(await step(session.stands()))) {

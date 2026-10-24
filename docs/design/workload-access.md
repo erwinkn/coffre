@@ -1182,7 +1182,8 @@ differences:
   authenticates, so the proxy never parses DPoP itself.
 - **The tunnel's WebSocket** carries `Authorization: DPoP` and a proof whose
   `htm` is `GET` and whose `htu` is the `https` form of its URL. Its
-  Durable Object is named by the session's ID rather than the bearer token.
+  Durable Object is the session's, named by its token's digest, which names
+  exactly that session with nothing to look up first (D22).
   Rechecks run 5.3 without the proof, because the socket is already
   authenticated.
 
@@ -1836,6 +1837,104 @@ line of registration after the owner has merged:
   (`GET /members/:member/tokens`, each with `session`), and its managers
   revoke one there.
 
+**As PR 1d built it**, where the design left a choice:
+
+- **Only `DPoP coffre_wl_…` is a session.** A credential whose rule sends
+  its key under the DPoP scheme has its app send a handle there, which
+  stays a handle's request.
+- **The URL alone routes a workload's request** (D17). Nothing tells a
+  session's environments by name before its one statement runs, so
+  `/use/<a>/…` is credential `<a>`'s stable URL whenever `<a>` names a
+  credential, and `/use/<project>/<env>/<credential>/…` otherwise. A
+  project named like a credential is reached through the stable URL only.
+  A handle's routing is unchanged.
+- **The statement resolves the place by path** (D18).
+  `PluginContext.workload` takes `place` as an environment's ID or its
+  path, `market/prod`. The one statement finds a path through the slugs'
+  unique indexes and says back the place used, by ID and by its current
+  path (`WorkloadUse.path`). So the `credential:` freeze and a child's
+  `places` are checked with no read of their own, and a warm request
+  still costs one statement. A path that names no environment is 404 once
+  the proof holds. `use` refuses (409) when the path it reads resolves to
+  another environment than the statement checked, a rename in between,
+  inside `reveal` before anything is logged or opened.
+  A Cloudflare call's bindings statement resolves the place the same way.
+- **The body's line** (D19). Through a `sigv4` credential, a request with
+  a body and an `x-amz-content-sha256` signs the hash it declares (64 hex)
+  or `UNSIGNED-PAYLOAD`. This holds whether or not the proxy streams the
+  body: coffre signs the declared hash again and S3 checks the bytes
+  against it. A body sent `UNSIGNED-PAYLOAD`, streamed or buffered, is
+  refused (403 `unsigned_upload`) unless the binding says
+  `unsignedUploads`. A request whose body has no bytes (a GET, an empty
+  POST, a streamed `content-length: 0`) signs `bodyDigest('')` whatever its
+  header says, on every platform, so it needs no `unsignedUploads`. Every
+  other request signs its bytes' digest. The rule is one function,
+  `bodyLine` in `@coffre/client/dpop`, which the SDK and coffre each call
+  with the body's length as they know it: the bytes read, or a stream's
+  `content-length`, null for a stream of no stated length. One case cannot
+  agree: an empty stream with no stated length, which the SDK signs as
+  declared and coffre, holding no bytes, cannot tell from no body at all.
+  It fails closed (401 `req`); a stream that states its length agrees. The
+  payload hash coffre signs again is that same line, never re-read from
+  the headers it forwards. A
+  copier may not choose the declared form: the header that chose it must
+  be one the proof signs (`hdr`), and a buffered body must be the hash it
+  declares (400 otherwise). `standingSession` holds the `unsignedUploads`
+  clause, beside the binding's other policy checks.
+- **Every HTTP request under `/use` signs its content**: forwarding, the
+  plan (an empty body) and `POST /use…`. A sign or presign body is
+  therefore signed: a copy that wins the race cannot change the message.
+  The tunnel's WebSocket signs none (`htm` GET, `htu` its https form).
+- **`POST /use`** signs and presigns for a workload that reaches one
+  environment, as the stable URL forwards for it. A handle still names its
+  environment.
+- **Limits** are `limit: { perMinute?, perDay? }` on a credential, or a
+  function of the service, and `privateKey(key, { limit })` on a signer
+  (D20). A presign counts against its credential's. The gate's keys are
+  `<name> per minute` and `<name> per day`. A function's limit takes the
+  service, which only authentication tells, so `WorkloadAt.counts` may be
+  a function of the service and the request still costs one gate call.
+- **Alerts are raised where coffre learns of them** (`src/alerts.ts`,
+  D21). The gate's first refusal of a count in its window writes its
+  `workload.alert` in `standingSession` (or for a Cloudflare call,
+  `workloadFromBinding`) before the 429 goes back. A plugin forwards
+  `WorkloadRefused.response` and raises nothing. The entry goes in a
+  transaction of its own; the deployment's `alert` runs after the
+  response. A failure of either is logged once to the process log and
+  never changes the answer. PRs 3 and 4 call `raiseAlert` for `enrolled`,
+  `contention`, `expiring` and `frozen`.
+- **A child's `paths` are the sent URL's own path**, the upstream's base
+  path included: under `upstream: 'https://api.acme.example/v2'`, a
+  child limited to `/v2/refunds`. That is what `constraintsAllow` reads
+  (8.4), and what PR 4's `narrow` should tell its callers.
+- **Sockets.** A workload's WebSocket goes to the Durable Object named by
+  a digest of its path and session token. The token names one session for
+  its life, renewals included, so the object is the session's with nothing
+  to look up in the Worker (D22). The proof is checked in the object, as
+  the plugin admits it. The tunnel asks the app's login for no password
+  (9.3): the signed upgrade authenticated the session, so `pg` with none
+  works through `connect()` and `coffre serve` alike.
+- **Rechecks.** A tunnel group's bytes flow while its last good check is
+  under a bound old, even if no check ran since (PR 8's finding): a timer
+  ends the group at the bound. A workload's bound is `recheckSeconds`, 15
+  at most. The statement runs again every two thirds of it, without the
+  proof (`PluginContext.recheck`), with a third of it to answer, so a
+  freeze or a revocation ends the tunnel within one bound. The vault's
+  decision is asked again every `recheckSeconds`. A handle's group keeps
+  its cadence; its bound is `recheckSeconds` plus the vault's 10 s to
+  answer, as before.
+- **Every answer after authentication carries `DPoP-Nonce`**, a refusal
+  of coffre's included.
+- **Request cost.** A warm workload request through the real proxy is one
+  app statement and no vault call; a Cloudflare call naming its
+  environment is one too (`request-cost.test.ts`). A Cloudflare call to
+  the stable URL adds one, its environment's path by ID.
+- **The plan for a workload** answers `{ environment, values, credentials,
+  tunnels, useOnly, mints }`: `credentials` names credentials and signers,
+  `tunnels` maps each name to `{ key, url }` as a handle's plan does (so
+  `coffre run --service` knows which variable gets its listener's URL), and
+  `useOnly` lists every key held and not read.
+
 ### 12.1 Verification
 
 **Model checking**, `formal/Workload.tla`, TLC as `pnpm formal` runs it. The
@@ -1982,6 +2081,30 @@ worker, deleted and then verified gone through the provider's API:
     to IDs in the binding's transaction, stored by ID only, shown back by
     path and name. Nothing on the wire takes the ID form, which no client
     could produce.
+
+17. **The URL alone routes a workload's request** (PR 1d):
+    `/use/<a>/…` is credential `<a>`'s whenever `<a>` names one.
+    *Alternative:* look up the session's environments by name first,
+    which costs a statement on every request.
+18. **The one statement resolves a place named by path** (PR 1d), and
+    says back its ID and path. *Alternative:* a cache of paths in the
+    proxy, stale across renames for its lifetime.
+19. **A sigv4 credential's body signs its declared hash, streamed or
+    not; `UNSIGNED-PAYLOAD` with a body needs `unsignedUploads`, buffered
+    too** (PR 1d), since coffre would forward a buffered body that no
+    proof bound. A request with no body is never unsigned. The SDK and
+    coffre run one function for it, `bodyLine` (Fable's review of PR 1d).
+20. **Signers take a `limit` too** (PR 1d). A signature by a payments key
+    is the use most worth counting. *Alternative:* limits on credentials
+    only, as section 8.1 shows them.
+21. **Alerts live in `packages/server/src/alerts.ts`**, not in `plugins/`
+    (PR 1d): section 12's `…/` there is `packages/server/src`, as for
+    `cloudflare-sockets.ts`, and alerts are coffre's, raised by the
+    exchange and the freezes as much as by the proxy.
+22. **A workload's socket object is named by its session token's
+    digest** (PR 1d), which names exactly one session, so no lookup runs
+    in the Worker before the object. *Alternative:* the session's ID,
+    which the Worker would read from the database first.
 
 ## 14. Later
 

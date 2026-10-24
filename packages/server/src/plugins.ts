@@ -5,7 +5,7 @@
 // table, checks, vault and audit log as the CLI.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
-import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type GateCount, type WorkloadCaller } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
 
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
@@ -20,9 +20,10 @@ import { callBindings, frozenTargets } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
 import { fetchApi } from './fetch-api.ts';
 import { errorResponse } from './http.ts';
+import { limitAlert, raiseAlert } from './alerts.ts';
 import { logged } from './logged.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
-import { dpopToken, gateOf, SessionRefused, sessionScope, standingSession, UUID, type StandingSession } from './workload-sessions.ts';
+import { dpopToken, gateOf, namedPlace, SessionRefused, sessionScope, sessionStands, standingSession, type GateCounts, type StandingSession } from './workload-sessions.ts';
 
 export type { PickKeys };
 
@@ -122,31 +123,48 @@ export type PluginContext = {
    * `constraints`. Through a Cloudflare service binding (`bindingRoute`),
    * the caller its binding's `props` name, with no proof and no session.
    *
-   * `place` is an environment's ID; null with a `credential` means the one
-   * environment the session reaches (`/use/<credential>`). A refusal throws
-   * a `WorkloadRefused`, whose `response` is the answer to forward as it is.
-   * What it returns is what `use` takes in place of a handle. Null for a
-   * request that is no workload's, which carries no `Authorization: DPoP`:
-   * a handle's, say.
+   * `place` is an environment's ID or path (`market/prod`); null with a
+   * `credential` means the one environment the session reaches
+   * (`/use/<credential>`). A refusal throws a `WorkloadRefused`, whose
+   * `response` is the answer to forward as it is; a count's first refusal
+   * in its window has written its `workload.alert` already. What it returns
+   * is what `use` takes in place of a handle. Null for a request that is no
+   * workload's, which carries no `Authorization: DPoP`: a handle's, say.
    */
   workload(request: Request, at: WorkloadAt): Promise<WorkloadUse | null>;
+  /**
+   * Whether a workload this context's `workload` returned still stands, as
+   * section 5.3's statement says now, freezes and the credential it used
+   * included, without its proof or its gate: what an open tunnel's rechecks
+   * ask, its socket authenticated already (section 7.1). No vault call.
+   * False for a caller this context did not make.
+   */
+  recheck(caller: WorkloadUse): Promise<boolean>;
 };
 
 /** What a workload's request uses (`PluginContext.workload`): where and which credential, the body line `req` signs, and the counts its limits take. */
 export type WorkloadAt = {
+  /** An environment's ID or its path, `market/prod`. */
   place: string | null;
   credential: string | null;
-  /** `bodyDigest(bytes)` of a buffered body, a sigv4 upload's declared digest, or `UNSIGNED_BODY`: for a request coffre forwards, whose proof signs its content. Left out for one that signs none. */
+  /**
+   * `bodyDigest(bytes)` of a buffered body, a sigv4 upload's declared
+   * digest, or `UNSIGNED_BODY`, which only a binding that says
+   * `unsignedUploads` takes: for a request whose proof signs its content.
+   * Left out for one that signs none.
+   */
   body?: string;
-  counts?: readonly GateCount[];
+  /** The counts, or how to make them for the service, `token:<name>`, which only authentication tells (a limit per workload). */
+  counts?: GateCounts;
 };
 
 /**
  * A workload, authenticated for one request: the caller the proxy sees, the
  * gate's nonce to send back (`DPoP-Nonce`; null for a Cloudflare call), the
- * environments it reaches by ID, and the one this request uses.
+ * environments it reaches by ID, and the one this request uses, by ID and
+ * by its path as named now (what `use` and `constraintsAllow` take).
  */
-export type WorkloadUse = WorkloadCaller & { readonly nonce: string | null; readonly places: readonly string[]; readonly place: string | null };
+export type WorkloadUse = WorkloadCaller & { readonly nonce: string | null; readonly places: readonly string[]; readonly place: string | null; readonly path: string | null };
 
 /** A workload's request refused: `response` is its answer, the headers RFC 9449 asks for included; `limit`, a count the gate refused. */
 export class WorkloadRefused extends CoffreError {
@@ -165,7 +183,7 @@ export class WorkloadRefused extends CoffreError {
  * request it was made for: `use` takes back only those, so one kept from
  * an earlier request, checked before a revocation or a freeze, is no one.
  */
-type Standing = { kind: 'session'; session: StandingSession } | { kind: 'binding'; binding: BindingRow; policy: BindingPolicy; policySeq: bigint | null };
+type Standing = { kind: 'session'; session: StandingSession; credential: string | null } | { kind: 'binding'; binding: BindingRow; policy: BindingPolicy; policySeq: bigint | null; credential: string | null };
 type Standings = WeakMap<WorkloadUse, Standing>;
 
 /**
@@ -256,13 +274,13 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
   const unbound = () => refusedWith(new ApiError('unauthenticated', `no live cloudflare binding of ${principal} takes this call`));
   if (workloads === null || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw await unbound();
-  if ((at.place !== null && !UUID.test(at.place)) || (at.credential !== null && !CREDENTIAL_NAME.test(at.credential))) {
-    throw await refusedWith(new ApiError('bad_request', 'an environment is named by its ID, and a credential by its name in the configuration'));
+  const named = at.place === null ? null : namedPlace(at.place);
+  if ((at.place !== null && named === null) || (at.credential !== null && !CREDENTIAL_NAME.test(at.credential))) {
+    throw await refusedWith(new ApiError('bad_request', 'an environment is named by its ID or its path, and a credential by its name in the configuration'));
   }
-  const target = at.credential === null || at.place === null ? null : `credential:${at.place}/${at.credential}`;
   let rows: Awaited<ReturnType<typeof callBindings>>;
   try {
-    rows = await callBindings(runtime.db, principal, target);
+    rows = await callBindings(runtime.db, principal, { place: named, credential: at.credential });
   } catch (error) {
     console.error('checking a cloudflare binding failed', logged(error));
     throw await refusedWith(new ApiError('unavailable', 'coffre cannot check who you are right now'));
@@ -275,23 +293,29 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   if (workloads.noReads && policy.reads !== undefined) {
     throw await refusedWith(new ApiError('forbidden', 'this instance lets no binding list reads (noReads): bind the workload again without them', 'no_reads'));
   }
-  // Where it reaches, by ID: its scope's environments, and a project's, read only when it names one.
+  // The place it names, as the statement found it.
+  const asked = at.place === null ? null : found.place;
+  if (at.place !== null && asked === null) throw await refusedWith(new ApiError('not_found', `${at.place} names no environment`));
+  // Where it reaches, by ID: its scope's environments, or a project's, read only when it names one.
   const scope = readScope(binding.scope) ?? [];
   const reached = scope.every((grant) => grant.environmentId !== null)
     ? [...new Set(scope.map((grant) => grant.environmentId!))]
     : environmentsOf(scope, await placeRows(runtime.db)).map((environment) => environment.id);
-  const place = at.place ?? (reached.length === 1 ? reached[0]! : null);
+  const place = asked ?? (reached.length === 1 ? reached[0]! : null);
+  // Its path: the statement's for a place named, else the one it reaches, read by its ID.
+  const path = asked !== null ? found.placePath : place === null ? null : ((await environmentPaths(runtime.db, [place])).get(place) ?? null);
   if (at.credential !== null && place === null) {
     throw await refusedWith(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this service reaches none, or several'));
   }
   // The credential's freeze, when the call named no environment and the statement could not know which.
   const frozen = found.frozen.instance || found.frozen.service || found.frozen.binding || found.frozen.credential
-    || (target === null && at.credential !== null && (await frozenTargets(runtime.db, [`credential:${place}/${at.credential}`])).length > 0);
+    || (asked === null && place !== null && at.credential !== null && (await frozenTargets(runtime.db, [`credential:${place}/${at.credential}`])).length > 0);
   if (frozen) throw await refusedWith(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
-  if (at.counts !== undefined && at.counts.length > 0) {
+  const counts = typeof at.counts === 'function' ? at.counts(principal) : at.counts;
+  if (counts !== undefined && counts.length > 0) {
     let admitted;
     try {
-      admitted = await gateOf(runtime, principal).admit({ counts: at.counts });
+      admitted = await gateOf(runtime, principal).admit({ counts });
     } catch (error) {
       if (error instanceof SessionRefused) throw await workloadRefused(error.response);
       console.error('the workload gate failed', logged(error));
@@ -300,6 +324,7 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
     if (!admitted.ok) {
       if (admitted.reason === 'limit') {
         const limit = { key: admitted.key, retryAfterMs: admitted.retryAfterMs, first: admitted.first };
+        if (admitted.first) await raiseAlert(runtime, limitAlert({ principal, bindingId: binding.id, session: null, sourceIp: null }, admitted), { credential: at.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place);
         throw await workloadRefused(errorResponse(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) }), limit);
       }
       throw await refusedWith(new ApiError('too_many_requests', 'this workload sends more calls than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
@@ -317,8 +342,9 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
     nonce: null,
     places: reached,
     place,
+    path,
   };
-  standings.set(caller, { kind: 'binding', binding, policy, policySeq: found.policySeq === null ? null : BigInt(found.policySeq) });
+  standings.set(caller, { kind: 'binding', binding, policy, policySeq: found.policySeq === null ? null : BigInt(found.policySeq), credential: at.credential });
   return caller;
 }
 
@@ -340,9 +366,27 @@ async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceI
     if (error instanceof SessionRefused) throw await workloadRefused(error.response, error.limit);
     throw error;
   }
-  const caller: WorkloadUse = { ...session.caller, nonce: session.nonce, places: session.places, place: session.place };
-  standings.set(caller, { kind: 'session', session });
+  const caller: WorkloadUse = { ...session.caller, nonce: session.nonce, places: session.places, place: session.place, path: session.path };
+  standings.set(caller, { kind: 'session', session, credential: at.credential });
   return caller;
+}
+
+/**
+ * Whether a caller `workload` made still stands (`PluginContext.recheck`):
+ * a session's statement again, every clause but the proof and the gate; a
+ * Cloudflare call's binding, as `workloadFromBinding` holds it.
+ */
+async function rechecked(runtime: CoffreRuntime, caller: WorkloadUse, standings: Standings): Promise<boolean> {
+  const standing = standings.get(caller);
+  if (standing === undefined) return false;
+  if (standing.kind === 'session') return sessionStands(runtime, standing.session, { place: caller.place, credential: standing.credential, children: true });
+  return bindingWorkload(runtime, caller.principal, { place: caller.place, credential: standing.credential }, new WeakMap()).then(
+    (again) => again.bindingId === caller.bindingId,
+    (error: unknown) => {
+      if (error instanceof WorkloadRefused) return false;
+      throw error;
+    },
+  );
 }
 
 /**
@@ -421,6 +465,7 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
   return {
     publicUrl: runtime.publicUrl,
     workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
+    recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {
       const { credentialExpiresAt, handlePlaces: places } = await proxyHandle(handle);
       if (places === null) return { expiresAt: credentialExpiresAt!, paths: null };
@@ -452,8 +497,10 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
           if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
           ({ identity: caller, expiresAt } = made);
         }
-        const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), asked);
-        return { values: read.values, plain: read.plain, keys: read.keys, environment: read.environment, expiresAt };
+        // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
+        const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
+        const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
+        return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
         throw new CoffreError(error.status, error.code, error.message, error.reason);

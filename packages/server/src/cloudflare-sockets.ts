@@ -4,7 +4,8 @@
 // connection of its own, which could land in any isolate. So the Worker
 // only routes: each WebSocket goes to a Durable Object named by its path and
 // its bearer, which is one `coffre run`'s connections to one database, its
-// cancel requests among them. There the plugin admits it, as on Node, and
+// cancel requests among them; or by its path and its workload's session, the
+// token of `Authorization: DPoP`, which names that one session. There the plugin admits it, as on Node, and
 // its session runs, with TCP out through `cloudflare:sockets`.
 //
 // The object holds what one run's connections share, and nothing an
@@ -76,14 +77,17 @@ const MOST_WAITING_MS = 15_000;
 
 /**
  * A WebSocket a plugin takes, sent to its object: one per path and bearer,
- * which the name is a digest of, so that the bearer, a handle, names no
- * object anyone can read.
+ * or per path and workload session, which the name is a digest of, so that
+ * the bearer, a handle, names no object anyone can read. A session's token
+ * names one session for its whole life, renewals included, so its object is
+ * the session's (docs/design/workload-access.md, section 7.1) with nothing
+ * to look up before it; its proof is checked there, as the plugin admits it.
  */
 export async function forwardSocket(request: Request, sockets: SocketsNamespace): Promise<Response> {
   const refused = refusal(request);
   if (refused !== null) return refused;
-  // As admission reads them: the token alone, and the path's segments decoded, so one run's spellings of them name one object.
-  const token = /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization')!)![1]!;
+  // As admission reads them: the scheme and the token alone, and the path's segments decoded, so one run's spellings of them name one object.
+  const [, scheme, token] = CREDENTIAL.exec(request.headers.get('authorization')!)!;
   const segments = new URL(request.url).pathname.split('/').map((segment) => {
     try {
       return decodeURIComponent(segment);
@@ -91,20 +95,25 @@ export async function forwardSocket(request: Request, sockets: SocketsNamespace)
       return segment;
     }
   });
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${JSON.stringify(segments)}\n${token}`));
+  // A handle's names are as they always were; a session's are apart, by its scheme.
+  const named = scheme!.toLowerCase() === 'bearer' ? `${JSON.stringify(segments)}\n${token}` : `${JSON.stringify(segments)}\ndpop\n${token}`;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(named));
   const name = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   return sockets.get(sockets.idFromName(name)).fetch(request);
 }
 
+/** What names a socket's object: a bearer, a handle, or a workload's session, `Authorization: DPoP <token>`. */
+const CREDENTIAL = /^(Bearer|DPoP)\s+(\S+)$/i;
+
 /**
  * A WebSocket no object is made for: one whose client paces nothing, which
- * a coffre before 0.11 is, or that carries no bearer, which names its object.
+ * a coffre before 0.11 is, or that carries no bearer or session, which names its object.
  */
 function refusal(request: Request): Response | null {
   if (request.headers.get(FLOW) !== 'credit') {
     return new Response(`this coffre's WebSockets pace their bytes (${FLOW}: credit), as coffre 0.11 and later do: update the CLI`, { status: 426 });
   }
-  if (!/^Bearer\s+\S+$/i.test(request.headers.get('authorization') ?? '')) return new Response('send a bearer token', { status: 401 });
+  if (!CREDENTIAL.test(request.headers.get('authorization') ?? '')) return new Response('send a bearer token, or a workload\'s session with its proof', { status: 401 });
   return null;
 }
 

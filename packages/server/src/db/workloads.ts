@@ -53,6 +53,33 @@ function idText(db: Queryable, id: SQL | AnyColumn): SQL {
   return dialect.engineOf(db) === 'postgres' ? sql`${id}::text` : sql`${id}`;
 }
 
+/** A place as a request names it: an environment's ID, or its path's slugs. */
+export type NamedPlace = string | { project: string; environment: string } | null;
+
+/** The placeholders a named place fills: by ID, or by its slugs. */
+function placeParams(place: NamedPlace) {
+  const byPath = typeof place === 'object' && place !== null ? place : null;
+  return { place: typeof place === 'string' ? place : null, placeProject: byPath?.project ?? null, placeEnvironment: byPath?.environment ?? null };
+}
+
+/**
+ * The place a request uses, as text: named by ID, or by path through the
+ * slugs' unique indexes (never a personal config, nor a deleted one, whose
+ * slug a `~` marks), or else `otherwise`; and its path as named now, null
+ * for none or one deleted.
+ */
+function placeColumns(db: Queryable, otherwise: SQL) {
+  const { environments, projects } = tablesOf(db);
+  const byId = sql`CAST(${sql.placeholder('place')} AS text)`;
+  const project = sql`CAST(${sql.placeholder('placeProject')} AS text)`;
+  const byPath = sql`(SELECT ${idText(db, environments.id)} FROM ${environments} INNER JOIN ${projects} ON ${projects.id} = ${environments.projectId}
+    WHERE ${projects.slug} = ${project} AND ${environments.slug} = CAST(${sql.placeholder('placeEnvironment')} AS text) AND ${environments.owner} IS NULL)`;
+  const place = sql<string | null>`CASE WHEN ${byId} IS NOT NULL THEN ${byId} WHEN ${project} IS NOT NULL THEN ${byPath} ELSE ${otherwise} END`;
+  const placePath = sql<string | null>`(SELECT ${projects.slug} || '/' || ${environments.slug} FROM ${environments} INNER JOIN ${projects} ON ${projects.id} = ${environments.projectId}
+    WHERE ${environments.id} = ${dialect.engineOf(db) === 'postgres' ? sql`CAST(${place} AS uuid)` : place} AND ${environments.slug} NOT LIKE '%~%' AND ${projects.slug} NOT LIKE '%~%')`;
+  return { place, placePath };
+}
+
 /** A one-row source, for a statement that reads only expressions. */
 const single = sql`(SELECT 1 AS ${sql.identifier('one')}) AS ${sql.identifier('single')}`;
 
@@ -67,9 +94,11 @@ const joined = (...parts: (SQL | string)[]) => sql.join(parts.map((part) => (typ
  * stale read can only refuse), its binding and whether a tombstone names
  * it, and the freezes of the instance, the service, the binding, the
  * session and, when the request names one, the credential it uses
- * (`credential:<environment id>/<name>`): in `place`, or when the request
- * names none, in the one environment the session's row was made for. With
- * the database clock, which
+ * (`credential:<environment id>/<name>`): in the place the request names,
+ * by ID or by path (`market/prod`, found by its slugs), or when it names
+ * none, in the one environment the session's row was made for. Each row
+ * also says that place, its ID and its path as named now (null when a path
+ * names no environment). With the database clock, which
  * keeps it out of Hyperdrive's cache and is what renewal decides on, and
  * the newest policy change, as `findCredential` reads it.
  *
@@ -77,8 +106,8 @@ const joined = (...parts: (SQL | string)[]) => sql.join(parts.map((part) => (typ
  * none at all for a token nobody holds. Nothing is checked here: the
  * caller holds every row to its MAC and every clause (`standingSession`).
  */
-export async function workloadSession(db: Queryable, tokenHash: Buffer, uses: { place: string | null; credential: string | null }) {
-  const rows = await sessionRows(db, { tokenHash, place: uses.place, credential: uses.credential });
+export async function workloadSession(db: Queryable, tokenHash: Buffer, uses: { place: NamedPlace; credential: string | null }) {
+  const rows = await sessionRows(db, { tokenHash, ...placeParams(uses.place), credential: uses.credential });
   return rows.map((row) => ({
     ...row,
     policySeq: row.policySeq === null ? null : BigInt(row.policySeq),
@@ -105,7 +134,9 @@ export function sessionStatement(db: Queryable) {
   const onlyPlace = postgres
     ? sql`CASE WHEN jsonb_array_length(${credentials.places}::jsonb) = 1 THEN ${credentials.places}::jsonb -> 0 ->> 'environmentId' END`
     : sql`CASE WHEN json_array_length(${credentials.places}) = 1 THEN json_extract(${credentials.places}, '$[0].environmentId') END`;
-  const used = sql`CASE WHEN ${name} IS NULL THEN NULL ELSE 'credential:' || COALESCE(CAST(${sql.placeholder('place')} AS text), ${onlyPlace}) || '/' || ${name} END`;
+  // The place it uses: named, or else the row's one.
+  const { place, placePath } = placeColumns(db, onlyPlace);
+  const used = sql`CASE WHEN ${name} IS NULL THEN NULL ELSE 'credential:' || ${place} || '/' || ${name} END`;
   return db
     .select({
       credential: credentials,
@@ -120,6 +151,8 @@ export function sessionStatement(db: Queryable) {
         session: frozen(db, joined('session:', idText(db, credentials.id))),
         credential: frozen(db, used),
       },
+      place,
+      placePath,
       now: clockMillis(db),
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
     })
@@ -132,16 +165,20 @@ export function sessionStatement(db: Queryable) {
 /**
  * A Cloudflare call's binding (section 9.2), in one statement: the
  * service's live bindings of profile `cloudflare`, each with whether a
- * tombstone names it, its member's standing, and the freezes of the
- * instance, the service, the binding and the credential the call uses. A
- * service holds at most a few; the caller takes the oldest that stands.
+ * tombstone names it, its member's standing, the place the call names, by
+ * ID or path, with its path as named now, and the freezes of the instance,
+ * the service, the binding and, in that place, the credential the call
+ * uses. A service holds at most a few; the caller takes the oldest that
+ * stands.
  */
-export async function callBindings(db: Queryable, principal: string, credentialTarget: string | null) {
-  return bindingCalls(db, { principal, credentialTarget });
+export async function callBindings(db: Queryable, principal: string, uses: { place: NamedPlace; credential: string | null }) {
+  return bindingCalls(db, { principal, ...placeParams(uses.place), credential: uses.credential });
 }
 
 const bindingCalls = prepared((db) => {
   const { serviceBindings, vaultMembers } = tablesOf(db);
+  const { place, placePath } = placeColumns(db, sql`NULL`);
+  const name = sql`CAST(${sql.placeholder('credential')} AS text)`;
   return db
     .select({
       binding: serviceBindings,
@@ -152,8 +189,10 @@ const bindingCalls = prepared((db) => {
         instance: frozen(db, 'instance'),
         service: frozen(db, sql`${serviceBindings.principal}`),
         binding: frozen(db, joined('binding:', idText(db, serviceBindings.id))),
-        credential: frozen(db, sql`CAST(${sql.placeholder('credentialTarget')} AS text)`),
+        credential: frozen(db, sql`CASE WHEN ${name} IS NULL THEN NULL ELSE 'credential:' || ${place} || '/' || ${name} END`),
       },
+      place,
+      placePath,
       now: clockMillis(db),
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
     })

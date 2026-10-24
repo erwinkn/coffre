@@ -1671,10 +1671,13 @@ export async function reveal(
    * only, opened to `use` them for the caller or to `expose` them to their
    * app (docs/design/credential-proxy.md), with `logged` in the app's own
    * entry of it, `credential.use`. A key the environment does not hold is
-   * left out, not refused: the proxy says which it needs.
+   * left out, not refused: the proxy says which it needs. `environmentId`,
+   * a workload's: the environment its request was checked for, freezes and
+   * all; a path that resolves to another (renamed meanwhile) is refused
+   * before anything is logged or opened.
    */
-  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown> },
-): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { path: string; personal: boolean }; keys: string[] }> {
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string },
+): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence, at) => {
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1690,6 +1693,9 @@ export async function reveal(
         }),
       );
     }
+    if (use?.environmentId !== undefined && environment.environmentId !== use.environmentId) {
+      throw new ApiError('conflict', `${formatPath(path)} is not the environment this request was checked for: it was renamed meanwhile, so send it again`);
+    }
     at({ ...environment, operationId });
     // The proxy uses values for its reader, and hands back only those they read: it needs use, and each value it gives, read.
     need(ctx, use === undefined ? 'secret.read' : 'secret.use', placeOf(place.project, place.environment), 'secret.read', {
@@ -1697,7 +1703,7 @@ export async function reveal(
       metadata: path.key === undefined ? {} : { key: path.key },
     });
     const read = await readableValues(ctx.db, place, environment, path.key);
-    const named = { path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
+    const named = { id: environment.environmentId, path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
     // else, its key is a key like any other.

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **The credential proxy takes a workload** ([workload-access.md](docs/design/workload-access.md),
+  its PR 1d). A key-bound session uses credentials, signers and tunnels
+  through `/use` as a handle does, with its proof in place of a
+  placeholder. The proof signs the request whole. Only the headers it
+  signs go upstream, and a query, header or body changed on the way is
+  refused. A sigv4 upload is bound by the payload hash it declares, so it
+  still streams; `UNSIGNED-PAYLOAD` with a body needs a binding that says
+  `unsignedUploads`. The session is checked on every request before the
+  value cache, so a revocation or a freeze stops the next request, warm
+  or not, and an open tunnel within 15 seconds. A narrowed session is held
+  to its constraints on the URL coffre sends. `POST /use` signs and
+  presigns for a workload that reaches one environment. Credentials and
+  signers take a `limit` (`{ perMinute, perDay }`, or a function of the
+  service): past it, 429 with `Retry-After`, and one `workload.alert` per
+  workload, credential and window, which also goes to the deployment's
+  `workloads.alert`. A tunnel's group now stops once its last good check
+  is a bound old, even if no check ran since. No database migration.
 - **Workloads sign in with a key** ([workload-access.md](docs/design/workload-access.md),
   its PR 1a). `POST /api/auth/workload` takes a platform's ID token, with a
   DPoP proof of a key the workload made in memory, and answers a session

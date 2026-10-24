@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { base64url, bodyDigest, createProof, generateProofKey, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
+import { base64url, bodyDigest, bodyLine, createProof, generateProofKey, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
 
 import { canonicalHtu, canonicalRequest, MAX_PROOF_LENGTH, parseProof, thumbprint, verifyProof, type ProofExpectation } from '../src/identity/dpop.ts';
 
@@ -257,4 +257,19 @@ test('the signer makes no proof the verifier would refuse for its size', async (
   const most = await createProof(key, { method: 'GET', url: long, token: TOKEN, iat: NOW, content: { headers: many(32), body: await bodyDigest('') } });
   assert.equal(reason(parseProof(most)), 'ok');
   await assert.rejects(createProof(key, { method: 'GET', url: long, token: TOKEN, iat: NOW, content: { headers: many(33), body: await bodyDigest('') } }), /at most 32 headers/);
+});
+
+test("a body's line is one rule for the SDK and coffre: no bytes sign the empty digest, a declared hash signs itself, any other declared value nothing", async () => {
+  const bytes = new TextEncoder().encode('object');
+  const hash = await bodyDigest(bytes);
+  const empty = await bodyDigest('');
+  assert.equal(await bodyLine({ declared: null, length: bytes.length, bytes }), hash);
+  assert.equal(await bodyLine({ declared: hash, length: bytes.length, bytes }), hash);
+  assert.equal(await bodyLine({ declared: hash, length: null }), hash, 'a stream of no stated length signs what it declares');
+  assert.equal(await bodyLine({ declared: 'UNSIGNED-PAYLOAD', length: null }), UNSIGNED_BODY);
+  assert.equal(await bodyLine({ declared: 'STREAMING-UNSIGNED-PAYLOAD-TRAILER', length: 5 }), UNSIGNED_BODY);
+  // No bytes, however they are known: read, or a stream's content-length of 0.
+  assert.equal(await bodyLine({ declared: 'UNSIGNED-PAYLOAD', length: 0 }), empty);
+  assert.equal(await bodyLine({ declared: hash, length: 0, bytes: new Uint8Array() }), empty);
+  assert.equal(await bodyLine({ declared: null, length: 0 }), empty);
 });

@@ -13,6 +13,8 @@ const AWS = { AWS_ACCESS_KEY_ID: 'AKIAREAL0123456789AB', AWS_SECRET_ACCESS_KEY: 
 /** coffre as the proxy calls it: every handle stands, for market/dev, and opens these values. */
 const coffre = {
   publicUrl: 'https://secrets.acme.example',
+  // A handle's request is no workload's.
+  workload: async () => null,
   handle: async () => ({ expiresAt: new Date(Date.now() + 3_600_000).toISOString(), paths: ['market/dev'] }),
   use: async () => ({
     values: { SCHUMANN_API_KEY: KEY, ...AWS },
