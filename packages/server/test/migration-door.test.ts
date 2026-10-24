@@ -33,6 +33,7 @@ function freshRuntime(): CoffreRuntime {
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
+    previousChainKeys: [],
     signin: null,
     workloads: null,
     mcp: null,
@@ -40,7 +41,7 @@ function freshRuntime(): CoffreRuntime {
     publicUrl: ORIGIN,
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
-    schema: { migrated: false },
+    schema: { migrated: false }, appKey: { settled: false },
     rotateAfterDays: 365,
     plugins: [],
   };
@@ -173,7 +174,7 @@ test('only a database that cannot be reached is an outage the door lets through;
 
 test('without an audit watch, the scheduled run asks the vault to checkpoint and writes no beat, and readiness is the database migrated', async () => {
   await resetDatabase(db.owner);
-  const runtime = { ...freshRuntime(), schema: { migrated: true } };
+  const runtime = { ...freshRuntime(), schema: { migrated: true }, appKey: { settled: true } };
   const written = () => db.owner.select({ action: auditLog.action }).from(auditLog).orderBy(asc(auditLog.seq));
   await runScheduled(runtime);
   await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ actorType: 'system', actorId: 'test', action: 'secret.read', decision: 'allow' }]));

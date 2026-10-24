@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **The app key rotates.** `APP_KEY` (`auditChainKey`) signs the app's log
+  entries and every row that signs someone in; changing it used to sign
+  everyone out, break every service token and binding, leave the log's
+  older entries unverifiable and the audit anchor red. Now the new key
+  becomes `auditChainKey` and the old one moves to the new
+  `previousAuditChainKeys`, as the vault's `previousKeks` do for the vault
+  key ([deploy.md](docs/deploy.md#rotating-the-app-key)). The first start
+  under the new key signs every signed row again under it, 100 rows a step,
+  each step a `key.reseal` entry, and then writes `key.rotate`; it signs
+  browser and CLI sessions out, and keeps service and personal tokens,
+  handles, workloads' sessions (one awaiting approval included), trust
+  bindings, enrollment codes, linked accounts and MCP connections; a CLI
+  login approved but not yet taken is used up. Before `key.rotate`, it
+  seals the audit anchor again under the new key. Until it is done, the
+  app answers 503 `rotating`, each request taking it a step further, and a
+  Node process steps it to the end as it starts: wait on `/readyz` after
+  the deploy.
+  - **From the first step, the old key writes nothing**: an append under a
+    key the log moved on from is refused, so an instance still running the
+    old key during the deploy has its writes refused. From `key.rotate`, it
+    vouches for no row, and verifies only the log's entries from before the
+    first step: an entry under it after is a finding. A key replaced cannot
+    come back: a start under it answers 503 `app_key`, and so does a start
+    under a key the log does not know, or an instance still writing under
+    the old one. Keep the old key configured, and
+    escrowed: a walk of the whole log needs it.
+  - **Rotations are crash-safe and race-free**: each step is one
+    transaction under the log's head, and goes on from the step before,
+    whichever process or isolate takes it.
+  - `coffre verify keys` says when the app key pasted is one the app
+    replaced (`GET /api/audit/keys` lists them, `app.previous`).
+  - **Upgrading: one migration**, `0018_rotate_app_key`, which only grants
+    the app's login to update an enrollment code's MAC. Upgrade first, and
+    rotate in a later deploy: an instance of an earlier release would go on
+    writing under the old key during the rotation.
+
 ## 0.13.0 (2026-10-24)
 
 - **Upgrading to 0.13.0, in short.** No migration: the database, the

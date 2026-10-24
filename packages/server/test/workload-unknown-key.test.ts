@@ -16,6 +16,7 @@ import { eq, sql } from 'drizzle-orm';
 import { UNKNOWN_KEY_ALERT_MS } from '../src/alerts.ts';
 import { claimAlert } from '../src/db/workloads.ts';
 import { resolveConfig } from '../src/config.ts';
+import { keyReady } from '../src/app.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
@@ -205,6 +206,8 @@ test('two connections claiming at once raise one alert, first and after the hour
 
 test('a refusal capped out opens no transaction: the one that alerts opens its own', async () => {
   await bindCluster();
+  // The door's read of where the app key stands is the isolate's, once, in a snapshot of its own (app.ts): not a refusal's.
+  assert.equal(await keyReady(runtime), null);
   let opened = 0;
   const transaction = deps.db.transaction.bind(deps.db);
   deps.db.transaction = ((work: never, ...rest: never[]) => (opened++, transaction(work, ...rest))) as typeof deps.db.transaction;

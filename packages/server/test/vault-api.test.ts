@@ -183,12 +183,12 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
   await assert.rejects(misled.vault.access(`user:${ROOT}`), /^Error: the vault's entries are under vault:\S+, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config$/);
   // It can check nobody's row, the Owner's included: every request is an outage, never a verdict on who asks.
   const runtime: CoffreRuntime = {
-    db: misled.db, vault: misled.vault, chainKey: misled.chainKey, signin: null, workloads: null, mcp: null,
+    db: misled.db, vault: misled.vault, chainKey: misled.chainKey, previousChainKeys: [], signin: null, workloads: null, mcp: null,
     auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }).resolve('https://coffre.test'),
     publicUrl: 'https://coffre.test',
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
-    schema: { migrated: true },
+    schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
     plugins: [],
   };
@@ -222,6 +222,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     db: deps.db,
     vault: deps.vault,
     chainKey: deps.chainKey,
+    previousChainKeys: [],
 
     signin: null,
     workloads: null,
@@ -231,7 +232,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     // Every token is simply the email of whoever holds it, and never expires.
     verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
     waitUntil,
-    schema: { migrated: true },
+    schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
     plugins: [],
   };

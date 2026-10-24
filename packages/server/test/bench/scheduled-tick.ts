@@ -24,6 +24,7 @@ const runtime = (plugins: CoffreRuntime['plugins']): CoffreRuntime => ({
   db: deps.db,
   vault: deps.vault,
   chainKey: deps.chainKey,
+  previousChainKeys: [],
   signin: null,
   workloads: null,
   mcp: null,
@@ -31,7 +32,7 @@ const runtime = (plugins: CoffreRuntime['plugins']): CoffreRuntime => ({
   publicUrl: 'https://coffre.test',
   verifier: { verify: async () => { throw new Error('unused'); } },
   waitUntil,
-  schema: { migrated: true },
+  schema: { migrated: true }, appKey: { settled: true },
   rotateAfterDays: 365,
   plugins,
 });

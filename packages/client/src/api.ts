@@ -1199,6 +1199,7 @@ export type Api = {
     output: {
       app: {
         keyId: string;
+        previous?: string[];
       };
       vault: {
         current: {

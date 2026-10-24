@@ -38,6 +38,7 @@ export function auditWatch(options: AuditWatchOptions): CoffrePlugin {
     },
     walkOn: (ctx, store) => walkOn(ctx, store ?? anchor),
     acceptLoss: (ctx, range) => acceptLoss(ctx, anchor, range),
+    reseal: (ctx, from) => reseal(ctx, anchor, from),
   });
   return { name: 'audit-watch', [WATCH]: hooks } as CoffrePlugin;
 }
@@ -145,8 +146,26 @@ const WRITES_LOST = 3;
 function foreign(ctx: WatchContext, anchor: AuditAnchor): string {
   const sealed = typeof anchor.keyId === 'string' ? anchor.keyId : null;
   return sealed !== null && sealed !== ctx.keyId
-    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed, and nothing re-seals it yet. Empty its store, and the next beat re-anchors`
+    ? `the audit anchor is sealed under ${sealed}, not the app's key ${ctx.keyId}: auditChainKey changed without a rotation that moved from ${sealed} (previousAuditChainKeys). Empty its store, and the next beat re-anchors`
     : 'the audit anchor is not one the app wrote: once it is understood, empty its store, and the next beat re-anchors';
+}
+
+/**
+ * The anchor sealed again under the app's key, as the app's rotation to it
+ * asks before its `key.rotate` (key-rotation.ts): what the record says, as
+ * it says it, if `from` says the old key sealed it. No record, the app's
+ * own already, or one under another key, is left as it is, and the next
+ * beat says what it finds. A beat between that writes first is read
+ * again; one that keeps writing first fails the step, which tries again.
+ */
+async function reseal(ctx: WatchContext, anchors: AnchorStore, from: (anchor: AuditAnchor) => boolean): Promise<void> {
+  for (let lost = 0; lost <= WRITES_LOST; lost++) {
+    const held = await anchors.read();
+    if (held === null || ctx.own(held) || !from(held)) return;
+    const { keyId: _sealedUnder, mac: _mac, ...fields } = held;
+    if (await anchors.write(held, ctx.seal(fields))) return;
+  }
+  throw new Error('the audit anchor kept changing while the rotation sealed it again');
 }
 
 function samePoint(a: LogHead | null, b: LogHead | null): boolean {

@@ -18,7 +18,7 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   protocol: the state, one step per SQL statement, and the invariants.
 - [`formal/MC.tla`](../formal/MC.tla) holds its scenarios: who runs what, and
   from which state. Each one has a configuration, `formal/<Name>.cfg`.
-- Five smaller models, each with its scenarios beside it, hold other
+- Six smaller models, each with its scenarios beside it, hold other
   protocols to the same discipline ([below](#credentials-issuing-and-the-bulk-limit)):
   - [`formal/Credentials.tla`](../formal/Credentials.tla), a CI run's ID
     token exchanged for a credential, and every way a credential ends;
@@ -27,9 +27,12 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   - [`formal/Bulk.tla`](../formal/Bulk.tla), the vault's bulk limit (R28);
   - [`formal/Audit.tla`](../formal/Audit.tla), the audit chain's
     heartbeats, checkpoints, anchor and readiness against someone who
-    writes the database ([below](#the-audit-chain-and-the-tunnel));
+    writes the database ([below](#the-audit-chain-the-app-key-and-the-tunnel));
   - [`formal/Tunnel.tla`](../formal/Tunnel.tla), how long a revoked
-    handle's tunnel session lives.
+    handle's tunnel session lives;
+  - [`formal/AppKey.tla`](../formal/AppKey.tla), the app key's rotation,
+    against instances still under the old key and someone who holds it
+    ([below](#appkeytla)).
 
   A configuration names the module of its scenarios on its second line,
   `\* model MCCredentials`; one that names none is `MC.tla`'s.
@@ -284,7 +287,9 @@ reference to that secret in `References`, and none yet elsewhere.
   `Coffre.tla` in the same pull request; one in `workloads.ts`, `signin.ts`,
   `services.ts` or `context.ts`, `Credentials.tla` or `Issuing.tla`; one in
   the vault's count, `Bulk.tla`; one in `plugins/audit-watch.ts`, `anchor.ts`, `audit.ts` or
-  the vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`.
+  the vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`;
+  one in `key-rotation.ts`, or in what an append reads under the head
+  (`log.ts`), `AppKey.tla`.
 - **Beyond the bounds.** The bounds are three places, a few members, and three
   or four requests of one to three operations each. Races that need more are
   not explored. The races found so far needed two requests, or three for
@@ -821,11 +826,12 @@ lifts, and only there do the rule's runs commit after they count.
 - **The platforms.** STS, Kubernetes, Railway's addresses and Cloudflare's
   `props` are trust roots (section 3), which the PRs check live.
 
-## The audit chain and the tunnel
+## The audit chain, the app key and the tunnel
 
-Two more, with the same discipline: the chain's verification against
-someone who writes the database, and how long a revoked handle's tunnel
-session lives.
+Three more, with the same discipline: the chain's verification against
+someone who writes the database, the app key's rotation against someone
+who holds the old key, and how long a revoked handle's tunnel session
+lives.
 
 ### Audit.tla
 
@@ -991,10 +997,41 @@ starts just after the check does, so with D = R a yes inside that gap
 skips a tick, and the watchdog can end a session whose handle stands: an
 availability edge, not a bound, which `StandingStaysOpen` does not see.
 
+### AppKey.tla
+
+The app key's rotation (`key-rotation.ts`). Starts under the new key B
+step it, each step one transaction under the log's head that reads where
+the rotation stands, signs the next row again under B if the old key A
+signed it, and appends its `key.reseal`; once no row is left, a step of
+its own appends `key.rotate` (`finishRotation`).
+Beside them, an instance still under A writes a row and its entry under
+the head, as during a deploy, and someone who holds A and can write the
+database writes rows and entries under A past every check, at any moment.
+A row is its MAC's key and who wrote what it says; one row a step.
+
+| Protection, in the code | Turned off, TLC finds |
+|---|---|
+| A step reads where the rotation stands under the head (`rotateStep` and `finishRotation`, `keyState(tx)` after `lockLogHead`) | two starts that each read the last row before the other's step write `key.rotate` twice (`OneRotate`); and a start that read the rotation under way signs under B, after `key.rotate`, a row someone wrote under A since (`NoLaunderingAfterRotate`) |
+| An append under a key the log names as moved from refuses (`appendEntries`, `KeyRetired`) | the instance under A writes an entry after the first step (`OldKeyWritesNothingAfter`), and a row the step had passed, left under A once rotated (`RotationComplete`) |
+| A verification takes A's entries only before the first step (`appVerifier`) | an entry forged under A after the first step verifies (`NothingForgedAccepted`) |
+
+What it does not cover: a row forged under A before `key.rotate` is
+signed again with the rest, as the rotation cannot tell it from the
+instance's own, so a leaked key's window for rows closes at `key.rotate`,
+and for entries at the first step; an instance under A that changes a
+row without the head, as no audited write does, may lose that change. The
+anchor, outside the database, is sealed again by compare-and-set before
+`key.rotate`, as `Audit.tla` models its writes, and not modelled here.
+
 ### Their invariants
 
 | Invariant | What must hold in every state |
 |---|---|
+| `OneRotate` | However many starts step the rotation at once, the log holds one `key.rotate` |
+| `NoLaunderingAfterRotate` | No row written under the old key after `key.rotate` is ever signed under the new one |
+| `OldKeyWritesNothingAfter` | An instance under the old key appends no entry from the rotation's first step on |
+| `RotationComplete` | Once rotated, a row under the old key alone is one someone forged past the checks |
+| `NothingForgedAccepted` | No entry forged under the old key from the first step on verifies |
 | `SignsNoForgedVault` | The vault never signs a prefix holding an entry of its own rewritten, or chained after a rewrite |
 | `StaysUnsignedOnceFound` | Once a checkpoint was refused for a broken log, none is signed while the vault could find the tamper |
 | `FoundEditStaysRed` | Against someone who edits, reverts and edits again, any entry, heartbeat rows among them: while an edit a beat wrote to the anchor is still in place, readiness is red. Edited again after a revert, it is a new edit behind the anchor, which the scrub finds (`EditFoundByNextScrub`) |
@@ -1017,6 +1054,7 @@ availability edge, not a bound, which `StandingStaysOpen` does not see.
 | `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 731 |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
+| `AppKeyRotation` | Two starts under the new key step a rotation of two rows at once, while an instance under the old key writes a row, and someone who holds it writes rows and an entry under it | 146 thousand |
 
 ## TLC
 

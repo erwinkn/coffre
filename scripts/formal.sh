@@ -99,6 +99,11 @@ REMOVALS=(
   "Tampering AnchorCas AnchorNeverBack"
   "Overtaking AnchorCas FoundEditStaysRed"
   "Walking AnchorCas AnchorNeverBack"
+  "AppKeyRotation StateUnderHead OneRotate"
+  "AppKeyRotation StateUnderHead NoLaunderingAfterRotate"
+  "AppKeyRotation RetiredCheck OldKeyWritesNothingAfter"
+  "AppKeyRotation RetiredCheck RotationComplete"
+  "AppKeyRotation WalkCutoff NothingForgedAccepted"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
 )

@@ -447,7 +447,12 @@ const TEMPLATES: Record<string, Template> = {
       ` tampered with: ${TAMPERING[entry.reason ?? ''] ?? 'it fails its seal'}`,
     ],
   },
-  'key.rotate': { did: 'rotated its key', tried: 'rotate its key', what: () => [] },
+  // The vault's rotation to a new vault key, or the app's to a new app key, which names the key it moved from.
+  'key.rotate': {
+    did: ({ entry }) => (entry.author === 'app' ? 'moved to its new app key' : 'rotated its key'),
+    tried: ({ entry }) => (entry.author === 'app' ? 'move to its new app key' : 'rotate its key'),
+    what: () => [],
+  },
   // An MCP client a person connected, such as Claude: named as the consent page showed it.
   'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
   // A tool an MCP client called, by its name, and the places it named.
@@ -517,6 +522,16 @@ const TEMPLATES: Record<string, Template> = {
     what: ({ entry }) => [['the', text(entry.metadata.kekProvider) === 'local' ? null : text(entry.metadata.kekProvider), 'vault key', text(entry.metadata.kekId)].filter((word) => word !== null).join(' ')],
   },
   'audit.heartbeat': { did: 'checked in', tried: 'check in', what: () => [] },
+  // A step of the app key's rotation: the rows it signed again under the new key, the sessions it signed out, any it could not sign.
+  'key.reseal': {
+    did: 'signed rows again under its new app key:',
+    tried: 'sign rows again under its new app key',
+    what: ({ entry }) => {
+      const count = (name: string) => (typeof entry.metadata[name] === 'number' ? (entry.metadata[name] as number) : 0);
+      const unsigned = count('unsignedCount');
+      return [`${count('resealed')}, and ${count('signedOut')} signed out${unsigned === 0 ? '' : `; ${unsigned} neither key had signed, left as they were`}`];
+    },
+  },
   // The audit watch's (server plugins/audit-watch.ts): what it found, what cleared it, and an Owner's acceptance.
   'audit.finding': {
     did: 'found the log changed',
@@ -829,6 +844,7 @@ const SYSTEM: Record<string, string> = {
   cron: 'the scheduler',
   vault: 'the vault',
   app: 'coffre',
+  'coffre-key-rotation': 'coffre',
 };
 
 /** Which components wrote the line, the vault first: "vault", "app", "vault, app". */
