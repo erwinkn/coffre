@@ -768,11 +768,16 @@ gate remembers the `jti`s it took under each. Everything else answers
 nonce is refused under both, whichever of the workload's sessions sends
 it, and it is spent as soon as the gate sees it, even if a count then
 refuses the request. Once both epochs are gone, a proof's nonce is
-refused anyway. A clock stepped back by up to 10 seconds runs at the time
-it had, so it revives no epoch and restarts no count. Stepped back
-further, the gate starts over as a restart does: a new epoch, and the
-counts of windows not yet begun forgotten, so a clock that jumped ahead
-and came back costs a nonce retry rather than holding the gate there.
+refused anyway. Clocks step, both ways, and the gate's epochs and counts
+take it apart. Its epochs run on the latest time it was given: a step back
+of up to 10 seconds, two machines' skew, revives none, and a step back
+further starts a new epoch, as a restart does, so a clock that jumped
+ahead and came back costs a nonce retry. Each count holds one window, the
+one it was last asked in, or a later one up to 10 seconds ahead, which a
+clock a little behind still counts in; asked in any other window, it
+starts again at zero, and that is written too, so what an eviction reads
+back is what memory held. A count never waits for the clock to come back
+to it.
 
 - **A restart or an eviction forgets nothing that matters.** A new epoch
   means every proof made before it carries an unknown nonce and is refused,
@@ -1529,10 +1534,10 @@ these:
 | Import the `jwk` (cached per isolate by `jkt`, as a settled value) | ~50 µs cold, 0 warm |
 | One ES256 verify (BoringSSL in workerd) | ~100–200 µs |
 | The one SQL statement of 5.3 (row, member's generation, binding, ancestors, freezes) | ~100 µs of client work, plus a round trip through Hyperdrive |
-| The gate: the Worker's `fetch` to the workload's object, and its work there | 1.6 µs of the gate's own (`GateState.admit`, a proof and two counts, in Node); in local workerd, about 1 ms a call, nearly all of it the Durable Object call's own machinery, as much by RPC (`packages/server/test/bench/gate.ts`). Plus a round trip to the object, made near the workload |
+| The gate: the Worker's `fetch` to the workload's object, and its work there | On Cloudflare (PR 1b's live check, 600 requests each): about 0.2 ms on the Worker's side (CPU p50 413 µs against a floor of 202 µs, p99 647 against 406) and about 0.2 ms in the object (p50 203 µs). The gate's own work is 1.6 µs (`GateState.admit`, a proof and two counts, in Node); the rest is the Durable Object call's own machinery, as much by RPC. Plus a round trip to the object, made near the workload: 4 ms of wall time at p50 from the check's client |
 | A cold request: `vault.access` and the opening, through the vault's connection | as a handle's cold request today |
 
-The budget is under 0.5 ms of CPU on a warm request, plus two round trips:
+The budget is under 0.7 ms of CPU on a warm request, the gate's 0.4 included, plus two round trips:
 one to the database and one to the gate. Freezes and revocations are then
 seen on every request. A body's hash adds about 2 ms per MiB. The bench
 reports cold and warm. `request-cost.test.ts` gains a workload case that

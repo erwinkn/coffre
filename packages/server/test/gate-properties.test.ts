@@ -57,17 +57,17 @@ const operation = gs.oneOf<Operation>(
 );
 
 type Answer = { ok: true } | { ok: false; reason: string; key?: string; retryAfterMs?: number; first?: boolean } | 'throws';
-/** A count's requests and refusals: their times, by count. */
-type Times = Map<string, { counted: number[]; refused: number[] }>;
+/** What a count holds: one window, the requests it took, and whether it refused one. */
+type Held = { start: number; taken: number; refused: boolean };
 
 const windowOf = (id: string) => Number(id.split('/')[1]);
 const startOf = (time: number, windowMs: number) => Math.floor(time / windowMs) * windowMs;
 
 /** The reference: what the design says each answer is. */
 class Reference {
-  /** The clock the gate is given, which may go back; and the time it runs at. */
+  /** The clock the gate is given, which may go back; and the latest it was given in this life, which its epochs run on. */
   clock = T0;
-  now = T0;
+  latest = T0;
   life = 0;
   started = T0;
   /** Each nonce a gate gave, with the life and epoch it named. */
@@ -76,10 +76,10 @@ class Reference {
   readonly taken: { life: number; epoch: number; jti: number; nonce: string }[] = [];
   second = -1;
   inSecond = 0;
-  times: Times = new Map();
+  /** Each count's window, by `<key>/<windowMs>`. */
+  held = new Map<string, Held>();
   /** A Durable Object's counts of an hour or more, as its alarm last wrote them. */
-  written: Times = new Map();
-
+  written = new Map<string, Held>();
   readonly durable: boolean;
 
   constructor(durable: boolean) {
@@ -90,27 +90,20 @@ class Reference {
     this.clock += ms;
   }
 
-  /** The gate is given the clock: a step back of `SKEW_MS` at most runs at the time it had; further, it starts over, keeping the counts of windows begun. */
+  /** The gate is given the clock: its epochs run on the latest time; a step back past `SKEW_MS` is a new epoch, its counts untouched. */
   called() {
-    if (this.clock >= this.now) this.now = this.clock;
-    else if (this.now - this.clock > SKEW_MS) {
-      this.newLife();
-      for (const [id, times] of this.times) {
-        const begun = (time: number) => startOf(time, windowOf(id)) <= this.clock;
-        this.times.set(id, { counted: times.counted.filter(begun), refused: times.refused.filter(begun) });
-      }
-    }
+    if (this.clock < this.latest - SKEW_MS) this.newEpochs();
+    else this.latest = Math.max(this.latest, this.clock);
   }
 
-  newLife() {
+  newEpochs() {
     this.life += 1;
     this.started = this.clock;
-    this.now = this.clock;
-    this.second = -1;
+    this.latest = this.clock;
   }
 
   epoch() {
-    return Math.floor((this.now - this.started) / EPOCH_MS);
+    return Math.floor((this.latest - this.started) / EPOCH_MS);
   }
 
   /** The gate's current nonce, as it said it: the same for one epoch of one life, and never one it gave before. */
@@ -124,35 +117,32 @@ class Reference {
     this.nonces.push({ nonce, life: this.life, epoch: this.epoch() });
   }
 
+  /** A new gate, in memory: a new epoch, no count, the ceiling's second unknown. */
   restart() {
-    this.newLife();
-    this.times = new Map();
+    this.newEpochs();
+    this.second = -1;
+    this.held = new Map();
   }
 
   flush() {
     if (!this.durable) return;
-    for (const [id, times] of this.times) {
-      if (windowOf(id) >= DURABLE_WINDOW_MS) this.written.set(id, { counted: [...times.counted], refused: [...times.refused] });
-    }
+    for (const [id, held] of this.held) if (windowOf(id) >= DURABLE_WINDOW_MS) this.written.set(id, { ...held });
   }
 
-  /**
-   * Made again from what was written: per count, the window it was last
-   * written in, unless that has ended; the clock then runs from the latest
-   * such window's start.
-   */
+  /** A new gate, made from what was written. */
   evict() {
-    this.newLife();
-    this.times = new Map();
-    for (const [id, times] of this.written) {
-      const all = [...times.counted, ...times.refused];
-      if (all.length === 0) continue;
-      const start = startOf(Math.max(...all), windowOf(id));
-      if (start + windowOf(id) <= this.clock) continue;
-      const inWindow = (time: number) => startOf(time, windowOf(id)) === start;
-      this.times.set(id, { counted: times.counted.filter(inWindow), refused: times.refused.filter(inWindow) });
-      this.now = Math.max(this.now, start);
-    }
+    this.restart();
+    for (const [id, held] of this.written) this.held.set(id, { ...held });
+  }
+
+  /** A count's window at the clock: the one it holds if that is the clock's, or ahead of it by a skew; else a new one. */
+  windowFor(id: string): Held {
+    const start = startOf(this.clock, windowOf(id));
+    const held = this.held.get(id);
+    if (held !== undefined && (held.start === start || (held.start > start && held.start - this.clock <= SKEW_MS))) return held;
+    const fresh = { start, taken: 0, refused: false };
+    this.held.set(id, fresh);
+    return fresh;
   }
 
   /** The answer the design gives, its nonce left to `current`. */
@@ -160,7 +150,7 @@ class Reference {
     const ids = counts.map((count) => `${count.key}/${count.windowMs}`);
     if (new Set(ids).size !== ids.length) return 'throws';
     this.called();
-    const second = Math.floor(this.now / 1000);
+    const second = Math.floor(this.clock / 1000);
     if (second !== this.second) {
       this.second = second;
       this.inSecond = 0;
@@ -176,23 +166,18 @@ class Reference {
       assert.ok(!this.taken.some((proof) => proof.nonce === nonce && proof.jti === jti), 'a proof was taken twice');
       this.taken.push({ life: this.life, epoch: named.epoch, jti, nonce });
     }
-    const timesOf = (id: string) => {
-      if (!this.times.has(id)) this.times.set(id, { counted: [], refused: [] });
-      return this.times.get(id)!;
-    };
-    let past: { id: string; count: Count; start: number } | undefined;
-    for (const [i, count] of counts.entries()) {
-      const start = startOf(this.now, count.windowMs);
-      const inWindow = timesOf(ids[i]!).counted.filter((time) => startOf(time, count.windowMs) === start).length;
-      if (inWindow >= count.most && (past === undefined || start + count.windowMs > past.start + past.count.windowMs)) past = { id: ids[i]!, count, start };
+    const windows = counts.map((count, i) => ({ count, held: this.windowFor(ids[i]!) }));
+    let past: (typeof windows)[number] | undefined;
+    for (const window of windows) {
+      const ends = (w: typeof window) => w.held.start + w.count.windowMs;
+      if (window.held.taken >= window.count.most && (past === undefined || ends(window) > ends(past))) past = window;
     }
     if (past !== undefined) {
-      const { refused } = timesOf(past.id);
-      const first = !refused.some((time) => startOf(time, past.count.windowMs) === past.start);
-      refused.push(this.now);
-      return { ok: false, reason: 'limit', key: past.count.key, retryAfterMs: past.start + past.count.windowMs - this.now, first };
+      const first = !past.held.refused;
+      past.held.refused = true;
+      return { ok: false, reason: 'limit', key: past.count.key, retryAfterMs: past.held.start + past.count.windowMs - this.clock, first };
     }
-    for (const id of ids) timesOf(id).counted.push(this.now);
+    for (const { held } of windows) held.taken += 1;
     return { ok: true };
   }
 }

@@ -30,9 +30,9 @@ export const DURABLE_WINDOW_MS = 3_600_000;
 /** How often a Durable Object writes its durable counts: an eviction loses at most this much of them. */
 export const FLUSH_MS = 10_000;
 /**
- * How far back a clock may step and the gate run on at the time it had,
- * its counts exact: two machines' skew, a Durable Object made again
- * elsewhere. Past it, the gate starts over as a restart does.
+ * How far a clock may step back and the gate take it as skew, two
+ * machines' or a Durable Object's made again elsewhere: its epoch and its
+ * counts' windows stay. Past it, a new epoch.
  */
 export const SKEW_MS = 10_000;
 
@@ -50,18 +50,21 @@ type Epoch = { nonce: string; seen: Set<string> };
  * given on each call. Every method runs to its end without waiting, so no
  * two requests interleave inside one.
  *
- * A clock stepped back by `SKEW_MS` at most runs at the time it had, so it
- * neither revives an epoch nor starts a count's window again. Stepped back
- * further, the gate starts over as a restart does: a new epoch, and the
- * counts of windows not yet begun forgotten. So a clock that jumped ahead
- * and came back costs a nonce retry, and never holds the gate where it
- * jumped to.
+ * Clocks step, both ways. Its epochs run on the latest time it was given,
+ * so a step back of `SKEW_MS` at most revives none; a step back further
+ * starts a new epoch, as a restart does, so a clock that jumped ahead and
+ * came back costs a nonce retry. Each count holds one window, the one it
+ * was last asked in, or a later one up to `SKEW_MS` ahead, which a clock a
+ * little behind still counts in; asked in any other, it starts again at
+ * zero. Neither depends on the other, and a count never waits for the
+ * clock to come back to it.
  */
 export class GateState {
   #started: number;
   readonly #ceiling: number;
   /** Whether its counts over `DURABLE_WINDOW_MS` or more are kept for `flush`: a Durable Object's, which writes them. */
   readonly #durable: boolean;
+  /** The latest time it was given, which its epochs run on. */
   #latest: number;
   #n = 0;
   #current: Epoch;
@@ -83,7 +86,7 @@ export class GateState {
   }
 
   nonce(now: number): string {
-    this.#rotate(this.#clock(now));
+    this.#rotate(now);
     return this.#current.nonce;
   }
 
@@ -93,11 +96,10 @@ export class GateState {
    * whatever follows. Then every count, each named once: past any, the
    * request is refused and none counts it.
    */
-  admit(request: { replay?: { jti: string; nonce: string }; counts?: readonly GateCount[] }, given: number): GateAdmission {
+  admit(request: { replay?: { jti: string; nonce: string }; counts?: readonly GateCount[] }, now: number): GateAdmission {
     const { replay, counts = [] } = request;
     const ids = counts.map(countId);
     if (new Set(ids).size !== ids.length) throw new Error(`a request names a count twice: ${ids.join(', ')}`);
-    const now = this.#clock(given);
     this.#rotate(now);
     const second = Math.floor(now / 1000);
     if (second !== this.#second) {
@@ -118,11 +120,13 @@ export class GateState {
       const id = ids[i]!;
       const start = Math.floor(now / count.windowMs) * count.windowMs;
       let held = this.#counts.get(id);
-      if (held === undefined || held.start !== start) {
+      const ahead = held !== undefined && held.start > start && held.start - now <= SKEW_MS;
+      if (held === undefined || (held.start !== start && !ahead)) {
         held = { start, taken: 0, refused: false };
         this.#counts.set(id, held);
+        this.#touched(id, count.windowMs);
       }
-      return { id, count, held, end: start + count.windowMs };
+      return { id, count, held, end: held.start + count.windowMs };
     });
     // Past several, the one that ends last says when to retry.
     const past = windows.filter(({ count, held }) => held.taken >= count.most).sort((a, b) => b.end - a.end)[0];
@@ -159,41 +163,9 @@ export class GateState {
     return this.#dirty.size > 0;
   }
 
-  /**
-   * Durable counts as `flush` gave them, read back when a Durable Object
-   * starts again, but those whose window has ended. Its clock moves to the
-   * latest window it keeps, so it counts on in it, a few milliseconds of
-   * skew after an eviction included; one written by a clock far ahead is
-   * forgotten at the next call, which steps back from it.
-   */
+  /** Durable counts as `flush` gave them, read back when a Durable Object starts again: one whose window has ended starts again when asked, as in memory. */
   restore(counts: Iterable<[string, Count]>) {
-    const now = this.#latest;
-    for (const [id, held] of counts) {
-      if (held.start + windowOf(id) <= now) continue;
-      this.#counts.set(id, { ...held });
-      if (held.start > this.#latest) this.#latest = held.start;
-    }
-  }
-
-  #clock(now: number): number {
-    if (now >= this.#latest) this.#latest = now;
-    else if (this.#latest - now > SKEW_MS) this.#restart(now);
-    return this.#latest;
-  }
-
-  /** What a restart does, but for the counts of windows begun by `now`. */
-  #restart(now: number) {
-    this.#started = now;
-    this.#latest = now;
-    this.#n = 0;
-    this.#current = epoch(0);
-    this.#previous = null;
-    this.#second = -1;
-    for (const [id, held] of this.#counts) {
-      if (held.start <= now) continue;
-      this.#counts.delete(id);
-      this.#dirty.delete(id);
-    }
+    for (const [id, held] of counts) this.#counts.set(id, { ...held });
   }
 
   #touched(id: string, windowMs: number) {
@@ -201,12 +173,22 @@ export class GateState {
   }
 
   /**
-   * The epoch `now` falls in, counted from the start: epoch `n`'s nonce is
-   * taken from `n × EPOCH_MS` until `(n + 2) × EPOCH_MS`, however few
-   * requests came.
+   * The epoch the latest time falls in, counted from the start: epoch
+   * `n`'s nonce is taken from `n × EPOCH_MS` until `(n + 2) × EPOCH_MS`,
+   * however few requests came. Given a time further back than `SKEW_MS`,
+   * it starts again from it with a new epoch.
    */
   #rotate(now: number) {
-    const n = Math.floor((now - this.#started) / EPOCH_MS);
+    if (now < this.#latest - SKEW_MS) {
+      this.#started = now;
+      this.#latest = now;
+      this.#n = 0;
+      this.#current = epoch(0);
+      this.#previous = null;
+      return;
+    }
+    if (now > this.#latest) this.#latest = now;
+    const n = Math.floor((this.#latest - this.#started) / EPOCH_MS);
     if (n <= this.#n) return;
     this.#previous = n === this.#n + 1 ? this.#current : null;
     this.#n = n;

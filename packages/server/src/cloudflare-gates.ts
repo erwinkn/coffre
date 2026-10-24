@@ -59,8 +59,8 @@ export function workersGates(namespace: GatesNamespace): Gates {
 export class CoffreGates {
   readonly #storage: GateObjectState['storage'];
   readonly #gate = new GateState(Date.now(), { durable: true });
-  /** Whether an alarm is set to write the durable counts. */
-  #flushing = false;
+  /** When the alarm that writes the durable counts is set for, if it is. */
+  #alarm: number | null = null;
 
   constructor(state: GateObjectState, _env: unknown) {
     this.#storage = state.storage;
@@ -74,16 +74,17 @@ export class CoffreGates {
     const call = (await request.json()) as GateCall;
     const now = Date.now();
     const answer = call.op === 'nonce' ? { nonce: this.#gate.nonce(now) } : this.#gate.admit(call, now);
-    if (this.#gate.dirty && !this.#flushing) {
+    // An alarm set by a clock that has since stepped back is brought forward: a write comes within `FLUSH_MS` of the change, whatever the clock did.
+    if (this.#gate.dirty && (this.#alarm === null || this.#alarm > now + FLUSH_MS)) {
       await this.#storage.setAlarm(now + FLUSH_MS);
-      this.#flushing = true;
+      this.#alarm = now + FLUSH_MS;
     }
     return Response.json(answer);
   }
 
   /** Writes the durable counts; a write that fails gives them back, and the alarm, retried, writes them again. */
   async alarm(): Promise<void> {
-    this.#flushing = false;
+    this.#alarm = null;
     const changed = this.#gate.flush();
     if (changed.length === 0) return;
     try {

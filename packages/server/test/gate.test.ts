@@ -120,13 +120,36 @@ test('past several counts, the one whose window ends last says when to retry', (
   assert.deepEqual(gate.admit({ counts }, T0), { ok: false, reason: 'limit', key: 'per-day', retryAfterMs: day + 86_400_000 - T0, first: true });
 });
 
-test("a clock that comes back from far ahead forgets the counts it made there: the window counts from zero when its time comes", () => {
-  const day = Math.ceil(T0 / 86_400_000) * 86_400_000;
-  const gate = new GateState(day - 60_000);
-  const perDay = [{ key: 'stripe', windowMs: 86_400_000, most: 1 }];
-  assert.equal(gate.admit({ counts: perDay }, day + 5000).ok, true);
-  gate.nonce(day - 59_000);
-  assert.equal(gate.admit({ counts: perDay }, day + 1).ok, true);
+test('a count asked again after a clock came back from far ahead counts in the real window, and what it writes says so', () => {
+  const hour = Math.ceil(T0 / 3_600_000) * 3_600_000;
+  const gate = new GateState(hour - 60_000, { durable: true });
+  const perHour = [{ key: 'stripe', windowMs: 3_600_000, most: 1 }];
+  // At 13:00 for one request, then back at 12:59.
+  assert.equal(gate.admit({ counts: perHour }, hour + 5000).ok, true);
+  const stored = new Map(gate.flush());
+  assert.equal(gate.admit({ counts: perHour }, hour - 59_000).ok, true);
+  for (const [id, held] of gate.flush()) stored.set(id, held);
+  // Evicted, and made again at the real 13:00: 12:00's window has ended, and 13:00's counts from zero, as in memory.
+  const again = new GateState(hour + 1, { durable: true });
+  again.restore(stored);
+  assert.equal(again.admit({ counts: perHour }, hour + 1).ok, true);
+  assert.equal(gate.admit({ counts: perHour }, hour + 1).ok, true);
+});
+
+test('a window a count starts again in is written even when another count refuses the request: an eviction brings back what memory holds', () => {
+  const hour = Math.ceil(T0 / 3_600_000) * 3_600_000;
+  const gate = new GateState(hour - 60_000, { durable: true });
+  const perHour = { key: 'stripe', windowMs: 3_600_000, most: 1 };
+  const closed = { key: 'openai', windowMs: 3_600_000, most: 0 };
+  assert.equal(gate.admit({ counts: [perHour] }, hour + 5000).ok, true);
+  const stored = new Map(gate.flush());
+  // Back at 12:59: refused by the other count, the first starts again in 12:00's window all the same.
+  assert.equal(gate.admit({ counts: [perHour, closed] }, hour - 59_000).ok, false);
+  for (const [id, held] of gate.flush()) stored.set(id, held);
+  const again = new GateState(hour + 1, { durable: true });
+  again.restore(stored);
+  assert.equal(gate.admit({ counts: [perHour] }, hour + 1).ok, true);
+  assert.equal(again.admit({ counts: [perHour] }, hour + 1).ok, true);
 });
 
 test("counts read back by an object whose clock is a little behind the window they were written in count on in it", () => {
@@ -138,10 +161,9 @@ test("counts read back by an object whose clock is a little behind the window th
   const written = before.flush();
   const after = new GateState(day - 100, { durable: true });
   after.restore(written);
-  // Its clock moved to the window's start, the day's whole length is left.
-  assert.deepEqual(after.admit({ counts: perDay }, day - 50), { ok: false, reason: 'limit', key: 'stripe', retryAfterMs: 86_400_000, first: true });
+  assert.deepEqual(after.admit({ counts: perDay }, day - 50), { ok: false, reason: 'limit', key: 'stripe', retryAfterMs: 86_400_050, first: true });
   assert.equal(after.admit({ counts: perDay }, day + 1000).ok, false);
-  // Written by a clock far ahead: forgotten at the first call, so it cannot hold the gate there.
+  // Written by a clock far ahead: more than a skew away, so the count starts again in its own window.
   const far = new GateState(day - 3_600_000, { durable: true });
   far.restore(written);
   assert.equal(far.admit({ counts: perDay }, day - 3_600_000).ok, true);
@@ -313,6 +335,29 @@ test('on Workers, a write that fails is written by the retried alarm, and an ala
   assert.equal(held.stored.size, 0);
   await object.alarm();
   assert.equal((held.stored.get('count:86400000:stripe') as { taken: number }).taken, 2);
+});
+
+test('on Workers, an alarm set by a clock that has since stepped back is brought forward', async (t) => {
+  const real = Date.now;
+  t.after(() => {
+    Date.now = real;
+  });
+  const now = real();
+  const held = objectState();
+  const object = new CoffreGates(held.state, {});
+  await held.started();
+  const gate = workersGates(namespace(() => object).gates)('token:api');
+  const perDay = { key: 'stripe', windowMs: 86_400_000, most: 5 };
+  Date.now = () => now + 86_400_000;
+  await gate.admit({ counts: [perDay] });
+  assert.equal(held.alarm(), now + 86_400_000 + FLUSH_MS);
+  Date.now = () => now;
+  await gate.admit({ counts: [perDay] });
+  assert.equal(held.alarm(), now + FLUSH_MS);
+  // Within a flush of the last, no new alarm.
+  Date.now = () => now + 1;
+  await gate.admit({ counts: [perDay] });
+  assert.equal(held.alarm(), now + FLUSH_MS);
 });
 
 test('a gate that fails is an error, never an answer', async () => {
