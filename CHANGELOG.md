@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.1 (2026-10-25)
+
 - **Upgrading to 0.14.1, in short.** No migration, and nothing to change in
   your config. Deploy the vault Worker before the app, as
   [deploy.md](docs/deploy.md) says; a new app beside an older vault asks
