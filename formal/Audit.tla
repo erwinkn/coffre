@@ -183,7 +183,7 @@ WalkTo(r, c) ==
 
 NoOp == [kind |-> "none", at |-> 0]
 L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0,
-       held |-> TRUE, wat |-> 0, wver |-> 0, wend |-> 0, wok |-> TRUE, wfault |-> 0,
+       wat |-> 0, wver |-> 0, wend |-> 0,
        sfrom |-> 0, slap |-> 0, slapEnd |-> 0, slapVer |-> 0, sok |-> TRUE, done |-> TRUE,
        beat |-> 0, prev |-> NoAnchor, next |-> NoAnchor, signed |-> FALSE, c |-> 0, cVer |-> 0, read |-> NoAnchor, fEdit |-> 0]
 
@@ -306,10 +306,10 @@ StartWalk(p, c) ==
     LET a == l[p].prev
         moved == WalkChecksFrom /\ ~Carries(a.verified, a.vver)
         w == WalkTo([at |-> a.verified, ver |-> a.vver], c)
-    IN IF AppWalkSteps
-         THEN Read(p, "app.step", [l[p] EXCEPT !.wat = a.verified, !.wver = a.vver, !.wok = ~moved /\ a.verified <= c,
-                                               !.wfault = IF moved THEN a.verified ELSE 0,
+    IN IF AppWalkSteps /\ ~moved /\ a.verified <= c
+         THEN Read(p, "app.step", [l[p] EXCEPT !.wat = a.verified, !.wver = a.vver,
                                                !.wend = IF c - a.verified > Walk THEN a.verified + Walk ELSE c])
+         \* One step, or a walk that cannot start, decided at once.
          ELSE Decided(p, Next_(p, w, IF w.to = 0 THEN 0 ELSE log[w.to].ver), Cas(p))
 
 \* A finding stands until its entry verifies again; a refusal, until the
@@ -338,8 +338,7 @@ AppStep(p) ==
            fault == IF ~linked THEN a + 1 ELSE IF faults = {} THEN 0 ELSE CHOOSE i \in faults : \A j \in faults : i <= j
            c == IF op[p].kind = "beat" THEN l[p].c ELSE l[p].prev.at
            end(at, ok, f, ver) == Decided(p, Next_(p, [ok |-> ok, to |-> at, done |-> at = c, fault |-> f], ver), Cas(p))
-       IN CASE ~l[p].wok -> end(l[p].wat, FALSE, l[p].wfault, l[p].wver)
-            [] a >= l[p].wend -> end(a, TRUE, 0, l[p].wver)
+       IN CASE a >= l[p].wend -> end(a, TRUE, 0, l[p].wver)
             [] fault # 0 -> end(b, FALSE, fault, log[b].ver)
             [] b = l[p].wend -> end(b, TRUE, 0, log[b].ver)
             [] OTHER -> Read(p, "app.step", [l[p] EXCEPT !.wat = b, !.wver = log[b].ver])

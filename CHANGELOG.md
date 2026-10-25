@@ -9,8 +9,9 @@
   app's Hyperdrive connections for the whole walk, as the vault's
   checkpoint did until 0.14.1. The walk now reads a batch a statement,
   outside any transaction, each linked to the hash it verified last, and
-  ends at the hash the vault signed, as before; a key rotation committed
-  while it walks is read from the entries themselves. With 6,000 entries
+  ends at the hash the vault signed, as before; where the log moved on
+  from a key it replaced is also read from the entries themselves, as a
+  safeguard. With 6,000 entries
   to walk, what the beat reads inside the app's transactions went from
   12,010 rows to 2, and its longest transaction from about 115 ms to 3 ms.
 
