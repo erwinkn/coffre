@@ -125,13 +125,13 @@ async function fixture(t: test.TestContext, values: Record<string, string> = awk
     envFile,
     requests: () => requests,
     /** `keys`: what --keys names, every key unless said, and none given as null. */
-    async run(format: string, path: string | null = envFile, keys: string | null = Object.keys(values).join(' ')) {
+    async run(format: string, path: string | null = envFile, keys: string | null = Object.keys(values).join(' '), session: string[] = []) {
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && key !== 'GITHUB_ENV'));
       Object.assign(env, { COFFRE_STATE_DIR: directory, HOME: directory });
       if (path !== null) env.GITHUB_ENV = path;
       // As the Action runs it: the token saved by `coffre login --token`, never in an argument or a variable.
       signedInWithToken(directory, `http://127.0.0.1:${address.port}`, TOKEN);
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, 'export', 'market/prod', '--format', format, ...(keys === null ? [] : ['--keys', keys])], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...session, 'export', 'market/prod', '--format', format, ...(keys === null ? [] : ['--keys', keys])], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => stdout += data);
@@ -150,6 +150,15 @@ test('CLI GitHub export appends to the environment file and prints only all its 
   assert.equal(run.stderr, '');
   assert.deepEqual(readEnvironment(readFileSync(setup.envFile, 'utf8')), { EXISTING: 'kept', ...awkward });
   assert.equal(setup.requests(), 2);
+});
+
+test('--verbose says each request the export makes, with its status and time, and no value or credential', async (t) => {
+  const setup = await fixture(t);
+  const run = await setup.run('github', setup.envFile, Object.keys(awkward).join(' '), ['--verbose']);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stderr, /^coffre: GET \/api\/secrets\/market\/prod: 200 in \d+(\.\d)? m?s\ncoffre: POST \/api\/reveals: 200 in \d+(\.\d)? m?s\n$/);
+  for (const value of [...Object.values(awkward).filter((value) => value !== ''), TOKEN]) assert.equal(run.stderr.includes(value), false);
+  assert.deepEqual(readEnvironment(readFileSync(setup.envFile, 'utf8')), { EXISTING: 'kept', ...awkward });
 });
 
 test('CLI GitHub export masks and appends only the keys --keys names, by name or prefix', async (t) => {
