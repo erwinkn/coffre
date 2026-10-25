@@ -46,11 +46,13 @@ test("a database that does not answer is 503 unavailable, the request's to ask a
     cause: Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' }),
   });
   const lock = new Error('Failed query: select "principal" …', { cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }) });
-  for (const error of [pool, lock, new Error('Connection terminated unexpectedly'), Object.assign(new Error('sorry, too many clients already'), { code: '53300' })]) {
+  const acquire = new Error('Failed query: select 1', { cause: new Error('Failed to acquire a connection from the pool.') });
+  for (const error of [pool, acquire, new Error('Connection terminated unexpectedly'), Object.assign(new Error('sorry, too many clients already'), { code: '53300' }), lock]) {
     assert.equal(isUnavailable(error), true, error.message);
-    assert.deepEqual(toErrorBody(error), { status: 503, body: { error: 'unavailable', message: "coffre's database is not answering right now; try again in a moment" } });
+    assert.deepEqual(toErrorBody(error), { status: 503, body: { error: 'unavailable', message: 'coffre cannot reach its database right now; try again in a moment' } });
   }
-  assert.deepEqual(logged.map(([label]) => label), Array(4).fill('the database did not answer'));
+  // A lock waited on past its bound is an outage under a busy database, and a transaction held too long otherwise: logged apart.
+  assert.deepEqual(logged.map(([label]) => label), [...Array(4).fill('the database did not answer'), 'a statement gave up waiting']);
   // A query that is wrong is a bug, whatever its words.
   assert.equal(isUnavailable(Object.assign(new Error('syntax error at or near "selec"'), { code: '42601' })), false);
 });

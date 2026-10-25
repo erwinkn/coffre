@@ -160,8 +160,10 @@ async function door(runtime: CoffreRuntime): Promise<((request: Request) => Resp
  * health answers 503 `migrating`; a database never migrated has no ledger,
  * and is below them too. Asked until it holds, then known. A database that
  * cannot be reached lets the request through, to meet the outage as it would
- * anyway: a page shows its error state, the API answers 503. Any other
- * failure of the question fails the request.
+ * anyway: a page shows its error state, the API answers 503. Hyperdrive's
+ * pool full is one too, which may free before the request's own queries:
+ * then they run, as they would have on a database that answered in time.
+ * Any other failure of the question fails the request.
  */
 export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
   if (!runtime.schema.migrated) {

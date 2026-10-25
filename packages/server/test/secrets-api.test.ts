@@ -563,7 +563,7 @@ test("a reveal whose vault cannot reach the database is 503 unavailable, to ask 
     });
   };
   try {
-    await assert.rejects(root.secrets.reveal('market/prod'), { status: 503, code: 'unavailable', message: "coffre's database is not answering right now; try again in a moment" });
+    await assert.rejects(root.secrets.reveal('market/prod'), { status: 503, code: 'unavailable', message: 'coffre cannot reach its database right now; try again in a moment' });
   } finally {
     deps.vault.unwrap = unwrap;
   }
