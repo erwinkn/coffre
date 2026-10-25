@@ -227,7 +227,12 @@ async function cloudflaredToken(origin: string): Promise<string> {
 
 /** `fetch`, each request said on stderr with its answer and its time under `--verbose` (`timings.ts`). */
 function http(input: string | Request, init?: RequestInit): Promise<Response> {
-  return sessionFlags.verbose ? timed(fetch, stderr)(input, init) : fetch(input, init);
+  return verbose()(input, init);
+}
+
+/** `fetch`, timed under `--verbose`: for the key-bound clients, which take one. */
+function verbose(): typeof fetch {
+  return sessionFlags.verbose ? timed(fetch, stderr) : fetch;
 }
 
 /** `http`, for GitHub's ID token, whose URL is the runner's to know. */
@@ -1339,7 +1344,7 @@ async function run(args: string[]): Promise<void> {
   if (flags.proof !== undefined && to.credential.kind !== 'workload') fail('--proof is how a service proves itself: coffre --service <name> run --proof …');
   const bound =
     to.credential.kind === 'workload'
-      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`)).catch(
+      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), verbose()).catch(
           (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
         )
       : null;
@@ -2068,7 +2073,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   approve,
   freeze,
   unfreeze,
-  serve: (args) => serve(args, sessionFlags.url),
+  serve: (args) => serve(args, sessionFlags.url, verbose()),
   audit,
   'audit accept-loss': acceptLoss,
   verify,

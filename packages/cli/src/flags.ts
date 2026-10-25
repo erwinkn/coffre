@@ -40,6 +40,8 @@ const TAKES: Record<string, readonly SessionName[]> = {
   help: [],
   login: ['url', 'auth-mode', 'verbose'],
   logout: ['url', 'verbose'],
+  // Its checks send what an attacker would, which is theirs to say.
+  verify: ['url', 'service', 'auth-mode'],
 };
 
 /**

@@ -69,6 +69,8 @@ test('--verbose is a session flag that takes no value, for every command that ta
   assert.deepEqual(commandLine(['--verbose', 'login', 'https://coffre.example.com']).session, { verbose: true });
   assert.throws(() => commandLine(['export', 'app/prod', '--verbose']), /--verbose is a session flag, which goes before the command: coffre --verbose export …/);
   assert.throws(() => commandLine(['--verbose', 'setup']), /--verbose does nothing for coffre setup/);
+  assert.throws(() => commandLine(['--verbose', '--url', 'u', 'verify', 'instance']), /--verbose does nothing for coffre verify/);
+  assert.deepEqual(commandLine(['--url', 'u', 'verify', 'instance']).session, { url: 'u' });
   assert.throws(() => commandLine(['--verbose=yes', 'get', 'x']), /does not take an argument/);
 });
 

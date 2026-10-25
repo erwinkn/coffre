@@ -81,7 +81,7 @@ runs:
           session=(--url "$INPUT_URL" --service "$INPUT_SERVICE" --verbose)
         else
           # The token goes on stdin, never in an argument, which ps shows.
-          printf '%s' "$INPUT_TOKEN" | coffre login "$INPUT_URL" --token
+          printf '%s' "$INPUT_TOKEN" | coffre --verbose login "$INPUT_URL" --token
           session=(--url "$INPUT_URL" --verbose)
         fi
         if [ "$INPUT_REQUIRE_COMPLETE" = true ]; then
