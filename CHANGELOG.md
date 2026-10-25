@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The Action says where its time goes.** A step that read seven keys
+  took 39 s on a busy instance and logged nothing in between. The CLI's
+  new session flag `--verbose` writes a line to stderr for each request,
+  with its method, path, status and duration (`coffre: POST /api/reveals:
+  200 in 480 ms`), and for each time it asks again; never a header, a
+  body, a query or a value. The Action passes it, so its log shows which
+  call was slow.
 - **A database that does not answer is 503, not 500.** When Hyperdrive had
   no free connection to the database for 15 s ("Timed out while waiting for
   an open slot in the pool"), or a statement gave up on a lock, a reveal or
