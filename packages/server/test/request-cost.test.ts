@@ -274,15 +274,15 @@ test('each hot request runs exactly its budget of statements, on as many connect
  * A workload's request at a proxy whose cache has lapsed, on an isolate
  * that has served one before: the session's statement, the path and the environment's rows,
  * the vault's access and unwrap, then its `credential.use` entry, under the
- * head: BEGIN, the head, the policy (the protected environments' rows and
- * the newest change), the credential still, the head again with the clock
- * and the last entry, the entries and the head, COMMIT. Seven of its
- * statements hold the head, which every append in the instance waits for.
+ * head: BEGIN, the head, the policy (the protected environments' rows with
+ * the newest change, one statement), the credential still, the head again
+ * with the clock and the last entry, the entries and the head, COMMIT. Six
+ * of its statements hold the head, which every append in the instance waits for.
  */
 test("a workload's request at a proxy whose cache lapsed runs its budget", POSTGRES, async () => {
   await coldWorkload();
   const spent = await cost(coldWorkload);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 11, vault: 8, vaultCalls: 2 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 8, vaultCalls: 2 });
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {

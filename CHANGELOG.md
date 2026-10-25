@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A decision made from the policy is checked in one statement, not two.**
+  Every write, and every proxied call whose cache has lapsed, checks under
+  the audit log's head that the policy it decided from is still the
+  newest: that no `policy.change` came since, and that no protected
+  environment was renamed or deleted. That was two round trips, the
+  protected environments' slugs, then the newest change, with every other
+  append in the instance waiting on the head. It is now one, with the same
+  answer. A proxied call whose cache lapsed runs 10 statements, not 11, of
+  which 6 hold the head, not 7.
+
 ## 0.14.0 (2026-10-25)
 
 - **Upgrading to 0.14.0, in short.** Run `coffre migrate`: one migration,

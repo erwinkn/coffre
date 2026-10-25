@@ -286,19 +286,28 @@ export async function environmentPaths(db: Queryable, ids: readonly string[]): P
 }
 
 /**
- * Live environments' slugs by id, as the vault reads them into the policy
- * (`livePolicy`): one deleted, or of a project deleted, is left out, as
- * one whose row is not written yet.
+ * What a decision made from the policy holds to (`policyStill`), in one
+ * statement: the newest `policy.change`, by its number, as
+ * `newestPolicySeq` reads it, and the live slug of each environment `ids`
+ * names, as the vault reads them into the policy (`livePolicy`). One
+ * deleted, or of a project deleted, is left out, as one whose row is not
+ * written yet.
  */
-export async function liveEnvironmentSlugs(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
-  if (ids.length === 0) return new Map();
+export async function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq: bigint | null; slugs: Map<string, string> }> {
   const { projects, environments } = tablesOf(db);
-  const rows = await db
-    .select({ id: environments.id, slug: environments.slug })
-    .from(environments)
-    .innerJoin(projects, eq(projects.id, environments.projectId))
-    .where(and(inArray(environments.id, [...ids]), standing(environments.slug), standing(projects.slug)));
-  return new Map(rows.map((row) => [row.id, row.slug]));
+  const live = ids.length === 0
+    ? sql`1 = 0`
+    : sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
+      AND EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${environments.projectId} AND ${standing(projects.slug)})`;
+  // One row for the newest change, whatever the environments: one more per live environment, each beside it.
+  const rows = await dialect.rowsOf<{ seq: string | number | null; id: string | null; slug: string | null }>(db, sql`
+    SELECT (${newestSeqQuery(db, 'policy.change')}) AS seq, ${environments.id} AS id, ${environments.slug} AS slug
+    FROM (SELECT 1 AS one) AS here LEFT JOIN ${environments} ON ${live}`);
+  const seq = rows[0]?.seq ?? null;
+  return {
+    seq: seq === null ? null : BigInt(seq),
+    slugs: new Map(rows.flatMap((row) => (row.id === null || row.slug === null ? [] : [[row.id, row.slug] as const]))),
+  };
 }
 
 export type PlaceRow = {

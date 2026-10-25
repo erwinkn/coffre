@@ -6,8 +6,8 @@ import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
-import { liveEnvironmentSlugs, wayInStands } from '../db/queries.ts';
-import { can, newestPolicySeq, type Caller, type Place } from './caller.ts';
+import { policyNow, wayInStands } from '../db/queries.ts';
+import { can, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
@@ -220,9 +220,10 @@ export async function audited<T>(
 export async function policyStill(ctx: { caller: Pick<Caller, 'policySeq' | 'policy'> }, db: Queryable): Promise<void> {
   const { policy, policySeq } = ctx.caller;
   const read = Object.values(policy.protectedIn).flat();
-  const slugs = await liveEnvironmentSlugs(db, read.map((place) => place.environmentId));
-  const moved = read.some(({ environmentId, slug }) => (slugs.get(environmentId) ?? null) !== slug);
-  if (!moved && (await newestPolicySeq(db)) === policySeq) return;
+  // The newest change and the protected environments' slugs, in one statement: under the head, every append waits on it.
+  const now = await policyNow(db, read.map((place) => place.environmentId));
+  const moved = read.some(({ environmentId, slug }) => (now.slugs.get(environmentId) ?? null) !== slug);
+  if (!moved && now.seq === policySeq) return;
   throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
 }
 
