@@ -525,11 +525,21 @@ export class Cloudflare {
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
         what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
+      if (limits[component] < limit) what += `, at ${limits[component]} connections where the database leaves it ${limit}`;
       details.push(`${name.padEnd(width)}${what}`);
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    // A limit someone set lower is kept: each config's own, then.
+    // A limit someone set lower is kept: each config's own, then. Setup can't tell one a person chose from its own,
+    // made for a smaller database, so it says how to raise it.
+    const low = COMPONENTS.filter((component) => limits[component] < limit);
+    if (low.length > 0) {
+      details.push(
+        "Hyperdrive splits a config's connections among its shards, and a transaction holds one to its commit:",
+        `at a few, one call waiting on a lock stops every other on its shard. To raise ${low.length === 1 ? 'it' : 'them'}:`,
+        ...low.map((component) => `  wrangler hyperdrive update ${this.workers[component].hyperdrive} --origin-connection-limit=${limit}`),
+      );
+    }
     const each = limits.app === limits.vault ? `a connection limit of ${limits.app} each` : `connection limits of ${limits.app} and ${limits.vault}`;
     return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details };
   }

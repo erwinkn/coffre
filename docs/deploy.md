@@ -563,6 +563,16 @@ at most 20; the commands it shows carry that number, here 9, for a
 `max_connections` of 25. Fix an existing config with
 `wrangler hyperdrive update <id> --origin-connection-limit=<n>`.
 
+Keep each config at that number, not below it. Hyperdrive splits a
+config's connections among its pool's shards, and a transaction holds one
+from BEGIN to COMMIT, a wait for a lock included. At Hyperdrive's minimum,
+5, a location may have five shards of one connection each: one vault call
+waiting on the audit log's head then stops every query on its shard, and
+under load the pool stays full ("Timed out while waiting for an open slot
+in the pool"). Setup never raises a limit set below its number, since it
+can't tell one a person chose from its own, made for a smaller database;
+it says so, and prints the commands that raise it.
+
 ### 3. Keys and secrets
 
 coffre needs two keys, one for each component, so that the app, which faces
