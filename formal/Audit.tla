@@ -48,6 +48,10 @@ CONSTANTS
     \* log.ts, rehash), and under the head that the prefix signed last still
     \* has its hash (vault.ts, checkpoint, `carries(newest)`).
     CheckpointChecksVault,
+    \* The checkpoint's walk, in no transaction, links each batch to the
+    \* hash it verified last (vault log.ts, rehash, `startPrevHash`): what
+    \* stands in for a snapshot while the log is rewritten under it.
+    CheckpointLinksWalk,
     \* Under the head, a checkpoint that another call checkpointed or
     \* refused after its snapshot signs nothing, and a refusal for a broken
     \* log since the last checkpoint stands (checkpoint, `seen`,
@@ -379,7 +383,7 @@ CkptWalkStep(p) ==
     /\ LET i == l[p].to + 1
        IN IF l[p].ok /\ i <= Len(log) /\ l[p].to - l[p].from < CkptWalk
             THEN Read(p, "ckpt.walk", [l[p] EXCEPT !.to = i, !.toVer = log[i].ver,
-                                                   !.ok = Carries(i - 1, l[p].toVer) /\ VaultWalkOk(i - 1, i)])
+                                                   !.ok = (CheckpointLinksWalk => Carries(i - 1, l[p].toVer)) /\ VaultWalkOk(i - 1, i)])
             ELSE Read(p, "ckpt.scrub", [l[p] EXCEPT !.done = l[p].to = Len(log)])
 
 \* The scrub, in a snapshot of its own: from where the lap is, ScrubWalk

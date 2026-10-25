@@ -454,12 +454,15 @@ test("a checkpoint's transactions read the same however far its walk goes", POST
     assert.ok((await signLog()).ok);
     await append(count);
     const before = { ...vaultPool.held };
-    const all = await cost(signLog);
+    let signed: { ok: boolean } = { ok: false };
+    const all = await cost(async () => (signed = await signLog()));
+    assert.ok(signed.ok, 'the measured checkpoint signed');
     return { statements: vaultPool.held.statements - before.statements, rows: vaultPool.held.rows - before.rows, walked: all.vault.rows };
   };
   const short = await held(10);
-  const long = await held(3000);
-  assert.ok(long.walked > short.walked + 3000, `the long walk read ${long.walked} rows, the short ${short.walked}`);
+  // Past a batch (`VERIFY_BATCH`): the walk reads two.
+  const long = await held(6000);
+  assert.ok(long.walked > short.walked + 6000, `the long walk read ${long.walked} rows, the short ${short.walked}`);
   assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
 });
 

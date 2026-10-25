@@ -2587,7 +2587,7 @@ class VaultService implements Vault {
       // Nothing since the last one, which signed every entry before its own: it is still the newest prefix.
       if (newest !== null && latest!.seq === head.nextSeq - 1n && latest!.relatedSeq === latest!.seq - 1n) return { checkpoint: signedPart(newest) };
       // Under the lock, the rest: the prefix signed last still where it was,
-      // and every entry since the snapshot, unless the walk is catching up,
+      // and every entry since the walk, unless the walk is catching up,
       // when what it walked must still be there. A rewrite is never signed over.
       if (newest !== null && !(await carries(d.tx, newest))) {
         throw refused('log_broken', { reason: `the log up to entry ${newest.seq} is not the prefix the last checkpoint signed` });
@@ -2595,7 +2595,7 @@ class VaultService implements Vault {
       const walk = new Walk(walked.tally, walked.digest);
       let { at } = walked;
       if (walked.done) {
-        // Where the snapshot's walk ended still has the hash it found there: what follows links to it.
+        // Where the walk ended still has the hash it found there: what follows links to it.
         if (!(await carries(d.tx, headOf(at)))) {
           throw refused('log_broken', { failedAtSeq: Number(at.seq), reason: `the log up to entry ${at.seq} changed while the vault walked it` });
         }

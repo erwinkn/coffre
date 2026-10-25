@@ -93,6 +93,7 @@ REMOVALS=(
   "WorkloadReads RefusesUnreadableSources NoLaundering"
   "Tampering WalkChecksAppMacs GreenIsReal"
   "Tampering CheckpointChecksVault SignsNoForgedVault"
+  "Tampering CheckpointLinksWalk SignsNoForgedVault"
   "Tampering SeenRecheckUnderHead StaysUnsignedOnceFound"
   "Tampering Scrubs EditFoundByNextScrub"
   "Tampering ReadinessChecksHeld GreenIsReal"

@@ -907,6 +907,7 @@ beat's: readiness says nothing of it.
 |---|---|---|
 | A beat's walk checks each app entry's MAC (`walkChain`, `verifyEntries`) | readiness green over a rewrite of app entries the vault cannot check (`GreenIsReal`) | |
 | A checkpoint's walk checks the vault's MACs, and under the head the prefix signed last (`rehash`, `carries`) | a prefix signed over a vault entry chained after a rewrite (`SignsNoForgedVault`) | |
+| The checkpoint's walk, in no transaction, links each batch to the hash it verified last (`rehash`, `startPrevHash`) | a prefix signed over a vault entry the log was rewritten from while the walk read it (`SignsNoForgedVault`) | |
 | Under the head, a call that another overtook signs nothing, and a refusal since the last checkpoint stands (`seen`, `#standingRefusal`) | a checkpoint signed after a refusal for a tamper the vault can find (`StaysUnsignedOnceFound`) | |
 | The scrub recomputes the signed prefix's hashes (`#scrub`, `relink`) | an entry edited in place, signed over again and again (`EditFoundByNextScrub`) | |
 | Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |

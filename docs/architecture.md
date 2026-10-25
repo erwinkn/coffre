@@ -659,9 +659,10 @@ where it was and every entry of it, by one count of the log's index;
 recomputes the chain since, every hash from content and its own entries
 by their MACs; and signs the log up to its last entry with Ed25519, in an
 `audit.checkpoint` entry of its own. A call with nothing new returns the
-last checkpoint. The walk runs in a snapshot, without the log's lock, so
-writes never wait for it, and only the entries appended meanwhile are
-walked under the lock. The same checkpoint checks every member's row, as
+last checkpoint. The walk takes neither the log's lock nor a transaction:
+it reads a batch a statement, each linked to the hash it verified last,
+so writes never wait for it and no connection is held while it rehashes,
+and only the entries appended meanwhile are walked under the lock. The same checkpoint checks every member's row, as
 `access` would, and logs a `vault.tampered` for each one changed around
 the vault.
 

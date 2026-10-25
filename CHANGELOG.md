@@ -23,7 +23,8 @@
   batch a statement, outside any transaction, and what it walked is held
   to the log again under the head before anything is signed over it, as
   before. With 10,000 entries to walk, what the vault reads inside
-  transactions went from 20,222 rows to 219.
+  transactions went from 20,222 rows to 219. On Node, over SQLite, the walk
+  no longer holds up every other transaction on the file.
 
 ## 0.14.0 (2026-10-25)
 
