@@ -402,11 +402,14 @@ long it took, and each time it asked again, as `--verbose` does: never a
 header, a body or a value. A slow step shows where its time went:
 
 ```text
-coffre: GitHub's ID token: 200 in 212 ms
+coffre: GET pipelines.actions.githubusercontent.com: 200 in 212 ms
 coffre: POST /api/auth/oidc: 200 in 1.4 s
 coffre: GET /api/secrets/deploy/prod: 200 in 310 ms
 coffre: POST /api/reveals: 200 in 480 ms
 ```
+
+Each `coffre` the step runs starts through `npx` first, which these lines
+do not count: the timestamps GitHub puts on each line of the log show it.
 
 To use an installed CLI directly inside a step:
 

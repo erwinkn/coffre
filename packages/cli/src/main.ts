@@ -19,7 +19,7 @@ import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken, keyBound, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
-import { stderr, timed, took } from './timings.ts';
+import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
@@ -225,19 +225,19 @@ async function cloudflaredToken(origin: string): Promise<string> {
   }
 }
 
-/** `fetch`, each request said on stderr with its answer and its time under `--verbose` (`timings.ts`). */
+/**
+ * `fetch`, under `--verbose` each request said on stderr with its answer
+ * and its time (`timings.ts`): by its path when it is `instance`'s, by its
+ * host when it is a platform's or GitHub's. Without `instance`, for the
+ * requests only the instance is sent.
+ */
+function fetching(instance?: string): typeof fetch {
+  return sessionFlags.verbose ? timed(fetch, stderr, instance) : fetch;
+}
+
+/** A request to the instance. */
 function http(input: string | Request, init?: RequestInit): Promise<Response> {
-  return verbose()(input, init);
-}
-
-/** `fetch`, timed under `--verbose`: for the key-bound clients, which take one. */
-function verbose(): typeof fetch {
-  return sessionFlags.verbose ? timed(fetch, stderr) : fetch;
-}
-
-/** `http`, for GitHub's ID token, whose URL is the runner's to know. */
-function githubToken(url: string, init?: RequestInit): Promise<Response> {
-  return sessionFlags.verbose ? timed(fetch, stderr, "GitHub's ID token")(url, init) : fetch(url, init);
+  return fetching()(input, init);
 }
 
 /**
@@ -248,7 +248,7 @@ let exchanged: Promise<{ credential: string; idToken: string }> | null = null;
 
 function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idToken: string }> {
   exchanged ??= (async () => {
-    const token = await idToken(undefined, process.env, origin, githubToken);
+    const token = await idToken(undefined, process.env, origin, fetching(origin));
     const issued = await exchange(origin, workload.service, token, http);
     return { credential: issued.token, idToken: token };
   })().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
@@ -315,7 +315,7 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
   if (response.status !== 409) return response;
   const body = (await response.clone().json().catch(() => null)) as { reason?: unknown } | null;
   if (body?.reason !== 'policy_changed') return response;
-  if (sessionFlags.verbose) stderr(`the access policy changed while ${request.method} ${new URL(request.url).pathname} was answered: asking again in ${took(POLICY_RETRY_MS)}`);
+  if (sessionFlags.verbose) stderr(`the access policy changed while ${requestLine(request.method, new URL(request.url))} was answered: asking again in ${took(POLICY_RETRY_MS)}`);
   await new Promise((resolve) => setTimeout(resolve, POLICY_RETRY_MS));
   return once(again);
 }
@@ -720,7 +720,7 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
   const given = ask
     ? await readSecret({ label: 'ID token', hint: `The run's ID token, for the audience ${origin}. Hidden as you type.` }).catch((error: unknown) => fail((error as Error).message))
     : undefined;
-  const issued = await (async () => exchange(origin, service, await idToken(given, process.env, origin, githubToken), http))().catch((error: unknown) =>
+  const issued = await (async () => exchange(origin, service, await idToken(given, process.env, origin, fetching(origin)), http))().catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
   await saveRun(
@@ -1344,7 +1344,7 @@ async function run(args: string[]): Promise<void> {
   if (flags.proof !== undefined && to.credential.kind !== 'workload') fail('--proof is how a service proves itself: coffre --service <name> run --proof …');
   const bound =
     to.credential.kind === 'workload'
-      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), verbose()).catch(
+      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
           (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
         )
       : null;
@@ -2073,7 +2073,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   approve,
   freeze,
   unfreeze,
-  serve: (args) => serve(args, sessionFlags.url, verbose()),
+  serve: (args) => serve(args, sessionFlags.url, fetching),
   audit,
   'audit accept-loss': acceptLoss,
   verify,

@@ -21,14 +21,22 @@ test("a request that fails is said with how long it waited and the network's cod
   const say = (line: string) => void said.push(line);
   const refused = timed(async () => {
     throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' }) });
-  }, say, "GitHub's ID token");
+  }, say, 'https://secrets.acme.example');
   await assert.rejects(refused('https://pipelines.actions.githubusercontent.com/abc?audience=x'), /fetch failed/);
   // An invalid header's error quotes it: a credential with a stray newline would be in the log.
   const invalid = timed(async () => {
     throw new TypeError('Headers.append: "Bearer coffre_svc_fake\n" is an invalid header value.');
   }, say);
   await assert.rejects(invalid('https://secrets.acme.example/api/me'), /invalid header value/);
-  assert.deepEqual(said.map((line) => line.replace(/\d+ ms/, 'n ms')), ["GitHub's ID token: failed after n ms (ECONNREFUSED)", 'GET /api/me: failed after n ms (TypeError)']);
+  assert.deepEqual(said.map((line) => line.replace(/\d+ ms/, 'n ms')), ['GET pipelines.actions.githubusercontent.com: failed after n ms (ECONNREFUSED)', 'GET /api/me: failed after n ms (TypeError)']);
+});
+
+test("only the instance's paths are said: a platform's, a proof's credentials URI say, only by its host", async () => {
+  const said: string[] = [];
+  const proving = timed(async () => new Response(null, { status: 200 }), (line) => void said.push(line), 'https://secrets.acme.example');
+  await proving('http://169.254.170.2/v2/credentials/0e5a7c4e-fake-uuid');
+  await proving('https://secrets.acme.example/api/auth/workload', { method: 'POST' });
+  assert.deepEqual(said.map((line) => line.replace(/ in .*/, '')), ['GET 169.254.170.2: 200', 'POST /api/auth/workload: 200']);
 });
 
 test("a credential proxy's path is said as far as its credential: the rest is the app's", async () => {
