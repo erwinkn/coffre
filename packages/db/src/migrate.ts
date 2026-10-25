@@ -24,10 +24,83 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
 export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promise<void> {
   await client.query(`DO $$ BEGIN
     EXECUTE format(
-      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
       current_database()
     );
   END $$`);
+}
+
+/**
+ * Coffre's tables and sequences that the backup group cannot read yet: the
+ * drizzle schema's, and in public those coffre's migrations make ($1, by
+ * name, as `FOREIGN_OWNERS` takes them). Never another table of public,
+ * whichever login migrates.
+ */
+const UNREAD_BY_BACKUP = `
+  SELECT c.oid::regclass::text AS name
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+     AND (n.nspname = 'drizzle' OR (n.nspname = 'public' AND c.relname = ANY($1::text[])))
+     AND NOT has_table_privilege('coffre_backup', c.oid, 'SELECT')
+   ORDER BY 1`;
+
+/**
+ * Reassert what backups need (0019_backup_role.sql), on every run: the
+ * backup group reads every table and sequence of coffre's, `relations` the
+ * ones its migrations make in public (`UNREAD_BY_BACKUP`), and the
+ * backup login, `coffre_backup_login`, is in it, as the baseline grants each
+ * runtime login its group, so a login made after the migrations gets it at
+ * the next run. When both hold already, it changes nothing. Granting the
+ * login needs ADMIN OPTION on the group: a login without it leaves that to a
+ * role that has it, and says so, rather than fail the run.
+ */
+export async function grantBackup(client: Pick<PoolClient, 'query'>, relations: readonly string[]): Promise<Exclude<MigrationRun['backupLogin'], null>> {
+  const { rows: unread } = await client.query<{ name: string }>(UNREAD_BY_BACKUP, [relations]);
+  for (const { name } of unread) await client.query(`GRANT SELECT ON ${name} TO coffre_backup`);
+  const { rows: [login] } = await client.query<{ member: boolean }>(
+    "SELECT pg_has_role(oid, 'coffre_backup', 'USAGE') AS member FROM pg_roles WHERE rolname = 'coffre_backup_login'",
+  );
+  if (login === undefined) return 'absent';
+  if (login.member) return 'granted';
+  try {
+    await client.query('GRANT coffre_backup TO coffre_backup_login WITH ADMIN FALSE, INHERIT TRUE, SET FALSE');
+  } catch (error) {
+    if ((error as { code?: string }).code === '42501') return 'refused';
+    throw error;
+  }
+  return 'granted';
+}
+
+/**
+ * What a run did besides migrating: whether the backup login is in its
+ * group, there being none to grant it (`absent`), or this login lacking the
+ * right to (`refused`). Null on SQLite, which has no roles.
+ */
+export type MigrationRun = { backupLogin: 'granted' | 'absent' | 'refused' | null };
+
+/** The line a run says of the backup login, when it cannot back the database up: null when it can, or there are no roles. */
+export function backupLoginNote({ backupLogin }: MigrationRun): string | null {
+  switch (backupLogin) {
+    case 'absent':
+      return 'no backup login: coffre_backup_login does not exist, so nothing can back this database up as coffre_backup; make it, and migrate again (docs/restore.md)';
+    case 'refused':
+      return 'coffre_backup_login does not inherit coffre_backup, and this login may not grant it, lacking ADMIN OPTION on coffre_backup: ' +
+        'as a role that has it, run GRANT coffre_backup TO coffre_backup_login WITH ADMIN FALSE, INHERIT TRUE, SET FALSE';
+    default:
+      return null;
+  }
+}
+
+/**
+ * The migrations are applied, and their ledger checked, but reasserting the
+ * privileges after them failed: unlike a migration's failure, this one
+ * changed the database.
+ */
+export class AfterMigrations extends Error {
+  constructor(error: unknown) {
+    super(`the migrations are applied, but reasserting the database's privileges after them failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    this.name = 'AfterMigrations';
+  }
 }
 
 interface JournalEntry {
@@ -57,6 +130,8 @@ interface Migrator {
   migrate(migrationsFolder: string): Promise<void>;
   /** Reassert privileges a one-database backup does not carry. */
   restrict(): Promise<void>;
+  /** Reassert what backups need (`grantBackup`), given what migrations make. */
+  backupLogin(managed: Managed): Promise<MigrationRun['backupLogin']>;
   /** Why this login cannot change the objects migrations change, `managed` among them, or null when it can. */
   notOwner(managed: Managed): Promise<NotOwner | null>;
   close(): Promise<void>;
@@ -265,6 +340,7 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     },
     migrate: (migrationsFolder) => migrate(drizzle(client), { migrationsFolder }),
     restrict: () => restrictDatabase(client),
+    backupLogin: ({ relations }) => grantBackup(client, relations),
     async notOwner({ relations, functions }) {
       const { rows } = await client.query<{ owner: string; member: boolean; login: string; grants_inherit: boolean; inherits: boolean }>(FOREIGN_OWNERS, [relations, functions]);
       if (rows.length === 0) return null;
@@ -300,6 +376,7 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
     async unlock() {},
     migrate: (migrationsFolder) => migrate(sqlite, { migrationsFolder }),
     async restrict() {},
+    backupLogin: async () => null,
     // One file, which whoever opens it may change.
     notOwner: async () => null,
     close,
@@ -342,8 +419,9 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
 }
 
 /**
- * Apply missing migrations, check their history and reassert database
- * privileges, as a login that can change coffre's objects: another is
+ * Apply missing migrations, check their history, and reassert database
+ * privileges and what backups need, on every run, even with nothing to
+ * apply, as a login that can change coffre's objects: another is
  * refused, NotOwner, before anything changes. `onPlan` hears what there is to apply before it is, under
  * the migration lock, and may stop the run by throwing: all of it then goes
  * in one call, with no word of each.
@@ -351,7 +429,7 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
 export async function migrateDatabase(
   url: string,
   onPlan?: (plan: MigrationPlan) => void | Promise<void>,
-): Promise<void> {
+): Promise<MigrationRun> {
   const engine = engineOfUrl(url);
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
@@ -361,7 +439,8 @@ export async function migrateDatabase(
     await migrator.lock();
     locked = true;
 
-    const notOwner = await migrator.notOwner(managedObjects(expected.map((entry) => entry.sql)));
+    const managed = managedObjects(expected.map((entry) => entry.sql));
+    const notOwner = await migrator.notOwner(managed);
     if (notOwner !== null) throw notOwner;
     const applied = await migrator.applied();
     verifyHistory(expected, applied, false);
@@ -369,7 +448,12 @@ export async function migrateDatabase(
     await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
     await migrator.migrate(migrationsFolder(engine));
     verifyHistory(expected, await migrator.applied(), true);
-    await migrator.restrict();
+    try {
+      await migrator.restrict();
+      return { backupLogin: await migrator.backupLogin(managed) };
+    } catch (error) {
+      throw new AfterMigrations(error);
+    }
   } finally {
     try {
       if (locked) await migrator.unlock();

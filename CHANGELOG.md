@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **Backups need not hold the owner's password.** The new group
+  `coffre_backup` reads every row and writes none: no insert, update,
+  delete or truncate, no `CREATE` or `TEMPORARY`, no function that writes as
+  its owner. The audit log's row-level security let only the app's and the
+  vault's groups read it, so `pg_dump` as any other role, even one in
+  `pg_read_all_data`, stopped at the log, or dumped none of its entries
+  with `--enable-row-security`; a policy now shows `coffre_backup` every
+  entry. A deployment makes the login, `coffre_backup_login`, as it makes
+  the runtime logins, and every `coffre migrate` grants it the group, the
+  run after the login is made included, and says so when it finds no
+  login. Back up with `pg_dump --enable-row-security` as that login
+  ([restore.md](docs/restore.md#on-plain-postgres)). `coffre migrate`, in a
+  deployment's folder, now reasserts the database's privileges and grants
+  the backup login even when nothing is pending; before, it stopped at "up
+  to date", and a restored database kept the privileges its dump left out
+  until the next migration. `migrateDatabase`, and `migrate` from
+  `@coffre/server/node`, now say whether they found the backup login
+  (`backupLogin`), and, should it lack the right to grant it the group,
+  they say so too, and do not fail. Each run also grants the group any of
+  coffre's tables it cannot read yet, by the names coffre's migrations
+  give them, whichever login made them. A failure after the migrations committed no longer
+  says that nothing was changed.
+  - **Upgrading: one migration**, `0019_backup_role`, Postgres only, which
+    only adds the group, read grants and the log's read policy for it:
+    the release before never meets them. It grants only on coffre's own
+    tables, by name: another table in `public` is left as it is, whichever
+    login migrates, a superuser included. A `coffre_backup` made before
+    keeps no other privilege on coffre's tables, and is refused if it is a
+    member of another role, or has members besides the backup login. It
+    makes a role, as no migration since the baseline did: the login that
+    migrates needs `CREATEROLE`, which a member of the owner does not
+    inherit, unless `coffre_backup` exists already (`CREATE ROLE
+    coffre_backup NOLOGIN`, by a login that has it).
+
 ## 0.14.1 (2026-10-25)
 
 - **Upgrading to 0.14.1, in short.** No migration, and nothing to change in

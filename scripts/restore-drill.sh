@@ -92,8 +92,9 @@ DATABASE_URL="$(owner_url "$source_db")" node dev/seed.mjs >/dev/null
 node scripts/restore-drill.mjs prepare >"$scratch/state.json"
 stop_coffre
 
-log "backing up $source_db with pg_dump"
-docker compose exec -T postgres pg_dump -U coffre_owner --format=custom --dbname="$source_db" >"$scratch/backup.dump"
+log "backing up $source_db with pg_dump, as coffre_backup_login"
+docker compose exec -T -e PGPASSWORD=local-backup-only postgres \
+    pg_dump -h 127.0.0.1 -U coffre_backup_login --enable-row-security --format=custom --dbname="$source_db" >"$scratch/backup.dump"
 
 log "restoring into $restored_db"
 # The logins and their passwords, which a dump of one database leaves out.

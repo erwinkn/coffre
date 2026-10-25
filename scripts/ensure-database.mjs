@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Create a local database, and the restricted logins the app and the vault
-// run as, unless they exist: `node scripts/ensure-database.mjs coffre`.
+// run as and backups take, unless they exist: `node scripts/ensure-database.mjs coffre`.
 // Connects to the local Postgres as its owner; nothing here is for anywhere
 // else.
 //
@@ -23,7 +23,7 @@ try {
     // transaction; ending this client releases it, including on failure.
     await client.query("SELECT pg_advisory_lock(hashtextextended('coffre:local-roles', 0))");
     const options = 'LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS';
-    for (const [login, password] of [['coffre_runtime', 'local-runtime-only'], ['coffre_vault_runtime', 'local-vault-only']]) {
+    for (const [login, password] of [['coffre_runtime', 'local-runtime-only'], ['coffre_vault_runtime', 'local-vault-only'], ['coffre_backup_login', 'local-backup-only']]) {
         const role = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [login]);
         await client.query(`${role.rowCount === 0 ? 'CREATE' : 'ALTER'} ROLE ${login} ${options} PASSWORD '${password}'`);
     }

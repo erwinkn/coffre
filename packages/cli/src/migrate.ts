@@ -15,11 +15,11 @@ import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, backupLoginNote, DatabaseAhead, migrateDatabase, type MigrationRun, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
-import { type Step, StepFailed, Steps } from './steps.ts';
+import { type Outcome, type Step, StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
 
@@ -58,6 +58,8 @@ export function pinProblem(cli: string, pinned: string): string | null {
  */
 export function migrationFailure(error: unknown): string {
   if (error instanceof NotOwner) return `${error.message}. Nothing was changed`;
+  // After the migrations' transaction: what it applied stays.
+  if (error instanceof AfterMigrations) return error.message;
   for (let cause: unknown = error; cause instanceof Error; cause = cause.cause) {
     const code = (cause as { code?: unknown }).code;
     if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) {
@@ -135,11 +137,24 @@ async function migrateDeployment(
   }
   const { applied, pending, notOwner } = status;
   if (pending.length === 0) {
-    out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
     // Nothing to apply now, but the next release's migrations would be refused: said while there is time.
     // The preview reads with the owner's login, which this is not.
-    if (notOwner !== null) out.write(`  ${s.dim(`The next migration needs another login: ${notOwner.message}`)}\n`);
-    else out.write(describeFirstRun(await previewFirstRun(url)));
+    if (notOwner !== null) {
+      out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
+      out.write(`  ${s.dim(`The next migration needs another login: ${notOwner.message}`)}\n`);
+      return;
+    }
+    // What every run does with nothing to apply: the privileges a restore leaves out, and the backup login's group.
+    let run: MigrationRun;
+    try {
+      run = await migrateDatabase(url.href);
+    } catch (error) {
+      throw new MigrateError(migrationFailure(error));
+    }
+    out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}; reasserted the database's privileges\n`);
+    const note = backupLoginNote(run);
+    if (note !== null) out.write(`  ${s.dim(note)}\n`);
+    out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
   if (notOwner !== null) throw new MigrateError(`${notOwner.message}. Nothing was changed`);
@@ -306,11 +321,12 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
 }
 
 /** Apply `pending` to the database, asking first unless told yes. */
-async function apply(url: URL, where: string, pending: string[], step: Step, yes: boolean): Promise<string> {
+async function apply(url: URL, where: string, pending: string[], step: Step, yes: boolean): Promise<Outcome> {
   if (!yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
   step.note(`Applying ${listed(pending, 'and')}`);
+  let run: MigrationRun;
   try {
-    await migrateDatabase(url.href, (plan) => {
+    run = await migrateDatabase(url.href, (plan) => {
       // Under the lock now: what was read before, or another run got there first.
       if (plan.pending.join() !== pending.join()) {
         throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
@@ -320,7 +336,8 @@ async function apply(url: URL, where: string, pending: string[], step: Step, yes
     if (error instanceof MigrateError) throw error;
     throw new MigrateError(migrationFailure(error));
   }
-  return `Applied ${listed(pending, 'and')}, and reasserted the database's privileges`;
+  const note = backupLoginNote(run);
+  return { text: `Applied ${listed(pending, 'and')}, and reasserted the database's privileges`, details: note === null ? [] : [note] };
 }
 
 function parseOptions(args: string[]): Options {

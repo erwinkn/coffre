@@ -177,7 +177,7 @@ test(
     const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
     const revoke = `DO $$ BEGIN
       EXECUTE format(
-        'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+        'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
         current_database()
       );
     END $$`;
@@ -185,14 +185,14 @@ test(
       `SELECT role,
               has_database_privilege(role, current_database(), 'CREATE') AS create,
               has_database_privilege(role, current_database(), 'TEMPORARY') AS temporary
-         FROM unnest(ARRAY['coffre_app', 'coffre_runtime', 'coffre_vault', 'coffre_vault_runtime']) AS role
+         FROM unnest(ARRAY['coffre_app', 'coffre_backup', 'coffre_runtime', 'coffre_vault', 'coffre_vault_runtime']) AS role
         ORDER BY role`,
     );
     try {
       // A one-database dump leaves these privileges behind, including PUBLIC's defaults.
       await owner.query(`DO $$ BEGIN
         EXECUTE format(
-          'GRANT CREATE, TEMPORARY ON DATABASE %I TO PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+          'GRANT CREATE, TEMPORARY ON DATABASE %I TO PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
           current_database()
         );
       END $$`);
@@ -202,6 +202,7 @@ test(
         await migrateDatabase(TEST_OWNER_DATABASE_URL);
         assert.deepEqual((await privileges()).rows, [
           { role: 'coffre_app', create: false, temporary: false },
+          { role: 'coffre_backup', create: false, temporary: false },
           { role: 'coffre_runtime', create: false, temporary: false },
           { role: 'coffre_vault', create: false, temporary: false },
           { role: 'coffre_vault_runtime', create: false, temporary: false },
