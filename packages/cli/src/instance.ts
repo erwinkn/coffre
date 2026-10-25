@@ -86,6 +86,8 @@ export type SessionFlags = {
   url?: string;
   service?: string;
   authMode?: string;
+  /** Say on stderr how each request was answered, and how long it took (`timings.ts`). */
+  verbose?: boolean;
 };
 
 /**

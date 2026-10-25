@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **The Action says where its time goes.** A step that read seven keys
+  took 39 s on a busy instance and logged nothing in between. The CLI's
+  new session flag `--verbose` writes a line to stderr for each request,
+  with its method, path, status and duration (`coffre: POST /api/reveals:
+  200 in 480 ms`), and for each time it asks again; never a header, a
+  body, a query or a value. The Action passes it, so its log shows which
+  call was slow.
+- **A database that does not answer is 503, not 500.** When Hyperdrive had
+  no free connection to the database for 15 s ("Timed out while waiting for
+  an open slot in the pool"), or a statement gave up on a lock, a reveal or
+  a proxied call answered 500 "something went wrong", as for a bug, and a
+  CI run could not tell it from one. These now answer 503 `unavailable`,
+  as do a dropped connection and a database out of connections: "coffre
+  cannot reach what it depends on right now; try again in a moment". They
+  are logged as `a dependency did not answer`, or, for a statement that
+  gave up on a lock or its own bound, `a statement gave up waiting`: under
+  a busy database an outage, and otherwise a transaction held too long,
+  which a bug may be. On Node, the vault's own outage crosses its socket
+  as one (503, with Postgres's code), where it was a 500 with the code
+  dropped.
+- **An append holds the log's head for two round trips fewer.** Every
+  write, and every proxied call whose cache has lapsed, appends its entry
+  under the audit log's head, the one lock every append in the instance
+  waits for. Having locked the head, the app's append locked it again,
+  then read the clock, then the last entry, before it wrote: three round
+  trips through Hyperdrive, with every other append, the vault's
+  included, queued behind them. It now reads all three in one statement.
+  A token exchange runs 14 statements, not 16, and a proxied call whose
+  cache lapsed 11, not 13, of which 7 hold the head, not 9.
 - **Setup says when a Hyperdrive config is below what the database leaves
   it.** `coffre setup` keeps a connection limit set lower than its own
   share of `max_connections`, and said nothing about it. A config made for

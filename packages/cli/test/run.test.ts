@@ -388,6 +388,19 @@ test('run, export and get read again, once, when the access policy changed under
   }
 });
 
+test('--verbose says the read the policy changed under, that it asks again, and the read again', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, conflicts: ['policy_changed'] } });
+  const read = await coffre.coffre(['--verbose', 'get', 'deploy/prod/TOKEN']);
+  assert.equal(read.code, 0, read.stderr);
+  assert.equal(read.stdout, 'deploy-token-value');
+  assert.deepEqual(read.stderr.replace(/: (\d+) in \d+(\.\d)? m?s/g, ': $1 in t').split('\n'), [
+    'coffre: POST /api/reveals: 409 in t',
+    'coffre: the access policy changed while POST /api/reveals was answered: asking again in 300 ms',
+    'coffre: POST /api/reveals: 200 in t',
+    '',
+  ]);
+});
+
 test('a read the policy changed under twice ends as a refusal does, and another conflict is not asked again', async (t) => {
   for (const [conflicts, reads] of [[['policy_changed', 'policy_changed'], 2], [['stale'], 1]] as const) {
     for (const args of [['export', 'deploy/prod'], ['get', 'deploy/prod/TOKEN']]) {

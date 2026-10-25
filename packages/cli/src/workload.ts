@@ -263,9 +263,9 @@ export type KeyBound = { places: string[]; env: Record<string, string>; close: (
  * listener, and a tunnel listener for each database. Null where the
  * instance has no key-bound sessions yet, which the bearer exchange serves.
  */
-export async function keyBound(origin: string, service: string, proof: Proof, positionals: readonly string[], log: (line: string) => void): Promise<KeyBound | null> {
+export async function keyBound(origin: string, service: string, proof: Proof, positionals: readonly string[], log: (line: string) => void, fetchImpl: typeof fetch): Promise<KeyBound | null> {
   // The run ends its session when its command ends, a SIGTERM passed on to the command included.
-  const coffre = await workload({ url: origin, service, proof, log, sigterm: false }).catch((error: unknown) => {
+  const coffre = await workload({ url: origin, service, proof, log, sigterm: false, fetch: fetchImpl }).catch((error: unknown) => {
     if (error instanceof CoffreError && (error.status === 404 || error.status === 501)) return null;
     throw error;
   });
