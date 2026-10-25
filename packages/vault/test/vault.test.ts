@@ -170,6 +170,65 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
 });
 
+test("a read on an answer of access the app kept opens only while it is still the reader's answer, and says it checked", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const secret = await w.secret(w.dev);
+  const key = randomBytes(32).toString('base64');
+  const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key }] });
+  assert.ok(wrap.ok);
+  const items = await versionItems([{ secret, wrapped: wrap.wrapped[0] }]);
+  const kept = await w.vault.access(ADA);
+  assert.match(kept.revision ?? '', /^[\w-]{32}$/);
+  assert.equal((await w.vault.access(ADA)).revision, kept.revision, 'the same answer has the same revision');
+  assert.deepEqual(await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: kept.revision, items }), { ok: true, keys: [key], accessRevision: kept.revision });
+  // Her access changed since: refused, and nothing read or logged but what was.
+  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'viewer']]);
+  const before = (await vaultLog()).length;
+  const refused = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: kept.revision, items });
+  assert.equal(!refused.ok && refused.refusal.code, 'access_changed');
+  assert.equal((await vaultLog()).length, before);
+  const now = await w.vault.access(ADA);
+  assert.notEqual(now.revision, kept.revision);
+  assert.deepEqual(await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items }), { ok: true, keys: [key], accessRevision: now.revision });
+  // A refusal for what the versions are is decided on the answer too: on a stale one, nothing logged.
+  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'developer']]);
+  const unknown = [{ secretVersionId: randomUUID() }];
+  const logged = (await vaultLog()).length;
+  const early = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items: unknown });
+  assert.equal(!early.ok && early.refusal.code, 'access_changed');
+  assert.equal((await vaultLog()).length, logged);
+  const claimed = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: (await w.vault.access(ADA)).revision, items: unknown });
+  assert.equal(!claimed.ok && claimed.refusal.code, 'bad_claim');
+  // No answer of a removed member is anyone's to read on.
+  await w.vault.remove({ actor: ROOT, principal: ADA });
+  const removed = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items });
+  assert.equal(!removed.ok && removed.refusal.code, 'access_changed');
+});
+
+test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', postgresOnly('a policy change commits while a read holds its row, not the head: SQLite runs one writer at a time'), async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const kept = await w.vault.access(ADA);
+  // Under her row, not the head: an Owner protects prod while the key service opens her key.
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
+  const reading = w.vault.unwrap({ principal: ADA, purpose: 'run', accessRevision: kept.revision, items });
+  await reached;
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: [w.prod], protected: true } })).ok);
+  answer();
+  const refused = await reading;
+  assert.equal(!refused.ok && refused.refusal.code, 'access_changed');
+  const entries = (await vaultLog(w)).filter((entry) => entry.actor === ADA);
+  assert.deepEqual(entries.map((entry) => [entry.action, entry.code]), [['key.intent', null], ['secret.read', 'access_changed']]);
+  const verified = await w.vault.verifyLog({});
+  assert.ok(verified.ok && verified.pending === undefined, JSON.stringify(verified));
+});
+
 test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork that keeps it so, read by a service on what an Owner issued", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'developer']]);
@@ -500,8 +559,18 @@ test('a wrapped key presented as another secret is a bad claim', async () => {
  */
 function service(options: { delayMs?: number } = {}) {
   const inner = LocalKekProvider.generate('test-kek-1');
-  const seen = { wrap: 0, unwrap: 0, down: false, failing: new Set<string>(), hanging: new Set<string>(), opened: [] as Buffer[] };
+  const seen = {
+    wrap: 0, unwrap: 0, down: false, failing: new Set<string>(), hanging: new Set<string>(), opened: [] as Buffer[],
+    /** The next key operation, once: it says it is under way, then waits until told to answer. */
+    pause: null as { reached: () => void; until: Promise<void> } | null,
+  };
   const answer = async <T>(secretId: string, work: () => Promise<T>, operation?: KeyOperation) => {
+    const pause = seen.pause;
+    seen.pause = null;
+    if (pause !== null) {
+      pause.reached();
+      await pause.until;
+    }
     try {
       if (options.delayMs) await sleep(options.delayMs, undefined, { signal: operation?.signal });
       if (seen.hanging.has(secretId)) await sleep(500, undefined, { signal: operation?.signal });

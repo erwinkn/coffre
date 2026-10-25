@@ -385,6 +385,22 @@ whether they are still a member, and the grants they hold
 `can()`, over that answer, and a path resolves to its project, environment
 and secret in one read.
 
+A read of values (`POST /api/reveals`, the credential proxy's) asks
+nothing first when the app kept the vault's last answer about the caller
+(`Accesses`, `packages/server/src/accesses.ts`): it decides on that one,
+and its one vault call, the unwrap, names it (`accessRevision`). The vault
+opens the values only while that is still its answer, under the reader's
+row and the head, and refuses `access_changed` otherwise, reading nothing
+and logging no read (with a key service, the intent it logged is closed,
+each key refused). A read that answers or refuses without opening a value
+asks first, and a request whose kept answer is not the vault's now starts
+over, asking. So a read on a kept answer is answered and logged exactly as
+one that asked: one vault call, not two, and three, once, after the
+caller's access or the policy changed. An app of 0.14.1 keeps only the
+answers of a vault that names them (`Access.revision`); one older than
+that names nothing back from an unwrap, and the app asks before it
+answers.
+
 ### Generated values
 
 A value can be made rather than typed, by a recipe, short text that the CLI
@@ -473,7 +489,7 @@ and membership generations. The interface:
 |---|---|
 | `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment |
 | `reference`, `endReferences` | make references, each a `reference.create` entry of its own, which every read through one is checked against; end them, each a `reference.end` naming it ([design](design/environments.md#references)) |
-| `access(principal)` | one principal's status, instance role and grants, their rows checked; the app asks once per request, and it makes someone the deployment names an Owner when they own nothing |
+| `access(principal)` | one principal's status, instance role and grants, their rows checked, and the answer's `revision`; the app asks once per request, except a read on an answer it kept, which the unwrap checks; and it makes someone the deployment names an Owner when they own nothing |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |

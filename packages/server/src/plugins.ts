@@ -7,9 +7,10 @@ import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
 import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
 
+import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
-import { callerFrom } from './api/caller.ts';
+import { callerFrom, withRecalled } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { parsePath } from './api/paths.ts';
 import { readScope } from './api/services.ts';
@@ -395,15 +396,22 @@ async function rechecked(runtime: CoffreRuntime, caller: WorkloadUse, standings:
  * grant with its binding's `reads` (`sessionScope`). Null for a caller
  * coffre did not make.
  */
-async function workloadIdentity(runtime: CoffreRuntime, caller: WorkloadUse, sourceIp: string | null, standings: Standings): Promise<{ identity: AuthenticatedIdentity; expiresAt: string; constraints: Constraints | null } | null> {
+async function workloadIdentity(
+  runtime: CoffreRuntime,
+  caller: WorkloadUse,
+  sourceIp: string | null,
+  standings: Standings,
+  /** Its read may decide on the vault's answer kept from an earlier request, which the vault checks (`accessFor`). */
+  recall = false,
+): Promise<{ identity: AuthenticatedIdentity; expiresAt: string; constraints: Constraints | null } | null> {
   const standing = standings.get(caller);
   if (standing === undefined) return null;
   const { row, binding, policy, policySeq } = standing.kind === 'session' ? standing.session : { ...standing, row: null };
   const scope: CredentialScope = sessionScope(row ?? { scope: null }, binding, policy);
-  const access = await runtime.vault.access(caller.principal);
-  const id = caller.principal.slice('token:'.length);
   const generation = row?.generation ?? binding.generation;
-  const callerOf = callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload');
+  const { access, recalled } = await accessFor(runtime, caller.principal, recall && { generation });
+  const id = caller.principal.slice('token:'.length);
+  const callerOf = withRecalled(callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload'), recalled);
   if (callerOf.generation !== generation) return null;
   return {
     constraints: standing.kind === 'session' ? standing.session.caller.constraints : null,
@@ -452,16 +460,46 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
     return body;
   };
-  const proxyHandle = async (handle: string): Promise<AuthenticatedIdentity> => {
+  const proxyHandle = async (handle: string, recall = false): Promise<AuthenticatedIdentity> => {
     // A call through a service binding is its service's alone: it carries no handle, token or session.
     if (binding !== null) throw new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
-    const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true });
+    const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true, recall });
     if (identity instanceof Response) await answer(identity);
     return identity as AuthenticatedIdentity;
   };
   const noCredential = () => new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
   // The workload callers this request's context made: the only ones its `use` takes.
   const standings: Standings = new WeakMap();
+  // One read for the proxy, as `use` asks it, on the caller's access recalled or asked for (`accessFor`).
+  const use = async (handle: Parameters<PluginContext['use']>[0], asked: Parameters<PluginContext['use']>[1], recall: boolean) => {
+    let recalled: Recalled | undefined;
+    try {
+      let caller: AuthenticatedIdentity;
+      let expiresAt: string;
+      if (typeof handle === 'string') {
+        caller = await proxyHandle(handle, recall);
+        if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
+        expiresAt = caller.credentialExpiresAt!;
+      } else {
+        // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
+        const made = await workloadIdentity(runtime, handle, sourceIp, standings, recall);
+        if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
+        // A `narrow` child never reads (section 8.4): it uses, and is handed nothing back. Decided on what coffre kept, not on what the plugin holds.
+        if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
+        ({ identity: caller, expiresAt } = made);
+      }
+      recalled = caller.caller.recalled;
+      // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
+      const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
+      const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
+      return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      // Nothing goes back on a kept answer the vault has not vouched for this request, a refusal included (`fetchApi`).
+      await recalled?.confirm();
+      throw new CoffreError(error.status, error.code, error.message, error.reason);
+    }
+  };
   return {
     publicUrl: runtime.publicUrl,
     workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
@@ -482,29 +520,14 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
       await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));
     },
     use: async (handle, asked) => {
+      // On the vault's answer about the caller kept from an earlier request, which the vault checks as it opens the
+      // values: one call. One that is not the vault's now read and logged nothing, and the read goes again, asking.
       try {
-        let caller: AuthenticatedIdentity;
-        let expiresAt: string;
-        if (typeof handle === 'string') {
-          caller = await proxyHandle(handle);
-          if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
-          expiresAt = caller.credentialExpiresAt!;
-        } else {
-          // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
-          const made = await workloadIdentity(runtime, handle, sourceIp, standings);
-          if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-          // A `narrow` child never reads (section 8.4): it uses, and is handed nothing back. Decided on what coffre kept, not on what the plugin holds.
-          if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
-          ({ identity: caller, expiresAt } = made);
-        }
-        // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
-        const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
-        const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
-        return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
+        return await use(handle, asked, true);
       } catch (error) {
-        if (!(error instanceof ApiError)) throw error;
-        throw new CoffreError(error.status, error.code, error.message, error.reason);
+        if (!(error instanceof AccessChanged)) throw error;
       }
+      return use(handle, asked, false);
     },
     api: (token) => {
       if (binding !== null) throw noCredential();

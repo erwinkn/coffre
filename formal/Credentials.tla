@@ -62,7 +62,13 @@ CONSTANTS
     \* commits entries of its own, as through the proxy, and with no lock
     \* when it has none, as an export.
     CredentialFenceUnderHead,
-    CredentialFenceUnlocked
+    CredentialFenceUnlocked,
+    \* A use may decide on the vault's answer about the account kept from an
+    \* earlier request (server accesses.ts, accessFor), which its unwrap
+    \* names: the vault decides it only while that is still its answer, under
+    \* the account's row (vault.ts, #keys, `accessRevision`), and the use
+    \* starts over, asking, otherwise (fetch-api.ts, AccessChanged).
+    KeptAnswerChecked
 
 None == "none"
 \* Credentials are named as entries are, by the operation that made them,
@@ -137,6 +143,9 @@ L0 == [id |-> <<None, 0>>,
        rate |-> 0,            \* the binding's credentials, counted before the head
        cred |-> NoCred,       \* the credential a use came in on
        at |-> 0,              \* where its `secret.read` is in the log
+       recalled |-> FALSE,    \* a use decided on a kept answer, not one it asked for
+       kept |-> 0,            \* that answer's generation
+       asks |-> FALSE,        \* a use started over: it asks, keeping nothing
        plan |-> {}]           \* the bindings a replace listed
 
 Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
@@ -169,7 +178,7 @@ Refuse(p) ==
     /\ Goto(p, "idle")
     /\ UNCHANGED <<rows, log, op, l, left, history>>
 
-Entry(kind, p) == [kind |-> kind, id |-> l[p].id, cred |-> NoCred, b |-> None, token |-> None, gen |-> gen]
+Entry(kind, p) == [kind |-> kind, id |-> l[p].id, cred |-> NoCred, b |-> None, token |-> None, gen |-> gen, stale |-> FALSE]
 
 FirstLabel(kind) ==
     CASE kind = "exchange" -> "ex.candidates"
@@ -270,12 +279,17 @@ UseVerify(p) ==
 
 \* The vault's answer about the account (vault.access), and the
 \* generation the credential was issued at (#liveCredential, and again in
-\* authenticateRequest).
+\* authenticateRequest). Or an answer kept from an earlier request, the
+\* account active then, at any generation it has had: one that verifies
+\* the credential.
 UseAccess(p) ==
     /\ pc[p] = "use.access"
-    /\ IF status = "active" /\ gen = Cred(l[p].cred).gen
-         THEN Read(p, "use.lock", l[p])
-         ELSE Refuse(p)
+    /\ \/ IF status = "active" /\ gen = Cred(l[p].cred).gen
+            THEN Read(p, "use.lock", [l[p] EXCEPT !.recalled = FALSE])
+            ELSE Refuse(p)
+       \/ /\ ~l[p].asks
+          /\ Cred(l[p].cred).gen <= gen
+          /\ Read(p, "use.lock", [l[p] EXCEPT !.recalled = TRUE, !.kept = Cred(l[p].cred).gen])
 
 UseLock(p) == pc[p] = "use.lock" /\ TakeRow(p, "use.head")
 
@@ -287,9 +301,16 @@ UseHead(p) == pc[p] = "use.head" /\ TakeHead(p, "use.decide")
 \* (vault.ts, traced): its row is the app's, and nothing here reads it.
 UseDecide(p) ==
     /\ pc[p] = "use.decide"
-    /\ IF status # "active"
+    /\ IF KeptAnswerChecked /\ l[p].recalled /\ (status # "active" \/ gen # l[p].kept)
+         \* Not the vault's answer now: nothing logged, and the use starts over, asking.
+         THEN /\ Release(p)
+              /\ Goto(p, "use.verify")
+              /\ l' = [l EXCEPT ![p].asks = TRUE]
+              /\ UNCHANGED <<rows, log, op, left, history>>
+         ELSE IF status # "active"
          THEN Refuse(p)
-         ELSE /\ log' = Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred])
+         \* A release on a kept answer is the model's to see when that answer is not the account's now.
+         ELSE /\ log' = Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred, !.stale = l[p].recalled /\ gen # l[p].kept])
               /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
               /\ Release(p)
               /\ Goto(p, IF op[p].proxy THEN "use.apphead" ELSE "use.fence")
@@ -503,6 +524,10 @@ Ends(e, r) ==
 \* vault's `secret.read`, follows the entry that ended it in the log.
 NoReleaseAfterEnd ==
     \A u \in revealed : \A i \in 1..(u.at - 1) : ~Ends(log[i], Cred(u.cred))
+
+\* No `secret.read` is logged on an answer kept from an earlier request that
+\* is no longer the vault's: such a use starts over, asking.
+NoReadOnStaleAnswer == \A i \in 1..Len(log) : ~log[i].stale
 
 \* A credential an untrusted or replaced binding issued never verifies again.
 UnboundStayUnusable ==

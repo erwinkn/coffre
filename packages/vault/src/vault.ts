@@ -61,6 +61,7 @@ import {
   checkpointVerifier,
   describeAccessFault,
   POLICY_REVISION,
+  accessRevision,
   policyRevision,
   type Access,
   type AccessChange,
@@ -341,6 +342,7 @@ const MESSAGES: Record<RefusalCode, string> = {
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',
   policy_changed: "the instance's roles or protected environments changed while this was asked: try again",
+  access_changed: 'what this member holds changed since the read was decided: try again',
   log_broken: 'the vault log does not hold from the last checkpoint',
   wrong_kek: "this vault's key does not open the data it holds",
   tampered: "this member's record failed the vault's integrity check",
@@ -906,10 +908,11 @@ class VaultService implements Vault {
 
   // Raw DEKs are cleared on every path. JSON and base64 leave strings that
   // cannot be wiped, so this is best-effort memory hygiene.
-  async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>> {
+  async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[]; accessRevision?: string }>> {
     const { principal } = input;
     validateText(input.purpose);
     if (input.keepsSensitive !== undefined && typeof input.keepsSensitive !== 'boolean') throw new Error('keepsSensitive is true, false or absent');
+    if (input.accessRevision !== undefined && typeof input.accessRevision !== 'string') throw new Error('accessRevision names an answer of access, or is absent');
     const vias = input.items.map((item) => validateVia(item.via));
     const throughs = input.items.map((item) => validateThrough(item.through));
     const loaded = await this.#versions(input, 'secret.read', { purpose: input.purpose });
@@ -947,10 +950,10 @@ class VaultService implements Vault {
       };
     };
     if (viaOk.includes(false)) {
-      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
+      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')), { asked: input.accessRevision });
     }
     if (throughOk.includes(false)) {
-      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
+      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')), { asked: input.accessRevision });
     }
     const ends = sealed.flatMap((seal) => (seal === null ? [] : [seal.seq]));
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
@@ -984,6 +987,8 @@ class VaultService implements Vault {
             key.fill(0);
           }
         }),
+        // Named back: the read was decided on that answer, which this vault checked.
+        ...(input.accessRevision === undefined ? {} : { accessRevision: input.accessRevision }),
       }),
     );
   }
@@ -1042,7 +1047,7 @@ class VaultService implements Vault {
     if (items.some((item, i) => !loosens[i] && item.secret.sensitive !== true && strict(i))) {
       return this.#refuseVersions(principal, 'invalid', loaded.versions.map((source) => ({
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'invalid', input), secretVersionId: source.id,
-      })), LOOSER);
+      })), { message: LOOSER });
     }
     const sources = new Map(items.map((item, i) => [item.secret, loaded.versions[i]]));
     const loosened = new Set(items.flatMap((item, i) => (loosens[i] ? [item.secret] : [])));
@@ -1094,7 +1099,7 @@ class VaultService implements Vault {
 
   /** Versions need no lock: they change only by being erased, once their place is archived, and their ids determine the whole batch before any key call. */
   async #versions(
-    input: Correlation & { principal: string; items: { secretVersionId: string }[] },
+    input: Correlation & { principal: string; items: { secretVersionId: string }[]; accessRevision?: string },
     action: KeyAction,
     detail: Record<string, unknown> = {},
   ): Promise<Outcome<{ versions: store.SecretVersion[] }>> {
@@ -1110,7 +1115,7 @@ class VaultService implements Vault {
     if ([...found.values()].some((version) => version.deleted)) {
       return this.#refuseVersions(input.principal, 'deleted', [...found.values()].map((version) => ({
         ...keyEntry(action, input.principal, version.secret, 'deny', 'deleted', input, detail), secretVersionId: version.id,
-      })));
+      })), { asked: input.accessRevision });
     }
     if (ids.some((id) => !found.has(id))) {
       return this.#refuseVersions(input.principal, 'bad_claim', ids.map((id) => {
@@ -1121,13 +1126,27 @@ class VaultService implements Vault {
           metadata: JSON.stringify({ ...detail, secretVersionId: id, ...traced(input) }),
         };
         return { ...keyEntry(action, input.principal, version.secret, 'deny', 'bad_claim', input, detail), secretVersionId: id };
-      }));
+      }), { asked: input.accessRevision });
     }
     return { ok: true, versions: ids.map((id) => found.get(id)!) };
   }
 
-  async #refuseVersions(principal: string, code: 'bad_claim' | 'deleted' | 'invalid', entries: NewEntry[], message = MESSAGES[code]): Promise<Outcome<never>> {
-    return this.#decide([principal], async () => {
+  /**
+   * Refuse a call for what its versions are, under the principal's row, as
+   * any decision: and a read on a kept answer no longer theirs as that, not
+   * for its versions, logging no read (`accessRevision`).
+   */
+  async #refuseVersions(
+    principal: string,
+    code: 'bad_claim' | 'deleted' | 'invalid',
+    entries: NewEntry[],
+    { message = MESSAGES[code], asked }: { message?: string; asked?: string } = {},
+  ): Promise<Outcome<never>> {
+    return this.#decide([principal], async (d) => {
+      if (asked !== undefined) {
+        const standing = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads);
+        if (this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
+      }
       throw new Refused(refusal(code, message), entries);
     });
   }
@@ -1185,7 +1204,7 @@ class VaultService implements Vault {
       viaReference?: readonly boolean[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
-      input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean };
+      input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean; accessRevision?: string };
     },
     /**
      * One per secret; null for a bad claim, an error for an outage or an
@@ -1206,7 +1225,11 @@ class VaultService implements Vault {
     // Each personal config's owner, hashed, by environment, as the decision read them: what its keys' contexts bind.
     const owners = new Map<string, string>();
     const check = async (d: Decision) => {
-      const reader = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads), call.input);
+      const standing = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads);
+      // A read decided on an earlier answer about its reader, only while that is still the answer: nothing read, nothing logged.
+      const asked = call.input.accessRevision;
+      if (asked !== undefined && this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
+      const reader = through(standing, call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
       // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
       // matches the slug there, and a place deleted on either side opens for none.
@@ -1290,9 +1313,11 @@ class VaultService implements Vault {
       try {
         await check(d);
       } catch (error) {
-        if (error instanceof Refused) {
+        // A read on a kept answer no longer the vault's logs no read; but a key service's intent, logged already, is
+        // accounted for all the same, each key refused, as after any other refusal.
+        if (error instanceof Refused && !(error.refusal.code === 'access_changed' && intentSeq === null)) {
           throw new Refused(error.refusal, secrets.map((secret, item) =>
-            outcomeEntry(secret, item, 'deny', error.entries[item].code ?? error.refusal.code)));
+            outcomeEntry(secret, item, 'deny', error.entries[item]?.code ?? error.refusal.code)));
         }
         throw error;
       }
@@ -1665,7 +1690,7 @@ class VaultService implements Vault {
 
   #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean, policy: Policy): Access {
     const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
-    return {
+    const access: Access = {
       principal,
       status: tampered ? 'tampered' : !PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
       generation: row?.generation ?? 0,
@@ -1675,6 +1700,14 @@ class VaultService implements Vault {
       by: row?.statusChangedBy ?? null,
       policy,
     };
+    return { ...access, revision: accessRevision(access) };
+  }
+
+  /** The revision of what `access` would answer about a standing a decision read: none but an active member's matches a kept answer. */
+  #revisionOf(standing: Standing, d: Decision): string | null {
+    const { policy } = standing.live;
+    if (standing.status !== 'active' || policy === undefined) return null;
+    return this.#access(standing.principal, d.members.get(standing.principal), standing.stored, d.at, false, policy).revision!;
   }
 
   /**

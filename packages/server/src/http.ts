@@ -29,6 +29,16 @@ export function methodNotAllowed(allowed: readonly string[]): Response {
  * limit the rest is never read. For a route anyone may call.
  */
 export async function readLimitedText(request: Request, max: number): Promise<string> {
+  const bytes = await readLimitedBytes(request, max);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw badRequest('the body is not UTF-8');
+  }
+}
+
+/** A body's bytes, no more than `max` of them: past it, its stream is cancelled and it is refused. */
+export async function readLimitedBytes(request: Request, max: number): Promise<Uint8Array<ArrayBuffer>> {
   const reader = request.body?.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -46,11 +56,7 @@ export async function readLimitedText(request: Request, max: number): Promise<st
       chunks.push(value);
     }
   }
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
-  } catch {
-    throw badRequest('the body is not UTF-8');
-  }
+  return Buffer.concat(chunks);
 }
 
 /**

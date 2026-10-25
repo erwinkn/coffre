@@ -25,8 +25,15 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
  * the vault has already logged. Only a fault (a bug, the store down) throws.
  */
 export interface Vault {
-  /** Unwrap data keys for `principal`: all of them, or none. */
-  unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[] }>>;
+  /**
+   * Unwrap data keys for `principal`: all of them, or none. Given the
+   * revision of an answer of `access` the app decided the read on
+   * (`accessRevision`), only while the principal's access is still that
+   * one, under their row and the head the decision holds: otherwise it
+   * refuses `access_changed` and logs no read, and says, by naming it back,
+   * that it checked. A vault older than 0.14.1 names none: it checked none.
+   */
+  unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[]; accessRevision?: string }>>;
   /**
    * Wrap fresh data keys for new versions `principal` writes: all, or none.
    * `seqs` are the `key.wrap` entries, one per key, which the app's
@@ -69,6 +76,7 @@ export interface Vault {
 
   /**
    * What one principal holds right now: the app asks once per request,
+   * unless the request reads values on an answer it kept (`accessRevision`),
    * and at sign-in for each verified email. A decision, its rows checked:
    * lists of who holds what read the rows themselves, and need not ask.
    * A person the vault's `owners` names who is no Owner of all of it
@@ -260,6 +268,14 @@ export type RefusalCode =
    * when another came since: asked again, it is weighed as the policy is now.
    */
   | 'policy_changed'
+  /**
+   * A read decided on an earlier answer of `access` about its principal
+   * (`accessRevision`) that is not theirs now: nothing was read, and no
+   * read logged; with a key service, the intent it logged is closed, each
+   * key refused.
+   * Asked again on the answer now, it is decided as they are now.
+   */
+  | 'access_changed'
   /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
   | 'log_broken'
   /**
@@ -371,6 +387,13 @@ export type UnwrapInput = Correlation & Through & {
   principal: string;
   purpose: Purpose;
   /**
+   * The revision of the answer of `access` the app decided this read on,
+   * kept from an earlier request (`Access.revision`): the vault refuses
+   * `access_changed` unless its answer now has the same. Absent when the
+   * app asked this request.
+   */
+  accessRevision?: string;
+  /**
    * That a `copy` keeps each sensitive value sensitive in what it writes:
    * the vault opens a sensitive value to copy for a person only when told
    * so, which an app older than 0.10, that would write it as a secret
@@ -452,7 +475,35 @@ export type Access = {
   by: string | null;
   /** The instance's policy, which every decision about them reads: absent from a vault older than 0.10, which decides as it ships. */
   policy?: Policy;
+  /**
+   * The answer, in a word (`accessRevision`): the app keeps the answer
+   * between requests, and a read it decides on the kept one names it, which
+   * the vault refuses unless its answer now has the same. Absent from a
+   * vault older than 0.14.1, whose answers the app keeps for nothing.
+   */
+  revision?: string;
 };
+
+/**
+ * An answer of `access` in a word: equal for two answers that say the same,
+ * whatever order the rows came back in, and different for any change to
+ * what they say, a grant lapsed, the policy's or the member's.
+ */
+export function accessRevision(access: Access): string {
+  const { revision: _, grants, ...rest } = access;
+  const facts = canonical({ ...rest, grants: grants.map(canonical).sort() });
+  return createHash('sha256').update(facts).digest('base64url').slice(0, 32);
+}
+
+/** A value as JSON whose every object's keys are sorted, at every depth. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
 
 /**
  * One place: a role to hold there, with an optional end, or null for none.

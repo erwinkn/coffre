@@ -32,7 +32,12 @@ export type Principal =
  * looks up coffre's own credentials.
  */
 export interface IdentityVerifier {
-  verify(token: string, request?: { sourceIp: string | null }): Promise<Principal>;
+  /**
+   * `recall`: the request reads values, and has the vault check, before it
+   * answers, an answer about its caller kept from an earlier request
+   * (server accesses.ts): a verifier that asks the vault may give that one.
+   */
+  verify(token: string, request?: { sourceIp: string | null; recall?: boolean }): Promise<Principal>;
 }
 
 /** Access delivers the JWT to the origin in this header. */

@@ -84,7 +84,8 @@ jobs:
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Formal model
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Audit.tla's checkpoint walks an entry a step: Tampering alone is 11.7 million states, and the job runs 12 to 15 minutes.
+    timeout-minutes: 25
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

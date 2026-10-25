@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A read of values makes one vault call, not two.** A reveal, an
+  export, the Action's read and a proxied call whose cache lapsed asked
+  the vault who the caller was (`access`), then had it open the values
+  (`unwrap`): two calls, and on Workers two of the vault's Hyperdrive
+  connections, for each. The app now keeps the vault's last answer about
+  each caller, and a read decides on it, its unwrap naming it: the vault
+  opens the values only while that is still its answer, under the
+  reader's row and the head, and otherwise refuses, reading nothing and
+  logging no read, and the read goes again, asking. What a read answers and logs
+  is what it was. A read whose caller's access, or the policy, changed
+  since their last request makes three calls, once. **Deploy the vault
+  first, as always**: an app of 0.14.1 keeps only answers that a vault of
+  0.14.1 names, so beside an older vault it asks as before; and an older
+  app never names one, which a vault of 0.14.1 decides on as before.
+
 - **A decision made from the policy is checked in one statement, not two.**
   Every write, and every proxied call whose cache has lapsed, checks under
   the audit log's head that the policy it decided from is still the
