@@ -222,19 +222,56 @@ test('a session awaiting approval is asked for again every 5 seconds, with the s
   assert.match(said[0]!, /waits for a person to approve it, at https:\/\/coffre\/approve\/s1/);
 });
 
-test('a projected token spent already is waited out until the kubelet writes the next', async (t) => {
+test('a restarted process finds its projected token spent (replayed) and waits for the kubelet to write the next', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-k8s-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, 'token');
   writeFileSync(file, 'spent-token\n');
-  const coffre = await fakeCoffre({ exchange: (proof) => (proof.oidc === 'spent-token' ? { status: 401, body: { error: 'unauthorized', reason: 'replayed' } } : null) });
+  const sent: unknown[] = [];
+  const coffre = await fakeCoffre({ exchange: (proof) => (sent.push(proof.oidc), proof.oidc === 'spent-token' ? { status: 401, body: { error: 'unauthorized', reason: 'replayed' } } : null) });
   t.after(() => coffre.close());
   setTimeout(() => writeFileSync(file, 'next-token\n'), 1500);
   const said: string[] = [];
   const session = await workload({ url: coffre.url, service: 'api-prod', proof: kubernetes(file), log: (line) => said.push(line) });
   t.after(() => session.close().catch(() => undefined));
-  assert.match(said[0]!, /was spent already/);
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /is already used; waiting for the next one/);
+  assert.deepEqual(sent, ['spent-token', 'next-token']);
   assert.equal(coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).join(','), 'POST /api/auth/workload 401,POST /api/auth/workload 200');
+});
+
+test('a long-running process waits for the kubelet to write the next token before it proves again, and never sends a spent one', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-k8s-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'token');
+  writeFileSync(file, 'token-1\n');
+  const sent: unknown[] = [];
+  const seen = new Set<unknown>();
+  // A projected token is spent once used, as the server's replay check has it.
+  const coffre = await fakeCoffre({
+    // The session re-proves at 90% of its 2 seconds; the kubelet's next comes a second later.
+    notAfterMs: 2000,
+    lifetimeMs: 60_000,
+    exchange: (proof) => {
+      sent.push(proof.oidc);
+      if (seen.has(proof.oidc)) return { status: 401, body: { error: 'unauthorized', reason: 'replayed' } };
+      seen.add(proof.oidc);
+      return null;
+    },
+  });
+  t.after(() => coffre.close());
+  const said: string[] = [];
+  const session = await workload({ url: coffre.url, service: 'api-prod', proof: kubernetes(file), log: (line) => said.push(line) });
+  t.after(() => session.close().catch(() => undefined));
+  await sleep(3000);
+  assert.deepEqual(sent, ['token-1'], 'it waits, and sends nothing, while the file holds the token it sent');
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /is already used; waiting for the next one/);
+  writeFileSync(file, 'token-2\n');
+  await sleep(2500);
+  assert.deepEqual(sent.slice(0, 2), ['token-1', 'token-2']);
+  assert.equal(coffre.log.filter((line) => /^POST \/api\/auth\/workload \d+$/.test(line)).slice(0, 2).join(','), 'POST /api/auth/workload 200,POST /api/auth/workload 200');
+  assert.ok(!coffre.log.some((line) => line === 'POST /api/auth/workload 401'), 'no replayed answer was ever needed');
 });
 
 test("a refused exchange rejects workload() with coffre's reason", async (t) => {

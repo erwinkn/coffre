@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { aws, azure, enrollment, gcp, github, keyAudience, sigv4, vercel, type ProofContext } from '../src/workload-proofs.ts';
+import { aws, azure, enrollment, gcp, github, keyAudience, kubernetes, sigv4, vercel, type ProofContext } from '../src/workload-proofs.ts';
 
 /** A proof's context, its platform's answers given by `reply`, each request it made kept. */
 function context(reply: (url: string, init: RequestInit) => Response) {
@@ -103,4 +106,65 @@ test('enrollment() takes the code out of the environment, under whatever name he
   assert.equal(process.env.SOME_NAME, undefined);
   assert.deepEqual(await proof.prove(context(() => new Response()).given), { enrollment: code });
   assert.throws(() => enrollment(undefined), /no enrollment code/);
+});
+
+/** A projected token's file, in a directory the test removes. */
+function tokenFile(t: test.TestContext, token: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-k8s-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'token');
+  writeFileSync(file, `${token}\n`);
+  return file;
+}
+
+test('kubernetes() never sends the token it sent already: it waits for the kubelet to write the next, and says so once', async (t) => {
+  const file = tokenFile(t, 'token-1');
+  const said: string[] = [];
+  const { given } = context(() => new Response(null, { status: 500 }));
+  given.log = (line) => said.push(line);
+  const proof = kubernetes(file);
+  assert.deepEqual(await proof.prove(given), { oidc: 'token-1' });
+  setTimeout(() => writeFileSync(file, 'token-2\n'), 1500);
+  assert.deepEqual(await proof.prove(given), { oidc: 'token-2' });
+  assert.deepEqual(said, [`coffre: the token at ${file} is already used; waiting for the next one (up to 10 minutes)`]);
+  // The next is not waited for when the kubelet wrote it before the renewal.
+  writeFileSync(file, 'token-3\n');
+  assert.deepEqual(await proof.prove(given), { oidc: 'token-3' });
+  assert.equal(said.length, 1);
+});
+
+test('kubernetes() stops waiting when the session closes', async (t) => {
+  const file = tokenFile(t, 'token-1');
+  const { given } = context(() => new Response(null, { status: 500 }));
+  const closing = new AbortController();
+  given.signal = closing.signal;
+  const proof = kubernetes(file);
+  await proof.prove(given);
+  const waiting = proof.prove(given);
+  setTimeout(() => closing.abort(), 200);
+  await assert.rejects(waiting, (error: Error) => error.name === 'AbortError');
+});
+
+test('kubernetes() gives up after 10 minutes of the same token, with what to check; spent() says false', async (t) => {
+  const file = tokenFile(t, 'token-1');
+  const { given } = context(() => new Response(null, { status: 500 }));
+  const proof = kubernetes(file);
+  await proof.prove(given);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  /** Time, moved on a second at a time, with the file reads in between on real I/O, until the wait ends. */
+  const waitOut = async <T>(running: Promise<T>) => {
+    let done = false;
+    const settled = running.then(
+      () => (done = true),
+      () => (done = true),
+    );
+    for (let i = 0; i < 5000 && !done; i++) {
+      t.mock.timers.tick(1000);
+      for (let turn = 0; turn < 10; turn++) await new Promise((resolve) => setImmediate(resolve));
+    }
+    await settled;
+    return running;
+  };
+  await assert.rejects(waitOut(proof.prove(given)), /wrote no new token at .* in 10 minutes/);
+  assert.equal(await waitOut(proof.spent!(given)), false);
 });

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The Kubernetes proof waits for a fresh token instead of sending a spent
+  one.** A long-running `coffre serve` sidecar re-proves at 90% of its
+  session's life, and the kubelet's next projected token, written at 80%,
+  sometimes lands after that. `kubernetes()` used to send the token it had
+  exchanged already, get `replayed`, and only then wait, logging "was
+  spent already, by an earlier start" at the renewals the kubelet was late
+  for. Now it waits for the file to change before sending (up to 10
+  minutes, the old session serving until its token expires), and logs
+  `coffre: the token at <path> is already used; waiting for the next one`
+  once per wait: a late kubelet still shows that line, but no failed
+  exchange. A restarted process still waits the same way when the exchange
+  says `replayed`.
 - **The app key rotates.** `APP_KEY` (`auditChainKey`) signs the app's log
   entries and every row that signs someone in; changing it used to sign
   everyone out, break every service token and binding, leave the log's
