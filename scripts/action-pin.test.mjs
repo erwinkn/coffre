@@ -143,25 +143,25 @@ test('the Action takes one of a token or a service, and a service only with the 
     assert.match(noIdToken.stderr, /permissions: id-token: write/);
     const service = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
     assert.equal(service.status, 0, service.stderr);
-    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`);
+    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`);
     const token = run({ INPUT_TOKEN: 'coffre_svc_x' });
     assert.equal(token.status, 0, token.stderr);
     // The token piped to login, never an argument; the export as that session; and the session forgotten after.
     assert.equal(
         token.stdout,
-        `npx ran with: ${cli} login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
-            `npx ran with: ${cli} --url https://coffre.example.com export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`,
+        `npx ran with: ${cli} --verbose login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
+            `npx ran with: ${cli} --url https://coffre.example.com --verbose export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`,
     );
     assert.ok(!token.stderr.includes('coffre_svc_x'));
     // Several environments, by spaces or lines as a YAML block gives them: a word each, read together.
     const several = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'deploy/prod  auth/prod\nwww/prod\n' });
     assert.equal(several.status, 0, several.stderr);
-    assert.equal(several.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github --keys=DATABASE_URL STRIPE_* deploy/prod auth/prod www/prod\nstdin: \n`);
+    assert.equal(several.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* deploy/prod auth/prod www/prod\nstdin: \n`);
     // The keys, by spaces or lines too, go to the CLI as one argument, unexpanded: STRIPE_* is no file glob.
     writeFileSync(join(dir, 'STRIPE_KEY'), '');
     const lines = spawnSync('/bin/bash', ['-e', '-c', shell], { cwd: dir, encoding: 'utf8', env: { PATH: path, ...inputs, INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_KEYS: 'STRIPE_*\n--format\n' }, timeout: 10_000 });
     assert.equal(lines.status, 0, lines.stderr);
-    assert.equal(lines.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy export --format github --keys=STRIPE_*\n--format\n app/ci\nstdin: \n`);
+    assert.equal(lines.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=STRIPE_*\n--format\n app/ci\nstdin: \n`);
     // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
     const homes = readFileSync(join(dir, 'homes'), 'utf8').trim().split('\n');
     assert.equal(new Set(homes).size, 4, 'one home per step, shared by its commands');
@@ -221,8 +221,8 @@ exit 0
         });
         return { ...ran, calls: existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n') : [] };
     };
-    const signIn = `npx ran with: ${cli} login https://coffre.example.com --token`;
-    const login = `npx ran with: ${cli} --url https://coffre.example.com`;
+    const signIn = `npx ran with: ${cli} --verbose login https://coffre.example.com --token`;
+    const login = `npx ran with: ${cli} --url https://coffre.example.com --verbose`;
 
     const refused = run({ INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'yes' });
     assert.equal(refused.status, 1);
@@ -252,6 +252,6 @@ exit 0
     assert.deepEqual(complete.calls, [signIn, `${login} missing app/ci --check`, `${login} missing app/staging --check`, `${login} export --format github --keys=DATABASE_URL app/ci app/staging`]);
     const service = run({ INPUT_TOKEN: '', INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' });
     assert.equal(service.status, 0, service.stderr);
-    const as = `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy`;
+    const as = `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose`;
     assert.deepEqual(service.calls, [`${as} missing app/ci --check`, `${as} export --format github --keys=DATABASE_URL app/ci`]);
 });
