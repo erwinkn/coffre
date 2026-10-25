@@ -133,7 +133,8 @@ export function isUnreachable(error: unknown): boolean {
   for (let cause = error; typeof cause === 'object' && cause !== null; ) {
     const { code, message } = cause as { code?: unknown; message?: unknown };
     if (typeof code === 'string' && (UNREACHABLE.has(code) || /^08[0-9A-Z]{3}$/.test(code))) return true;
-    if (typeof message === 'string' && UNREACHABLE_WORDS.test(message)) return true;
+    // Not Drizzle's words, which quote the query and its parameters: the driver's are its cause's.
+    if (typeof message === 'string' && !('params' in cause) && UNREACHABLE_WORDS.test(message)) return true;
     cause = (cause as { cause?: unknown }).cause;
   }
   return false;

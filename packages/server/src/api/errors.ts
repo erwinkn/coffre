@@ -102,8 +102,12 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
   return new ApiError('vault_refused', `the vault refused: ${refusal.message}`, refusal.code);
 }
 
-/** What a request that met the database not answering is told: its database, or the vault's, which is the same one. */
-const UNAVAILABLE = 'coffre cannot reach its database right now; try again in a moment';
+/**
+ * What a request is told when what coffre needs did not answer: its
+ * database, mostly, but the same words come from the vault's RPC and from
+ * a key service, which coffre cannot tell apart from here.
+ */
+export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; try again in a moment';
 
 /** The status and body for anything a handler throws. */
 export function toErrorBody(error: unknown): { status: number; body: ErrorBody } {
@@ -124,11 +128,11 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
   }
-  // The database not answering, or the vault's, behind its call: the request was fine, and may be asked again. A
+  // The database not answering, the vault's behind its call, or a key service's: the request was fine, and may be asked again. A
   // statement that gave up waiting is logged apart: under a busy database it is an outage, but a transaction held too
   // long, across a vault call say, is a bug that looks the same.
   if (isUnavailable(error)) {
-    console.error(gaveUp(error) ? 'a statement gave up waiting' : 'the database did not answer', logged(error));
+    console.error(gaveUp(error) ? 'a statement gave up waiting' : 'a dependency did not answer', logged(error));
     return { status: 503, body: { error: 'unavailable', message: UNAVAILABLE } };
   }
   console.error('unhandled API error', logged(error));
