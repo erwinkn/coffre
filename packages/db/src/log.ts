@@ -116,6 +116,15 @@ export function forgetLogHeads(): void {
 }
 
 /**
+ * The transactions that hold the head: an append in one reads what it
+ * needs under the lock in one statement, where one that does not first
+ * takes the lock in another. A savepoint's transaction is another to this
+ * set, so a lock is marked on the object that took it, and an append made
+ * through another object locks again, which is free.
+ */
+const holding = new WeakSet<Transaction>();
+
+/**
  * Lock the log's head, and read it. A transaction that appends takes this
  * before any other row, so the lock order is the same everywhere; taking it
  * again in the same transaction is free.
@@ -123,6 +132,7 @@ export function forgetLogHeads(): void {
 export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; headHash: Buffer }> {
   const [head] = await lockedHead(tx);
   if (head === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+  holding.add(tx);
   return head;
 }
 
@@ -133,10 +143,15 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
  * SQLite's transactions hold the whole file, so the head is always free.
  */
 export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
-  if (engineOf(tx) === 'sqlite') return (await lockedHead(tx)).length > 0;
+  if (engineOf(tx) === 'sqlite') {
+    const held = (await lockedHead(tx)).length > 0;
+    if (held) holding.add(tx);
+    return held;
+  }
   const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(
     sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`,
   );
+  if (rows.length > 0) holding.add(tx);
   return rows.length > 0;
 }
 
@@ -170,15 +185,11 @@ export async function appendEntries(
   const { auditChainHead, auditLog } = tablesOf(tx);
 
   // Every append queues here, if its transaction has not already.
-  const head = locked?.head ?? (await lockLogHead(tx));
+  if (locked === undefined && !holding.has(tx)) await lockLogHead(tx);
   await check?.(tx);
-  const now = locked?.at ?? (await clockNow(tx))[0]!.now;
-  const [read] = locked === undefined ? await lastEntry(tx, { author: key.author, keyId: key.keyId }) : [];
-  const last = locked === undefined ? read : locked.last ?? undefined;
-  // The log's own last row says whether the log has moved on from this key: one statement, under the lock.
-  if (read !== undefined && Boolean(read.retired)) {
-    throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
-  }
+  const held = locked ?? (await readUnderHead(tx, key));
+  const { head, at: now } = held;
+  const last = held.last ?? undefined;
 
   const expected = last === undefined ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
   if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
@@ -241,16 +252,52 @@ export async function appendEntries(
 /** A head locked by a statement of the caller's, and what it read under the lock (`appendEntries`). */
 export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { seq: bigint; hash: Buffer } | null; at: number };
 
+/**
+ * What an append reads under the head its transaction holds, in one
+ * statement: the head, the clock and the log's last entry, all as of the
+ * lock, since locking a head the transaction holds waits for nothing, and
+ * after the append's `check`. The log's own last row says whether the log
+ * has moved on from `key`.
+ */
+async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  const [read] = await underHead(tx, { author: key.author, keyId: key.keyId });
+  if (read === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+  if (read.retired) throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
+  return {
+    head: { nextSeq: read.nextSeq, headHash: read.headHash },
+    last: read.lastSeq === null || read.lastHash === null ? null : { seq: read.lastSeq, hash: read.lastHash },
+    at: read.now,
+  };
+}
+
 /** Entries one statement inserts at most, at 21 parameters each: Postgres takes 65,535. */
 const ROWS_AT_ONCE = 3000;
 
-const clockNow = prepared((db) => db.select({ now: clockMillis(db) }).from(tablesOf(db).auditChainHead));
-
-const lastEntry = prepared((db) => {
-  const { auditLog } = tablesOf(db);
+/**
+ * `readUnderHead`'s statement. Its `FOR UPDATE` waits for nothing in a
+ * transaction that holds the head, and stays for one that would not: there
+ * it waits, and if an append committed meanwhile, its head, read again
+ * after the wait, disagrees with the last entry its snapshot saw before it,
+ * so the append refuses (`LogHeadMismatch`) rather than writing unlocked.
+ */
+const underHead = prepared((db) => {
+  const { auditChainHead, auditLog } = tablesOf(db);
   const moved = sql.raw(MOVES_FROM.map((action) => `'${action}'`).join(', '));
-  const retired = sql<boolean | number>`EXISTS (SELECT 1 FROM audit_log moved WHERE moved.author = ${sql.placeholder('author')} AND moved.subject_principal = ${sql.placeholder('keyId')} AND moved.action IN (${moved}))`;
-  return db.select({ seq: auditLog.seq, hash: auditLog.hash, retired }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+  const newest = (column: SQL) => sql`(SELECT ${column} FROM audit_log ORDER BY seq DESC LIMIT 1)`;
+  return forUpdate(
+    db,
+    db
+      .select({
+        nextSeq: auditChainHead.nextSeq,
+        headHash: auditChainHead.headHash,
+        now: clockMillis(db),
+        lastSeq: newest(sql`seq`).mapWith(auditLog.seq) as SQL<bigint | null>,
+        lastHash: newest(sql`hash`).mapWith(auditLog.hash) as SQL<Buffer | null>,
+        retired: sql<boolean | number>`EXISTS (SELECT 1 FROM audit_log moved WHERE moved.author = ${sql.placeholder('author')} AND moved.subject_principal = ${sql.placeholder('keyId')} AND moved.action IN (${moved}))`,
+      })
+      .from(auditChainHead)
+      .where(eq(auditChainHead.onlyRow, true)),
+  );
 });
 
 // --- reading the vault's entries back ---------------------------------------------

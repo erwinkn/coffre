@@ -22,6 +22,15 @@
   which a bug may be. On Node, the vault's own outage crosses its socket
   as one (503, with Postgres's code), where it was a 500 with the code
   dropped.
+- **An append holds the log's head for two round trips fewer.** Every
+  write, and every proxied call whose cache has lapsed, appends its entry
+  under the audit log's head, the one lock every append in the instance
+  waits for. Having locked the head, the app's append locked it again,
+  then read the clock, then the last entry, before it wrote: three round
+  trips through Hyperdrive, with every other append, the vault's
+  included, queued behind them. It now reads all three in one statement.
+  A token exchange runs 14 statements, not 16, and a proxied call whose
+  cache lapsed 11, not 13, of which 7 hold the head, not 9.
 - **The Kubernetes proof waits for a fresh token instead of sending a spent
   one.** A long-running `coffre serve` sidecar re-proves at 90% of its
   session's life, and the kubelet's next projected token, written at 80%,
