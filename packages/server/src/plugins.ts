@@ -408,9 +408,9 @@ async function workloadIdentity(
   if (standing === undefined) return null;
   const { row, binding, policy, policySeq } = standing.kind === 'session' ? standing.session : { ...standing, row: null };
   const scope: CredentialScope = sessionScope(row ?? { scope: null }, binding, policy);
-  const { access, recalled } = await accessFor(runtime, caller.principal, recall);
-  const id = caller.principal.slice('token:'.length);
   const generation = row?.generation ?? binding.generation;
+  const { access, recalled } = await accessFor(runtime, caller.principal, recall && { generation });
+  const id = caller.principal.slice('token:'.length);
   const callerOf = withRecalled(callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload'), recalled);
   if (callerOf.generation !== generation) return null;
   return {
@@ -518,14 +518,12 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     use: async (handle, asked) => {
       // On the vault's answer about the caller kept from an earlier request, which the vault checks as it opens the
       // values: one call. One that is not the vault's now read and logged nothing, and the read goes again, asking.
-      for (const recall of [true, false]) {
-        try {
-          return await use(handle, asked, recall);
-        } catch (error) {
-          if (!(recall && error instanceof AccessChanged)) throw error;
-        }
+      try {
+        return await use(handle, asked, true);
+      } catch (error) {
+        if (!(error instanceof AccessChanged)) throw error;
       }
-      throw new Error('unreachable');
+      return use(handle, asked, false);
     },
     api: (token) => {
       if (binding !== null) throw noCredential();

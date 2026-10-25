@@ -390,8 +390,9 @@ nothing first when the app kept the vault's last answer about the caller
 (`Accesses`, `packages/server/src/accesses.ts`): it decides on that one,
 and its one vault call, the unwrap, names it (`accessRevision`). The vault
 opens the values only while that is still its answer, under the reader's
-row and the head, and refuses `access_changed` otherwise, reading and
-logging nothing. A read that answers or refuses without opening a value
+row and the head, and refuses `access_changed` otherwise, reading nothing
+and logging no read (with a key service, the intent it logged is closed,
+each key refused). A read that answers or refuses without opening a value
 asks first, and a request whose kept answer is not the vault's now starts
 over, asking. So a read on a kept answer is answered and logged exactly as
 one that asked: one vault call, not two, and three, once, after the

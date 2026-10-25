@@ -270,7 +270,9 @@ export type RefusalCode =
   | 'policy_changed'
   /**
    * A read decided on an earlier answer of `access` about its principal
-   * (`accessRevision`) that is not theirs now: nothing was read or logged.
+   * (`accessRevision`) that is not theirs now: nothing was read, and no
+   * read logged; with a key service, the intent it logged is closed, each
+   * key refused.
    * Asked again on the answer now, it is decided as they are now.
    */
   | 'access_changed'

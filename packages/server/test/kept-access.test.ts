@@ -129,7 +129,7 @@ test('a read on a kept answer makes one vault call, which checks it', async () =
   assert.deepEqual(calls, ['unwrap']);
 });
 
-test('a grant revoked since: the vault refuses the kept answer, reads and logs nothing, and the read is refused as the reader is now', async () => {
+test('a grant revoked since: the vault refuses the kept answer, reading and logging no read, and the read is refused as the reader is now', async () => {
   const reader = await readerSession();
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
@@ -153,13 +153,38 @@ test('a grant given since: the refusal the kept answer would make is checked fir
   assert.deepEqual(await entries(since, 'secret.read'), ['allow']);
 });
 
-test('removed since: the read on the kept answer is refused by the vault, and the credential by the app', async () => {
+test('removed since: the credential is refused, and nothing read', async () => {
   const reader = await readerSession();
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   await root.members.remove(`user:${READER}`);
   const since = await newestSeq();
+  calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), '401');
+  // The removal revoked the session's row too: refused before anything is asked of the vault.
+  assert.deepEqual(calls, []);
   assert.deepEqual(await entries(since, 'secret.read'), []);
+});
+
+test('admitted again, on a new credential: an answer kept from before is no answer about it', async () => {
+  const before = await readerSession();
+  assert.equal(await reveal(before, 'market/dev/API_KEY'), 'fake-dev-key');
+  await root.members.remove(`user:${READER}`);
+  await root.members.add(`user:${READER}`);
+  await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
+  const after = await readerSession();
+  calls = [];
+  assert.equal(await reveal(after, 'market/dev/API_KEY'), 'fake-dev-key');
+  assert.deepEqual(calls, ['access', 'unwrap']);
+  assert.equal(await reveal(before, 'market/dev/API_KEY'), '401');
+});
+
+test('a read of plain values alone, which opens nothing, asks before it answers', async () => {
+  await root.secrets.set('market/dev', { REGION: { value: 'eu-west-3', sensitivity: 'plain' } });
+  const reader = await readerSession();
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
+  calls = [];
+  assert.equal(await reveal(reader, 'market/dev/REGION'), 'eu-west-3');
+  assert.deepEqual(calls, ['access']);
 });
 
 test('a vault older than 0.14.1 checks nothing it is not told: the app asks before it answers', async () => {

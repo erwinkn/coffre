@@ -9,8 +9,8 @@
   connections, for each. The app now keeps the vault's last answer about
   each caller, and a read decides on it, its unwrap naming it: the vault
   opens the values only while that is still its answer, under the
-  reader's row and the head, and otherwise refuses, reading and logging
-  nothing, and the read goes again, asking. What a read answers and logs
+  reader's row and the head, and otherwise refuses, reading nothing and
+  logging no read, and the read goes again, asking. What a read answers and logs
   is what it was. A read whose caller's access, or the policy, changed
   since their last request makes three calls, once. **Deploy the vault
   first, as always**: an app of 0.14.1 keeps only answers that a vault of

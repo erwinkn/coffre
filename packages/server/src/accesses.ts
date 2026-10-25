@@ -16,14 +16,19 @@ import type { Access, Vault } from '@coffre/core/vault';
  * (`AccessChanged`).
  *
  *   Ada's export, her answer kept from her last request    unwrap, naming it: the vault checks it   one call
- *   her role changed meanwhile                              access_changed, nothing read            asked again: access, unwrap
+ *   her role changed meanwhile                              access_changed, no read                 asked again: access, unwrap
  */
 export class Accesses {
   readonly #kept = new Map<string, Access>();
 
-  /** The answer kept about `principal`: an active member's, from a vault that names its answers. */
-  recall(principal: string): Access | undefined {
-    return this.#kept.get(principal);
+  /**
+   * The answer kept about `principal`, an active member's from a vault that
+   * names its answers, at `generation` when the request's credential names
+   * one: an answer of another generation is no answer about it.
+   */
+  recall(principal: string, generation?: number): Access | undefined {
+    const kept = this.#kept.get(principal);
+    return kept === undefined || (generation !== undefined && kept.generation !== generation) ? undefined : kept;
   }
 
   /** Keep an answer, the newest about its principal; any other is forgotten. */
@@ -85,19 +90,20 @@ export class Recalled {
 /**
  * The vault's answer about `principal`: asked, and kept. Or, when `recall`
  * says the request reads values and checks a kept answer before it
- * answers, the kept one, if any, with its `Recalled`.
+ * answers, the kept one, if any, at the generation its credential names,
+ * with its `Recalled`.
  */
 export async function accessFor(
   deps: { vault: Vault; accesses?: Accesses },
   principal: string,
-  recall = false,
+  recall: boolean | { generation: number } = false,
 ): Promise<{ access: Access; recalled: Recalled | null }> {
   const ask = async () => {
     const access = await deps.vault.access(principal);
     deps.accesses?.remember(access);
     return access;
   };
-  const kept = recall ? deps.accesses?.recall(principal) : undefined;
+  const kept = recall === false ? undefined : deps.accesses?.recall(principal, recall === true ? undefined : recall.generation);
   if (kept === undefined) return { access: await ask(), recalled: null };
   return { access: kept, recalled: new Recalled(kept.revision!, ask) };
 }

@@ -346,15 +346,7 @@ Each CI run holds an ID token, good for one credential.
 | Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head through the proxy | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
 | And with no lock for an export, which commits nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
-
-The vault's check of a kept answer (`KeptAnswerChecked`) is not needed
-by these invariants: turned off, a use on an answer kept from before a
-removal is released, and the fence refuses it after, as it refuses a
-removal that commits between the answer and the release. What it keeps
-out is a release logged on an answer that is no longer the vault's, and,
-outside this model, a read decided on grants or a policy that changed
-since the answer was kept; `kept-access.test.ts` and `vault.test.ts` hold
-the code to both.
+| A read on a kept answer is decided only while that is still the vault's answer, under the account's row (`#keys`, `accessRevision`) | a `secret.read` logged on an answer kept from before a removal and an admission (`NoReadOnStaleAnswer`); the fence still withholds the value, so `NoReleaseAfterEnd` holds without it | |
 | That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
 
 The race this model found, as the script prints it with the export's fence off. A
@@ -455,6 +447,7 @@ window of fifteen minutes. #292's review.
 | `RateHeld` | A binding issues no more than its rate |
 | `NoReleaseAfterEnd` | No value reaches a caller through a credential whose release, the vault's `secret.read`, follows the entry that ended it: its `token.revoke`, its binding's `token.unbind`, or a removal past its generation |
 | `UnboundStayUnusable` | A credential an untrusted or replaced binding issued never verifies again |
+| `NoReadOnStaleAnswer` | No `secret.read` is logged on an answer of the vault's kept from an earlier request that is no longer its answer |
 | `SensitiveOnlyFromOwners` | A scope reads a project's sensitive values only if whoever issued it is an Owner of the project when it commits |
 | `SealedOnce` | The older release's token is sealed once, however many first uses race |
 | `CapHolds` | At most the limit's keys decided for the principal in any window |

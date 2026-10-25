@@ -178,7 +178,7 @@ Refuse(p) ==
     /\ Goto(p, "idle")
     /\ UNCHANGED <<rows, log, op, l, left, history>>
 
-Entry(kind, p) == [kind |-> kind, id |-> l[p].id, cred |-> NoCred, b |-> None, token |-> None, gen |-> gen]
+Entry(kind, p) == [kind |-> kind, id |-> l[p].id, cred |-> NoCred, b |-> None, token |-> None, gen |-> gen, stale |-> FALSE]
 
 FirstLabel(kind) ==
     CASE kind = "exchange" -> "ex.candidates"
@@ -309,7 +309,8 @@ UseDecide(p) ==
               /\ UNCHANGED <<rows, log, op, left, history>>
          ELSE IF status # "active"
          THEN Refuse(p)
-         ELSE /\ log' = Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred])
+         \* A release on a kept answer is the model's to see when that answer is not the account's now.
+         ELSE /\ log' = Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred, !.stale = l[p].recalled /\ gen # l[p].kept])
               /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
               /\ Release(p)
               /\ Goto(p, IF op[p].proxy THEN "use.apphead" ELSE "use.fence")
@@ -523,6 +524,10 @@ Ends(e, r) ==
 \* vault's `secret.read`, follows the entry that ended it in the log.
 NoReleaseAfterEnd ==
     \A u \in revealed : \A i \in 1..(u.at - 1) : ~Ends(log[i], Cred(u.cred))
+
+\* No `secret.read` is logged on an answer kept from an earlier request that
+\* is no longer the vault's: such a use starts over, asking.
+NoReadOnStaleAnswer == \A i \in 1..Len(log) : ~log[i].stale
 
 \* A credential an untrusted or replaced binding issued never verifies again.
 UnboundStayUnusable ==

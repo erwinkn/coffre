@@ -670,11 +670,11 @@ export class SigninService {
       row = await findCredential(db, chainKey, { tokenHash });
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
-      if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, request.recall));
+      // A kept answer at the credential's generation, unless its scope is still to be sealed, from what the account holds now.
+      const recall = request.recall === true && row !== null && !(row.kind === 'service' && unsealedScope(row.scope));
+      if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
       // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
-        // Asked, not kept: what it seals is the account's now.
-        if (recalled !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal));
         const binding = issuingBinding(row.createdBy);
         const issued = binding === null ? row : await findBinding(db, chainKey, row.principal, binding);
         if (issued !== null) {

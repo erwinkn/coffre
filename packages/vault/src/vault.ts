@@ -1299,9 +1299,11 @@ class VaultService implements Vault {
       try {
         await check(d);
       } catch (error) {
-        if (error instanceof Refused && error.refusal.code !== 'access_changed') {
+        // A read on a kept answer no longer the vault's logs no read; but a key service's intent, logged already, is
+        // accounted for all the same, each key refused, as after any other refusal.
+        if (error instanceof Refused && !(error.refusal.code === 'access_changed' && intentSeq === null)) {
           throw new Refused(error.refusal, secrets.map((secret, item) =>
-            outcomeEntry(secret, item, 'deny', error.entries[item].code ?? error.refusal.code)));
+            outcomeEntry(secret, item, 'deny', error.entries[item]?.code ?? error.refusal.code)));
         }
         throw error;
       }

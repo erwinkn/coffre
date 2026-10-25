@@ -187,9 +187,9 @@ export async function fetchApi(
    */
   options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean; recall?: false },
 ): Promise<Response> {
-  // A read that may decide on a kept answer, and so start over: its body kept for that.
   const recall = options.recall !== false && options.authenticate === undefined && request.method === 'POST' && routeIn(request, RECALLING);
-  const again = recall ? request.clone() : null;
+  // A request decided on a kept answer, which may start over: its body, unread yet, kept for that.
+  let again: Request | null = null;
   try {
     const { pathname } = new URL(request.url);
     if (pathname === '/api/auth') {
@@ -203,6 +203,7 @@ export async function fetchApi(
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
+    if (identity.caller.recalled !== undefined) again = request.clone();
     const response = await serveApi(request, apiContext(runtime, identity));
     // Nothing goes back on a kept answer the vault has not vouched for this request.
     await identity.caller.recalled?.confirm();
