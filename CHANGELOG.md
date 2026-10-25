@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.0, in short.** Run `coffre migrate`: one migration,
+  `0018_rotate_app_key`, which only grants the app's login to update an
+  enrollment code's MAC, so the previous release serves on it until the
+  deploy. Upgrade the instance, its `coffre serve` sidecars and the apps on
+  the SDK (and the Action, which pins the CLI of its own tag) together: the
+  instance carries the 503 `unavailable`, the faster append and the key
+  rotation, the sidecar the fresh-token wait, the CLI and Action `--verbose`.
+  Then check each Hyperdrive config's `origin_connection_limit`: it should
+  be 20, not 5 (Equisafe's two configs at 5 starved the pool: 15 s waits
+  for a slot, then 503s). `coffre setup` now names a config below its
+  share, and `wrangler hyperdrive update <id>
+  --origin-connection-limit=20` raises it. An upgrade changes no key: the
+  app key rotates only when you rotate it ([deploy.md](docs/deploy.md#rotating-the-app-key)),
+  in a later deploy than the upgrade: list the old `APP_KEY` as a
+  `previousAuditChainKeys` secret of its own, deploy, then set `APP_KEY` to
+  the new key and wait on `/readyz`. **A rotation signs every browser and
+  CLI session out**; service and personal tokens, bindings and workloads
+  go on. **After a rotation, don't roll back to 0.13.x**: 0.13 knows one
+  key, so under the new one it cannot verify the log's older entries, and
+  under the old one every row the rotation signed again fails, tokens and
+  bindings included; 0.14 itself answers 503 `app_key` to a start under a
+  key it replaced, and to undo a rotation you rotate again to a new key.
+  Before any rotation, going back to 0.13.x is as it was in 0.13: the
+  migration only adds a grant. Keep every key replaced listed, and
+  escrowed, to verify the log's history, and never list one that leaked.
+
 - **The Action says where its time goes.** A step that read seven keys
   took 39 s on a busy instance and logged nothing in between. The CLI's
   new session flag `--verbose` writes a line to stderr for each request,
