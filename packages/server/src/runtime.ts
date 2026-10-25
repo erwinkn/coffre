@@ -2,6 +2,7 @@ import { AccessIdentityVerifier, type AccessVerifierConfig, type IdentityVerifie
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
+import { Accesses } from './accesses.ts';
 import type { ApiContext } from './api/context.ts';
 import { SigninService } from './api/signin.ts';
 import { WorkloadService } from './api/workloads.ts';
@@ -42,6 +43,8 @@ export type CoffreRuntime = {
   schema: { migrated: boolean };
   /** Whether the log is under the app's key, for as long as the configuration lives (key-rotation.ts). */
   appKey: { settled: boolean };
+  /** The vault's last answer about each principal, for as long as the configuration lives (`Accesses`): none, kept by nothing. */
+  accesses?: Accesses;
   /**
    * Each workload's gate (gate.ts): the process's on Node, the `GATES`
    * Durable Objects on Workers. Absent on Workers without that binding,
@@ -55,7 +58,7 @@ export type CoffreRuntime = {
  * isolate's, or the process's. Settled values, never a pending read
  * (AGENTS.md, "What an isolate keeps").
  */
-type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey'] };
+type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey']; accesses: Accesses };
 const known = new WeakMap<ResolvedConfig, Known>();
 
 /**
@@ -79,7 +82,7 @@ export function createRuntime(
   let workloads: WorkloadService | null = null;
   let mcp: McpService | null = null;
   let verifier: IdentityVerifier;
-  const { schema, scopes, appKey } = knownOf(config);
+  const { schema, scopes, appKey, accesses } = knownOf(config);
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
       db,
@@ -87,6 +90,7 @@ export function createRuntime(
       vault,
       signin: config.auth.signin,
       scopes,
+      accesses,
     });
     verifier = signin;
     const trusted = config.auth.signin.workloads;
@@ -114,6 +118,7 @@ export function createRuntime(
     waitUntil,
     schema,
     appKey,
+    accesses,
     rotateAfterDays: config.rotateAfterDays,
     plugins: config.plugins,
     gates,
@@ -123,7 +128,7 @@ export function createRuntime(
 function knownOf(config: ResolvedConfig): Known {
   let kept = known.get(config);
   if (kept === undefined) {
-    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false } };
+    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false }, accesses: new Accesses() };
     known.set(config, kept);
   }
   return kept;

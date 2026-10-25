@@ -323,8 +323,11 @@ Each CI run holds an ID token, good for one credential.
 - **Using a credential** (`signin.ts`, `verify`; `secrets.ts`, `reveal`;
   `context.ts`, `recorded`):
   1. its row, unlocked;
-  2. the vault's answer;
-  3. the vault's decision, under the account's row and the head;
+  2. the vault's answer, or one kept from an earlier request
+     (`accesses.ts`, `accessFor`), at any generation the account has had;
+  3. the vault's decision, under the account's row and the head; on a
+     kept answer that is no longer the vault's, none: the use starts
+     over, asking (`#keys`, `accessRevision`; `AccessChanged`);
   4. through the credential proxy, `credential.use` under the head;
   5. the value answered.
 - **Ending one:**
@@ -343,6 +346,15 @@ Each CI run holds an ID token, good for one credential.
 | Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head through the proxy | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
 | And with no lock for an export, which commits nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
+
+The vault's check of a kept answer (`KeptAnswerChecked`) is not needed
+by these invariants: turned off, a use on an answer kept from before a
+removal is released, and the fence refuses it after, as it refuses a
+removal that commits between the answer and the release. What it keeps
+out is a release logged on an answer that is no longer the vault's, and,
+outside this model, a read decided on grants or a policy that changed
+since the answer was kept; `kept-access.test.ts` and `vault.test.ts` hold
+the code to both.
 | That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
 
 The race this model found, as the script prints it with the export's fence off. A
@@ -452,7 +464,7 @@ window of fifteen minutes. #292's review.
 | Scenario | Who runs what | States |
 |---|---|---|
 | `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
-| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 83 thousand |
+| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 145 thousand |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 

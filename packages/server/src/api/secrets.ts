@@ -1800,7 +1800,7 @@ export async function reveal(
         denied(ctx, 'secret.read', 'not_owner_issued', { ...environment, operationId, metadata: { keys } }),
       );
     }
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows);
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows, ctx.caller.recalled);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);

@@ -20,6 +20,7 @@ import type { Access, CallerKind, Vault } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { newestVaultSeq } from '@coffre/db/log';
 
+import type { Recalled } from '../accesses.ts';
 import { formatMember } from './paths.ts';
 
 /**
@@ -79,6 +80,12 @@ export type Caller = {
    * told it with every call (`through`).
    */
   kind: CallerKind;
+  /**
+   * Set when this is the vault's answer kept from an earlier request, not
+   * one asked for this one (`accessFor`): the request answers only once
+   * the vault has vouched for it, or confirmed it (`Recalled`).
+   */
+  recalled?: Recalled;
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -128,6 +135,11 @@ export function callerFrom(
     service: principal.type === 'service',
     kind,
   };
+}
+
+/** The caller, marked as built from a kept answer when it was (`Caller.recalled`). */
+export function withRecalled(caller: Caller, recalled: Recalled | null): Caller {
+  return recalled === null ? caller : { ...caller, recalled };
 }
 
 /**

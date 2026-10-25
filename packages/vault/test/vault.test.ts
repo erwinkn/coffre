@@ -170,6 +170,33 @@ test('a read needs a live grant on the environment, and unwraps the key it was w
   assert.equal(!write.ok && write.refusal.code, 'no_grant');
 });
 
+test("a read on an answer of access the app kept opens only while it is still the reader's answer, and says it checked", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'developer']]);
+  const secret = await w.secret(w.dev);
+  const key = randomBytes(32).toString('base64');
+  const wrap = await w.vault.wrap({ principal: ADA, items: [{ secret, key }] });
+  assert.ok(wrap.ok);
+  const items = await versionItems([{ secret, wrapped: wrap.wrapped[0] }]);
+  const kept = await w.vault.access(ADA);
+  assert.match(kept.revision ?? '', /^[\w-]{32}$/);
+  assert.equal((await w.vault.access(ADA)).revision, kept.revision, 'the same answer has the same revision');
+  assert.deepEqual(await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: kept.revision, items }), { ok: true, keys: [key], accessRevision: kept.revision });
+  // Her access changed since: refused, and nothing read or logged but what was.
+  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'viewer']]);
+  const before = (await vaultLog()).length;
+  const refused = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: kept.revision, items });
+  assert.equal(!refused.ok && refused.refusal.code, 'access_changed');
+  assert.equal((await vaultLog()).length, before);
+  const now = await w.vault.access(ADA);
+  assert.notEqual(now.revision, kept.revision);
+  assert.deepEqual(await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items }), { ok: true, keys: [key], accessRevision: now.revision });
+  // No answer of a removed member is anyone's to read on.
+  await w.vault.remove({ actor: ROOT, principal: ADA });
+  const removed = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items });
+  assert.equal(!removed.ok && removed.refusal.code, 'access_changed');
+});
+
 test("a sensitive value is never handed back to a person, an Owner included: used for them, copied for a fork that keeps it so, read by a service on what an Owner issued", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'developer']]);

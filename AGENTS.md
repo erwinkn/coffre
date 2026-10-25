@@ -153,7 +153,9 @@ asked of its pool from there throws `QueryOutsideTransaction`. A call that
 opened several Hyperdrive connections at once was now and then cancelled
 as hung on Cloudflare (`packages/vault/test/workers.test.ts` counts them).
 A request asks the vault about its caller once: a page's render checks its
-credential once for all its API calls (`pageClient`).
+credential once for all its API calls (`pageClient`), and a read of values
+asks nothing first when the app kept the vault's last answer, which its
+unwrap checks (`Accesses`).
 
 **Tests / checks.**
 `Validate` runs the full CI suite except for a proven, synchronized version

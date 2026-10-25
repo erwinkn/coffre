@@ -22,6 +22,7 @@ import { localVault } from '@coffre/vault/node';
 import { desc, eq } from 'drizzle-orm';
 import type pg from 'pg';
 
+import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
@@ -151,11 +152,13 @@ before(async () => {
       await db.owner.transaction((tx) => appendEntries(tx, appLogKey(base.chainKey), entries));
     }
   };
-  const signinService = new SigninService({ ...base, signin: auth.signin });
+  // The vault's answers kept between requests, as a configuration keeps them (`Accesses`).
+  const accesses = new Accesses();
+  const signinService = new SigninService({ ...base, signin: auth.signin, accesses });
   const deps: FixtureDeps = { ...base, signin: signinService };
   const runtime: CoffreRuntime = {
     db: deps.db, vault, chainKey: deps.chainKey, previousChainKeys: [], signin: signinService, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
-    verifier: signinService, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
+    verifier: signinService, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, plugins: [],
   };
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
@@ -251,15 +254,16 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
  *
  * A reveal: the credential, with the newest policy change; the path; the
  * environment's rows; once the vault has released, the credential and its
- * member again (`credentialStill`). The vault's `access`: one statement. Its `unwrap`:
- * the versions, then BEGIN, its lock timeout, the reader's row locked,
- * the head locked with everything the decision reads, the entries and the
- * head in one statement, COMMIT.
+ * member again (`credentialStill`). One vault call, its `unwrap`, decided
+ * on the vault's answer about the reader kept from their last request,
+ * which it checks (`Accesses`): the versions, then BEGIN, its lock
+ * timeout, the reader's row locked, the head locked with everything the
+ * decision reads, the entries and the head in one statement, COMMIT.
  */
 const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
-  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
-  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 8, vaultCalls: 2 } },
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
+  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
+  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
   // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked, its
   // decision warm in the proxy's cache.
@@ -280,7 +284,8 @@ test('each hot request runs exactly its budget of statements, on as many connect
 /**
  * A workload's request at a proxy whose cache has lapsed, on an isolate
  * that has served one before: the session's statement, the path and the environment's rows,
- * the vault's access and unwrap, then its `credential.use` entry, under the
+ * the vault's unwrap, on the answer about the service kept from its last
+ * request, then its `credential.use` entry, under the
  * head: BEGIN, the head, the policy (the protected environments' rows with
  * the newest change, one statement), the credential still, the head again
  * with the clock and the last entry, the entries and the head, COMMIT. Six
@@ -289,7 +294,22 @@ test('each hot request runs exactly its budget of statements, on as many connect
 test("a workload's request at a proxy whose cache lapsed runs its budget", POSTGRES, async () => {
   await coldWorkload();
   const spent = await cost(coldWorkload);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 8, vaultCalls: 2 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+});
+
+/**
+ * The same through the proxy, its service's access changed since the
+ * proxy's last read: the read on the kept answer, refused by the vault,
+ * goes again, asking, through the session it already checked.
+ */
+test("a proxied call whose cache lapsed, after its service's access changed, asks the vault again, once", POSTGRES, async () => {
+  await coldWorkload();
+  await root.access.set(SERVICE, { 'market/dev': 'developer' });
+  const changed = await cost(coldWorkload);
+  const after = await cost(coldWorkload);
+  await root.access.set(SERVICE, { 'market/dev': 'viewer' });
+  assert.equal(changed.vaultCalls, 3);
+  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
@@ -308,9 +328,27 @@ test('a request runs the same statements, and reads the same rows, however large
   // The policy changed, again and again: prod unprotected, then protected again.
   for (let i = 0; i < 40; i++) await root.environments.protect('market/prod', i % 2 === 1);
 
+  // Once first: a request whose caller's access, or the policy, changed since their last asks the vault again, once.
+  for (const { request } of Object.values(requests)) await request();
   for (const [name, { request }] of Object.entries(requests)) {
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
+});
+
+/**
+ * A reveal decided on a kept answer about its reader that is no longer the
+ * vault's, their role changed since: the vault refuses it, reading and
+ * logging nothing, and the request goes again, asking. Three calls, once:
+ * the next is one again.
+ */
+test("a reveal after the reader's access changed asks the vault again, once", POSTGRES, async () => {
+  await reader.secrets.reveal('market/dev/API_KEY');
+  await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });
+  const changed = await cost(() => reader.secrets.reveal('market/dev/API_KEY'));
+  const after = await cost(() => reader.secrets.reveal('market/dev/API_KEY'));
+  await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
+  assert.deepEqual({ app: changed.app.statements, vaultCalls: changed.vaultCalls }, { app: 7, vaultCalls: 3 });
+  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
 });
 
 test("a caller's check reads nothing of a project they reach nothing in", POSTGRES, async () => {
@@ -409,6 +447,8 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
           break;
       }
     }
+    // Once first, as above: a caller whose access, or the policy, changed asks the vault again, once.
+    for (const { request } of Object.values(requests)) await request();
     for (const [name, { request }] of Object.entries(requests)) {
       const spent = await cost(request);
       const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;

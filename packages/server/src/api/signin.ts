@@ -42,6 +42,7 @@ import {
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
 import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
@@ -72,6 +73,8 @@ export type SigninServiceDeps = {
    * each request, or the process's. The service's own when left out.
    */
   scopes?: { sealed: boolean };
+  /** The vault's last answer about each principal, for as long as the configuration lives (`Accesses`). */
+  accesses?: Accesses;
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
@@ -177,6 +180,8 @@ export type CredentialPrincipal = Principal & {
   credentialId: string;
   credentialGeneration: number;
   access: Access;
+  /** Set when `access` is the vault's answer kept from an earlier request (`accessFor`), for a request that `recall`s. */
+  recalled?: Recalled;
   /** The newest `policy.change` as the credential was read, before the vault was asked for `access`; null for none. */
   policySeq: bigint | null;
   /** Its scope, a service or personal token's or its binding's, past which nothing it asks reaches; null for a session's. */
@@ -647,7 +652,7 @@ export class SigninService {
    * caller is, and a removed member is turned away on the next request
    * whatever credentials they still hold, before any revocation sweep.
    */
-  async verify(token: string, request: { sourceIp: string | null } = { sourceIp: null }): Promise<CredentialPrincipal> {
+  async verify(token: string, request: { sourceIp: string | null; recall?: boolean } = { sourceIp: null }): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
     const now = new Date();
@@ -655,6 +660,7 @@ export class SigninService {
 
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
+    let recalled: Recalled | null = null;
     let policySeq: bigint | null = null;
     try {
       if (!this.#scopes.sealed) {
@@ -664,9 +670,11 @@ export class SigninService {
       row = await findCredential(db, chainKey, { tokenHash });
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
-      if (row !== null) access = await this.#deps.vault.access(row.principal);
+      if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, request.recall));
       // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
+        // Asked, not kept: what it seals is the account's now.
+        if (recalled !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal));
         const binding = issuingBinding(row.createdBy);
         const issued = binding === null ? row : await findBinding(db, chainKey, row.principal, binding);
         if (issued !== null) {
@@ -697,6 +705,7 @@ export class SigninService {
           credentialId: row.id,
           credentialGeneration: row.generation,
           access,
+          ...(recalled === null ? {} : { recalled }),
           policySeq,
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
@@ -713,6 +722,7 @@ export class SigninService {
           credentialGeneration: row.generation,
           exchanged: false,
           access,
+          ...(recalled === null ? {} : { recalled }),
           policySeq,
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
           credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,

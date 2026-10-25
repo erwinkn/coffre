@@ -2,6 +2,7 @@ import { MCP_SCOPE_INFO, scopeString } from '@coffre/core/mcp';
 import { environmentPath, folderName, roleId, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { AccessChanged } from '../accesses.ts';
 import { resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can, placeOf } from './caller.ts';
@@ -265,6 +266,8 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
 
     return jsonResponse(await def.run(ctx, { params: found.params, place, input, query } as never));
   } catch (error) {
+    // Decided on a kept answer about the caller that is not the vault's now: answered by whoever starts it over.
+    if (error instanceof AccessChanged) throw error;
     return errorResponse(error);
   }
 }

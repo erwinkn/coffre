@@ -172,7 +172,7 @@ export class Refusal extends Error {
  * was turned away is half of what an audit log is for.
  */
 export async function audited<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq' | 'policy'> },
+  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq' | 'policy' | 'recalled'> },
   work: (tx: Transaction, log: AuditEntry[]) => Promise<T>,
 ): Promise<T> {
   try {
@@ -235,7 +235,9 @@ export const POLICY_CHANGED = 'policy_changed';
  * returning anything, through the fence (`audited`). A read that hands
  * back a value the app opened itself says so (`fence`), and goes through
  * it even with nothing to log (`fenced`). Either way, the way the request
- * came in must still stand (`credentialStill`).
+ * came in must still stand (`credentialStill`), and a read decided on a
+ * kept answer about the caller is one the vault vouched for, or answers
+ * the same about now (`Recalled`).
  */
 export async function recorded<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
@@ -247,6 +249,7 @@ export async function recorded<T>(
     // Where the read was, and its operation, for the refusal of a credential that ended meanwhile.
     let where: EntryFields = {};
     const result = await work(log, () => (fencing = true), (fields) => (where = fields));
+    await ctx.caller.recalled?.confirm();
     if (log.length > 0) {
       await audited(ctx, async (tx, entries) => {
         await credentialStill(ctx, tx, 'secret.read', where);
@@ -423,8 +426,14 @@ export function requireProjectMaker(ctx: ApiContext, action: string, fields: Ent
   );
 }
 
-/** Log a refusal on its own and throw its error, for checks made outside any transaction. */
-export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'>, refusal: Refusal): Promise<never> {
+/**
+ * Log a refusal on its own and throw its error, for checks made outside
+ * any transaction. Decided on a kept answer about the caller, only once
+ * the vault answers the same now (`Recalled.confirm`): otherwise nothing is
+ * logged, and the request starts over (`AccessChanged`).
+ */
+export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'recalled'> }, refusal: Refusal): Promise<never> {
+  await ctx.caller?.recalled?.confirm();
   await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [refusal.entry]));
   throw answered(refusal);
 }

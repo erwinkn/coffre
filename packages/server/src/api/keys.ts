@@ -1,6 +1,7 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
 import type { Purpose, Refusal, SecretRef, Through, Vault, Via, WrappedKey } from '@coffre/core/vault';
 
+import { AccessChanged, type Recalled } from '../accesses.ts';
 import { ApiError } from './errors.ts';
 
 /**
@@ -74,17 +75,24 @@ export async function openValues(
   vault: Vault,
   asking: Asking & { purpose: Purpose; keepsSensitive?: boolean },
   items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string }[],
+  /** The caller's, decided on a kept answer of the vault's: the vault checks it, and says so by naming it back. */
+  recalled?: Recalled,
 ): Promise<Keyed<string>> {
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
+  const checks = recalled !== undefined && !recalled.confirmed ? recalled.revision : undefined;
   const result = await vault.unwrap({
     ...asking,
+    ...(checks === undefined ? {} : { accessRevision: checks }),
     items: sealed.map(({ secretVersionId, via, through }) => ({
       secretVersionId,
       ...(via === undefined ? {} : { via }),
       ...(through === undefined ? {} : { through }),
     })),
   });
+  if (!result.ok && result.refusal.code === 'access_changed') throw new AccessChanged();
+  // A vault older than 0.14.1 names nothing back: it checked nothing, and the request asks before it answers.
+  if (result.ok && checks !== undefined && result.accessRevision === checks) recalled!.vouched();
   if (!result.ok) return result;
   const opened = sealed.map(({ secret, envelope }, i) => {
     const dek = Buffer.from(result.keys[i], 'base64');

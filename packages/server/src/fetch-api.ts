@@ -1,6 +1,7 @@
 import { createClient, type CoffreClient } from '@coffre/client';
 import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
 
+import { AccessChanged } from './accesses.ts';
 import { ApiError } from './api/errors.ts';
 import { routeParts, serveApi } from './api/router.ts';
 import {
@@ -75,6 +76,13 @@ function routeIn(request: Request, routes: readonly string[][]): boolean {
 }
 
 const isPageRead = (request: Request) => routeIn(request, PAGE_READS);
+
+/**
+ * The reads that decide on the vault's answer about their caller kept from
+ * an earlier request, as the vault checks it when it opens their values:
+ * one vault call, not two (`accessFor`).
+ */
+const RECALLING = [['reveals']];
 
 /**
  * Routes only the browser reaches: an approval is decided on coffre's page,
@@ -173,26 +181,39 @@ function authInfo(request: Request, runtime: CoffreRuntime): AuthInfo {
 export async function fetchApi(
   request: Request,
   runtime: CoffreRuntime,
-  /** `inProcess`: a page's render (`pageClient`), whose cookie the browser sent to coffre's own page. */
-  options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean },
+  /**
+   * `inProcess`: a page's render (`pageClient`), whose cookie the browser sent to coffre's own page.
+   * `recall: false`: asked again, its caller asked of the vault (`RECALLING`).
+   */
+  options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean; recall?: false },
 ): Promise<Response> {
+  // A read that may decide on a kept answer, and so start over: its body kept for that.
+  const recall = options.recall !== false && options.authenticate === undefined && request.method === 'POST' && routeIn(request, RECALLING);
+  const again = recall ? request.clone() : null;
   try {
     const { pathname } = new URL(request.url);
     if (pathname === '/api/auth') {
       return request.method === 'GET' ? jsonResponse(authInfo(request, runtime)) : methodNotAllowed(['GET']);
     }
-    const identity = await apiCaller(request, runtime, options.sourceIp, options.authenticate, options.inProcess);
+    const authenticate: Authenticate | undefined = recall
+      ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, { recall: true })
+      : options.authenticate;
+    const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess);
     if (identity instanceof Response) return identity;
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
     const response = await serveApi(request, apiContext(runtime, identity));
+    // Nothing goes back on a kept answer the vault has not vouched for this request.
+    await identity.caller.recalled?.confirm();
     if (identity.workload == null) return response;
     // A workload's every answer carries the gate's current nonce, which its next proof signs (section 5.1): on a copy, whose headers are its own.
     const answered = new Response(response.body, response);
     answered.headers.set('dpop-nonce', identity.workload.nonce);
     return answered;
   } catch (error) {
+    // Decided on a kept answer that is not the vault's now: nothing was read, logged or answered. Again, asking.
+    if (error instanceof AccessChanged && again !== null) return fetchApi(again, runtime, { ...options, recall: false });
     return errorResponse(error);
   }
 }

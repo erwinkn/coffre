@@ -2,7 +2,8 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@
 import type { CredentialScope } from '@coffre/core/access';
 import type { Access } from '@coffre/core/vault';
 
-import { callerFrom, newestPolicySeq, type Caller } from './api/caller.ts';
+import { accessFor, type Recalled } from './accesses.ts';
+import { callerFrom, newestPolicySeq, withRecalled, type Caller } from './api/caller.ts';
 import { formatMember } from './api/paths.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
@@ -44,7 +45,7 @@ export type AuthenticatedIdentity = {
 
 type AuthenticationRuntime = Pick<
   CoffreRuntime,
-  'auth' | 'verifier' | 'vault' | 'db' | 'chainKey' | 'publicUrl' | 'gates' | 'waitUntil'
+  'auth' | 'verifier' | 'vault' | 'db' | 'chainKey' | 'publicUrl' | 'gates' | 'waitUntil' | 'accesses'
 >;
 
 function cookieValue(request: Request, name: string): string | null {
@@ -144,8 +145,12 @@ export async function authenticateRequest(
   requestId: string = crypto.randomUUID(),
   token = accessTokenForRequest(request, runtime.auth),
   sourceIp: string | null = null,
-  /** `handle`: the credential proxy's, which takes a handle and nothing else; everything else takes anything but one. */
-  options: { handle?: boolean } = {},
+  /**
+   * `handle`: the credential proxy's, which takes a handle and nothing else; everything else takes anything but one.
+   * `recall`: the request reads values, and may decide on the vault's answer about its caller kept from an earlier
+   * request, which it has the vault check before it answers (`accessFor`).
+   */
+  options: { handle?: boolean; recall?: boolean } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
@@ -158,6 +163,7 @@ export async function authenticateRequest(
   // An enrollment code buys a workload's session and is no credential; a session is used with its key's proof, never
   // as a bearer: its hash covers its prefix, so neither is ever looked up as one (docs/design/workload-access.md).
   if (kind === 'enrollment') return errorResponse(new ApiError('unauthenticated', 'an enrollment code is no credential: a workload exchanges it at /api/auth/workload', 'enrollment'));
+  // Never on a kept answer: started over, its request would show its proof a second time, which the gate refuses.
   if (kind === 'workload') return authenticateWorkload(request, runtime, requestId, token, sourceIp);
   // A strict instance leaves services nothing but key-bound sessions (section 6.3): a bearer service token, kept or exchanged, reads nothing.
   if (kind === 'service' && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true) {
@@ -173,14 +179,16 @@ export async function authenticateRequest(
   let personalToken: PersonalToken | null = null;
   let handlePlaces: readonly HandlePlace[] | null = null;
   let checked: Access | undefined;
+  let recalled: Recalled | null = null;
   // The newest policy change before the vault is asked: the policy it answers with is this one or newer (`policyStill`).
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
   try {
-    const verified = (await runtime.verifier.verify(token, { sourceIp })) as Principal & {
+    const verified = (await runtime.verifier.verify(token, { sourceIp, recall: options.recall === true })) as Principal & {
       credentialId?: string;
       credentialGeneration?: number;
       access?: Access;
+      recalled?: Recalled | null;
       exchanged?: boolean;
       credentialScope?: CredentialScope | null;
       personalToken?: PersonalToken | null;
@@ -188,7 +196,7 @@ export async function authenticateRequest(
       expiresAt?: string;
       policySeq?: bigint | null;
     };
-    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, ...principal } = verified);
+    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, recalled = null, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, ...principal } = verified);
   } catch (error) {
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
@@ -208,7 +216,8 @@ export async function authenticateRequest(
 
   try {
     // A coffre credential was checked against what the vault says of its member: that answer, not a second call.
-    const caller = callerFrom({ type: principal.type, id: principal.id }, checked ?? await runtime.vault.access(formatMember(principal)), policySeq, credentialScope);
+    if (checked === undefined) ({ access: checked, recalled } = await accessFor(runtime, formatMember(principal), options.recall));
+    const caller = withRecalled(callerFrom({ type: principal.type, id: principal.id }, checked, policySeq, credentialScope), recalled);
     // Removal may have raced the credential verification above.
     if (credentialGeneration !== undefined && caller.generation !== credentialGeneration) {
       return unauthenticated(runtime.auth);
@@ -260,7 +269,7 @@ async function authenticateWorkload(
   const { row, binding, policy } = session;
   const id = row.principal.slice('token:'.length);
   try {
-    const access = await runtime.vault.access(row.principal);
+    const { access } = await accessFor(runtime, row.principal);
     const caller = callerFrom({ type: 'service', id }, access, session.policySeq, sessionScope(row, binding, policy), 'workload');
     // Removal may have raced the statement.
     if (caller.generation !== row.generation) return unauthenticated(runtime.auth);
