@@ -58,6 +58,8 @@ test("a database that does not answer is 503 unavailable, the request's to ask a
   const quoted = Object.assign(new Error('Failed query: update members set note = $1\nparams: connection terminated'), { query: 'update …', params: ['connection terminated'] });
   quoted.cause = Object.assign(new Error('insert or update violates foreign key constraint'), { code: '23503' });
   assert.equal(isUnavailable(quoted), false);
+  // Postgres's own words may quote input too: an error with a code is read by its code.
+  assert.equal(isUnavailable(Object.assign(new Error('invalid input syntax for type uuid: "connection timeout"'), { code: '22P02' })), false);
   // Postgres answered, telling the client it broke the protocol: the same request fails the same way, a 500.
   const violation = Object.assign(new Error('bind message supplies 1 parameters, but prepared statement "" requires 2'), { code: '08P01' });
   assert.equal(isUnavailable(violation), false);

@@ -12,7 +12,9 @@
   are logged as `a dependency did not answer`, or, for a statement that
   gave up on a lock or its own bound, `a statement gave up waiting`: under
   a busy database an outage, and otherwise a transaction held too long,
-  which a bug may be.
+  which a bug may be. On Node, the vault's own outage crosses its socket
+  as one (503, with Postgres's code), where it was a 500 with the code
+  dropped.
 - **The Kubernetes proof waits for a fresh token instead of sending a spent
   one.** A long-running `coffre serve` sidecar re-proves at 90% of its
   session's life, and the kubelet's next projected token, written at 80%,

@@ -134,8 +134,9 @@ export function isUnreachable(error: unknown): boolean {
     const { code, message } = cause as { code?: unknown; message?: unknown };
     // Class 08 but its protocol violation (08P01), which is the client's bug: asked again, it fails again.
     if (typeof code === 'string' && (UNREACHABLE.has(code) || (/^08[0-9A-Z]{3}$/.test(code) && code !== '08P01'))) return true;
-    // Not Drizzle's words, which quote the query and its parameters: the driver's are its cause's.
-    if (typeof message === 'string' && !('params' in cause) && UNREACHABLE_WORDS.test(message)) return true;
+    // The words only of what said no code, or Hyperdrive's 58000, and never a message quoting a query and its
+    // parameters (Drizzle's, the Node vault's carrying it): the driver's words are its cause's.
+    if (typeof message === 'string' && (typeof code !== 'string' || code === '58000') && !message.includes('Failed query: ') && UNREACHABLE_WORDS.test(message)) return true;
     cause = (cause as { cause?: unknown }).cause;
   }
   return false;

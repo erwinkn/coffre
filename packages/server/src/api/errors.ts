@@ -128,9 +128,10 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
   }
-  // The database not answering, the vault's behind its call, or a key service's: the request was fine, and may be asked again. A
-  // statement that gave up waiting is logged apart: under a busy database it is an outage, but a transaction held too
-  // long, across a vault call say, is a bug that looks the same.
+  // The database not answering, the vault's behind its call, or a key service's: the request was fine, and may be
+  // asked again; a write whose connection dropped may have committed, which a look at it says. A statement that gave
+  // up waiting is logged apart: under a busy database it is an outage, but a transaction held too long, across a
+  // vault call say, is a bug that looks the same.
   if (isUnavailable(error)) {
     console.error(gaveUp(error) ? 'a statement gave up waiting' : 'a dependency did not answer', logged(error));
     return { status: 503, body: { error: 'unavailable', message: UNAVAILABLE } };
