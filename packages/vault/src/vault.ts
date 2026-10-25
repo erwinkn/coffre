@@ -2536,17 +2536,7 @@ class VaultService implements Vault {
       if (gap !== null) return { ok: false as const, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
       return from;
     }, SNAPSHOT);
-    // The walk on from there, outside any transaction: a batch a statement, so that no connection is held while it
-    // rehashes, seconds for a long walk. Entries are appended in order, under the head, and never change, so no snapshot
-    // keeps them: what it read is held to the log again under the head, before anything is signed over it (`carries`).
-    const walked = !resumed.ok ? resumed : await (async () => {
-      const walk = new Walk(resumed.tally, resumed.digest);
-      const chain = await rehash(this.#db, logKeys, resumed.at, walk, { limit: walks.checkpoint });
-      if (!chain.ok) return chain;
-      const unsigned = await this.#checkpointFault(this.#db, walk.checkpoints);
-      if (unsigned !== null) return unsigned;
-      return { ok: true as const, from: resumed, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
-    })();
+    const walked = resumed.ok ? await this.#walkOn(resumed, walks.checkpoint) : resumed;
     // The past rehashed, in a snapshot of its own. The database failing it leaves the stretch for the
     // next call, where it was, and the checkpoint is signed all the same, saying why (`warning`); a bug
     // throws, as anywhere else.
@@ -2630,6 +2620,25 @@ class VaultService implements Vault {
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
+  }
+
+  /**
+   * The walk on from where a checkpoint resumes, no further than `limit`
+   * entries, outside any transaction: a batch a statement, each linked to
+   * the hash it verified last, so that no connection is held while it
+   * rehashes, seconds for a long walk. Entries are appended in order, under
+   * the head, and never change, so no snapshot keeps them: what it read is
+   * held to the log again under the head, before anything is signed over it
+   * (`carries`).
+   */
+  async #walkOn(from: Resumed, limit: number) {
+    const { logKeys } = this.#prepared;
+    const walk = new Walk(from.tally, from.digest);
+    const chain = await rehash(this.#db, logKeys, from.at, walk, { limit });
+    if (!chain.ok) return chain;
+    const unsigned = await this.#checkpointFault(this.#db, walk.checkpoints);
+    if (unsigned !== null) return unsigned;
+    return { ok: true as const, from, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
   }
 
   /**

@@ -662,9 +662,9 @@ by their MACs; and signs the log up to its last entry with Ed25519, in an
 last checkpoint. The walk takes neither the log's lock nor a transaction:
 it reads a batch a statement, each linked to the hash it verified last,
 so writes never wait for it and no connection is held while it rehashes,
-and only the entries appended meanwhile are walked under the lock. The same checkpoint checks every member's row, as
-`access` would, and logs a `vault.tampered` for each one changed around
-the vault.
+and only the entries appended meanwhile are walked under the lock. The
+same checkpoint checks every member's row, as `access` would, and logs a
+`vault.tampered` for each one changed around the vault.
 
 **The tally.** A walk from the first entry gathers more than a head
 hash: the vault's keys in the order the log moved through them, the key
