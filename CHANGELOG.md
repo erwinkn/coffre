@@ -33,8 +33,10 @@
     member of another role, or has members besides the backup login. It
     makes a role, as no migration since the baseline did: the login that
     migrates needs `CREATEROLE`, which a member of the owner does not
-    inherit, unless `coffre_backup` exists already (`CREATE ROLE
-    coffre_backup NOLOGIN`, by a login that has it).
+    inherit, unless `coffre_backup` exists already, made by a login that has
+    it, which then grants the migrating login `ADMIN` on it: `CREATE ROLE
+    coffre_backup NOLOGIN; GRANT coffre_backup TO <login> WITH ADMIN TRUE,
+    INHERIT FALSE, SET FALSE`.
 
 ## 0.14.1 (2026-10-25)
 

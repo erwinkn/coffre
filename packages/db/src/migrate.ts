@@ -82,7 +82,7 @@ export type MigrationRun = { backupLogin: 'granted' | 'absent' | 'refused' | nul
 export function backupLoginNote({ backupLogin }: MigrationRun): string | null {
   switch (backupLogin) {
     case 'absent':
-      return 'no backup login: coffre_backup_login does not exist, so nothing can back this database up as coffre_backup; make it, and migrate again (docs/restore.md)';
+      return 'no backup login: coffre_backup_login does not exist. Backing up with pg_dump without the owner\'s password needs it (docs/restore.md): make it, and migrate again. A host\'s own backups do not';
     case 'refused':
       return 'coffre_backup_login does not inherit coffre_backup, and this login may not grant it, lacking ADMIN OPTION on coffre_backup: ' +
         'as a role that has it, run GRANT coffre_backup TO coffre_backup_login WITH ADMIN FALSE, INHERIT TRUE, SET FALSE';

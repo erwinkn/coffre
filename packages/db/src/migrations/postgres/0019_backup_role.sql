@@ -4,7 +4,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_backup') THEN
         -- No migration since the baseline made a role: a login that migrates as a member of the owner inherits its privileges, never its CREATEROLE.
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolcreaterole)) THEN
-            RAISE EXCEPTION '% may not create roles, and this migration makes coffre_backup: migrate as a login with CREATEROLE, or have one run CREATE ROLE coffre_backup NOLOGIN first', current_user;
+            RAISE EXCEPTION '% may not create roles, and this migration makes coffre_backup: migrate as a login with CREATEROLE, or have one run CREATE ROLE coffre_backup NOLOGIN; GRANT coffre_backup TO % WITH ADMIN TRUE, INHERIT FALSE, SET FALSE first', current_user, current_user;
         END IF;
         CREATE ROLE coffre_backup NOLOGIN INHERIT NOCREATEDB NOCREATEROLE;
     ELSE

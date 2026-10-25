@@ -1267,6 +1267,8 @@ To back up with `pg_dump`, make a third login, `coffre_backup_login`, the
 same way, before or after migrating: every migration run grants it the
 group that reads every row ([restore.md](restore.md#on-plain-postgres)).
 Nothing checks that login's own rights: keep it as plain as the two above.
+Every run grants the group to whichever role bears that name, so on a server
+where others may create roles, make it before they can.
 
 New roles default to no superuser, replication or RLS-bypass rights. The
 migration checks those rights and refuses unsafe roles. It hardens existing

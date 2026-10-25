@@ -108,16 +108,19 @@ fi
 # Databases at 0018, the schema before this migration, whose public holds a
 # table of another role, as migrate.test.ts's reporting table, and in which
 # the group was granted a write. 0019 then grants coffre's tables, and only
-# them, whoever migrates, the superuser included, and revokes the write.
+# them, whoever migrates (the owner, the superuser, or a member of the owner
+# on a database the owner made), and revokes the write.
 tree="$scratch/migrations-0018"
 cp -r packages/db/src/migrations/postgres "$tree"
 rm "$tree/0019_backup_role.sql" "$tree/meta/0019_snapshot.json"
 node -e 'const fs = require("fs"), f = process.argv[1], j = JSON.parse(fs.readFileSync(f, "utf8")); j.entries = j.entries.filter((e) => e.tag !== "0019_backup_role"); fs.writeFileSync(f, JSON.stringify(j))' "$tree/meta/_journal.json"
 as_superuser -c 'CREATE ROLE reporting NOLOGIN'
-for login in migration_owner:local-owner-only postgres:local-bootstrap-only; do
+for logins in migration_owner:local-owner-only,migration_owner:local-owner-only postgres:local-bootstrap-only,postgres:local-bootstrap-only \
+    migration_owner:local-owner-only,migration_member:local-member-only; do
+    maker="${logins%%,*}" login="${logins#*,}"
     database="at_0018_${login%%:*}"
-    url="postgresql://$login@127.0.0.1:$port/$database"
-    as_superuser -c "CREATE DATABASE $database OWNER ${login%%:*}"
+    url="postgresql://$maker@127.0.0.1:$port/$database"
+    as_superuser -c "CREATE DATABASE $database OWNER ${maker%%:*}"
     (cd packages/db && node --input-type=module -e '
         const { default: pg } = await import("pg");
         const { drizzle } = await import("drizzle-orm/node-postgres");
@@ -132,7 +135,8 @@ CREATE TABLE public.reporting_rows (n integer);
 ALTER TABLE public.reporting_rows OWNER TO reporting;
 GRANT INSERT ON projects TO coffre_backup;
 SQL
-    DATABASE_URL="$url" pnpm --filter @coffre/db run db:migrate >"$scratch/at_0018.log" 2>&1 || { cat "$scratch/at_0018.log" >&2; exit 1; }
+    DATABASE_URL="postgresql://$login@127.0.0.1:$port/$database" pnpm --filter @coffre/db run db:migrate >"$scratch/at_0018.log" 2>&1 \
+        || { cat "$scratch/at_0018.log" >&2; exit 1; }
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'projects', 'SELECT') AND NOT has_table_privilege('coffre_backup', 'projects', 'INSERT')")" == t ]] \
         || { echo "0019, as ${login%%:*}, did not leave the group exactly SELECT on projects" >&2; exit 1; }
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'reporting_rows', 'SELECT')")" == f ]] \
