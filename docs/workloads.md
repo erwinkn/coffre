@@ -189,9 +189,9 @@ it uses with its own key.
   whole, up to 16 MiB.
 - **Waits** for an enrollment code that is `full` (up to 5 minutes), for a
   person to approve a pending session (up to 10 minutes, every 5 seconds),
-  and for the kubelet to write the next projected token when a restarted
-  process finds the old one spent (up to 10 minutes). It says so once on
-  standard error, or through `log`.
+  and for the kubelet to write the next projected token when the file still
+  holds the one already used, at a renewal or after a restart (up to 10
+  minutes). It says so once on standard error, or through `log`.
 - **Follows redirects hop by hop**, signing each hop within coffre afresh,
   and sending a hop elsewhere with the app's own headers alone, never the
   session's, and, as fetch does, without the app's `Authorization` and
@@ -317,9 +317,13 @@ For a private cluster, coffre takes the cluster's public keys with the
 binding, as [kubernetes.md](kubernetes.md) does today. With the SDK
 instead, mount the same volume in the app's container and use
 `kubernetes()`, which reads `/var/run/secrets/coffre/token` unless given
-another path. A restarted app finds that token spent and waits for the
-kubelet's next one, which comes at 80% of the token's life (8 minutes with
-600 seconds), so the sidecar suits apps that restart often.
+another path. A projected token is spent once used, so the SDK never sends
+one twice: at a renewal, and when a restarted app finds the last start's
+token, it waits for the kubelet's next, which comes at 80% of the token's
+life (8 minutes with 600 seconds) on the kubelet's next volume sync, a few
+seconds late at times. It logs `coffre: the token at <path> is already used;
+waiting for the next one` once per wait, and the old session keeps serving
+meanwhile.
 
 ### ECS, Lambda, EC2, EKS
 

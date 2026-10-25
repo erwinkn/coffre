@@ -82,33 +82,42 @@ export const KUBERNETES_TOKEN = '/var/run/secrets/coffre/token';
 /**
  * A Kubernetes projected service account token, read from its file before
  * each exchange: the pod spec's `serviceAccountToken` with coffre's URL as
- * its `audience`. Such a token is spent once used. If the exchange finds it
- * spent (a restarted process reading the file again), this waits for the
- * kubelet's next, which it writes at 80% of the token's life, watching the
- * file for up to 10 minutes.
+ * its `audience`. Such a token is spent once used, so a file still holding
+ * the token this process exchanged last is never sent again: the proof
+ * waits for the kubelet's next, which it writes at 80% of the token's life,
+ * watching the file for up to 10 minutes. That is the normal renewal in a
+ * long-running pod (the session re-proves at 90% of its life, and the
+ * kubelet's next volume sync can land after that), and so is the other
+ * case: a restarted process finds the token an earlier one used, which the
+ * exchange says (`replayed`), and `spent()` waits the same way.
  */
 export function kubernetes(path: string = KUBERNETES_TOKEN): Proof {
+  /** The token this process sent last. */
   let last: string | null = null;
   const read = async () => (await (await import('node:fs/promises')).readFile(path, 'utf8')).trim();
+  /** The file's next token once it differs from `last`, polled every second, or null after 10 minutes. */
+  const next = async ({ log, signal }: ProofContext): Promise<string | null> => {
+    log(`coffre: the token at ${path} is already used; waiting for the next one (up to 10 minutes)`);
+    for (const end = Date.now() + 10 * 60_000; Date.now() < end; ) {
+      await sleep(1000);
+      signal?.throwIfAborted();
+      const now = await read().catch(() => last);
+      if (now !== last && now !== '') return now;
+    }
+    return null;
+  };
   return {
     name: 'kubernetes',
     kind: 'oidc',
-    prove: async () => {
-      last = await read().catch((error: Error & { code?: string }) => {
+    prove: async (context) => {
+      const token = await read().catch((error: Error & { code?: string }) => {
         throw new Error(`no projected service account token at ${path} (${error.code ?? error.message}): mount one whose audience is coffre's URL`);
       });
-      return { oidc: last };
+      const fresh = token === last ? await next(context) : token;
+      if (fresh === null) throw new Error(`the kubelet wrote no new token at ${path} in 10 minutes: check the projected volume and its expirationSeconds`);
+      return { oidc: (last = fresh) };
     },
-    spent: async ({ log, signal }) => {
-      log(`coffre: the projected token at ${path} was spent already, by an earlier start; waiting for the kubelet to write its next, up to 10 minutes`);
-      for (const end = Date.now() + 10 * 60_000; Date.now() < end; ) {
-        await sleep(1000);
-        signal?.throwIfAborted();
-        const now = await read().catch(() => last);
-        if (now !== last) return true;
-      }
-      return false;
-    },
+    spent: async (context) => (await next(context)) !== null,
   };
 }
 
