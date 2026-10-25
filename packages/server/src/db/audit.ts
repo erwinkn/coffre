@@ -84,7 +84,11 @@ export type AppKeys = { chainKey: Buffer; previousChainKeys: readonly Buffer[] }
  * first `key.reseal` or `key.rotate` naming it. A key verifies only the
  * entries before that one.
  */
-export type AppVerifier = { keys: readonly LogKey[]; movedOn: ReadonlyMap<string, bigint> };
+export type AppVerifier = {
+  /** The key the app signs with now, first, then those it replaced. */
+  keys: readonly LogKey[];
+  movedOn: ReadonlyMap<string, bigint>;
+};
 
 /** The verifier for `keys`, as the log now says where it moved on from each: one indexed read, none without previous keys. */
 export async function appVerifier(db: Queryable, keys: AppKeys): Promise<AppVerifier> {
@@ -98,6 +102,31 @@ export async function appVerifier(db: Queryable, keys: AppKeys): Promise<AppVeri
     .where(and(eq(auditLog.author, 'app'), inArray(auditLog.action, [...MOVES_FROM]), inArray(auditLog.subjectPrincipal, previous.map((key) => key.keyId))))
     .groupBy(auditLog.subjectPrincipal);
   return { keys: all, movedOn: new Map(rows.map((row) => [row.keyId!, BigInt(row.seq!)])) };
+}
+
+/**
+ * `verifier`, with where the log moved on from each key it replaced as
+ * `entries` say it too: the first `key.reseal` or `key.rotate` of the
+ * app's naming one, as `appVerifier` reads it. An entry forged as one
+ * fails its own MAC; until then it only makes the verifier stricter.
+ * Defense in depth: a beat walks only up to a checkpoint the vault signed
+ * before the verifier was read, so a rotation within its walk is in the
+ * verifier already; a walk in no transaction with no such end would need it.
+ */
+export function movedOnIn(verifier: AppVerifier, entries: readonly StoredEntry[]): AppVerifier {
+  // No key replaced, nothing to move on from.
+  if (verifier.keys.length <= 1) return verifier;
+  const replaced = new Set(verifier.keys.slice(1).map((key) => key.keyId));
+  let movedOn: Map<string, bigint> | null = null;
+  for (const entry of entries) {
+    const keyId = entry.subjectPrincipal;
+    if (entry.author !== 'app' || !MOVES_FROM.includes(entry.action as (typeof MOVES_FROM)[number]) || keyId === null || !replaced.has(keyId)) continue;
+    const known = (movedOn ?? verifier.movedOn).get(keyId);
+    if (known !== undefined && known <= entry.seq) continue;
+    movedOn ??= new Map(verifier.movedOn);
+    movedOn.set(keyId, entry.seq);
+  }
+  return movedOn === null ? verifier : { ...verifier, movedOn };
 }
 
 /**
@@ -175,7 +204,7 @@ export async function walkChain(
       return { ok: false, failedAtSeq: from.seq, reason: 'changed since the app last verified the log through it', through: from.seq - 1n };
     }
   }
-  const verifier = await appVerifier(db, keys);
+  let verifier = await appVerifier(db, keys);
   let at = from;
   for (let left = limit; ; ) {
     if (to !== undefined && at.seq >= to) return { ok: true, at, done: true };
@@ -184,6 +213,8 @@ export async function walkChain(
     let batch = await auditRange(db, at.seq + 1n, Math.min(BATCH, left));
     if (to !== undefined) batch = batch.filter((row) => row.seq <= to);
     if (batch.length === 0) return { ok: true, at, done: to === undefined };
+    // Where the log moved on from a key it replaced, as these entries say too (`movedOnIn`).
+    verifier = movedOnIn(verifier, batch);
     const result = verifyAppEntries(batch, { startSeq: at.seq + 1n, startPrevHash: at.hash }, verifier);
     if (!result.ok) {
       // Verified through the entry read before the faulty one: with a gap, not the seq before it.
