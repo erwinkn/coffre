@@ -24,7 +24,7 @@ import { routes, type Check, type Route } from './routes.ts';
  * the body's value count is held to `MAX_BODY_NODES` in `readJson` before
  * validation, which is what keeps a parse within R27's budget.
  */
-const API_BODY_BYTES = 1024 * 1024;
+export const API_BODY_BYTES = 1024 * 1024;
 
 /**
  * The most top-level entries a request body may name, refused before it is

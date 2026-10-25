@@ -86,12 +86,16 @@ beforeEach(async () => {
 
 /** The reader's CLI session, from an approved device login: it carries everything they hold, now. */
 async function readerSession(): Promise<CoffreClient> {
+  return bearer(await readerToken());
+}
+
+async function readerToken(): Promise<string> {
   const signinService = runtime.signin!;
   const started = await signinService.startDevice({ clientLabel: 'laptop', sourceIp: null });
   await signinService.decideDevice(await contextFor(deps, READER), started.userCode, true);
   const polled = await signinService.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null });
   if (polled.status !== 'approved') throw new Error('the device login was not approved');
-  return bearer(polled.credential.token);
+  return polled.credential.token;
 }
 
 function bearer(token: string): CoffreClient {
@@ -215,4 +219,21 @@ test("an answer from a vault older than 0.14.1, which names none, is never kept:
   assert.equal(accesses.recall(answer.principal, 1), undefined);
   accesses.remember({ ...answer, status: 'removed', generation: 1, revision: 'r2' });
   assert.equal(accesses.recall(answer.principal), undefined);
+});
+
+test('a body past the bound, on a kept answer, is refused at once, its stream cancelled', async () => {
+  const token = await readerToken();
+  assert.equal(await reveal(bearer(token), 'market/dev/API_KEY'), 'fake-dev-key');
+  let cancelled = false;
+  const chunk = new Uint8Array(64 * 1024).fill(0x20);
+  const body = new ReadableStream<Uint8Array>({ pull: (controller) => controller.enqueue(chunk), cancel: () => void (cancelled = true) });
+  const request = new Request(`${ORIGIN}/api/reveals`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body, duplex: 'half',
+  } as RequestInit);
+  const answered = await Promise.race([
+    coffreRoute(request, runtime, '203.0.113.7'),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+  ]);
+  assert.equal(answered?.status, 400);
+  assert.ok(cancelled, 'the body was cancelled');
 });

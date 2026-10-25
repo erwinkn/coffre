@@ -3,7 +3,7 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from 
 
 import { AccessChanged } from './accesses.ts';
 import { ApiError } from './api/errors.ts';
-import { routeParts, serveApi } from './api/router.ts';
+import { API_BODY_BYTES, routeParts, serveApi } from './api/router.ts';
 import {
   authenticateRequest,
   headerToken,
@@ -15,7 +15,7 @@ import {
   unauthenticated,
   type AuthenticatedIdentity,
 } from './auth.ts';
-import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
+import { errorResponse, jsonResponse, methodNotAllowed, readLimitedText } from './http.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { publicProviders } from './signin.ts';
 
@@ -188,7 +188,7 @@ export async function fetchApi(
   options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean; recall?: false },
 ): Promise<Response> {
   const recall = options.recall !== false && options.authenticate === undefined && request.method === 'POST' && routeIn(request, RECALLING);
-  // A request decided on a kept answer, which may start over: its body, unread yet, kept for that.
+  // A request decided on a kept answer, which may start over: its body, read once within the API's bound, kept for that.
   let again: Request | null = null;
   try {
     const { pathname } = new URL(request.url);
@@ -203,8 +203,14 @@ export async function fetchApi(
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
-    if (identity.caller.recalled !== undefined) again = request.clone();
-    const response = await serveApi(request, apiContext(runtime, identity));
+    let served = request;
+    if (identity.caller.recalled !== undefined) {
+      // Read, not teed: a branch left unread would hold back the cancel of one past the bound, which then never answers.
+      const body = await readLimitedText(request, API_BODY_BYTES);
+      const replay = () => new Request(request.url, { method: request.method, headers: request.headers, body });
+      [served, again] = [replay(), replay()];
+    }
+    const response = await serveApi(served, apiContext(runtime, identity));
     // Nothing goes back on a kept answer the vault has not vouched for this request.
     await identity.caller.recalled?.confirm();
     if (identity.workload == null) return response;
