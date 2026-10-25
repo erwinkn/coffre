@@ -132,7 +132,8 @@ const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect
 export function isUnreachable(error: unknown): boolean {
   for (let cause = error; typeof cause === 'object' && cause !== null; ) {
     const { code, message } = cause as { code?: unknown; message?: unknown };
-    if (typeof code === 'string' && (UNREACHABLE.has(code) || /^08[0-9A-Z]{3}$/.test(code))) return true;
+    // Class 08 but its protocol violation (08P01), which is the client's bug: asked again, it fails again.
+    if (typeof code === 'string' && (UNREACHABLE.has(code) || (/^08[0-9A-Z]{3}$/.test(code) && code !== '08P01'))) return true;
     // Not Drizzle's words, which quote the query and its parameters: the driver's are its cause's.
     if (typeof message === 'string' && !('params' in cause) && UNREACHABLE_WORDS.test(message)) return true;
     cause = (cause as { cause?: unknown }).cause;
