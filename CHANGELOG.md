@@ -33,10 +33,11 @@
   cache lapsed 11, not 13, of which 7 hold the head, not 9.
 - **Setup says when a Hyperdrive config is below what the database leaves
   it.** `coffre setup` keeps a connection limit set lower than its own
-  share of `max_connections`, and said nothing about it. A config made for
-  a small database stayed at 5 after the move to one with room for 20.
-  That is Hyperdrive's minimum, split into shards of one connection each,
-  so one slow call stops every other on its shard. Setup now prints each
+  share of `max_connections`, and said nothing about it. Equisafe's two
+  configs sat at 5 on a database with room for 20 each: Hyperdrive's
+  minimum, split into shards of one connection each, so one slow call
+  stopped every other on its shard. The docs' commands now make configs
+  at 20, the share for a `max_connections` of 100. Setup now prints each
   such config's limit beside the one it would give it, and the `wrangler
   hyperdrive update … --origin-connection-limit=<n>` that raises it
   ([deploy.md](docs/deploy.md)).

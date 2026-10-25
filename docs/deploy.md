@@ -533,8 +533,8 @@ password stays out of your shell's history: run it, paste the URL from
 commands, ready to copy.
 
 ```sh
-read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --origin-connection-limit=9 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
-read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --origin-connection-limit=9 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --origin-connection-limit=20 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --origin-connection-limit=20 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
 ```
 
 The first takes the app's database URL, the second the vault's. They drop
@@ -559,8 +559,9 @@ briefly exceed), and the database refuses any past its
 connection slots are reserved" (53300). `coffre setup` reads the database's
 `max_connections`, less the slots it reserves for superusers, keeps 3 for
 the administrator and `coffre migrate`, and gives each config half the rest,
-at most 20; the commands it shows carry that number, here 9, for a
-`max_connections` of 25. Fix an existing config with
+at most 20; the commands it shows carry that number, here 20, for a
+`max_connections` of 100 (47 each, capped at 20), and 9 for one of 25. Fix
+an existing config with
 `wrangler hyperdrive update <id> --origin-connection-limit=<n>`.
 
 Keep each config at that number, not below it. Hyperdrive splits a
@@ -572,8 +573,8 @@ under load the pool stays full ("Timed out while waiting for an open slot
 in the pool"). Its share assumes the database serves coffre alone: keep
 a config lower only when its database serves something else too, which
 more connections would crowd out. So with Cloudflare access, setup never
-raises a limit set below its share, which may be yours or its own for a
-smaller database; it says so, and prints the commands that raise it.
+raises a limit set below its share, which it cannot tell from one chosen
+for such a database; it says so, and prints the commands that raise it.
 Without, when it prints update commands, they set the share; check a
 config it does not update with `wrangler hyperdrive get <id>`.
 
