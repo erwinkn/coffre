@@ -113,7 +113,7 @@ export function kubernetes(path: string = KUBERNETES_TOKEN): Proof {
       const token = await read().catch((error: Error & { code?: string }) => {
         throw new Error(`no projected service account token at ${path} (${error.code ?? error.message}): mount one whose audience is coffre's URL`);
       });
-      const fresh = token === last ? await next(context) : token;
+      const fresh = token === last || token === '' ? await next(context) : token;
       if (fresh === null) throw new Error(`the kubelet wrote no new token at ${path} in 10 minutes: check the projected volume and its expirationSeconds`);
       return { oidc: (last = fresh) };
     },

@@ -320,10 +320,10 @@ instead, mount the same volume in the app's container and use
 another path. A projected token is spent once used, so the SDK never sends
 one twice: at a renewal, and when a restarted app finds the last start's
 token, it waits for the kubelet's next, which comes at 80% of the token's
-life (8 minutes with 600 seconds) on the kubelet's next volume sync, a few
-seconds late at times. It logs `coffre: the token at <path> is already used;
-waiting for the next one` once per wait, and the old session keeps serving
-meanwhile.
+life (8 minutes with 600 seconds) on the kubelet's next volume sync, which
+can land a minute or so late, after the session's re-proof is due. It logs
+`coffre: the token at <path> is already used; waiting for the next one`
+once per wait, and the old session keeps serving until its token expires.
 
 ### ECS, Lambda, EC2, EKS
 
