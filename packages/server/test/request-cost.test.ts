@@ -91,7 +91,7 @@ let reader: CoffreClient;
 let service: CoffreClient;
 /** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
 let workload: () => Promise<void>;
-/** The same, at a proxy that remembers nothing: what each request costs once its cache has lapsed, or on a fresh isolate. */
+/** The same, at a proxy that remembers nothing: what each request costs once its cache has lapsed, on a warm isolate. */
 let coldWorkload: () => Promise<void>;
 /** The same through a Cloudflare service binding, its caller the binding's `props`. */
 let bound: () => Promise<void>;
@@ -275,8 +275,8 @@ test('each hot request runs exactly its budget of statements, on as many connect
 });
 
 /**
- * A workload's request at a proxy whose cache has lapsed, or on a fresh
- * isolate: the session's statement, the path and the environment's rows,
+ * A workload's request at a proxy whose cache has lapsed, on an isolate
+ * that has served one before: the session's statement, the path and the environment's rows,
  * the vault's access and unwrap, then its `credential.use` entry, under the
  * head: BEGIN, the head, the policy (the protected environments' rows and
  * the newest change), the credential still, the head again with the clock

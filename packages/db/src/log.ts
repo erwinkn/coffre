@@ -116,6 +116,13 @@ export function forgetLogHeads(): void {
 }
 
 /**
+ * The transactions that hold the head: an append in one reads what it
+ * needs under the lock in one statement, where one that does not first
+ * takes the lock in another.
+ */
+const holding = new WeakSet<Transaction>();
+
+/**
  * Lock the log's head, and read it. A transaction that appends takes this
  * before any other row, so the lock order is the same everywhere; taking it
  * again in the same transaction is free.
@@ -128,19 +135,17 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
 }
 
 /**
- * The transactions that hold the head: an append in one reads under its
- * lock, in one statement, what it would otherwise lock and read in three.
- */
-const holding = new WeakSet<Transaction>();
-
-/**
  * Lock the log's head if no one holds it, without waiting: whether it is
  * held now. For work any caller may do, of which one at a time is enough,
  * which a request that finds the head taken leaves to the one that has it.
  * SQLite's transactions hold the whole file, so the head is always free.
  */
 export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
-  if (engineOf(tx) === 'sqlite') return (await lockedHead(tx)).length > 0;
+  if (engineOf(tx) === 'sqlite') {
+    const held = (await lockedHead(tx)).length > 0;
+    if (held) holding.add(tx);
+    return held;
+  }
   const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(
     sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`,
   );
@@ -180,16 +185,9 @@ export async function appendEntries(
   // Every append queues here, if its transaction has not already.
   if (locked === undefined && !holding.has(tx)) await lockLogHead(tx);
   await check?.(tx);
-  // Held, the head is read again with the clock and the last entry in one statement, which waits for nothing: all of it
-  // as of the lock, and after `check`. The log's own last row says whether the log has moved on from this key.
-  const read = locked === undefined ? (await underHead(tx, { author: key.author, keyId: key.keyId }))[0] : undefined;
-  if (locked === undefined && read === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
-  const head = locked?.head ?? { nextSeq: read!.nextSeq, headHash: read!.headHash };
-  const now = locked?.at ?? read!.now;
-  const last = locked === undefined ? (read!.lastSeq === null ? undefined : { seq: read!.lastSeq, hash: read!.lastHash! }) : locked.last ?? undefined;
-  if (read !== undefined && Boolean(read.retired)) {
-    throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
-  }
+  const held = locked ?? (await readUnderHead(tx, key));
+  const { head, at: now } = held;
+  const last = held.last ?? undefined;
 
   const expected = last === undefined ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
   if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
@@ -251,6 +249,23 @@ export async function appendEntries(
 
 /** A head locked by a statement of the caller's, and what it read under the lock (`appendEntries`). */
 export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { seq: bigint; hash: Buffer } | null; at: number };
+
+/**
+ * What an append reads under the head its transaction holds, in one
+ * statement, which waits for nothing: all of it as of the lock, and after
+ * the append's `check`. The log's own last row says whether the log has
+ * moved on from `key`.
+ */
+async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  const [read] = await underHead(tx, { author: key.author, keyId: key.keyId });
+  if (read === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+  if (read.retired) throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
+  return {
+    head: { nextSeq: read.nextSeq, headHash: read.headHash },
+    last: read.lastSeq === null || read.lastHash === null ? null : { seq: read.lastSeq, hash: read.lastHash },
+    at: read.now,
+  };
+}
 
 /** Entries one statement inserts at most, at 21 parameters each: Postgres takes 65,535. */
 const ROWS_AT_ONCE = 3000;
