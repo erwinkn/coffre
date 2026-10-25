@@ -98,7 +98,7 @@ import {
   type WrappedKey,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { isUniqueViolation, isUnreachable, SNAPSHOT } from '@coffre/db/dialect';
+import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
@@ -2550,7 +2550,7 @@ class VaultService implements Vault {
         scrub = await this.#db.transaction((tx) => this.#scrub(tx, walked.from), SNAPSHOT);
       } catch (error) {
         // Only the database not answering, or a statement it gave up on: anything else is coffre's to fix.
-        if (!isUnreachable(error) && !timedOut(error)) throw error;
+        if (!isUnavailable(error)) throw error;
         stalled = `the rehash of the past did not run, and goes on where it was next time: ${(error as Error).message}`;
       }
     }
@@ -2912,14 +2912,6 @@ type Resumed = {
 
 /** A lap of the rehash of the past: the last entry rehashed, and the prefix it rehashes to, signed when it began. */
 type Lap = { at: Position; end: Position };
-
-/** Whether a statement was cancelled for taking too long: Postgres's `query_canceled`, a statement timeout among them. */
-function timedOut(error: unknown): boolean {
-  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
-    if ((cause as { code?: unknown }).code === '57014') return true;
-  }
-  return false;
-}
 
 /** Where the next rehash of the past goes on from, null for the first entry; or what it found. */
 type Scrubbed = { ok: true; next: Lap | null } | Broken;

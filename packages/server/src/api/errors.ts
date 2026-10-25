@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { gaveUp, isUnavailable } from '@coffre/db/dialect';
 import { KeyRetired } from '@coffre/db/log';
 
 import { logged } from '../logged.ts';
@@ -22,7 +23,7 @@ import { Superseded } from '../watch.ts';
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later
  *   501 not_implemented    a route this release declares and does not serve yet
- *   503 unavailable        something coffre needs is not answering
+ *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
  *   503 rotating           the app is moving to its new key: nothing is served until it has (key-rotation.ts)
  *   503 app_key            the log is under an app key this deployment does not hold, or has moved on from its own
@@ -101,6 +102,13 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
   return new ApiError('vault_refused', `the vault refused: ${refusal.message}`, refusal.code);
 }
 
+/**
+ * What a request is told when what coffre needs did not answer: its
+ * database, mostly, but the same words come from the vault's RPC and from
+ * a key service, which coffre cannot tell apart from here.
+ */
+export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; try again in a moment';
+
 /** The status and body for anything a handler throws. */
 export function toErrorBody(error: unknown): { status: number; body: ErrorBody } {
   if (error instanceof ApiError) {
@@ -119,6 +127,14 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       status: 400,
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
+  }
+  // The database not answering, the vault's behind its call, or a key service's: the request was fine, and may be
+  // asked again; a write whose connection dropped may have committed, which a look at it says. A statement that gave
+  // up waiting is logged apart: under a busy database it is an outage, but a transaction held too long, across a
+  // vault call say, is a bug that looks the same.
+  if (isUnavailable(error)) {
+    console.error(gaveUp(error) ? 'a statement gave up waiting' : 'a dependency did not answer', logged(error));
+    return { status: 503, body: { error: 'unavailable', message: UNAVAILABLE } };
   }
   console.error('unhandled API error', logged(error));
   return {

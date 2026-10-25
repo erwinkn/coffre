@@ -22,6 +22,7 @@ import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
+import { failureOf } from './failure.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
 import type { VaultOptions } from './vault.ts';
 
@@ -75,7 +76,8 @@ export async function serveVault(config: NodeVaultConfig & { socket: string }): 
       reply(200, result === undefined ? {} : { result });
     } catch (error) {
       console.error(`vault ${name} failed`, error);
-      reply(500, { error: error instanceof Error ? error.message : 'the vault failed' });
+      const { status, body } = failureOf(error);
+      reply(status, body);
     }
   });
 
@@ -123,13 +125,16 @@ export function connectVault(socket: string): Vault {
         },
         (res) => {
           readBody(res).then((text) => {
-            const payload = JSON.parse(text) as { result?: unknown; error?: string };
-            if (res.statusCode === 200) resolve(payload.result);
-            else reject(new Error(`vault ${name}: ${payload.error ?? `status ${res.statusCode}`}`));
+            const payload = JSON.parse(text) as { result?: unknown; error?: string; code?: string };
+            if (res.statusCode === 200) return resolve(payload.result);
+            const failed = new Error(`vault ${name}: ${payload.error ?? `status ${res.statusCode}`}`);
+            reject(payload.code === undefined ? failed : Object.assign(failed, { code: payload.code }));
           }, reject);
         },
       );
-      req.on('error', (error) => reject(new Error(`the vault at ${socket} is unreachable: ${error.message}`)));
+      // No socket file is a vault that stopped cleanly, as a refused connection is one that did not: the same outage.
+      req.on('error', (error: NodeJS.ErrnoException) =>
+        reject(new Error(`the vault at ${socket} is unreachable: ${error.message}`, { cause: error.code === 'ENOENT' ? Object.assign(error, { code: 'ECONNREFUSED' }) : error })));
       req.end(body);
     });
   return Object.fromEntries(METHODS.map((name) => [name, call(name)])) as unknown as Vault;
