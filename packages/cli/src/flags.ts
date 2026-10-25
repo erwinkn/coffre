@@ -15,17 +15,18 @@ import { parseArgs } from 'node:util';
 import type { SessionFlags } from './instance.ts';
 import { listed } from './tty.ts';
 
-/** The session flags, each a string, and each overriding the saved session for one command. */
+/** The session flags, each overriding the saved session for one command, and `--verbose`, which says how each request went. */
 export const SESSION_OPTIONS = {
   url: { type: 'string' },
   service: { type: 'string' },
   'auth-mode': { type: 'string' },
+  verbose: { type: 'boolean' },
 } as const;
 
 type SessionName = keyof typeof SESSION_OPTIONS;
 
 /** The session flags as given. */
-export type SessionArgs = { [name in SessionName]?: string };
+export type SessionArgs = { url?: string; service?: string; 'auth-mode'?: string; verbose?: boolean };
 
 /** The session flags each command takes, when not all of them: none where it talks to no instance. */
 const TAKES: Record<string, readonly SessionName[]> = {
@@ -37,8 +38,8 @@ const TAKES: Record<string, readonly SessionName[]> = {
   use: [],
   roles: [],
   help: [],
-  login: ['url', 'auth-mode'],
-  logout: ['url'],
+  login: ['url', 'auth-mode', 'verbose'],
+  logout: ['url', 'verbose'],
 };
 
 /**
@@ -66,7 +67,7 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
   for (; at < argv.length; at++) {
     const [name, value] = argv[at]!.startsWith('--') ? argv[at]!.slice(2).split(/=(.*)/s) : [];
     if (name === undefined || !Object.hasOwn(SESSION_OPTIONS, name)) break;
-    if (value === undefined) at++;
+    if (value === undefined && SESSION_OPTIONS[name as SessionName].type === 'string') at++;
   }
   const session: SessionArgs = { ...parseArgs({ args: argv.slice(0, at), options: SESSION_OPTIONS, strict: true }).values };
   const [command, ...rest] = argv.slice(at);
@@ -77,7 +78,7 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
   for (const arg of SELF.has(command) ? [] : end === -1 ? rest : rest.slice(0, end)) {
     const name = arg.startsWith('--') ? arg.slice(2).split('=')[0]! : '';
     if (Object.hasOwn(SESSION_OPTIONS, name) && !own.includes(name)) {
-      throw new Error(`--${name} is a session flag, which goes before the command: coffre --${name} ${placeholder(name)} ${command} …`);
+      throw new Error(`--${name} is a session flag, which goes before the command: coffre --${name}${placeholder(name)} ${command} …`);
     }
   }
   const takes = TAKES[command];
@@ -89,7 +90,7 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
 }
 
 function placeholder(name: string): string {
-  return { url: '<url>', service: '<name>', 'auth-mode': 'signin|cloudflare' }[name] ?? '…';
+  return { url: ' <url>', service: ' <name>', 'auth-mode': ' signin|cloudflare', verbose: '' }[name] ?? ' …';
 }
 
 /**
@@ -99,7 +100,7 @@ function placeholder(name: string): string {
  */
 export function readSession(args: SessionArgs): SessionFlags {
   for (const [name, value] of Object.entries(args)) {
-    if (value.trim() === '') throw new Error(`--${name} is empty: an unset variable, perhaps`);
+    if (typeof value === 'string' && value.trim() === '') throw new Error(`--${name} is empty: an unset variable, perhaps`);
   }
-  return { url: args.url?.trim(), service: args.service?.trim(), authMode: args['auth-mode']?.trim() };
+  return { url: args.url?.trim(), service: args.service?.trim(), authMode: args['auth-mode']?.trim(), verbose: args.verbose === true };
 }

@@ -55,7 +55,21 @@ test('an empty session flag is refused, never taken for one left out', () => {
     url: 'https://coffre.example.com',
     service: 'deploy',
     authMode: undefined,
+    verbose: false,
   });
+});
+
+test('--verbose is a session flag that takes no value, for every command that talks to an instance', () => {
+  assert.deepEqual(commandLine(['--url', 'u', '--verbose', '--service', 's', 'export', 'app/prod']), {
+    session: { url: 'u', verbose: true, service: 's' },
+    command: 'export',
+    rest: ['app/prod'],
+  });
+  assert.equal(readSession(commandLine(['--verbose', 'get', 'app/prod/KEY']).session).verbose, true);
+  assert.deepEqual(commandLine(['--verbose', 'login', 'https://coffre.example.com']).session, { verbose: true });
+  assert.throws(() => commandLine(['export', 'app/prod', '--verbose']), /--verbose is a session flag, which goes before the command: coffre --verbose export …/);
+  assert.throws(() => commandLine(['--verbose', 'setup']), /--verbose does nothing for coffre setup/);
+  assert.throws(() => commandLine(['--verbose=yes', 'get', 'x']), /does not take an argument/);
 });
 
 /** The CLI, with none of this process's COFFRE_ variables, and `input` on stdin. */

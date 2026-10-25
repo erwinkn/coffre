@@ -450,6 +450,8 @@ const SESSION_FLAGS = `  Session flags, before the command: coffre [flags] <comm
                                     which a trust binding accepts (coffre trust); on GitHub Actions, with
                                     \`permissions: id-token: write\`, nothing else
     --auth-mode signin|cloudflare   normally detected at login
+    --verbose                       each request on stderr: its method, path, status and time, and
+                                    each time the CLI asks again; never a header, a body or a value
     Without them, the session \`coffre login\` saved.
 
   A secret is asked for, at a hidden prompt, or piped in; never a flag or an argument:

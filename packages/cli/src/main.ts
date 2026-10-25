@@ -19,6 +19,7 @@ import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
 import { exchange, idToken, keyBound, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
+import { stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
 import { help, lookup, usage, type Command } from './commands.ts';
@@ -224,6 +225,16 @@ async function cloudflaredToken(origin: string): Promise<string> {
   }
 }
 
+/** `fetch`, each request said on stderr with its answer and its time under `--verbose` (`timings.ts`). */
+function http(input: string | Request, init?: RequestInit): Promise<Response> {
+  return sessionFlags.verbose ? timed(fetch, stderr)(input, init) : fetch(input, init);
+}
+
+/** `http`, for GitHub's ID token, whose URL is the runner's to know. */
+function githubToken(url: string, init?: RequestInit): Promise<Response> {
+  return sessionFlags.verbose ? timed(fetch, stderr, "GitHub's ID token")(url, init) : fetch(url, init);
+}
+
 /**
  * A CI run's credential, and the ID token it was traded for: asked for once
  * in this process, before its first request, and kept in memory only.
@@ -232,8 +243,8 @@ let exchanged: Promise<{ credential: string; idToken: string }> | null = null;
 
 function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idToken: string }> {
   exchanged ??= (async () => {
-    const token = await idToken(undefined, process.env, origin, fetch);
-    const issued = await exchange(origin, workload.service, token, fetch);
+    const token = await idToken(undefined, process.env, origin, githubToken);
+    const issued = await exchange(origin, workload.service, token, http);
     return { credential: issued.token, idToken: token };
   })().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   return exchanged;
@@ -280,8 +291,11 @@ type Ask = (request: Request) => Promise<Response>;
  * failure into HTML that later explodes in JSON parsing.
  */
 function once(request: Request): Promise<Response> {
-  return fetch(request, { redirect: 'manual' });
+  return http(request, { redirect: 'manual' });
 }
+
+/** How long a read waits before it asks again, once the access policy changed under it. */
+const POLICY_RETRY_MS = 300;
 
 /**
  * A read of values (`get`, `run`, `export`), or the handle `run` makes,
@@ -296,7 +310,8 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
   if (response.status !== 409) return response;
   const body = (await response.clone().json().catch(() => null)) as { reason?: unknown } | null;
   if (body?.reason !== 'policy_changed') return response;
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  if (sessionFlags.verbose) stderr(`the access policy changed while ${request.method} ${new URL(request.url).pathname} was answered: asking again in ${took(POLICY_RETRY_MS)}`);
+  await new Promise((resolve) => setTimeout(resolve, POLICY_RETRY_MS));
   return once(again);
 }
 
@@ -496,7 +511,7 @@ async function keepSession(origin: string, kept: Session | undefined, mode: Auth
       url: origin,
       headers: () => ({ authorization: `Bearer ${token}` }),
       transport: (request) =>
-        fetch(request, { redirect: 'manual' }).catch((error: unknown) => {
+        http(request, { redirect: 'manual' }).catch((error: unknown) => {
           throw new Unreachable(origin, error);
         }),
     }).me();
@@ -541,7 +556,7 @@ function pinTo(directory: string, origin: string): void {
 async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
   let started: Response;
   try {
-    started = await fetch(`${origin}/api/auth/device`, {
+    started = await http(`${origin}/api/auth/device`, {
       method: 'POST',
       redirect: 'manual',
       headers: { 'content-type': 'application/json' },
@@ -595,7 +610,7 @@ async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
 async function askMode(origin: string): Promise<'signin' | 'cloudflare'> {
   let response: Response;
   try {
-    response = await fetch(`${origin}/api/auth`, { redirect: 'manual', headers: { accept: 'application/json' } });
+    response = await http(`${origin}/api/auth`, { redirect: 'manual', headers: { accept: 'application/json' } });
   } catch (error) {
     fail(unreachable(origin, error));
   }
@@ -623,7 +638,7 @@ async function pollDevice(
     await new Promise((resolve) => setTimeout(resolve, wait));
     let response: Response;
     try {
-      response = await fetch(`${origin}/api/auth/device/token`, {
+      response = await http(`${origin}/api/auth/device/token`, {
         method: 'POST',
         redirect: 'manual',
         headers: { 'content-type': 'application/json' },
@@ -700,7 +715,7 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
   const given = ask
     ? await readSecret({ label: 'ID token', hint: `The run's ID token, for the audience ${origin}. Hidden as you type.` }).catch((error: unknown) => fail((error as Error).message))
     : undefined;
-  const issued = await (async () => exchange(origin, service, await idToken(given, process.env, origin, fetch), fetch))().catch((error: unknown) =>
+  const issued = await (async () => exchange(origin, service, await idToken(given, process.env, origin, githubToken), http))().catch((error: unknown) =>
     fail(error instanceof Error ? error.message : String(error)),
   );
   await saveRun(
@@ -767,7 +782,7 @@ async function logout(args: string[]): Promise<void> {
     // pretend the token is dead.
     let response: Response;
     try {
-      response = await fetch(`${origin}/api/auth/logout`, {
+      response = await http(`${origin}/api/auth/logout`, {
         method: 'POST',
         redirect: 'manual',
         headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
@@ -1280,7 +1295,7 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
 async function proxied(to: Target): Promise<boolean> {
   const person = to.by === 'person' || (to.credential.kind === 'token' && to.credential.token.startsWith('coffre_pat_'));
   if (!person) return false;
-  const proxy = await fetch(`${to.origin}/use`, { headers: await headersFor(to), redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
+  const proxy = await http(`${to.origin}/use`, { headers: await headersFor(to), redirect: 'manual' }).catch((error: unknown) => fail(unreachable(to.origin, error)));
   if (proxy.status === 404 || !isJsonContentType(proxy.headers.get('content-type'))) return false;
   if (!proxy.ok) fail(`${to.origin}'s credential proxy answered ${proxy.status}`);
   return true;

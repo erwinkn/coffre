@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The Action says where its time goes.** A step that read seven keys
+  took 39 s on a busy instance and logged nothing in between. The CLI's
+  new session flag `--verbose` writes a line to stderr for each request,
+  with its method, path, status and duration (`coffre: POST /api/reveals:
+  200 in 480 ms`), and for each time it asks again; never a header, a
+  body, a query or a value. The Action passes it, so its log shows which
+  call was slow.
 - **The Kubernetes proof waits for a fresh token instead of sending a spent
   one.** A long-running `coffre serve` sidecar re-proves at 90% of its
   session's life, and the kubelet's next projected token, written at 80%,
