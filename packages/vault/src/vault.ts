@@ -2498,15 +2498,16 @@ class VaultService implements Vault {
   /**
    * Sign the log up to its last entry, from the newest checkpoint's tally.
    *
-   * In one snapshot, and without the log's lock, so that no append waits on
-   * it: every member's row checked, since rows changed around the vault
-   * write nothing to the log; the prefix the newest checkpoint signed still
-   * there, its hash where it was, which a rewrite chained again changes, and
-   * every entry of it, which a cut changes; the chain recomputed from there,
-   * every hash from content and every vault entry by its MAC, no further
-   * than one walk (`walks.checkpoint`); and a stretch of the prefixes signed
-   * before rehashed (`#scrub`). Then, under the lock, the entries appended
-   * since the snapshot, so that it signs the head.
+   * Without the log's lock, so that no append waits on it, and in one short
+   * snapshot: every member's row checked, since rows changed around the
+   * vault write nothing to the log; the prefix the newest checkpoint signed
+   * still there, its hash where it was, which a rewrite chained again
+   * changes, and every entry of it, which a cut changes. Then, in no
+   * transaction, a batch a statement, the chain recomputed from there, every
+   * hash from content and every vault entry by its MAC, no further than one
+   * walk (`walks.checkpoint`); and a stretch of the prefixes signed before
+   * rehashed (`#scrub`). Then, under the lock, the entries appended since
+   * the walk, so that it signs the head.
    *
    * A walk cut short signs where it got to, behind the head: the log after
    * an upgrade from 0.10.0, whose checkpoints kept no tally, is signed again
@@ -2522,7 +2523,7 @@ class VaultService implements Vault {
     const found: NewEntry[] = [];
     // The newest checkpoint entry, signed or refused, as this call's snapshot found it.
     let seen: bigint | null = null;
-    const walked = await this.#db.transaction(async (tx) => {
+    const resumed = await this.#db.transaction(async (tx) => {
       seen = (await store.newestCheckpointEntry(tx))?.seq ?? null;
       await this.#sweep(tx, found);
       const from = await this.#resume(tx, 'newest');
@@ -2533,13 +2534,9 @@ class VaultService implements Vault {
       }
       const gap = await missingEntry(tx, from.at.seq);
       if (gap !== null) return { ok: false as const, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
-      const walk = new Walk(from.tally, from.digest);
-      const chain = await rehash(tx, logKeys, from.at, walk, { limit: walks.checkpoint });
-      if (!chain.ok) return chain;
-      const unsigned = await this.#checkpointFault(tx, walk.checkpoints);
-      if (unsigned !== null) return unsigned;
-      return { ok: true as const, from, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
+      return from;
     }, SNAPSHOT);
+    const walked = resumed.ok ? await this.#walkOn(resumed, walks.checkpoint) : resumed;
     // The past rehashed, in a snapshot of its own. The database failing it leaves the stretch for the
     // next call, where it was, and the checkpoint is signed all the same, saying why (`warning`); a bug
     // throws, as anywhere else.
@@ -2580,7 +2577,7 @@ class VaultService implements Vault {
       // Nothing since the last one, which signed every entry before its own: it is still the newest prefix.
       if (newest !== null && latest!.seq === head.nextSeq - 1n && latest!.relatedSeq === latest!.seq - 1n) return { checkpoint: signedPart(newest) };
       // Under the lock, the rest: the prefix signed last still where it was,
-      // and every entry since the snapshot, unless the walk is catching up,
+      // and every entry since the walk, unless the walk is catching up,
       // when what it walked must still be there. A rewrite is never signed over.
       if (newest !== null && !(await carries(d.tx, newest))) {
         throw refused('log_broken', { reason: `the log up to entry ${newest.seq} is not the prefix the last checkpoint signed` });
@@ -2588,7 +2585,7 @@ class VaultService implements Vault {
       const walk = new Walk(walked.tally, walked.digest);
       let { at } = walked;
       if (walked.done) {
-        // Where the snapshot's walk ended still has the hash it found there: what follows links to it.
+        // Where the walk ended still has the hash it found there: what follows links to it.
         if (!(await carries(d.tx, headOf(at)))) {
           throw refused('log_broken', { failedAtSeq: Number(at.seq), reason: `the log up to entry ${at.seq} changed while the vault walked it` });
         }
@@ -2623,6 +2620,25 @@ class VaultService implements Vault {
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
+  }
+
+  /**
+   * The walk on from where a checkpoint resumes, no further than `limit`
+   * entries, outside any transaction: a batch a statement, each linked to
+   * the hash it verified last, so that no connection is held while it
+   * rehashes, seconds for a long walk. Entries are appended in order, under
+   * the head, and never change, so no snapshot keeps them: what it read is
+   * held to the log again under the head, before anything is signed over it
+   * (`carries`).
+   */
+  async #walkOn(from: Resumed, limit: number) {
+    const { logKeys } = this.#prepared;
+    const walk = new Walk(from.tally, from.digest);
+    const chain = await rehash(this.#db, logKeys, from.at, walk, { limit });
+    if (!chain.ok) return chain;
+    const unsigned = await this.#checkpointFault(this.#db, walk.checkpoints);
+    if (unsigned !== null) return unsigned;
+    return { ok: true as const, from, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
   }
 
   /**

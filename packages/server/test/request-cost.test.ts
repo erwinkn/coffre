@@ -48,19 +48,26 @@ const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-
 
 type Count = { statements: number; rows: number };
 
-/** A pool that counts the statements run on it, a transaction's included, and the rows they answered. Drizzle checks out a client for a transaction from a class named `…Pool`. */
+/**
+ * A pool that counts the statements run on it, a transaction's included, and the rows they answered; and, apart,
+ * those run on a client checked out, which holds its connection from the first to the last. Drizzle checks out a
+ * client for a transaction from a class named `…Pool`.
+ */
 class CountingPool {
   readonly #pool: pg.Pool;
   readonly count: Count = { statements: 0, rows: 0 };
+  readonly held: Count = { statements: 0, rows: 0 };
 
   constructor(pool: pg.Pool) {
     this.#pool = pool;
   }
 
-  async #counted(query: pg.Pool['query'] | pg.PoolClient['query'], args: unknown[]): Promise<unknown> {
+  async #counted(query: pg.Pool['query'] | pg.PoolClient['query'], args: unknown[], held = false): Promise<unknown> {
     const answered = await (query as (...queryArgs: unknown[]) => Promise<pg.QueryResult>)(...args);
-    this.count.statements += 1;
-    this.count.rows += answered.rows?.length ?? 0;
+    for (const count of held ? [this.count, this.held] : [this.count]) {
+      count.statements += 1;
+      count.rows += answered.rows?.length ?? 0;
+    }
     return answered;
   }
 
@@ -69,7 +76,7 @@ class CountingPool {
   async connect() {
     const client = await this.#pool.connect();
     return {
-      query: ((...args: unknown[]) => this.#counted(client.query.bind(client), args)) as pg.PoolClient['query'],
+      query: ((...args: unknown[]) => this.#counted(client.query.bind(client), args, true)) as pg.PoolClient['query'],
       release: () => client.release(),
     };
   }
@@ -431,6 +438,32 @@ test('readiness costs the same however long the log, and however far it ran past
   await beat();
   await beat();
   assert.equal((await ready()).ok, true);
+});
+
+/**
+ * The vault's checkpoint walks the log on from the last one, up to a walk
+ * of entries, a batch a statement, in no transaction: on Workers, a
+ * transaction holds its Hyperdrive connection, one of a few the vault
+ * shares, from BEGIN to COMMIT, and a long walk took seconds. What its
+ * transactions read, the members' rows, where it resumes, a stretch of
+ * the past rehashed and the head, is the same after a long stretch of the
+ * log as after a short one.
+ */
+test("a checkpoint's transactions read the same however far its walk goes", POSTGRES, async () => {
+  const held = async (count: number) => {
+    assert.ok((await signLog()).ok);
+    await append(count);
+    const before = { ...vaultPool.held };
+    let signed: { ok: boolean } = { ok: false };
+    const all = await cost(async () => (signed = await signLog()));
+    assert.ok(signed.ok, 'the measured checkpoint signed');
+    return { statements: vaultPool.held.statements - before.statements, rows: vaultPool.held.rows - before.rows, walked: all.vault.rows };
+  };
+  const short = await held(10);
+  // Past a batch (`VERIFY_BATCH`): the walk reads two.
+  const long = await held(6000);
+  assert.ok(long.walked > short.walked + 6000, `the long walk read ${long.walked} rows, the short ${short.walked}`);
+  assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
 });
 
 test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows', POSTGRES, async () => {
