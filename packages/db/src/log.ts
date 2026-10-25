@@ -118,7 +118,9 @@ export function forgetLogHeads(): void {
 /**
  * The transactions that hold the head: an append in one reads what it
  * needs under the lock in one statement, where one that does not first
- * takes the lock in another.
+ * takes the lock in another. A savepoint's transaction is another to this
+ * set, so a lock is marked on the object that took it, and an append made
+ * through another object locks again, which is free.
  */
 const holding = new WeakSet<Transaction>();
 
@@ -252,9 +254,10 @@ export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { se
 
 /**
  * What an append reads under the head its transaction holds, in one
- * statement, which waits for nothing: all of it as of the lock, and after
- * the append's `check`. The log's own last row says whether the log has
- * moved on from `key`.
+ * statement: the head, the clock and the log's last entry, all as of the
+ * lock, since locking a head the transaction holds waits for nothing, and
+ * after the append's `check`. The log's own last row says whether the log
+ * has moved on from `key`.
  */
 async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
   const [read] = await underHead(tx, { author: key.author, keyId: key.keyId });
@@ -271,10 +274,11 @@ async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
 const ROWS_AT_ONCE = 3000;
 
 /**
- * What an append reads under the head its transaction holds: the head, the
- * clock, the log's last entry, and whether the log has moved on from the
- * appending key. Locking a head the transaction holds already waits for
- * nothing, so the statement reads all of it as of the lock.
+ * `readUnderHead`'s statement. Its `FOR UPDATE` waits for nothing in a
+ * transaction that holds the head, and stays for one that would not: there
+ * it waits, and if an append committed meanwhile, its head, read again
+ * after the wait, disagrees with the last entry its snapshot saw before it,
+ * so the append refuses (`LogHeadMismatch`) rather than writing unlocked.
  */
 const underHead = prepared((db) => {
   const { auditChainHead, auditLog } = tablesOf(db);

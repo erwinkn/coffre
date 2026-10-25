@@ -189,22 +189,18 @@ before(async () => {
   const gate: Gate = { nonce: async () => 'g1.cost', admit: async () => ({ ok: true, nonce: 'g1.cost' }) };
   // Its last use, written once in five minutes after the answer: waited for, so it lands on its own request's count.
   const background: Promise<unknown>[] = [];
+  // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
+  const credentials = { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } };
   const proxied = {
     ...runtime,
     waitUntil: (promise: Promise<unknown>) => void background.push(promise),
     auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10, total: 10 }) } }).resolve(ORIGIN),
     gates: () => gate,
-    // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
-    plugins: checkPlugins([credentialProxy({
-      credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } },
-    })]),
+    plugins: checkPlugins([credentialProxy({ credentials })]),
   } satisfies CoffreRuntime;
   const forgetful = {
     ...proxied,
-    plugins: checkPlugins([credentialProxy({
-      cacheSeconds: 0,
-      credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } },
-    })]),
+    plugins: checkPlugins([credentialProxy({ cacheSeconds: 0, credentials })]),
   } satisfies CoffreRuntime;
   const through = (at: CoffreRuntime) => async () => {
     const url = `${ORIGIN}/use/stripe/v1/charges`;
