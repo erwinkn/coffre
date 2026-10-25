@@ -323,7 +323,7 @@ export async function fenced(ctx: Pick<ApiContext, 'db' | 'caller'>): Promise<vo
 
 /** Checks made before the write transaction still need their refusal recorded. */
 export async function withRefusals<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'recalled'> },
   work: () => Promise<T>,
 ): Promise<T> {
   try {
