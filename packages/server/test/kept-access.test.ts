@@ -14,6 +14,7 @@ import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { and, eq, gt } from 'drizzle-orm';
 
+import { Accesses } from '../src/accesses.ts';
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -201,4 +202,17 @@ test('a vault older than 0.14.1 checks nothing it is not told: the app asks befo
   // The vault decides the unwrap on its own rules and refuses it; the answer, asked for before anything goes back, has
   // changed, so the read goes again, asking, and is refused as the reader is now.
   assert.deepEqual(calls, ['unwrap', 'access', 'access']);
+});
+
+test("an answer from a vault older than 0.14.1, which names none, is never kept: beside one, every read asks", () => {
+  const accesses = new Accesses();
+  const answer = { principal: `user:${READER}`, status: 'active' as const, generation: 0, role: 'member' as const, scope: { kind: 'everywhere' } as never, grants: [], since: null, by: null };
+  accesses.remember(answer);
+  assert.equal(accesses.recall(answer.principal), undefined);
+  accesses.remember({ ...answer, revision: 'r1' });
+  assert.equal(accesses.recall(answer.principal)?.revision, 'r1');
+  // Nor is a removed member's, nor one of another generation than the credential's.
+  assert.equal(accesses.recall(answer.principal, 1), undefined);
+  accesses.remember({ ...answer, status: 'removed', generation: 1, revision: 'r2' });
+  assert.equal(accesses.recall(answer.principal), undefined);
 });

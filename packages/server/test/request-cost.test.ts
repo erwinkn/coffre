@@ -19,7 +19,7 @@ import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '
 import { createDatabase } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { localVault } from '@coffre/vault/node';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, gt } from 'drizzle-orm';
 import type pg from 'pg';
 
 import { Accesses } from '../src/accesses.ts';
@@ -305,7 +305,11 @@ test("a workload's request at a proxy whose cache lapsed runs its budget", POSTG
 test("a proxied call whose cache lapsed, after its service's access changed, asks the vault again, once", POSTGRES, async () => {
   await coldWorkload();
   await root.access.set(SERVICE, { 'market/dev': 'developer' });
+  const [{ seq: since }] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
   const changed = await cost(coldWorkload);
+  // Logged as one read that asked: the vault's read and the proxy's use, and no refusal.
+  const logged = await db.owner.select({ action: auditLog.action, decision: auditLog.decision }).from(auditLog).where(gt(auditLog.seq, since!)).orderBy(auditLog.seq);
+  assert.deepEqual(logged.map((entry) => `${entry.action} ${entry.decision}`), ['secret.read allow', 'credential.use allow']);
   const after = await cost(coldWorkload);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   assert.equal(changed.vaultCalls, 3);

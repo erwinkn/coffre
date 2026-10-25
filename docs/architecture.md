@@ -489,7 +489,7 @@ and membership generations. The interface:
 |---|---|
 | `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment |
 | `reference`, `endReferences` | make references, each a `reference.create` entry of its own, which every read through one is checked against; end them, each a `reference.end` naming it ([design](design/environments.md#references)) |
-| `access(principal)` | one principal's status, instance role and grants, their rows checked, and the answer's `revision`; the app asks once per request, but a read on an answer it kept, which the unwrap checks, and it makes someone the deployment names an Owner when they own nothing |
+| `access(principal)` | one principal's status, instance role and grants, their rows checked, and the answer's `revision`; the app asks once per request, except a read on an answer it kept, which the unwrap checks; and it makes someone the deployment names an Owner when they own nothing |
 | `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
 | `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
 | `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |

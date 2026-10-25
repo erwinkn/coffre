@@ -7,7 +7,7 @@ import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
 import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
 
-import { AccessChanged, accessFor } from './accesses.ts';
+import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
 import { callerFrom, withRecalled } from './api/caller.ts';
@@ -472,6 +472,7 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
   const standings: Standings = new WeakMap();
   // One read for the proxy, as `use` asks it, on the caller's access recalled or asked for (`accessFor`).
   const use = async (handle: Parameters<PluginContext['use']>[0], asked: Parameters<PluginContext['use']>[1], recall: boolean) => {
+    let recalled: Recalled | undefined;
     try {
       let caller: AuthenticatedIdentity;
       let expiresAt: string;
@@ -487,12 +488,15 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
         if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
         ({ identity: caller, expiresAt } = made);
       }
+      recalled = caller.caller.recalled;
       // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
       const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
       const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
       return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;
+      // Nothing goes back on a kept answer the vault has not vouched for this request, a refusal included (`fetchApi`).
+      await recalled?.confirm();
       throw new CoffreError(error.status, error.code, error.message, error.reason);
     }
   };

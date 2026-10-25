@@ -197,7 +197,7 @@ test("a read on an answer of access the app kept opens only while it is still th
   assert.equal(!removed.ok && removed.refusal.code, 'access_changed');
 });
 
-test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', async () => {
+test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', postgresOnly('a policy change commits while a read holds its row, not the head: SQLite runs one writer at a time'), async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);

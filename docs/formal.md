@@ -324,7 +324,7 @@ Each CI run holds an ID token, good for one credential.
   `context.ts`, `recorded`):
   1. its row, unlocked;
   2. the vault's answer, or one kept from an earlier request
-     (`accesses.ts`, `accessFor`), at any generation the account has had;
+     (`accesses.ts`, `accessFor`) at the generation the credential names;
   3. the vault's decision, under the account's row and the head; on a
      kept answer that is no longer the vault's, none: the use starts
      over, asking (`#keys`, `accessRevision`; `AccessChanged`);
@@ -346,7 +346,7 @@ Each CI run holds an ID token, good for one credential.
 | Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head through the proxy | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
 | And with no lock for an export, which commits nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
-| A read on a kept answer is decided only while that is still the vault's answer, under the account's row (`#keys`, `accessRevision`) | a `secret.read` logged on an answer kept from before a removal and an admission (`NoReadOnStaleAnswer`); the fence still withholds the value, so `NoReleaseAfterEnd` holds without it | |
+| A read on a kept answer is decided only while that is still the vault's answer, under the account's row (`#keys`, `accessRevision`) | a `secret.read` logged on an answer kept from before a removal and an admission (`NoReadOnStaleAnswer`, which states the check itself: a wiring check, as this model carries no grants or policy, what the check is for); the fence still withholds the value, so `NoReleaseAfterEnd` holds without it | |
 | That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
 
 The race this model found, as the script prints it with the export's fence off. A
