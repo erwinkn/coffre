@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 (2026-10-25)
+
 - **Upgrading to 0.14.0, in short.** Run `coffre migrate`: one migration,
   `0018_rotate_app_key`, which only grants the app's login to update an
   enrollment code's MAC, so the previous release serves on it until the
