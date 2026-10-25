@@ -325,12 +325,10 @@ test('a run with everything done: nothing made, nothing shown, both deployed aga
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);
   assert.equal(code, 0, text);
-  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, connection limits of 5 and 7\n\s+coffre\s+kept, at 5 connections where the database leaves it 20\n\s+coffre-vault\s+kept, at 7 connections where the database leaves it 20\n/);
-  assert.match(text, new RegExp(
-    "\\s+Hyperdrive splits a config's connections among its shards, and a transaction holds one to its commit:\\n" +
-      '\\s+at a few, one call waiting on a lock stops every other on its shard\\. To raise them:\\n' +
-      `\\s+wrangler hyperdrive update ${appConfig!.id} --origin-connection-limit=20\\n\\s+wrangler hyperdrive update ${vaultConfig!.id} --origin-connection-limit=20\\n`,
-  ));
+  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, connection limits of 5 and 7\n\s+coffre\s+kept, at 5 of the 20 it may open\n\s+coffre-vault\s+kept, at 7 of the 20 it may open\n\s+max_connections 100/);
+  // The commands to copy, printed whole under the step, wrapped by the terminal and never cut.
+  assert.ok(text.replace(/\s+/g, ' ').includes('coffre and coffre-vault are at 5 and 7 connections, below their share of 20 each. Hyperdrive splits'), text);
+  for (const config of [appConfig!, vaultConfig!]) assert.ok(text.includes(`\n  pnpm exec wrangler hyperdrive update ${config.id} --origin-connection-limit=20\n`), text);
   assert.deepEqual([appConfig!.origin_connection_limit, vaultConfig!.origin_connection_limit], [5, 7]);
   appConfig!.origin_connection_limit = vaultConfig!.origin_connection_limit = 20;
   assert.ok(!output.includes(ENTER_ALT), 'no screen: nothing new to save');

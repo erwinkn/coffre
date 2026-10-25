@@ -569,9 +569,12 @@ from BEGIN to COMMIT, a wait for a lock included. At Hyperdrive's minimum,
 5, a location may have five shards of one connection each: one vault call
 waiting on the audit log's head then stops every query on its shard, and
 under load the pool stays full ("Timed out while waiting for an open slot
-in the pool"). Setup never raises a limit set below its number, since it
-can't tell one a person chose from its own, made for a smaller database;
-it says so, and prints the commands that raise it.
+in the pool"). Its share assumes the database serves coffre alone: keep
+a config lower only for one that serves something else too, which more
+connections would crowd out. So with Cloudflare access, setup never raises
+a limit set below its share, which may be yours or its own for a smaller
+database; it says so, and prints the commands that raise it. Without, the
+update commands it prints set the share.
 
 ### 3. Keys and secrets
 

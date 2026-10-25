@@ -481,7 +481,7 @@ export class Cloudflare {
    * a new password, and stops the run when it does not, Hyperdrive needing
    * a password setup can't read.
    */
-  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[] }> {
+  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[]; low: { name: string; id: string; limit: number }[] }> {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
     const details: string[] = [];
@@ -525,23 +525,17 @@ export class Cloudflare {
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
         what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
-      if (limits[component] < limit) what += `, at ${limits[component]} connections where the database leaves it ${limit}`;
+      if (limits[component] < limit) what += `, at ${limits[component]} of the ${limit} it may open`;
       details.push(`${name.padEnd(width)}${what}`);
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    // A limit someone set lower is kept: each config's own, then. Setup can't tell one a person chose from its own,
-    // made for a smaller database, so it says how to raise it.
-    const low = COMPONENTS.filter((component) => limits[component] < limit);
-    if (low.length > 0) {
-      details.push(
-        "Hyperdrive splits a config's connections among its shards, and a transaction holds one to its commit:",
-        `at a few, one call waiting on a lock stops every other on its shard. To raise ${low.length === 1 ? 'it' : 'them'}:`,
-        ...low.map((component) => `  wrangler hyperdrive update ${this.workers[component].hyperdrive} --origin-connection-limit=${limit}`),
-      );
-    }
+    // A limit someone set lower is kept: each config's own, then. It may be theirs, for a database that serves more than
+    // coffre, or setup's own, made for a smaller one: the caller says how to raise it.
+    const low = COMPONENTS.filter((component) => limits[component] < limit)
+      .map((component) => ({ name: this.workers[component].name, id: this.workers[component].hyperdrive!, limit: limits[component] }));
     const each = limits.app === limits.vault ? `a connection limit of ${limits.app} each` : `connection limits of ${limits.app} and ${limits.vault}`;
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details };
+    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details, low };
   }
 
   /**
