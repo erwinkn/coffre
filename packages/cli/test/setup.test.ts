@@ -160,10 +160,10 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const } };
   assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>", 9), hyperdriveCommand("update <the vault's config id>", 9)]);
   for (const command of commands(reset)) assert.match(command, / --origin-connection-limit=9 /);
-  // Setup can't see what each config allows now: the screen says the updates set it, and how to keep one set lower.
+  // Setup can't see what each config allows now: the screen says the updates set it, why that matters, and when to keep one lower.
   const lines = (result: SetupResult) => setupScreen(result).guide[0]!.lines.filter((line): line is string => typeof line === 'string');
-  const check = "Setup can't see the limit each config has now, and the update commands set it to 9. Check it first with pnpm exec wrangler hyperdrive get <id>: for one you set lower on purpose, leave --origin-connection-limit out of its command.";
-  // Said before the commands, so that one set lower on purpose is not raised by copying them as they are.
+  const check = "Setup can't see the limit each config has now, and the update commands set it to 9. Below that, a call waiting on a lock stops the others on its Hyperdrive shard: leave --origin-connection-limit out only for a config you keep lower because its database serves more than coffre (pnpm exec wrangler hyperdrive get <id> shows its limit).";
+  // Said before the commands, so that one kept lower on purpose is not raised by copying them as they are.
   const guide = setupScreen(reset).guide[0]!.lines;
   assert.ok(guide.includes(check) && guide.indexOf(check) < guide.findIndex((line) => typeof line !== 'string'));
   assert.ok(!lines(made).some((line) => line.startsWith("Setup can't see")), 'new configs have no limit yet');

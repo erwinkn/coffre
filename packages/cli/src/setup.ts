@@ -385,12 +385,27 @@ async function run(
       return { text: 'Each login holds only its rights', details };
     });
     if (cloudflare !== null) {
+      // Checked before Cloudflare was asked, and before any of this run's changes (`inspect`).
+      const limit = hyperdriveLimit(connections)!;
+      let low: Awaited<ReturnType<Cloudflare['hyperdrive']>>['low'] = [];
       await step(3, async () => {
-        // Checked before Cloudflare was asked, and before any of this run's changes (`inspect`).
-        const limit = hyperdriveLimit(connections)!;
-        const { text, details } = await cloudflare.hyperdrive(logins, limit);
-        return { text, details: [...details, limitReason(connections, limit)] };
+        const made = await cloudflare.hyperdrive(logins, limit);
+        low = made.low;
+        return { text: made.text, details: [...made.details, limitReason(connections, limit)] };
       });
+      // Printed whole, to copy: a step's lines are cut to the terminal's width.
+      if (low.length > 0) {
+        const [one, other] = low;
+        const below = other === undefined
+          ? `${one!.name} is at ${one!.limit} connections, below its share of ${limit}`
+          : `${one!.name} and ${other.name} are at ${one!.limit === other.limit ? `${one!.limit} connections each` : `${one!.limit} and ${other.limit} connections`}, below their share of ${limit}`;
+        steps.aside(
+          `${below}. Hyperdrive splits a config's connections among its shards, and a transaction holds one to its commit, a wait ` +
+            'for a lock included: with few connections, one call waiting on the audit log stops every other on its shard. Unless the ' +
+            `database serves more than coffre, raise ${other === undefined ? 'it' : 'them'}:`,
+        );
+        for (const { id } of low) steps.print(`  pnpm exec wrangler hyperdrive update ${id} --origin-connection-limit=${limit}`);
+      }
       await step(4, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
       await step(5, async () => cloudflare.write());
       return { keys: null, ...logins, version, connections };
@@ -593,7 +608,7 @@ export function setupScreen(result: SetupResult): Screen {
             ...(updated.length === 0
               ? []
               : [
-                  `Setup can't see the limit each config has now, and the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}. Check it first with pnpm exec wrangler hyperdrive get <id>: for one you set lower on purpose, leave --origin-connection-limit out of its command.`,
+                  `Setup can't see the limit each config has now, and the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}. Below that, a call waiting on a lock stops the others on its Hyperdrive shard: leave --origin-connection-limit out only for a config you keep lower because its database serves more than coffre (pnpm exec wrangler hyperdrive get <id> shows its limit).`,
                 ]),
             ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
             `Each command sets its config's connection limit to ${limit}, so that both fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,

@@ -318,14 +318,17 @@ test('the run after: the vault keeps its key; the app gets a new one, and a new 
 
 test('a run with everything done: nothing made, nothing shown, both deployed again as they are', { skip }, async () => {
   const before = cloudflare.state.configs.get('acc-acme')!.map(({ origin }) => origin.password);
-  // Limits someone set lower, each its own: kept, and said as they are.
+  // Limits someone set lower, each its own: kept, said as they are, and how to raise them to what the database leaves each.
   const [appConfig, vaultConfig] = cloudflare.state.configs.get('acc-acme')!;
   appConfig!.origin_connection_limit = 5;
   vaultConfig!.origin_connection_limit = 7;
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);
   assert.equal(code, 0, text);
-  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, connection limits of 5 and 7\n\s+coffre\s+kept\n\s+coffre-vault\s+kept\n/);
+  assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, connection limits of 5 and 7\n\s+coffre\s+kept, 5 of 20\n\s+coffre-vault\s+kept, 7 of 20\n\s+max_connections 100/);
+  // The commands to copy, printed whole under the step, wrapped by the terminal and never cut.
+  assert.ok(text.replace(/\s+/g, ' ').includes('coffre and coffre-vault are at 5 and 7 connections, below their share of 20. Hyperdrive splits'), text);
+  for (const config of [appConfig!, vaultConfig!]) assert.ok(text.includes(`\n  pnpm exec wrangler hyperdrive update ${config.id} --origin-connection-limit=20\n`), text);
   assert.deepEqual([appConfig!.origin_connection_limit, vaultConfig!.origin_connection_limit], [5, 7]);
   appConfig!.origin_connection_limit = vaultConfig!.origin_connection_limit = 20;
   assert.ok(!output.includes(ENTER_ALT), 'no screen: nothing new to save');

@@ -481,7 +481,7 @@ export class Cloudflare {
    * a new password, and stops the run when it does not, Hyperdrive needing
    * a password setup can't read.
    */
-  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[] }> {
+  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[]; low: { name: string; id: string; limit: number }[] }> {
     const { api, account } = this.#found;
     const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
     const details: string[] = [];
@@ -525,13 +525,17 @@ export class Cloudflare {
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
         what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
+      if (limits[component] < limit) what += `, ${limits[component]} of ${limit}`;
       details.push(`${name.padEnd(width)}${what}`);
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
     }
-    // A limit someone set lower is kept: each config's own, then.
+    // A limit someone set lower is kept: each config's own, then. It may be theirs, for a database that serves more than
+    // coffre, or setup's own, made for a smaller one: the caller says how to raise it.
+    const low = COMPONENTS.filter((component) => limits[component] < limit)
+      .map((component) => ({ name: this.workers[component].name, id: this.workers[component].hyperdrive!, limit: limits[component] }));
     const each = limits.app === limits.vault ? `a connection limit of ${limits.app} each` : `connection limits of ${limits.app} and ${limits.vault}`;
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details };
+    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details, low };
   }
 
   /**

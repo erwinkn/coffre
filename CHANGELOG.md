@@ -31,6 +31,16 @@
   included, queued behind them. It now reads all three in one statement.
   A token exchange runs 14 statements, not 16, and a proxied call whose
   cache lapsed 11, not 13, of which 7 hold the head, not 9.
+- **Setup says when a Hyperdrive config is below what the database leaves
+  it.** `coffre setup` keeps a connection limit set lower than its own
+  share of `max_connections`, and said nothing about it. Equisafe's two
+  configs sat at 5 on a database with room for 20 each: Hyperdrive's
+  minimum, split into shards of one connection each, so one slow call
+  stopped every other on its shard. The docs' commands now make configs
+  at 20, the share for a `max_connections` of 100. Setup now prints each
+  such config's limit beside the one it would give it, and the `wrangler
+  hyperdrive update … --origin-connection-limit=<n>` that raises it
+  ([deploy.md](docs/deploy.md)).
 - **The Kubernetes proof waits for a fresh token instead of sending a spent
   one.** A long-running `coffre serve` sidecar re-proves at 90% of its
   session's life, and the kubelet's next projected token, written at 80%,
