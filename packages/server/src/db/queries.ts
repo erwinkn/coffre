@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { newestSeqQuery, withinBytes } from '@coffre/db/log';
+import { newestSeqQuery, newestVaultSeq, withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -294,11 +294,11 @@ export async function environmentPaths(db: Queryable, ids: readonly string[]): P
  * written yet.
  */
 export async function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq: bigint | null; slugs: Map<string, string> }> {
+  // Nothing protected, the newest change alone: a join on nothing still scans every environment on SQLite.
+  if (ids.length === 0) return { seq: await newestVaultSeq(db, 'policy.change'), slugs: new Map() };
   const { projects, environments } = tablesOf(db);
-  const live = ids.length === 0
-    ? sql`1 = 0`
-    : sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
-      AND EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${environments.projectId} AND ${standing(projects.slug)})`;
+  const live = sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
+    AND EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${environments.projectId} AND ${standing(projects.slug)})`;
   // One row for the newest change, whatever the environments: one more per live environment, each beside it.
   const rows = await dialect.rowsOf<{ seq: string | number | null; id: string | null; slug: string | null }>(db, sql`
     SELECT (${newestSeqQuery(db, 'policy.change')}) AS seq, ${environments.id} AS id, ${environments.slug} AS slug
