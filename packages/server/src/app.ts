@@ -1,6 +1,6 @@
 import type { CoffreClient } from '@coffre/client';
 
-import { ApiError, badRequest } from './api/errors.ts';
+import { ApiError, badRequest, UNAVAILABLE } from './api/errors.ts';
 import { narrowWorkload } from './api/narrow.ts';
 import {
   finishSignin,
@@ -160,8 +160,12 @@ async function door(runtime: CoffreRuntime): Promise<((request: Request) => Resp
  * health answers 503 `migrating`; a database never migrated has no ledger,
  * and is below them too. Asked until it holds, then known. A database that
  * cannot be reached lets the request through, to meet the outage as it would
- * anyway: a page shows its error state, the API answers 503. Any other
- * failure of the question fails the request.
+ * anyway: a page shows its error state, the API answers 503. Hyperdrive's
+ * pool full is one too, and may free before the request's own queries:
+ * then, below the migrations, they run on the old schema. That is a gap
+ * accepted, as it was for a database that came back mid-request: it needs
+ * a deploy that skipped `coffre migrate`, and migrations only add. Any
+ * other failure of the question fails the request.
  */
 export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
   if (!runtime.schema.migrated) {
@@ -284,7 +288,7 @@ function wrongKey(request: Request): Response {
 
 /** The answer while the database cannot say where the app's key stands: nothing is checked under a key it has not settled. */
 function unreachable(): Response {
-  return errorResponse(new ApiError('unavailable', "coffre's database cannot be reached"), { 'retry-after': '5' });
+  return errorResponse(new ApiError('unavailable', UNAVAILABLE), { 'retry-after': '5' });
 }
 
 const refusals = new WeakMap<object, string>();

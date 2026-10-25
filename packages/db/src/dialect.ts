@@ -113,22 +113,58 @@ export function isUniqueViolation(error: unknown): boolean {
   return false;
 }
 
-/** The network's codes for a server that is not there, and Postgres's for one that will not take the connection. */
-const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', '57P01', '57P02', '57P03']);
+/** The network's codes for a server that is not there, and Postgres's for one that will not take the connection, or has none left (53300). */
+const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', '53300', '57P01', '57P02', '57P03']);
+
+/** Hyperdrive's words for having no connection to give, beside pg's and Workers' for one lost. */
+const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|open slot in the pool|acquire a connection from the pool|server connection attempt failed/i;
 
 /**
  * Whether a query failed because the database could not be reached or
  * dropped the connection: an outage, not an answer. Postgres's connection
- * exceptions are class 08; pg and Workers' sockets say so in words.
+ * exceptions are class 08; pg and Workers' sockets say so in words, and so
+ * does Hyperdrive when it has no connection to the database to give: every
+ * one of its pool busy for 15 s ("Timed out while waiting for an open slot
+ * in the pool", FATAL 58000; "Failed to acquire a connection from the
+ * pool"), or none to be made ("Server connection attempt failed:
+ * destination_unavailable").
  */
 export function isUnreachable(error: unknown): boolean {
   for (let cause = error; typeof cause === 'object' && cause !== null; ) {
     const { code, message } = cause as { code?: unknown; message?: unknown };
-    if (typeof code === 'string' && (UNREACHABLE.has(code) || /^08[0-9A-Z]{3}$/.test(code))) return true;
-    if (typeof message === 'string' && /connection terminated|network connection lost|connect(ion)? timeout/i.test(message)) return true;
+    // Class 08 but its protocol violation (08P01), which is the client's bug: asked again, it fails again.
+    if (typeof code === 'string' && (UNREACHABLE.has(code) || (/^08[0-9A-Z]{3}$/.test(code) && code !== '08P01'))) return true;
+    // The words only of what said no code, or Hyperdrive's 58000, and never a message quoting a query and its
+    // parameters (Drizzle's, the Node vault's carrying it): the driver's words are its cause's.
+    if (typeof message === 'string' && (typeof code !== 'string' || code === '58000') && !message.includes('Failed query: ') && UNREACHABLE_WORDS.test(message)) return true;
     cause = (cause as { cause?: unknown }).cause;
   }
   return false;
+}
+
+/** Postgres's codes for a statement that gave up waiting: on a lock (55P03), or past its own bound (57014). */
+const GAVE_UP = new Set(['55P03', '57014']);
+
+/**
+ * Whether a statement gave up waiting, on a lock or past its bound: the
+ * database too busy to answer in time, or a transaction held too long,
+ * which a bug may be (one held across a vault call waits on the vault's
+ * decision, which waits on it).
+ */
+export function gaveUp(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (GAVE_UP.has((cause as { code?: unknown }).code as string)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a query failed for want of the database, not for anything the
+ * request asked: it could not be reached (`isUnreachable`), or a statement
+ * gave up waiting (`gaveUp`). The same request may well succeed in a moment.
+ */
+export function isUnavailable(error: unknown): boolean {
+  return isUnreachable(error) || gaveUp(error);
 }
 
 /**

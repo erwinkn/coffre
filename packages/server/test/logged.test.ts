@@ -5,6 +5,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { isUnavailable } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { toErrorBody } from '../src/api/errors.ts';
@@ -35,4 +36,32 @@ test('an unhandled database error is logged with its message and what Postgres s
     assert.deepEqual([cause.code, cause.severity, cause.routine !== undefined], ['42P01', 'ERROR', true]);
     assert.match(String(cause.message), /relation "no_such_table" does not exist/);
   }
+});
+
+test("a database that does not answer is 503 unavailable, the request's to ask again, and logged as such", (t) => {
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(args));
+  // As the vault's error reached the app on 2026-10-25, across its RPC: Drizzle's, Hyperdrive's beneath.
+  const pool = new Error('Failed query: select "secret_versions"."id" …', {
+    cause: Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' }),
+  });
+  const lock = new Error('Failed query: select "principal" …', { cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }) });
+  const acquire = new Error('Failed query: select 1', { cause: new Error('Failed to acquire a connection from the pool.') });
+  for (const error of [pool, acquire, new Error('Connection terminated unexpectedly'), Object.assign(new Error('sorry, too many clients already'), { code: '53300' }), lock]) {
+    assert.equal(isUnavailable(error), true, error.message);
+    assert.deepEqual(toErrorBody(error), { status: 503, body: { error: 'unavailable', message: 'coffre cannot reach what it depends on right now; try again in a moment' } });
+  }
+  // A lock waited on past its bound is an outage under a busy database, and a transaction held too long otherwise: logged apart.
+  assert.deepEqual(logged.map(([label]) => label), [...Array(4).fill('a dependency did not answer'), 'a statement gave up waiting']);
+  // A query that is wrong is a bug, whatever its words, Drizzle's quoting a parameter included.
+  assert.equal(isUnavailable(Object.assign(new Error('syntax error at or near "selec"'), { code: '42601' })), false);
+  const quoted = Object.assign(new Error('Failed query: update members set note = $1\nparams: connection terminated'), { query: 'update …', params: ['connection terminated'] });
+  quoted.cause = Object.assign(new Error('insert or update violates foreign key constraint'), { code: '23503' });
+  assert.equal(isUnavailable(quoted), false);
+  // Postgres's own words may quote input too: an error with a code is read by its code.
+  assert.equal(isUnavailable(Object.assign(new Error('invalid input syntax for type uuid: "connection timeout"'), { code: '22P02' })), false);
+  // Postgres answered, telling the client it broke the protocol: the same request fails the same way, a 500.
+  const violation = Object.assign(new Error('bind message supplies 1 parameters, but prepared statement "" requires 2'), { code: '08P01' });
+  assert.equal(isUnavailable(violation), false);
+  assert.equal(toErrorBody(violation).status, 500);
 });

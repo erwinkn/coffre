@@ -9,6 +9,19 @@
   200 in 480 ms`), and for each time it asks again; never a header, a
   body, a query or a value. The Action passes it, so its log shows which
   call was slow.
+- **A database that does not answer is 503, not 500.** When Hyperdrive had
+  no free connection to the database for 15 s ("Timed out while waiting for
+  an open slot in the pool"), or a statement gave up on a lock, a reveal or
+  a proxied call answered 500 "something went wrong", as for a bug, and a
+  CI run could not tell it from one. These now answer 503 `unavailable`,
+  as do a dropped connection and a database out of connections: "coffre
+  cannot reach what it depends on right now; try again in a moment". They
+  are logged as `a dependency did not answer`, or, for a statement that
+  gave up on a lock or its own bound, `a statement gave up waiting`: under
+  a busy database an outage, and otherwise a transaction held too long,
+  which a bug may be. On Node, the vault's own outage crosses its socket
+  as one (503, with Postgres's code), where it was a 500 with the code
+  dropped.
 - **The Kubernetes proof waits for a fresh token instead of sending a spent
   one.** A long-running `coffre serve` sidecar re-proves at 90% of its
   session's life, and the kubelet's next projected token, written at 80%,
