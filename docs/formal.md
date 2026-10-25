@@ -843,8 +843,11 @@ abstracted to the chain's version where it is: a rewrite moves every
 entry from there on to a new one. An entry's MAC binds its content and
 the hash before it, so one rewritten, or after one, fails it, unless it
 was appended after the rewrite. An edit leaves the stored hash, and only
-recomputing it finds the edit. Each walk runs in a snapshot of its own,
-so it is one step.
+recomputing it finds the edit. Each of the app's walks, and the
+vault's scrub, runs in a snapshot of its own, so it is one step. The
+vault's checkpoint walks in no transaction, a batch a statement, so as to
+hold no connection while it rehashes: an entry a step, each linked to the
+one before as the walk read it, finer than the code's batches.
 
 The anchor (`anchor.ts`) is out of their reach: one variable, which a
 beat, or a walk between beats, writes by compare-and-set, a step. It holds the newest checkpoint a
@@ -873,8 +876,10 @@ wrote it.
   walk of step 4 toward its own checkpoint, and the anchor written over
   that record, its beat and age unchanged.
 - **A checkpoint** (`vault.ts`, `checkpoint`), as before the anchor:
-  1. the walk from the newest one, in a snapshot, at most
-     `walks.checkpoint` entries, each link and hash, and the vault's MACs;
+  1. in a snapshot, where it resumes, the newest one, its prefix still
+     holding its hash; then the walk on from there, in no transaction, at
+     most `walks.checkpoint` entries, each link and hash, and the vault's
+     MACs;
   2. a stretch of the scrub in another, each hash of the signed prefix
      recomputed;
   3. under the head, whether another call checkpointed or refused
@@ -926,8 +931,8 @@ What it does not claim, as the code does not:
 - **A refusal of the vault's stands only until it signs again.** Three
   checkpoints at once break `StaysUnsignedOnceFound`, so `Overtaking`
   leaves it to `Tampering`. Call b refuses for an entry edited while call
-  a walked; a, whose snapshot began before the edit, has signed over it;
-  call c's snapshot begins after b's refusal and resumes from a's
+  a walked; a, which walked past the entry before the edit, has signed
+  over it; call c begins after b's refusal and resumes from a's
   checkpoint, past the edit, and signs. This is the vault's, unchanged by
   the anchor, and the scrub finds the edit again within two laps. The
   anchor clears a refusal once the vault signs, so readiness is green over
@@ -1046,12 +1051,12 @@ anchor, outside the database, is sealed again by compare-and-set before
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 5.2 million |
-| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 178 thousand |
-| `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 1.7 million |
-| `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 1.1 million |
-| `Walking` | From a checkpoint past a backlog of four entries: walks between beats go on with it, two entries a walk, while two beats run at once, someone edits an entry in the backlog, and a monitor asks | 1.3 million |
-| `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 731 |
+| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 11.7 million |
+| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 249 thousand |
+| `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 4.6 million |
+| `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 2.0 million |
+| `Walking` | From a checkpoint past a backlog of four entries: walks between beats go on with it, two entries a walk, while two beats run at once, someone edits an entry in the backlog, and a monitor asks | 2.4 million |
+| `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 1,063 |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
 | `AppKeyRotation` | Two starts under the new key step a rotation of two rows at once, while an instance under the old key writes a row, and someone who holds it writes rows and an entry under it | 146 thousand |

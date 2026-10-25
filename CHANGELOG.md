@@ -12,6 +12,19 @@
   answer. A proxied call whose cache lapsed runs 10 statements, not 11, of
   which 6 hold the head, not 7.
 
+- **The vault's checkpoint no longer holds a connection while it walks.**
+  The audit watch's beat, every five minutes, has the vault checkpoint the
+  log: it rehashes every entry since the last checkpoint, up to 10,000,
+  and checks the vault's own by their MACs. It did all of that in one
+  read-only transaction, which on Workers held one of the vault's
+  Hyperdrive connections for the whole walk, 6 to 30 s on Equisafe's
+  instance, while requests waited for one. The transaction now covers only
+  the members' rows and where the walk resumes; the walk itself reads a
+  batch a statement, outside any transaction, and what it walked is held
+  to the log again under the head before anything is signed over it, as
+  before. With 10,000 entries to walk, what the vault reads inside
+  transactions went from 20,222 rows to 219.
+
 ## 0.14.0 (2026-10-25)
 
 - **Upgrading to 0.14.0, in short.** Run `coffre migrate`: one migration,

@@ -2498,15 +2498,16 @@ class VaultService implements Vault {
   /**
    * Sign the log up to its last entry, from the newest checkpoint's tally.
    *
-   * In one snapshot, and without the log's lock, so that no append waits on
-   * it: every member's row checked, since rows changed around the vault
-   * write nothing to the log; the prefix the newest checkpoint signed still
-   * there, its hash where it was, which a rewrite chained again changes, and
-   * every entry of it, which a cut changes; the chain recomputed from there,
-   * every hash from content and every vault entry by its MAC, no further
-   * than one walk (`walks.checkpoint`); and a stretch of the prefixes signed
-   * before rehashed (`#scrub`). Then, under the lock, the entries appended
-   * since the snapshot, so that it signs the head.
+   * Without the log's lock, so that no append waits on it, and in one short
+   * snapshot: every member's row checked, since rows changed around the
+   * vault write nothing to the log; the prefix the newest checkpoint signed
+   * still there, its hash where it was, which a rewrite chained again
+   * changes, and every entry of it, which a cut changes. Then, in no
+   * transaction, a batch a statement, the chain recomputed from there, every
+   * hash from content and every vault entry by its MAC, no further than one
+   * walk (`walks.checkpoint`); and a stretch of the prefixes signed before
+   * rehashed (`#scrub`). Then, under the lock, the entries appended since
+   * the walk, so that it signs the head.
    *
    * A walk cut short signs where it got to, behind the head: the log after
    * an upgrade from 0.10.0, whose checkpoints kept no tally, is signed again
@@ -2522,7 +2523,7 @@ class VaultService implements Vault {
     const found: NewEntry[] = [];
     // The newest checkpoint entry, signed or refused, as this call's snapshot found it.
     let seen: bigint | null = null;
-    const walked = await this.#db.transaction(async (tx) => {
+    const resumed = await this.#db.transaction(async (tx) => {
       seen = (await store.newestCheckpointEntry(tx))?.seq ?? null;
       await this.#sweep(tx, found);
       const from = await this.#resume(tx, 'newest');
@@ -2533,13 +2534,19 @@ class VaultService implements Vault {
       }
       const gap = await missingEntry(tx, from.at.seq);
       if (gap !== null) return { ok: false as const, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
-      const walk = new Walk(from.tally, from.digest);
-      const chain = await rehash(tx, logKeys, from.at, walk, { limit: walks.checkpoint });
-      if (!chain.ok) return chain;
-      const unsigned = await this.#checkpointFault(tx, walk.checkpoints);
-      if (unsigned !== null) return unsigned;
-      return { ok: true as const, from, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
+      return from;
     }, SNAPSHOT);
+    // The walk on from there, outside any transaction: a batch a statement, so that no connection is held while it
+    // rehashes, seconds for a long walk. Entries are appended in order, under the head, and never change, so no snapshot
+    // keeps them: what it read is held to the log again under the head, before anything is signed over it (`carries`).
+    const walked = !resumed.ok ? resumed : await (async () => {
+      const walk = new Walk(resumed.tally, resumed.digest);
+      const chain = await rehash(this.#db, logKeys, resumed.at, walk, { limit: walks.checkpoint });
+      if (!chain.ok) return chain;
+      const unsigned = await this.#checkpointFault(this.#db, walk.checkpoints);
+      if (unsigned !== null) return unsigned;
+      return { ok: true as const, from: resumed, tally: walk.tally(), digest: walk.digest(), at: chain.at, done: chain.done };
+    })();
     // The past rehashed, in a snapshot of its own. The database failing it leaves the stretch for the
     // next call, where it was, and the checkpoint is signed all the same, saying why (`warning`); a bug
     // throws, as anywhere else.

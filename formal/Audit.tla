@@ -8,10 +8,13 @@
 (* everything after it again. docs/formal.md says what this covers, what   *)
 (* it abstracts and what it does not prove.                                *)
 (*                                                                         *)
-(* Each walk runs in a snapshot of its own (REPEATABLE READ, read only:     *)
-(* db dialect.ts, SNAPSHOT), so it is one step here, reading the log as    *)
-(* that step finds it. Appends take the log's head; the vault's checkpoint *)
-(* decides under it. The anchor's store is one compare-and-set a step.     *)
+(* Each of the app's walks, and the vault's scrub, runs in a snapshot of   *)
+(* its own (REPEATABLE READ, read only: db dialect.ts, SNAPSHOT), so it is *)
+(* one step here, reading the log as that step finds it. The vault's       *)
+(* checkpoint walks in no transaction, a batch a statement: an entry a     *)
+(* step here, each linked to the one before as it was read. Appends take   *)
+(* the log's head; the vault's checkpoint decides under it. The anchor's   *)
+(* store is one compare-and-set a step.                                    *)
 (*                                                                         *)
 (* An entry's hash is abstracted to the chain's version where it is: a     *)
 (* rewrite from an entry moves every entry from there on to a new version, *)
@@ -347,25 +350,37 @@ WalkCas(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* A checkpoint (vault vault.ts, checkpoint): a walk from the newest one in *)
-(* a snapshot, a stretch of the scrub in another, then, under the head,    *)
-(* the rest and the signature. What it returns, the beat walks to.         *)
+(* A checkpoint (vault vault.ts, checkpoint): where it resumes, from the   *)
+(* newest one, in a snapshot; the walk on from there in no transaction, an *)
+(* entry a step; a stretch of the scrub in a snapshot of its own; then,    *)
+(* under the head, the rest and the signature. What it returns, the beat   *)
+(* walks to.                                                               *)
 (***************************************************************************)
 
-\* The newest checkpoint entry, signed or refused, the newest signed one,
-\* its prefix still holding its hash, and the walk from it.
+\* In one snapshot: the newest checkpoint entry, signed or refused, the
+\* newest signed one, and its prefix still holding its hash.
 CkptSnapshot(p) ==
     /\ pc[p] = "ckpt.snapshot"
     /\ LET s == Signed
            from == IF s = 0 THEN 0 ELSE log[s].at
            fromVer == IF s = 0 THEN 0 ELSE log[s].atVer
-           to == IF Len(log) - from > CkptWalk THEN from + CkptWalk ELSE Len(log)
-           ok == Carries(from, fromVer) /\ VaultWalkOk(from, to)
-       IN Read(p, "ckpt.scrub", [l[p] EXCEPT !.seen = Newest({"ckpt", "deny"}), !.from = from, !.fromVer = fromVer, !.done = to = Len(log),
-                                              !.to = to, !.toVer = IF to = 0 THEN 0 ELSE log[to].ver, !.ok = ok,
-                                              !.slap = IF s = 0 THEN 0 ELSE log[s].lap,
-                                              !.slapEnd = IF s = 0 THEN 0 ELSE IF log[s].lapEnd = 0 THEN from ELSE log[s].lapEnd,
-                                              !.slapVer = IF s = 0 THEN 0 ELSE IF log[s].lapEnd = 0 THEN fromVer ELSE log[s].lapVer])
+       IN Read(p, "ckpt.walk", [l[p] EXCEPT !.seen = Newest({"ckpt", "deny"}), !.from = from, !.fromVer = fromVer,
+                                             !.to = from, !.toVer = fromVer, !.ok = Carries(from, fromVer),
+                                             !.slap = IF s = 0 THEN 0 ELSE log[s].lap,
+                                             !.slapEnd = IF s = 0 THEN 0 ELSE IF log[s].lapEnd = 0 THEN from ELSE log[s].lapEnd,
+                                             !.slapVer = IF s = 0 THEN 0 ELSE IF log[s].lapEnd = 0 THEN fromVer ELSE log[s].lapVer])
+
+\* The walk, an entry a step, at most CkptWalk (vault log.ts, rehash, a
+\* batch a statement): each linked to the hash it computed for the one
+\* before, its own recomputed, and the vault's by its MAC. Out of entries,
+\* or of its budget, it is done if it reached the log's end.
+CkptWalkStep(p) ==
+    /\ pc[p] = "ckpt.walk"
+    /\ LET i == l[p].to + 1
+       IN IF l[p].ok /\ i <= Len(log) /\ l[p].to - l[p].from < CkptWalk
+            THEN Read(p, "ckpt.walk", [l[p] EXCEPT !.to = i, !.toVer = log[i].ver,
+                                                   !.ok = Carries(i - 1, l[p].toVer) /\ VaultWalkOk(i - 1, i)])
+            ELSE Read(p, "ckpt.scrub", [l[p] EXCEPT !.done = l[p].to = Len(log)])
 
 \* The scrub, in a snapshot of its own: from where the lap is, ScrubWalk
 \* entries, each hash recomputed; a lap ends at the prefix signed when it
@@ -465,7 +480,7 @@ Init ==
 Step(p) ==
     \/ Begin(p) \/ AppendHead(p) \/ AppendCommit(p) \/ Tamper(p)
     \/ BeatHead(p) \/ BeatCommit(p) \/ BeatRead(p) \/ BeatWalk(p) \/ BeatCas(p)
-    \/ CkptSnapshot(p) \/ CkptScrub(p) \/ CkptHead(p) \/ CkptCommit(p) \/ CkptDenyHead(p) \/ CkptDenied(p)
+    \/ CkptSnapshot(p) \/ CkptWalkStep(p) \/ CkptScrub(p) \/ CkptHead(p) \/ CkptCommit(p) \/ CkptDenyHead(p) \/ CkptDenied(p)
     \/ WalkRead(p) \/ WalkWalk(p) \/ WalkCas(p)
     \/ ProbeAnchor(p) \/ ProbeLog(p)
 
