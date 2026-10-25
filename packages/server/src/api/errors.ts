@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { isUnavailable } from '@coffre/db/dialect';
 import { KeyRetired } from '@coffre/db/log';
 
 import { logged } from '../logged.ts';
@@ -22,7 +23,7 @@ import { Superseded } from '../watch.ts';
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later
  *   501 not_implemented    a route this release declares and does not serve yet
- *   503 unavailable        something coffre needs is not answering
+ *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
  *   503 rotating           the app is moving to its new key: nothing is served until it has (key-rotation.ts)
  *   503 app_key            the log is under an app key this deployment does not hold, or has moved on from its own
@@ -119,6 +120,11 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       status: 400,
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
+  }
+  // The database not answering, or the vault's, behind its call: the request was fine, and may be asked again.
+  if (isUnavailable(error)) {
+    console.error('the database did not answer', logged(error));
+    return { status: 503, body: { error: 'unavailable', message: "coffre's database is not answering right now; try again in a moment" } };
   }
   console.error('unhandled API error', logged(error));
   return {

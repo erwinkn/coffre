@@ -5,6 +5,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { isUnavailable } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { toErrorBody } from '../src/api/errors.ts';
@@ -35,4 +36,21 @@ test('an unhandled database error is logged with its message and what Postgres s
     assert.deepEqual([cause.code, cause.severity, cause.routine !== undefined], ['42P01', 'ERROR', true]);
     assert.match(String(cause.message), /relation "no_such_table" does not exist/);
   }
+});
+
+test("a database that does not answer is 503 unavailable, the request's to ask again, and logged as such", (t) => {
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(args));
+  // As the vault's error reached the app on 2026-10-25, across its RPC: Drizzle's, Hyperdrive's beneath.
+  const pool = new Error('Failed query: select "secret_versions"."id" …', {
+    cause: Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' }),
+  });
+  const lock = new Error('Failed query: select "principal" …', { cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }) });
+  for (const error of [pool, lock, new Error('Connection terminated unexpectedly'), Object.assign(new Error('sorry, too many clients already'), { code: '53300' })]) {
+    assert.equal(isUnavailable(error), true, error.message);
+    assert.deepEqual(toErrorBody(error), { status: 503, body: { error: 'unavailable', message: "coffre's database is not answering right now; try again in a moment" } });
+  }
+  assert.deepEqual(logged.map(([label]) => label), Array(4).fill('the database did not answer'));
+  // A query that is wrong is a bug, whatever its words.
+  assert.equal(isUnavailable(Object.assign(new Error('syntax error at or near "selec"'), { code: '42601' })), false);
 });

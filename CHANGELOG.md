@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A database that does not answer is 503, not 500.** When Hyperdrive had
+  no free connection to the database for 15 s ("Timed out while waiting for
+  an open slot in the pool"), or a statement gave up on a lock, a reveal or
+  a proxied call answered 500 "something went wrong", as for a bug, and a
+  CI run could not tell it from one. These, a dropped connection and a
+  database out of connections now answer 503 `unavailable`, "coffre's
+  database is not answering right now; try again in a moment", and are
+  logged as `the database did not answer`.
 - **The Kubernetes proof waits for a fresh token instead of sending a spent
   one.** A long-running `coffre serve` sidecar re-proves at 90% of its
   session's life, and the kubelet's next projected token, written at 80%,

@@ -119,14 +119,36 @@ const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOU
 /**
  * Whether a query failed because the database could not be reached or
  * dropped the connection: an outage, not an answer. Postgres's connection
- * exceptions are class 08; pg and Workers' sockets say so in words.
+ * exceptions are class 08; pg and Workers' sockets say so in words, and so
+ * does Hyperdrive when it has no connection to the database to give: every
+ * one of its pool busy for 15 s ("Timed out while waiting for an open slot
+ * in the pool", FATAL 58000), or none to be made ("Server connection
+ * attempt failed: destination_unavailable").
  */
 export function isUnreachable(error: unknown): boolean {
   for (let cause = error; typeof cause === 'object' && cause !== null; ) {
     const { code, message } = cause as { code?: unknown; message?: unknown };
     if (typeof code === 'string' && (UNREACHABLE.has(code) || /^08[0-9A-Z]{3}$/.test(code))) return true;
-    if (typeof message === 'string' && /connection terminated|network connection lost|connect(ion)? timeout/i.test(message)) return true;
+    if (typeof message === 'string' && UNREACHABLE_WORDS.test(message)) return true;
     cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|open slot in the pool|acquire a connection from the pool|server connection attempt failed/i;
+
+/** Postgres's codes for a database too busy to answer now: out of connections, a lock or a statement that waited past its bound. */
+const BUSY = new Set(['53300', '55P03', '57014']);
+
+/**
+ * Whether a query failed for want of the database, not for anything the
+ * request asked: it could not be reached (`isUnreachable`), or was too busy
+ * to answer in time. The same request may well succeed in a moment.
+ */
+export function isUnavailable(error: unknown): boolean {
+  if (isUnreachable(error)) return true;
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (BUSY.has((cause as { code?: unknown }).code as string)) return true;
   }
   return false;
 }

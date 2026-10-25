@@ -170,6 +170,10 @@ test('only a database that cannot be reached is an outage the door lets through;
   assert.equal(isUnreachable(Object.assign(new Error('relation "drizzle.__drizzle_migrations" does not exist'), { code: '42P01' })), false);
   assert.equal(isUnreachable(Object.assign(new Error('permission denied for schema drizzle'), { code: '42501' })), false);
   assert.equal(isUnreachable(new Error('no such table: __drizzle_migrations')), false);
+  // Hyperdrive, with every connection of its pool to the database busy, or none to be made.
+  const pool = Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' });
+  assert.equal(isUnreachable(new Error('Failed query: select 1', { cause: pool })), true);
+  assert.equal(isUnreachable(new Error('Server connection attempt failed: destination_unavailable')), true);
 });
 
 test('without an audit watch, the scheduled run asks the vault to checkpoint and writes no beat, and readiness is the database migrated', async () => {

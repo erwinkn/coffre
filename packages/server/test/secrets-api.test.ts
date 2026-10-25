@@ -552,3 +552,20 @@ for (const read of ['reveal', 'run', 'import preview'] as const) {
     ]);
   });
 }
+
+test("a reveal whose vault cannot reach the database is 503 unavailable, to ask again, not a 500", async () => {
+  await root.secrets.set('market/prod', { API_KEY: 'fake-key' });
+  // What the vault threw on 2026-10-25, every connection of Hyperdrive's pool busy past 15 s.
+  const unwrap = deps.vault.unwrap;
+  deps.vault.unwrap = async () => {
+    throw new Error('Failed query: select "secret_versions"."id" …', {
+      cause: Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' }),
+    });
+  };
+  try {
+    await assert.rejects(root.secrets.reveal('market/prod'), { status: 503, code: 'unavailable', message: "coffre's database is not answering right now; try again in a moment" });
+  } finally {
+    deps.vault.unwrap = unwrap;
+  }
+  assert.deepEqual((await root.secrets.reveal('market/prod')).values, { API_KEY: 'fake-key' });
+});
