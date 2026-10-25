@@ -20,9 +20,9 @@ import { Agent, createServer, request as httpRequest, type IncomingMessage } fro
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
-import { isUnavailable } from '@coffre/db/dialect';
 
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
+import { failureOf } from './failure.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
 import type { VaultOptions } from './vault.ts';
 
@@ -132,7 +132,9 @@ export function connectVault(socket: string): Vault {
           }, reject);
         },
       );
-      req.on('error', (error) => reject(new Error(`the vault at ${socket} is unreachable: ${error.message}`, { cause: error })));
+      // No socket file is a vault that stopped cleanly, as a refused connection is one that did not: the same outage.
+      req.on('error', (error: NodeJS.ErrnoException) =>
+        reject(new Error(`the vault at ${socket} is unreachable: ${error.message}`, { cause: error.code === 'ENOENT' ? Object.assign(error, { code: 'ECONNREFUSED' }) : error })));
       req.end(body);
     });
   return Object.fromEntries(METHODS.map((name) => [name, call(name)])) as unknown as Vault;
@@ -147,20 +149,4 @@ async function readBody(stream: IncomingMessage): Promise<string> {
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString('utf8');
-}
-
-/**
- * A vault call's failure, as `serveVault` answers it. Its database not
- * answering is the app's outage too, not a bug: 503, with the code that
- * says so (`isUnavailable`), which `connectVault` puts back on its error.
- * One only its words say (pg's "Connection terminated") goes as
- * Postgres's code for a connection that failed, 08006.
- */
-export function failureOf(error: unknown): { status: number; body: { error: string; code?: string } } {
-  if (!isUnavailable(error)) return { status: 500, body: { error: error instanceof Error ? error.message : 'the vault failed' } };
-  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
-    const { code } = cause as { code?: unknown };
-    if (typeof code === 'string' && isUnavailable({ code })) return { status: 503, body: { error: "the vault's database did not answer", code } };
-  }
-  return { status: 503, body: { error: "the vault's database did not answer", code: '08006' } };
 }
