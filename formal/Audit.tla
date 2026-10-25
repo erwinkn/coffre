@@ -8,13 +8,12 @@
 (* everything after it again. docs/formal.md says what this covers, what   *)
 (* it abstracts and what it does not prove.                                *)
 (*                                                                         *)
-(* Each of the app's walks, and the vault's scrub, runs in a snapshot of   *)
-(* its own (REPEATABLE READ, read only: db dialect.ts, SNAPSHOT), so it is *)
-(* one step here, reading the log as that step finds it. The vault's       *)
-(* checkpoint walks in no transaction, a batch a statement: an entry a     *)
-(* step here, each linked to the one before as it was read. Appends take   *)
-(* the log's head; the vault's checkpoint decides under it. The anchor's   *)
-(* store is one compare-and-set a step.                                    *)
+(* The vault's scrub runs in a snapshot of its own (REPEATABLE READ, read  *)
+(* only: db dialect.ts, SNAPSHOT), so it is one step here. The app's walks *)
+(* and the vault's checkpoint walk in no transaction, a batch a statement: *)
+(* an entry a step here, each linked to the one before as it was read.     *)
+(* Appends take the log's head; the vault's checkpoint decides under it.   *)
+(* The anchor's store is one compare-and-set a step.                       *)
 (*                                                                         *)
 (* An entry's hash is abstracted to the chain's version where it is: a     *)
 (* rewrite from an entry moves every entry from there on to a new version, *)
@@ -35,6 +34,8 @@ CONSTANTS
     Budget,         \* Budget[p]: how many times
     MaxLen,         \* no append past this many entries
     Walk,           \* CHAIN_WALK: entries a heartbeat's walk reads at most
+    AppBatch,       \* entries the app's walk reads a statement (walkChain, BATCH)
+    AppWalkSteps,   \* the app's walks a batch a step, in no transaction; else one step, as in a snapshot
     CkptWalk,       \* walks.checkpoint: entries a checkpoint's walk reads at most
     ScrubWalk       \* walks.scrub: entries a scrub reads a call
 
@@ -42,6 +43,9 @@ CONSTANTS
     \* A heartbeat's walk checks first that the entry it goes on from still
     \* has the hash it verified (db audit.ts, walkChain, `from`).
     WalkChecksFrom,
+    \* The app's walk, in no transaction, links each batch to the hash it
+    \* verified last (walkChain, verifyAppEntries, `startPrevHash`).
+    AppLinksWalk,
     \* And the app's MAC of each app entry it walks (walkChain, verifyEntries).
     WalkChecksAppMacs,
     \* A checkpoint's walk checks the vault's MAC of each vault entry (vault
@@ -179,6 +183,7 @@ WalkTo(r, c) ==
 
 NoOp == [kind |-> "none", at |-> 0]
 L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0,
+       held |-> TRUE, wat |-> 0, wver |-> 0, wend |-> 0, wok |-> TRUE, wfault |-> 0,
        sfrom |-> 0, slap |-> 0, slapEnd |-> 0, slapVer |-> 0, sok |-> TRUE, done |-> TRUE,
        beat |-> 0, prev |-> NoAnchor, next |-> NoAnchor, signed |-> FALSE, c |-> 0, cVer |-> 0, read |-> NoAnchor, fEdit |-> 0]
 
@@ -266,31 +271,78 @@ BeatCommit(p) ==
     /\ Goto(p, "ckpt.snapshot")
     /\ UNCHANGED <<tampered, anchor, op, left, history>>
 
-\* In one snapshot: the anchor's prefix still there, then the walk from
-\* where the app verified to, toward the prefix the vault just signed. A
-\* finding stands until its entry verifies again; a refusal, until the
-\* vault signs.
+\* What a beat or a walk between beats will write, and what it found, as the log is now.
+Decided(p, next, then) ==
+    /\ l' = [l EXCEPT ![p].next = IF op[p].kind = "beat" THEN [next EXCEPT !.beat = l[p].beat] ELSE next,
+                      ![p].fEdit = IF next.found > 0 /\ next.found <= Len(log) THEN log[next.found].edited ELSE 0]
+    /\ history' = IF op[p].kind = "beat" THEN [history EXCEPT !.calmWalks = IF Calm THEN @ + 1 ELSE 0] ELSE history
+    /\ Goto(p, then)
+    /\ UNCHANGED <<log, head, tampered, anchor, op, left>>
+
+\* What a walk that got to `w.to`, computing there the version `wver`,
+\* makes of the anchor: a beat's, toward the prefix the vault signed (`c`,
+\* `cVer`); a walk between beats', toward the anchor's own.
+BeatNext(p, w, wver) ==
+    LET a == l[p].prev
+        Found(e) == [a EXCEPT !.found = e, !.vfound = FALSE]
+        \* The vault signed the hash the app computes there.
+        ends == ~w.done \/ wver = l[p].cVer
+    IN CASE ~w.ok -> Found(w.fault)
+         [] ~ends -> Found(l[p].c)
+         [] OTHER -> [a EXCEPT !.exists = TRUE, !.at = l[p].c, !.ver = l[p].cVer, !.verified = w.to,
+                               !.vver = wver, !.found = 0, !.vfound = FALSE]
+WalkNext(p, w, wver) ==
+    LET a == l[p].prev
+    IN CASE ~w.ok -> [a EXCEPT !.found = w.fault]
+         [] w.done /\ wver # a.ver -> [a EXCEPT !.found = a.at]
+         [] OTHER -> [a EXCEPT !.verified = w.to, !.vver = wver]
+Next_(p, w, wver) == IF op[p].kind = "beat" THEN BeatNext(p, w, wver) ELSE WalkNext(p, w, wver)
+Cas(p) == IF op[p].kind = "beat" THEN "beat.cas" ELSE "walk.cas"
+
+\* The anchor's prefix still there, read first, then the walk from where the
+\* app verified toward the prefix: with `AppWalkSteps`, in no transaction,
+\* a batch a step (`AppStep`); otherwise in the same step, as one snapshot.
+StartWalk(p, c) ==
+    LET a == l[p].prev
+        moved == WalkChecksFrom /\ ~Carries(a.verified, a.vver)
+        w == WalkTo([at |-> a.verified, ver |-> a.vver], c)
+    IN IF AppWalkSteps
+         THEN Read(p, "app.step", [l[p] EXCEPT !.wat = a.verified, !.wver = a.vver, !.wok = ~moved /\ a.verified <= c,
+                                               !.wfault = IF moved THEN a.verified ELSE 0,
+                                               !.wend = IF c - a.verified > Walk THEN a.verified + Walk ELSE c])
+         ELSE Decided(p, Next_(p, w, IF w.to = 0 THEN 0 ELSE log[w.to].ver), Cas(p))
+
+\* A finding stands until its entry verifies again; a refusal, until the
+\* vault signs: neither walks.
 BeatWalk(p) ==
     /\ pc[p] = "beat.walk"
     /\ LET a == l[p].prev
            c == l[p].c
            held == ~AnchorHeld \/ (Carries(a.at, a.ver) /\ c >= a.at)
-           w == WalkTo([at |-> a.verified, ver |-> a.vver], c)
-           \* The vault signed the hash the app computes there.
-           ends == ~w.done \/ Carries(c, l[p].cVer)
-           Found(e) == [a EXCEPT !.found = e, !.vfound = FALSE]
-           next == CASE ~l[p].signed -> IF a.found > 0 THEN a ELSE [a EXCEPT !.vfound = TRUE]
-                     [] a.found > 0 /\ ~Repaired(a) -> a
-                     [] ~held -> Found(a.at)
-                     [] ~w.ok -> Found(w.fault)
-                     [] ~ends -> Found(c)
-                     [] OTHER -> [a EXCEPT !.exists = TRUE, !.at = c, !.ver = l[p].cVer, !.verified = w.to,
-                                           !.vver = IF w.to = 0 THEN 0 ELSE log[w.to].ver, !.found = 0, !.vfound = FALSE]
-       IN /\ l' = [l EXCEPT ![p].next = [next EXCEPT !.beat = l[p].beat],
-                             ![p].fEdit = IF next.found > 0 /\ next.found <= Len(log) THEN log[next.found].edited ELSE 0]
-          /\ history' = [history EXCEPT !.calmWalks = IF Calm THEN @ + 1 ELSE 0]
-    /\ Goto(p, "beat.cas")
-    /\ UNCHANGED <<log, head, tampered, anchor, op, left>>
+       IN CASE ~l[p].signed -> Decided(p, IF a.found > 0 THEN a ELSE [a EXCEPT !.vfound = TRUE], "beat.cas")
+            [] a.found > 0 /\ ~Repaired(a) -> Decided(p, a, "beat.cas")
+            [] ~held -> Decided(p, [a EXCEPT !.found = a.at, !.vfound = FALSE], "beat.cas")
+            [] OTHER -> StartWalk(p, c)
+
+\* One statement of the app's walk (db audit.ts, walkChain): up to AppBatch
+\* entries, the first linked to the hash computed for the one before, each
+\* its own hash and the app's MAC of the app's, read as the log is then.
+\* Once it is out of its budget, or faulty, the anchor is decided in the
+\* same step: on what the walk computed, nothing read again.
+AppStep(p) ==
+    /\ pc[p] = "app.step"
+    /\ LET a == l[p].wat
+           b == IF l[p].wend - a > AppBatch THEN a + AppBatch ELSE l[p].wend
+           faults == {i \in Seqs(a, b) : AppFault(i)}
+           linked == AppLinksWalk => Carries(a, l[p].wver)
+           fault == IF ~linked THEN a + 1 ELSE IF faults = {} THEN 0 ELSE CHOOSE i \in faults : \A j \in faults : i <= j
+           c == IF op[p].kind = "beat" THEN l[p].c ELSE l[p].prev.at
+           end(at, ok, f, ver) == Decided(p, Next_(p, [ok |-> ok, to |-> at, done |-> at = c, fault |-> f], ver), Cas(p))
+       IN CASE ~l[p].wok -> end(l[p].wat, FALSE, l[p].wfault, l[p].wver)
+            [] a >= l[p].wend -> end(a, TRUE, 0, l[p].wver)
+            [] fault # 0 -> end(b, FALSE, fault, log[b].ver)
+            [] b = l[p].wend -> end(b, TRUE, 0, log[b].ver)
+            [] OTHER -> Read(p, "app.step", [l[p] EXCEPT !.wat = b, !.wver = log[b].ver])
 
 \* The store: the new record only over the one read, unless the write is
 \* blind. One that moves a point back is the model's to see. What it
@@ -328,23 +380,14 @@ WalkRead(p) ==
     /\ pc[p] = "walk.read"
     /\ Read(p, IF Walking(anchor) THEN "walk.walk" ELSE "idle", [l[p] EXCEPT !.prev = anchor])
 
-\* In one snapshot, as a beat's walk: the anchor's prefix still there, then
-\* from where the app verified toward it, ending at its hash.
+\* As a beat's walk: the anchor's prefix still there, then from where the
+\* app verified toward it, ending at its hash.
 WalkWalk(p) ==
     /\ pc[p] = "walk.walk"
     /\ LET a == l[p].prev
-           held == ~AnchorHeld \/ Carries(a.at, a.ver)
-           w == WalkTo([at |-> a.verified, ver |-> a.vver], a.at)
-           ends == ~w.done \/ Carries(a.at, a.ver)
-           Found(e) == [a EXCEPT !.found = e]
-           next == CASE ~held -> Found(a.at)
-                     [] ~w.ok -> Found(w.fault)
-                     [] ~ends -> Found(a.at)
-                     [] OTHER -> [a EXCEPT !.verified = w.to, !.vver = IF w.to = 0 THEN 0 ELSE log[w.to].ver]
-       IN l' = [l EXCEPT ![p].next = next,
-                         ![p].fEdit = IF next.found > 0 /\ next.found <= Len(log) THEN log[next.found].edited ELSE 0]
-    /\ Goto(p, "walk.cas")
-    /\ UNCHANGED <<log, head, tampered, anchor, op, left, history>>
+       IN IF AnchorHeld /\ ~Carries(a.at, a.ver)
+            THEN Decided(p, [a EXCEPT !.found = a.at], "walk.cas")
+            ELSE StartWalk(p, a.at)
 
 WalkCas(p) ==
     /\ pc[p] = "walk.cas"
@@ -483,7 +526,7 @@ Init ==
 
 Step(p) ==
     \/ Begin(p) \/ AppendHead(p) \/ AppendCommit(p) \/ Tamper(p)
-    \/ BeatHead(p) \/ BeatCommit(p) \/ BeatRead(p) \/ BeatWalk(p) \/ BeatCas(p)
+    \/ BeatHead(p) \/ BeatCommit(p) \/ BeatRead(p) \/ BeatWalk(p) \/ AppStep(p) \/ BeatCas(p)
     \/ CkptSnapshot(p) \/ CkptWalkStep(p) \/ CkptScrub(p) \/ CkptHead(p) \/ CkptCommit(p) \/ CkptDenyHead(p) \/ CkptDenied(p)
     \/ WalkRead(p) \/ WalkWalk(p) \/ WalkCas(p)
     \/ ProbeAnchor(p) \/ ProbeLog(p)

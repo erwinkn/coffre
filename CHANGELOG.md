@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The audit watch's beat no longer holds the app's connection while it
+  walks.** Each beat walks the log on from where the anchor says the app
+  verified, up to 10,000 entries, checking every hash and the app's MACs.
+  It did so in one read-only transaction, which on Workers held one of the
+  app's Hyperdrive connections for the whole walk, as the vault's
+  checkpoint did until 0.14.1. The walk now reads a batch a statement,
+  outside any transaction, each linked to the hash it verified last, and
+  ends at the hash the vault signed, as before; a key rotation committed
+  while it walks is read from the entries themselves. With 6,000 entries
+  to walk, what the beat reads inside the app's transactions went from
+  12,010 rows to 2, and its longest transaction from about 115 ms to 3 ms.
+
 ## 0.14.1 (2026-10-25)
 
 - **Upgrading to 0.14.1, in short.** No migration, and nothing to change in

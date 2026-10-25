@@ -15,8 +15,8 @@ import { asc, desc, eq } from 'drizzle-orm';
 import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/app.ts';
 import { authMac, signedBy, type AuthTable } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
-import { appendAudit, appLogKey, CHAIN_START, walkChain } from '../src/db/audit.ts';
-import { insertBinding, insertConnection, insertOauthClient, memberStanding } from '../src/db/queries.ts';
+import { appendAudit, appLogKey, CHAIN_START, movedOnIn, verifyAppEntries, walkChain } from '../src/db/audit.ts';
+import { auditRange, insertBinding, insertConnection, insertOauthClient, memberStanding } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { sealAnchor } from '../src/anchor.ts';
 import { toErrorBody } from '../src/api/errors.ts';
@@ -202,6 +202,13 @@ test('from its first step, the old key writes no more; after it, it verifies onl
     reason: `written under ${appLogKey(A).keyId} after the app moved on from it, at entry ${rotated.seq}: a key it replaced verifies only what came before`,
     through: forged.seq - 1n,
   });
+  // A walk in no transaction, whose verifier was read before the rotation, learns it from the entries it walks.
+  const stretch = await auditRange(deps.db, rotated.seq, Number(forged.seq - rotated.seq) + 1);
+  const blind = { keys: [appLogKey(B), appLogKey(A)], movedOn: new Map<string, bigint>() };
+  const from = { startSeq: rotated.seq, startPrevHash: stretch[0]!.prevHash };
+  assert.equal(verifyAppEntries(stretch, from, blind).ok, true, 'read before the rotation, the verifier alone vouches for the forged entry');
+  const learned = verifyAppEntries(stretch, from, movedOnIn(blind, stretch));
+  assert.equal(!learned.ok && learned.failedAtSeq, forged.seq);
   // A row A signs after the rotation is no credential.
   const token = generateToken('service');
   const row = {
