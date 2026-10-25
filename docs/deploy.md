@@ -570,11 +570,12 @@ from BEGIN to COMMIT, a wait for a lock included. At Hyperdrive's minimum,
 waiting on the audit log's head then stops every query on its shard, and
 under load the pool stays full ("Timed out while waiting for an open slot
 in the pool"). Its share assumes the database serves coffre alone: keep
-a config lower only for one that serves something else too, which more
-connections would crowd out. So with Cloudflare access, setup never raises
-a limit set below its share, which may be yours or its own for a smaller
-database; it says so, and prints the commands that raise it. Without, the
-update commands it prints set the share.
+a config lower only when its database serves something else too, which
+more connections would crowd out. So with Cloudflare access, setup never
+raises a limit set below its share, which may be yours or its own for a
+smaller database; it says so, and prints the commands that raise it.
+Without, when it prints update commands, they set the share; check a
+config it does not update with `wrangler hyperdrive get <id>`.
 
 ### 3. Keys and secrets
 

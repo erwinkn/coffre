@@ -398,11 +398,11 @@ async function run(
         const [one, other] = low;
         const below = other === undefined
           ? `${one!.name} is at ${one!.limit} connections, below its share of ${limit}`
-          : `${one!.name} and ${other.name} are at ${one!.limit} and ${other.limit} connections, below their share of ${limit} each`;
+          : `${one!.name} and ${other.name} are at ${one!.limit === other.limit ? `${one!.limit} connections each` : `${one!.limit} and ${other.limit} connections`}, below their share of ${limit}`;
         steps.aside(
           `${below}. Hyperdrive splits a config's connections among its shards, and a transaction holds one to its commit, a wait ` +
-            'for a lock included: at a few, one call waiting on the audit log stops every other on its shard. Unless the database ' +
-            `serves more than coffre, raise ${other === undefined ? 'it' : 'them'}:`,
+            'for a lock included: with few connections, one call waiting on the audit log stops every other on its shard. Unless the ' +
+            `database serves more than coffre, raise ${other === undefined ? 'it' : 'them'}:`,
         );
         for (const { id } of low) steps.print(`  pnpm exec wrangler hyperdrive update ${id} --origin-connection-limit=${limit}`);
       }

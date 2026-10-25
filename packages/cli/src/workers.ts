@@ -525,7 +525,7 @@ export class Cloudflare {
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
         what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
-      if (limits[component] < limit) what += `, at ${limits[component]} of the ${limit} it may open`;
+      if (limits[component] < limit) what += `, ${limits[component]} of ${limit}`;
       details.push(`${name.padEnd(width)}${what}`);
       this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
       this.workers[component].hyperdrive = config.id;
