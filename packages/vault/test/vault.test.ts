@@ -191,6 +191,15 @@ test("a read on an answer of access the app kept opens only while it is still th
   const now = await w.vault.access(ADA);
   assert.notEqual(now.revision, kept.revision);
   assert.deepEqual(await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items }), { ok: true, keys: [key], accessRevision: now.revision });
+  // A refusal for what the versions are is decided on the answer too: on a stale one, nothing logged.
+  await member(w, ADA, [[w.dev, 'developer'], [w.prod, 'developer']]);
+  const unknown = [{ secretVersionId: randomUUID() }];
+  const logged = (await vaultLog()).length;
+  const early = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items: unknown });
+  assert.equal(!early.ok && early.refusal.code, 'access_changed');
+  assert.equal((await vaultLog()).length, logged);
+  const claimed = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: (await w.vault.access(ADA)).revision, items: unknown });
+  assert.equal(!claimed.ok && claimed.refusal.code, 'bad_claim');
   // No answer of a removed member is anyone's to read on.
   await w.vault.remove({ actor: ROOT, principal: ADA });
   const removed = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', accessRevision: now.revision, items });

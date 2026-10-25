@@ -15,7 +15,7 @@ import {
   unauthenticated,
   type AuthenticatedIdentity,
 } from './auth.ts';
-import { errorResponse, jsonResponse, methodNotAllowed, readLimitedText } from './http.ts';
+import { errorResponse, jsonResponse, methodNotAllowed, readLimitedBytes } from './http.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { publicProviders } from './signin.ts';
 
@@ -205,8 +205,18 @@ export async function fetchApi(
     }
     let served = request;
     if (identity.caller.recalled !== undefined) {
-      // Read, not teed: a branch left unread would hold back the cancel of one past the bound, which then never answers.
-      const body = await readLimitedText(request, API_BODY_BYTES);
+      // Its bytes, read once within the bound, not teed: a branch left unread would hold back the cancel of a body past it,
+      // which then never answers. Decoded by the route, as any request's.
+      let body: Uint8Array<ArrayBuffer>;
+      try {
+        body = await readLimitedBytes(request, API_BODY_BYTES);
+      } catch (error) {
+        // A body refused is answered as for a request that asked who its caller is: its caller asked for now, first.
+        const asked = await apiCaller(request, runtime, options.sourceIp, options.authenticate, options.inProcess);
+        if (asked instanceof Response) return asked;
+        if (!asked.registered) return asked.caller.tampered ? accessTampered() : registrationRequired();
+        throw error;
+      }
       const replay = () => new Request(request.url, { method: request.method, headers: request.headers, body });
       [served, again] = [replay(), replay()];
     }

@@ -950,10 +950,10 @@ class VaultService implements Vault {
       };
     };
     if (viaOk.includes(false)) {
-      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
+      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')), { asked: input.accessRevision });
     }
     if (throughOk.includes(false)) {
-      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')));
+      return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')), { asked: input.accessRevision });
     }
     const ends = sealed.flatMap((seal) => (seal === null ? [] : [seal.seq]));
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
@@ -1047,7 +1047,7 @@ class VaultService implements Vault {
     if (items.some((item, i) => !loosens[i] && item.secret.sensitive !== true && strict(i))) {
       return this.#refuseVersions(principal, 'invalid', loaded.versions.map((source) => ({
         ...keyEntry('key.rewrap', principal, source.secret, 'deny', 'invalid', input), secretVersionId: source.id,
-      })), LOOSER);
+      })), { message: LOOSER });
     }
     const sources = new Map(items.map((item, i) => [item.secret, loaded.versions[i]]));
     const loosened = new Set(items.flatMap((item, i) => (loosens[i] ? [item.secret] : [])));
@@ -1099,7 +1099,7 @@ class VaultService implements Vault {
 
   /** Versions need no lock: they change only by being erased, once their place is archived, and their ids determine the whole batch before any key call. */
   async #versions(
-    input: Correlation & { principal: string; items: { secretVersionId: string }[] },
+    input: Correlation & { principal: string; items: { secretVersionId: string }[]; accessRevision?: string },
     action: KeyAction,
     detail: Record<string, unknown> = {},
   ): Promise<Outcome<{ versions: store.SecretVersion[] }>> {
@@ -1115,7 +1115,7 @@ class VaultService implements Vault {
     if ([...found.values()].some((version) => version.deleted)) {
       return this.#refuseVersions(input.principal, 'deleted', [...found.values()].map((version) => ({
         ...keyEntry(action, input.principal, version.secret, 'deny', 'deleted', input, detail), secretVersionId: version.id,
-      })));
+      })), { asked: input.accessRevision });
     }
     if (ids.some((id) => !found.has(id))) {
       return this.#refuseVersions(input.principal, 'bad_claim', ids.map((id) => {
@@ -1126,13 +1126,27 @@ class VaultService implements Vault {
           metadata: JSON.stringify({ ...detail, secretVersionId: id, ...traced(input) }),
         };
         return { ...keyEntry(action, input.principal, version.secret, 'deny', 'bad_claim', input, detail), secretVersionId: id };
-      }));
+      }), { asked: input.accessRevision });
     }
     return { ok: true, versions: ids.map((id) => found.get(id)!) };
   }
 
-  async #refuseVersions(principal: string, code: 'bad_claim' | 'deleted' | 'invalid', entries: NewEntry[], message = MESSAGES[code]): Promise<Outcome<never>> {
-    return this.#decide([principal], async () => {
+  /**
+   * Refuse a call for what its versions are, under the principal's row, as
+   * any decision: and a read on a kept answer no longer theirs as that, not
+   * for its versions, logging no read (`accessRevision`).
+   */
+  async #refuseVersions(
+    principal: string,
+    code: 'bad_claim' | 'deleted' | 'invalid',
+    entries: NewEntry[],
+    { message = MESSAGES[code], asked }: { message?: string; asked?: string } = {},
+  ): Promise<Outcome<never>> {
+    return this.#decide([principal], async (d) => {
+      if (asked !== undefined) {
+        const standing = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads);
+        if (this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
+      }
       throw new Refused(refusal(code, message), entries);
     });
   }

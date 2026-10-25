@@ -237,3 +237,26 @@ test('a body past the bound, on a kept answer, is refused at once, its stream ca
   assert.equal(answered?.status, 400);
   assert.ok(cancelled, 'the body was cancelled');
 });
+
+/** A raw POST /api/reveals with this token and body: its status. */
+async function post(token: string, body: BodyInit, init: Partial<RequestInit> = {}): Promise<number> {
+  const request = new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body, ...init } as RequestInit);
+  return (await coffreRoute(request, runtime, '203.0.113.7'))!.status;
+}
+
+test('a body is read as it would be on an answer asked for: decoded once, by the route', async () => {
+  const token = await readerToken();
+  const doubled = '\uFEFF\uFEFF{"path":"market/dev/API_KEY"}';
+  const cold = await post(token, doubled);
+  calls = [];
+  assert.equal(await post(token, doubled), cold);
+  assert.equal(await post(token, '{"path":"market/dev/API_KEY"}'), 200);
+});
+
+test('a body refused, on a kept answer the vault no longer gives, is answered as a request that asked: its caller first', async () => {
+  const token = await readerToken();
+  assert.equal(await reveal(bearer(token), 'market/dev/API_KEY'), 'fake-dev-key');
+  // Removed in the vault, before the app's sweep reaches the session's row.
+  assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: `user:${READER}` })).ok, true);
+  assert.equal(await post(token, new Uint8Array(1024 * 1024 + 1).fill(0x20)), 401);
+});
