@@ -30,11 +30,14 @@ export type WatchActor = Pick<AuditEntry, 'actorType' | 'actorId' | 'requestId' 
 export type WatchContext = {
   log: {
     /**
-     * In one read-only snapshot: each of `held` still at its hash, then the
-     * chain walked from `from` (null: before the first entry) toward entry
-     * `to`, at most `CHAIN_WALK` entries, every link and hash and the app's
-     * MACs (`walkChain`). Where it got to and whether that is `to`; or the
-     * first fault, `held` ones first, the held point's seq for one.
+     * In no transaction, each read as the log is then: each of `held` still
+     * at its hash, then the chain walked from `from` (null: before the first
+     * entry) toward entry `to`, at most `CHAIN_WALK` entries, a batch a
+     * statement, each batch linked to the hash verified last, every link and
+     * hash and the app's MACs (`walkChain`). The caller holds where it ends
+     * to the hash the vault signed there (`advance`), which pins every entry
+     * before it. Where it got to and whether that is `to`; or the first
+     * fault, `held` ones first, the held point's seq for one.
      */
     walk(input: { held: readonly LogHead[]; from: LogHead | null; to: number }): Promise<
       { ok: true; at: LogHead | null; done: boolean } | { ok: false; failedAtSeq: number; reason: string }
