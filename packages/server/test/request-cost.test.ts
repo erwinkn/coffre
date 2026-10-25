@@ -91,6 +91,8 @@ let reader: CoffreClient;
 let service: CoffreClient;
 /** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
 let workload: () => Promise<void>;
+/** The same, at a proxy that remembers nothing: what each request costs once its cache has lapsed, or on a fresh isolate. */
+let coldWorkload: () => Promise<void>;
 /** The same through a Cloudflare service binding, its caller the binding's `props`. */
 let bound: () => Promise<void>;
 /** The scheduled beat, and `/readyz`'s check, on the counted connections. */
@@ -197,15 +199,24 @@ before(async () => {
       credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } },
     })]),
   } satisfies CoffreRuntime;
-  workload = async () => {
+  const forgetful = {
+    ...proxied,
+    plugins: checkPlugins([credentialProxy({
+      cacheSeconds: 0,
+      credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } },
+    })]),
+  } satisfies CoffreRuntime;
+  const through = (at: CoffreRuntime) => async () => {
     const url = `${ORIGIN}/use/stripe/v1/charges`;
     const body = 'amount=2000';
     const headers = { 'content-type': 'application/x-www-form-urlencoded' };
     const proof = await createProof(key, { method: 'POST', url, token, nonce: 'g1.cost', content: { headers, body: await bodyDigest(body) } });
-    const answered = await pluginRoute(new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${token}`, dpop: proof }, body }), proxied, null);
+    const answered = await pluginRoute(new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${token}`, dpop: proof }, body }), at, null);
     if (answered?.status !== 204) throw new Error(`the proxy's workload was refused: ${await answered?.text()}`);
     await Promise.all(background.splice(0));
   };
+  workload = through(proxied);
+  coldWorkload = through(forgetful);
   await insertBinding(deps.db, deps.chainKey, {
     id: randomUUID(), principal: SERVICE, generation: standing.generation, profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
     jwks: null, claims: '{}', scope: null, policy: '{}', label: null, createdBy: ROOT,
@@ -261,6 +272,21 @@ test('each hot request runs exactly its budget of statements, on as many connect
     const spent = await cost(request);
     assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, budget, name);
   }
+});
+
+/**
+ * A workload's request at a proxy whose cache has lapsed, or on a fresh
+ * isolate: the session's statement, the path and the environment's rows,
+ * the vault's access and unwrap, then its `credential.use` entry, under the
+ * head: BEGIN, the head, the policy (the protected environments' rows and
+ * the newest change), the credential still, the head again with the clock
+ * and the last entry, the entries and the head, COMMIT. Seven of its
+ * statements hold the head, which every append in the instance waits for.
+ */
+test("a workload's request at a proxy whose cache lapsed runs its budget", POSTGRES, async () => {
+  await coldWorkload();
+  const spent = await cost(coldWorkload);
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 11, vault: 8, vaultCalls: 2 });
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
