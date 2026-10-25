@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.1, in short.** No migration, and nothing to change in
+  your config. Deploy the vault Worker before the app, as
+  [deploy.md](docs/deploy.md) says; a new app beside an older vault asks
+  the vault twice for a read, as 0.14.0 did, so either order is safe. This
+  release makes the vault cheaper to use, without changing what it answers:
+  a read of values makes one vault call, not two (a reveal of seven keys,
+  two calls and three Workers connections before, is one call and two
+  now); a decision made from the policy is one statement, not two; and the
+  audit watch's checkpoint no longer holds a connection while it walks the
+  log (its longest transaction, at 10,000 entries, from 148.6 to 6.8 ms).
+  Nothing here eases a rollback concern of 0.14.0's: after an `APP_KEY`
+  rotation, don't go back to 0.13.x.
+
 - **A read of values makes one vault call, not two.** A reveal, an
   export, the Action's read and a proxied call whose cache lapsed asked
   the vault who the caller was (`access`), then had it open the values
