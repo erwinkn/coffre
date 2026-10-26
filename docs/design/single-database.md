@@ -530,9 +530,11 @@ integers in SQL, `bigint` in TypeScript and decimal strings over JSON, from
 0 for both authors.
 
 **Constraints and indexes for the hot paths** (S11). The bulk count reads
-`vault_releases(principal, released_at, key)`, which a trigger keeps from
-the log (0.14.4; it read `audit_log(author, actor, action, decision,
-occurred_at)` before, every entry of the reader's); the freshness
+`vault_releases` by its key, `(principal, key)`, a row per key, which a
+trigger keeps from the log (0.14.4; it read `audit_log(author, actor,
+action, decision, occurred_at)` before, every entry of the reader's).
+`released_at` stays unindexed on purpose: indexed, each read's update
+would leave an index entry behind rather than move the time on in place; the freshness
 check `(author, subject_principal, seq)`; checkpoints and heartbeats
 `(author, action, seq)`; audit pages page by `seq` within project,
 environment, secret or actor; operations group by `(operation_id, seq)`.

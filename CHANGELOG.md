@@ -15,17 +15,21 @@
   reads `vault_releases`: a row per principal and key, with when it was
   last released. A trigger on `audit_log` keeps it from the log, in each
   read's own transaction. No login writes it, and the vault and backups
-  read it. The count reads a row per key the reader was ever released,
-  however often they read it: 0.5 ms and 22 pages on the same copy, and
-  as many pages on a log of a million entries. The limit counts exactly what it did.
+  read it. The count reads one row per key the principal was ever
+  released, deleted keys included, however often they read it: 0.5 ms
+  and 22 pages on the same copy, and as many pages on a log of a million
+  entries. Nothing prunes the table yet: its size follows the instance's
+  keys, not the log. The limit counts exactly what it did.
   A test now holds every statement of the hot requests to the same pages
   on a log ten times longer.
 
   Migration `0020_vault_releases` (Postgres; `0017` on SQLite) makes the
   table and the trigger, then fills it from the log, in one transaction.
   Audit appends wait for it: 2.1 s on the 119k-entry copy, 7.7 s with the
-  log grown to a million, the whole `coffre migrate` run on 2 vCPUs. The
-  release before keeps working on it, and its reads keep the table too.
+  log grown to a million, the whole `coffre migrate` run on 2 vCPUs. A
+  read waits at most 3 s, so on a log that large some reads answer 503
+  `unavailable` meanwhile: migrate in a quiet minute. The release before
+  keeps working on it, and its reads keep the table too.
 
 - **A CI run's sign-in holds the audit log's head for fewer round trips.**
   `POST /api/auth/oidc` ran 14 app statements, 10 of them while its
