@@ -513,6 +513,15 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   assert.deepEqual(await logEntries(shown.backup.DATABASE_URL!), []);
   assert.deepEqual(await membership('setup_later'), [{ admin: false, inherit: true, set: false }]);
 
+  // Made by setup, then unable to log in, as a Cloudflare run stopped before it showed the password leaves it: given one, unasked, the others kept.
+  await asSuperuser('setup_later', (client) => client.query('ALTER ROLE coffre_backup_login NOLOGIN'));
+  const locked = setup(['--json'], { stdin: `${url}\n` });
+  const unlocked = json(locked);
+  assert.match(locked.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; set a new password for coffre_backup_login\n/);
+  assert.deepEqual(Object.keys(unlocked.backup), ['DATABASE_URL']);
+  assert.deepEqual(await logEntries(unlocked.backup.DATABASE_URL!), []);
+  assert.equal(await connects(shown.backup.DATABASE_URL!), false, 'the password the run before set, replaced');
+
   // Made by hand, as Terraform does, with no group: kept as it is, its password included, and granted the group.
   await asSuperuser('setup_later', async (client) => {
     await client.query('DROP ROLE coffre_backup_login');

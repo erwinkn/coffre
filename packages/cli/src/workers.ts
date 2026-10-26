@@ -912,7 +912,7 @@ function deploys(cloudflare: Cloudflare): string {
 }
 
 /** After the deploy: where coffre is, and what is left, with no secret in it. */
-export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
+export function deployedSummary(cloudflare: Cloudflare, out: Output, backup: boolean): string {
   const s = style(out);
   const url = `https://${cloudflare.address}`;
   const first = cloudflare.owners.value.split(',')[0]!;
@@ -920,9 +920,11 @@ export function deployedSummary(cloudflare: Cloudflare, out: Output): string {
     '',
     `  ${s.green('✓')} ${s.bold(`coffre is at ${url}`)}`,
     ...(cloudflare.keys === null ? [] : [s.dim(paragraph(out, "The keys shown are only in your password manager now, and in Cloudflare, which won't show them again.", 4))]),
+    ...(backup ? [s.dim(paragraph(out, 'The backup database URL shown is only in your password manager now: coffre setup --reset-passwords gives the backup login another.', 4))] : []),
     '',
     `    ${s.bold('Next')}`,
     row(out, s, 'Sign in', `${url}, with GitHub, as ${first}.`),
+    ...(backup ? [row(out, s, 'Backups', "the backup database URL in your backup job's secrets, for coffre backup: docs/restore.md.")] : []),
     row(out, s, 'CLI', `coffre login ${url}`),
     row(out, s, 'Monitor', `${url}/readyz turns green at the first scheduled run, within 5 minutes.`),
     row(out, s, 'Deploys', deploys(cloudflare)),

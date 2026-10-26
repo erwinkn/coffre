@@ -382,8 +382,17 @@ test('a deployment that is a GitHub repository: a token made on the form, checke
 test("a Hyperdrive config deleted during a run, its login's password kept: setup stops, and says to run it again", { skip }, async () => {
   const files = ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
   cloudflare.state.vanishing.add('coffre');
+  // As a deployment set up before setup made the backup login has it: none. This run makes it, and stops before it could show its password.
+  await asSuperuser('postgres', (client) => client.query('DROP ROLE coffre_backup_login'));
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);
+  assert.match(text, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; created coffre_backup_login\n/);
+  assert.ok(!output.includes(ENTER_ALT), 'no screen');
+  // So it cannot log in yet, with no password anyone has seen: the next run gives it one, and shows it.
+  assert.deepEqual(
+    await asSuperuser('postgres', async (client) => (await client.query("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'coffre_backup_login'")).rows),
+    [{ rolcanlogin: false }],
+  );
   assert.equal(code, 1, text);
   assert.match(text, /✗ Point Hyperdrive at the database\n\s+The Hyperdrive config coffre was deleted during this run\. coffre_runtime kept its password/);
   assert.match(text, /run\s+setup\s+again,\s+which\s+gives\s+coffre_runtime\s+a\s+new\s+password\s+and\s+makes\s+the\s+config\s+with\s+it\./);
@@ -416,7 +425,12 @@ test("the run after, the vault's config deleted under its update: both configs m
   assert.match(text, /✓ Set new passwords for coffre_runtime, coffre_vault_runtime and coffre_backup_login/);
   assert.ok(!/(App|Vault) (key|database URL)/.test(alternateText(output)), 'only the backup URL');
   assert.match(alternateText(output), /Backup database URL/);
-  secrets.add(/coffre_backup_login:([A-Za-z0-9_-]{32})@/.exec(alternateText(output))![1]!);
+  const backup = /postgresql:\/\/coffre_backup_login:([A-Za-z0-9_-]{32})@[^\s']+/.exec(alternateText(output))!;
+  secrets.add(backup[1]!);
+  assert.ok(await connects(backup[0]), 'the login the run before left unable to log in, with its password now');
+  assert.match(text, /coffre_backup_login: from the catalog, its password set last, right before it is shown\n/);
+  assert.match(text, /The backup database URL shown is only in your password manager now/);
+  assert.match(text, /Backups\s+the backup database URL in your backup job's secrets, for coffre backup: docs\/restore\.md\./);
   assert.match(text, /coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made again: the config coffre-vault was deleted during this run\n/);
   assert.match(text, /✓ coffre answers at/);
   const configs = cloudflare.state.configs.get('acc-acme')!;

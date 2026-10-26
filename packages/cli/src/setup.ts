@@ -167,7 +167,7 @@ export async function setup(args: string[]): Promise<void> {
     if (cloudflare !== null) {
       if (cloudflare.keys !== null || result.backup.url !== null) await showSecrets(terminal!, cloudflare.screen(result.backup.url === null ? null : { values: backupValues(result.backup), guide: BACKUP_GUIDE }));
       await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
-      out.write(deployedSummary(cloudflare, out));
+      out.write(deployedSummary(cloudflare, out, result.backup.url !== null));
     } else if (options.json) {
       jsonWarning(process.stderr, listed(shownNames(result), 'and'));
       process.stdout.write(`${JSON.stringify(asJson(result))}\n`);
@@ -253,7 +253,7 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
 }
 
 /** The database as setup finds it: what it lets in, whether it holds data, and which of its logins exist. */
-type Inspected = { connections: Connections; used: boolean; existing: ReadonlySet<string> };
+type Inspected = { connections: Connections; used: boolean; existing: ReadonlyMap<string, boolean> };
 
 /**
  * The database, read before anything changes it or Cloudflare: the
@@ -353,20 +353,20 @@ async function run(
       // On Cloudflare, a login gets a new password when its Hyperdrive config needs one, as decided before Cloudflare changed (`newPasswords`).
       const reset =
         cloudflare === null
-          ? async (existing: ReadonlySet<string>) => {
+          ? async (existing: ReadonlyMap<string, boolean>) => {
               const all =
                 options.resetPasswords ||
                 (existing.size > 0 &&
                   (await progress.ask(`${listed(COMPONENTS.map((component) => ROLES[component]).filter((role) => existing.has(role)), 'and')} ${existing.size === 1 ? 'exists' : 'exist'} already. Set new passwords?`)));
               return () => all;
             }
-          : async (existing: ReadonlySet<string>) => {
+          : async (existing: ReadonlyMap<string, boolean>) => {
               // Cloudflare's refusals again, against the database as it is now: it may have changed while setup asked its questions.
               cloudflare.recheck(asRead(administrator, await holdsData(client), existing));
               // No Hyperdrive config holds the backup login's password: only --reset-passwords sets a new one.
               return (component: Component) => (component === 'backup' ? options.resetPasswords : cloudflare.newPasswords[component]);
             };
-      logins = await provision(client, administrator, user, reset, secrets);
+      logins = await provision(client, administrator, user, reset, secrets, cloudflare !== null);
       return described(logins);
     });
     await step(1, async (progress) => {
@@ -396,8 +396,9 @@ async function run(
         const allowed = login.url === null ? await granted(client, login.role) : await probed(login.url);
         details.push(checked(component, login, allowed));
       }
-      const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null);
+      const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null && login.password === 'kept');
       if (kept.length > 0) details.push(`${listed(kept.map(({ role }) => role), 'and')}: from the catalog, with no new password to log in with`);
+      if (logins.backup.url === null && logins.backup.password !== 'kept') details.push(`${logins.backup.role}: from the catalog, its password set last, right before it is shown`);
       used = await holdsData(client);
       return { text: 'Each login holds only its rights', details };
     });
@@ -425,6 +426,8 @@ async function run(
       }
       await step(4, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
       await step(5, async () => cloudflare.write());
+      // Last, right before the screen shows it: a run stopped before here leaves the backup login unable to log in, and the next run gives it a password (`provision`).
+      if (logins.backup.password !== 'kept') logins.backup = { ...logins.backup, url: await setPassword(client, administrator, logins.backup, false, secrets) };
       return { keys: null, ...logins, version, connections };
     }
     // Keys come with new passwords, for a database that holds no data yet: one that does has its keys already.
@@ -444,53 +447,67 @@ async function holdsData(client: pg.Client): Promise<boolean> {
 }
 
 /** The database as Cloudflare's checks take it (`Database`). */
-function asRead(administrator: URL, used: boolean, existing: ReadonlySet<string>): Database {
+function asRead(administrator: URL, used: boolean, existing: ReadonlyMap<string, boolean>): Database {
   const user = decodeURIComponent(administrator.username);
   const login = (component: Runtime) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
   return { administrator, used, logins: { app: login('app'), vault: login('vault') } };
 }
 
-/** Coffre's logins that exist, by role. */
-async function existingLogins(client: pg.Client): Promise<Set<string>> {
-  const { rows } = await client.query<{ rolname: string }>('SELECT rolname FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)]);
-  return new Set(rows.map(({ rolname }) => rolname));
+/** Coffre's logins that exist, by role, and whether each may log in. */
+async function existingLogins(client: pg.Client): Promise<Map<string, boolean>> {
+  const { rows } = await client.query<{ rolname: string; rolcanlogin: boolean }>('SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)]);
+  return new Map(rows.map(({ rolname, rolcanlogin }) => [rolname, rolcanlogin]));
 }
 
 /**
  * Each login, created with a fresh password, or, if it exists, its
  * password set again when `reset`, given the logins that exist, says so;
- * otherwise left as it is.
+ * otherwise left as it is. A backup login that cannot log in gets a
+ * password too: a run that made it never showed one. With `later`, on
+ * Cloudflare, the backup login's password waits for the end of the run
+ * (`run`), where the screen shows it, and one made now cannot log in
+ * until then.
  */
 async function provision(
   client: pg.Client,
   administrator: URL,
   user: string,
-  reset: (existing: ReadonlySet<string>) => Promise<(component: Component) => boolean>,
+  reset: (existing: ReadonlyMap<string, boolean>) => Promise<(component: Component) => boolean>,
   secrets: string[],
+  later: boolean,
 ): Promise<Record<Component, Login>> {
   const existing = await existingLogins(client);
   const resets = await reset(existing);
   const logins = {} as Record<Component, Login>;
   for (const component of COMPONENTS) {
     const role = ROLES[component];
-    const login = loginFor(role, user);
     const create = !existing.has(role);
-    if (!create && !resets(component)) {
-      logins[component] = { role, login, password: 'kept', url: null };
-      continue;
+    const locked = component === 'backup' && existing.get(role) === false;
+    const login: Login = { role, login: loginFor(role, user), password: create ? 'created' : 'reset', url: null };
+    if (!create && !locked && !resets(component)) {
+      logins[component] = { ...login, password: 'kept' };
+    } else if (component === 'backup' && later) {
+      if (create) await client.query(`CREATE ROLE ${client.escapeIdentifier(role)} NOLOGIN INHERIT NOCREATEDB NOCREATEROLE`);
+      logins[component] = login;
+    } else {
+      logins[component] = { ...login, url: await setPassword(client, administrator, login, create, secrets) };
     }
-    const password = newPassword();
-    secrets.push(password);
-    const verifier = client.escapeLiteral(scramVerifier(password));
-    // The superuser-only attributes are off by default, and a managed owner may not name them, even to turn them off.
-    await client.query(
-      create
-        ? `CREATE ROLE ${client.escapeIdentifier(role)} LOGIN INHERIT NOCREATEDB NOCREATEROLE PASSWORD ${verifier}`
-        : `ALTER ROLE ${client.escapeIdentifier(role)} LOGIN PASSWORD ${verifier}`,
-    );
-    logins[component] = { role, login, password: create ? 'created' : 'reset', url: loginUrl(administrator, login, password) };
   }
   return logins;
+}
+
+/** A fresh password for `login`, made with it or set on it, and its connection string. */
+async function setPassword(client: pg.Client, administrator: URL, { role, login }: Login, create: boolean, secrets: string[]): Promise<string> {
+  const password = newPassword();
+  secrets.push(password);
+  const verifier = client.escapeLiteral(scramVerifier(password));
+  // The superuser-only attributes are off by default, and a managed owner may not name them, even to turn them off.
+  await client.query(
+    create
+      ? `CREATE ROLE ${client.escapeIdentifier(role)} LOGIN INHERIT NOCREATEDB NOCREATEROLE PASSWORD ${verifier}`
+      : `ALTER ROLE ${client.escapeIdentifier(role)} LOGIN PASSWORD ${verifier}`,
+  );
+  return loginUrl(administrator, login, password);
 }
 
 /** The logins step's line: what happened to each, those alike together, and what they log in as on PlanetScale. */
@@ -501,7 +518,8 @@ function described(logins: Record<Component, Login>): { text: string; details: s
   const text = happened
     .map((password, i) => {
       const roles = all.filter((login) => login.password === password).map(({ role }) => role);
-      const verb = i === 0 ? verbs[password] : verbs[password].toLowerCase();
+      const phrase = password === 'reset' && roles.length === 1 ? 'Set a new password for' : verbs[password];
+      const verb = i === 0 ? phrase : phrase.toLowerCase();
       return `${verb} ${listed(roles, 'and')}${password === 'kept' ? `, with ${roles.length === 1 ? 'its password' : 'their passwords'}` : ''}`;
     })
     .join('; ');

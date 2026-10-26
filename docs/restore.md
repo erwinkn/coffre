@@ -137,8 +137,8 @@ CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROL
 
 then run `pnpm exec coffre migrate --backup-login coffre_backup_login` in
 the deployment's directory, which grants the login its group. Passing it on
-every run, as a pipeline does, is harmless. Coffre never makes the login and
-never revokes its group: revoke it yourself when it should go. Postgres
+every run, as a pipeline does, is harmless. Migrate never makes the login
+and never revokes its group: revoke it yourself when it should go. Postgres
 keeps one membership per grantor, the role whose `ADMIN OPTION` granted it
 (the owner, when a member of the owner migrated). A `REVOKE` naming no
 grantor removes only the caller's own, and anyone else's, a superuser's
