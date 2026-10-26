@@ -70,8 +70,10 @@ entries, quickly and in a way that no database writer can undo.
   answer carries its inclusion proof instead.
 - **Key ratcheting** buys too little here to be worth a holder for its
   state. Below is why.
-- **Retention** works with the tree in both layouts. The retention entry is a
-  kept-forever change that commits to what stays below the cut.
+- **Retention** works with the tree in both layouts. A day is dropped only
+  below a freshly sealed head. The retention entry is a kept-forever change
+  that commits to the changes below the cut. Retention drew a review finding
+  in each of rounds 3 to 8, all fixed. It is the least settled part.
 
 ## The tree
 
@@ -897,9 +899,11 @@ Not modelled:
    reveals through the CLI.
 5. **Tree shape:** one growing RFC 9162 tree with C2SP formats
    (recommended), not a tree per window.
-6. **Day layout:** `number` days (exact, recorded in signed day entries) or
-   `at` days (W208's current layout, with the retention digest). W208's
-   call, under the hot path's constraints.
+6. **Day layout:** `number` days (exact, recorded in signed day entries)
+   or `at` days (W208's current layout). `number` days are recommended.
+   Every `at`-specific review finding (rounds 7 and 8) came from days
+   interleaving at midnight, which `number` days rule out. W208's call,
+   under the hot path's constraints.
 7. **External witnesses, if any:** the R2 archive protects against a
    compromised Worker or database, not against the Cloudflare account (lock
    rules can be removed). Protecting against the account needs a witness
