@@ -112,8 +112,7 @@ try {
 
   const { rows: [{ last }] } = await client.query("SELECT pg_sequence_last_value('entry_number')::text AS last");
   const genesis = checkpointHash(Buffer.alloc(32), []);
-  // The floor of `at` starts below every use to come; the first barrier raises it.
-  await client.query("INSERT INTO fence VALUES (true, (extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max())");
+  // The floor of `at` (schema-one.sql makes its row) starts below every use to come; the first barrier raises it.
   await client.query('INSERT INTO checkpoints SELECT $1, $1, 0, $2, $3, at_floor, $4 FROM fence',
     [last, genesis, checkpointSignature(keys.log, last, last, genesis), String(now)]);
 

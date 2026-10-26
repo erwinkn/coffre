@@ -60,8 +60,10 @@ CREATE TABLE entries_uses PARTITION OF entries FOR VALUES IN ('use') PARTITION B
 ALTER TABLE entries_changes ADD PRIMARY KEY (number);
 CREATE UNIQUE INDEX entries_uses_request ON entries_uses (at, request_id);
 CREATE OR REPLACE FUNCTION deadline_max() RETURNS bigint LANGUAGE sql IMMUTABLE AS 'SELECT 3000::bigint';
--- The lowest `at` a use may still be written with: raised by each barrier, never lowered.
+-- The lowest `at` a use may still be written with: raised by each barrier, never lowered. Its one
+-- row is made here, below every use to come; without it, use_credential refuses every use.
 CREATE TABLE fence (only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row), at_floor bigint NOT NULL);
+INSERT INTO fence VALUES (true, (extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max());
 CREATE UNIQUE INDEX entries_changes_request ON entries_changes (request_id);
 CREATE INDEX entries_changes_principal ON entries_changes (principal, number);
 
@@ -107,7 +109,7 @@ DECLARE
 BEGIN
   IF p_deadline IS NULL OR p_deadline > p_at + deadline_max() THEN RETURN NULL; END IF;
   PERFORM pg_advisory_xact_lock_shared(208);
-  IF (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline OR p_at < (SELECT at_floor FROM fence WHERE only_row) THEN RETURN NULL; END IF;
+  IF (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline OR p_at < coalesce((SELECT at_floor FROM fence WHERE only_row), 9223372036854775807) THEN RETURN NULL; END IF;
   WITH c AS (
     SELECT p_cover IS NOT NULL AND p_cover > coalesce((SELECT max(number) FROM entries_changes WHERE principal = p_principal), 0) AS covered
   ),
@@ -131,7 +133,8 @@ BEGIN
 END $$;
 
 -- A change to a member: its grant taken or given, its credential revoked or restored. Under the lock
--- exclusive: a replay answers its entry's number; the member's seal moves only from the one the vault
+-- exclusive: a replay answers its entry's number (a request id names one change: another payload under
+-- it is refused); the member's seal moves only from the one the vault
 -- read (of two changes to one member, the second reads again: null), the payload is applied as
 -- logged, and its entry numbered now. It returns the number, which a change waits to see sealed.
 CREATE OR REPLACE FUNCTION change_member(p_principal text, p_request text, p_at bigint, p_payload text, p_seal_from bytea, p_seal bytea, p_mac bytea)
@@ -142,7 +145,12 @@ DECLARE
 BEGIN
   PERFORM pg_advisory_xact_lock(208);
   SELECT number INTO n FROM entries_changes WHERE request_id = p_request;
-  IF FOUND THEN RETURN n; END IF;
+  IF FOUND THEN
+    IF NOT EXISTS (SELECT 1 FROM entries_changes WHERE request_id = p_request AND payload = p_payload AND principal = p_principal) THEN
+      RAISE EXCEPTION 'request % names another change', p_request;
+    END IF;
+    RETURN n;
+  END IF;
   UPDATE members SET seal = p_seal WHERE principal = p_principal AND seal = p_seal_from;
   IF NOT FOUND THEN RETURN NULL; END IF;
   CASE op->>'op'

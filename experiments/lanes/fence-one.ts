@@ -116,6 +116,16 @@ try {
   const replays = !again.ok && again.code === 'replayed' && c1 === c2 && uses === 1 && changes === 1;
   if (!replays) wrong += 1;
   console.log(`replay   a use retried answered ${again.ok ? 'a fresh decision' : again.code} (the first is #${first.number}); a change's #${c2} (first #${c1}); entries: ${uses} use, ${changes} change${replays ? '' : '  UNEXPECTED'}`);
+  // A retry that comes after its deadline answers `late`, and writes nothing more: the first entry stands.
+  const lateAt = Date.now() - 2_900;
+  const lateRequest = { ...input, requestId: 'replay-late', at: lateAt };
+  const early = await use(db, keys, lateRequest);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const tooLate = await use(db, keys, lateRequest);
+  const { rows: [{ n: lateEntries }] } = await db.query("SELECT count(*)::int AS n FROM entries WHERE request_id = 'replay-late'");
+  const lateHolds = early.number !== undefined && !tooLate.ok && tooLate.code === 'late' && lateEntries === 1;
+  if (!lateHolds) wrong += 1;
+  console.log(`late     a use retried after its deadline answered ${tooLate.ok ? 'a fresh decision' : tooLate.code} (the first is #${early.number}); entries: ${lateEntries}${lateHolds ? '' : '  UNEXPECTED'}`);
   // The floor of `at`, as a barrier taken before Postgres's clock stepped back leaves it: above the
   // time of a use whose deadline still passes. The use must write nothing, or a checkpoint would miss it.
   await db.query('UPDATE fence SET at_floor = $1', [String(Date.now() + 60_000)]);
@@ -124,6 +134,13 @@ try {
   const floorHolds = !below.ok && below.code === 'late' && floored === 0;
   if (!floorHolds) wrong += 1;
   console.log(`floor    a use below the barrier's floor of \`at\` answered ${below.ok ? 'allowed' : below.code}, entries: ${floored}${floorHolds ? '' : '  UNEXPECTED'}`);
+  // With no floor row at all, a use is refused, not written where no checkpoint would look.
+  await db.query('DELETE FROM fence');
+  const unfenced = await use(db, keys, { ...input, requestId: 'floor-2' });
+  const { rows: [{ n: unfencedEntries }] } = await db.query("SELECT count(*)::int AS n FROM entries WHERE request_id = 'floor-2'");
+  const unfencedHolds = !unfenced.ok && unfenced.code === 'late' && unfencedEntries === 0;
+  if (!unfencedHolds) wrong += 1;
+  console.log(`no floor a use with no floor row answered ${unfenced.ok ? 'allowed' : unfenced.code}, entries: ${unfencedEntries}${unfencedHolds ? '' : '  UNEXPECTED'}`);
   await db.end();
 } finally {
   await admin.query('DROP DATABASE IF EXISTS w208_fence WITH (FORCE)');

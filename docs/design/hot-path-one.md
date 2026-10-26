@@ -60,9 +60,9 @@ Every number below is labelled **measured** (with where) or **reasoned**.
     round trip doubles what a pool serves.
 - **Overload:**
   - **Locally,** past the ceiling (8,000/s offered to `one`, 5,000/s to
-    `seq`, 1.6–1.7× each): with a cap and a deadline, `one` served 4,991/s at
-    p50 3.8 ms and refused the rest at once (503, `Retry-After`). Without
-    them, `seq` collapsed to 243/s.
+    `seq`, 1.6–1.7× each): with a cap and a deadline, `one` served 4,991/s
+    before review r1 and 4,554/s after it, at p50 3.8 ms, and refused the rest
+    at once (503, `Retry-After`). Without them, `seq` collapsed to 243/s.
   - **On Workers,** a deadline carried into Postgres keeps goodput at the pool's
     ceiling, because calls held too long do nothing. But a per-isolate cap
     does not refuse fast: Cloudflare spread the load over at least ~150
@@ -76,8 +76,9 @@ Every number below is labelled **measured** (with where) or **reasoned**.
   1M rows, heap and index).
 - **Fewer rows:** a repeat of an allowed use, with no change since, can ride
   on that use's entry ("covers"). At 80% repeats, 0.215 entries per use and a
-  fifth of the WAL locally, with revocation and replay unchanged. On Workers,
-  0.63 entries per use, because covers are per isolate.
+  fifth of the WAL locally, with a member's revocation and the replay
+  unchanged (secret and environment changes are not yet covers-aware). On
+  Workers, 0.63 entries per use, because covers are per isolate.
 
 ## The design
 
@@ -268,11 +269,17 @@ A call whose answer is lost may be sent again (W201 saw 190 such appends on a
 slow network), by Hyperdrive or by the Worker retrying the request. A request
 carries its id and its time from the start, and a retry reuses both
 (`UseInput.at`, `change(…, request)`). A use's entry is unique on (time,
-request id), both under its MAC, so the retry fails on that index, writes
-nothing and the Worker answers 503 `replayed`. It must not decide again: on today's state, after a revoke, it could
+request id), both under its MAC, so a retry within the deadline fails on that
+index, writes nothing and answers 503 `replayed`; a retry after it answers
+503 `late` and writes nothing either. Both leave the first entry standing.
+This binds callers of `one.use` and `one.change`; the prototype's Worker
+route mints a new request id per HTTP request, so there an HTTP retry is a
+new use. It must not decide again: on today's state, after a revoke, it could
 allow a use the log puts before the revoke. A change's replay finds its entry
-under the lock and returns its number. `fence-one.ts` checks both, retrying
-through `one.use` and `one.change` (measured: one entry each). The verifier rejects two entries with one request id, so a
+under the lock and returns its number; a request id names one change, and
+another payload under it is refused. `fence-one.ts` checks both, retrying
+through `one.use` and `one.change`, and a retry after the deadline (measured:
+one entry each). The verifier rejects two entries with one request id, so a
 copied entry is caught. A replay or a failed call uses up a number, so the
 numbers have gaps, and a gap is not a deletion: only checkpoints prove
 completeness.
@@ -301,6 +308,8 @@ request id) index from there.
   (`late`), never let one be written below the floor where a checkpoint
   would miss it. `fence-one.ts` checks it: a floor set ahead of the clock,
   then a use whose deadline still passes: `late`, no entry (measured).
+- **No floor row** (the schema makes it): every use is refused, so a
+  database without one cannot log uses where no checkpoint looks (tested).
 - **Cost:** the use reads one more row (the floor), and the barrier writes
   it, once a tick.
 
@@ -325,9 +334,10 @@ tick.
 
 The barrier waits for the uses in flight, and new uses queue behind it while
 it waits. Its mean server time, lock wait included, is load-dependent
-(measured, `pg_stat_statements`): 0.15 ms at 1,000/s, 0.32 ms at 4,000/s,
-6.4 ms at 5,000/s, and 11–30 ms past saturation, where the uses it waits for
-are themselves waiting for CPU. That stall comes once a tick.
+(measured, `pg_stat_statements`, `matrix4.log`): 0.21 ms at 1,000/s, 0.38 ms
+at 4,000/s, 12.5 ms in the capped overload run, and 40 ms at 5,000/s (past
+the ceiling), where the uses it waits for are themselves waiting for CPU.
+That stall comes once a tick.
 
 ### The log's tables
 
@@ -433,7 +443,7 @@ distinct key the same way (reasoned; not measured here).
 
 What one use costs on disk, measured at 1M rows (heap and index), and in WAL
 over 20,000 more, one per transaction, commit records included
-([`size-one.ts`](../../experiments/lanes/size-one.ts)):
+([`size-one.ts`](../../experiments/lanes/size-one.ts); `size-one.txt`):
 
 | row | heap | index | total | WAL | at 1,000/s |
 |---|---|---|---|---|---|
@@ -561,9 +571,11 @@ its own pool saves nothing here; on Cloudflare it does (below).
 
 | log | use: server time, buffers (before r1) | after r1 | p50 / p99 after r1 | checkpoint db time p50 / max |
 |---|---|---|---|---|
-| 10k | 0.42 ms, 13.7 | 0.43 ms, 14.7 | 2.6 / 32 ms | 4.6 / 10 ms |
-| 1M | 0.34 ms, 13.4 | 0.50 ms, 14.6 | 2.6 / 77 ms | 5.5 / 22 ms |
+| 10k | 0.42 ms, 13.7 | 0.43 ms, 14.7 | 2.6 / 32 ms | 4.9 / 11 ms |
+| 1M | 0.34 ms, 13.4 | 0.50 ms, 14.6 | 2.6 / 77 ms | 5.3 / 12 ms |
 | 10M | 0.50 ms, 13.9 | 0.64 ms, 15.5 | 2.6 / 110 ms | 4.5 / 19 ms |
+
+The checkpoint column is from the runs after r1.
 
 - **Buffers:** the floor adds about one buffer per use. The 10M run after r1
   reads about one more again, which the runs before r1 did not. It was not
