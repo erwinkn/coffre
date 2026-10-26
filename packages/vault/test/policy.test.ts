@@ -310,11 +310,16 @@ test('a protected environment keeps its slug: a person scoped to it by slug hold
 test('a read in flight when an environment is protected is decided as the policy is when it commits', { skip: process.env.COFFRE_TEST_ENGINE === 'sqlite' && 'SQLite runs one writer at a time' }, async () => {
   const inner = LocalKekProvider.generate('test-kek-1');
   let hold: Promise<void> | null = null;
+  // Said once the held unwrap is under way: the read has passed its first check, as the policy was.
+  let entered = () => {};
   const kek = {
     provider: inner.provider, keyId: inner.keyId, keyVersion: inner.keyVersion,
     wrap: (dek: Buffer, ctx: Parameters<typeof inner.wrap>[1], operation?: Parameters<typeof inner.wrap>[2]) => inner.wrap(dek, ctx, operation),
     unwrap: async (wrapped: Parameters<typeof inner.unwrap>[0], ctx: Parameters<typeof inner.unwrap>[1], operation?: Parameters<typeof inner.unwrap>[2]) => {
-      if (hold !== null) await hold;
+      if (hold !== null) {
+        entered();
+        await hold;
+      }
       return inner.unwrap(wrapped, ctx, operation);
     },
   };
@@ -330,8 +335,9 @@ test('a read in flight when an environment is protected is decided as the policy
   const items = await storedVersions(db.owner, [{ secret, wrapped: wrap.wrapped[0]! }]);
   let release!: () => void;
   hold = new Promise<void>((resolve) => (release = resolve));
+  const inFlight = new Promise<void>((resolve) => (entered = resolve));
   const reading = vault.unwrap({ principal: ADA, purpose: 'reveal', items });
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await inFlight;
   // Another connection protects prod while the read waits on its key, and commits: it waits on nothing the read holds.
   const twin = await openLocalVault(await db.connect(), config);
   const protectedNow = await protect(twin, ROOT, where.project, [where.prod]);

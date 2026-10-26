@@ -1011,16 +1011,6 @@ class VaultService implements Vault {
       const decidedAt = sealed[i]?.holder ?? item.secret;
       return fork !== undefined && !fork.deleted && !fork.archived && fork.projectId === decidedAt.projectId && through !== decidedAt.environmentId;
     });
-    // The app's record of a use names where the read was, which the vault vouches for once it appends it: one of the
-    // places the read is about, a value's own, a reference's holder, or the fork it is read in, with its project.
-    if (use !== null && (use.environmentId !== null || use.projectId !== null)) {
-      const places = items.flatMap((item, i) => {
-        const fork = throughs[i] === null ? undefined : forks.get(throughs[i]!);
-        return [item.secret, sealed[i]?.holder ?? item.secret, ...(fork === undefined ? [] : [{ projectId: fork.projectId, environmentId: throughs[i]! }])];
-      });
-      const named = places.some((place) => (use.environmentId === null || place.environmentId === use.environmentId) && (use.projectId === null || place.projectId === use.projectId));
-      if (!named) throw new Error("a use's place must be one the read is about: a value's own, a reference's holder, or the fork it is read in");
-    }
     const versionIds = new Map(items.map((item) => [item.secret, item.id]));
     const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i], through: throughs[i], throughOk: throughOk[i] }]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => {
@@ -1040,6 +1030,17 @@ class VaultService implements Vault {
     }
     if (throughOk.includes(false)) {
       return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')), { asked: input.accessRevision });
+    }
+    // The app's record of a use names where the read was, which the vault vouches for once it appends it: the place an
+    // item was read at, the fork it is read in, else a reference's holder, else its own, with its project. Another is
+    // a claim the read does not bear out, refused and logged as one; no use is appended.
+    if (use !== null && (use.environmentId !== null || use.projectId !== null)) {
+      const named = items.some((item, i) => {
+        const fork = throughs[i] === null ? undefined : forks.get(throughs[i]!);
+        const place = fork === undefined ? sealed[i]?.holder ?? item.secret : { projectId: fork.projectId, environmentId: throughs[i]! };
+        return (use.environmentId === null || place.environmentId === use.environmentId) && (use.projectId === null || place.projectId === use.projectId);
+      });
+      if (!named) return this.#refuseVersions(principal, 'bad_claim', items.map((item) => entry(item.secret, 'deny', 'bad_claim')), { asked: input.accessRevision });
     }
     const ends = sealed.flatMap((seal) => (seal === null ? [] : [seal.seq]));
     const remote = items.some(({ wrapped }) => this.#remote(this.#config.keks.providerOf(wrapped)));
