@@ -12,7 +12,8 @@
 (* statement. Locks are row locks, held to the end of the transaction:     *)
 (*                                                                         *)
 (*   - a member's row, vault_members, FOR NO KEY UPDATE, taken one row at  *)
-(*     a time in principal order (vault store.ts, lockMembers);            *)
+(*     a time in principal order by a decision that changes members (vault *)
+(*     store.ts, lockMembers); a read or a wrap takes none;                *)
 (*   - the log's head, audit_chain_head, the one row every append and      *)
 (*     every change to a place takes (db log.ts, lockLogHead).             *)
 (*                                                                         *)
@@ -85,9 +86,11 @@ CONSTANTS
     \* Members' rows are locked in principal order (vault store.ts,
     \* lockMembers, `ORDER BY principal`), not in the order a call names them.
     SortedMemberLocks,
-    \* A read decides under the reader's row, which a change to their grants
-    \* or their removal locks too (vault vault.ts, #keys through #decide).
-    ReaderRowLocked,
+    \* A read locks no row of the reader's: under the head, as it appends,
+    \* their standing is held to what the read decided on, and a change to
+    \* their grants or their removal appends under the head too (vault
+    \* vault.ts, #decideOnce; snapshot.ts, `unchanged`).
+    ReaderRecheckUnderHead,
     \* A read through a reference checks again, under the head, that no
     \* `reference.end` committed since it decided (vault vault.ts, unwrap's
     \* `vet`, run again in #keys' `underLock`).
@@ -337,7 +340,7 @@ Begin(p) ==
     /\ \E o \in Ops[p] :
          /\ op' = [op EXCEPT ![p] = o]
          /\ l' = [l EXCEPT ![p] = [L0 EXCEPT !.id = <<p, left[p]>>,
-                                             !.toLock = CASE o.kind \in {"read", "write", "remove", "demote"} -> LockOrder(o.actor, o.who)
+                                             !.toLock = CASE o.kind \in {"remove", "demote"} -> LockOrder(o.actor, o.who)
                                                            [] o.kind = "declare" -> <<o.who>>
                                                            [] o.kind = "refer" -> <<o.actor>>
                                                            [] OTHER -> <<>>]]
@@ -373,16 +376,15 @@ ReadResolve(p) ==
 ReadVersions(p) ==
     /\ pc[p] = "read.versions"
     /\ IF ~Gone("env") /\ held
-         THEN Read(p, IF ReaderRowLocked THEN "read.lock" ELSE "read.check", l[p])
+         THEN Read(p, "read.check", l[p])
          ELSE Refuse(p)
 
-ReadLock(p) == pc[p] = "read.lock" /\ LockNext(p, "read.check")
-
-\* Under the reader's row: their standing and grants where they read, and
+\* Under no lock: the reader's standing and grants where they read, and
 \* whether either place was deleted (environmentsById); through a
 \* reference, whether it ended (`vet`). Then the bulk limit and the key
-\* service. Without the row's lock, a revocation or a removal can commit
-\* between this check and the entry.
+\* service. A revocation, a removal, a deletion or a reference's end can
+\* commit between this check and the entry: the rechecks under the head
+\* find it.
 ReadCheck(p) ==
     /\ pc[p] = "read.check"
     /\ IF /\ MayUse(op[p].who, op[p].at)
@@ -393,21 +395,23 @@ ReadCheck(p) ==
 
 ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
 
-\* Under the head: both places again, which a deletion renames under the
-\* same lock, and the reference's end again (`underLock`), then append
-\* `secret.read` and commit; then the key leaves the vault. Without the
-\* rechecks, a place deleted or a reference ended since the check above is
-\* read all the same. This is the read with a key service, which takes the
-\* head only once the keys are open, and reads it all again with it. With a
-\* key in memory, the vault takes the head right after the row, in the one
-\* statement that reads all the check decides on, and checks once, under
-\* both: the run here in which no step comes between ReadCheck and
-\* ReadHead, so its rechecks find what the check found. That statement
-\* never waits for the head (SKIP LOCKED; held, the vault waits in a
-\* statement of its own and reads again), so it reads as of the lock.
+\* Under the head: the reader's standing, both places, which a deletion
+\* renames under the same lock, and the reference's end again
+\* (`underLock`), then append `secret.read` and commit; then the key leaves
+\* the vault. Without the rechecks, a removal, a place deleted or a
+\* reference ended since the check above is read all the same. With a key
+\* service, which takes the head only once the keys are open, it is all
+\* read again holding it. With a key in memory, the one statement that
+\* reads all the check decides on waits for the head itself, and reads as
+\* of before the wait: the run here in which ReadCheck and ReadHead are
+\* that statement. When an append committed while it waited, the append's
+\* own statement reads it all again, and must find it as it was, or the
+\* read is decided again holding the head (snapshot.ts, `unchanged`;
+\* `ReadsChanged`): the rechecks here, a failed one refusing.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
-    /\ IF \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
+    /\ IF \/ ReaderRecheckUnderHead /\ ~MayUse(op[p].who, op[p].at)
+          \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
           \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref])
@@ -431,10 +435,8 @@ ReadAnswer(p) ==
 WriteResolve(p) ==
     /\ pc[p] = "write.resolve"
     /\ IF AppLive
-         THEN Read(p, "write.lock", [l[p] EXCEPT !.named = Named, !.nver = version])
+         THEN Read(p, "write.check", [l[p] EXCEPT !.named = Named, !.nver = version])
          ELSE Refuse(p)
-
-WriteLock(p) == pc[p] = "write.lock" /\ LockNext(p, "write.check")
 
 WriteCheck(p) ==
     /\ pc[p] = "write.check"
@@ -445,9 +447,12 @@ WriteCheck(p) ==
 WriteHead(p) == pc[p] = "write.head" /\ TakeHead(p, "write.wrap")
 
 \* The vault appends `key.wrap` and commits; the wrapped key goes to the app.
+\* Under the head, the writer and the place as the check found them, as a
+\* read's are.
 WriteWrap(p) ==
     /\ pc[p] = "write.wrap"
-    /\ IF KeyPlaceRecheckUnderHead /\ Gone("env")
+    /\ IF \/ ReaderRecheckUnderHead /\ ~MayUse(op[p].who, "env")
+          \/ KeyPlaceRecheckUnderHead /\ Gone("env")
          THEN Refuse(p)
          ELSE /\ log' = Append(log, Entry("key.wrap", "env", p))
               /\ Release(p)
@@ -1006,9 +1011,9 @@ Init ==
 
 Step(p) ==
     \/ Begin(p)
-    \/ ReadResolve(p) \/ ReadVersions(p) \/ ReadLock(p) \/ ReadCheck(p)
+    \/ ReadResolve(p) \/ ReadVersions(p) \/ ReadCheck(p)
     \/ ReadHead(p) \/ ReadCommit(p) \/ ReadAnswer(p)
-    \/ WriteResolve(p) \/ WriteLock(p) \/ WriteCheck(p) \/ WriteHead(p)
+    \/ WriteResolve(p) \/ WriteCheck(p) \/ WriteHead(p)
     \/ WriteWrap(p) \/ WriteTx(p) \/ WriteStore(p)
     \/ GrantResolve(p) \/ CallLock(p) \/ CallHeadFirst(p) \/ CallCheck(p)
     \/ CallHead(p) \/ CallCommit(p)
@@ -1051,7 +1056,7 @@ TypeOK ==
     /\ head \in Procs \cup {None}
 
 \* The process p waits for: the holder of the lock its next step takes.
-LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
+LockLabels == {"call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
 HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
                "delete.head", "patch.head", "addenv.head", "renamekey.head",
                "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",

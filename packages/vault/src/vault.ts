@@ -101,7 +101,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
-import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, lockLogHead, missingEntry, newestAuthentic, ReadsChanged, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
 import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
@@ -200,7 +200,7 @@ export function openVault(db: Database, prepared: PreparedVault): Vault {
 /** Every key operation of one call, together: a removal waits at most this long for a read at KMS. */
 const KEY_BUDGET_MS = 5_000;
 
-/** How long a decision waits for a lock: above the key budget, so a removal outwaits a read in flight. */
+/** How long a decision waits for a lock, a member's row or the log's head: above the key budget, as a key operation's intent expires by it. */
 const LOCK_TIMEOUT_MS = 15_000;
 
 /** A member: `user:<email>` or `token:<name>`. */
@@ -392,6 +392,16 @@ type Decision = {
  */
 type Reads = Pick<Asked, 'environments' | 'references'> & { released?: { principal: string; keys: readonly string[] } };
 
+/** How a decision is made (`#decide`). */
+type DecideOptions = {
+  /** Take the head only once the key service has answered (`#keys`). */
+  late?: boolean;
+  /** What it reads besides its members' standing. */
+  asked?: Reads;
+  /** It may change its members, and so locks their rows first; false for one that only reads them. */
+  changes?: boolean;
+};
+
 /** The actions of the entries the vault writes about keys. */
 type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
 
@@ -441,9 +451,9 @@ type KeyOutcome<T> = { ok: true; value: T } | { ok: false; code: string; error?:
 
 /**
  * The one implementation of `Vault`. Every decision is one transaction on
- * the shared database: it locks the rows of the members it is about, reads
- * what it needs, decides, appends its entries under the log's lock, and
- * only then changes members and grants. Locks come in one order
+ * the shared database: one that changes members locks their rows first; it
+ * reads what it needs, decides, appends its entries under the log's lock,
+ * and only then changes members and grants. Locks come in one order
  * everywhere, a member row, then the log's head, then the app's rows, so
  * any number of vault instances and app servers decide side by side
  * without a cycle (docs/design/single-database.md, question 2).
@@ -475,43 +485,64 @@ class VaultService implements Vault {
     return reads.at + this.#prepared.options.clockOffset();
   }
 
-  /** What a decision about `principals` reads, and `asked` besides, in one statement: under the head when `head` is set. */
-  #snapshot(tx: Transaction, principals: readonly string[], asked: Reads, head: boolean): Promise<Snapshot> {
+  /**
+   * What a decision about `principals` reads, and `asked` besides, in one
+   * statement: their rows too, unless the decision locked them; under the
+   * head when `head` is set, which the transaction holds already if `held`,
+   * and if not, waiting for it no longer than any decision waits for a
+   * lock, when `bound`: the decision's first wait.
+   */
+  #snapshot(tx: Transaction, principals: readonly string[], asked: Reads, head: boolean, { members = false, held = false, bound = false } = {}): Promise<Snapshot> {
     const { released, ...rest } = asked;
+    const { windowMs, count } = this.#config.bulkLimit;
     return snapshot(tx, {
       ...rest,
       principals,
+      members,
       head,
-      ...(released === undefined ? {} : { released: { ...released, windowMs: this.#config.bulkLimit.windowMs, clockOffsetMs: this.#prepared.options.clockOffset() } }),
+      held,
+      ...(bound ? { waitMs: LOCK_TIMEOUT_MS } : {}),
+      ...(released === undefined ? {} : { released: { ...released, windowMs, count, clockOffsetMs: this.#prepared.options.clockOffset() } }),
     });
   }
 
   /**
-   * Decide in one transaction, with `principals`' rows locked first, then
-   * the log's head. A `Refused` or an `Outage` rolls back all but its own
-   * entries, which commit on their own: then the refusal is the answer, and
-   * the outage fails the call.
+   * Decide in one transaction, with the log's head held, and `principals`'
+   * rows locked first when it `changes` them. A `Refused` or an `Outage`
+   * rolls back all but its own entries, which commit on their own: then the
+   * refusal is the answer, and the outage fails the call.
    *
    * Every change to the policy, the settings, a member or a place appends
    * under the head, so whatever the decision reads of them stands until it
-   * commits: no decision acts on a policy read before it. A key operation
-   * alone takes the head later (`late`), once its key service has answered,
-   * which it must not wait on holding it, and decides again then (`#keys`).
+   * commits, or is held to the database as it is when the decision appends
+   * (`snapshot`): no decision acts on a policy, or a member's standing, read
+   * before a change that committed first. A decision that changes no member
+   * locks no row: those about one member run side by side, and wait for each
+   * other only to append, as every decision does, holding the head for the
+   * append and its commit. A key operation alone takes the head later
+   * (`late`), once its key service has answered, which it must not wait on
+   * holding it, and decides again then (`#keys`).
    */
-  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, late = false, asked: Reads = {}): Promise<Outcome<T>> {
+  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, options: DecideOptions = {}): Promise<Outcome<T>> {
     const superseded = await this.#settled();
     if (superseded !== null) return { ok: false, refusal: refusal('wrong_kek', superseded) };
-    return this.#decideNow(principals, decide, late, asked);
+    return this.#decideNow(principals, decide, options);
   }
 
   /** `#decide`, once the vault is settled. */
-  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, late = false, asked: Reads = {}): Promise<Outcome<T>> {
+  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, options: DecideOptions = {}): Promise<Outcome<T>> {
     const reports: NewEntry[] = [];
+    let fresh = false;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.#decideOnce(principals, decide, reports, late, asked);
+        return await this.#decideOnce(principals, decide, reports, options, fresh);
       } catch (error) {
-        // A member who had no row when this decision locked theirs, and has
+        // What a read read changed while it waited for the head: again, holding the head before it reads, after every change.
+        if (error instanceof ReadsChanged && !fresh) {
+          fresh = true;
+          continue;
+        }
+        // A member who had no row when this decision read theirs, and has
         // one now: another decision admitted them meanwhile. Again, with it.
         if (attempt < 3 && (error instanceof Retry || isUniqueViolation(error))) continue;
         throw error;
@@ -519,13 +550,20 @@ class VaultService implements Vault {
     }
   }
 
-  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], late: boolean, asked: Reads): Promise<Outcome<T>> {
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], options: DecideOptions, fresh: boolean): Promise<Outcome<T>> {
+    const { late = false, asked = {}, changes = true } = options;
     try {
       const result = await this.#db.transaction(async (tx) => {
-        await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
-        const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
-        // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
-        const reads = await this.#snapshot(tx, principals, asked, !late);
+        // A read takes the head in the statement that reads what it decides on, and bounds its wait there.
+        const held = !late && (changes || fresh);
+        if (held || late) await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+        const locked = changes && principals.length > 0 ? await store.lockMembers(tx, principals) : null;
+        // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds). A change to
+        // members, or a read made again, takes the head first, and reads after every change; a read holds what it read
+        // to the log when it appends.
+        if (held) await lockLogHead(tx);
+        const reads = await this.#snapshot(tx, principals, asked, !late, { members: !changes && principals.length > 0, held, bound: !held && !late });
+        const members = locked ?? (changes ? new Map<string, Member>() : reads.members);
         const d: Decision = {
           tx, members, at: this.#at(reads), reads, log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
         };
@@ -535,6 +573,7 @@ class VaultService implements Vault {
         let at = d.at;
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
+        if (!changes && (d.touched.size > 0 || d.writes.length > 0 || entries.some(isAccessEntry))) throw new Error('a decision that changes a member locks their row');
         if (entries.length > 0) {
           // Under the head the decision's reads took: a remote key's decision takes it late, and reads again with it.
           if (d.reads.head === null) throw new Error('a decision appends only under the head it read with');
@@ -883,7 +922,11 @@ class VaultService implements Vault {
     tx: Transaction,
     entries: readonly NewEntry[],
     underLock: readonly ((locked: Queryable) => Promise<void>)[] = [],
-    /** A snapshot that holds the head: what it read under it is read again by nothing. */
+    /**
+     * A snapshot that holds the head: what it read under it is read again
+     * by nothing, or, read before a wait, held to the database in the
+     * append's statement (`Snapshot`'s `unchanged`).
+     */
     held?: Snapshot,
   ): Promise<Appended> {
     const prepared = this.#prepared;
@@ -895,11 +938,12 @@ class VaultService implements Vault {
         throw new Error(prepared.superseded);
       }
       for (const check of underLock) await check(locked);
-    }, head === undefined ? undefined : { head, last: head.last, at: held!.at });
+    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, held?.unchanged ?? undefined);
     // The head still held, as this append left it, for the next append of the same transaction: a remote key's intent,
-    // then the decision's reports.
+    // then the decision's reports. What was read stands now as long as it is held.
     if (head !== undefined) {
       held!.head = { ...head, nextSeq: appended.nextSeq, headHash: appended.headHash, last: { seq: appended.nextSeq - 1n, hash: appended.headHash } };
+      held!.unchanged = null;
     }
     return appended;
   }
@@ -1132,9 +1176,9 @@ class VaultService implements Vault {
   }
 
   /**
-   * Refuse a call for what its versions are, under the principal's row, as
-   * any decision: and a read on a kept answer no longer theirs as that, not
-   * for its versions, logging no read (`accessRevision`).
+   * Refuse a call for what its versions are, as any decision: and a read
+   * on a kept answer no longer theirs as that, not for its versions,
+   * logging no read (`accessRevision`).
    */
   async #refuseVersions(
     principal: string,
@@ -1148,7 +1192,7 @@ class VaultService implements Vault {
         if (this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
       }
       throw new Refused(refusal(code, message), entries);
-    });
+    }, { changes: false });
   }
 
   /**
@@ -1172,10 +1216,9 @@ class VaultService implements Vault {
 
   /**
    * One call's key operations, decided as one. With a key service, the
-   * intent commits first; then, under the reader's row, the check, every
-   * operation within the budget, and each key's outcome. With a key in
-   * memory there is nothing to pair with outside, and it is all one short
-   * transaction.
+   * intent commits first; then the check, every operation within the
+   * budget, and each key's outcome. With a key in memory there is nothing
+   * to pair with outside, and it is all one short transaction.
    */
   async #keys<T extends { wipe: () => void }, R>(
     call: {
@@ -1291,7 +1334,7 @@ class VaultService implements Vault {
           metadata: JSON.stringify({
             intent: intentId,
             operation: action,
-            // Member and outcome locks can each wait before accounting is overdue.
+            // The intent's and the outcome's decisions can each wait for the head before accounting is overdue.
             expiresAt: at + this.#prepared.options.keyBudgetMs + 2 * LOCK_TIMEOUT_MS,
             ...(call.input.purpose === undefined ? {} : { purpose: call.input.purpose }),
             ...traced(call.input),
@@ -1299,15 +1342,16 @@ class VaultService implements Vault {
           }),
         }], [], d.reads);
         return { seq: appended.seqStart };
-      }, false, reads);
+      }, { asked: reads, changes: false });
       if (!intent.ok) return intent;
       intentSeq = intent.seq;
     }
 
-    // Under the reader's row: the check, the key operations, and their outcome. With a key in memory, under the
-    // log's head too, from the start (`#decideOnce`): what the check read stands until the commit, as every change it
-    // reads appends under the head, and the head waits on nothing slow. With a key service, which nothing may wait on
-    // holding the head, the head is taken once the keys are open, and what the check read is read again under it.
+    // The check, the key operations, and their outcome, under no row: a read changes no member. With a key in memory,
+    // under the log's head, taken in the statement that reads what the check decides on (`#decideOnce`): what it read
+    // stands until the commit, or is held to the log when the outcome appends, as every change it reads appends under
+    // the head, and the head waits on nothing slow. With a key service, which nothing may wait on holding the head,
+    // the head is taken once the keys are open, and what the check read is read again under it.
     const late = call.remote;
     const decided = async (d: Decision) => {
       try {
@@ -1359,8 +1403,11 @@ class VaultService implements Vault {
           // check above is seen here, and nothing is released after it.
           // A read through a reference: its holder's place too, which a deletion may have taken.
           // And as the policy is now, under the head every change to it takes: an environment protected, or a role narrowed,
-          // since the check above is seen here, and nothing it refuses now is released. All of it read again, holding the head.
-          d.reads = await this.#snapshot(d.tx, [principal], reads, true);
+          // since the check above is seen here, and nothing it refuses now is released. All of it read again, holding the head
+          // first: the keys are open, and their outcome is logged once, never decided again.
+          await lockLogHead(d.tx);
+          d.reads = await this.#snapshot(d.tx, [principal], reads, true, { members: true, held: true });
+          d.members = d.reads.members;
           d.at = this.#at(d.reads);
           await decided(d);
           const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
@@ -1377,14 +1424,15 @@ class VaultService implements Vault {
       } finally {
         for (const value of done) value.wipe();
       }
-    }, late, reads);
+    }, { late, asked: reads, changes: false });
   }
 
   /**
    * Whether this read's keys would take the reader past the bulk limit: the
    * distinct keys released to them in the window, these among them. A key
    * read again exposes nothing new, so it counts once, whatever its version.
-   * Counted under their row's lock, so exactly (`Reads`).
+   * Counted as of the head the read appends under, so exactly: again in
+   * the append's statement, when the count was read before a wait (`Snapshot`'s `unchanged`).
    */
   #overBulkLimit(d: Decision): boolean {
     return d.reads.released > this.#config.bulkLimit.count;
@@ -1460,7 +1508,7 @@ class VaultService implements Vault {
       const answer = { seqs: [] as number[] };
       d.after.push((seqOf) => (answer.seqs = entries.map(seqOf)));
       return answer;
-    });
+    }, { changes: false });
   }
 
   /**
@@ -1509,7 +1557,7 @@ class VaultService implements Vault {
     if (sealed.some((seal) => seal === null)) {
       return this.#decide([principal], async () => {
         throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), vias.map((via, i) => entry(via, sealed[i]!, 'deny', 'bad_claim')));
-      });
+      }, { changes: false });
     }
     const seals = sealed as Sealed[];
     const ended = async (db: Queryable) => {
@@ -1538,7 +1586,7 @@ class VaultService implements Vault {
       const answer = { seqs: [] as number[] };
       d.after.push((seqOf) => (answer.seqs = entries.map(seqOf)));
       return answer;
-    });
+    }, { changes: false });
   }
 
   /**

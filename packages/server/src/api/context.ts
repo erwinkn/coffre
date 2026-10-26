@@ -268,7 +268,7 @@ export async function recorded<T>(
  * checked: its credential revoked, the MCP connection or the Cloudflare
  * binding it came through revoked or unbound, or its member removed, even if admitted again since, at a new
  * generation. The vault releases values on the member's standing and
- * grants, under their row and its head, and is told the credential only to
+ * grants, as of its head, and is told the credential only to
  * name it in its entries; the app checked the credential before asking it,
  * unlocked. So a read checks it again after the vault has released: under
  * the head when it commits entries of its own, otherwise with no lock. A

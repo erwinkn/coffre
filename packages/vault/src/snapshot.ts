@@ -1,11 +1,12 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { Queryable, Transaction } from '@coffre/db';
-import { LogHeadMismatch, lockLogHead } from '@coffre/db/log';
+import { LogHeadMismatch } from '@coffre/db/log';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import type { GrantRow } from '@coffre/db/grants';
+import type { SQL } from 'drizzle-orm';
 
-import { snapshotQuery as postgres } from './snapshot.postgres.ts';
-import { snapshotQuery as sqlite } from './snapshot.sqlite.ts';
+import { snapshotQuery as postgresQuery, stillQuery } from './snapshot.postgres.ts';
+import { snapshotQuery as sqliteQuery } from './snapshot.sqlite.ts';
 import * as store from './store.ts';
 import type { EnvironmentRow, Member } from './store.ts';
 
@@ -13,23 +14,23 @@ import type { EnvironmentRow, Member } from './store.ts';
  * What a decision reads, or `access`, in one statement: one round trip, and
  * one snapshot of the database, so its parts agree with each other.
  *
- * In a decision, the same statement locks the log's head, but only if it
- * is free (`SKIP LOCKED`). Postgres takes a statement's snapshot when it
- * starts, so one that waited for the lock would have read everything but
- * the head as it was before the wait: a policy changed, a place deleted, a
- * grant written around the vault while it waited would be missed. A
- * statement that never waits reads all of it as of the lock. When another
- * transaction holds the head, the decision waits for it in a statement of
- * its own, then reads again, holding it. The read checks that the head names
- * the last entry it saw, too (`current`): one taken between the snapshot and
- * the lock, by an append that committed in that instant, is read again. That
- * check sees a commit only through the head it moved, which holds because
- * every change a decision reads commits with an entry under the head: the
- * vault's own decisions, and the app's writes to places, each `audited`
- * with its entry.
+ * In a decision, the same statement locks the log's head, waiting for it
+ * while another transaction holds it. Postgres takes a statement's snapshot
+ * when it starts, so one that waited read everything but the head as it was
+ * before the wait. Whether it did, the read says itself: the head names the
+ * last entry the statement saw (`current`), or an append committed while it
+ * waited. Every change a decision reads commits with an entry under the
+ * head, the vault's decisions and the app's writes to places alike, each
+ * `audited` with its entry, so a head that names the last entry seen means
+ * nothing it read has changed: it stands until the decision commits. One
+ * that does not is held to the database as it is when the decision appends,
+ * in the append's own statement (`unchanged`): the same read again, the
+ * same text, or nothing is written (`ReadsChanged`) and the decision is
+ * made again, holding the head as it reads. So the head is held for the
+ * append and its commit, never for a second read, however many wait.
  */
 export type Snapshot = {
-  /** The database's clock, milliseconds since the epoch. */
+  /** The database's clock, milliseconds since the epoch: once the head is held, when asked for it. */
   at: number;
   /** The rows of `asked.members`, by principal; those with none are not in the map. */
   members: Map<string, Member>;
@@ -52,8 +53,15 @@ export type Snapshot = {
    * again, or asked for again, counts once.
    */
   released: number;
-  /** The log's head, locked, with the last entry and the newest `key.rotate`; null unless asked, or held by another. */
+  /** The log's head, locked, with the last entry and the newest `key.rotate`; null unless asked. */
   head: LockedHead | null;
+  /**
+   * Null when this read stands as long as the head is held: it holds none,
+   * or it read after every append before its lock. Otherwise, what the
+   * append must find for it to stand still (`appendEntries`, `unchanged`):
+   * the same read again, and the keys released still within the bulk limit.
+   */
+  unchanged: SQL | null;
 };
 
 export type LockedHead = {
@@ -74,30 +82,31 @@ export type Asked = {
   references?: readonly bigint[];
   /**
    * One principal's releases within the last `windowMs` of the clock, moved
-   * on by `clockOffsetMs` as the vault's is, with `keys`, secret ids, besides.
+   * on by `clockOffsetMs` as the vault's is, with `keys`, secret ids,
+   * besides; `count` the most they may hold (`unchanged`).
    */
-  released?: { principal: string; keys: readonly string[]; windowMs: number; clockOffsetMs: number };
-  /** Lock the log's head first. */
+  released?: { principal: string; keys: readonly string[]; windowMs: number; clockOffsetMs: number; count: number };
+  /** Lock the log's head, waiting for it. */
   head?: boolean;
+  /**
+   * With the head, on Postgres: wait for it no longer than this, as
+   * `boundLockWaits` would, set by the statement itself, for the rest of
+   * the transaction.
+   */
+  waitMs?: number;
+  /** The transaction held the head before this read: it waits for nothing, and reads as of the lock. */
+  held?: boolean;
 };
 
-/** One statement's read, as `Snapshot` says; with the head, two more when another holds it. */
+/** One statement's read, as `Snapshot` says. */
 export async function snapshot(tx: Transaction, asked: Asked): Promise<Snapshot>;
 export async function snapshot(db: Queryable, asked: Asked & { head?: false }): Promise<Snapshot>;
 export async function snapshot(db: Queryable, asked: Asked): Promise<Snapshot> {
-  const read = () => readOnce(db, asked);
-  const first = await read();
-  if (asked.head !== true || (first.head !== null && current(first.head))) return first;
-  // Held by another, or moved in the instant before the lock: everything again, once the head is this transaction's.
-  // Asked for the head, `db` is a transaction (the overloads above).
-  if (first.head === null) await lockLogHead(db as Transaction);
-  const again = await read();
-  if (again.head === null) throw new Error("the log's head, held by this transaction, was read as held by another");
-  // Held, nothing appends: a head that names another last entry was moved, or the log written, around it (`appendEntries`).
-  if (!current(again.head)) {
-    throw new LogHeadMismatch(`the log's head says entry ${again.head.nextSeq} comes next, but the log ends ${again.head.last === null ? 'empty' : `at entry ${again.head.last.seq}`}, or with another hash`);
-  }
-  return again;
+  const read = await readOnce(db, asked);
+  if (read.head === null || current(read.head) || read.unchanged !== null) return read;
+  // Held as it began, or on SQLite, where nothing waits: a head that names another last entry was moved, or the log
+  // written, around it (`appendEntries`).
+  throw new LogHeadMismatch(`the log's head says entry ${read.head.nextSeq} comes next, but the log ends ${read.head.last === null ? 'empty' : `at entry ${read.head.last.seq}`}, or with another hash`);
 }
 
 /** Whether the head names the last entry the same statement saw: nothing was appended between its snapshot and its lock. */
@@ -107,28 +116,32 @@ export function current(head: LockedHead): boolean {
 }
 
 async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
-  const query = (engineOf(db) === 'postgres' ? postgres : sqlite)(asked);
-  const [row] = await rowsOf<{ snapshot: string | Raw }>(db, query);
+  const postgres = engineOf(db) === 'postgres';
+  const [row] = await rowsOf<{ snapshot: string | Raw; stable: string }>(db, (postgres ? postgresQuery : sqliteQuery)(asked));
   const raw: Raw = typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
+  const kept = JSON.parse(row!.stable) as Stable;
+  const head = raw.head === null ? null : {
+    nextSeq: BigInt(raw.head.nextSeq),
+    headHash: Buffer.from(raw.head.hash, 'hex'),
+    last: raw.last === null ? null : { seq: BigInt(raw.last.seq), hash: Buffer.from(raw.last.hash, 'hex') },
+    rotation: kept.rotation === null ? null : entryOf(kept.rotation),
+  };
+  const at = Number(raw.at);
   return {
-    at: Number(raw.at),
-    members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
-    grants: new Map(asked.principals.map((principal) => [principal, raw.grants.filter((grant) => grant.principal === principal).map(grantOf)])),
-    newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
-    newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
-    environments: new Map(raw.environments.map(({ id, ...environment }) => [id, {
+    at,
+    members: new Map(kept.members.map((member) => [member.principal, memberOf(member)])),
+    grants: new Map(asked.principals.map((principal) => [principal, kept.grants.filter((grant) => grant.principal === principal).map(grantOf)])),
+    newestAccess: new Map(kept.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
+    newestPolicy: kept.policy === null ? null : entryOf(kept.policy),
+    environments: new Map(kept.environments.map(({ id, ...environment }) => [id, {
       ...environment,
       deleted: Boolean(environment.deleted),
       archived: Boolean(environment.archived),
     }])),
-    ended: new Set(raw.ended.map((seq) => BigInt(seq))),
+    ended: new Set(kept.ended.map((seq) => BigInt(seq))),
     released: Number(raw.released ?? 0),
-    head: raw.head === null ? null : {
-      nextSeq: BigInt(raw.head.nextSeq),
-      headHash: Buffer.from(raw.head.hash, 'hex'),
-      last: raw.last === null ? null : { seq: BigInt(raw.last.seq), hash: Buffer.from(raw.last.hash, 'hex') },
-      rotation: raw.rotation === null ? null : entryOf(raw.rotation),
-    },
+    head,
+    unchanged: postgres && asked.held !== true && head !== null && !current(head) ? stillQuery(asked, row!.stable, at, asked.released?.count ?? 0) : null,
   };
 }
 
@@ -143,10 +156,16 @@ export type RawEntry = {
   relatedSeq: Int | null; metadata: string; prevHash: string; mac: string; hash: string;
 };
 
+/** What the statement reads besides `Stable`. */
 type Raw = {
   at: Int;
   head: { nextSeq: Int; hash: string } | null;
   last: { seq: Int; hash: string } | null;
+  released: Int | null;
+};
+
+/** What nothing but a change, with its entry, changes: the statement's `stable`, as text. */
+type Stable = {
   rotation: RawEntry | null;
   members: {
     principal: string; status: 'active' | 'removed'; owner: boolean | number; role: string | null; scope: string | null; generation: Int;
@@ -157,7 +176,6 @@ type Raw = {
   policy: RawEntry | null;
   environments: { id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number }[];
   ended: Int[];
-  released: Int | null;
 };
 
 /** An entry as the chain's codec reads it, from what `entryJson` wrote. */
@@ -174,11 +192,11 @@ export function entryOf(raw: RawEntry): StoredEntry {
   };
 }
 
-function grantOf(raw: Raw['grants'][number]): GrantRow {
+function grantOf(raw: Stable['grants'][number]): GrantRow {
   return { ...raw, expiresAt: raw.expiresAt === null ? null : Number(raw.expiresAt), grantedAt: Number(raw.grantedAt) };
 }
 
-function memberOf({ owner, ...raw }: Raw['members'][number]): Member {
+function memberOf({ owner, ...raw }: Stable['members'][number]): Member {
   return store.memberOf({
     ...raw,
     owner: owner === true || owner === 1,

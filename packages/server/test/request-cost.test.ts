@@ -256,14 +256,16 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
  * environment's rows; once the vault has released, the credential and its
  * member again (`credentialStill`). One vault call, its `unwrap`, decided
  * on the vault's answer about the reader kept from their last request,
- * which it checks (`Accesses`): the versions, then BEGIN, its lock
- * timeout, the reader's row locked, the head locked with everything the
- * decision reads, the entries and the head in one statement, COMMIT.
+ * which it checks (`Accesses`): the versions, then BEGIN, the head locked
+ * with everything the decision reads, its wait bounded there, the entries
+ * and the head in one statement, COMMIT. A read locks no row of the
+ * reader's: the head is the one lock it waits for, held from the second
+ * statement to the commit.
  */
 const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
-  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
-  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 5, vaultCalls: 1 } },
+  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 5, vaultCalls: 1 } },
+  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 5, vaultCalls: 1 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
   // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked, its
   // decision warm in the proxy's cache.
@@ -294,7 +296,7 @@ test('each hot request runs exactly its budget of statements, on as many connect
 test("a workload's request at a proxy whose cache lapsed runs its budget", POSTGRES, async () => {
   await coldWorkload();
   const spent = await cost(coldWorkload);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 5, vaultCalls: 1 });
 });
 
 /**
@@ -313,7 +315,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
   const after = await cost(coldWorkload);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   assert.equal(changed.vaultCalls, 3);
-  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 10, vault: 5, vaultCalls: 1 });
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
@@ -352,7 +354,7 @@ test("a reveal after the reader's access changed asks the vault again, once", PO
   const after = await cost(() => reader.secrets.reveal('market/dev/API_KEY'));
   await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
   assert.deepEqual({ app: changed.app.statements, vaultCalls: changed.vaultCalls }, { app: 7, vaultCalls: 3 });
-  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 5, vaultCalls: 1 });
 });
 
 test("a caller's check reads nothing of a project they reach nothing in", POSTGRES, async () => {

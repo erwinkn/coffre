@@ -29,7 +29,7 @@ export interface Vault {
    * Unwrap data keys for `principal`: all of them, or none. Given the
    * revision of an answer of `access` the app decided the read on
    * (`accessRevision`), only while the principal's access is still that
-   * one, under their row and the head the decision holds: otherwise it
+   * one, as of the head the decision appends under: otherwise it
    * refuses `access_changed` and logs no read, and says, by naming it back,
    * that it checked. A vault older than 0.14.1 names none: it checked none.
    */

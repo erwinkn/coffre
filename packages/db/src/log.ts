@@ -72,6 +72,18 @@ export class LogRewound extends Error {
 }
 
 /**
+ * What an append was asked to hold (`appendEntries`, `unchanged`) no longer
+ * does: a change committed while its decision waited for the head. Nothing
+ * was written; the decision is made again, holding the head as it reads.
+ */
+export class ReadsChanged extends Error {
+  constructor() {
+    super('what the decision read changed while it waited for the log\'s head');
+    this.name = 'ReadsChanged';
+  }
+}
+
+/**
  * An append under a key the log has moved on from: an entry of its
  * author's, `key.reseal` or `key.rotate`, names it as the key it moves
  * from (`MOVES_FROM`), and a key moved from writes no more.
@@ -180,6 +192,15 @@ export async function appendEntries(
    * nothing to read again.
    */
   locked?: HeldHead,
+  /**
+   * With `locked`, when that statement waited for the head and read the
+   * log as it was before the wait: a condition on the database as it is
+   * now, held in the append's own statement, which reads the last entry
+   * there too. False, nothing is written (`ReadsChanged`). Postgres only:
+   * on SQLite, a transaction holds the database from its first statement,
+   * so no statement reads the log before a wait.
+   */
+  unchanged?: SQL,
 ): Promise<Appended> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
@@ -189,14 +210,9 @@ export async function appendEntries(
   await check?.(tx);
   const held = locked ?? (await readUnderHead(tx, key));
   const { head, at: now } = held;
-  const last = held.last ?? undefined;
-
-  const expected = last === undefined ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
-  if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
-    throw new LogHeadMismatch(
-      `the log's head says entry ${head.nextSeq} comes next, but the log ends ${last === undefined ? 'empty' : `at entry ${last.seq}`}, or with another hash`,
-    );
-  }
+  // A head read after a wait: the last entry is read in the append's statement, and held to it there.
+  if (unchanged === undefined) namesLast(head, held.last);
+  else if (locked === undefined || engineOf(tx) !== 'postgres') throw new Error('only a Postgres head held by the caller is held to a condition');
   const before = remembered.get(key);
   if (
     before !== undefined &&
@@ -236,7 +252,23 @@ export async function appendEntries(
     seq += 1n;
   }
 
-  if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
+  if (unchanged !== undefined) {
+    // The log's last entry and the condition, read in the statement that appends, as of when it began:
+    // holding the head, after every append before it. Either fails, all of it rolls back with the transaction.
+    const found = sql`SELECT last.seq::text AS last_seq, last.hash AS last_hash, (${unchanged}) AS unchanged
+      FROM (SELECT 1) one LEFT JOIN (SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1) last ON true`;
+    const many = rows.length > ROWS_AT_ONCE;
+    const { rows: [read] } = await tx.execute<{ last_seq: string | null; last_hash: Buffer | null; unchanged: boolean }>(many ? found : sql`
+      WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()}),
+        moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row)
+      ${found}`);
+    namesLast(head, read!.last_seq === null ? null : { seq: BigInt(read!.last_seq), hash: read!.last_hash! });
+    if (!read!.unchanged) throw new ReadsChanged();
+    if (many) {
+      await tx.insert(auditLog).values(rows);
+      await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
+    }
+  } else if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
     await tx.execute(sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
       UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`);
@@ -247,6 +279,16 @@ export async function appendEntries(
   const written = { nextSeq: seq, headHash: prevHash };
   afterCommit(tx, () => remember(key, written));
   return { seqStart: head.nextSeq, ...written, occurredAt: now };
+}
+
+/** Refuse unless the head names the log's last entry: one that does not was moved, or the log cut behind it. */
+function namesLast(head: { nextSeq: bigint; headHash: Buffer }, last: { seq: bigint; hash: Buffer } | null): void {
+  const expected = last === null ? { nextSeq: 0n, headHash: GENESIS_HASH } : { nextSeq: last.seq + 1n, headHash: last.hash };
+  if (head.nextSeq !== expected.nextSeq || !head.headHash.equals(expected.headHash)) {
+    throw new LogHeadMismatch(
+      `the log's head says entry ${head.nextSeq} comes next, but the log ends ${last === null ? 'empty' : `at entry ${last.seq}`}, or with another hash`,
+    );
+  }
 }
 
 /** A head locked by a statement of the caller's, and what it read under the lock (`appendEntries`). */

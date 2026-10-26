@@ -21,7 +21,7 @@ const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
 /**
  * `snapshot`'s statement on SQLite, the same as on Postgres. Nothing is
  * locked: one transaction runs at a time (connect.ts), so the head is the
- * last entry's.
+ * last entry's, and nothing changes what a decision read before it commits.
  */
 export function snapshotQuery(asked: Asked): SQL {
   const principals = JSON.stringify(asked.principals);
@@ -39,6 +39,21 @@ export function snapshotQuery(asked: Asked): SQL {
       'at', ${NOW},
       'head', ${head ? sql`json((SELECT json_object('nextSeq', next_seq, 'hash', hex(head_hash)) FROM audit_chain_head WHERE only_row))` : sql`NULL`},
       'last', ${head ? sql`json((SELECT json_object('seq', seq, 'hash', hex(hash)) FROM audit_log ORDER BY seq DESC LIMIT 1))` : sql`NULL`},
+      'released', ${released === undefined
+        ? sql`0`
+        : sql`(
+          SELECT count(DISTINCT key) FROM (
+            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts). An entry, or an
+            -- item of its list, that names no key, which only a forged entry is, counts as one key of its own.
+            SELECT coalesce(e.secret_id, CASE WHEN one.type = 'object' AND json_type(one.value, '$.secretId') = 'text' THEN json_extract(one.value, '$.secretId') END, 'entry:' || e.seq) AS key
+            FROM audit_log e
+            LEFT JOIN json_each(CASE WHEN e.secret_id IS NULL AND json_type(e.metadata, '$.secrets') = 'array' THEN e.metadata END, '$.secrets') AS one
+            WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
+              AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
+            UNION ALL SELECT value FROM json_each(${JSON.stringify(released.keys)})
+          )
+        )`}
+    ) AS snapshot, json_object(
       'rotation', ${head
         ? sql`json((SELECT ${ENTRY} FROM audit_log e WHERE author = 'vault' AND action = 'key.rotate' AND decision = 'allow' ORDER BY seq DESC LIMIT 1))`
         : sql`NULL`},
@@ -84,20 +99,6 @@ export function snapshotQuery(asked: Asked): SQL {
       'ended', json((
         SELECT json_group_array(related_seq) FROM audit_log
         WHERE author = 'vault' AND action = 'reference.end' AND decision = 'allow' AND related_seq IN (SELECT value FROM json_each(${references}))
-      )),
-      'released', ${released === undefined
-        ? sql`0`
-        : sql`(
-          SELECT count(DISTINCT key) FROM (
-            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts). An entry, or an
-            -- item of its list, that names no key, which only a forged entry is, counts as one key of its own.
-            SELECT coalesce(e.secret_id, CASE WHEN one.type = 'object' AND json_type(one.value, '$.secretId') = 'text' THEN json_extract(one.value, '$.secretId') END, 'entry:' || e.seq) AS key
-            FROM audit_log e
-            LEFT JOIN json_each(CASE WHEN e.secret_id IS NULL AND json_type(e.metadata, '$.secrets') = 'array' THEN e.metadata END, '$.secrets') AS one
-            WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
-              AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
-            UNION ALL SELECT value FROM json_each(${JSON.stringify(released.keys)})
-          )
-        )`}
-    ) AS snapshot`;
+      ))
+    ) AS stable`;
 }

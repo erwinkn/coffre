@@ -30,6 +30,7 @@ import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultC
 import { signer } from '../src/checkpoint.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
+import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
@@ -1019,7 +1020,7 @@ test('two processes on one SQLite file share the bulk limit exactly', { skip: EN
   assert.equal(all.filter((outcome) => outcome === 'bulk_limit').length, 6);
 });
 
-test('a removal waits for a read in flight at the key service, and the next read is refused before it', async () => {
+test('a removal does not wait for a read in flight at the key service: the read is withheld, and the next refused before it', async () => {
   const { keks, seen } = service({ delayMs: 300 });
   const w = await world({ keks });
   const other = await w.twin();
@@ -1030,14 +1031,16 @@ test('a removal waits for a read in flight at the key service, and the next read
   const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   await sleep(150);
   const asked = seen.unwrap;
-  const removal = other.remove({ actor: ROOT, principal: ADA });
-  const [released, removed] = await Promise.all([read, removal]);
-  assert.equal(released.ok, true, 'the read in flight finishes');
+  // The read holds no lock on her row while the key service answers: the removal commits at once.
+  const removed = await other.remove({ actor: ROOT, principal: ADA });
   assert.equal(removed.ok, true);
+  const released = await read;
+  assert.equal(!released.ok && released.refusal.code, 'removed', 'the read in flight decides again under the head, and is refused');
   const log = await vaultLog(w);
-  const release = log.findLast((entry) => entry.action === 'secret.read' && entry.outcome === 'allow')!;
-  const removal_ = log.find((entry) => entry.action === 'member.remove')!;
-  assert.ok(release.seq < removal_.seq, 'and is logged before the removal, which waited for it');
+  const removal = log.find((entry) => entry.action === 'member.remove')!;
+  const reads = log.filter((entry) => entry.action === 'secret.read');
+  assert.ok(reads.every((entry) => entry.outcome === 'refuse'), 'nothing released');
+  assert.ok(reads.at(-1)!.seq > removal.seq, 'its outcome logged after the removal');
 
   const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!next.ok && next.refusal.code, 'removed');
@@ -2211,6 +2214,109 @@ async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promis
   await holder;
   return pending;
 }
+
+/**
+ * Hold the log's head as its owner while `first` and then `second` queue
+ * for it, in that order, then let go: `first` takes it first, and
+ * `second`'s read, made before `first` committed, waited for it. What
+ * `second` read is from before `first`'s change.
+ */
+async function queuedBehind<A, B>(first: () => Promise<A>, second: () => Promise<B>): Promise<[A, B]> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holder = db.owner.transaction(async (tx) => {
+    await run(tx, sql`SELECT 1 FROM audit_chain_head FOR UPDATE`);
+    holding();
+    await released;
+  });
+  await held;
+  const queued = async (n: number) => {
+    for (let i = 0; ; i++) {
+      const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock'`);
+      if (waiting.n >= n) return;
+      assert.ok(i < 200, 'the decisions never queued on the head');
+      await sleep(25);
+    }
+  };
+  const a = first();
+  await queued(1);
+  const b = second();
+  await queued(2);
+  release();
+  await holder;
+  return Promise.all([a, b]);
+}
+
+test('a read that waited for the head while a removal committed is refused: what it read is held to the log as it appends', postgresOnly('SQLite runs one transaction at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const [removed, read] = await queuedBehind(
+    () => w.vault.remove({ actor: ROOT, principal: ADA }),
+    () => w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }),
+  );
+  assert.equal(removed.ok, true);
+  assert.equal(!read.ok && read.refusal.code, 'removed', 'decided again, holding the head: her row as the removal left it');
+  const log = await vaultLog(w);
+  assert.equal(log.filter((entry) => entry.action === 'secret.read' && entry.outcome === 'allow').length, 0, 'nothing released');
+  assert.ok(log.findLast((entry) => entry.action === 'secret.read')!.seq > log.find((entry) => entry.action === 'member.remove')!.seq);
+});
+
+test('a read that waited for the head while its environment was protected is refused', postgresOnly('SQLite runs one transaction at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.prod, 'viewer']]);
+  const secret = await w.secret(w.prod);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const [protectedNow, read] = await queuedBehind(
+    () => w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: [w.prod], protected: true } }),
+    () => w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }),
+  );
+  assert.equal(protectedNow.ok, true);
+  assert.equal(read.ok, false, 'a viewer reads nothing in a protected environment, as the policy is when the read appends');
+  assert.equal((await vaultLog(w)).filter((entry) => entry.action === 'secret.read' && entry.outcome === 'allow').length, 0);
+});
+
+test('two reads by one member side by side: the second, counted before the first released, is counted again as it appends', postgresOnly('SQLite runs one transaction at a time'), async () => {
+  const w = await world({ bulkLimit: { count: 2, windowMs: 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const keys = await Promise.all(['K1', 'K2', 'K3'].map((key) => w.secret(w.dev, key)));
+  const items = await versionItems(await Promise.all(keys.map(async (secret) => ({ secret, wrapped: await wrapped(w, secret) }))));
+  const [both, third] = await queuedBehind(
+    () => w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: items.slice(0, 2) }),
+    () => w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: items.slice(2) }),
+  );
+  assert.equal(both.ok, true);
+  assert.equal(!third.ok && third.refusal.code, 'bulk_limit', 'one key past the limit of two, though each read alone is within it');
+});
+
+test("a read's statement bounds its own wait for the head: the transaction gives up on a head held too long", postgresOnly('SQLite runs one transaction at a time'), async () => {
+  await world();
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holder = db.owner.transaction(async (tx) => {
+    await run(tx, sql`SELECT 1 FROM audit_chain_head FOR UPDATE`);
+    holding();
+    await released;
+  });
+  await held;
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      db.vault.transaction((tx) => readSnapshot(tx, { principals: [ADA], head: true, waitMs: 200 })),
+      (error: Error) => (error.cause as { code?: string } | undefined)?.code === '55P03' || (error as { code?: string }).code === '55P03',
+    );
+    assert.ok(Date.now() - started < 5_000, 'within its bound, not the database default of waiting for ever');
+  } finally {
+    release();
+    await holder;
+  }
+});
 
 test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', postgresOnly('SQLite lets no write in beside a decision'), async () => {
   const w = await world();

@@ -132,7 +132,7 @@ test('the bulk limit counts a source read through references once, however many 
   // One read naming the source alone, then one listing it through both holders, its holders' own ids beside it.
   assert.ok((await read(w, BO, first.via)).ok);
   assert.ok((await w.vault.unwrap({ principal: BO, purpose: 'run', items: [first, second].map(({ via }) => ({ secretVersionId: w.secretVersionId, via })) })).ok);
-  const counted = await snapshot(db.owner, { principals: [BO], released: { principal: BO, keys: [w.source.secretId], windowMs: 15 * 60_000, clockOffsetMs: 0 } });
+  const counted = await snapshot(db.owner, { principals: [BO], released: { principal: BO, keys: [w.source.secretId], windowMs: 15 * 60_000, clockOffsetMs: 0, count: 1000 } });
   assert.equal(counted.released, 1, 'one key released, the source: never a holder');
 });
 

@@ -8,8 +8,8 @@ import type { Access, Vault } from '@coffre/core/vault';
  *
  * A request that reads values may decide on the kept answer instead of
  * asking (`accessFor`), and so make one vault call, not two: the vault
- * checks the answer when it opens the values, under the reader's row and
- * the head (`UnwrapInput.accessRevision`). A request that answers or
+ * checks the answer when it opens the values, as of the head it appends
+ * under (`UnwrapInput.accessRevision`). A request that answers or
  * refuses without opening any asks first (`Recalled.confirm`). Either
  * way, it answers only on an answer the vault gave it, or vouched for,
  * during the request; one that is not the vault's now starts over, asking
