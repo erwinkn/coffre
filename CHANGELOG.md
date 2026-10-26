@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.2, in short.** No migration, and nothing to change in
+  your config. Deploy the vault Worker before the app, as
+  [deploy.md](docs/deploy.md) says. This release is 0.14.1 plus one change,
+  the audit watch's beat walking the log outside a transaction, which adds
+  no query. If you come from 0.14.0, it also brings 0.14.1's: a read of
+  values makes one vault call, not two; a decision made from the policy is
+  one statement, not two; and the vault's checkpoint walks the log without
+  holding a connection. Keep both Hyperdrive limits at 20. Nothing here
+  eases a rollback concern of 0.14.0's: after an `APP_KEY` rotation, don't
+  go back to 0.13.x.
+
 - **The audit watch's beat no longer holds the app's connection while it
   walks.** Each beat walks the log on from where the anchor says the app
   verified, up to 10,000 entries, checking every hash and the app's MACs.
