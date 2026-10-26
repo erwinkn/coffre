@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- **Every "not signed in" error says how `coffre login` works.** It always
+  runs the device flow: it prints a link and a code and waits, and opens a
+  browser only on a terminal. Someone over SSH, or an agent, could not tell
+  that it works there, nor that it blocks until the link is approved (10
+  minutes), so an agent that ran it in the foreground hit its own timeout
+  before the person saw the link. The first line is as it was, ``not signed
+  in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` ``,
+  and four lines under it say: open the link on any device where you are
+  signed in to coffre, check the code, press Approve; from an agent or a
+  script, run it in the background, pass the link and code on, and wait; it
+  returns once approved, or fails after 10 minutes (`DEVICE_TTL_SECONDS`,
+  now in `@coffre/core/access`, which the server expires the code by). One
+  function, `signInHint` in `packages/cli/src/instance.ts`, builds it for
+  every such error: a command with no session, a session ended or unknown
+  to the instance, `coffre use`, `coffre verify instance`. A Cloudflare
+  Access instance signs in with cloudflared, not a code, and gets none.
+  `coffre login` also says how long it waits: "Waiting for you to approve
+  it; the code expires in 10 minutes…".
+- **`coffre update` updates an npm global whose prefix npm no longer has as
+  its own.** After Node was reinstalled, npm's global prefix pointed
+  elsewhere (`/opt/node-…`), `npm ls -g` listed nothing, and `coffre update`
+  stopped with "can't tell how this CLI was installed", suggesting an
+  `npm install -g` that would have put a second copy under the new prefix,
+  shadowed on `PATH` by the old one. A CLI that runs from
+  `<prefix>/lib/node_modules/@coffre/cli` (on Windows,
+  `<prefix>\node_modules\@coffre\cli`, with npm's `coffre.cmd` beside it) is
+  now npm's global at that prefix, and is updated with
+  `npm install -g --prefix <prefix> @coffre/cli@<version>`. A project's
+  dependency, pnpm's globals and npx's cache are told apart first; npm's
+  own prefix runs the same command as before.
+
 - **A use through the credential proxy takes the log's head once.** The
   vault's read appended its `secret.read` under the head; then the app took
   the head again for its own `credential.use` entry, for six statements

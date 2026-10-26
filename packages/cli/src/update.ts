@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { dirname, join, posix, sep, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -45,7 +45,8 @@ const PACKAGE = '@coffre/cli';
 
 /** How this CLI came to be here, which says how to update it. */
 export type Install =
-  | { kind: 'npm' }
+  /** `prefix` and `dir`: npm's global that npm no longer lists, where this CLI is, said by its path (`npmPrefixOf`). */
+  | { kind: 'npm'; prefix?: string; dir?: string }
   | { kind: 'pnpm' }
   /** npx fetches what it is asked for each time: nothing stays to update. */
   | { kind: 'npx' }
@@ -77,9 +78,31 @@ export function installOf(path: string, globals: Globals, isProject: (dir: strin
   if (within(globals.pnpmHome)) return { kind: 'pnpm' };
   // The project is where its node_modules starts: pnpm's own packages are further down, in node_modules/.pnpm.
   const modules = path.indexOf(`${sep}node_modules${sep}`);
-  if (modules !== -1) return isProject(path.slice(0, modules)) ? { kind: 'project', dir: path.slice(0, modules) } : { kind: 'unknown', path };
+  if (modules !== -1 && isProject(path.slice(0, modules))) return { kind: 'project', dir: path.slice(0, modules) };
+  // A prefix npm no longer has as its own, after a Node reinstall: npm lists nothing there, but the layout says it.
+  // On Windows, npm's layout is a project's too, and pnpm's store may have it: its shim beside it says it is npm's.
+  const moved = npmPrefixOf(path);
+  if (moved !== null && (sep === '/' || existsSync(join(moved.prefix, 'coffre.cmd')))) return { kind: 'npm', ...moved };
+  if (modules !== -1) return { kind: 'unknown', path };
   if (path.includes(`${sep}packages${sep}cli${sep}`)) return { kind: 'checkout' };
   return { kind: 'unknown', path };
+}
+
+/**
+ * The npm prefix a path is an install under, by npm's layout: `<prefix>/lib/node_modules/@coffre/cli`,
+ * and on Windows `<prefix>\node_modules\@coffre\cli`. With `dir`, the package's own directory.
+ * Null for any other path. A project's `node_modules` has the Windows layout too: the caller asks
+ * whether the directory is a project first.
+ */
+export function npmPrefixOf(path: string, flavour: typeof posix | typeof win32 = sep === '\\' ? win32 : posix): { prefix: string; dir: string } | null {
+  const tail = flavour === win32 ? ['node_modules', '@coffre', 'cli'] : ['lib', 'node_modules', '@coffre', 'cli'];
+  const parts = path.split(flavour.sep);
+  const at = parts.findIndex((_, i) => tail.every((name, j) => parts[i + j] === name) && i > 0);
+  if (at === -1) return null;
+  const above = parts.slice(0, at).join(flavour.sep);
+  // The root has no name left: `/`, or `C:\`.
+  const prefix = above === '' || /^[A-Za-z]:$/.test(above) ? above + flavour.sep : above;
+  return { prefix, dir: parts.slice(0, at + tail.length).join(flavour.sep) };
 }
 
 /** Whether `dir` is a project with @coffre/cli among its dependencies. */
@@ -120,6 +143,15 @@ export function migrationsAdded(from: string, to: string, before: readonly strin
     `coffre ${to} adds ${added.length === 1 ? '1 migration' : `${added.length} migrations`} to ${from}'s ` +
     `(${listed(added, 'and')}): run \`pnpm exec coffre migrate\` here first, then deploy.`
   );
+}
+
+/**
+ * What updates a global CLI to `version`. A moved npm prefix is named: npm's own
+ * would put a copy there, and this one would shadow it on PATH.
+ */
+export function updateCommand(how: Install & { kind: 'npm' | 'pnpm' }, version: string): readonly [string, readonly string[]] {
+  if (how.kind === 'pnpm') return ['pnpm', ['add', '-g', `${PACKAGE}@${version}`]];
+  return ['npm', ['install', '-g', ...(how.prefix === undefined ? [] : ['--prefix', how.prefix]), `${PACKAGE}@${version}`]];
 }
 
 /** What there is to say, and do, about a CLI its update leaves as it is: not npm's or pnpm's global. */
@@ -404,14 +436,14 @@ export async function update(args: string[]): Promise<void> {
     await steps.run(1, async (step) => {
       if (current === latest) return `This CLI is up to date, at ${current}`;
       if (how.kind !== 'npm' && how.kind !== 'pnpm') return notUpdated(how, latest, deployment);
-      const run = how.kind === 'npm' ? ['npm', ['install', '-g', `${PACKAGE}@${latest}`]] as const : ['pnpm', ['add', '-g', `${PACKAGE}@${latest}`]] as const;
+      const run = updateCommand(how, latest);
       if (!(await ask(`Update this CLI from ${current} to ${latest}, with ${run[0]} ${run[1].join(' ')}?`, step))) {
         return { text: `This CLI stays at ${current}`, details: [] };
       }
       step.note(`Updating this CLI, with ${run[0]}`);
       await command(run[0], [...run[1]], homedir());
       // The new CLI's migrations ship in it, where its manager keeps it now: not where this one ran, under pnpm.
-      const updated = globalCli(how.kind);
+      const updated = how.kind === 'npm' && how.dir !== undefined ? how.dir : globalCli(how.kind);
       try {
         if (updated) after ??= journalTags(join(updated, 'dist', 'migrations', 'postgres'));
       } catch {

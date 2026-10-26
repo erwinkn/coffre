@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { parseStore } from '../src/instance.ts';
+import { parseStore, signInError } from '../src/instance.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const token = `coffre_cli_${'a'.repeat(43)}`;
@@ -55,7 +55,8 @@ for (const linked of [false, true]) {
       });
       assert.equal(readFileSync(join(home, 'linked.json'), 'utf8'), contents);
     } else {
-      await login;
+      const { stderr } = await login;
+      assert.match(stderr, /Waiting for you to approve it; the code expires in 1 minute…/);
       assert.equal(JSON.parse(readFileSync(file, 'utf8')).instances[`http://127.0.0.1:${address.port}`].token, token);
       assert.equal(statSync(file).mode & 0o777, 0o600);
       assert.equal(statSync(directory).mode & 0o777, 0o700);
@@ -298,7 +299,7 @@ test('a login pins the directory it ran in: there and below, commands use that i
   const quiet = b.seen.length;
   const refused = await at('code/gone', ['whoami']);
   assert.equal(refused.status, 1);
-  assert.equal(refused.stderr, `coffre: not signed in to ${gone}: run \`coffre login ${gone}\`\n`);
+  assert.equal(refused.stderr, `coffre: ${signInError(`not signed in to ${gone}: run \`coffre login ${gone}\``)}\n`);
   assert.equal(b.seen.length, quiet);
   const dropped = await at('code/gone', ['logout']);
   assert.equal(dropped.stdout, `Not signed in to ${gone}\n  Unpinned ~/code/gone\n`);
@@ -452,7 +453,7 @@ test("a repository's coffre.json names its instance for a fresh clone, which sig
   // Not signed in yet: the error says where the URL came from, and nothing is sent.
   const fresh = await at('code/acme/src', ['whoami']);
   assert.equal(fresh.status, 1);
-  assert.equal(fresh.stderr, `coffre: not signed in to ${a.origin}, which ${join(home, 'code/acme/coffre.json')} names: run \`coffre login ${a.origin}\`\n`);
+  assert.equal(fresh.stderr, `coffre: ${signInError(`not signed in to ${a.origin}, which ${join(home, 'code/acme/coffre.json')} names: run \`coffre login ${a.origin}\``)}\n`);
   assert.equal(a.seen.length, 0);
   assert.equal((await at('code/acme', ['use'])).stdout, `* ${a.origin.padEnd(36)} ${'not signed in'.padEnd(24)} named by ~/code/acme/coffre.json\n`);
 

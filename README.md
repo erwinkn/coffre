@@ -267,6 +267,12 @@ interval, whichever is longer; a first round that fails ends it, as an
 export would. Each read is logged as any export's, and answers the version
 of what it read, which the watch compares the next with.
 
+`coffre login` prints a link and a code and waits, up to 10 minutes: open
+the link on any device where you are signed in to coffre (it works over SSH,
+and opens a browser itself only on a terminal), check the code, and press
+Approve. An agent or a script runs it in the background, passes the link and
+code on, and waits for it to return. Every "not signed in" error says so.
+
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
 (mode 0600), and can be revoked from the account page.
 

@@ -31,6 +31,27 @@
 
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { apiMember, type AuthInfo } from '@coffre/client';
+import { DEVICE_TTL_SECONDS } from '@coffre/core/access';
+
+/**
+ * What `coffre login` asks of whoever runs it, said under every message that
+ * tells them to: the device flow is the same for a person at a terminal, over
+ * SSH, and for an agent, which must not wait on it in the foreground.
+ */
+export function signInHint(): string {
+  const minutes = Math.round(DEVICE_TTL_SECONDS / 60);
+  return [
+    '  `coffre login` prints a link and a code, then waits. Open the link on any device where you are signed in to coffre',
+    '  (it works over SSH too), check that it shows that code, and press Approve.',
+    '  From an agent or a script: run it in the background, pass the link and code on, and wait.',
+    `  It returns once approved, or fails after ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+  ].join('\n');
+}
+
+/** A sign-in error: `message`, which names the command, and what the command asks of whoever runs it. */
+export function signInError(message: string): string {
+  return `${message}\n${signInHint()}`;
+}
 
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
 export type AuthMode = 'signin' | 'cloudflare';
@@ -272,7 +293,7 @@ export function choose(flags: SessionFlags, store: Store, local: Local | null): 
   if (flags.url !== undefined) return { origin: instanceOrigin(flags.url), by: 'url' };
   if (local !== null) return { ...local, origin: instanceOrigin(local.origin) };
   if (store.current !== null) return { origin: instanceOrigin(store.current), by: 'default' };
-  throw new Error('not signed in anywhere yet: run `coffre login <url>`');
+  throw new Error(signInError('not signed in anywhere yet: run `coffre login <url>`'));
 }
 
 export function parseMode(raw: string | undefined): AuthMode | undefined {
@@ -383,7 +404,9 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
   if (stored === undefined || stored.mode !== mode) {
     // A clone's first command: where the instance came from, so that a URL the repository chose is not taken for one you did.
     const named = choice.by === 'file' ? `, which ${join(choice.directory, REPO_FILE)} names` : '';
-    throw new Error(`not signed in to ${origin}${named}: ${relogin}`);
+    const message = `not signed in to ${origin}${named}: ${relogin}`;
+    // Access has its own sign-in, cloudflared's, not the device flow the hint explains.
+    throw new Error(mode === 'cloudflare' ? message : signInError(message));
   }
   const by = stored.kind ?? 'person';
   if (mode === 'cloudflare') {
@@ -391,12 +414,15 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
     if (!stored.clientId || !stored.clientSecret) throw new Error(`not signed in to ${origin}: ${relogin}`);
     return { origin, mode, by, credential: { kind: 'access-service-token', clientId: stored.clientId, clientSecret: stored.clientSecret } };
   }
-  if (!stored.token) throw new Error(`not signed in to ${origin}: ${relogin}`);
+  if (!stored.token) throw new Error(signInError(`not signed in to ${origin}: ${relogin}`));
   if (stored.expiresAt && Date.parse(stored.expiresAt) <= now.getTime()) {
+    const ended = `your session on ${origin} ended on ${stored.expiresAt.slice(0, 10)}: ${relogin}`;
     throw new Error(
       by === 'run'
         ? `the credential this run's ID token bought on ${origin} lasted until ${stored.expiresAt.slice(11, 19)}: sign in again, \`coffre login ${origin} --service ${stored.principal?.id ?? '<name>'}\``
-        : `your session on ${origin} ended on ${stored.expiresAt.slice(0, 10)}: ${relogin}`,
+        : by === 'person'
+          ? signInError(ended)
+          : ended,
     );
   }
   return { origin, mode, by, credential: { kind: 'token', token: stored.token } };
