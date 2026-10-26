@@ -19,7 +19,7 @@ import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '
 import { createDatabase } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { localVault } from '@coffre/vault/node';
-import { desc, eq, gt } from 'drizzle-orm';
+import { desc, eq, gt, sql } from 'drizzle-orm';
 import type pg from 'pg';
 
 import { Accesses } from '../src/accesses.ts';
@@ -65,12 +65,16 @@ class CountingPool {
   readonly #pool: pg.Pool;
   readonly count: Count = { statements: 0, rows: 0 };
   readonly held: Count = { statements: 0, rows: 0 };
+  /** Each statement run while set, as it was sent: what `work` replays. */
+  recorded: Statement[] | null = null;
 
   constructor(pool: pg.Pool) {
     this.#pool = pool;
   }
 
   async #counted(query: pg.Pool['query'] | pg.PoolClient['query'], args: unknown[], held = false): Promise<unknown> {
+    const [first, values] = args as [string | { text: string; values?: unknown[] }, unknown[] | undefined];
+    this.recorded?.push(typeof first === 'string' ? { text: first, values: values ?? [] } : { text: first.text, values: first.values ?? values ?? [] });
     const answered = await (query as (...queryArgs: unknown[]) => Promise<pg.QueryResult>)(...args);
     for (const count of held ? [this.count, this.held] : [this.count]) {
       count.statements += 1;
@@ -92,6 +96,36 @@ class CountingPool {
   end() {
     return this.#pool.end();
   }
+
+  /**
+   * The shared buffers `statement` touches, read or found in the cache, as
+   * this login runs it again now, in a transaction rolled back: null for
+   * one that fails again, as a write of a row it made does.
+   */
+  async work(statement: Statement): Promise<{ pages: number; plan: string } | null> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: [row] } = await client.query({ text: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, values: statement.values });
+      const [{ Plan: plan }] = (row as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
+      return { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
+    } catch {
+      return null;
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  }
+}
+
+type Statement = { text: string; values: unknown[] };
+
+type Plan = { 'Node Type': string; 'Relation Name'?: string; 'Index Name'?: string; 'Shared Hit Blocks': number; 'Shared Read Blocks': number; Plans?: Plan[] };
+
+/** A plan's nodes, each with what it reads and the pages it read, one a line: what a failure shows. */
+function shown(plan: Plan, depth = 0): string {
+  const node = `${'  '.repeat(depth)}${plan['Node Type']}${plan['Index Name'] ? ` using ${plan['Index Name']}` : ''}${plan['Relation Name'] ? ` on ${plan['Relation Name']}` : ''}: ${plan['Shared Hit Blocks'] + plan['Shared Read Blocks']} pages`;
+  return [node, ...(plan.Plans ?? []).map((child) => shown(child, depth + 1))].join('\n');
 }
 
 /** What a request ran: statements and rows on the app's connection and on the vault's, and how many calls the vault answered, each a connection of its own on Workers. */
@@ -437,6 +471,80 @@ test('a request runs the same statements, and reads the same rows, however large
   await warm();
   for (const [name, { request }] of Object.entries(requests)) {
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
+  }
+});
+
+/**
+ * R48: a request's work in the database does not grow with the log. Each
+ * statement of each hot request, run again under EXPLAIN, reads as many
+ * pages of the database (shared buffers, cached or not) on a log of ten
+ * thousand entries as on one ten times longer, grown as Equisafe's grows:
+ * the vault's reads of a few principals and the proxy's uses, over the last
+ * day, some within the bulk limit's window. No statement scans the log, nor
+ * one principal's reads in it (the bulk count reads `vault_releases`).
+ */
+test("each hot request's statements read as many pages however long the log grows", POSTGRES, async () => {
+  /** `count` entries more, older than any, copies of the reads and uses the log holds: what the hot paths would scan. */
+  const grow = async (count: number) => {
+    // In parts, each within a statement's time on the fixture's connections.
+    for (let left = count; left > 0; left -= 5000) await db.owner.execute(more(Math.min(5000, left)));
+    // As autovacuum leaves it: a part moves each reader's keys on thousands of times in one transaction, which no read
+    // does (each moves them once, in place), and only a vacuum takes back.
+    await db.owner.execute(sql`VACUUM ANALYZE`);
+  };
+  const more = (count: number) => sql`
+      INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, project_id, environment_id, secret_id,
+        secret_version_id, operation_id, request_id, source_ip, related_seq, metadata, prev_hash, mac, hash)
+      SELECT (SELECT least(min(seq), 0) FROM audit_log) - row_number() OVER (), author, key_id, occurred_at - (g * 7919) % 86400000, actor, action, decision, code,
+        subject_principal, project_id, environment_id, secret_id, secret_version_id, operation_id, request_id, source_ip, related_seq, metadata, prev_hash, mac, hash
+      FROM (SELECT * FROM audit_log WHERE seq >= 0 AND action IN ('secret.read', 'credential.use')) e CROSS JOIN generate_series(1, ${count}) g
+      ORDER BY g, e.seq LIMIT ${count}`;
+  /** Each hot request's statements, and the pages each reads run again; null for a write that cannot run twice. */
+  const pages = async () => {
+    await warm();
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, request] of Object.entries(measured)) {
+      await request();
+      app.recorded = [];
+      vaultPool.recorded = [];
+      await request();
+      const run = [...app.recorded.map((statement) => ({ pool: app, statement })), ...vaultPool.recorded.map((statement) => ({ pool: vaultPool, statement }))];
+      app.recorded = vaultPool.recorded = null;
+      read[name] = [];
+      for (const { pool, statement } of run) {
+        if (!/^\s*(select|with|insert|update|delete)\b/i.test(statement.text)) continue;
+        const work = await pool.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  // The hot requests, and those whose cost the budgets above leave out: a proxied call or verify whose cache
+  // lapsed, and a handle for `coffre run`.
+  const measured: Record<string, () => Promise<unknown>> = {
+    ...Object.fromEntries(Object.entries(requests).map(([name, { request }]) => [name, request])),
+    "a workload's request at a proxy whose cache lapsed": coldWorkload,
+    "a workload's verify at a proxy whose cache lapsed": coldVerify,
+    'a handle for `coffre run`': () => reader.handles.create({ label: 'run', paths: ['market/dev'] }),
+  };
+  await grow(10_000);
+  const small = await pages();
+  // 110,000 entries in all: a statement that reads the log, or a principal's reads in it, reads hundreds of pages more.
+  // One that does not reads a few more at most, as an index grows a level, or as the window holds the reads made here.
+  await grow(100_000);
+  const grown = await pages();
+  for (const [name, statements] of Object.entries(small)) {
+    assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+    for (const [i, { text, pages: before }] of statements.entries()) {
+      const { pages: after, plan } = grown[name]![i]!;
+      if (before === null || after === null) {
+        // Only a write that cannot run twice, which writes the rows it is given.
+        assert.equal(before, after, `${name}: ${text} ran again once, not twice`);
+        assert.match(text, /^\s*(with appended as \(insert|insert)/i, `${name}: ${text} could not run again`);
+        continue;
+      }
+      assert.ok(after <= 2 * before + 16, `${name}: ${text} read ${after} pages once the log grew tenfold, ${before} before:\n${plan}`);
+    }
   }
 });
 

@@ -617,14 +617,23 @@ Tools that export one environment on every command never trip it. A refusal is
 logged and answers 403 `bulk_limit`; the principal reads new keys again as the
 window rolls on.
 
-The vault counts from its own allowed `secret.read` entries in the window,
-under the log's head, in the statement that reads the rest of the
-decision (with KMS, again in the one that takes the head): a read of one key names it in `secret_id`, a read of several at one
-place lists each in its `secrets`. That is a pass over the reader's own reads in
-the window. On Postgres a full window of 1000 distinct keys costs about 4 ms,
-whether 25 reads of 40 keys or 1000 of one; a read of 40 keys repeated adds
-about 0.1 ms, so a principal reading the same 40 keys every two seconds for the
-whole window, 500 reads, pays about 55 ms a read.
+The vault counts the keys its allowed `secret.read` entries released in the
+window, under the log's head, in the statement that reads the rest of the
+decision (with KMS, again in the one that takes the head): a read of one key
+names it in `secret_id`, a read of several at one place lists each in its
+`secrets`. It reads them from `vault_releases`, a row per principal and key
+with when it was last released, which the database keeps from the log: a
+trigger on `audit_log`, in the transaction of each such entry, upserts a row
+for each key it names (an entry that names none, which only a forged one is,
+counts as a key of its own). No login writes the table; the trigger's function
+runs as its owner. Only the key is indexed, so a read moves its keys' times on
+in place (a HOT update) and leaves the table a row a key. So the count reads a
+row for each key the reader was ever released, whatever their history and
+however often they read the same keys: about 25 pages of the database for the
+whole decision's statement, on a log of ten thousand entries as on one of a
+million. Before 0.14.4 it read every entry the reader ever made (the window's
+bound, `clock_timestamp()`, is volatile, so no index could use it): a busy
+service's reads cost a second of the database's time each.
 
 ### One log, two authors
 

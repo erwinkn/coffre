@@ -141,6 +141,13 @@
       "when": 1792937576477,
       "tag": "0019_backup_role",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793017780802,
+      "tag": "0020_vault_releases",
+      "breakpoints": true
     }
   ]
 }

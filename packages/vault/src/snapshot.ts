@@ -49,7 +49,9 @@ export type Snapshot = {
   /**
    * How many distinct keys `asked.released.principal` holds released within
    * its window once it is given `asked.released.keys` too: a key released
-   * again, or asked for again, counts once.
+   * again, or asked for again, counts once. Those released before are
+   * counted up to one past `asked.released.cap`, which is enough to say
+   * whether the read goes past it.
    */
   released: number;
   /** The log's head, locked, with the last entry and the newest `key.rotate`; null unless asked, or held by another. */
@@ -74,9 +76,11 @@ export type Asked = {
   references?: readonly bigint[];
   /**
    * One principal's releases within the last `windowMs` of the clock, moved
-   * on by `clockOffsetMs` as the vault's is, with `keys`, secret ids, besides.
+   * on by `clockOffsetMs` as the vault's is, with `keys`, secret ids, besides;
+   * read from `vault_releases`, which the database keeps from the log, up to
+   * `cap` + 1 of them.
    */
-  released?: { principal: string; keys: readonly string[]; windowMs: number; clockOffsetMs: number };
+  released?: { principal: string; keys: readonly string[]; windowMs: number; clockOffsetMs: number; cap: number };
   /** Lock the log's head first. */
   head?: boolean;
 };

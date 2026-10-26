@@ -14,8 +14,11 @@
 (*                                                                         *)
 (* There is no counter: each decision counts the distinct keys of the      *)
 (* reader's `secret.read` entries stamped inside the window, with the keys *)
-(* it would release (vault snapshot.postgres.ts, the bulk count). Time is  *)
-(* a clock that ticks: an entry stamped at t counts until t + Window.      *)
+(* it would release (vault snapshot.postgres.ts, the bulk count). The code *)
+(* reads them from vault_releases, each key's newest stamp, which a        *)
+(* trigger keeps from those entries in their own transaction: the same     *)
+(* count. Time is a clock that ticks: an entry stamped at t counts until   *)
+(* t + Window.                                                             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 

@@ -19,6 +19,7 @@ export const {
   secretVersions,
   vaultMembers,
   vaultGrants,
+  vaultReleases,
   auditLog,
   auditChainHead,
   identities,

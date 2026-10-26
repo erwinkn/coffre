@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **A read costs the database the same however much its reader has read
+  before.** The bulk limit's count read every `secret.read` the reader had
+  ever made, not only the window's. Its bound, `clock_timestamp()`, is
+  volatile, so Postgres could not use it on the index and fetched each
+  entry. On a copy of Equisafe's log (119k entries), the busiest reader's
+  decision cost 17 ms and 18,882 pages of the database, and it grew every
+  day. 0.14.3 let one principal's reads decide side by side, so a burst of
+  50 ran it 50 times at once on a 2-vCPU database. Each then ran past the
+  3 s a read's statement may take (57014), holding a Hyperdrive
+  connection, and calls on every principal waited for one. The count now
+  reads `vault_releases`: a row per principal and key, with when it was
+  last released. A trigger on `audit_log` keeps it from the log, in each
+  read's own transaction. No login writes it, and the vault and backups
+  read it. The count reads a row per key the reader was ever released,
+  however often they read it: 0.5 ms and 22 pages on the same copy, and
+  as many pages on a log of a million entries. The limit counts exactly what it did.
+  A test now holds every statement of the hot requests to the same pages
+  on a log ten times longer.
+
+  Migration `0020_vault_releases` (Postgres; `0017` on SQLite) makes the
+  table and the trigger, then fills it from the log, in one transaction.
+  Audit appends wait for it: 2.1 s on the 119k-entry copy, 7.7 s with the
+  log grown to a million, the whole `coffre migrate` run on 2 vCPUs. The
+  release before keeps working on it, and its reads keep the table too.
+
 - **A CI run's sign-in holds the audit log's head for fewer round trips.**
   `POST /api/auth/oidc` ran 14 app statements, 10 of them while its
   transaction held the head that every audited write on the instance

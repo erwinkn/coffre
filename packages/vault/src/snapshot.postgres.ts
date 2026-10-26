@@ -82,16 +82,15 @@ export function snapshotQuery(asked: Asked): SQL {
       'released', ${released === undefined
         ? sql`0`
         : sql`(
-          SELECT count(DISTINCT key) FROM (
-            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts). An entry, or an
-            -- item of its list, that names no key, which only a forged entry is, counts as one key of its own.
-            SELECT coalesce(e.secret_id::text, CASE jsonb_typeof(one -> 'secretId') WHEN 'string' THEN one ->> 'secretId' END, 'entry:' || e.seq) FROM audit_log e
-            -- Each item of a list, never what lax paths would make of an object; silent, as strict paths fail on what is missing.
-            LEFT JOIN LATERAL jsonb_path_query(CASE WHEN e.secret_id IS NULL THEN e.metadata::jsonb END, 'strict $.secrets ? (@.type() == "array")[*]', '{}', true) AS one ON true
-            WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
-              AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
-            UNION ALL SELECT unnest(${sql.param([...released.keys])}::text[])
-          ) AS released (key)
-        )`}
+          -- The keys released within the window, but those asked for, up to one past the cap: a row for each key the
+          -- principal was ever released, however many reads of them the log holds (vault_releases, which the database
+          -- keeps from it). The bound is a subquery, evaluated once: clock_timestamp() alone is volatile, and runs a row.
+          SELECT count(*) FROM (
+            SELECT 1 FROM vault_releases
+            WHERE principal = ${released.principal} AND released_at > (SELECT ${NOW} + ${released.clockOffsetMs} - ${released.windowMs})
+              AND key <> ALL(${sql.param([...released.keys])}::text[])
+            LIMIT ${released.cap + 1}
+          ) AS before
+        ) + (SELECT count(DISTINCT key) FROM unnest(${sql.param([...released.keys])}::text[]) AS asked (key))`}
     ) AS snapshot`;
 }

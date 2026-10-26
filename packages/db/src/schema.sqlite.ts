@@ -303,6 +303,28 @@ export const vaultGrants = sqliteTable(
   ],
 );
 
+/**
+ * Each key the vault released to a principal, and when last: what its bulk
+ * limit counts (R28), the distinct keys released within a window, without
+ * reading the log. The database keeps it from the log itself, in the
+ * transaction of each vault `secret.read` allowed: a trigger on
+ * `audit_log` upserts a row for each key the entry names, as the count
+ * read them from the entries before (an entry that names none, which only
+ * a forged one is, counts as a key of its own, `entry:<seq>`). No login
+ * writes it: the vault and the backup read it. A row a window old counts
+ * for nothing, so nothing prunes them: there are at most as many as
+ * principals times keys, and a count reads one principal's.
+ */
+export const vaultReleases = sqliteTable(
+  'vault_releases',
+  {
+    principal: text().notNull(),
+    key: text().notNull(),
+    releasedAt: integer('released_at', { mode: 'number' }).notNull(),
+  },
+  (table) => [primaryKey({ name: 'vault_releases_pkey', columns: [table.principal, table.key] })],
+);
+
 export const auditLog = sqliteTable(
   'audit_log',
   {

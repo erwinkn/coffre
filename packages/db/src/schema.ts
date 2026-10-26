@@ -321,6 +321,30 @@ export const vaultGrants = pgTable(
   ],
 );
 
+/**
+ * Each key the vault released to a principal, and when last: what its bulk
+ * limit counts (R28), the distinct keys released within a window, without
+ * reading the log. The database keeps it from the log itself, in the
+ * transaction of each vault `secret.read` allowed: a trigger on
+ * `audit_log` upserts a row for each key the entry names, as the count
+ * read them from the entries before (an entry that names none, which only
+ * a forged one is, counts as a key of its own, `entry:<seq>`). No login
+ * writes it: the vault and the backup read it. A row a window old counts
+ * for nothing, so nothing prunes them: there are at most as many as
+ * principals times keys, and a count reads one principal's.
+ */
+export const vaultReleases = pgTable(
+  'vault_releases',
+  {
+    principal: text().notNull(),
+    key: text().notNull(),
+    releasedAt: bigint('released_at', { mode: 'number' }).notNull(),
+  },
+  // The key alone is indexed: a read moves its keys' times on in place (a HOT update), leaving no index entry behind,
+  // and the count reads the principal's keys from the key, a row each, however often they are read.
+  (table) => [primaryKey({ name: 'vault_releases_pkey', columns: [table.principal, table.key] })],
+);
+
 export const auditLog = pgTable(
   'audit_log',
   {

@@ -117,7 +117,7 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
  * found in it, which would otherwise refuse the next append as a rollback.
  */
 export async function emptyLog(owner: Database): Promise<void> {
-  const { auditLog, auditChainHead } = tablesOf(owner);
+  const { auditLog, auditChainHead, vaultReleases } = tablesOf(owner);
   await withLogUnlocked(owner, async (db) => {
     // Deleting checks every row against `related_seq`, which no index serves: on Postgres, a log of
     // thousands takes longer than a statement may. References name entries, and are gone by now.
@@ -127,5 +127,7 @@ export async function emptyLog(owner: Database): Promise<void> {
     await db.delete(auditLog);
   });
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
+  // Kept from the log, and gone with it.
+  await owner.delete(vaultReleases);
   forgetLogHeads();
 }

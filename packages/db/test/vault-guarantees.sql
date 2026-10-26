@@ -15,6 +15,16 @@ VALUES (1, 'vault', 'vault:fixture', 0, 'user:admin@acme.example', 'secret.read'
         decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
 \echo 'PASS: coffre_vault can append to audit_log'
 
+-- 1b. Which keeps its releases, through the log alone: this entry names no key, so it counts as one of its own.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM vault_releases WHERE principal = 'user:admin@acme.example' AND key = 'entry:1' AND released_at = 0) THEN
+        RAISE EXCEPTION 'FAIL: the vault''s read was not kept in vault_releases';
+    END IF;
+    RAISE NOTICE 'PASS: a vault read is kept in vault_releases, which the vault reads';
+END
+$$;
+
 -- 2. Only as itself.
 DO $$
 BEGIN
@@ -220,6 +230,10 @@ BEGIN
         'TRUNCATE vault_grants',
         'TRUNCATE audit_log',
         'UPDATE vault_grants SET role = role',
+        'INSERT INTO vault_releases VALUES (''user:admin@acme.example'', ''forged'', 0)',
+        'UPDATE vault_releases SET released_at = 0',
+        'DELETE FROM vault_releases',
+        'TRUNCATE vault_releases',
         'SET ROLE coffre_app',
         'CREATE TEMP TABLE vault_must_not_create_temp (id integer)'
     ] LOOP
@@ -230,7 +244,7 @@ BEGIN
             WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    RAISE NOTICE 'PASS: coffre_vault reads no sign-in row, empties nothing, rewrites no grant, and acts as no one else';
+    RAISE NOTICE 'PASS: coffre_vault reads no sign-in row, empties nothing, rewrites no grant or release, and acts as no one else';
 END
 $$;
 

@@ -88,16 +88,13 @@ export function snapshotQuery(asked: Asked): SQL {
       'released', ${released === undefined
         ? sql`0`
         : sql`(
-          SELECT count(DISTINCT key) FROM (
-            -- A read of one key names it; of several at one place, lists them (readsByPlace, vault.ts). An entry, or an
-            -- item of its list, that names no key, which only a forged entry is, counts as one key of its own.
-            SELECT coalesce(e.secret_id, CASE WHEN one.type = 'object' AND json_type(one.value, '$.secretId') = 'text' THEN json_extract(one.value, '$.secretId') END, 'entry:' || e.seq) AS key
-            FROM audit_log e
-            LEFT JOIN json_each(CASE WHEN e.secret_id IS NULL AND json_type(e.metadata, '$.secrets') = 'array' THEN e.metadata END, '$.secrets') AS one
-            WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
-              AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
-            UNION ALL SELECT value FROM json_each(${JSON.stringify(released.keys)})
+          -- The keys released within the window, but those asked for, up to one past the cap (snapshot.postgres.ts).
+          SELECT count(*) FROM (
+            SELECT 1 FROM vault_releases
+            WHERE principal = ${released.principal} AND released_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
+              AND key NOT IN (SELECT value FROM json_each(${JSON.stringify(released.keys)}))
+            LIMIT ${released.cap + 1}
           )
-        )`}
+        ) + (SELECT count(DISTINCT value) FROM json_each(${JSON.stringify(released.keys)}))`}
     ) AS snapshot`;
 }
