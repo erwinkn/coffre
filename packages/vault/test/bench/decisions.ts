@@ -42,12 +42,24 @@ if (ENGINE !== 'postgres') throw new Error('the bench runs on Postgres: COFFRE_T
 
 const ROOT = 'user:root@acme.example';
 
-/** Postgres as Hyperdrive serves it from far away: each chunk delayed by half the round trip, each way. */
+/**
+ * Postgres as Hyperdrive serves it from far away: each chunk delayed by
+ * half the round trip, each way, give or take half that, in order. A delay
+ * that never varies lines every call up on the same instants, which a real
+ * network does not: a call back at the very moment the head is let go of
+ * takes it before those waiting, again and again.
+ */
 async function farPostgres(rtt: number): Promise<{ url: string; close(): Promise<void> }> {
   const target = new URL(VAULT_URL);
   const server: Server = createServer((client) => {
     const upstream = connect(Number(target.port), target.hostname);
-    const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => from.on('data', (chunk) => setTimeout(() => to.write(chunk), rtt / 2));
+    const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => {
+      let last = 0;
+      from.on('data', (chunk) => {
+        last = Math.max(last, performance.now() + (rtt / 2) * (0.5 + Math.random()));
+        setTimeout(() => to.write(chunk), last - performance.now());
+      });
+    };
     relay(client, upstream);
     relay(upstream, client);
     const end = () => {
@@ -64,7 +76,7 @@ async function farPostgres(rtt: number): Promise<{ url: string; close(): Promise
 }
 
 /** What one call ran: its statements, and how long they took beyond the round trip each. */
-type Cost = { statements: number; waitedMs: number };
+type Cost = { statements: number; waitedMs: number; each?: number[] };
 
 /**
  * A call's own pool, timing each statement it runs, a transaction's
@@ -87,6 +99,7 @@ class TimedPool {
     } finally {
       this.#cost.statements += 1;
       this.#cost.waitedMs += Math.max(0, performance.now() - started - RTT);
+      (this.#cost.each ??= []).push(Math.round(performance.now() - started));
     }
   }
 
@@ -172,7 +185,7 @@ try {
         return done;
       }))).flat();
       report(`${callers} at once, ${label}`, runs);
-      if (process.env.BENCH_TAIL) console.log('  slowest:', runs.map((run) => Math.round(run.ms)).sort((x, y) => y - x).slice(0, 12).join(' '));
+      if (process.env.BENCH_TAIL) console.log('  slowest:', [...runs].sort((x, y) => y.ms - x.ms).slice(0, 12).map((run) => `${Math.round(run.ms)}[${run.each!.join(',')}]`).join(' '));
     }
   }
 } finally {
