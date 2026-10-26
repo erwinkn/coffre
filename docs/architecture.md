@@ -603,10 +603,13 @@ removal off. Each statement of a read's decision runs at most three
 seconds, a wait for a lock included, then fails as unavailable: a
 statement, not a lock timeout, since a waiter for the log's head waits
 again on each new version of it. A read's whole call, its retries, a
-refusal's entries and a key service's intent included, is due five
-seconds after its first decision: each statement of a transaction it
-starts runs at most what was left when the transaction began, and past
-the deadline the call starts nothing more and fails as unavailable. At most sixteen
+refusal's entries, the record of a vault key's check and a key service's
+intent included, is due five seconds after it starts (with a key service,
+plus the service's own five-second budget, which it spends from the same
+deadline): each statement of a transaction it starts runs at most what was
+left when the transaction began, and past the deadline the call starts
+nothing more and fails as unavailable. Only settling the vault's keys after
+a rotation, once, is not bound by it. At most sixteen
 reads wait for the head at once, each holding one of its places in line,
 an advisory lock tried and never waited for; the next is refused at once,
 as unavailable (55P03), and holds no connection while it would have

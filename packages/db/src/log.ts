@@ -187,7 +187,14 @@ export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promi
     WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINE}, place) LIMIT 1)
     FOR UPDATE`);
   const [head] = rows;
-  if (head === undefined) throw new HeadBusy();
+  if (head === undefined) {
+    // No place, or no head at all: the second, which no one may write past, said as lockLogHead says it.
+    const { rows: [found] } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: { found: boolean }[] }> }).execute(
+      sql`SELECT EXISTS (SELECT 1 FROM audit_chain_head WHERE only_row) AS found`,
+    );
+    if (found?.found !== true) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+    throw new HeadBusy();
+  }
   holding.add(tx);
   return { nextSeq: BigInt(head.next_seq), headHash: head.head_hash };
 }

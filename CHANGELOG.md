@@ -3,11 +3,13 @@
 ## Unreleased
 
 - **A read under load answers within seconds: read, or 503 at once.** A
-  read's whole vault call, its retries, the entries of a refusal and a key
-  service's intent included, is due five seconds after its first
-  decision. Each transaction's waits are bounded by what is left, and past
-  the deadline it fails as unavailable rather than start another; a
-  refused read's entries no longer wait fifteen seconds for the log's
+  read's whole vault call, its retries, the entries of a refusal, the
+  record of a vault key's check and a key service's intent included, is
+  due five seconds after it starts (with a key service, plus its own
+  five-second budget, spent from the same deadline). Each transaction's
+  waits are bounded by what is left, and past the deadline it fails as
+  unavailable rather than start another; a refused read's entries take a
+  place in line too, and no longer wait fifteen seconds for the log's
   head. At most sixteen reads wait for the head at once, each holding one
   of its places in line, an advisory lock that is tried and never waited
   for. The next answers 503 `unavailable` with `Retry-After` in one round

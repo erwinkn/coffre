@@ -423,12 +423,13 @@ ReadCheck(p) ==
 
 ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
 
-\* Or, while another holds the head, the read gives up waiting for it,
-\* before it decides anything: its statement's bound ran out, or as many
-\* reads as the vault lets wait for the head already do (vault snapshot.ts,
-\* log.ts lockLogHeadQueued). It rolls back, having written nothing, and
-\* answers unavailable; its caller asks again later. No invariant may need
-\* a read to wait.
+\* Or, while another holds the head, the read gives up waiting for it: its
+\* statement's bound or its call's deadline ran out, or as many reads as
+\* the vault lets wait for the head already do (vault snapshot.ts, log.ts
+\* lockLogHeadQueued). It rolls back, having released nothing and appended
+\* no `secret.read` (a key service's intent, committed before, is accounted
+\* for as after any failure), and answers unavailable; its caller asks
+\* again later. No invariant may need a read to wait.
 ReadGivesUp(p) ==
     /\ pc[p] = "read.head"
     /\ head \notin {None, p}

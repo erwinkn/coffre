@@ -14,11 +14,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { WrappedKey } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
+import { isUnavailable } from '@coffre/db/dialect';
 import { and, eq, inArray } from 'drizzle-orm';
+import pg from 'pg';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, openTestDatabase, places, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
+import { READ_HEAD_WAITERS } from '../src/vault.ts';
 
 const ROOT = 'user:root@acme.example';
 const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
@@ -70,7 +74,7 @@ async function slowPostgres(ms: number): Promise<{ url: string; readonly opened:
 
 /** A fresh isolate of the vault Worker, over the suite's database through the vault's login. */
 async function freshVault(database: string): Promise<{
-  call(method: string, ...args: unknown[]): Promise<{ ok: boolean; error?: string }>;
+  call(method: string, ...args: unknown[]): Promise<{ ok: boolean; error?: string; code?: string; result?: unknown }>;
   stop(): Promise<void>;
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
@@ -104,7 +108,7 @@ async function freshVault(database: string): Promise<{
       const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ method, args }), signal: AbortSignal.timeout(20_000) });
       const text = await response.text();
       try {
-        return JSON.parse(text) as { ok: boolean; error?: string };
+        return JSON.parse(text) as { ok: boolean; error?: string; code?: string; result?: unknown };
       } catch {
         return { ok: false, error: `${response.status}: ${text}` };
       }
@@ -225,6 +229,36 @@ test('through the entrypoint, the credential a CI run came in on is copied into 
     const refused = await vault.call('admit', { actor: ROOT, principal: 'token:other', credentialId: 'not-a-uuid' });
     assert.match(refused.error ?? '', /credentialId must be a lowercase UUID/);
   } finally {
+    await vault.stop();
+  }
+});
+
+test('through the entrypoint, a read past the head\'s places in line fails at once with its code, which the app answers as unavailable', { skip, timeout: 120_000 }, async () => {
+  const placed = await places(db.owner);
+  const secret = await placed.secret(placed.dev);
+  const vault = await freshVault(VAULT_URL);
+  const holder = new pg.Client({ connectionString: OWNER_URL });
+  await holder.connect();
+  try {
+    assert.ok((await vault.call('access', ROOT)).ok);
+    const wrapped = (await vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })) as { ok: boolean; result: { wrapped: WrappedKey[] } };
+    assert.ok(wrapped.ok);
+    const items = await storedVersions(db.owner, [{ secret, wrapped: wrapped.result.wrapped[0]! }]);
+    const read = () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'reveal', items });
+    // Once, so that what a process does once is done; then the head held, and every place in line taken.
+    assert.equal(((await read()).result as { ok: boolean }).ok, true);
+    await holder.query('BEGIN');
+    await holder.query('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.query('SELECT pg_advisory_xact_lock($1, place) FROM generate_series(1, $2::int) AS place', [0x636f6668, READ_HEAD_WAITERS]);
+    const started = Date.now();
+    const refused = await read();
+    assert.ok(Date.now() - started < 2_000, `refused after ${Date.now() - started} ms`);
+    assert.equal(refused.ok, false, JSON.stringify(refused));
+    assert.equal(refused.code, '55P03', 'the code crossed the binding');
+    assert.ok(isUnavailable({ code: refused.code }), 'which the app answers as unavailable');
+  } finally {
+    await holder.query('ROLLBACK').catch(() => undefined);
+    await holder.end();
     await vault.stop();
   }
 });

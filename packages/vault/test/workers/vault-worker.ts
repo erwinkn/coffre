@@ -34,7 +34,9 @@ export default {
     try {
       return Response.json({ ok: true, result: await env.VAULT[method]!(...args) });
     } catch (error) {
-      return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+      // Its code too, as the app reads it on the other side of the binding (`isUnavailable`).
+      const code = (error as { code?: unknown }).code;
+      return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error), ...(typeof code === 'string' ? { code } : {}) }, { status: 500 });
     }
   },
 };

@@ -101,7 +101,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
-import { appendEntries, lockLogHead, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
 import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
@@ -213,9 +213,9 @@ const LOCK_TIMEOUT_MS = 15_000;
 const READ_LOCK_TIMEOUT_MS = 3_000;
 
 /**
- * How long a whole read call may take, from its first decision to its
- * answer, its refusal's entries and, with a key service, its intent
- * included: each transaction's waits are bounded by what is left of it, and
+ * How long a whole read call may take, from its start to its answer, its
+ * refusal's entries, the record of a vault key's check and, with a key
+ * service, its intent and its own budget (added) included: each transaction's waits are bounded by what is left of it, and
  * past it the call fails as unavailable (`Overdue`) rather than start
  * another. So a caller hears within it, ok or 503, never tens of seconds later.
  */
@@ -627,6 +627,8 @@ class VaultService implements Vault {
         // its call's deadline: past it, the call fails as unavailable, having released nothing.
         await this.#db.transaction(async (tx) => {
           await store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared);
+          // In one of the head's places in line, as the read's decision waited, or refused at once.
+          if (shared) await lockLogHeadQueued(tx, READ_HEAD_WAITERS);
           await this.#append(tx, entries);
         });
       }
@@ -1283,13 +1285,14 @@ class VaultService implements Vault {
   ): Promise<Outcome<R>> {
     const { action, principal, secrets, entry } = call;
     for (const secret of secrets) entry(secret, 'allow', null);
-    // One deadline for the call's decisions, the intent's and the keys', and the key service's own budget besides.
+    // One deadline for the call: the record of the KEK's check, the decisions, the intent's and the keys', and, with a
+    // key service, its own budget besides, spent from it too.
     const deadline = Date.now() + READ_DEADLINE_MS + (call.remote ? this.#prepared.options.keyBudgetMs : 0);
-    const wrongKek = await this.#kekMismatch();
+    const wrongKek = await this.#kekMismatch(deadline);
     if (wrongKek !== null) {
       return this.#decide([], async () => {
         throw new Refused(refusal('wrong_kek', wrongKek), secrets.map((secret) => entry(secret, 'deny', 'wrong_kek')));
-      });
+      }, { reads: true, deadline });
     }
     // Each personal config's owner, hashed, by environment, as the decision read them: what its keys' contexts bind.
     const owners = new Map<string, string>();
@@ -1404,7 +1407,7 @@ class VaultService implements Vault {
           throw new Refused(refusal(first, MESSAGES[first]), secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', codes[item] ?? first)));
         });
       }
-      const { outcomes, expired } = await settle(operations((secret) => context(secret, owners.get(secret.environmentId))), this.#prepared.options.keyBudgetMs);
+      const { outcomes, expired } = await settle(operations((secret) => context(secret, owners.get(secret.environmentId))), within(deadline, this.#prepared.options.keyBudgetMs));
       const done = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
       try {
         const entries = () => secrets.map((secret, i) =>
@@ -2453,10 +2456,10 @@ class VaultService implements Vault {
    * service that cannot answer leaves it undecided: the error is thrown,
    * and the next call asks again.
    */
-  async #kekMismatch(): Promise<string | null> {
+  async #kekMismatch(deadline?: number): Promise<string | null> {
     const prepared = this.#prepared;
     if (!prepared.kekChecked) {
-      const wrong = await this.#checkKeks();
+      const wrong = await this.#checkKeks(deadline);
       if (!prepared.kekChecked) {
         prepared.wrongKek = wrong;
         prepared.kekChecked = true;
@@ -2471,7 +2474,7 @@ class VaultService implements Vault {
    * keys it wrapped, if there are any; then its check value is recorded.
    * A KEK that opens neither is not the one that wrapped the data.
    */
-  async #checkKeks(): Promise<string | null> {
+  async #checkKeks(deadline?: number): Promise<string | null> {
     // A vault that may not write cannot record a check either; why it may not is the answer.
     const superseded = await this.#settled();
     if (superseded !== null) return superseded;
@@ -2509,6 +2512,8 @@ class VaultService implements Vault {
       // The key it opened, if any, is in the log, as every key the vault opens is. Another call that
       // checked at the same time may have recorded one first: under the log's lock, the first stays.
       await this.#db.transaction(async (tx) => {
+        // Once a process, by its first key operation: a read's waits as the read's, within its deadline.
+        await store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), true);
         await lockLogHead(tx);
         if ((await this.#checkValues(tx)).has(`${kek.provider}:${kek.keyId}`)) return;
         await this.#append(tx, [
