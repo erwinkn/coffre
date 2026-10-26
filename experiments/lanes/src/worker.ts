@@ -468,6 +468,7 @@ export default {
       if (route === 'simple') {
         const [, , , action] = url.pathname.split('/');
         const variant = protocol as simple.Variant;
+        // A setting of the isolate, not of the request: every request of a run asks the same, so it holds for the run.
         simple.nameStatements(url.searchParams.get('named') === '1');
         const db = action === 'use' || env.HD_CONTROL === undefined ? await open() : (null as unknown as Client);
         if (action === 'use') {

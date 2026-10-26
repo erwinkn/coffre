@@ -128,7 +128,8 @@ const line = [
 console.log(line);
 // Each statement's time at the Worker, where it says (s1, s2: the first and second statement).
 const steps = ['s1', 's2', 's3'].map((name) => [name, ok.map((r) => r.timing[name]).filter((v) => v !== undefined && !Number.isNaN(v)).sort((a, b) => a - b)]).filter(([, v]) => v.length > 0);
-if (steps.length > 0) console.log(`  statements at the worker: ${steps.map(([name, v]) => `${name} p50/p90/p99 ${percentile(v, 50)}/${percentile(v, 90)}/${percentile(v, 99)} ms`).join(', ')}`);
+const mean = (v) => v.reduce((a, b) => a + b, 0) / v.length;
+if (steps.length > 0) console.log(`  statements at the worker: ${steps.map(([name, v]) => `${name} mean ${mean(v).toFixed(1)}, p50/p90/p99 ${percentile(v, 50)}/${percentile(v, 90)}/${percentile(v, 99)} ms`).join(', ')}`);
 
 if (revocation !== null) {
   const r = await revocation;

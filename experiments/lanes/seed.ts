@@ -12,7 +12,7 @@ import pg from 'pg';
 
 import { GENESIS, sealAll, type Fields } from './src/chain.ts';
 import { keysFrom, memberMac, wrap } from './src/model.ts';
-import { entryMac, link } from './src/simple.ts';
+import { checkpointHash, checkpointSignature, entryMac, link } from './src/simple.ts';
 
 const { values } = parseArgs({
   options: {
@@ -92,6 +92,10 @@ try {
   const lastSeq = String(PRINCIPALS + history);
   await client.query("INSERT INTO audit_head VALUES (true, $1, $2, $3, $4, gen_random_uuid()::text)", [String(PRINCIPALS + history + 1), prev, String(PRINCIPALS), lastSeq]);
   await client.query("SELECT setval('audit_seq', $1)", [lastSeq]);
+  // The first checkpoint, empty, where the checkpointer starts: every later one tiles on from it.
+  const genesis = checkpointHash(GENESIS, []);
+  await client.query('INSERT INTO checkpoints VALUES ($1, $1, $2, 0, $3, $4, $5)',
+    [lastSeq, String(PRINCIPALS), genesis, checkpointSignature(keys.log, lastSeq, lastSeq, String(PRINCIPALS), genesis), String(now)]);
 
   for (const [i, principal] of principals.entries()) {
     const member = { principal, status: 'active', role: null, access_seq: simple === undefined ? String(sealed[i]!.seq) : String(i + 1) };
