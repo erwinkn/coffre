@@ -330,8 +330,9 @@ export const vaultGrants = pgTable(
  * read them from the entries before (an entry that names none, which only
  * a forged one is, counts as a key of its own, `entry:<seq>`). No login
  * writes it: the vault and the backup read it. A row a window old counts
- * for nothing, so nothing prunes them: there are at most as many as
- * principals times keys, and a count reads one principal's.
+ * for nothing: the vault's checkpoint forgets those a day and an hour old,
+ * longer than any window (`prune_vault_releases`), so a count reads about a
+ * day of keys.
  */
 export const vaultReleases = pgTable(
   'vault_releases',

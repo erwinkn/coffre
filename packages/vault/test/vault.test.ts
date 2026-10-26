@@ -30,6 +30,7 @@ import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultC
 import { signer } from '../src/checkpoint.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
+import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
@@ -1197,6 +1198,47 @@ test("a read given the app's record of a use appends it beside its read, names i
     await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'use', items, use: bad }));
   }
   assert.equal((await vaultLog(w)).length, before, 'and nothing was appended for them');
+});
+
+test('a checkpoint forgets the releases a day and an hour old, longer than any window, and keeps the rest', async () => {
+  const w = await world({ bulkLimit: { count: 1000, windowMs: 15 * 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const keys = [];
+  for (let i = 0; i < 3; i++) {
+    const secret = await w.secret(w.dev);
+    keys.push(...(await versionItems([{ secret, wrapped: await wrapped(w, secret) }])));
+  }
+  for (const item of keys) assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [item] })).ok);
+  const { vaultReleases } = tablesOf(db.owner);
+  const released = async () => (await db.owner.select().from(vaultReleases).where(eq(vaultReleases.principal, ADA))).length;
+  assert.equal(await released(), 3);
+  // By the database's clock, which the prune reads: one released a day, an hour and a minute ago; one a minute short.
+  const now = await store.now(db.owner);
+  const [first, second] = await db.owner.select({ key: vaultReleases.key }).from(vaultReleases).where(eq(vaultReleases.principal, ADA));
+  await db.owner.update(vaultReleases).set({ releasedAt: now - store.RELEASES_KEPT_MS - 60_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, first!.key)));
+  await db.owner.update(vaultReleases).set({ releasedAt: now - store.RELEASES_KEPT_MS + 60_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, second!.key)));
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok && signed.warning === undefined, JSON.stringify(signed));
+  assert.equal(await released(), 2, 'the one past a day and an hour went');
+  assert.deepEqual((await db.owner.select({ key: vaultReleases.key }).from(vaultReleases).where(eq(vaultReleases.key, first!.key))), []);
+  // What the window holds is still counted: the one read just now; the one a minute short is kept, but past the window.
+  const counted = await readSnapshot(db.owner, { principals: [ADA], released: { principal: ADA, keys: [], windowMs: 15 * 60_000, clockOffsetMs: 0, cap: 1000 } });
+  assert.equal(counted.released, 1);
+});
+
+test('a checkpoint whose prune fails signs all the same, and says so', postgresOnly('the function is Postgres\'s'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) })).ok);
+  await db.owner.execute(sql`REVOKE EXECUTE ON FUNCTION prune_vault_releases(integer) FROM coffre_vault`);
+  try {
+    const signed = await w.vault.checkpoint();
+    assert.ok(signed.ok, JSON.stringify(signed));
+    assert.match(signed.warning ?? '', /the releases the bulk limit counts were not pruned/);
+  } finally {
+    await db.owner.execute(sql`GRANT EXECUTE ON FUNCTION prune_vault_releases(integer) TO coffre_vault`);
+  }
 });
 
 // --- the KEK -------------------------------------------------------------------
@@ -3188,6 +3230,9 @@ test('configuration', () => {
   assert.deepEqual(resolved.bulkLimit, { count: 20, windowMs: 30_000 });
   assert.deepEqual(resolveVaultConfig(base).bulkLimit, { count: 1000, windowMs: 900_000 });
   assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 0, windowMinutes: 1 } }), /bulkLimit/);
+  // A window of a day at most: its releases are kept a day and an hour (prune_vault_releases).
+  assert.deepEqual(resolveVaultConfig({ ...base, bulkLimit: { count: 1000, windowMinutes: 24 * 60 } }).bulkLimit, { count: 1000, windowMs: 24 * 3_600_000 });
+  assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 1000, windowMinutes: 24 * 60 + 1 } }), /a day \(1440\) at most/);
   assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek-1', key: 'c2hvcnQ=' } }), /32 bytes/);
   assert.throws(() => resolveVaultConfig({ ...base, signingKey: '' }), /signing key/);
   assert.throws(() => resolveVaultConfig({ ...base, previousKeks: [{ id: 'kek-1', key }] }), /share an id/);

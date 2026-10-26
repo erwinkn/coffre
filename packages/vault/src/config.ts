@@ -11,6 +11,14 @@ export type BulkLimit = { count: number; windowMs: number };
  */
 export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_000 };
 
+/**
+ * The longest bulk limit window: a day. The releases a window counts are
+ * kept a day and an hour (migration 0021's `prune_vault_releases`, and on
+ * SQLite `RELEASES_KEPT_MS`), so every window up to it, and one widened
+ * since, counts exactly.
+ */
+export const MAX_BULK_WINDOW_MINUTES = 24 * 60;
+
 /** The vault as it runs: keys decoded, emails checked. */
 export type ResolvedVaultConfig = {
   keks: KekRegistry;
@@ -61,7 +69,10 @@ export type VaultConfig = {
    * service holds the KEK, as AWS KMS does: the vault never sees that key.
    */
   signingKey?: string;
-  /** At most `count` distinct data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. */
+  /**
+   * At most `count` distinct data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. The
+   * window is a day at most: the releases it counts are kept a day and an hour (`prune_vault_releases`).
+   */
   bulkLimit?: { count: number; windowMinutes: number };
   /**
    * @deprecated Gone in 0.10, and refused: each key says who sees it now. Mark
@@ -176,8 +187,8 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
 
 
 function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {
-  if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0)) {
-    throw new Error('bulkLimit needs a whole count of at least 1 and a window above 0 minutes');
+  if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0) || windowMinutes > MAX_BULK_WINDOW_MINUTES) {
+    throw new Error(`bulkLimit needs a whole count of at least 1 and a window above 0 minutes, a day (${MAX_BULK_WINDOW_MINUTES}) at most`);
   }
   return { count, windowMs: windowMinutes * 60_000 };
 }

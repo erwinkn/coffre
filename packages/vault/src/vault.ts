@@ -235,6 +235,9 @@ export const READ_DEADLINE_MS = 5_000;
  */
 export const READ_HEAD_WAITERS = 16;
 
+/** How many releases a checkpoint prunes at most: one short statement, a few each scheduled run. */
+const RELEASES_PRUNED = 10_000;
+
 /** A read's call past its deadline (`READ_DEADLINE_MS`): unavailable, as a statement past its bound (57014) is. */
 class Overdue extends Error {
   readonly code = '57014';
@@ -2672,7 +2675,7 @@ class VaultService implements Vault {
         stalled = `the rehash of the past did not run, and goes on where it was next time: ${(error as Error).message}`;
       }
     }
-    return this.#decide([], async (d) => {
+    const decided = await this.#decide([], async (d) => {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
@@ -2748,6 +2751,15 @@ class VaultService implements Vault {
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
+    // Then the bulk count's upkeep, which no read waits on, after a checkpoint signed, never instead of a refusal: the
+    // releases no window can count again, kept a day and an hour (`RELEASES_KEPT_MS`), longer than any window, up to
+    // `RELEASES_PRUNED` of them, in one statement of its own, holding no lock any read takes but the rows it deletes,
+    // and none an append holds. What is kept is the database's to say, not the caller's: no login forgets a release a
+    // window counts. A failure leaves it to the next checkpoint, and says so.
+    if (!decided.ok) return decided;
+    const pruned = await store.pruneReleases(this.#db, RELEASES_PRUNED).then(() => null, (error: Error) => `the releases the bulk limit counts were not pruned, and the next checkpoint tries again: ${error.message}`);
+    if (pruned === null) return decided;
+    return { ...decided, warning: decided.warning === undefined ? pruned : `${decided.warning}; ${pruned}` };
   }
 
   /**
