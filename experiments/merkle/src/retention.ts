@@ -23,15 +23,16 @@ export type Retention = { action: 'audit.retention'; day: number; mode: 'number'
 
 export async function retainDay(db: Db, keys: Keys, day: number, checkpointer: Checkpointer): Promise<{ retention: Retention | null; dropped: number; tilesDropped: number; ms: number }> {
   const started = performance.now();
-  const { rows: [layout] } = await db.query('SELECT mode FROM audit_layout');
+  if (!checkpointer.remembers) throw new Error('retention needs a checkpointer that remembers its head outside the database');
+  const { rows: [layout] } = await db.query('SELECT mode, day_ms::text FROM audit_layout');
   const mode = layout.mode as 'number' | 'at';
+  // Days go in order: a later day's cut lies above an earlier day's uses, which could then never be dropped.
+  const last = await latestRetention(db);
+  if (last !== null && day <= last.day) throw new Error(`day ${day}: retention goes in day order, and day ${last.day} is already retained`);
+  // `at` days: only once the day is over on the clock (an append stamped in it would find no partition).
+  if (mode === 'at' && Date.now() < (day + 1) * Number(layout.day_ms)) throw new Error(`day ${day} has not ended`);
   const partition = `audit_uses_d${day}`;
   const { rows: [part] } = await db.query(`SELECT count(*)::int AS n, max(number)::text AS max FROM ${partition}`);
-  // A day with no uses: nothing to drop from the tree, so no cut and no entry; its empty partition just goes.
-  if (part.n === 0) {
-    await db.query(`DROP TABLE ${partition}`);
-    return { retention: null, dropped: 0, tilesDropped: 0, ms: performance.now() - started };
-  }
   // The cut: the first checkpoint at or above every number the day holds. Number days: the day's signed entry names
   // its last number (an unsigned column would let a writer move the cut).
   let highest: string = part.max ?? '0';
@@ -45,20 +46,29 @@ export async function retainDay(db: Db, keys: Keys, day: number, checkpointer: C
     if (!entryMac(keys.mac, d).equals(d.mac)) throw new Error(`day ${day}: its entry fails its MAC`);
     highest = (JSON.parse(d.payload) as DayRecord).last;
   }
+  // A day with no uses (once over, and for number days once closed): nothing to drop from the tree, so no cut and no
+  // entry; its empty partition just goes.
+  if (part.n === 0) {
+    await db.query(`DROP TABLE ${partition}`);
+    return { retention: null, dropped: 0, tilesDropped: 0, ms: performance.now() - started };
+  }
   const { rows: [cut] } = await db.query('SELECT c.upto::text, c.size::int, c.note FROM checkpoints c WHERE c.upto >= $1 ORDER BY c.upto LIMIT 1', [highest]);
   if (cut === undefined) throw new Error(`day ${day} is not sealed yet`);
+  const prevCutUpto = last?.cutUpto ?? '0';
+  // Every use of the day already below the last cut (`at` days, when the tick that sealed one day's end sealed all of
+  // the next day's uses too): the last retention entry already counts them droppable, and the fresh head it sealed
+  // already keeps copies of them out, so the partition just goes.
+  if (BigInt(cut.upto) <= BigInt(prevCutUpto)) {
+    await db.query(`DROP TABLE ${partition}`);
+    return { retention: null, dropped: part.n, tilesDropped: 0, ms: performance.now() - started };
+  }
+  const cutHead = await openCheckpoint(cut.note, await verifierFrom(keys.signer.verifierKey));
+  // The note must be the row's own: a row's columns are the writer's, the note's place and size are signed.
+  if (cutHead === null || cutHead.upto !== cut.upto || cutHead.size !== cut.size) throw new Error(`day ${day}: the checkpoint at its cut is not the one this log signed there`);
   // Before anything is dropped, a head signed well after the cut: the signer then refuses to seal any entry stamped
   // before it, less its freshness bound, and every dropped entry was stamped before the cut was signed. So a copy of
   // a dropped use, which no lookup can match once its original is gone, is refused whenever it is slipped in, even
   // into the tick that seals the retention entry, on a log quiet since the day closed (review r5).
-  const previous = await latestRetention(db);
-  const prevCutUpto = previous?.cutUpto ?? '0';
-  // Cuts only move forward: a day whose uses all lie below the last cut has nothing left to drop from the tree.
-  if (BigInt(cut.upto) <= BigInt(prevCutUpto)) throw new Error(`day ${day}: its cut (${cut.upto}) does not pass the last one (${prevCutUpto})`);
-  if (!checkpointer.remembers) throw new Error('retention needs a checkpointer that remembers its head outside the database');
-  const cutHead = await openCheckpoint(cut.note, await verifierFrom(keys.signer.verifierKey));
-  // The note must be the row's own: a row's columns are the writer's, the note's place and size are signed.
-  if (cutHead === null || cutHead.upto !== cut.upto || cutHead.size !== cut.size) throw new Error(`day ${day}: the checkpoint at its cut is not the one this log signed there`);
   // A request ID of its own per attempt: an attempt refused below may be tried again later.
   const begin = await append(db, keys, {
     at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `retention-begin-${day}-${randomUUID()}`, payload: JSON.stringify({ action: 'audit.retention.begin', day }),
@@ -67,7 +77,7 @@ export async function retainDay(db: Db, keys: Keys, day: number, checkpointer: C
   const notBefore = cutHead.at + 2 * checkpointer.freshMs;
   if (head.at < notBefore) throw new Error(`day ${day} closed too recently to drop: not before ${new Date(notBefore).toISOString()}`);
   await db.query(`DROP TABLE ${partition}`);
-  const kept = await entriesBetween(db, prevCutUpto, cut.upto);
+  const kept = await keptBetween(db, prevCutUpto, cut.upto);
   const retention: Retention = {
     action: 'audit.retention', day, mode, prevCutUpto, cutUpto: cut.upto, cutSize: cut.size,
     kept: kept.length, keptRoot: referenceHash(kept.map(leafOf)).toString('base64'),
@@ -75,6 +85,16 @@ export async function retainDay(db: Db, keys: Keys, day: number, checkpointer: C
   await append(db, keys, { at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `retention-${day}`, payload: JSON.stringify(retention) });
   const { rows: [t] } = await db.query('WITH d AS (DELETE FROM audit_tiles WHERE level = 0 AND idx < $1 RETURNING 1) SELECT count(*)::int AS n FROM d', [Math.floor(cut.size / 256)]);
   return { retention, dropped: part.n, tilesDropped: t.n, ms: performance.now() - started };
+}
+
+/**
+ * What a retention entry commits to below its cut: the changes, which are kept forever. Uses below a cut are all
+ * droppable, whichever day's partition holds them: with `at` days, a tick that sealed the end of one day sealed the
+ * start of the next with it, and the next day's retention drops those (review r8). So a use below a cut that is still
+ * there is not protected any more: at most a tick's worth at each midnight, until its own day goes.
+ */
+export function keptBetween(db: Db, from: string, upto: string): Promise<Entry[]> {
+  return entriesBetween(db, from, upto, "a.kind = 'change'");
 }
 
 /** Every retention entry, oldest first. */

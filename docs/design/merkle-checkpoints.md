@@ -311,7 +311,15 @@ Retention now also refuses a checkpointer that keeps no memory. Round seven
 found that retaining an ended day with no uses (a quiet `at` day) wrote a
 cut that did not advance, which then failed verification forever. Now a day
 with no uses just loses its empty partition, with no entry, and a cut that
-does not pass the last one is refused before anything is dropped. Round five
+does not pass the last one is refused before anything is dropped. Round
+eight found the same layout's sharper case: a tick that seals one day's end
+together with the next day's start puts some of the next day's uses below
+the first day's cut, and the first retention counted them as kept, so
+dropping the next day broke verification. Now a retention entry commits
+only to the changes below its cut. Every use below a cut is droppable,
+whichever day holds it, and a day whose uses all lie below the last cut just
+loses its partition. Retention also goes in day order, and an `at` day only
+once it has ended on the clock. Round five
 found that the signer's freshness bound, measured from its newest head,
 freezes on a quiet log, so a replay slipped into the retention entry's own
 tick passed. Now retention drops a day only after sealing a head at least
@@ -572,8 +580,8 @@ are prototyped ([`retention.ts`](../../experiments/merkle/src/retention.ts),
   (the Worker's clock) falls in it. Near midnight the numbers interleave
   with the next day's.
   - The cut is the first checkpoint at or above the day's highest number.
-  - A few next-day uses below it (stragglers) stay, and are covered by the
-    digest.
+  - A few next-day uses below it (stragglers) stay until their own day
+    goes, unprotected meanwhile (step 3).
   - An append whose `at` falls in an already dropped day fails for want of
     a partition, so days must be dropped well after any clock skew (they
     will be: retention is weeks).
@@ -589,9 +597,12 @@ In both, retention runs in five steps:
 2. Drop the day's uses partition once it is sealed. A day with no uses
    only loses its empty partition: no cut, no entry. A cut must pass the
    last one, or nothing is dropped.
-3. Append a kept-forever `audit.retention` change: {cut, the entries still
-   below the cut since the last cut, as a count and the RFC 9162 head of
-   their leaves}.
+3. Append a kept-forever `audit.retention` change: {cut, the changes below
+   the cut since the last cut, as a count and the RFC 9162 head of their
+   leaves}. Below a cut, only changes are protected. A use still there
+   (with `at` days, at most a tick's worth of the next day at each
+   midnight) can be deleted unseen until its own day goes. Its copies stay
+   out all the same: the fresh head of step 1 is past its stamp.
 4. Delete the level-0 tiles below the cut.
 5. Keep the higher levels: one hash per 256 leaves, 10 MB a day at a
    sustained 1,000/s.

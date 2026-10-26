@@ -1,5 +1,5 @@
 import { entryMac, FRESH_MS, leafOf, proveConsistency, readTiles, type Db, type Entry } from './log.ts';
-import { entriesBetween, retentions } from './retention.ts';
+import { entriesBetween, keptBetween, retentions } from './retention.ts';
 import { referenceHash, verifyConsistency } from './tree.ts';
 import { openCheckpoint, verifierFrom, type Checkpoint } from './note.ts';
 import { Edge, edgeOf, tileMap } from './tiles.ts';
@@ -105,7 +105,7 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
     if (r.prevCutUpto !== prevCut || BigInt(r.cutUpto) <= BigInt(prevCut)) problems.push(`retention of day ${r.day}: its cut does not follow the one before (${prevCut})`);
     if (BigInt(r.number) <= BigInt(r.cutUpto)) problems.push(`retention of day ${r.day}: written below its own cut`);
     if (BigInt(r.number) > BigInt(last.upto)) problems.push(`retention of day ${r.day}: not sealed yet`);
-    const kept = await entriesBetween(db, r.prevCutUpto, r.cutUpto);
+    const kept = await keptBetween(db, r.prevCutUpto, r.cutUpto);
     kept.forEach(check);
     if (kept.length !== r.kept || referenceHash(kept.map(leafOf)).toString('base64') !== r.keptRoot) {
       problems.push(`retention of day ${r.day}: ${kept.length} entries stay below its cut at ${r.cutUpto}, it kept ${r.kept}${kept.length === r.kept ? ' with another head' : ''}`);

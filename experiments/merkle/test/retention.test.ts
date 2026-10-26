@@ -61,6 +61,16 @@ for (const mode of ['number', 'at'] as const) {
     await cp.tick();
     assert.ok((await verify()).ok);
 
+    // An ended day with no uses (`at` days: a quiet day): its partition goes, with no cut and no entry. Today's, never.
+    if (mode === 'at') {
+      await pool.query('SELECT new_day($1)', [d0 - 5]);
+      const empty = await retainDay(pool, keys, d0 - 5, cp);
+      assert.equal(empty.retention, null);
+      assert.deepEqual((await verify()).problems, []);
+      const today = Math.floor(Date.now() / dayMs);
+      await pool.query('SELECT new_day($1)', [today]);
+      await assert.rejects(retainDay(pool, keys, today, cp), /has not ended/);
+    }
     // Too early first: refused, and tried again later, as an operator would.
     await assert.rejects(retainDay(pool, keys, d0, cp), /too recently/);
     await sleep(2 * freshMs + 100);
@@ -86,11 +96,15 @@ for (const mode of ['number', 'at'] as const) {
     assert.match((await verify()).problems.join(';'), /retention of day/);
     await pool.query('INSERT INTO audit SELECT * FROM saved');
     assert.ok((await verify()).ok);
-    // An ended day with no uses (`at` days: a quiet day): its partition goes, with no cut and no entry; the log still verifies.
+    // Days go in order.
+    await assert.rejects(retainDay(pool, keys, d0 - 1, cp), /day order/);
+    // The next day too (`at` days: one tick sealed the end of day d0 with the start of d0 + 1, so d0's cut lies
+    // above some of d0 + 1's uses): the log still verifies once both are gone.
     if (mode === 'at') {
-      await pool.query('SELECT new_day($1)', [d0 - 5]);
-      const empty = await retainDay(pool, keys, d0 - 5, cp);
-      assert.equal(empty.retention, null);
+      await sleep(2 * freshMs + 100);
+      const next = await retainDay(pool, keys, d0 + 1, cp);
+      assert.ok(next.dropped > 0, `dropped ${next.dropped}`);
+      await cp.tick();
       assert.deepEqual((await verify()).problems, []);
     }
     // The retention entry itself deleted: the walk then starts below the cut, where leaves are gone.
