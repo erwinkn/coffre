@@ -1299,7 +1299,8 @@ run` calls the same `credential(name).verify` from
   exactly. coffre decodes it and asks WebCrypto's `verify`, which compares
   in constant time on Node and in workerd (BoringSSL's `CRYPTO_memcmp`).
   A signature of the wrong prefix, encoding or length is `valid: false`,
-  and the answer says nothing else. A scheme of another shape (Stripe's
+  and the answer says nothing else. A request past its bound (below) is
+  413, whatever it carries, a signature of 100,000 characters included. A scheme of another shape (Stripe's
   `t=…,v1=…`, which signs a timestamp with the body) gets a helper of its
   own when someone needs one, never a template language.
 - **The raw body, byte for byte.** A provider signs the bytes it sent. An
