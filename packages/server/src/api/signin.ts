@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { allows, DEFAULT_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -269,7 +269,6 @@ export type DevicePoll =
   | { status: 'expired' }
   | { status: 'approved'; principal: PrincipalRef; credential: IssuedCredential };
 
-const DEVICE_TTL_SECONDS = 10 * 60;
 const DEVICE_POLL_SECONDS = 5;
 const DEVICE_PENDING_PER_IP = 5;
 const DEVICE_PENDING_TOTAL = 200;

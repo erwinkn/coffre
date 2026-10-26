@@ -49,6 +49,7 @@ import {
   parseStore,
   REPO_FILE,
   resolveTarget,
+  signInError,
   within,
   withPin,
   withoutPins,
@@ -479,7 +480,7 @@ function refused(to: Target): string {
     case 'person':
       return to.mode === 'cloudflare'
         ? `${to.origin} refused your Cloudflare Access sign-in: run ${relogin}`
-        : `${to.origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: ${relogin}`;
+        : signInError(`${to.origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: ${relogin}`, 'signin');
   }
 }
 
@@ -643,6 +644,13 @@ function pinTo(directory: string, origin: string): void {
   process.stdout.write(`Pinned ${shown(directory)} to it: coffre uses ${origin} there and in every directory below\n`);
 }
 
+/** How long a code lasts, as it is said: `10 minutes`, `1 minute`, `45 seconds`. */
+function expiresIn(seconds: number): string {
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
 /** A device login: a code shown here, approved in a browser signed in to coffre. */
 async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
   let started: Response;
@@ -674,7 +682,7 @@ async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
       `and check that it shows the code  ${device.user_code}\n\n`,
   );
   if (!noBrowser && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
-  process.stderr.write('Waiting for you to approve it…\n');
+  process.stderr.write(`Waiting for you to approve it; the code expires in ${expiresIn(device.expires_in)}…\n`);
 
   const session = await pollDevice(origin, device.device_code, device.interval, device.expires_in);
   const me = await client({
@@ -747,10 +755,10 @@ async function pollDevice(
     }
     if (error === 'authorization_pending') continue;
     if (error === 'access_denied') fail('the sign-in was declined in the browser');
-    if (error === 'expired_token') fail('the code expired before it was approved; run `coffre login` again');
+    if (error === 'expired_token') fail(signInError('the code expired before it was approved; run `coffre login` again', 'signin'));
     fail(`sign-in failed: ${error ?? `status ${response.status}`}`);
   }
-  fail('the code expired before it was approved; run `coffre login` again');
+  fail(signInError('the code expired before it was approved; run `coffre login` again', 'signin'));
 }
 
 /** Best effort: on a machine without a desktop the printed link is enough. */
@@ -944,7 +952,7 @@ function use(args: string[]): void {
   if (args[0] === undefined) {
     const pinned = Object.entries(readPins().directories);
     const origins = [...new Set([...Object.keys(store.instances), ...pinned.map(([, origin]) => origin), ...(file === null ? [] : [file.origin])])];
-    if (origins.length === 0) fail('not signed in anywhere yet: run `coffre login <url>`');
+    if (origins.length === 0) fail(signInError('not signed in anywhere yet: run `coffre login <url>`'));
     const used = local?.origin ?? store.current;
     for (const origin of origins) {
       const session = store.instances[origin];
@@ -959,7 +967,7 @@ function use(args: string[]): void {
     return;
   }
   const origin = attempt(() => instanceOrigin(args[0]));
-  if (!(origin in store.instances)) fail(`not signed in to ${origin}: run \`coffre login ${origin}\``);
+  if (!(origin in store.instances)) fail(signInError(`not signed in to ${origin}: run \`coffre login ${origin}\``));
   writeStore({ ...store, current: origin });
   process.stdout.write(`Now using ${origin} by default\n`);
   if (local !== null && local.origin !== origin) {

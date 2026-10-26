@@ -15,11 +15,14 @@ import {
   parseStore,
   pinFor,
   resolveTarget,
+  signInError,
+  signInHint,
   within,
   withPin,
   withoutPins,
   withSession,
   withoutSession,
+  type AuthMode,
   type Local,
   type Pins,
   type Store,
@@ -156,6 +159,47 @@ test('an instance with no saved session asks for a login there', () => {
   assert.throws(() => resolveTarget({}, emptyStore(), null, NOW), /coffre login <url>/);
 });
 
+test('every message that sends someone to `coffre login` explains the device flow under it, in one shared hint', () => {
+  const hint = signInHint(true);
+  // What a person and an agent each need: a link and a code, any device, the background, and how long it waits (the server's).
+  assert.match(hint, /prints a link and a code, then waits/);
+  assert.match(hint, /any device where you are signed in to coffre/);
+  assert.match(hint, /press Approve/);
+  assert.match(hint, /run it in the background, pass the link and code on, and wait/);
+  assert.match(hint, /fails at once if declined, or fails after 10 minutes\.$/);
+  // An instance not yet signed in to may be behind Access, which signs in through cloudflared: it says so.
+  assert.equal(signInHint(), `${hint}\n  (An instance behind Cloudflare Access signs in through cloudflared instead: no code, no link.)`);
+
+  const sentTo = (call: () => unknown, line: string, mode?: AuthMode) =>
+    assert.throws(call, (error: Error) => {
+      assert.equal(error.message.split('\n')[0], line, 'the first line is the one grep finds');
+      assert.equal(error.message, signInError(line, mode));
+      return true;
+    });
+  sentTo(() => resolveTarget({}, emptyStore(), null, NOW), 'not signed in anywhere yet: run `coffre login <url>`');
+  sentTo(() => choose({}, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`');
+  sentTo(() => resolveTarget({ url: 'https://other.example.com' }, storeWith(), null, NOW), 'not signed in to https://other.example.com: run `coffre login https://other.example.com`');
+  // Named a sign-in instance by --auth-mode: known.
+  sentTo(() => resolveTarget({ url: 'https://other.example.com', authMode: 'signin' }, storeWith(), null, NOW), 'not signed in to https://other.example.com: run `coffre login https://other.example.com`', 'signin');
+  sentTo(
+    () => resolveTarget({}, storeWith(), null, new Date('2026-11-01T00:00:00Z')),
+    `your session on ${OURS} ended on 2026-10-26: run \`coffre login ${OURS}\``,
+    'signin',
+  );
+  // A person's session with no token left in it; a bearer token's or a CI run's is signed in again another way.
+  const tokenless = (kind?: 'token' | 'run') => withSession(emptyStore(), OURS, { mode: 'signin', ...(kind === undefined ? {} : { kind }), obtainedAt: '2026-09-26T00:00:00Z' });
+  sentTo(() => resolveTarget({}, tokenless(), null, NOW), `not signed in to ${OURS}: run \`coffre login ${OURS}\``, 'signin');
+  for (const kind of ['token', 'run'] as const) {
+    assert.throws(() => resolveTarget({}, tokenless(kind), null, NOW), (error: Error) => !error.message.includes('\n'));
+  }
+  // Cloudflare Access signs in with cloudflared, not a code: no hint.
+  assert.throws(() => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW), (error: Error) => !error.message.includes('\n'));
+  assert.throws(() => choose({ authMode: 'cloudflare' }, emptyStore(), null), (error: Error) => !error.message.includes('\n'));
+  sentTo(() => choose({ authMode: 'signin' }, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`', 'signin');
+  // A mode that is none is the command's to refuse, not the hint's.
+  sentTo(() => choose({ authMode: 'dev' }, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`');
+});
+
 test('a saved token is not sent to the same origin under a different mode', () => {
   assert.throws(
     () => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW),
@@ -269,7 +313,7 @@ test('a coffre.json names the instance, and the session sent there is its own: w
   assert.deepEqual(resolveTarget({}, storeWith(), file, NOW).credential, { kind: 'cloudflared' });
   assert.throws(
     () => resolveTarget({}, emptyStore(), file, NOW),
-    /^Error: not signed in to https:\/\/coffre\.acme\.example, which \/home\/ada\/Code\/acme\/coffre\.json names: run `coffre login https:\/\/coffre\.acme\.example`$/,
+    /^Error: not signed in to https:\/\/coffre\.acme\.example, which \/home\/ada\/Code\/acme\/coffre\.json names: run `coffre login https:\/\/coffre\.acme\.example`\n/,
   );
   // A CI run's ID token is asked for that origin alone, which no other instance takes: it needs no --url.
   assert.deepEqual(resolveTarget({ service: 'deploy' }, emptyStore(), file, NOW), {
@@ -301,7 +345,7 @@ test('a directory pinned to an instance with no session asks for a login there, 
   const pin: Local = { directory: '/home/ada/Code/gone', origin: 'https://gone.example.com', by: 'pin' };
   assert.throws(
     () => resolveTarget({}, storeWith(), pin, NOW),
-    /^Error: not signed in to https:\/\/gone\.example\.com: run `coffre login https:\/\/gone\.example\.com`$/,
+    /^Error: not signed in to https:\/\/gone\.example\.com: run `coffre login https:\/\/gone\.example\.com`\n/,
   );
 });
 

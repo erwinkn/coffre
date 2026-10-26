@@ -12,6 +12,7 @@ import { everyRoute } from '@coffre/client/routes';
 
 import { ENTRIES, PARITY } from '../src/commands.ts';
 import { commandLine, SESSION_OPTIONS } from '../src/flags.ts';
+import { signInError } from '../src/instance.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const COMMANDS = [...new Set(ENTRIES.map(({ command }) => command))];
@@ -153,5 +154,5 @@ test('a saved session the instance does not know is said plainly, with the login
   chmodSync(join(home, '.coffre', 'credentials.json'), 0o600);
   const run = await coffre(['whoami'], home);
   assert.equal(run.code, 1);
-  assert.equal(run.stderr, `coffre: ${origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: \`coffre login ${origin}\`\n`);
+  assert.equal(run.stderr, `coffre: ${signInError(`${origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: \`coffre login ${origin}\``, 'signin')}\n`);
 });

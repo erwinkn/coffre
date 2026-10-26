@@ -560,6 +560,12 @@ export const DELEGABLE_ROLES: readonly Role[] = delegableRoles();
 export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
 
 /**
+ * How long a `coffre login` code waits to be approved. The server expires it
+ * then, and the CLI's sign-in hint says so before it has asked for one.
+ */
+export const DEVICE_TTL_SECONDS = 10 * 60;
+
+/**
  * A credential's scope, by path as the API names it, in words, each role
  * with its places: `developer on market/dev, api/dev; viewer on market/prod`.
  */

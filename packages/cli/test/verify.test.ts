@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 import { appLogKeyId, KEY_CHECK_CONTEXT, KEY_CHECK_VALUE, LocalKekProvider } from '@coffre/core/kek';
 
+import { signInError } from '../src/instance.ts';
 import { Failure, Skip } from '../src/verify/checks.ts';
 import { appKeyVerdict, vaultKeyVerdict, type KeyMaterial } from '../src/verify/keys.ts';
 import { inTerminal, ptySkip, visible } from './pty.ts';
@@ -233,11 +234,18 @@ test('coffre verify instance without a session says to sign in first, and checks
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const nowhere = await coffre(['verify', 'instance'], home);
   assert.equal(nowhere.code, 1);
-  assert.equal(nowhere.stderr, 'coffre: not signed in anywhere yet: run `coffre login <url>` first\n');
+  assert.equal(nowhere.stderr, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first')}\n`);
   const elsewhere = await coffre(['verify', 'instance', 'https://coffre.acme.example'], home);
   assert.equal(elsewhere.code, 1);
-  assert.equal(elsewhere.stderr, 'coffre: not signed in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` first\n');
-  assert.equal(nowhere.stdout + elsewhere.stdout, '');
+  assert.equal(elsewhere.stderr, `coffre: ${signInError('not signed in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` first')}\n`);
+  // Named a sign-in instance by --auth-mode, it is not hedged about Access.
+  const named = await coffre(['--auth-mode', 'signin', 'verify', 'instance', 'https://coffre.acme.example'], home);
+  assert.equal(named.stderr, `coffre: ${signInError('not signed in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` first', 'signin')}\n`);
+  const access = await coffre(['--auth-mode', 'cloudflare', 'verify', 'instance', 'https://coffre.acme.example'], home);
+  assert.equal(access.stderr, 'coffre: not signed in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` first\n', 'Access signs in with cloudflared: no code to explain');
+  const noUrl = await coffre(['--auth-mode', 'signin', 'verify', 'instance'], home);
+  assert.equal(noUrl.stderr, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first', 'signin')}\n`);
+  assert.equal(nowhere.stdout + elsewhere.stdout + named.stdout + access.stdout + noUrl.stdout, '');
 });
 
 test('coffre verify alone, without a terminal, lists the checks and exits 2', async (t) => {

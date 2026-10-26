@@ -16,7 +16,7 @@ import { parseArgs } from 'node:util';
 import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
-import { credentialHeaders, instanceOrigin, resolveTarget, type Local, type SessionFlags, type Store } from '../instance.ts';
+import { askedMode, credentialHeaders, instanceOrigin, resolveTarget, signInError, signInHint, type Local, type SessionFlags, type Store } from '../instance.ts';
 import { style, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
 import { Checks, expect, Failure, stop } from './checks.ts';
@@ -80,7 +80,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     );
   }
   const requested = positionals[0] ?? session.url ?? local?.origin ?? store.current;
-  if (!requested) stop(1, 'coffre: not signed in anywhere yet: run `coffre login <url>` first');
+  if (!requested) stop(1, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first', askedMode(session.authMode))}`);
   let origin: string;
   try {
     origin = instanceOrigin(requested);
@@ -117,7 +117,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   }
 
   // The session `coffre login` made, and none other: no second sign-in.
-  if (store.instances[origin] === undefined) stop(1, `coffre: not signed in to ${origin}: run \`coffre login ${origin}\` first`);
+  if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in to ${origin}: run \`coffre login ${origin}\` first`, askedMode(session.authMode))}`);
   let api: CoffreClient;
   try {
     const to = resolveTarget({ ...session, url: origin }, store);
@@ -179,7 +179,7 @@ async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: st
     me = await api.me();
   } catch (error) {
     if (error instanceof CoffreError && error.status === 401) {
-      throw new Failure(`your session on ${origin} is missing, expired or revoked: run \`coffre login ${origin}\`, then again`);
+      throw new Failure(`your session on ${origin} is missing, expired or revoked: run \`coffre login ${origin}\`, then again`, signInHint(true).replace(/^ {2}/gm, ''));
     }
     throw error;
   }
