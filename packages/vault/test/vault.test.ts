@@ -2410,6 +2410,38 @@ test('an entry edited in place behind the newest checkpoint is found by the reha
   assert.deepEqual(laps, [...Array(Number(edited) / 2 | 0).fill(true), false]);
 });
 
+test('a refusal of an entry behind the newest checkpoint stands for a call that walks past it, until the entry is whole again (T104)', async () => {
+  // A lap of the rehash of the past one entry a call, which reaches nothing near the edit here.
+  const w = await world({}, { walks: { scrub: 1 } });
+  for (const name of ['ada', 'bob', 'cy', 'di']) await member(w, `user:${name}@acme.example`, [[w.dev, 'viewer']]);
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok);
+  // An entry the checkpoint signed over, edited in place after it walked it, its hash left as it was. Another call,
+  // which walked on from an earlier checkpoint, found it, and refused: its refusal, as it writes one, under the
+  // vault's key.
+  const edited = BigInt(signed.checkpoint.seq - 1);
+  const { auditLog } = tablesOf(db.owner);
+  const [{ actor }] = await db.owner.select({ actor: auditLog.actor }).from(auditLog).where(eq(auditLog.seq, edited));
+  await rewrite(edited, 'in place');
+  await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
+    actor: 'system:coffre-scheduler', action: 'audit.checkpoint', decision: 'deny', code: 'log_broken',
+    metadata: JSON.stringify({ failedAtSeq: Number(edited), reason: 'hash does not match the entry' }),
+  }]));
+  await member(w, 'user:eve@acme.example', []);
+
+  // The next call resumes from the newest checkpoint, past the edit, and walks only what came since: it checks the
+  // entry the refusal names again, finds it broken still, and refuses as well.
+  const next = await w.vault.checkpoint();
+  assert.equal(!next.ok && next.refusal.code, 'log_broken');
+  assert.equal((await vaultLog(w)).at(-1)!.detail.failedAtSeq, Number(edited));
+
+  // Put back, the entry holds again, and the next call signs, which clears the refusal.
+  await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor }).where(eq(auditLog.seq, edited)));
+  const cleared = await w.vault.checkpoint();
+  assert.ok(cleared.ok, JSON.stringify(cleared));
+  assert.ok(cleared.checkpoint.seq > signed.checkpoint.seq);
+});
+
 test('a lap of the rehash of the past ends where it began to, so a log growing faster than it still gets back to its start', async () => {
   const w = await world({}, { walks: { scrub: 2 } });
   for (const name of ['ada', 'bob', 'cy']) await member(w, `user:${name}@acme.example`, [[w.dev, 'viewer']]);

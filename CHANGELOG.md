@@ -14,6 +14,15 @@
   a database 25 ms away, one sign-in went from 396 ms to 250 ms, three at
   once from 943 ms to 707 ms at p99, and ten at once from 2,473 ms to
   1,514 ms. No migration.
+- **A refusal to checkpoint stands until the entry it found is whole
+  again.** With three checkpoints at once, one could refuse for an entry
+  edited after another had signed past it, and a third, starting after
+  the refusal, resume from the second's checkpoint and sign, never reading
+  the entry: the edit stayed unflagged until the rehash of the past found
+  it again, within two laps. Now, while a refusal stands, a checkpoint
+  whose walk began after the entry it names checks that entry again under
+  the head, its hash, its link and the vault's MAC, and refuses while it
+  is still broken (T104, found by `formal/Audit.tla`).
 
 ## 0.14.3 (2026-10-26)
 
