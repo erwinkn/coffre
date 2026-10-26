@@ -38,19 +38,24 @@ import { DEVICE_TTL_SECONDS } from '@coffre/core/access';
  * tells them to: the device flow is the same for a person at a terminal, over
  * SSH, and for an agent, which must not wait on it in the foreground.
  */
-export function signInHint(): string {
+export function signInHint(known = false): string {
   const minutes = Math.round(DEVICE_TTL_SECONDS / 60);
   return [
     '  `coffre login` prints a link and a code, then waits. Open the link on any device where you are signed in to coffre',
     '  (it works over SSH too), check that it shows that code, and press Approve.',
     '  From an agent or a script: run it in the background, pass the link and code on, and wait.',
-    `  It returns once approved, or fails after ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+    `  It returns once approved, fails at once if declined, or fails after ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+    // Which sign-in an instance has is only known once it was signed in to, or named by --auth-mode.
+    ...(known ? [] : ['  (An instance behind Cloudflare Access signs in through cloudflared instead: no code, no link.)']),
   ].join('\n');
 }
 
-/** A sign-in error: `message`, which names the command, and what the command asks of whoever runs it. */
-export function signInError(message: string): string {
-  return `${message}\n${signInHint()}`;
+/**
+ * A sign-in error: `message`, which names the command, and what the command asks of whoever runs it.
+ * `known`: the instance is one coffre signs in, from a saved session or --auth-mode, not one asked about for the first time.
+ */
+export function signInError(message: string, known = false): string {
+  return `${message}\n${signInHint(known)}`;
 }
 
 /** Who vouches for you there: coffre's own sign-in, or Cloudflare Access in front of it. */
@@ -406,7 +411,7 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
     const named = choice.by === 'file' ? `, which ${join(choice.directory, REPO_FILE)} names` : '';
     const message = `not signed in to ${origin}${named}: ${relogin}`;
     // Access has its own sign-in, cloudflared's, not the device flow the hint explains.
-    throw new Error(mode === 'cloudflare' ? message : signInError(message));
+    throw new Error(mode === 'cloudflare' ? message : signInError(message, explicitMode === 'signin' || stored?.mode === 'signin'));
   }
   const by = stored.kind ?? 'person';
   if (mode === 'cloudflare') {
@@ -414,14 +419,17 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
     if (!stored.clientId || !stored.clientSecret) throw new Error(`not signed in to ${origin}: ${relogin}`);
     return { origin, mode, by, credential: { kind: 'access-service-token', clientId: stored.clientId, clientSecret: stored.clientSecret } };
   }
-  if (!stored.token) throw new Error(signInError(`not signed in to ${origin}: ${relogin}`));
+  if (!stored.token) {
+    const message = `not signed in to ${origin}: ${relogin}`;
+    throw new Error(by === 'person' ? signInError(message, true) : message);
+  }
   if (stored.expiresAt && Date.parse(stored.expiresAt) <= now.getTime()) {
     const ended = `your session on ${origin} ended on ${stored.expiresAt.slice(0, 10)}: ${relogin}`;
     throw new Error(
       by === 'run'
         ? `the credential this run's ID token bought on ${origin} lasted until ${stored.expiresAt.slice(11, 19)}: sign in again, \`coffre login ${origin} --service ${stored.principal?.id ?? '<name>'}\``
         : by === 'person'
-          ? signInError(ended)
+          ? signInError(ended, true)
           : ended,
     );
   }

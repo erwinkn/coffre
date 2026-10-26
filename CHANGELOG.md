@@ -12,12 +12,14 @@
   and four lines under it say: open the link on any device where you are
   signed in to coffre, check the code, press Approve; from an agent or a
   script, run it in the background, pass the link and code on, and wait; it
-  returns once approved, or fails after 10 minutes (`DEVICE_TTL_SECONDS`,
+  returns once approved, fails at once if declined, or fails after 10 minutes (`DEVICE_TTL_SECONDS`,
   now in `@coffre/core/access`, which the server expires the code by). One
   function, `signInHint` in `packages/cli/src/instance.ts`, builds it for
   every such error: a command with no session, a session ended or unknown
-  to the instance, `coffre use`, `coffre verify instance`. A Cloudflare
-  Access instance signs in with cloudflared, not a code, and gets none.
+  to the instance, `coffre use`, `coffre verify instance`. An instance
+  not signed in to yet gets a line saying that behind Cloudflare Access,
+  which signs in with cloudflared, there is no code; one that signs in
+  with cloudflared already gets no hint.
   `coffre login` also says how long it waits: "Waiting for you to approve
   it; the code expires in 10 minutes…".
 - **`coffre update` updates an npm global whose prefix npm no longer has as
@@ -27,7 +29,8 @@
   `npm install -g` that would have put a second copy under the new prefix,
   shadowed on `PATH` by the old one. A CLI that runs from
   `<prefix>/lib/node_modules/@coffre/cli` (on Windows,
-  `<prefix>\node_modules\@coffre\cli`, with npm's `coffre.cmd` beside it) is
+  `<prefix>\node_modules\@coffre\cli`), with npm's shim beside it
+  (`<prefix>/bin/coffre`, on Windows `<prefix>\coffre.cmd`), is
   now npm's global at that prefix, and is updated with
   `npm install -g --prefix <prefix> @coffre/cli@<version>`. A project's
   dependency, pnpm's globals and npx's cache are told apart first; npm's

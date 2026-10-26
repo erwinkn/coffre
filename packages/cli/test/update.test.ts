@@ -84,34 +84,39 @@ test('how the CLI was installed: by what npm and pnpm say their globals are, not
 
 test("a CLI under a prefix that is no longer npm's own is still an npm global, updated at that prefix", () => {
   const none = { npm: null, pnpm: null, pnpmHome: null };
+  const shimmed = () => true;
   const prefix = '/home/ada/.npm-global';
   const dir = `${prefix}/lib/node_modules/@coffre/cli`;
   // Node was reinstalled: npm's prefix is /opt/…, lists nothing, and says nothing of this copy.
-  assert.deepEqual(installOf(`${dir}/dist/main.js`, { ...none, npm: null }), { kind: 'npm', prefix, dir });
+  assert.deepEqual(installOf(`${dir}/dist/main.js`, { ...none, npm: null }, undefined, shimmed), { kind: 'npm', prefix, dir });
   // A prefix that is the root, or one with a space in it.
-  assert.deepEqual(installOf('/lib/node_modules/@coffre/cli/dist/main.js', none), { kind: 'npm', prefix: '/', dir: '/lib/node_modules/@coffre/cli' });
-  assert.equal((installOf('/home/ada/My Tools/lib/node_modules/@coffre/cli/dist/main.js', none) as { prefix: string }).prefix, '/home/ada/My Tools');
+  assert.deepEqual(installOf('/lib/node_modules/@coffre/cli/dist/main.js', none, undefined, shimmed), { kind: 'npm', prefix: '/', dir: '/lib/node_modules/@coffre/cli' });
+  assert.equal((installOf('/home/ada/My Tools/lib/node_modules/@coffre/cli/dist/main.js', none, undefined, shimmed) as { prefix: string }).prefix, '/home/ada/My Tools');
   // When npm lists it, the prefix is npm's own: the command stays `npm install -g`.
-  assert.deepEqual(installOf(`${dir}/dist/main.js`, { ...none, npm: dir }), { kind: 'npm' });
+  assert.deepEqual(installOf(`${dir}/dist/main.js`, { ...none, npm: dir }, undefined, shimmed), { kind: 'npm' });
   // A project is a project, even one with a lib/ of its own; so are pnpm's and npx's.
-  assert.deepEqual(installOf('/srv/lib/node_modules/@coffre/cli/dist/main.js', none, (at) => at === '/srv/lib'), { kind: 'project', dir: '/srv/lib' });
-  assert.deepEqual(installOf(`${dir}/dist/main.js`, { ...none, pnpm: dir }), { kind: 'pnpm' });
-  assert.deepEqual(installOf('/home/ada/.local/share/pnpm/global/5/.pnpm/@coffre+cli@0.1.11/node_modules/@coffre/cli/dist/main.js', none), {
+  assert.deepEqual(installOf('/srv/lib/node_modules/@coffre/cli/dist/main.js', none, (at) => at === '/srv/lib', shimmed), { kind: 'project', dir: '/srv/lib' });
+  assert.deepEqual(installOf(`${dir}/dist/main.js`, { ...none, pnpm: dir }, undefined, shimmed), { kind: 'pnpm' });
+  assert.deepEqual(installOf('/home/ada/.local/share/pnpm/global/5/.pnpm/@coffre+cli@0.1.11/node_modules/@coffre/cli/dist/main.js', none, undefined, shimmed), {
     kind: 'unknown',
     path: '/home/ada/.local/share/pnpm/global/5/.pnpm/@coffre+cli@0.1.11/node_modules/@coffre/cli/dist/main.js',
   });
-  assert.deepEqual(installOf('/home/ada/.npm/_npx/0a1b2c/lib/node_modules/@coffre/cli/dist/main.js', none), { kind: 'npx' });
+  assert.deepEqual(installOf('/home/ada/.npm/_npx/0a1b2c/lib/node_modules/@coffre/cli/dist/main.js', none, undefined, shimmed), { kind: 'npx' });
+  // The layout alone is not enough: a lib/ folder of a project, with no npm shim beside it, is not a prefix.
+  const copy = '/home/ada/work/lib/node_modules/@coffre/cli/dist/main.js';
+  assert.deepEqual(installOf(copy, none, () => false, () => false), { kind: 'unknown', path: copy });
+  assert.deepEqual(installOf(copy, none, () => false, (prefix) => prefix === '/home/ada/work'), { kind: 'npm', prefix: '/home/ada/work', dir: '/home/ada/work/lib/node_modules/@coffre/cli' });
   // Not npm's layout: a node_modules without lib/, another package, a different place for the cli.
-  assert.deepEqual(installOf('/opt/tools/node_modules/@coffre/cli/dist/main.js', none), { kind: 'unknown', path: '/opt/tools/node_modules/@coffre/cli/dist/main.js' });
-  assert.deepEqual(installOf('/opt/lib/node_modules/@coffre/client/dist/main.js', none), { kind: 'unknown', path: '/opt/lib/node_modules/@coffre/client/dist/main.js' });
-  assert.deepEqual(installOf('/opt/lib/node_modules/@coffre/cli-extras/dist/main.js', none), { kind: 'unknown', path: '/opt/lib/node_modules/@coffre/cli-extras/dist/main.js' });
+  assert.deepEqual(installOf('/opt/tools/node_modules/@coffre/cli/dist/main.js', none, undefined, shimmed), { kind: 'unknown', path: '/opt/tools/node_modules/@coffre/cli/dist/main.js' });
+  assert.deepEqual(installOf('/opt/lib/node_modules/@coffre/client/dist/main.js', none, undefined, shimmed), { kind: 'unknown', path: '/opt/lib/node_modules/@coffre/client/dist/main.js' });
+  assert.deepEqual(installOf('/opt/lib/node_modules/@coffre/cli-extras/dist/main.js', none, undefined, shimmed), { kind: 'unknown', path: '/opt/lib/node_modules/@coffre/cli-extras/dist/main.js' });
 });
 
 test('a moved npm prefix is updated by name; npm and pnpm own globals as they were', () => {
   assert.deepEqual(updateCommand({ kind: 'npm' }, '0.14.4'), ['npm', ['install', '-g', '@coffre/cli@0.14.4']]);
   assert.deepEqual(updateCommand({ kind: 'pnpm' }, '0.14.4'), ['pnpm', ['add', '-g', '@coffre/cli@0.14.4']]);
   const prefix = '/home/ada/.npm-global';
-  const how = installOf(`${prefix}/lib/node_modules/@coffre/cli/dist/main.js`, { npm: null, pnpm: null, pnpmHome: null });
+  const how = installOf(`${prefix}/lib/node_modules/@coffre/cli/dist/main.js`, { npm: null, pnpm: null, pnpmHome: null }, undefined, () => true);
   assert.deepEqual(how.kind === 'npm' && updateCommand(how, '0.14.4'), ['npm', ['install', '-g', '--prefix', prefix, '@coffre/cli@0.14.4']]);
 });
 

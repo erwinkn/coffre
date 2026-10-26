@@ -154,5 +154,5 @@ test('a saved session the instance does not know is said plainly, with the login
   chmodSync(join(home, '.coffre', 'credentials.json'), 0o600);
   const run = await coffre(['whoami'], home);
   assert.equal(run.code, 1);
-  assert.equal(run.stderr, `coffre: ${signInError(`${origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: \`coffre login ${origin}\``)}\n`);
+  assert.equal(run.stderr, `coffre: ${signInError(`${origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: \`coffre login ${origin}\``, true)}\n`);
 });

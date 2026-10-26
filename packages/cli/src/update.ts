@@ -70,7 +70,12 @@ export type Globals = { npm: string | null; pnpm: string | null; pnpmHome: strin
  * global package in its store's links/, where a project's may be too.
  * `isProject` says whether a directory is one that depends on @coffre/cli.
  */
-export function installOf(path: string, globals: Globals, isProject: (dir: string) => boolean = dependsOnCli): Install {
+export function installOf(
+  path: string,
+  globals: Globals,
+  isProject: (dir: string) => boolean = dependsOnCli,
+  shimmed: (prefix: string) => boolean = hasShim,
+): Install {
   const within = (dir: string | null) => dir !== null && (path === dir || path.startsWith(dir + sep));
   if (path.includes(`${sep}_npx${sep}`)) return { kind: 'npx' };
   if (within(globals.pnpm)) return { kind: 'pnpm' };
@@ -80,9 +85,9 @@ export function installOf(path: string, globals: Globals, isProject: (dir: strin
   const modules = path.indexOf(`${sep}node_modules${sep}`);
   if (modules !== -1 && isProject(path.slice(0, modules))) return { kind: 'project', dir: path.slice(0, modules) };
   // A prefix npm no longer has as its own, after a Node reinstall: npm lists nothing there, but the layout says it.
-  // On Windows, npm's layout is a project's too, and pnpm's store may have it: its shim beside it says it is npm's.
+  // The layout alone is not npm's: a project's may be the same. The shim npm made beside it says that it is.
   const moved = npmPrefixOf(path);
-  if (moved !== null && (sep === '/' || existsSync(join(moved.prefix, 'coffre.cmd')))) return { kind: 'npm', ...moved };
+  if (moved !== null && shimmed(moved.prefix)) return { kind: 'npm', ...moved };
   if (modules !== -1) return { kind: 'unknown', path };
   if (path.includes(`${sep}packages${sep}cli${sep}`)) return { kind: 'checkout' };
   return { kind: 'unknown', path };
@@ -103,6 +108,11 @@ export function npmPrefixOf(path: string, flavour: typeof posix | typeof win32 =
   // The root has no name left: `/`, or `C:\`.
   const prefix = above === '' || /^[A-Za-z]:$/.test(above) ? above + flavour.sep : above;
   return { prefix, dir: parts.slice(0, at + tail.length).join(flavour.sep) };
+}
+
+/** Whether npm's global bin for `coffre` is at `prefix`: `bin/coffre`, on Windows `coffre.cmd` in the prefix itself. */
+function hasShim(prefix: string): boolean {
+  return existsSync(sep === '\\' ? join(prefix, 'coffre.cmd') : join(prefix, 'bin', 'coffre'));
 }
 
 /** Whether `dir` is a project with @coffre/cli among its dependencies. */

@@ -480,7 +480,7 @@ function refused(to: Target): string {
     case 'person':
       return to.mode === 'cloudflare'
         ? `${to.origin} refused your Cloudflare Access sign-in: run ${relogin}`
-        : signInError(`${to.origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: ${relogin}`);
+        : signInError(`${to.origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: ${relogin}`, true);
   }
 }
 
@@ -755,10 +755,10 @@ async function pollDevice(
     }
     if (error === 'authorization_pending') continue;
     if (error === 'access_denied') fail('the sign-in was declined in the browser');
-    if (error === 'expired_token') fail('the code expired before it was approved; run `coffre login` again');
+    if (error === 'expired_token') fail(signInError('the code expired before it was approved; run `coffre login` again', true));
     fail(`sign-in failed: ${error ?? `status ${response.status}`}`);
   }
-  fail('the code expired before it was approved; run `coffre login` again');
+  fail(signInError('the code expired before it was approved; run `coffre login` again', true));
 }
 
 /** Best effort: on a machine without a desktop the printed link is enough. */

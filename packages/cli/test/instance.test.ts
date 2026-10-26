@@ -15,6 +15,7 @@ import {
   parseStore,
   pinFor,
   resolveTarget,
+  signInError,
   signInHint,
   within,
   withPin,
@@ -158,31 +159,38 @@ test('an instance with no saved session asks for a login there', () => {
 });
 
 test('every message that sends someone to `coffre login` explains the device flow under it, in one shared hint', () => {
-  const hint = signInHint();
+  const hint = signInHint(true);
   // What a person and an agent each need: a link and a code, any device, the background, and how long it waits (the server's).
   assert.match(hint, /prints a link and a code, then waits/);
   assert.match(hint, /any device where you are signed in to coffre/);
   assert.match(hint, /press Approve/);
   assert.match(hint, /run it in the background, pass the link and code on, and wait/);
-  assert.match(hint, /after 10 minutes\.$/);
+  assert.match(hint, /fails at once if declined, or fails after 10 minutes\.$/);
+  // An instance not yet signed in to may be behind Access, which signs in through cloudflared: it says so.
+  assert.equal(signInHint(), `${hint}\n  (An instance behind Cloudflare Access signs in through cloudflared instead: no code, no link.)`);
 
-  const first = (error: unknown) => (error as Error).message.split('\n')[0];
-  const sentTo = (call: () => unknown, line: string) =>
+  const sentTo = (call: () => unknown, line: string, known: boolean) =>
     assert.throws(call, (error: Error) => {
-      assert.equal(first(error), line, 'the first line is the one grep finds');
-      assert.equal(error.message, `${line}\n${hint}`);
+      assert.equal(error.message.split('\n')[0], line, 'the first line is the one grep finds');
+      assert.equal(error.message, signInError(line, known));
       return true;
     });
-  sentTo(() => resolveTarget({}, emptyStore(), null, NOW), 'not signed in anywhere yet: run `coffre login <url>`');
-  sentTo(() => choose({}, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`');
-  sentTo(() => resolveTarget({ url: 'https://other.example.com' }, storeWith(), null, NOW), 'not signed in to https://other.example.com: run `coffre login https://other.example.com`');
+  sentTo(() => resolveTarget({}, emptyStore(), null, NOW), 'not signed in anywhere yet: run `coffre login <url>`', false);
+  sentTo(() => choose({}, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`', false);
+  sentTo(() => resolveTarget({ url: 'https://other.example.com' }, storeWith(), null, NOW), 'not signed in to https://other.example.com: run `coffre login https://other.example.com`', false);
+  // Named a sign-in instance by --auth-mode: known.
+  sentTo(() => resolveTarget({ url: 'https://other.example.com', authMode: 'signin' }, storeWith(), null, NOW), 'not signed in to https://other.example.com: run `coffre login https://other.example.com`', true);
   sentTo(
     () => resolveTarget({}, storeWith(), null, new Date('2026-11-01T00:00:00Z')),
     `your session on ${OURS} ended on 2026-10-26: run \`coffre login ${OURS}\``,
+    true,
   );
-  // A session with no token left in it.
-  const tokenless = withSession(emptyStore(), OURS, { mode: 'signin', obtainedAt: '2026-09-26T00:00:00Z' });
-  sentTo(() => resolveTarget({}, tokenless, null, NOW), `not signed in to ${OURS}: run \`coffre login ${OURS}\``);
+  // A person's session with no token left in it; a bearer token's or a CI run's is signed in again another way.
+  const tokenless = (kind?: 'token' | 'run') => withSession(emptyStore(), OURS, { mode: 'signin', ...(kind === undefined ? {} : { kind }), obtainedAt: '2026-09-26T00:00:00Z' });
+  sentTo(() => resolveTarget({}, tokenless(), null, NOW), `not signed in to ${OURS}: run \`coffre login ${OURS}\``, true);
+  for (const kind of ['token', 'run'] as const) {
+    assert.throws(() => resolveTarget({}, tokenless(kind), null, NOW), (error: Error) => !error.message.includes('\n'));
+  }
   // Cloudflare Access signs in with cloudflared, not a code: no hint.
   assert.throws(() => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW), (error: Error) => !error.message.includes('\n'));
 });
