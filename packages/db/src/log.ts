@@ -60,6 +60,20 @@ export class LogHeadMismatch extends Error {
 }
 
 /**
+ * As many transactions as may already wait for the log's head do
+ * (`lockLogHeadQueued`): this one waits for nothing, and holds nothing.
+ * Its code is Postgres's for a lock not available, so every caller already
+ * answers it as one that gave up waiting: unavailable, ask again shortly.
+ */
+export class HeadBusy extends Error {
+  readonly code = '55P03';
+  constructor() {
+    super("too many requests wait for the audit log's head: ask again shortly");
+    this.name = 'HeadBusy';
+  }
+}
+
+/**
  * The log's head is behind one this process wrote: the database was rolled
  * back, or entries were cut off its end. That cannot be told from a restore,
  * so the append refuses and someone has to look.
@@ -154,6 +168,44 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
   if (rows.length > 0) holding.add(tx);
   return rows.length > 0;
 }
+
+/**
+ * Lock the log's head, waiting for it as `lockLogHead` does, if fewer than
+ * `waiters` other transactions hold one of its places in line; otherwise
+ * refuse at once (`HeadBusy`), having waited for nothing. A place is an
+ * advisory lock, tried, never waited for, and held to the end of the
+ * transaction, which holds the head by then: so at most `waiters`
+ * connections wait for the head, or hold it, through here, and a burst
+ * beyond them answers in one round trip rather than seconds later, holding
+ * a connection all the while. One statement: the place, then, only if one
+ * was free, the head; refused, one more says whether the head is there at
+ * all. SQLite's transactions hold the whole file.
+ */
+export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promise<{ nextSeq: bigint; headHash: Buffer }> {
+  if (engineOf(tx) === 'sqlite') return lockLogHead(tx);
+  const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: { next_seq: string; head_hash: Buffer }[] }> }).execute(sql`
+    SELECT next_seq, head_hash FROM audit_chain_head
+    WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINE}, place) LIMIT 1)
+    FOR UPDATE`);
+  const [head] = rows;
+  if (head === undefined) {
+    // No place, or no head at all: the second, which no one may write past, said as lockLogHead says it.
+    const { rows: [found] } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: { found: boolean }[] }> }).execute(
+      sql`SELECT EXISTS (SELECT 1 FROM audit_chain_head WHERE only_row) AS found`,
+    );
+    if (found?.found !== true) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+    throw new HeadBusy();
+  }
+  holding.add(tx);
+  return { nextSeq: BigInt(head.next_seq), headHash: head.head_hash };
+}
+
+/**
+ * The first key of the head's places in line, Postgres's advisory locks:
+ * the second is the place. A space apart from the members' queues and the
+ * migrator's key.
+ */
+const HEAD_LINE = 0x636f6668;
 
 const lockedHead = prepared((db) => {
   const { auditChainHead } = tablesOf(db);

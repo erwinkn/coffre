@@ -602,8 +602,22 @@ removal waits queues behind it, so a steady stream of reads never holds a
 removal off. Each statement of a read's decision runs at most three
 seconds, a wait for a lock included, then fails as unavailable: a
 statement, not a lock timeout, since a waiter for the log's head waits
-again on each new version of it. A change waits up to fifteen seconds for
-each lock, and so does the entry of a refused read.
+again on each new version of it. A read's whole call, its retries, a
+refusal's entries, the record of a vault key's check and a key service's
+intent included, is due five seconds after its key decision starts, once
+it has read the versions it opens (with a key service,
+plus the service's own five-second budget, which it spends from the same
+deadline): each statement of a transaction it starts runs at most what was
+left when the transaction began, and past the deadline the call starts
+nothing more and fails as unavailable. Only settling the vault's keys after
+a rotation, and converting a 0.4 instance's grants, each once, are not
+bound by it. At most sixteen
+reads wait for the head at once, each holding one of its places in line,
+an advisory lock tried and never waited for; the next is refused at once,
+as unavailable (55P03), and holds no connection while it would have
+waited. A caller hears 503 with `Retry-After`, never tens of seconds later.
+A change waits up to fifteen seconds for each lock, and so does the entry
+of a change's refusal.
 
 ### The bulk limit
 

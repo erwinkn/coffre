@@ -32,7 +32,7 @@ import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
-import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
+import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
 import {
   emptyDatabase,
   ENGINE,
@@ -70,8 +70,8 @@ beforeEach(() => emptyDatabase(db.owner));
 type World = Awaited<ReturnType<typeof places>> & {
   vault: LocalVault;
   clock: { offset: number };
-  /** Another instance of the same vault, over connections of its own, as a second process or isolate. */
-  twin(): Promise<LocalVault>;
+  /** Another instance of the same vault, over connections of its own (up to `connections` at once), as a second process or isolate. */
+  twin(connections?: number): Promise<LocalVault>;
 };
 
 function configure(overrides: Partial<ResolvedVaultConfig> = {}): ResolvedVaultConfig {
@@ -101,7 +101,7 @@ async function world(overrides: Partial<ResolvedVaultConfig> = {}, options: Vaul
   // A vault that names someone else, or nobody, finds them one.
   const named = config.owners.includes('root@acme.example') ? vault : await openLocalVault(db.vault, configure(), options);
   assert.equal((await named.access(ROOT)).role, 'owner');
-  return { ...(await places(db.owner)), vault, clock, twin: async () => open(await db.connect()) };
+  return { ...(await places(db.owner)), vault, clock, twin: async (connections) => open(await db.connect(connections)) };
 }
 
 /** A vault started afresh over the same database: it has verified nothing yet. */
@@ -1124,6 +1124,51 @@ test('a read gives up a lock it waits seconds for, and fails as unavailable, its
   await holds;
   assert.ok(took >= 2_500 && took < 6_000, `the read waited ${took} ms`);
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'and the next one, the head free, reads');
+});
+
+test("a burst of reads at a held head: those past its places in line are refused at once, and none waits past its deadline", postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  // Over enough connections for every place in line and one more, each read on its own, as isolates are; once first,
+  // so that what a process does once is done.
+  const vault = await w.twin(READ_HEAD_WAITERS + 4);
+  assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+  const holder = await db.connect();
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holds = holder.transaction(async (tx) => {
+    await lockLogHead(tx);
+    holding();
+    await released;
+  });
+  await held;
+  // As many reads as may wait for the head, each on a connection of its own, until they all do.
+  const started = Date.now();
+  const timed = () => vault.unwrap({ principal: ADA, purpose: 'reveal', items }).then(
+    (outcome) => ({ ok: outcome.ok, error: null as unknown, ms: Date.now() - started }),
+    (error: unknown) => ({ ok: false, error, ms: Date.now() - started }),
+  );
+  const waiting = Array.from({ length: READ_HEAD_WAITERS }, timed);
+  const inLine = async () => (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND classid::bigint = ${0x636f6668} AND granted`))[0]!.n;
+  while ((await inLine()) < READ_HEAD_WAITERS) await sleep(20);
+  // The next waits for nothing: unavailable, at once, as a lock not available.
+  const refusedAt = Date.now();
+  await assert.rejects(vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error & { code?: string }) => isUnavailable(error) && error.code === '55P03');
+  assert.ok(Date.now() - refusedAt < 1_000, `the read past the line was refused after ${Date.now() - refusedAt} ms`);
+  // Those in line give up at their bound, unavailable, within the call's deadline.
+  const outcomes = await Promise.all(waiting);
+  release();
+  await holds;
+  for (const { ok, error, ms } of outcomes) {
+    assert.ok(!ok && isUnavailable(error), `a read in line ended ${ok ? 'ok' : String(error)}`);
+    assert.ok(ms < READ_DEADLINE_MS + 1_000, `a read in line answered after ${ms} ms`);
+  }
+  assert.equal(await inLine(), 0, 'and every place is free again');
+  assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'the head free, the next read reads');
 });
 
 // --- the KEK -------------------------------------------------------------------
