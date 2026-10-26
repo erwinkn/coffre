@@ -1128,10 +1128,13 @@ every pull request that is not a version-only bump:
   after it was made, so after a quiet week the first run is a full one. To
   trust nothing, label the pull request `full-formal` and re-run the plan.
   A cache counts only if the run it names is one of
-  `validate.yml`'s and its *Formal model* job ran the step named for that
-  key and run, which only happens after every shard held, and each shard checks
-  that its own Java gives the plan's key; what is left to trust is whoever
-  can merge a workflow change, as the check itself is.
+  `validate.yml`'s, at a commit whose model, script and workflow files are
+  the ones hashed, and its *Formal model* job ran the step named for that
+  key and run, which only happens after every shard held; each shard
+  checks that its own Java gives the plan's key. Anyone who can push a
+  branch could already make `Validate` pass by editing the workflow in their
+  own pull request, so this guards against mistakes and stale answers, not
+  against them.
 - **A run is three jobs in parallel.** `scripts/formal.sh --shard
   tampering|large|rest` runs the scenarios of one (`shard_of`), each with its
   runs without a protection, balanced by what they took: Tampering's 7 to 11

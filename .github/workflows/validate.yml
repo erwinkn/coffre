@@ -114,20 +114,24 @@ jobs:
           # merged from a PR is a hit for the next one.
           hit=false
           run=""
-          labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')"
+          # A lookup that fails is a full run, the safe way.
+          labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')" || labels=full-formal
           if grep -qx full-formal <<< "$labels"; then
             echo "The full-formal label asks for a full run."
           else
-            # Newest first. A key counts only if the run in it is one of this workflow's and,
-            # in some attempt, its `Formal model` job ran the step named for this very key and
-            # run (the last step below, which runs only after every shard held): a cache saved
-            # by hand, or under another run's id, names no such step. Jobs of every attempt.
+            # Newest first. A key counts only if the run in it is one of this workflow's, its
+            # commit holds the very files the key hashes (so a doctored workflow's run, which
+            # saved a key of its choosing, is no source) and, in some attempt, its `Formal
+            # model` job ran the step named for this very key and run (the last step below,
+            # which runs only after every shard held). Jobs of every attempt.
             candidates="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
-              jq -r --arg prefix "$key-" '.actions_caches[] | select(.key | startswith($prefix)) | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')"
+              jq -r --arg prefix "$key-" '.actions_caches[] | select(.key | startswith($prefix)) | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')" || candidates=""
             while read -r id cref created; do
               [[ "$id" =~ ^[0-9]+$ ]] || continue
-              path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || continue
+              { read -r path; read -r sha; } < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq '.path, .head_sha') || continue
               [ "$path" = .github/workflows/validate.yml ] || continue
+              git fetch -q --depth=1 origin "$sha" || continue
+              git diff --quiet HEAD "$sha" -- 'formal/*.tla' 'formal/*.cfg' scripts/formal.sh scripts/formal-trace.mjs scripts/formal-key.sh .github/workflows/validate.yml || continue
               gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -qxF "Save it as $key-$id" || continue
               hit=true
               run="$id"
