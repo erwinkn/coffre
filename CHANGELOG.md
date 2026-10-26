@@ -38,13 +38,15 @@
   nothing more. An `hmac()` among `signers` also signs, as its scheme
   writes it, for an app's own tokens. Signatures are `hex`, `base64` or
   `base64url`, after an optional prefix. A message is 64 KiB at most
-  unless the `hmac()` says `maxBytes` (up to 16 MiB). The secret is opened
+  unless the `hmac()` says `maxBytes` (up to 1 MiB). The secret is opened
   as a credential's key is, once a minute per session and name, so a warm
   verify by a workload is one statement and no vault call, and its use is
   logged then, not per webhook. Pass the raw body: a body parsed and
   written again (`JSON.stringify(req.body)`) is not what the provider
-  signed. No migration; nothing changes for a deployment that adds no
-  verifier ([credential-proxy.md](docs/design/credential-proxy.md),
+  signed. No migration. For every caller of `POST /use/<project>/<env>`, a
+  request past its bound is now 413, not 400, and a private key signs a
+  message of up to 64 KiB, where the whole request was 64 KiB before
+  ([credential-proxy.md](docs/design/credential-proxy.md),
   section 5, "Verifying, and HMAC"; [workloads.md](docs/workloads.md)).
 
 ## 0.14.2 (2026-10-26)

@@ -10,9 +10,11 @@
  *   base64      with its padding, read with or without it
  *   base64url   without padding, read with or without it
  *
- * A signature is checked by WebCrypto's own `verify`, which compares in
- * constant time (BoringSSL's `CRYPTO_memcmp`, on Node and in workerd); one
- * written otherwise than its scheme says, or of another length, is no match.
+ * A signature is decoded, then checked by WebCrypto's own `verify`, which
+ * compares in constant time (BoringSSL's `CRYPTO_memcmp`, on Node and in
+ * workerd): it is the bytes that count, so base64's last character may
+ * carry bits no byte reads. One in another alphabet, without its prefix,
+ * or of another length, is no match.
  */
 
 export type Encoding = 'hex' | 'base64' | 'base64url';

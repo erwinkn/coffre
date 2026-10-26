@@ -1275,8 +1275,8 @@ credentialProxy({
 The app passes the body as it came and the header as it is:
 
 ```ts
-const valid = await coffre.credential('yousign').verify(request.rawBody, request.headers['x-yousign-signature-256']);
-if (!valid) throw new UnauthorizedException();
+const signature = request.headers['x-yousign-signature-256'];
+if (typeof signature !== 'string' || !(await coffre.credential('yousign').verify(request.rawBody, signature))) throw new UnauthorizedException();
 ```
 
 That is `POST /use/<project>/<env>` with `{ verify: { credential, message,
@@ -1325,12 +1325,13 @@ run` calls the same `credential(name).verify` from
   `<header>.<payload>`, base64url).
 - **Bounded.** A message is 64 KiB at most: Equisafe's largest webhook in
   90 days of production was DFNS's, 5,234 bytes (p99 2,272), Yousign's
-  2,013. `hmac(…, { maxBytes })` takes up to 16 MiB for a provider whose
-  bodies run longer; coffre reads a request up to what the longest of its
-  signers and verifiers takes, and refuses past it with 413, before
-  anything is opened. The CPU is the body's: about 0.2 ms at 4 KiB, 3 ms
-  at 512 KiB and 5 ms at 1 MiB on Node, which a Worker on the Free plan
-  (10 ms) should keep under 512 KiB.
+  2,013. `hmac(…, { maxBytes })` takes up to 1 MiB for a provider whose
+  bodies run longer. coffre reads a request up to what the longest of its
+  signers and verifiers takes, before it knows who asks, and refuses past
+  it with 413, before anything is opened: so the cap keeps that read far
+  below the 16 MiB a request through a credential is read up to. The CPU
+  is the body's: about 0.2 ms at 4 KiB, 3 ms at 512 KiB and 5 ms at 1 MiB
+  on Node, within a Worker's 10 ms on the Free plan.
 - **Opened as a credential's values are, logged once a minute.** A
   webhook comes on a request's path, and the vault is the instance's
   narrowest point, so a verify or an HMAC signature opens its secret as a

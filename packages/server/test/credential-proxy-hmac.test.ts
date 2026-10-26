@@ -60,6 +60,8 @@ useMcp(async () => {
     DFNS_PRIVATE_KEY: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
   });
   await root.secrets.set('market/bare', { OTHER: 'x' });
+  await root.environments.create('market/empty');
+  await root.secrets.set('market/empty', { YOUSIGN_WEBHOOK_SECRET: '', IFRAME_TOKEN_SECRET: '' });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -141,6 +143,13 @@ test('an HMAC signer signs as Node does and checks its own signatures; a verifie
   const absent = (await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }) }));
   assert.equal(absent.status, 409);
   assert.match(((await absent.json()) as { message: string }).message, /market\/bare holds no YOUSIGN_WEBHOOK_SECRET, which yousign needs/);
+  // An empty secret, which WebCrypto takes for no key: said, never a 500.
+  const empty = await run(['market/empty']);
+  for (const asked of [{ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }, { sign: { credential: 'iframe-token', message: 'aGk' } }]) {
+    const refused = await route('/use/market/empty', { method: 'POST', headers: { authorization: `Bearer ${empty.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify(asked) });
+    assert.equal(refused.status, 409, JSON.stringify(asked));
+    assert.match(((await refused.json()) as { message: string }).message, /market\/empty's (YOUSIGN_WEBHOOK_SECRET|IFRAME_TOKEN_SECRET) is empty/);
+  }
   // Malformed asks: a message not base64url, a signature not a string.
   for (const verify of [{ credential: 'yousign', message: 'not base64!', signature: 'x' }, { credential: 'yousign', message: 'aGk', signature: 1 }, { credential: 'yousign', message: 'a', signature: 'x' }]) {
     const refused = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify }) });
@@ -163,6 +172,9 @@ test("a webhook body is 64 KiB at most, or its hmac()'s maxBytes; one past it is
   assert.equal((await entries('credential.use')).length, before, 'nothing opened for a message past its bound');
   assert.equal(await check('yousign', SECRETS.YOUSIGN_WEBHOOK_SECRET, sized(64 * 1024)), true);
   assert.equal(await check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(512 * 1024)), true);
+  // A private key signs up to the same 64 KiB, and past it is 413 too.
+  await assert.rejects(used(env, 'dfns-key').sign(sized(64 * 1024 + 1)), /dfns-key signs a message of 64 KiB at most/);
+  assert.equal(typeof (await used(env, 'dfns-key').sign(sized(64 * 1024))), 'string');
 });
 
 test("verifies and HMAC signatures are logged once a minute per handle and name, as a credential's requests are, the vault asked once", async () => {
@@ -238,7 +250,7 @@ test('the configuration refuses what is no HMAC-SHA256 of these schemes', () => 
   refused({ signers: { x: hmac('KEY', { encoding: 'hex' }) }, verifiers: { x: hmac('KEY', { encoding: 'hex' }) } }, /x names a signer and a verifier/);
   refused({ credentials: { x: { upstream: 'https://api.example', inject: { kind: 'header', name: 'x-key', template: '{KEY}' } } }, verifiers: { x: hmac('KEY', { encoding: 'hex' }) } }, /x names a credential and a verifier/);
   refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', limit: { perMinute: 0 } }) } }, /limit is \{ perMinute\?, perDay\? \}/);
-  for (const maxBytes of [0, 1.5, 17 * 1024 * 1024]) refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', maxBytes }) } }, /maxBytes is a whole number of bytes, 16 MiB at most/);
+  for (const maxBytes of [0, 1.5, 1024 * 1024 + 1]) refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', maxBytes }) } }, /maxBytes is a whole number of bytes, 1 MiB at most/);
 });
 
 /** coffre, as a plugin sees it: the handle stands for `market/dev`, whose one value is `secret`. */

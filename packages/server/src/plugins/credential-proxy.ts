@@ -238,7 +238,7 @@ export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: str
  * is written in `encoding`, `hex`, `base64` or `base64url`, after
  * `prefix`: `hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' })`
  * checks Yousign's `x-yousign-signature-256`. `maxBytes` is the longest
- * message it signs or checks, 64 KiB unless set, up to 16 MiB: a 1 MiB
+ * message it signs or checks, 64 KiB unless set, 1 MiB at most: such a
  * body costs about 5 ms of CPU, of a Worker's 10 ms on the Free plan.
  * `limit`, as a credential's.
  */
@@ -309,6 +309,13 @@ const HANDLE_LENGTH = 'coffre_use_'.length + 43;
  * message as base64url, in JSON beside the rest.
  */
 const MESSAGE_BYTES = 64 * 1024;
+/**
+ * The most an `hmac()`'s `maxBytes` may say: the body read before anyone is
+ * authenticated (the proxy reads a request to compute up to what the
+ * longest message takes) stays a fraction of a request through a
+ * credential's, and the CPU within a Worker's Free plan.
+ */
+const MAX_MESSAGE_BYTES = 1024 * 1024;
 /** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
 const UNSIGNED = base64url(new TextEncoder().encode('{"alg":"none","typ":"JWT"}'));
 /** Values shorter than this are not redacted from answers: too short to tell from the text around them. */
@@ -961,6 +968,8 @@ function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {
 /** An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheSeconds`, logged as one use when opened. */
 async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<string> {
   const { values } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
+  // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
+  if (values[hmac.key] === '') throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
   return values[hmac.key]!;
 }
 
@@ -1759,7 +1768,7 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
     // HMAC-SHA256 alone, written as these schemes write it: a key it does not know is refused, never ignored.
     const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'encoding', 'prefix', 'maxBytes', 'limit'].includes(option));
     if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, maxBytes and limit, and signs with SHA-256 alone; got ${unknown}`);
-    if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_BODY_BYTES)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, 16 MiB at most`);
+    if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_MESSAGE_BYTES)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, 1 MiB at most`);
     if (signer.encoding !== 'hex' && signer.encoding !== 'base64' && signer.encoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() writes its signatures in hex, base64 or base64url`);
     if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !/^[\x21-\x7e]{1,32}$/.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
   }

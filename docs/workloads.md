@@ -107,9 +107,10 @@ and the app hands coffre the body exactly as it came, with the header:
 
 ```ts
 // NestFactory.create(AppModule, { rawBody: true }), so that req.rawBody is the bytes the provider signed.
-const valid = await coffre.credential('dfns').verify(req.rawBody, req.headers['x-dfns-webhook-signature']);
+const signature = req.headers['x-dfns-webhook-signature'];
+if (typeof signature !== 'string' || !(await coffre.credential('dfns').verify(req.rawBody, signature))) throw new UnauthorizedException();
 const { timestampSent } = JSON.parse(req.rawBody.toString());
-if (!valid || !(Math.abs(Date.now() / 1000 - timestampSent) <= 300)) throw new UnauthorizedException();
+if (!(Math.abs(Date.now() / 1000 - timestampSent) <= 300)) throw new UnauthorizedException();
 ```
 
 - **The raw body.** `JSON.stringify(req.body)` is not what the provider
@@ -122,8 +123,8 @@ if (!valid || !(Math.abs(Date.now() / 1000 - timestampSent) <= 300)) throw new U
   http://127.0.0.1:7300/use/market/prod` with `{"verify": {"credential":
   "dfns", "message": "<the body, base64url>", "signature": "<the header>"}}`
   answers `{"valid": true}` or `{"valid": false}`.
-- **Bounded.** A body is 64 KiB at most unless the `hmac()` says `maxBytes`;
-  past it, 413.
+- **Bounded.** A body is 64 KiB at most unless the `hmac()` says `maxBytes`,
+  up to 1 MiB; past it, 413.
 - **Cheap.** The secret is opened once a minute per session and logged
   then, as a credential's key is: a warm `verify` is one statement and no
   vault call.
