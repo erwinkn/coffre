@@ -11,7 +11,7 @@ import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProf
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, consumedTokens, credentials, serviceBindings } from './db/tables.ts';
+import { auditLog, consumedTokens, credentials, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -22,7 +22,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
@@ -91,6 +91,8 @@ let limits: { perSource: RateLimiter; total: RateLimiter };
 let vaultCalls: number;
 /** Waited for before the vault is asked about the member: the last step before the commit. */
 let beforeAccess: (() => Promise<void>) | undefined;
+/** Waited for once the vault has answered about the member, before the head is taken: what changes then, only the re-check under the head sees. */
+let afterAccess: (() => Promise<void>) | undefined;
 /** The binding every test starts with, of `deploy.yml` on main. */
 let bound: string;
 
@@ -124,11 +126,14 @@ beforeEach(async () => {
   deps = testDeps(db.runtime, [ROOT]);
   vaultCalls = 0;
   beforeAccess = undefined;
+  afterAccess = undefined;
   const access = deps.vault.access.bind(deps.vault);
   deps.vault.access = async (principal) => {
     vaultCalls++;
     await beforeAccess?.();
-    return access(principal);
+    const answered = await access(principal);
+    await afterAccess?.();
+    return answered;
   };
   config = resolveConfig({
     publicUrl: ORIGIN,
@@ -677,6 +682,54 @@ test('an exchange racing a removal never leaves a credential the removal missed'
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
   assert.equal(await caller(body.token!), 401);
   assert.equal((await trade(token(rsa))).body.reason, 'no_match');
+});
+
+test('a binding removed, or a member removed or admitted again, while an exchange waits for the head: refused there, and nothing written', async () => {
+  const root = await contextFor(deps, ROOT);
+  const nothingWritten = async () => {
+    assert.deepEqual(await db.owner.select().from(credentials), []);
+    assert.deepEqual(await db.owner.select().from(consumedTokens), []);
+  };
+  // Unbound once the bindings were read: the vault still answers for the member, and only the binding's re-check refuses.
+  beforeAccess = async () => {
+    beforeAccess = undefined;
+    await runtime.workloads!.unbind(root, SERVICE, bound);
+  };
+  assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
+  await nothingWritten();
+
+  // Removed once the vault answered that it stands.
+  await bind(DEPLOY);
+  afterAccess = async () => {
+    afterAccess = undefined;
+    assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+  };
+  assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
+  await nothingWritten();
+
+  // Removed and admitted again: active once more, but at a generation the binding and the vault's answer are not.
+  assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+  const [reads] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, `${SERVICE}-reads`));
+  assert.equal((await speaking(deps.vault).setAccess({ actor: `user:${ROOT}`, principal: MEMBER, changes: [{ projectId: reads!.id, environmentId: null, role: 'viewer', expiresAt: null }] })).ok, true);
+  await bind(DEPLOY);
+  afterAccess = async () => {
+    afterAccess = undefined;
+    assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+    assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+  };
+  assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
+  await nothingWritten();
+});
+
+test("the re-check under the head stands only for a member's row at the binding's generation and a binding whose MAC is the app's", async () => {
+  const since = new Date(Date.now() - 60_000);
+  const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: true, recent: 0 });
+  // No member row: a foreign key keeps one for every binding, so the member's columns read null only for a principal not the binding's.
+  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' }, since, 60), { stands: false, recent: 0 });
+  // The member's binding, its MAC not the app's.
+  await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32) }).where(eq(serviceBindings.id, bound));
+  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: false, recent: 0 });
 });
 
 test('one binding trusts a workflow on several events: a pull request into its branch, by its own run, and the push, but no other event', async () => {

@@ -40,7 +40,7 @@ import { answer, type Pages } from './start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog, credentials as credentialRows } from './db/tables.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -106,8 +106,11 @@ let reader: CoffreClient;
 let service: CoffreClient;
 /** A CI run's sign-in, `POST /api/auth/oidc`, with a fresh ID token of its platform's each time. */
 let exchange: () => Promise<void>;
-/** The credential a CI run's sign-in bought, as its next requests hold it. */
+/** The credential a CI run's sign-in bought, as its next requests hold it, and when it ends. */
 let ci: CoffreClient;
+let ciEnds = 0;
+/** A CI run's credential, bought again: it lives five minutes, and a long run outlasts it. */
+let buyCi: () => Promise<void>;
 /** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
 let workload: () => Promise<void>;
 /** A workload's check of an inbound webhook's signature, `verify`, at the proxy; and at one that remembers nothing. */
@@ -221,10 +224,18 @@ before(async () => {
     const request = new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: SERVICE, token: idToken() }) });
     const answered = await answer(request, trusting, {} as Pages, '203.0.113.9');
     if (answered.status !== 200) throw new Error(`the exchange was refused: ${await answered.text()}`);
-    return ((await answered.json()) as { token: string }).token;
+    const issued = (await answered.json()) as { token: string; expiresAt: string };
+    // Issued an hour ago, as far as the binding's rate counts, which a long run's sign-ins would pass: the MAC does not cover when.
+    await db.owner.update(credentialRows).set({ createdAt: new Date(Date.now() - 3_600_000) }).where(eq(credentialRows.tokenHash, hashToken(issued.token)));
+    return issued;
   };
   exchange = async () => void (await signIn());
-  ci = bearer(runtime, await signIn());
+  buyCi = async () => {
+    const issued = await signIn();
+    ci = bearer(runtime, issued.token);
+    ciEnds = Date.parse(issued.expiresAt);
+  };
+  await buyCi();
 
   // A workload's key-bound session of the service, as `/api/auth/workload` makes one, and a plugin that asks for it as the proxy does.
   const standing = (await memberStanding(deps.db, SERVICE))!;
@@ -300,6 +311,16 @@ after(async () => {
   await Promise.all([app.end(), vaultPool.end(), db.close()]);
 });
 
+/**
+ * Each request once, unmeasured: what the vault does once per process, or
+ * once a caller's access or the policy changed, is done before a request
+ * is counted. A CI run's credential near its end is bought again first.
+ */
+async function warm(): Promise<void> {
+  if (ciEnds - Date.now() < 120_000) await buyCi();
+  for (const { request } of Object.values(requests)) await request();
+}
+
 async function cost(request: () => Promise<unknown>): Promise<Cost> {
   const before = { app: { ...app.count }, vault: { ...vaultPool.count }, vaultCalls };
   await request();
@@ -347,8 +368,7 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
 };
 
 test('each hot request runs exactly its budget of statements, on as many connections', POSTGRES, async () => {
-  // Once first, for what the vault does once per process.
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   for (const [name, { request, budget }] of Object.entries(requests)) {
     const spent = await cost(request);
     assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, budget, name);
@@ -398,7 +418,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
 
@@ -414,7 +434,7 @@ test('a request runs the same statements, and reads the same rows, however large
   for (let i = 0; i < 40; i++) await root.environments.protect('market/prod', i % 2 === 1);
 
   // Once first: a request whose caller's access, or the policy, changed since their last asks the vault again, once.
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   for (const [name, { request }] of Object.entries(requests)) {
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
@@ -462,7 +482,7 @@ const growth = gs.record({
 const growthSettings = propertySettings(4, 10);
 
 test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, POSTGRES, async () => {
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
   // Places made so far: names from a counter, since the instance keeps what every case made. So Hegel's replay of a
@@ -533,7 +553,7 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
       }
     }
     // Once first, as above: a caller whose access, or the policy, changed asks the vault again, once.
-    for (const { request } of Object.values(requests)) await request();
+    await warm();
     for (const [name, { request }] of Object.entries(requests)) {
       const spent = await cost(request);
       const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;

@@ -9,7 +9,10 @@
 // jobs of one run sign in as one service at once, as a market Build's do.
 // It reports each phase's wall time, p50 and p99, its statements, and the
 // time its statements spent in the database beyond the round trip:
-// waiting on locks, almost all of it, and which statements waited.
+// waiting on locks, almost all of it, and which statements waited. A
+// binding issues at most 60 credentials a minute, so the service is bound
+// afresh before a round would pass that, and a level runs at most 60 jobs
+// at once. With 5 to 15 runs a level, its p99 is its slowest run.
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
@@ -25,6 +28,7 @@ import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { localVault, type LocalVault } from '@coffre/vault/node';
 
 import { resolveConfig } from '../../src/config.ts';
+import { EXCHANGES_PER_BINDING_MINUTE } from '../../src/api/workloads.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transport.ts';
@@ -178,11 +182,19 @@ try {
   await root.members.add(MEMBER);
   await root.access.set(MEMBER, { 'ci/dev': 'viewer' });
   let binding: string | null = null;
-  /** A binding of its own for each level, so no level meets the last one's per-minute limit. */
+  /** Sign-ins the binding has left this minute: a round that would pass them binds afresh, replacing it. */
+  let left = 0;
   const bind = async () => {
     const made = await setup.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: CLAIMS, label: 'build', replaces: binding === null ? [] : [binding] }, { dryRun: false });
     if (!('binding' in made)) throw new Error('bind');
     binding = made.binding.id;
+    left = EXCHANGES_PER_BINDING_MINUTE;
+  };
+  /** `jobs` sign-ins, on a binding that has them left. */
+  const room = async (jobs: number) => {
+    if (jobs > EXCHANGES_PER_BINDING_MINUTE) throw new Error(`a binding takes at most ${EXCHANGES_PER_BINDING_MINUTE} sign-ins a minute: run at most that many jobs at once`);
+    if (left < jobs) await bind();
+    left -= jobs;
   };
 
   const ui = {} as Pages;
@@ -218,12 +230,12 @@ try {
   const percentile = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)]!;
   console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: sign-in, list, reveal of ${SEVEN.length} keys, all as ${MEMBER}`);
   // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day.
-  await bind();
+  await room(1);
   await job();
   for (const jobs of JOBS) {
-    await bind();
     const phases = { oidc: [] as { ms: number; cost: Cost }[], list: [] as { ms: number; cost: Cost }[], reveal: [] as { ms: number; cost: Cost }[] };
     for (let round = 0; round < ROUNDS; round += 1) {
+      await room(jobs);
       for (const done of await Promise.all(Array.from({ length: jobs }, job))) {
         for (const phase of ['oidc', 'list', 'reveal'] as const) phases[phase].push(done[phase]);
       }

@@ -40,16 +40,16 @@ CONSTANTS
 CONSTANTS
     \* The exchange spends the ID token in the transaction that issues its
     \* credential, an insert into consumed_tokens whose primary key is the
-    \* token's hash (server api/workloads.ts, #exchange, consumeToken). Off,
-    \* only the read before it (tokenConsumed) stands in its way.
+    \* token's hash (server api/workloads.ts, #exchange, exchangeToken). Off,
+    \* only the read before it (exchangeCandidates) stands in its way.
     SpentTokenInsertedWithCredential,
     \* The exchange reads its binding again under the head (#exchange,
-    \* standingBinding), not only before it (exchangeCandidates).
+    \* exchangeStill), not only before it (exchangeCandidates).
     BindingRecheckUnderHead,
-    \* And the account's standing and generation (#exchange, stillMember).
+    \* And the account's standing and generation (#exchange, exchangeStill).
     MemberRecheckInExchange,
     \* The binding's rate, credentials it issued in the last minute, is
-    \* counted under the head (#exchange, exchangesSince), not before it.
+    \* counted under the head (#exchange, exchangeStill), not before it.
     RateCountUnderHead,
     \* Untrusting or replacing a binding revokes the live credentials it
     \* issued (workloads.ts, #revoke, revokeLiveCredentials).
@@ -110,7 +110,7 @@ vars == <<rows, log, locks, procs, history>>
 (* Credentials and bindings *)
 
 \* The binding stands: made, not revoked, at the account's generation as it
-\* was made (exchangeCandidates and standingBinding read all three).
+\* was made (exchangeCandidates and exchangeStill read all three).
 Stands(b, g) == binding[b].made /\ ~binding[b].revoked /\ binding[b].gen = g
 
 Cred(c) == CHOOSE r \in creds : r.id = c
@@ -232,7 +232,7 @@ ExCandidates(p) ==
             ELSE Read(p, "ex.spent", [l[p] EXCEPT !.b = b, !.bgen = binding[b].gen,
                                                   !.rate = Cardinality({r \in creds : r.by = b})])
 
-\* Whether the token was spent already, a read (db/queries.ts, tokenConsumed).
+\* Whether the token was spent already, read with the bindings (db/queries.ts, exchangeCandidates).
 ExSpent(p) ==
     /\ pc[p] = "ex.spent"
     /\ IF op[p].token \in consumed THEN Refuse(p) ELSE Read(p, "ex.access", l[p])
