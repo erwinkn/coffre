@@ -65,7 +65,8 @@ Checkpointer == "checkpointer"
 
 VARIABLES
     revision,  \* the committed revision: changes made so far
-    granted,   \* the committed grant: may the principal use the secret
+    granted,   \* the committed grant: may the principal use the secret. It stands for every input a
+               \* decision reads (members, grants, places, secrets, credentials), each written only by a change
     log,       \* the committed entries
     nextSeq,   \* "head": the head's next number; "seq": the sequence's next value
     floor,     \* "seq": the highest number a checkpoint has closed

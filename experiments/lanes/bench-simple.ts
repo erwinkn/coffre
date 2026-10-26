@@ -20,7 +20,7 @@ import { parseArgs } from 'node:util';
 import pg from 'pg';
 
 import { keysFrom } from './src/model.ts';
-import { change, checkpoint, nameStatements, use, type CheckpointState, type Variant } from './src/simple.ts';
+import { change, checkpoint, loadCheckpointState, nameStatements, use, type Variant } from './src/simple.ts';
 
 const { values } = parseArgs({
   options: {
@@ -38,6 +38,10 @@ const { values } = parseArgs({
     // How long a use waits for a connection before it is refused 503: the pool's queue bound.
     'queue-ms': { type: 'string', default: '1000' },
     'hold-snapshot': { type: 'boolean', default: false },
+    // What the revocation takes away: svc-0's grant, or its credential.
+    'revoke-kind': { type: 'string', default: 'grant' },
+    // The relay's pid, to report its CPU: a bottleneck of the rig, not of the design.
+    'relay-pid': { type: 'string' },
     // Named (prepared) statements on the hot path.
     named: { type: 'boolean', default: false },
     label: { type: 'string', default: '' },
@@ -84,9 +88,9 @@ const pending: Promise<void>[] = [];
 // Checkpoints, from their own connection, every --checkpoint-ms.
 const checkpoints: Awaited<ReturnType<typeof checkpoint>>[] = [];
 let checkpointing = true;
-const { rows: [h] } = await admin.query('SELECT (next_seq - 1)::text AS upto, floor::text AS floor FROM audit_head');
-const state: CheckpointState = { upto: VARIANT === 'seq' ? h.floor : h.upto, hash: Buffer.alloc(32), seen: [], tip: null };
+const state = await loadCheckpointState(admin);
 const mode = VARIANT === 'cas' ? null : VARIANT;
+const kind = values['revoke-kind'] as 'grant' | 'credential';
 const checkpointer = (async () => {
   const every = Number(values['checkpoint-ms']);
   while (checkpointing && mode !== null && every > 0) {
@@ -96,10 +100,21 @@ const checkpointer = (async () => {
   }
 })();
 
-let revocation: { ms: number; at: number } | null = null;
+let revocation: { ms: number; at: number; seq: string } | null = null;
 const revokeAt = values['revoke-at'] === undefined ? null : Number(values['revoke-at']) * 1000;
 let revoking = false;
 
+// The rig's own CPU: this process (the load and the vault's work) and the relay.
+const relayCpu = () => {
+  if (values['relay-pid'] === undefined) return NaN;
+  const fields = readFileSync(`/proc/${values['relay-pid']}/stat`, 'utf8').split(') ')[1]!.split(' ');
+  return (Number(fields[11]) + Number(fields[12])) * 10; // utime + stime, in ms at 100 ticks a second
+};
+const relayBefore = relayCpu();
+const selfBefore = process.cpuUsage();
+// How many uses wait for a connection, sampled every 50 ms.
+const waiting: number[] = [];
+const sampler = setInterval(() => waiting.push(pool.waitingCount), 50);
 const cpuBefore = cpu();
 const start = performance.now();
 let n = 0;
@@ -110,8 +125,8 @@ while (next < SECONDS * 1000) {
   if (revokeAt !== null && !revoking && performance.now() - start >= revokeAt) {
     revoking = true;
     const began = performance.now();
-    pending.push(change(control, keys, mode ?? 'head', 'svc-0', false, ENVIRONMENT).then(() => {
-      revocation = { ms: performance.now() - began, at: performance.now() - start };
+    pending.push(change(control, keys, mode ?? 'head', 'svc-0', false, ENVIRONMENT, kind).then((done) => {
+      revocation = { ms: performance.now() - began, at: performance.now() - start, seq: done.seq };
     }, (error: Error) => console.log(`  revocation FAILED: ${error.message}`)));
   }
   const principal = `svc-${n % PRINCIPALS}`;
@@ -135,6 +150,9 @@ while (next < SECONDS * 1000) {
 await Promise.all(pending);
 const elapsed = (performance.now() - start) / 1000;
 const cpuAfter = cpu();
+clearInterval(sampler);
+const self = process.cpuUsage(selfBefore);
+const relayMs = relayCpu() - relayBefore;
 checkpointing = false;
 await checkpointer;
 
@@ -159,12 +177,15 @@ console.log([
   refused.length === 0 ? '' : `503 p50/p99 ${percentile(refused, 50).toFixed(0)}/${percentile(refused, 99).toFixed(0)} ms`,
 ].join('  '));
 
+console.log(`  rig: load generator ${((self.user + self.system) / 1000 / elapsed / 10).toFixed(0)}% of a core, relay ${(relayMs / elapsed / 10).toFixed(0)}% of a core; uses waiting for a connection mean ${(waiting.reduce((a, b) => a + b, 0) / Math.max(1, waiting.length)).toFixed(0)}, max ${Math.max(0, ...waiting)}`);
+
 if (checkpoints.length > 0) {
   const db = checkpoints.map((c) => c.dbMs).sort((a, b) => a - b);
   const verify = checkpoints.map((c) => c.verifyMs).sort((a, b) => a - b);
   const entries = checkpoints.reduce((s, c) => s + c.entries, 0);
   const failures = checkpoints.flatMap((c) => c.failures);
-  console.log(`  checkpoints: ${checkpoints.length}, ${entries} entries (${(entries / checkpoints.length).toFixed(0)} each), db p50/max ${percentile(db, 50).toFixed(1)}/${db.at(-1)!.toFixed(1)} ms, verify+sign p50/max ${percentile(verify, 50).toFixed(1)}/${verify.at(-1)!.toFixed(1)} ms (${(verify.reduce((a, b) => a + b, 0) / Math.max(1, entries) * 1000).toFixed(1)} µs/entry), ${failures.length === 0 ? 'all verified' : `FAILURES ${failures.slice(0, 5).join(', ')}`}`);
+  const signed = checkpoints.filter((c) => c.signed).length;
+  console.log(`  checkpoints: ${signed} signed of ${checkpoints.length} ticks, ${entries} entries (${(entries / Math.max(1, signed)).toFixed(0)} each), db p50/max ${percentile(db, 50).toFixed(1)}/${db.at(-1)!.toFixed(1)} ms, verify+sign p50/max ${percentile(verify, 50).toFixed(1)}/${verify.at(-1)!.toFixed(1)} ms (${(verify.reduce((a, b) => a + b, 0) / Math.max(1, entries) * 1000).toFixed(1)} µs/entry), ${failures.length === 0 ? 'all verified' : `FAILURES ${failures.slice(0, 5).join(', ')}`}`);
 }
 
 if (revocation !== null) {
@@ -173,8 +194,19 @@ if (revocation !== null) {
   const allowed = after.filter((x) => x.status === 200).length;
   const codes = new Map<string, number>();
   for (const x of after) if (x.status !== 200) codes.set(x.code, (codes.get(x.code) ?? 0) + 1);
-  console.log(`  revocation: took ${r.ms.toFixed(1)} ms; svc-0 uses sent after its answer: ${after.length}, allowed: ${allowed} (must be 0); refused ${JSON.stringify(Object.fromEntries(codes))}`);
-  await change(control, keys, mode ?? 'head', 'svc-0', true, ENVIRONMENT);
+  console.log(`  revocation (${kind}): took ${r.ms.toFixed(1)} ms; svc-0 uses sent after its answer: ${after.length}, allowed: ${allowed} (must be 0); refused ${JSON.stringify(Object.fromEntries(codes))}`);
+  // The case the count above cannot see: a use that read before the revocation and appended after it. In the log,
+  // no use by svc-0 allowed at a revision before the revocation's may have been written after the revocation was.
+  const inFlight = runs.filter((x) => x.principal === 'svc-0' && x.sent < r.at && x.sent + x.ms > r.at - r.ms).length;
+  const { rows: [audit] } = await admin.query(
+    `SELECT count(*) FILTER (WHERE u.revision < c.revision AND u.written_at > c.written_at)::int AS late,
+            count(*) FILTER (WHERE u.revision >= c.revision)::int AS after,
+            count(*) FILTER (WHERE u.revision < c.revision)::int AS before
+     FROM audit u, audit c WHERE c.seq = $1 AND u.subject = 'svc-0' AND u.action = 'secret.use' AND u.decision = 'allow'`,
+    [r.seq],
+  );
+  console.log(`  revocation, in the log: svc-0 uses in flight while it ran: ${inFlight}; allowed entries before it ${audit.before}, of which written after it ${audit.late} (must be 0); allowed at or after its revision ${audit.after} (must be 0)`);
+  await change(control, keys, mode ?? 'head', 'svc-0', true, ENVIRONMENT, kind);
 }
 
 // Each statement's mean server time and buffers, the busiest first.

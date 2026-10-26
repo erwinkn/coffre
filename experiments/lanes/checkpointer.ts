@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import pg from 'pg';
 
 import { keysFrom } from './src/model.ts';
-import { checkpoint, type Checkpoint, type CheckpointState } from './src/simple.ts';
+import { checkpoint, loadCheckpointState, type Checkpoint } from './src/simple.ts';
 
 const { values } = parseArgs({
   options: {
@@ -24,8 +24,7 @@ const mode = values.variant as 'head' | 'seq';
 const keys = keysFrom(values.seed);
 const client = new pg.Client({ connectionString: values.url });
 await client.connect();
-const { rows: [h] } = await client.query('SELECT (next_seq - 1)::text AS upto, floor::text AS floor FROM audit_head');
-const state: CheckpointState = { upto: mode === 'seq' ? h.floor : h.upto, hash: Buffer.alloc(32), seen: [], tip: null };
+const state = await loadCheckpointState(client);
 const done: Checkpoint[] = [];
 const until = Date.now() + Number(values.seconds) * 1000;
 while (Date.now() < until) {
@@ -37,5 +36,6 @@ const sorted = (xs: number[]) => xs.sort((a, b) => a - b);
 const db = sorted(done.map((c) => c.dbMs));
 const verify = sorted(done.map((c) => c.verifyMs));
 const entries = done.reduce((s, c) => s + c.entries, 0);
+const signed = done.filter((c) => c.signed).length;
 const failures = done.flatMap((c) => c.failures);
-console.log(`checkpoints ${done.length}, ${entries} entries (${(entries / Math.max(1, done.length)).toFixed(0)} each), db p50/max ${db[Math.floor(db.length / 2)]?.toFixed(1)}/${db.at(-1)?.toFixed(1)} ms, verify+sign p50/max ${verify[Math.floor(verify.length / 2)]?.toFixed(1)}/${verify.at(-1)?.toFixed(1)} ms, ${failures.length === 0 ? 'all verified' : `FAILURES ${failures.slice(0, 5).join(', ')}`}`);
+console.log(`checkpoints ${signed} signed of ${done.length} ticks, ${entries} entries (${(entries / Math.max(1, signed)).toFixed(0)} each), db p50/max ${db[Math.floor(db.length / 2)]?.toFixed(1)}/${db.at(-1)?.toFixed(1)} ms, verify+sign p50/max ${verify[Math.floor(verify.length / 2)]?.toFixed(1)}/${verify.at(-1)?.toFixed(1)} ms, ${failures.length === 0 ? 'all verified' : `FAILURES ${failures.slice(0, 5).join(', ')}`}`);

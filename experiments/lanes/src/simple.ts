@@ -188,7 +188,9 @@ export async function use(db: Db, keys: Keys, variant: Variant, input: UseInput)
  * refused if another change moved the revision in between. It answers only
  * once committed.
  */
-export async function change(db: Db, keys: Keys, mode: 'head' | 'seq', principal: string, give: boolean, environmentId: string): Promise<{ seq: string; revision: string; tries: number }> {
+export async function change(
+  db: Db, keys: Keys, mode: 'head' | 'seq', principal: string, give: boolean, environmentId: string, kind: 'grant' | 'credential' = 'grant',
+): Promise<{ seq: string; revision: string; tries: number }> {
   for (let tries = 1; tries <= 20; tries += 1) {
     const { rows: [r] } = await db.query(
       `SELECT h.revision::text AS revision, CASE WHEN $1::boolean THEN nextval('audit_seq')::text END AS seq,
@@ -198,22 +200,29 @@ export async function change(db: Db, keys: Keys, mode: 'head' | 'seq', principal
     );
     const revision = String(BigInt(r.revision) + 1n);
     const f: Fields = {
-      actor: 'user:root@acme.example', action: give ? 'access.grant' : 'access.revoke', decision: 'allow', subject: principal,
+      actor: 'user:root@acme.example',
+      action: kind === 'credential' ? (give ? 'credential.restore' : 'credential.revoke') : give ? 'access.grant' : 'access.revoke',
+      decision: 'allow', subject: principal,
       environmentId, controlSeq: null, occurredAt: Date.now(), metadata: '{}',
     };
     const mac = entryMac(keys.log, mode === 'seq' ? r.seq : null, null, revision, f);
     const grants: Grant[] = give ? [{ principal, environment_id: environmentId, role: 'viewer' }] : [];
     const memberSeal = memberMac(keys.row, { ...r.member, access_seq: revision }, grants);
     const { rows: [done] } = await db.query(
-      'SELECT change_grant($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)::text AS seq',
-      [mode, r.revision, r.seq, principal, give, environmentId, f.actor, String(f.occurredAt), mac, memberSeal],
+      'SELECT change_grant($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)::text AS seq',
+      [mode, kind, r.revision, r.seq, principal, give, environmentId, f.actor, String(f.occurredAt), mac, memberSeal],
     );
     if (done.seq !== null) return { seq: done.seq, revision, tries };
   }
   throw new Error('the revision kept moving');
 }
 
-export type Checkpoint = { upto: string; from: string; entries: number; statements: number; dbMs: number; verifyMs: number; bytes: number; failures: string[] };
+export type Checkpoint = {
+  upto: string; from: string; entries: number; statements: number; dbMs: number; verifyMs: number; bytes: number;
+  /** Whether a checkpoint was signed: not when the window was empty, nor when an entry failed its check. */
+  signed: boolean;
+  failures: string[];
+};
 
 type Row = { seq: string; revision: string; actor: string; action: string; decision: 'allow' | 'deny'; subject: string | null; environment_id: string | null; occurred_at: string; metadata: string; mac: Buffer; prev_hash: Buffer | null; hash: Buffer | null };
 
@@ -223,8 +232,11 @@ const fieldsOfRow = (row: Row): Fields => ({
 });
 
 /**
- * The checkpointer's own state between ticks: where the last checkpoint
- * ended, and (seq) what the last ticks saw of the sequence, oldest first.
+ * The checkpointer's state between ticks: the last signed checkpoint (where
+ * it ended, its hash, and for `head` the hash of the entry it ended on), and
+ * (seq) what the last ticks saw of the sequence, oldest first. Loaded from
+ * the last checkpoint row, so a checkpointer that restarts carries on from
+ * what was signed, and signs a window that was closed but not yet signed.
  */
 export type CheckpointState = { upto: string; hash: Buffer; seen: string[]; tip: Buffer | null };
 
@@ -236,17 +248,41 @@ export type CheckpointState = { upto: string; hash: Buffer; seen: string[]; tip:
  */
 export const LAG_TICKS = 5;
 
+const ENTRIES = 'SELECT seq::text, revision::text, actor, action, decision, subject, environment_id, occurred_at::text, metadata, mac, prev_hash, hash FROM audit a WHERE a.seq > $1 AND a.seq <= $2 ORDER BY a.seq';
+
+/** A checkpoint's hash: every entry in (from, upto], in number order, chained to the checkpoint before. */
+export function checkpointHash(prev: Buffer, entries: readonly { seq: string; mac: Buffer }[]): Buffer {
+  const chain = createHash('sha256').update('simple.checkpoint.v1').update(prev);
+  for (const e of entries) chain.update(e.seq).update(':').update(e.mac);
+  return chain.digest();
+}
+
+/** The vault's signature over a checkpoint: the window it covers, the revision, and the hash. A stand-in for its signing key. */
+export function checkpointSignature(key: Buffer, from: string, upto: string, revision: string, hash: Buffer): Buffer {
+  return createHmac('sha256', key).update('simple.signature.v1').update(JSON.stringify([from, upto, revision])).update(hash).digest();
+}
+
+/** The state to go on from: the last checkpoint row (the seed writes the first). */
+export async function loadCheckpointState(db: Db): Promise<CheckpointState> {
+  const { rows: [last] } = await db.query(
+    'SELECT c.upto::text, c.hash, (SELECT hash FROM audit WHERE seq = c.upto) AS tip FROM checkpoints c ORDER BY c.upto DESC LIMIT 1',
+  );
+  if (last === undefined) throw new Error('no checkpoint to go on from: seed the database');
+  return { upto: last.upto, hash: last.hash, seen: [], tip: last.tip };
+}
+
 /**
  * One checkpoint: every entry since the last one, read and verified (MAC,
- * and for `head` the link), then signed together with the last one's hash.
- * `head`: up to the head, which names a committed prefix. `seq`: up to
- * what the previous tick saw the sequence at, once `close_checkpoint` has
- * made sure no append at or below it can still commit.
+ * and for `head` the link), then signed together with the last one's hash,
+ * and the state moved on only once its row is in. `head`: up to the head,
+ * which names a committed prefix. `seq`: up to the floor, once
+ * `close_checkpoint` has made sure no append at or below it can still
+ * commit. An entry that fails its check stops it: nothing is signed over it.
  */
 export async function checkpoint(db: Db, keys: Keys, mode: 'head' | 'seq', state: CheckpointState): Promise<Checkpoint> {
   const started = performance.now();
   let statements = 0;
-  let from = state.upto;
+  const from = state.upto;
   let upto: string;
   let revision: string;
   if (mode === 'head') {
@@ -255,49 +291,56 @@ export async function checkpoint(db: Db, keys: Keys, mode: 'head' | 'seq', state
     upto = String(BigInt(h.next_seq) - 1n);
     revision = h.revision;
   } else {
-    // Until LAG_TICKS ticks have passed, nothing to close: '0' leaves the floor where it is.
+    // Until LAG_TICKS ticks have passed, nothing to close: '0' leaves the floor where it is. The floor may be past the
+    // last checkpoint already: closed, then not signed before a restart. This one signs up to it.
     const closing = state.seen.length >= LAG_TICKS ? state.seen.shift()! : '0';
-    const { rows: [c] } = await db.query('SELECT floor_from::text, floor_to::text, revision::text, next_upto::text FROM close_checkpoint($1)', [closing]);
+    const { rows: [c] } = await db.query('SELECT floor_to::text, revision::text, next_upto::text FROM close_checkpoint($1)', [closing]);
     statements += 1;
-    from = c.floor_from;
     upto = c.floor_to;
     revision = c.revision;
     state.seen.push(c.next_upto);
   }
-  const { rows } = await db.query(
-    'SELECT seq::text, revision::text, actor, action, decision, subject, environment_id, occurred_at::text, metadata, mac, prev_hash, hash FROM audit a WHERE a.seq > $1 AND a.seq <= $2 ORDER BY a.seq',
-    [from, upto],
-  );
+  const empty = { upto: from, from, entries: 0, statements, dbMs: performance.now() - started, verifyMs: 0, bytes: 0, signed: false, failures: [] };
+  if (BigInt(upto) <= BigInt(from)) return empty;
+  const { rows } = await db.query(ENTRIES, [from, upto]);
   statements += 1;
   const dbMs = performance.now() - started;
   const verifying = performance.now();
-  const failures: string[] = [];
+  const failures = verifyEntries(keys, mode, state.tip, rows as Row[]);
   let bytes = 0;
-  const chain = createHash('sha256').update('simple.checkpoint.v1').update(state.hash);
-  let prev = state.tip;
-  for (const row of rows as Row[]) {
-    bytes += row.metadata.length + 200;
-    const f = fieldsOfRow(row);
-    if (mode === 'head') {
-      if (!entryMac(keys.log, null, null, row.revision, f).equals(row.mac)) failures.push(`${row.seq}: mac`);
-      if (prev !== null && !row.prev_hash!.equals(prev)) failures.push(`${row.seq}: prev`);
-      if (!link(row.prev_hash!, row.mac).equals(row.hash!)) failures.push(`${row.seq}: link`);
-      prev = row.hash;
-    } else if (!entryMac(keys.log, row.seq, null, row.revision, f).equals(row.mac)) {
-      failures.push(`${row.seq}: mac`);
-    }
-    chain.update(row.seq).update(row.mac);
-  }
-  const hash = chain.digest();
-  const signature = createHmac('sha256', keys.log).update('simple.signature.v1').update(upto).update(revision).update(hash).digest();
+  for (const row of rows as Row[]) bytes += row.metadata.length + 200;
+  if (failures.length > 0) return { ...empty, dbMs, entries: rows.length, failures };
+  const hash = checkpointHash(state.hash, rows as Row[]);
+  const signature = checkpointSignature(keys.log, from, upto, revision, hash);
   const verifyMs = performance.now() - verifying;
   await db.query(
-    'INSERT INTO checkpoints (upto, from_seq, revision, entries, hash, signature, at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING',
+    'INSERT INTO checkpoints (upto, from_seq, revision, entries, hash, signature, at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
     [upto, from, revision, rows.length, hash, signature, String(Date.now())],
   );
   statements += 1;
   state.upto = upto;
   state.hash = hash;
-  state.tip = prev;
-  return { upto, from, entries: rows.length, statements, dbMs, verifyMs, bytes, failures };
+  if (mode === 'head' && rows.length > 0) state.tip = (rows.at(-1) as Row).hash;
+  return { upto, from, entries: rows.length, statements, dbMs, verifyMs, bytes, signed: true, failures };
 }
+
+/** Each entry's MAC, and for `head` its link to the one before (from `tip`, the hash of the entry before the first). */
+export function verifyEntries(keys: Keys, mode: 'head' | 'seq', tip: Buffer | null, rows: readonly Row[]): string[] {
+  const failures: string[] = [];
+  let prev = tip;
+  for (const row of rows) {
+    const f = fieldsOfRow(row);
+    if (mode === 'head') {
+      if (!entryMac(keys.log, null, null, row.revision, f).equals(row.mac)) failures.push(`${row.seq}: mac`);
+      if (prev !== null && (row.prev_hash === null || !row.prev_hash.equals(prev))) failures.push(`${row.seq}: prev`);
+      if (row.prev_hash === null || row.hash === null || !link(row.prev_hash, row.mac).equals(row.hash)) failures.push(`${row.seq}: link`);
+      prev = row.hash;
+    } else if (!entryMac(keys.log, row.seq, null, row.revision, f).equals(row.mac)) {
+      failures.push(`${row.seq}: mac`);
+    }
+  }
+  return failures;
+}
+
+export type AuditRow = Row;
+export { ENTRIES };

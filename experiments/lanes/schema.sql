@@ -65,6 +65,7 @@ INSERT INTO revision VALUES (true, 1, gen_random_uuid()::text);
 --         checks the revision and the checkpoint floor under it. Checkpoints link the entries.
 DROP TABLE IF EXISTS audit, audit_head, checkpoints CASCADE;
 DROP SEQUENCE IF EXISTS audit_seq;
+DROP FUNCTION IF EXISTS change_grant(text, bigint, bigint, text, boolean, uuid, text, bigint, bytea, bytea);
 CREATE TABLE audit (
   seq bigint PRIMARY KEY,
   revision bigint NOT NULL,
@@ -72,7 +73,9 @@ CREATE TABLE audit (
   occurred_at bigint NOT NULL, metadata text NOT NULL,
   mac bytea NOT NULL,
   -- head: the entry before's hash, and sha256(prev_hash || mac); seq: null, linked by checkpoints.
-  prev_hash bytea, hash bytea
+  prev_hash bytea, hash bytea,
+  -- When the row was written, inside its statement's lock: for the benches' check of commit order, not signed.
+  written_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX audit_access ON audit (subject, seq) WHERE action LIKE 'access.%';
 -- next_seq and hash: the head (head only). revision: raised by every change. floor: the highest seq a
@@ -100,11 +103,12 @@ BEGIN
   RETURN true;
 END $$;
 
--- A change to a grant (give or take), its entry, and the member row sealed over it, at revision
+-- A change to a grant (give or take) or to a credential (p_kind 'credential'), its entry, and the member row sealed
+-- over it (grants), at revision
 -- p_from + 1, in one statement: refused (null) if another change moved the revision since the
 -- caller read it. head: under the head row's lock, linked in SQL. seq: under the exclusive lock, at
 -- the seq the caller took.
-CREATE OR REPLACE FUNCTION change_grant(p_mode text, p_from bigint, p_seq bigint, p_principal text, p_give boolean, p_environment uuid,
+CREATE OR REPLACE FUNCTION change_grant(p_mode text, p_kind text, p_from bigint, p_seq bigint, p_principal text, p_give boolean, p_environment uuid,
   p_actor text, p_at bigint, p_mac bytea, p_member_mac bytea) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
   s bigint;
@@ -118,14 +122,22 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM audit_head WHERE only_row AND revision = p_from AND floor < p_seq) THEN RETURN NULL; END IF;
     s := p_seq;
   END IF;
-  IF p_give THEN
-    INSERT INTO grants VALUES (p_principal, p_environment, 'viewer') ON CONFLICT DO NOTHING;
+  IF p_kind = 'credential' THEN
+    -- A credential revoked or restored: a decision input like any other, so a fenced change too.
+    UPDATE credentials SET revoked = NOT p_give WHERE principal = p_principal;
   ELSE
-    DELETE FROM grants WHERE principal = p_principal;
+    -- The prototype's one environment: a principal's grants are its grant there.
+    IF p_give THEN
+      INSERT INTO grants VALUES (p_principal, p_environment, 'viewer') ON CONFLICT DO NOTHING;
+    ELSE
+      DELETE FROM grants WHERE principal = p_principal;
+    END IF;
+    UPDATE members SET access_seq = p_from + 1, mac = p_member_mac WHERE principal = p_principal;
   END IF;
-  UPDATE members SET access_seq = p_from + 1, mac = p_member_mac WHERE principal = p_principal;
   INSERT INTO audit (seq, revision, actor, action, decision, subject, environment_id, occurred_at, metadata, mac, prev_hash, hash)
-    VALUES (s, p_from + 1, p_actor, CASE WHEN p_give THEN 'access.grant' ELSE 'access.revoke' END, 'allow', p_principal, p_environment,
+    VALUES (s, p_from + 1, p_actor,
+      CASE WHEN p_kind = 'credential' THEN (CASE WHEN p_give THEN 'credential.restore' ELSE 'credential.revoke' END)
+           WHEN p_give THEN 'access.grant' ELSE 'access.revoke' END, 'allow', p_principal, p_environment,
       p_at, '{}', p_mac, prev, sha256(prev || p_mac));
   IF p_mode = 'head' THEN
     UPDATE audit_head SET revision = p_from + 1, next_seq = s + 1, hash = sha256(prev || p_mac) WHERE only_row;

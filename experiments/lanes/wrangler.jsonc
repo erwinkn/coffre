@@ -11,5 +11,10 @@
   "durable_objects": { "bindings": [{ "name": "LANE", "class_name": "Lane" }, { "name": "SHARD", "class_name": "Shard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lane"] }, { "tag": "v2", "new_sqlite_classes": ["Shard"] }],
   // `wrangler hyperdrive create coffre-w201-pg --caching-disabled --origin-connection-limit 40`; locally, the connection string below.
-  "hyperdrive": [{ "binding": "HD", "id": "0920a9159a1549f0b810236686412c6d", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" }]
+  // W201: HD for uses (40, then 100 origin connections); HD_CONTROL, 5 connections, for changes, so that a revocation never
+  // queues behind uses for a connection.
+  "hyperdrive": [
+    { "binding": "HD", "id": "0920a9159a1549f0b810236686412c6d", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" },
+    { "binding": "HD_CONTROL", "id": "a2e4f60ae1224c098a942b0729a514f8", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" }
+  ]
 }
