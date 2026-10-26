@@ -25,16 +25,23 @@ BEGIN
 END
 $$;
 
--- 1c. And forgets only those older than it asks, through the function made for it (0021).
+-- 1c. And forgets, through the function made for it (0021), only those a day and an hour old: never one a window
+-- may count, whatever it asks.
+INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+VALUES (2, 'vault', 'vault:fixture', (extract(epoch from clock_timestamp()) * 1000)::bigint, 'user:admin@acme.example', 'secret.read', 'allow',
+        decode(repeat('bb', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
 DO $$
 DECLARE
     pruned integer;
 BEGIN
-    SELECT prune_vault_releases(3600000, 10) INTO pruned;
+    SELECT prune_vault_releases(1000) INTO pruned;
     IF pruned <> 1 OR EXISTS (SELECT 1 FROM vault_releases WHERE key = 'entry:1') THEN
         RAISE EXCEPTION 'FAIL: prune_vault_releases did not forget the release at time 0 (pruned %)', pruned;
     END IF;
-    RAISE NOTICE 'PASS: coffre_vault prunes old releases through prune_vault_releases';
+    IF NOT EXISTS (SELECT 1 FROM vault_releases WHERE key = 'entry:2') THEN
+        RAISE EXCEPTION 'FAIL: prune_vault_releases forgot a release made just now';
+    END IF;
+    RAISE NOTICE 'PASS: coffre_vault prunes only releases a day and an hour old, through prune_vault_releases';
 END
 $$;
 

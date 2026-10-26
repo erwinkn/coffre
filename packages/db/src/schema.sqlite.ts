@@ -312,9 +312,8 @@ export const vaultGrants = sqliteTable(
  * read them from the entries before (an entry that names none, which only
  * a forged one is, counts as a key of its own, `entry:<seq>`). No login
  * writes it: the vault and the backup read it. A row a window old counts
- * for nothing: the vault's checkpoint forgets those a window and an hour
- * old (`prune_vault_releases`), so a count reads a window's keys and an
- * hour's more.
+ * for nothing: the vault's checkpoint forgets those a day and an hour old,
+ * longer than any window, so a count reads about a day of keys.
  */
 export const vaultReleases = sqliteTable(
   'vault_releases',

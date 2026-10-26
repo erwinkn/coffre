@@ -68,22 +68,30 @@ export async function boundLockWaits(tx: Transaction, ms: number, statements = f
 }
 
 /**
- * Delete up to `atMost` rows of `vault_releases` released over `keepMs`
- * before the database's clock: what the bulk count can no longer read. On
- * Postgres the vault's login deletes no row itself, and asks
- * `prune_vault_releases`, which deletes only those (migration 0021). How
- * many went.
+ * How long a release is kept: a day, the longest bulk limit window
+ * (`MAX_BULK_WINDOW_MINUTES`), and an hour, a margin for the database's
+ * clock stepping back between a prune and a later count, which is seconds.
+ * Migration 0021's `prune_vault_releases` holds the same, in its own SQL.
  */
-export async function pruneReleases(db: Queryable, keepMs: number, atMost: number): Promise<number> {
+export const RELEASES_KEPT_MS = 25 * 3_600_000;
+
+/**
+ * Delete up to `atMost` rows of `vault_releases`, the oldest first,
+ * released over `RELEASES_KEPT_MS` before the database's clock: what no
+ * bulk count can read again. On Postgres the vault's login deletes no row
+ * itself, and asks `prune_vault_releases`, which deletes only those
+ * (migration 0021). How many went.
+ */
+export async function pruneReleases(db: Queryable, atMost: number): Promise<number> {
   if (engineOf(db) === 'postgres') {
     const { rows } = await (db as unknown as { execute(query: SQL): Promise<{ rows: { pruned: number }[] }> }).execute(
-      sql`SELECT prune_vault_releases(${Math.trunc(keepMs)}::bigint, ${atMost}::int) AS pruned`,
+      sql`SELECT prune_vault_releases(${atMost}::int) AS pruned`,
     );
     return rows[0]!.pruned;
   }
   const { vaultReleases } = tablesOf(db);
   const old = db.select({ principal: vaultReleases.principal, key: vaultReleases.key }).from(vaultReleases)
-    .where(lt(vaultReleases.releasedAt, sql`${clockMillis(db)} - ${Math.trunc(keepMs)}`)).limit(atMost);
+    .where(lt(vaultReleases.releasedAt, sql`${clockMillis(db)} - ${RELEASES_KEPT_MS}`)).orderBy(asc(vaultReleases.releasedAt)).limit(atMost);
   const gone = await (db as unknown as { run(query: SQL): Promise<{ rowsAffected: number }> }).run(
     sql`DELETE FROM vault_releases WHERE (principal, key) IN ${old}`,
   );

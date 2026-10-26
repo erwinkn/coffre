@@ -492,22 +492,21 @@ test("each hot request's statements read as many pages however long the log grow
   const grow = async (count: number) => {
     // In parts, each within a statement's time on the fixture's connections.
     for (let left = count; left > 0; left -= 5000) await db.owner.execute(more(Math.min(5000, left)));
-    // And a tenth as many keys, each read once by each reader two hours ago, past the window and its margin: what a
+    // And a tenth as many keys, each read once by each reader over a day ago, past any window and its margin: what a
     // count of every key ever released would read. A checkpoint, as each scheduled run asks, forgets them (T111).
     for (let left = count / 10; left > 0; left -= 5000) await db.owner.execute(keys(Math.min(5000, left)));
-    // As many runs as it takes, each forgetting up to 10,000: the keys of every reader, a window and an hour old.
-    const old = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM vault_releases WHERE released_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 75 * 60000`)).rows[0]!.n;
-    for (let runs = 0; (await old()) > 0; runs++) {
-      assert.ok(runs < 20, 'the checkpoints forgot nothing');
-      assert.ok((await signLog()).ok);
-    }
+    // As many runs as it takes, each forgetting up to 10,000: the keys of every reader, a day and an hour old.
+    const old = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM vault_releases WHERE released_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 25 * 3600000`)).rows[0]!.n;
+    const runs = Math.ceil((await old()) / 10_000) + 1;
+    for (let run = 0; run < runs; run++) assert.ok((await signLog()).ok);
+    assert.equal(await old(), 0, 'the checkpoints forgot them all');
     // As autovacuum leaves it: a part moves each reader's keys on thousands of times in one transaction, which no read
     // does (each moves them once, in place), and only a vacuum takes back.
     await db.owner.execute(sql`VACUUM ANALYZE`);
   };
   const keys = (count: number) => sql`
       INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
-      SELECT (SELECT least(min(seq), 0) FROM audit_log) - row_number() OVER (), 'vault', e.key_id, e.occurred_at - 7200000 - g, e.actor,
+      SELECT (SELECT least(min(seq), 0) FROM audit_log) - row_number() OVER (), 'vault', e.key_id, e.occurred_at - 26 * 3600000 - g, e.actor,
         'secret.read', 'allow', e.prev_hash, e.mac, e.hash, json_build_object('secrets', json_build_array(json_build_object('secretId', gen_random_uuid()::text)))::text
       FROM (SELECT DISTINCT ON (actor) * FROM audit_log WHERE author = 'vault' AND action = 'secret.read' AND decision = 'allow' AND seq >= 0 ORDER BY actor, seq DESC) e
       CROSS JOIN generate_series(1, ${count}) g`;

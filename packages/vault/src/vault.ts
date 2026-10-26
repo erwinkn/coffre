@@ -235,16 +235,6 @@ export const READ_DEADLINE_MS = 5_000;
  */
 export const READ_HEAD_WAITERS = 16;
 
-/**
- * How much longer than the bulk limit's window a release is kept before a
- * checkpoint prunes it (T111): a row the window still counts must never go.
- * The window is measured on the database's clock, which may step back (a
- * correction, a failover to a server whose clock is behind) between a
- * prune and a later count; that step is seconds. An hour is far beyond it,
- * and keeps the table at about a window and an hour of each reader's keys.
- */
-const RELEASES_MARGIN_MS = 60 * 60_000;
-
 /** How many releases a checkpoint prunes at most: one short statement, a few each scheduled run. */
 const RELEASES_PRUNED = 10_000;
 
@@ -2649,18 +2639,16 @@ class VaultService implements Vault {
    * checkpoints reach the newest heartbeat.
    */
   /**
-   * Forget the releases no window can count again (T111): those older than
-   * the bulk limit's window and `RELEASES_MARGIN_MS` besides, up to
-   * `RELEASES_PRUNED` of them, in one statement of their own, holding no
-   * lock any read takes but the rows it deletes, which only an append moves
-   * on, a row at a time. A row the count would read is never older than
-   * the window by the count's own clock, which is the database's, moved on
-   * by `clockOffset`: the margin covers that clock stepping back between
-   * the prune and a later count.
+   * Forget the releases no window can count again (T111): those kept a day
+   * and an hour (`RELEASES_KEPT_MS`), longer than any bulk limit window,
+   * up to `RELEASES_PRUNED` of them, the oldest first, in one statement of
+   * its own, holding no lock any read takes but the rows it deletes, which
+   * only an append moves on, a row at a time. What is kept is the
+   * database's to say, not the caller's: no login forgets a release a
+   * window counts.
    */
   async #pruneReleases(): Promise<number> {
-    const keep = this.#config.bulkLimit.windowMs + RELEASES_MARGIN_MS - this.#prepared.options.clockOffset();
-    return store.pruneReleases(this.#db, Math.max(keep, this.#config.bulkLimit.windowMs), RELEASES_PRUNED);
+    return store.pruneReleases(this.#db, RELEASES_PRUNED);
   }
 
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
@@ -2776,9 +2764,10 @@ class VaultService implements Vault {
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
-    // Then the bulk count's upkeep, which no read waits on: a failure leaves it to the next checkpoint.
-    await this.#pruneReleases().catch((error: Error) => console.error('vault_releases could not be pruned; the next checkpoint tries again', error.message));
-    return decided;
+    // Then the bulk count's upkeep, which no read waits on: a failure leaves it to the next checkpoint, and says so.
+    const pruned = await this.#pruneReleases().then(() => null, (error: Error) => `the releases the bulk limit counts were not pruned, and the next checkpoint tries again: ${error.message}`);
+    if (pruned === null || !decided.ok) return decided;
+    return { ...decided, warning: decided.warning === undefined ? pruned : `${decided.warning}; ${pruned}` };
   }
 
   /**

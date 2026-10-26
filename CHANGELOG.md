@@ -2,19 +2,23 @@
 
 ## Unreleased
 
-- **The bulk count's table keeps only the keys a window can still count.**
-  Since 0.14.4, `vault_releases` held a row for every key a principal was
-  ever released, deleted keys included, and the count read them all. Each
-  scheduled run's checkpoint now forgets those released more than the
-  bulk limit's window and an hour before, up to 10,000 a run, in one
-  statement of their own, off every read's path; a failure leaves them to
-  the next run. The hour is the margin for the database's clock stepping
-  back between a prune and a later count, which is seconds: a row the
-  window still counts never goes. So the count reads a window and an
-  hour of each reader's keys, however long the instance lives. Migration
+- **The bulk count's table keeps only a day of keys.** Since 0.14.4,
+  `vault_releases` held a row for every key a principal was ever released,
+  deleted keys included, and the count read them all. Each scheduled run's
+  checkpoint now forgets those released over a day and an hour before, the
+  oldest first, up to 10,000 a run, in one statement of its own, off every
+  read's path. A failure leaves them to the next run and says so: the
+  checkpoint's `warning`, which the audit watch reports. The day is the
+  longest window `bulkLimit.windowMinutes` now takes (1,440; a vault given
+  more refuses to start, saying so), and the hour a margin for the
+  database's clock stepping back, which is seconds: a release any window
+  counts never goes, and widening the window counts exactly. What is kept
+  is the database's to say, not the caller's: migration
   `0021_prune_vault_releases` (Postgres only) adds the function the vault
-  calls, `prune_vault_releases`, which deletes only those rows: the vault's
-  login still deletes nothing itself. The release before never calls it.
+  calls, `prune_vault_releases(at_most)`, which holds the day and an hour
+  in its own SQL, so the vault's login, which still deletes no row itself,
+  cannot forget a release a window counts. The release before never calls
+  it.
 
 - **A use through the credential proxy takes the log's head once.** The
   vault's read appended its `secret.read` under the head; then the app took
