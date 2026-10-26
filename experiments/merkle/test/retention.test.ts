@@ -28,27 +28,36 @@ const entry = (kind: 'use' | 'change', at = Date.now()) => append(pool, keys, {
 
 for (const mode of ['number', 'at'] as const) {
   test(`${mode} days: a sealed day dropped, the changes kept, the log verifying from the cut`, async () => {
-    const dayMs = 60_000;
+    // Days of real time, a second long, and a freshness bound to match: retention drops a day only below a head
+    // signed two bounds after its cut, and the signer seals nothing stamped a bound before its head.
+    const dayMs = 1000;
+    const freshMs = mode === 'number' ? 50 : 1500;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     await createLog(pool, mode, dayMs);
-    const cp = await Checkpointer.open(pool, keys);
-    // Day "d0": uses and a few changes. With `at` days, the day is the Worker's clock: the uses carry at in day d0.
+    const cp = await Checkpointer.open(pool, keys, { freshMs });
+    // `at` days start on a day boundary, so day d0 holds what follows.
+    if (mode === 'at') while (Date.now() % dayMs > 20) await sleep(1);
     const d0 = mode === 'number' ? 0 : Math.floor(Date.now() / dayMs);
-    const atOf = (d: number) => (mode === 'number' ? Date.now() : d * dayMs + 1000);
+    if (mode === 'at') for (const d of [d0 + 1, d0 + 2]) await pool.query('SELECT new_day($1)', [d]);
     for (let r = 0; r < 4; r += 1) {
-      for (let e = 0; e < 40; e += 1) await entry(e % 13 === 0 ? 'change' : 'use', atOf(d0));
+      for (let e = 0; e < 40; e += 1) await entry(e % 13 === 0 ? 'change' : 'use');
       await cp.tick();
     }
+    // With `at` days, a straggler: a use stamped in day d0, numbered after day d0 + 1 began.
+    const stamped = Date.now();
     if (mode === 'number') {
       await pool.query('SELECT new_day(1)');
       await cp.tick({ nextDay: 1 });
+    } else {
+      while (Math.floor(Date.now() / dayMs) === d0) await sleep(5);
     }
-    // Day d0 + 1, and, with `at` days, a straggler: a use of day d0 numbered after day d0 + 1 began.
-    for (let e = 0; e < 30; e += 1) await entry(e % 10 === 0 ? 'change' : 'use', atOf(d0 + 1));
-    if (mode === 'at') await entry('use', atOf(d0));
+    for (let e = 0; e < 30; e += 1) await entry(e % 10 === 0 ? 'change' : 'use');
+    if (mode === 'at') await entry('use', stamped);
     await cp.tick();
     assert.ok((await verify()).ok);
 
-    const r = await retainDay(pool, keys, d0);
+    await sleep(2 * freshMs + 100);
+    const r = await retainDay(pool, keys, d0, cp);
     await cp.tick();
     const v = await verify();
     assert.deepEqual(v.problems, []);

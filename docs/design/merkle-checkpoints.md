@@ -292,14 +292,22 @@ fresh log of 8 checkpoints (all as expected):
 | (p) a garbage checkpoint row; a malformed retention entry | **a failing verdict**, not a crash | | |
 | (q) a witness that refuses once, then recovers, while a change waits | | the change answers witnessed: the witness is asked again within the deadline | |
 | (r) no witness set up | | | the change answers `witnessed: null`, never "witnessed" |
-| (s) a use copied before its day is dropped, replayed after the retention cut, the checkpoint rows between deleted | the verifier warns only (rows are the writer's) | | **the signer refuses to seal it**: "older than the signer's head: a replay" (the request-ID lookup cannot: the original is gone) |
+| (s) a use copied before its day is dropped, replayed after the retention cut: after a tick with the rows between deleted, or slipped into the retention entry's own tick on a log quiet since the day closed | the verifier warns only (rows are the writer's) | | **the signer refuses to seal it**: "older than the signer's head: a replay" (the request-ID lookup cannot: the original is gone) |
 | (t) a witness that always refuses, after the change has answered | | asked 4 times until the answer (300 ms), 0 after | |
 | (u) remembering a head fails once | | | the next tick's head holds |
 | (v) writing a head fails, then putting the tree back fails too | | | the checkpointer refuses every tick until reopened; reopened, the log holds |
 
-Rows (f) to (v) came from four review rounds: (g) to (l), (n) to (r),
-(s) to (u) and (v) are the reviewer's own reproductions, each of which got
-through the version before. Round four found:
+Rows (f) to (v) came from five review rounds: (g) to (l), (n) to (r),
+(s) to (u), (v) and (s)'s second variant are the reviewer's own
+reproductions, each of which got through the version before. Round five
+found that the signer's freshness bound, measured from its newest head,
+freezes on a quiet log, so a replay slipped into the retention entry's own
+tick passed. Now retention drops a day only after sealing a head at least
+two bounds after the cut (it appends an `audit.retention.begin` change and
+waits for its seal), so every later replay of a dropped use is too old for
+the signer.
+
+Round four found:
 - round three's freshness rule measured age against checkpoint rows, which
   the writer can delete. The signer now enforces it against its own head;
   the verifier keeps the row check as a warning;
@@ -558,14 +566,18 @@ are prototyped ([`retention.ts`](../../experiments/merkle/src/retention.ts),
     a partition, so days must be dropped well after any clock skew (they
     will be: retention is weeks).
 
-In both, retention runs in four steps:
+In both, retention runs in five steps:
 
-1. Drop the day's uses partition once it is sealed.
-2. Append a kept-forever `audit.retention` change: {cut, the entries still
+1. Seal a head at least two freshness bounds (20 minutes) after the day's
+   cut: append an `audit.retention.begin` change and wait for its seal.
+   From then on the signer refuses any entry stamped before the cut, so a
+   copy of a dropped use can never be sealed (see Replays, below).
+2. Drop the day's uses partition once it is sealed.
+3. Append a kept-forever `audit.retention` change: {cut, the entries still
    below the cut since the last cut, as a count and the RFC 9162 head of
    their leaves}.
-3. Delete the level-0 tiles below the cut.
-4. Keep the higher levels: one hash per 256 leaves, 10 MB a day at a
+4. Delete the level-0 tiles below the cut.
+5. Keep the higher levels: one hash per 256 leaves, 10 MB a day at a
    sustained 1,000/s.
 
 **What a verifier keeps after a drop:**
@@ -614,6 +626,10 @@ also do two things:
     within one statement's timeout (W208's one-statement append: seconds),
     and the Workers' clocks agree with the signer's to well under 10 minutes
     (NTP: milliseconds).
+  - **Why it covers every dropped use:** retention seals a head at least two
+    bounds after a day's cut before dropping it, and every dropped entry was
+    stamped before that cut was signed. Copies of uses that were not dropped
+    still have their originals, which the request-ID lookup finds.
   - **What breaks it:** a stamp held back longer, say a request suspended
     for ten minutes between stamping and appending. The signer then refuses
     the window and raises the alarm: a false alarm, never a silent pass. The append

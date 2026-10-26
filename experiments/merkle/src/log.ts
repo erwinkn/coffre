@@ -117,7 +117,7 @@ export class Checkpointer {
   private witnesses: Witness[];
 
   /** FRESH_MS, shorter in the demos. */
-  private freshMs: number;
+  readonly freshMs: number;
 
   private constructor(db: Db, keys: Keys, edge: Edge, head: Checkpoint, note: string, memory: Memory | null, witnesses: Witness[], freshMs: number) {
     this.freshMs = freshMs;
@@ -393,6 +393,8 @@ export class Checkpointer {
       // If that read fails too, the edge cannot be trusted: this checkpointer signs nothing more until reopened.
       try {
         this.edge = await loadEdge(this.db, this.head.size);
+        // Tiles of the right length can still be the wrong hashes: the edge must give the head the signer holds.
+        if (!this.edge.root().equals(this.head.root)) this.broken = true;
       } catch {
         this.broken = true;
       }

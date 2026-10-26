@@ -1,4 +1,5 @@
-import { append, entryMac, leafOf, type Db, type DayRecord, type Entry, type Keys } from './log.ts';
+import { append, entryMac, leafOf, type Checkpointer, type Db, type DayRecord, type Entry, type Keys } from './log.ts';
+import { openCheckpoint, verifierFrom } from './note.ts';
 import { referenceHash } from './tree.ts';
 
 /**
@@ -18,7 +19,7 @@ import { referenceHash } from './tree.ts';
  */
 export type Retention = { action: 'audit.retention'; day: number; mode: 'number' | 'at'; prevCutUpto: string; cutUpto: string; cutSize: number; kept: number; keptRoot: string };
 
-export async function retainDay(db: Db, keys: Keys, day: number): Promise<{ retention: Retention; dropped: number; tilesDropped: number; ms: number }> {
+export async function retainDay(db: Db, keys: Keys, day: number, checkpointer: Checkpointer): Promise<{ retention: Retention; dropped: number; tilesDropped: number; ms: number }> {
   const started = performance.now();
   const { rows: [layout] } = await db.query('SELECT mode FROM audit_layout');
   const mode = layout.mode as 'number' | 'at';
@@ -37,8 +38,20 @@ export async function retainDay(db: Db, keys: Keys, day: number): Promise<{ rete
     if (!entryMac(keys.mac, d).equals(d.mac)) throw new Error(`day ${day}: its entry fails its MAC`);
     highest = (JSON.parse(d.payload) as DayRecord).last;
   }
-  const { rows: [cut] } = await db.query('SELECT c.upto::text, c.size::int FROM checkpoints c WHERE c.upto >= $1 ORDER BY c.upto LIMIT 1', [highest]);
+  const { rows: [cut] } = await db.query('SELECT c.upto::text, c.size::int, c.note FROM checkpoints c WHERE c.upto >= $1 ORDER BY c.upto LIMIT 1', [highest]);
   if (cut === undefined) throw new Error(`day ${day} is not sealed yet`);
+  // Before anything is dropped, a head signed well after the cut: the signer then refuses to seal any entry stamped
+  // before it, less its freshness bound, and every dropped entry was stamped before the cut was signed. So a copy of
+  // a dropped use, which no lookup can match once its original is gone, is refused whenever it is slipped in, even
+  // into the tick that seals the retention entry, on a log quiet since the day closed (review r5).
+  const cutHead = await openCheckpoint(cut.note, await verifierFrom(keys.signer.verifierKey));
+  if (cutHead === null) throw new Error(`day ${day}: the checkpoint at its cut is not signed by this log`);
+  const begin = await append(db, keys, {
+    at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `retention-begin-${day}`, payload: JSON.stringify({ action: 'audit.retention.begin', day }),
+  });
+  const { head } = await checkpointer.sealThrough(begin);
+  const notBefore = cutHead.at + 2 * checkpointer.freshMs;
+  if (head.at < notBefore) throw new Error(`day ${day} closed too recently to drop: not before ${new Date(notBefore).toISOString()}`);
   const previous = await latestRetention(db);
   const prevCutUpto = previous?.cutUpto ?? '0';
   await db.query(`DROP TABLE ${partition}`);

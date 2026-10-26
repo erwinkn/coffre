@@ -329,24 +329,28 @@ for (const tamper of [false, true]) {
 
 // Review r3's reproductions, each now caught.
 {
-  console.log('(s) a use copied before its day is dropped, replayed after the retention cut, the rows between deleted');
-  await createLog(pool);
-  // The demo's day lasts a second; a real one is dropped weeks later. The bound is 10 minutes, here 200 ms.
-  const cp = await Checkpointer.open(pool, keys, { freshMs: 200 });
-  for (let e = 0; e < 20; e += 1) await use();
-  await cp.tick();
-  await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE number = 20');
-  await new Promise((r) => setTimeout(r, 400));
-  await pool.query('SELECT new_day(1)');
-  await cp.tick({ nextDay: 1 });
-  await cp.tick();
-  const { retainDay } = await import('./src/retention.ts');
-  const r = await retainDay(pool, keys, 0);
-  await cp.tick();
-  await pool.query('DELETE FROM checkpoints WHERE upto > $1', [r.retention.cutUpto]);
-  await pool.query("INSERT INTO audit (number, at, principal, credential, kind, request_id, payload, seal, mac) SELECT nextval('audit_number'), at, principal, credential, kind, request_id, payload, seal, mac FROM saved");
-  const t = await cp.tick().catch((e: Error) => ({ failures: [e.message] }));
-  expect('the signer', t.failures.some((f) => /replay/.test(f)), true, t.failures.find((f) => /replay/.test(f)) ?? t.failures[0] ?? '', ['refuses to seal it', 'seals it']);
+  console.log('(s) a use copied before its day is dropped, replayed after the retention cut');
+  for (const variant of ['after a tick, the rows between deleted', "into the retention entry's own tick, on a log quiet since the day closed"]) {
+    await createLog(pool);
+    // The demo's day lasts a second; a real one is dropped weeks later. The bound is 10 minutes, here 200 ms.
+    const cp = await Checkpointer.open(pool, keys, { freshMs: 200 });
+    for (let e = 0; e < 20; e += 1) await use();
+    await cp.tick();
+    await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE number = 20');
+    await pool.query('SELECT new_day(1)');
+    await cp.tick({ nextDay: 1 });
+    await cp.tick();
+    await new Promise((r) => setTimeout(r, 500));
+    const { retainDay } = await import('./src/retention.ts');
+    const r = await retainDay(pool, keys, 0, cp);
+    if (variant.startsWith('after')) {
+      await cp.tick();
+      await pool.query('DELETE FROM checkpoints WHERE upto > $1', [r.retention.cutUpto]);
+    }
+    await pool.query("INSERT INTO audit (number, at, principal, credential, kind, request_id, payload, seal, mac) SELECT nextval('audit_number'), at, principal, credential, kind, request_id, payload, seal, mac FROM saved");
+    const t = await cp.tick().catch((e: Error) => ({ failures: [e.message] }));
+    expect(`${variant}: the signer`, t.failures.some((f) => /replay/.test(f)), true, t.failures.find((f) => /replay/.test(f)) ?? t.failures[0] ?? '', ['refuses to seal it', 'seals it']);
+  }
 }
 {
   console.log('(t) a witness that always refuses: how often it is asked once the change has answered');
