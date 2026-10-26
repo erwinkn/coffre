@@ -579,6 +579,8 @@ test('a proof given once, found spent when proving again, is final: no retry sto
 });
 
 test("a session proved again waits at least the Retry-After coffre answers, not its own backoff", async (t) => {
+  // No spread: its backoff its least, coffre's 4 s exactly.
+  t.mock.method(Math, 'random', () => 0);
   const busy = { status: 503, body: { error: 'unavailable', message: 'coffre cannot reach what it depends on right now' }, headers: { 'retry-after': '4' } };
   const coffre = await fakeCoffre({ notAfterMs: 1000, exchange: (_proof, _jkt, attempt) => (attempt === 2 || attempt === 3 ? busy : null) });
   t.after(() => coffre.close());

@@ -3,7 +3,7 @@ import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
-import { ApiError, notFound } from './api/errors.ts';
+import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import type { SignedInAccount } from './api/signin.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
@@ -119,7 +119,8 @@ const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'u
 
 /** An exchange refused, as its client reads it: 401 with the reason, or 429 and 503 with when to come back (`Retry-After`). */
 function refuseExchange(error: ExchangeRefused, headers: Record<string, string> = {}): Response {
-  const later = error.reason === 'full' ? '30' : '60';
+  // A limiter that could not count is coffre not answering for a moment (`errorResponse`), not a limit reached.
+  const later = error.status === 503 && error.reason === 'busy' ? UNAVAILABLE_RETRY_AFTER : error.reason === 'full' ? '30' : '60';
   return jsonResponse(
     { error: REFUSED_CODE[error.status], reason: error.reason, message: error.message },
     error.status,

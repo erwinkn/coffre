@@ -66,7 +66,7 @@ function oauthError(error: unknown): Response {
   if (error instanceof OAuthError) {
     return jsonResponse({ error: error.error, error_description: error.message }, error.status, {
       ...NO_STORE,
-      ...(error.status === 429 ? { 'retry-after': '60' } : {}),
+      ...(error.status === 429 ? { 'retry-after': '60' } : error.status === 503 ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
     });
   }
   if (error instanceof ApiError && error.code === 'unavailable') {

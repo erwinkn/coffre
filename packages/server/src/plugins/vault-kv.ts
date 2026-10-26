@@ -32,6 +32,7 @@
 import { CoffreError, type Me } from '@coffre/client';
 
 import type { CoffrePlugin, PluginContext } from '../plugins.ts';
+import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 
 export type VaultKvOptions = {
   /** The mount clients name, `secret` as Vault's own default: `secret/data/market/prod`. */
@@ -229,8 +230,8 @@ function success(data: unknown, auth: Record<string, unknown> | null = null, war
 }
 
 /** Vault's error shape. A 404's list is empty, as Vault's is: ESO reads it as "no such secret". */
-function failure(status: number, message = ''): Response {
-  return Response.json({ errors: status === 404 ? [] : [message] }, { status, headers: { 'cache-control': 'no-store' } });
+function failure(status: number, message = '', retryAfter?: string): Response {
+  return Response.json({ errors: status === 404 ? [] : [message] }, { status, headers: { 'cache-control': 'no-store', ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }) } });
 }
 
 /**
@@ -241,5 +242,6 @@ function failure(status: number, message = ''): Response {
  */
 function refused(error: CoffreError): Response {
   if (error.status === 401 || error.status === 403) return failure(403, `permission denied: ${error.message}`);
-  return failure(error.status, error.message);
+  // coffre not answering for a moment says when to ask again, as the API does.
+  return failure(error.status, error.message, error.status === 503 && error.code === 'unavailable' && error.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
 }

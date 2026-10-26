@@ -274,7 +274,8 @@ function unavailableWait(attempt: number, retryAfter: string | null): number | u
   const wait = UNAVAILABLE_RETRY_MS[attempt];
   if (wait === undefined) return undefined;
   const said = Number(retryAfter);
-  const asked = retryAfter !== null && Number.isFinite(said) && said > 0 ? Math.min(said * 1000, MAX_RETRY_AFTER_MS) : 0;
+  // Clamped so that the spread past it still fits under the cap: a run's jobs told 60 s do not all come back at 15.
+  const asked = retryAfter !== null && Number.isFinite(said) && said > 0 ? Math.min(said * 1000, MAX_RETRY_AFTER_MS / 1.5) : 0;
   const jittered = wait * (0.5 + Math.random());
   // Never sooner than asked, spread past it as the schedule is, and never past the cap.
   return Math.round(asked === 0 ? jittered : Math.min(MAX_RETRY_AFTER_MS, Math.max(jittered, asked * (1 + Math.random() / 2))));
