@@ -61,6 +61,11 @@ CONSTANTS
     \* log since the last checkpoint stands (checkpoint, `seen`,
     \* #standingRefusal).
     SeenRecheckUnderHead,
+    \* A refusal names the entry it found broken, and a checkpoint whose walk
+    \* began after it, while the refusal stands, checks that entry again under
+    \* the head before it signs: its hash, its link to the one before, the
+    \* vault's MAC of the vault's (vault.ts, checkpoint, #standingRefusal).
+    RefusalRecheckedUnderHead,
     \* The scrub recomputes each hash of the prefixes signed before, a
     \* stretch a call (vault.ts, #scrub, relink).
     Scrubs,
@@ -182,7 +187,7 @@ WalkTo(r, c) ==
 (* Processes *)
 
 NoOp == [kind |-> "none", at |-> 0]
-L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0,
+L0 == [from |-> 0, fromVer |-> 0, to |-> 0, toVer |-> 0, ok |-> TRUE, seen |-> 0, failed |-> 0,
        wat |-> 0, wver |-> 0, wend |-> 0,
        sfrom |-> 0, slap |-> 0, slapEnd |-> 0, slapVer |-> 0, sok |-> TRUE, done |-> TRUE,
        beat |-> 0, prev |-> NoAnchor, next |-> NoAnchor, signed |-> FALSE, c |-> 0, cVer |-> 0, read |-> NoAnchor, fEdit |-> 0]
@@ -424,8 +429,8 @@ CkptWalkStep(p) ==
     /\ pc[p] = "ckpt.walk"
     /\ LET i == l[p].to + 1
        IN IF l[p].ok /\ i <= Len(log) /\ l[p].to - l[p].from < CkptWalk
-            THEN Read(p, "ckpt.walk", [l[p] EXCEPT !.to = i, !.toVer = log[i].ver,
-                                                   !.ok = (CheckpointLinksWalk => Carries(i - 1, l[p].toVer)) /\ VaultWalkOk(i - 1, i)])
+            THEN LET ok == (CheckpointLinksWalk => Carries(i - 1, l[p].toVer)) /\ VaultWalkOk(i - 1, i)
+                 IN Read(p, "ckpt.walk", [l[p] EXCEPT !.to = i, !.toVer = log[i].ver, !.ok = ok, !.failed = IF ok THEN 0 ELSE i])
             ELSE Read(p, "ckpt.scrub", [l[p] EXCEPT !.done = l[p].to = Len(log)])
 
 \* The scrub, in a snapshot of its own: from where the lap is, ScrubWalk
@@ -436,7 +441,11 @@ CkptScrub(p) ==
     /\ LET a == l[p].slap
            b == IF l[p].slapEnd - a > ScrubWalk THEN a + ScrubWalk ELSE l[p].slapEnd
            ok == ~Scrubs \/ ((\A i \in Seqs(a, b) : HashOk(i)) /\ (b = l[p].slapEnd => Carries(b, l[p].slapVer)))
-       IN Read(p, "ckpt.head", [l[p] EXCEPT !.sok = ok, !.sfrom = IF b = l[p].slapEnd THEN 0 ELSE b])
+           broken == {i \in Seqs(a, b) : ~HashOk(i)}
+           \* The entry it names: the first whose hash is not its own, or the lap's end.
+           failed == IF broken = {} THEN b ELSE CHOOSE i \in broken : \A j \in broken : i <= j
+       IN Read(p, "ckpt.head", [l[p] EXCEPT !.sok = ok, !.sfrom = IF b = l[p].slapEnd THEN 0 ELSE b,
+                                            !.failed = IF ok \/ ~l[p].ok THEN @ ELSE failed])
 
 CkptHead(p) == pc[p] = "ckpt.head" /\ TakeHead(p, "ckpt.commit")
 
@@ -452,22 +461,39 @@ CkptCommit(p) ==
            newest == Newest({"ckpt", "deny"})
            \* A refusal stands only as the vault's own (#standingRefusal, by its MAC).
            standing == Newest({"deny"}) > s /\ MacOk(Newest({"deny"}))
+           \* The entry the standing refusal names, 0 for none.
+           named == IF standing THEN log[Newest({"deny"})].at ELSE 0
+           \* That entry as the walk checks each: its hash, its links to the ones either side, the vault's MAC.
+           \* A link is a version here, stricter than the code's: a rewrite from i breaks i's link to i - 1,
+           \* which the code's prevHash keeps; the vault names no such entry, so the two agree.
+           holds(i) == /\ VaultWalkOk(i - 1, i)
+                       /\ i = 1 \/ log[i - 1].ver = log[i].ver
+                       /\ i = Len(log) \/ log[i].ver = log[i + 1].ver
            \* Done, the rest under the head, and the head signed; else where the walk got to, behind it.
            at == IF l[p].done THEN Len(log) ELSE l[p].to
            rest == ~l[p].done \/ VaultWalkOk(l[p].to, Len(log))
+           unrest == {i \in Seqs(l[p].to, Len(log)) : ~VaultWalkOk(i - 1, i)}
            sign == [E("ckpt") EXCEPT !.at = at, !.atVer = log[at].ver, !.lap = l[p].sfrom,
                                      !.lapEnd = IF l[p].sfrom = 0 THEN 0 ELSE l[p].slapEnd,
                                      !.lapVer = IF l[p].sfrom = 0 THEN 0 ELSE l[p].slapVer]
            \* Returns the newest checkpoint, signed by another call or before.
            Idle == /\ head' = None /\ Goto(p, After(p)) /\ l' = [l EXCEPT ![p] = Returned(p, s)]
                    /\ UNCHANGED <<log, tampered, anchor, op, left, history>>
-           Deny == /\ head' = None /\ Goto(p, "ckpt.deny") /\ UNCHANGED <<log, tampered, anchor, op, l, left, history>>
-       IN CASE ~l[p].ok \/ ~l[p].sok -> Deny
-            [] SeenRecheckUnderHead /\ newest # l[p].seen -> IF standing THEN Deny ELSE Idle
+           \* A refusal, naming the entry it found broken, 0 for none.
+           Deny(failed) == /\ head' = None /\ Goto(p, "ckpt.deny") /\ l' = [l EXCEPT ![p].failed = failed]
+                           /\ UNCHANGED <<log, tampered, anchor, op, left, history>>
+       IN CASE ~l[p].ok \/ ~l[p].sok -> Deny(l[p].failed)
+            [] SeenRecheckUnderHead /\ newest # l[p].seen -> IF standing THEN Deny(named) ELSE Idle
+            \* A refusal that stands, of an entry this walk began after: that entry again.
+            [] RefusalRecheckedUnderHead /\ named > 0 /\ named <= l[p].from /\ ~holds(named) -> Deny(named)
             \* Nothing since the newest, which signed all before its own.
             [] s > 0 /\ s = Len(log) /\ log[s].at = s - 1 -> Idle
+            \* It names the first entry under the head the vault cannot vouch for, or none. The code names the
+            \* walk's end when that changed (`changed while the vault walked it`): an app entry, whose refusal a
+            \* later call clears either way, as its rewrite is the app's to find (FoundEditStaysRed).
             [] ~(CheckpointChecksVault => Carries(l[p].from, l[p].fromVer))
-               \/ ~Carries(l[p].to, l[p].toVer) \/ ~rest -> Deny
+               \/ ~Carries(l[p].to, l[p].toVer) \/ ~rest
+               -> Deny(IF unrest = {} THEN 0 ELSE CHOOSE i \in unrest : \A j \in unrest : i <= j)
             \* Another call signed as far, or further: that is the newest prefix.
             [] s > 0 /\ log[s].at >= at -> Idle
             [] Len(log) >= MaxLen -> Idle
@@ -485,7 +511,7 @@ CkptDenyHead(p) == pc[p] = "ckpt.deny" /\ TakeHead(p, "ckpt.denied")
 
 CkptDenied(p) ==
     /\ pc[p] = "ckpt.denied"
-    /\ IF Len(log) < MaxLen THEN Add(E("deny")) ELSE UNCHANGED log
+    /\ IF Len(log) < MaxLen THEN Add([E("deny") EXCEPT !.at = l[p].failed]) ELSE UNCHANGED log
     /\ head' = None
     /\ Goto(p, After(p))
     /\ l' = [l EXCEPT ![p].signed = FALSE]
