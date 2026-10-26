@@ -3,11 +3,10 @@
 // what the Go checksum database's clients run). It shares no code with the
 // TypeScript: if both agree, the bytes are RFC 6962/9162's.
 //
-//   go run . -server http://127.0.0.1:8209 -key 'coffre.example/audit+…' [-count 50]
+//	go run . -server http://127.0.0.1:8209 -key 'coffre.example/audit+…' [-count 50]
 package main
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -124,8 +123,10 @@ func main() {
 		json.Unmarshal(get("/audit/proof?number="+number+"&size="+strconv.FormatInt(top.size, 10)), &p)
 		h := open([]byte(p.Checkpoint), verifiers)
 		leaf, _ := base64.StdEncoding.DecodeString(p.Leaf)
-		if !bytes.Contains(leaf, []byte(`"`+number+`"`)) {
-			log.Fatalf("leaf of %s does not name its number", number)
+		// The leaf is the whole entry as a JSON array: its format tag, then its number.
+		var fields []any
+		if err := json.Unmarshal(leaf, &fields); err != nil || len(fields) != 10 || fields[0] != "coffre.audit.v1" || fields[1] != number {
+			log.Fatalf("leaf of %s is not that entry: %s", number, leaf)
 		}
 		rh := tlog.RecordHash(leaf)
 		proof := hashes(p.Proof)

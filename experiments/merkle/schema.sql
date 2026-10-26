@@ -92,9 +92,10 @@ END $$;
 -- The checkpointer's one read: the entries above `p_from` and up to the newest number handed out, every one of which
 -- has committed or never will. The fence's lock is taken exclusively for as long as it takes to read the sequence
 -- (and, at a day's end, move it to the next day), then let go before the read: appends wait for a few hundred
--- microseconds, never for the read. The first row carries only `upto`.
+-- microseconds, never for the read. The first row carries only `upto`, and `newest`: the newest checkpoint row's upto,
+-- which a running signer compares with the head it holds, so a deleted row shows within a tick, traffic or not.
 CREATE FUNCTION seal_window(p_from bigint, p_next_day bigint DEFAULT NULL)
-RETURNS TABLE (upto bigint, number bigint, at bigint, principal text, credential text, kind text, request_id text, payload text, seal bytea, mac bytea, written_at timestamptz)
+RETURNS TABLE (upto bigint, newest bigint, number bigint, at bigint, principal text, credential text, kind text, request_id text, payload text, seal bytea, mac bytea, written_at timestamptz)
 LANGUAGE plpgsql AS $$
 DECLARE
   u bigint;
@@ -115,7 +116,8 @@ BEGIN
   END;
   PERFORM pg_advisory_unlock(209);
   upto := u;
+  newest := (SELECT max(c.upto) FROM checkpoints c);
   RETURN NEXT;
-  RETURN QUERY SELECT u, a.number, a.at, a.principal, a.credential, a.kind, a.request_id, a.payload, a.seal, a.mac, a.written_at
+  RETURN QUERY SELECT u, NULL::bigint, a.number, a.at, a.principal, a.credential, a.kind, a.request_id, a.payload, a.seal, a.mac, a.written_at
     FROM audit a WHERE a.number > p_from AND a.number <= u ORDER BY a.number;
 END $$;

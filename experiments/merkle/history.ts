@@ -15,7 +15,7 @@ import { checkpointBody, signNote } from './src/note.ts';
 import { Edge, nodesFrom, tileMap, tilesFor, type Tile } from './src/tiles.ts';
 import { consistencyProof, inclusionProof, treeHash, verifyConsistency, verifyInclusion } from './src/tree.ts';
 
-const { values } = parseArgs({ options: { url: { type: 'string' }, leaves: { type: 'string', default: '10000000' }, proofs: { type: 'string', default: '200' }, seed: { type: 'boolean', default: true } } });
+const { values } = parseArgs({ options: { url: { type: 'string' }, leaves: { type: 'string', default: '10000000' }, proofs: { type: 'string', default: '200' }, seed: { type: 'boolean', default: true } }, allowNegative: true });
 const pool = new pg.Pool({ connectionString: values.url, max: 4 });
 const keys = await keysFrom('w209-synthetic');
 const N = Number(values.leaves);
@@ -50,6 +50,7 @@ const { rows: [c] } = await pool.query('SELECT size::int, root FROM checkpoints 
 const times: number[] = [];
 const counts: number[] = [];
 let bytes = 0;
+const lengths: number[] = [];
 for (let i = 0; i < Number(values.proofs); i += 1) {
   const m = Math.floor(Math.random() * c.size);
   const t0 = performance.now();
@@ -58,7 +59,7 @@ for (let i = 0; i < Number(values.proofs); i += 1) {
   const proof = inclusionProof(nodes, m, c.size);
   times.push(performance.now() - t0);
   counts.push(keysNeeded.length);
-  bytes = proof.length * 32;
+  lengths.push(proof.length);
   // The leaf itself, from its tile, to check the proof against the signed head.
   if (!verifyInclusion(nodes(0, m), m, c.size, proof, c.root)) throw new Error(`proof of ${m} failed`);
 }
@@ -66,6 +67,7 @@ const old = Math.floor(c.size / 3);
 const cons = consistencyProof(nodesFrom(tileMap(await readTiles(pool, tilesFor((n) => consistencyProof(n, old, c.size))))), old, c.size);
 const oldRoot = treeHash(nodesFrom(tileMap(await readTiles(pool, tilesFor((n) => treeHash(n, old))))), old);
 if (!verifyConsistency(old, c.size, oldRoot, c.root, cons)) throw new Error('consistency failed');
+bytes = Math.max(...lengths) * 32;
 times.sort((a, b) => a - b);
-console.log(`tree of ${c.size}: inclusion proof ${bytes} bytes (${bytes / 32} hashes), ${Math.max(...counts)} tiles read in one statement, p50 ${times[Math.floor(times.length / 2)]!.toFixed(2)} ms p99 ${times[Math.floor(times.length * 0.99)]!.toFixed(2)} ms (read + compute, local); consistency proof from ${old}: ${cons.length} hashes, verified`);
+console.log(`tree of ${c.size}: inclusion proof at most ${bytes} bytes (${bytes / 32} hashes; at least ${Math.min(...lengths)}), ${Math.max(...counts)} tiles read in one statement, p50 ${times[Math.floor(times.length / 2)]!.toFixed(2)} ms p99 ${times[Math.floor(times.length * 0.99)]!.toFixed(2)} ms (read + compute, local); consistency proof from ${old}: ${cons.length} hashes, verified`);
 await pool.end();

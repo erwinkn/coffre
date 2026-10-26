@@ -5,9 +5,9 @@
 # crash, and an attacker with write access to the database but no key. As
 # scripts/formal-hotpath.sh: every scenario must hold, then each runs again
 # with one of the design's protections turned off, and must fail on the
-# invariant it keeps. Last, the window: with every protection on, deleting or
-# moving an entry before it is sealed must go unseen (UnsealedDeletionDetected
-# and UnsealedReorderDetected fail).
+# invariant it keeps. Last, what the design leaves open, which TLC must find:
+# deleting or moving an entry before it is sealed (the window), and the witness
+# without the signer's memory (a crash between writing a head and publishing it).
 #
 #   scripts/formal-seal.sh                 every scenario
 #   scripts/formal-seal.sh Seal            one, and its runs without a protection
@@ -24,21 +24,29 @@ TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v$TLA_VERSION/tla2
 REMOVALS=(
   "Seal NumberUnderLock Complete"
   "Seal CloseLocks Complete"
-  "Seal Anchored SealedDeletionDetected"
-  "Seal Anchored SplitViewDetected"
   "Seal RememberFirst SealedDeletionDetected"
   "Seal RememberFirst SplitViewDetected"
   "Seal MacChecked NoForgerySealed"
   "Seal RequestIdChecked NoUndetectedReplay"
   "Seal WaitForSeal AnsweredChangeKept"
-  # R40's degraded mode, no anchor plugin: a change still waits for its seal, in the database only.
-  "Seal Anchored AnsweredChangeKept"
+  # The witness alone does not stand in for the signer's memory (SealPlugin's expected failures, below).
+  "Seal SignerMemory SealedDeletionDetected"
+  # Core, R40 without the plugin: the signer's memory is what holds.
+  "SealCore SignerMemory SealedDeletionDetected"
+  "SealCore SignerMemory SplitViewDetected"
+  "SealCore SignerMemory AnsweredChangeKept"
+  # A newest row deleted with nothing new to seal: seen at the next tick only if the signer checks the row.
+  "SealCore RowChecked SealedDeletionDetected"
+  # The plugin alone: the witness is what holds an answered change.
+  "SealPlugin Witness AnsweredChangeKept"
 )
 
-# What the design does not protect, with every protection on: TLC must find it broken.
+# What the design does not protect, with every protection of the scenario on: TLC must find it broken.
 EXPECTED=(
   "Seal UnsealedDeletionDetected"
   "Seal UnsealedReorderDetected"
+  "SealPlugin SealedDeletionDetected"
+  "SealPlugin SplitViewDetected"
 )
 
 LONG=()

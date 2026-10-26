@@ -1,4 +1,4 @@
-import { append, leafOf, type Db, type DayRecord, type Entry, type Keys } from './log.ts';
+import { append, entryMac, leafOf, type Db, type DayRecord, type Entry, type Keys } from './log.ts';
 import { referenceHash } from './tree.ts';
 
 /**
@@ -28,8 +28,13 @@ export async function retainDay(db: Db, keys: Keys, day: number): Promise<{ rete
   // its last number (an unsigned column would let a writer move the cut).
   let highest: string = part.max ?? '0';
   if (mode === 'number') {
-    const { rows: [d] } = await db.query(`SELECT a.payload FROM audit_changes a WHERE a.payload LIKE '{"action":"audit.day","day":' || $1 || ',%'`, [day]);
-    if (d === undefined) throw new Error(`day ${day} has not closed`);
+    // Exactly one, sealed, with its MAC: the day's extent is read from the log, never from what a writer can edit.
+    const records = (await entriesBetween(db, '0', '9223372036854775807', `a.kind = 'change' AND a.payload LIKE '{"action":"audit.day","day":${Number(day)},%'`));
+    if (records.length !== 1) throw new Error(`day ${day}: ${records.length} day entries, not one`);
+    const d = records[0]!;
+    const { rows: [top] } = await db.query('SELECT max(upto)::text AS upto FROM checkpoints');
+    if (BigInt(d.number) > BigInt(top.upto)) throw new Error(`day ${day}: its entry is not sealed yet`);
+    if (!entryMac(keys.mac, d).equals(d.mac)) throw new Error(`day ${day}: its entry fails its MAC`);
     highest = (JSON.parse(d.payload) as DayRecord).last;
   }
   const { rows: [cut] } = await db.query('SELECT c.upto::text, c.size::int FROM checkpoints c WHERE c.upto >= $1 ORDER BY c.upto LIMIT 1', [highest]);
@@ -59,9 +64,9 @@ async function latestRetention(db: Db): Promise<Retention | null> {
   return (await retentions(db)).at(-1) ?? null;
 }
 
-export async function entriesBetween(db: Db, from: string, upto: string): Promise<Entry[]> {
+export async function entriesBetween(db: Db, from: string, upto: string, where = 'true'): Promise<Entry[]> {
   const { rows } = await db.query(
-    'SELECT a.number::text, a.at::text, a.principal, a.credential, a.kind, a.request_id, a.payload, a.seal, a.mac FROM audit a WHERE a.number > $1 AND a.number <= $2 ORDER BY a.number',
+    `SELECT a.number::text, a.at::text, a.principal, a.credential, a.kind, a.request_id, a.payload, a.seal, a.mac FROM audit a WHERE a.number > $1 AND a.number <= $2 AND ${where} ORDER BY a.number`,
     [from, upto],
   );
   return rows.map((r) => ({ number: r.number, at: Number(r.at), principal: r.principal, credential: r.credential, kind: r.kind, requestId: r.request_id, payload: r.payload, seal: r.seal, mac: r.mac }));

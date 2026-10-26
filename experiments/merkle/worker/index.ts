@@ -44,7 +44,8 @@ export class Witness extends DurableObject<Env> {
     if (state !== null && from !== state.checkpoint.size) return { status: 409, body: { size: state.checkpoint.size } };
     const r = await witnessAdd(state, note, proof.map((p) => Buffer.from(p, 'base64')), k.log, k.witness);
     if (!r.answer.ok) return { status: 422, body: { reason: r.answer.reason } };
-    await this.ctx.storage.put('held', { note });
+    // The cosigned head: the log's signature and this witness's, which it serves to anyone who asks.
+    await this.ctx.storage.put('held', { note: r.answer.cosigned });
     return { status: 200, body: { cosigned: r.answer.cosigned } };
   }
 
@@ -52,6 +53,8 @@ export class Witness extends DurableObject<Env> {
     return (await this.ctx.storage.get<{ note: string }>('held'))?.note ?? null;
   }
 }
+
+const MAC = Buffer.alloc(32, 7).toString('base64');
 
 /** A receipt: the vault's signed promise that the use's entry, this leaf at this number, is sealed by `deadline`. */
 function receiptText(origin: string, number: number, leaf: Hash, deadline: number): string {
@@ -64,13 +67,15 @@ async function receipts(env: Env, k: number, alg: string, batch: number): Promis
   const leaves: Hash[] = [];
   for (let i = 0; i < Math.max(k, batch); i += 1) {
     // The entry as the use wrote it: its leaf from the fields, the number the append returned and the MAC.
-    const entry = JSON.stringify(['coffre.audit.v1', String(1_000_000_000_000 + i), Date.now(), 'svc-1', 'cred-1', 'use', `r${i}`, '{"secret":"DFNS_KEY"}', 'AAAA']);
+    // The leaf exactly as leafData (src/log.ts) lays it out: the entry, its number and its 32-byte MAC.
+    const number = 1_000_000_000_000 + i;
+    const entry = JSON.stringify(['coffre.audit.v1', String(number), Date.now(), 'svc-1', 'cred-1', 'use', `r${i}`, '{"secret":"DFNS_KEY","environment":"production"}', null, MAC]);
     const leaf = leafHash(new TextEncoder().encode(entry));
     if (batch > 0) {
       leaves.push(leaf);
       continue;
     }
-    const text = receiptText(env.ORIGIN, i, leaf, Date.now() + 5000);
+    const text = receiptText(env.ORIGIN, number, leaf, Date.now() + 5000);
     if (alg === 'ed25519') last = (await keys.receipts.sign(new TextEncoder().encode(text))).toString('base64');
     else if (alg === 'hmac') last = Buffer.from(await crypto.subtle.sign('HMAC', keys.hmac, new TextEncoder().encode(text))).toString('base64');
     else last = text;

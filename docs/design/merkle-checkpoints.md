@@ -55,18 +55,21 @@ entries, quickly and in a way that no database writer can undo.
   nothing extra and should be core, not a plugin. External witnesses (a
   Durable Object witness, an R2 archive under a lock) stay optional, as R40
   has it, and add third-party verifiability.
-- **TLA+ found a real bug.** The checkpointer must record a head outside the
-  database before writing it to the database. Otherwise a crash between the
-  two, followed by a rollback, gets a split view signed even with the anchor
-  in place. Fixed and modelled (RememberFirst).
-- **A change answers once sealed** (Erwin approved this as a rule during the
-  experiment): +5 ms p50 / +54 ms p99 with no witness, +66 / +587 ms with
+- **TLA+ found a real bug, and settles the core/plugin split.** The
+  checkpointer must record a head outside the database before writing it to
+  the database. Otherwise a crash between the two, followed by a rollback,
+  gets a split view signed even with the anchor in place. Fixed and modelled
+  (RememberFirst). The model also shows a witness alone cannot replace the
+  signer's memory.
+- **A change answers once sealed** (R51, approved by Erwin during the
+  experiment): +5 ms p50 / +53 ms p99 with no witness, +63 / +518 ms with
   the Cloudflare witness. This closes the "undo a change" window entirely.
   Uses keep a one-tick window.
-- **Receipts** cost ~25 µs of Workers CPU each (Ed25519); batching does not
-  help. Recommendation: none for uses (nobody would check them); a change's
+- **Receipts** cost ~24 µs of Workers CPU each for the Ed25519 signature;
+  batching saves about 18 µs of that, which is not worth coalescing requests. Recommendation: none for uses (nobody would check them); a change's
   answer carries its inclusion proof instead.
-- **Key ratcheting** buys nothing here. Below is why.
+- **Key ratcheting** buys too little here to be worth a holder for its
+  state. Below is why.
 - **Retention** works with the tree in both layouts. The retention entry is a
   kept-forever change that commits to what stays below the cut.
 
@@ -135,9 +138,10 @@ because changes are kept forever and sit among the leaves. That's the
   hashes)`, stores them. A proof reads one tile per 8 levels, in a single
   statement.
 
-**Proved by an independent implementation.**
+**Checked by an independent implementation.**
 [`go/verify.go`](../../experiments/merkle/go/verify.go) ran against our
-proof server over a 70,001-entry log that spanned three days. It:
+proof server over a log of 70,003 leaves (70,001 uses and two day entries)
+that spanned three days. It:
 
 - opened every checkpoint with `note.Open`;
 - loaded our tiles through `tlog.TileHashReader`, which checks every tile
@@ -147,6 +151,12 @@ proof server over a 70,001-entry log that spanned three days. It:
 - recomputed each proof with `tlog.ProveRecord` and `tlog.ProveTree` from
   our tiles, and got the same bytes;
 - rejected every proof with one flipped byte.
+
+What this proves: the bytes of the tree, the tiles, the proofs and the notes
+are RFC 9162's and C2SP's. It does not check how an entry becomes a leaf.
+The leaf Go proves comes from the same proof server, and Go only checks it
+names its number. That binding, `leafData`, is checked by the TypeScript
+tests and by the verifier, which rebuilds every leaf from the rows.
 
 ### What the database holds
 
@@ -202,8 +212,9 @@ directly):
 | 500 ms | 501 | 3.9 | 2.2 / 1.1 ms | 6.5 ms | 526 ms |
 | 250 ms | 250 | 7.9 | 1.3 / 0.8 ms | 3.5 ms | 269 ms |
 
-- **"Sealed after"** runs from the oldest entry's commit to the commit of
-  the checkpoint that seals it, so it is the worst case of each tick.
+- **"Sealed after"** runs from when the oldest entry's row was written,
+  inside its statement, a moment before its commit, to the commit of the
+  checkpoint that seals it. It is the worst case of each tick.
 - **Postgres CPU** was 12.9% of a core without checkpoints and 12.8–13.0%
   with them: below noise. The appends' p99 moved within noise too
   (2.1 → 1.3–4.4 ms).
@@ -220,7 +231,7 @@ directly):
 
 | | 70,000 leaves | 10,000,000 leaves |
 |---|---|---|
-| inclusion proof | 17 hashes, 544 B, 4 tiles, 1.08 ms p50 | 24 hashes, 768 B, 5 tiles, 1.49 ms p50 |
+| inclusion proof (largest of 300 random) | 17 hashes, 544 B, 4 tiles, 1.1 ms p50 | 24 hashes, 768 B, 5 tiles, 1.5 ms p50 |
 | consistency proof | 18 hashes | 25 hashes |
 | checkpoint at 1,000/s, 500 ms tick | seal 2.2 / write 1.1 ms p50, sealed after p99 526 ms | seal 2.3 / write 1.2 ms p50, sealed after p99 530 ms, 4 tiles written |
 
@@ -228,8 +239,8 @@ A checkpoint touches only the tiles at the tree's right edge, one per level.
 A proof reads one tile per 8 levels. The first 10-million-leaf run, right
 after loading 324 MB of tiles, showed append p99 at 663 ms and seal p99 at
 79 ms. That was Postgres writing out what had just been loaded: after a
-`CHECKPOINT` and `VACUUM ANALYZE`, the numbers above. The proof p99 at
-10 million (68 ms, against 1.5 ms p50) is cold tiles read from disk.
+`CHECKPOINT` and `VACUUM ANALYZE`, the numbers above. Proof p99s run 13–68 ms
+at either size, against ~1.5 ms p50: cold tiles read from disk.
 
 ## Proofs: the API
 
@@ -268,6 +279,36 @@ fresh log of 8 checkpoints (all as expected):
 | (d) slip a forged entry into the window | caught: the checkpointer seals nothing over a failed MAC | | |
 | (e) crash after remembering a head, before writing it | — | — | rewrites it at restart; the log verifies |
 | (e′) same crash, then one entry of that window deleted | — | — | **caught**: refuses |
+| (f) copy an unsealed entry under a fresh number (a replay: the MAC still holds), both then sealed | **caught**: "request r2121 logged twice" | | |
+| (g) every checkpoint row deleted | **caught**: no genesis to start from | | **caught**: "the database holds no checkpoint; the signer signed 200 leaves" |
+| (h) a sealed change deleted, a forged retention entry naming what is left as kept | **caught**, with or without the MAC key: the cuts must chain from genesis, and a retention entry must lie above its cut and be sealed | | |
+| (i) a sealed entry deleted, with every checkpoint up to the one after it | **caught**: the walk starts at genesis, not at the first row left | | |
+| (j) an equal-size fork signed by a stateless signer, then the signer with memory restarts | | | **caught**: "does not extend the one the signer remembers" |
+| (k) a change sealed by a background tick, the witness slower than the deadline | | the change answers `witnessed: false` at the deadline | |
+| (l) a forged entry in the window, then a change waits for its seal | | | the change fails with the MAC alarm instead of waiting forever |
+| (m) the newest row and its entries deleted under a running signer, no traffic after | | | **caught** at the next tick: "the database's newest checkpoint is 0, the signer's head is at 20" |
+
+Rows (f) to (l) came from review: (g) to (l) are the reviewer's own
+reproductions, each of which got through the first version. What that
+version did wrong:
+- the signer signed a fresh genesis, and overwrote its memory with it,
+  before comparing that memory with an empty checkpoint table;
+- the verifier started at whatever checkpoint row came first, and trusted
+  any retention entry it found;
+- `sealThrough` reported `witnessed` when another tick had sealed the change;
+- a database ahead of the memory was accepted at equal size.
+
+All are fixed, as follows:
+- the memory is read first;
+- the verifier starts only from the genesis head, from a retention cut
+  named by a sealed, chained retention entry, or from a head the caller
+  verified before;
+- a change waits for every witness to hold a head that covers it;
+- the database's head and the memory must be one history.
+
+**What a verification costs.** A full one walks every entry from genesis or
+the newest retention cut: 15 µs an entry in Node. Routine checks pass the
+last head they verified as `from` and walk only what came after (R25).
 
 Against the real anchors on Cloudflare
 ([`anchor-check.ts`](../../experiments/merkle/anchor-check.ts)), with the
@@ -293,7 +334,7 @@ log the benchmark left (88 checkpoints, 60,497 entries):
 
 | | signer's memory (checkpointer DO storage) | DO witness | R2 archive under a bucket lock | W201 / R40's audit-watch DO anchor |
 |---|---|---|---|---|
-| holds | its last head | the newest head it cosigned | every head, immutable for the lock's term | the chain head |
+| holds | its last head | the newest head it cosigned, served with its cosignature | every head, immutable for the lock's term | the chain head |
 | checks consistency | yes, at each start (re-seals from entries) | yes, at each head | no, the verifier does later | n/a |
 | catches a tail cut | at the signer's next tick | at verification | at verification | yes |
 | catches a split view | prevents it | refuses at publication | at verification | no (it holds no signed tree) |
@@ -323,13 +364,20 @@ account.
 - **The fix is the checkpointer's own memory of its last head**, in the same
   Durable Object that runs the ticks (on Node, a file beside the vault),
   written before the database (RememberFirst). It costs one storage write
-  per tick and needs no plugin, so it belongs in core.
+  per tick and needs no plugin, so it belongs in core. On Node the file is
+  synced before the database write (file, rename, directory), so it holds
+  through a power loss, not just a process crash.
 - **R40's plugin keeps what it has:** alerts, readiness gating, re-anchoring
-  and "accept loss". It also gains external witnesses (cosigning,
-  third-party verification, surviving a reset of the vault's DO).
+  and "accept loss". It also gains external witnesses: cosigning (the DO
+  witness stores and serves the cosigned head, and a change's answer
+  carries every cosignature it got in time), third-party verification, and
+  surviving a reset of the vault's DO.
 - **The core checkpointer must refuse to sign** when the database is behind
-  or beside its memory, and say so where an operator sees it. Without the
-  plugin, that refusal is the only alarm.
+  or beside its memory, and say so where an operator sees it. It also checks
+  at every tick that the database's newest checkpoint row is its own head
+  (folded into the sealing statement, at no extra round trip), so a deleted
+  row shows within a tick, even with no traffic. Without the plugin, that
+  refusal is the only alarm.
 
 ## Changes answer once sealed (the rule)
 
@@ -345,13 +393,14 @@ which the admin's client checks and can keep. Uses keep the one-tick window.
 
 Measured ([`change-bench.ts`](../../experiments/merkle/change-bench.ts), 40
 changes under 1,000 uses/s, 500 ms tick, 2 s witness deadline; every
-answer's proof verified):
+answer's proof verified). The first three rows were re-run after the review
+fixes; the first run gave the same within noise (DO witness 68 / 600 ms):
 
 | witness | commit | seal (+ witness) | total, p50 / p99 | witnessed |
 |---|---|---|---|---|
-| none (R40 without the plugin) | 1 / 2 ms | 5 / 54 ms | **7 / 58 ms** | n/a |
-| Cloudflare DO witness, from this host | 1 / 5 ms | 66 / 587 ms | **68 / 600 ms** | 40 of 40 |
-| slow witness (answers after 3 s) | 1 / 20 ms | 2,004 / 2,086 ms | 2,006 / 2,092 ms | 0 of 20: "no answer within 2000 ms" |
+| none (R40 without the plugin) | 1 / 2 ms | 5 / 53 ms | **7 / 58 ms** | n/a |
+| Cloudflare DO witness, from this host | 1 / 2 ms | 63 / 518 ms | **65 / 531 ms** | 40 of 40 |
+| slow witness (answers after 3 s) | 1 / 1 ms | 2,004 / 2,077 ms | 2,008 / 2,082 ms | 0 of 20: "no answer within 2000 ms" |
 | unreachable (connection refused) | 1 / 2 ms | 5 / 77 ms | 7 / 82 ms | 0 of 20: "unreachable" |
 | unreachable (no route; packets dropped) | 1 / 1 ms | 2,004 / 2,078 ms | 2,006 / 2,083 ms | 0 of 20: "no answer within 2000 ms" |
 
@@ -391,13 +440,16 @@ per row):
 
 | per 1,000 receipts | CPU (median) | per receipt |
 |---|---|---|
-| leaf only (JSON + SHA-256) | 11.5–13 ms | ~12 µs |
-| + HMAC (not publicly verifiable) | 19 ms | +7.5 µs |
-| + Ed25519 (WebCrypto) | 36.5–60 ms | **+25–45 µs** |
-| batched: 1,024 leaves, one signature, 1,024 paths | 37.5 ms | ~37 µs: no better |
+| the leaf only (`leafData`'s layout, SHA-256) | 12.5 ms | ~12.5 µs |
+| + HMAC (not publicly verifiable) | 16.5 ms | +4 µs |
+| + Ed25519 (WebCrypto) | 36 ms | **+23.5 µs** |
+| batched: 1,024 leaves, one signature, 1,024 paths | 18.5 ms | ~18 µs, the leaf included |
 
 So a receipt per use costs about 1% of the 2.9 ms a use already costs on
-Workers (W201), and batching does not pay.
+Workers (W201). Batching halves that, to about 0.6%, but it means holding
+requests in an isolate to fill a batch, which is not worth 18 µs. (A first
+run of this probe hashed a shorter, made-up leaf. The figures above are from
+the corrected probe, 8 requests per row.)
 
 **What it closes in practice: little, for uses.** A receipt makes deleting
 that entry detectable by whoever holds it and checks inclusion after the
@@ -410,7 +462,7 @@ now get something stronger: the inclusion proof itself, in the answer.
 people's reveals through the CLI, which can keep and check them, if Erwin
 wants a user to hold proof that Coffre logged their access.
 
-## Key ratcheting (forward-secure MACs): not worth it here
+## Key ratcheting (forward-secure MACs): too little to be worth it here
 
 Schneier and Kelsey's scheme evolves the MAC key after each entry or epoch
 (`K_{i+1} = H(K_i)`) and erases the old one. Someone who steals today's key
@@ -424,12 +476,18 @@ ratchet's state, and Coffre on Workers has none:
   for the current key: the checkpointer's DO, back on the hot path (R44).
 - **The database is no holder:** a ratchet stored there, wrapped by a key
   that still exists, buys nothing.
-- **Whoever steals the MAC key has stolen the vault's config,** and with it
-  the key-encryption key. Forging log entries is the least of it.
-- **The tree already gives the property ratcheting was for.** Sealed,
-  anchored heads fix the past. A stolen MAC key can forge entries only
-  inside the one-tick window, and a stolen signing key cannot rewrite heads
-  that the signer's memory and the witnesses hold.
+- **Today the keys live together.** Whoever steals the MAC key has, in
+  practice, stolen the vault's config, and with it the key-encryption key.
+  Forging log entries is the least of it. (The prototype's MAC, signing and
+  witness keys are separate values. If a deployment ever kept the MAC key
+  apart, a MAC-only theft would be the case ratcheting protects.)
+- **The tree already gives most of what ratcheting was for.** Sealed,
+  anchored heads fix the past. A stolen MAC key can forge entries only for
+  the unsealed window, about one tick; a stolen signing key cannot rewrite
+  heads that the signer's memory and the witnesses hold.
+- **What ratcheting would add** is protection, after a MAC-only theft, for
+  the entries written in the tick before it. That is under a second of
+  entries, and it would put a DO call back on the hot path.
 
 Not prototyped, for those reasons.
 
@@ -446,8 +504,10 @@ are prototyped ([`retention.ts`](../../experiments/merkle/src/retention.ts),
   Verifiers read the extent from the entry rather than infer it from
   numbers, and retention reads it from there, not from an unsigned column.
   Rules:
-  - the sequence only ever moves forward (a clock stepped back, or a day
-    closed twice, does nothing);
+  - the sequence only ever moves forward, and a day's entry is written once
+    (a clock stepped back, or a day closed twice, does nothing);
+  - retention takes the one day entry, and requires it sealed and
+    MAC-valid;
   - a missed midnight just makes a long day;
   - 10¹² numbers a day allow 11 million appends a second and 25,000 years
     of days.
@@ -485,6 +545,14 @@ In both, retention runs in four steps:
   - deleting a kept change below the cut fails its retention entry's digest;
   - deleting the retention entry itself moves the walk below the cut, where
     leaves are gone.
+
+**The bulk cap.** `bulkLimit` is the deployment's choice (R52):
+`{ count, windowMinutes }`, default 1,000 keys per principal per 15 minutes,
+any window up to a day. Nothing here fixes either number. The cap counts from
+a table of its own that keeps up to a day of keys (W199), not from the audit
+log, so dropping days of uses weeks later never touches it. If it ever
+counted from the log instead, retention would have to keep at least the
+configured window (at most a day) plus a tick.
 
 **Which layout:** `number` days are exact and simpler to verify. `at` days
 work with the digest rule, at the cost of stragglers and the
@@ -562,57 +630,107 @@ mutable-until-sealed rows, a fence on them, and a hot row per key.
 
 [`formal/Seal.tla`](../../formal/Seal.tla) models the following:
 
-- appends that take the lock, the number and commit, or abort and leave a
-  gap; one append is a change, answered to an admin;
-- ticks that take the barrier, seal, sign, remember and write;
-- crashes between those steps;
-- an attacker who may delete entries or the newest checkpoint rows, forge
-  an entry at a gap, replay an entry under a free number, or swap two
-  numbers;
-- a ghost set of every head ever shown to a reader.
+- **Appends** take the lock, then the number, then commit, or abort and
+  leave a gap. One append is a change, answered to an admin.
+- **Ticks** check the database's newest checkpoint row against the head
+  they hold, take the barrier, seal, sign, remember, write, and queue the
+  head for the witness. Publication runs behind the tick and sends only the
+  newest head.
+- **Crashes** can fall between any of those steps. A crash loses the
+  witness queue and the head held in memory. A restart (`open()`) follows
+  the code's rules:
+  - **no rows at all:** refuse if the memory holds a head beyond genesis,
+    otherwise start at genesis;
+  - **memory ahead of the database:** re-derive from the entries, then
+    write the row or refuse;
+  - **same place:** the two heads must be equal;
+  - **database ahead:** the remembered head must be a prefix of it.
+- **An attacker** may delete any entry or any checkpoint row, forge an
+  entry, replay one under any number handed out (live ones included: there
+  is no unique key on numbers), or swap two numbers.
+- **A ghost set** of every head shown to a reader: written to the database
+  or published.
 
-`scripts/formal-seal.sh --workers 8`, about 47 s:
+The alarm is the code's verifier:
+- a walk from genesis, where every row and the witness's head must equal
+  the entries at or below its place;
+- no database ending before the witness's head;
+- no duplicate numbers or request IDs;
+- the signer's and the witness's refusals, and a failed MAC at sealing.
 
-| scenario | bounds | distinct states | time |
-|---|---|---|---|
-| Seal | 3 appends (1 change), 3 ticks, 1 crash, 2 attacks | 917,570 | 5 s |
-| SealDeep | 4 ticks, 2 crashes, 3 attacks | 7,883,882 | 32 s |
+Protections, each a constant:
+- **NumberUnderLock, CloseLocks:** the append and the barrier.
+- **SignerMemory:** the head kept outside the database, read at restart.
+- **Witness:** an external head, consistency-checked at publication.
+- **RememberFirst:** memory written before the database.
+- **RowChecked:** each tick compares the database's newest row with the
+  head the signer holds.
+- **MacChecked:** no entry sealed over a failed MAC.
+- **RequestIdChecked:** a verifier check; removing it is removing the
+  protection.
+- **WaitForSeal:** R51.
 
-Invariants, all holding:
+`scripts/formal-seal.sh --workers 8`, about 2 minutes:
 
+| scenario | distinct states | time |
+|---|---|---|
+| **Seal**: memory and witness | 8,986,394 | 37 s |
+| **SealCore**: memory only (R40 without the plugin) | 4,742,654 | 20 s |
+| **SealPlugin**: witness only, no signer memory | 10,432,858 | 40 s |
+
+Seal and SealCore hold every invariant. SealPlugin holds Complete,
+AnsweredChangeKept, NoForgerySealed, NoUndetectedReplay and NoFalseAlarm.
+
+Invariants:
 - **Complete:** no honest entry commits under a signed head.
 - **SealedDeletionDetected**
 - **SplitViewDetected**
 - **NoForgerySealed**
 - **NoUndetectedReplay**
-- **AnsweredChangeKept:** an answered change missing from the database
-  raises the alarm.
-- **NoFalseAlarm:** an honest run with crashes never alarms.
+- **AnsweredChangeKept**
+- **NoFalseAlarm:** honest runs with crashes never alarm.
+
+The deletion, split-view, answered-change and replay invariants are stated
+over heads shown to someone, from the next tick after an attack on. Before
+the signer acts again, nobody outside the database has looked.
 
 Each protection removed, TLC fails as required:
 
 | removed | breaks | TLC's counterexample |
 |---|---|---|
-| NumberUnderLock | Complete | number 1 taken before the lock; the tick seals up to 1 without it; then 1 commits under the seal |
+| NumberUnderLock | Complete | number 1 taken before the lock; the tick seals up to 1 without it; then 1 commits |
 | CloseLocks | Complete | the tick reads the sequence while an append holding number 1 is in flight |
-| Anchored | SealedDeletionDetected | entry 1 sealed; the attacker deletes it and the newest checkpoint row: a consistent shorter log |
-| Anchored | SplitViewDetected | the same, then the stateless signer seals the window again: two signed heads, a clean database |
-| RememberFirst | SealedDeletionDetected, SplitViewDetected | the head is written to the database, then the checkpointer crashes before recording it outside; the attacker deletes the entry and the row; the restarted signer signs a second head |
+| RememberFirst | SealedDeletionDetected, SplitViewDetected | head h1 holding entry 1 is written, not yet remembered; the attacker deletes entry and row; crash; the restart sees memory equal to the database (genesis) and signs a second head for the same place |
 | MacChecked | NoForgerySealed | a forged entry at an aborted append's gap gets sealed |
-| RequestIdChecked | NoUndetectedReplay | an entry copied into a gap; both copies sealed |
-| WaitForSeal | AnsweredChangeKept | a change answered at commit, deleted before any tick |
-| Anchored, with WaitForSeal on (R40 without the plugin) | AnsweredChangeKept | the change is sealed into the database's checkpoint and answered; the attacker deletes it and the newest checkpoint row |
+| RequestIdChecked | NoUndetectedReplay | an entry replayed into a gap, both MACs valid, both sealed and written |
+| WaitForSeal | AnsweredChangeKept | a change answered while the signer is down; the attacker deletes it |
+| SignerMemory (Seal) | SealedDeletionDetected | h1 written and queued; crash drops the queue; entry and row deleted; the stateless restart opens on genesis |
+| SignerMemory (SealCore) | SealedDeletionDetected, SplitViewDetected, AnsweredChangeKept | the same shape, then a second head for the same place |
+| RowChecked (SealCore) | SealedDeletionDetected | h1 written; entry and row deleted; no new traffic, so the next tick writes nothing and nothing ever alarms |
+| Witness (SealPlugin) | AnsweredChangeKept | written, the change's entry deleted, answered, crash, row deleted, stateless restart |
 
-The design leaves two things open on purpose, both TLC failures as
-expected: **UnsealedDeletionDetected** and **UnsealedReorderDetected**,
-the one-tick window.
+Expected to fail, as documented:
+- **The window (Seal):** UnsealedDeletionDetected and
+  UnsealedReorderDetected.
+- **A witness without signer memory (SealPlugin):** SealedDeletionDetected
+  and SplitViewDetected. h1 is written, a crash drops its queued
+  publication, the attacker deletes the entry and the row, and the
+  stateless restart signs a second head, which the witness (still at
+  genesis) accepts.
+
+**What the model settles for the design:** a witness cannot stand in for
+the signer's memory, because the head is written to the database before it
+is published. The signer's memory is what closes the hole across a restart.
+That is why it belongs in core. The witness adds what the model does not
+exercise: surviving the loss of that memory, and a head third parties can
+check.
 
 Not modelled:
-
 - several checkpointers at once (one DO is assumed);
 - tile edits (the tree is abstracted to its leaves; an edit changes the
   head, by the code's argument, not TLC's);
-- the attacker moving the sequence.
+- the attacker moving the sequence;
+- retention.
 
 ## Prior art
 
@@ -695,4 +813,21 @@ Not modelled:
 
 ## Cleanup
 
-CLEANUP_LINE
+Everything was on Erwin's personal Cloudflare account and is gone. Each
+deletion was verified by listing through the API: no Worker, R2 bucket or
+Durable Object namespace named w209 remains.
+
+**Resources** (cost: within the plan's included usage, a few thousand
+requests):
+- the Worker `coffre-w209-anchor`, deleted with its Durable Object witness;
+- the R2 bucket `coffre-w209-anchor`: its 88 archived heads deleted, then
+  the bucket itself.
+
+**The lock-rule test, which is where R2's guarantee ends.**
+1. A fresh head was archived under the 900 s lock rule.
+2. The Worker's delete was refused ("locked by the bucket policy").
+3. The rule was removed through the account API.
+4. The same delete then succeeded at once, well inside the 900 s.
+
+Locally: a Postgres 16 container of W209's own (compose project `w209`, port
+56209), its volume and `~/scratch/w209`, deleted after the last run.

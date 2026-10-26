@@ -1,5 +1,5 @@
 import type { Witness, WitnessAnswer } from './log.ts';
-import { cosignNote, openNote, parseCheckpoint, type Checkpoint, type Signer, type Verifier } from './note.ts';
+import { cosignNote, openCheckpoint, parseCheckpoint, type Checkpoint, type Signer, type Verifier } from './note.ts';
 import { verifyConsistency, type Hash } from './tree.ts';
 
 /**
@@ -14,9 +14,8 @@ export type WitnessState = { checkpoint: Checkpoint; note: string } | null;
 export async function witnessAdd(
   state: WitnessState, note: string, proof: readonly Hash[], log: Verifier, self: Signer,
 ): Promise<{ state: WitnessState; answer: WitnessAnswer }> {
-  const text = await openNote(note, log);
-  if (text === null) return { state, answer: { ok: false, reason: 'not signed by the log' } };
-  const c = parseCheckpoint(text);
+  const c = await openCheckpoint(note, log);
+  if (c === null) return { state, answer: { ok: false, reason: 'not signed by the log' } };
   if (state !== null) {
     const held = state.checkpoint;
     if (BigInt(c.upto) < BigInt(held.upto)) return { state, answer: { ok: false, reason: `older than the head held (${held.upto})` } };

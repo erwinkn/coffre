@@ -1,7 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import { checkpointBody, openNote, parseCheckpoint, signerFrom, signNote, verifierFrom, type Checkpoint, type Signer } from './note.ts';
+import { checkpointBody, openCheckpoint, signerFrom, signNote, verifierFrom, type Checkpoint, type Signer } from './note.ts';
 import { Edge, edgeOf, nodesFrom, tileMap, tilesFor, type Tile, type TileKey } from './tiles.ts';
 import { consistencyProof, inclusionProof, leafHash, treeHash, type Hash } from './tree.ts';
 
@@ -61,7 +61,7 @@ export async function append(db: Db, keys: Keys, f: Fields): Promise<string> {
   return row.number;
 }
 
-type EntryRow = { upto: string; number: string | null; at: string; principal: string; credential: string | null; kind: string; request_id: string; payload: string; seal: Buffer | null; mac: Buffer; written_at: Date };
+type EntryRow = { upto: string; newest?: string | null; number: string | null; at: string; principal: string; credential: string | null; kind: string; request_id: string; payload: string; seal: Buffer | null; mac: Buffer; written_at: Date };
 
 const toEntry = (r: EntryRow): Entry => ({
   number: r.number!, at: Number(r.at), principal: r.principal, credential: r.credential, kind: r.kind, requestId: r.request_id, payload: r.payload, seal: r.seal, mac: r.mac,
@@ -79,6 +79,11 @@ export type Memory = { last(): Promise<string | null>; remember(note: string): P
 /** Somewhere each signed head goes that a database writer cannot reach: a witness, an archive. */
 export type Witness = { name: string; publish(note: string, proofFrom: (size: number) => Promise<Hash[]>): Promise<WitnessAnswer> };
 export type WitnessAnswer = { ok: true; cosigned?: string } | { ok: false; reason: string };
+
+type Pump = {
+  busy: boolean; next: { note: string; head: Checkpoint } | null; acked: bigint; cosigned: string | null;
+  waiters: { upto: bigint; done: (failure: string | null) => void }[];
+};
 
 /** A closed day, as its signed entry records it. */
 export type DayRecord = { action: 'audit.day'; day: number; first: string; last: string; firstLeaf: number; lastLeaf: number };
@@ -99,14 +104,17 @@ export class Checkpointer {
   private keys: Keys;
   private edge: Edge;
   private head: Checkpoint;
+  /** The newest head's signed note, as the witnesses get it. */
+  private note: string;
   private memory: Memory | null;
   private witnesses: Witness[];
 
-  private constructor(db: Db, keys: Keys, edge: Edge, head: Checkpoint, memory: Memory | null, witnesses: Witness[]) {
+  private constructor(db: Db, keys: Keys, edge: Edge, head: Checkpoint, note: string, memory: Memory | null, witnesses: Witness[]) {
     this.db = db;
     this.keys = keys;
     this.edge = edge;
     this.head = head;
+    this.note = note;
     this.memory = memory;
     this.witnesses = witnesses;
   }
@@ -132,32 +140,38 @@ export class Checkpointer {
   static async open(db: Db, keys: Keys, opts: { memory?: Memory; witnesses?: Witness[] } = {}): Promise<Checkpointer> {
     const memory = opts.memory ?? null;
     const verifier = await verifierFrom(keys.signer.verifierKey);
+    // What the signer remembers comes first: nothing is signed or remembered before it is compared.
+    const remembered = (await memory?.last()) ?? null;
+    let mine: Checkpoint | null = null;
+    if (remembered !== null) {
+      mine = await openCheckpoint(remembered, verifier);
+      if (mine === null) throw new Error('the signer remembers a head it did not sign');
+    }
     const { rows: [last] } = await db.query('SELECT note FROM checkpoints ORDER BY upto DESC LIMIT 1');
-    let head: Checkpoint;
     if (last === undefined) {
-      // A new log: the empty tree, sealing nothing below the sequence as it stands.
-      const { rows: [s] } = await db.query("SELECT coalesce(pg_sequence_last_value('audit_number'), 0)::text AS upto");
-      head = { origin: keys.origin, size: 0, root: treeHash(() => Buffer.alloc(0), 0), upto: s.upto, at: Date.now() };
+      if (mine !== null && (mine.size > 0 || mine.upto !== '0')) {
+        throw new Error(`the database holds no checkpoint; the signer signed ${mine.size} leaves up to ${mine.upto}`);
+      }
+      // A new log: the empty tree at number 0, sealing nothing, so the first tick seals every entry there is.
+      const head: Checkpoint = { origin: keys.origin, size: 0, root: treeHash(() => Buffer.alloc(0), 0), upto: '0', at: Date.now() };
       const note = await signNote(checkpointBody(head), [keys.signer]);
       await memory?.remember(note);
       await db.query('INSERT INTO checkpoints (upto, size, root, note) VALUES ($1, 0, $2, $3)', [head.upto, head.root, note]);
-    } else {
-      const text = await openNote(last.note, verifier);
-      if (text === null) throw new Error('the last checkpoint is not signed by this log');
-      head = parseCheckpoint(text);
+      return new Checkpointer(db, keys, Edge.empty(), head, note, memory, opts.witnesses ?? []);
     }
+    const newest = await openCheckpoint(last.note, verifier);
+    if (newest === null) throw new Error('the last checkpoint is not signed by this log');
+    let head = newest;
+    let note: string = last.note;
     let edge = await loadEdge(db, head.size);
     if (!edge.root().equals(head.root)) throw new Error('the tiles at the edge do not give the signed head');
-    const remembered = await memory?.last();
-    if (remembered !== undefined && remembered !== null) {
-      const text = await openNote(remembered, verifier);
-      if (text === null) throw new Error('the signer remembers a head it did not sign');
-      const mine = parseCheckpoint(text);
-      if (mine.upto === head.upto && !(mine.size === head.size && mine.root.equals(head.root))) {
-        throw new Error(`the database's checkpoint at ${head.upto} is not the one signed`);
-      }
-      if (BigInt(mine.upto) > BigInt(head.upto)) {
-        // Seal again, from the database's newest row up to the remembered head, and require the same head.
+    if (mine !== null) {
+      // One rule: the remembered head and the database's must be one history, the shorter a prefix of the longer.
+      if (mine.upto === head.upto) {
+        if (!(mine.size === head.size && mine.root.equals(head.root))) throw new Error(`the database's checkpoint at ${head.upto} is not the one signed`);
+      } else if (BigInt(mine.upto) > BigInt(head.upto)) {
+        // The memory is ahead (a crash between remembering and writing, or rows deleted): seal again from the
+        // database's newest row up to the remembered head, from the entries, and require exactly that head.
         const { rows } = await db.query(
           'SELECT a.number::text, a.at::text, a.principal, a.credential, a.kind, a.request_id, a.payload, a.seal, a.mac FROM audit a WHERE a.number > $1 AND a.number <= $2 ORDER BY a.number',
           [head.upto, mine.upto],
@@ -166,17 +180,19 @@ export class Checkpointer {
         if (edge.size !== mine.size || !edge.root().equals(mine.root)) {
           throw new Error(`the database lost entries the signer sealed: it holds ${edge.size} leaves up to ${mine.upto}, the signer signed ${mine.size}`);
         }
-        await writeCheckpoint(db, tiles, mine, remembered, null);
+        await writeCheckpoint(db, tiles, mine, remembered!, null);
         head = mine;
-      } else if (mine.size < head.size) {
-        // A database ahead of the memory can only be one the signer wrote and then lost track of: impossible while
-        // it remembers first. Accept it only if it extends the remembered head.
-        const nodes = nodesFrom(tileMap(await readTiles(db, tilesFor((n) => treeHash(n, mine.size)))));
-        if (!treeHash(nodes, mine.size).equals(mine.root)) throw new Error('the database does not extend the head the signer remembers');
+        note = remembered!;
+      } else {
+        // The database is ahead, which RememberFirst rules out for this signer (a memory restored from a backup,
+        // say): accept it only if the remembered head is a prefix of it.
+        const prefix = mine.size <= head.size
+          && treeHash(nodesFrom(tileMap(await readTiles(db, tilesFor((n) => treeHash(n, mine!.size))))), mine.size).equals(mine.root);
+        if (!prefix) throw new Error(`the database's head (${head.size} leaves up to ${head.upto}) does not extend the one the signer remembers (${mine.size} up to ${mine.upto})`);
       }
       edge = await loadEdge(db, head.size);
     }
-    return new Checkpointer(db, keys, edge, head, memory, opts.witnesses ?? []);
+    return new Checkpointer(db, keys, edge, head, note, memory, opts.witnesses ?? []);
   }
 
   private running: Promise<unknown> = Promise.resolve();
@@ -185,46 +201,58 @@ export class Checkpointer {
    * One checkpoint: seal what has committed, sign it, store it, publish it.
    * `nextDay` also moves the sequence to that day (number days) and records the
    * day just closed in a signed `audit.day` entry. A witness slower than
-   * `witnessTimeoutMs` is reported as such; its publication carries on. Ticks
-   * run one at a time: the regular ones and those a change asks for.
+   * `witnessTimeoutMs` is reported as such; its publication carries on.
    */
   async tick(opts: { nextDay?: number; witnessTimeoutMs?: number } = {}): Promise<Tick> {
-    // Sealing runs one tick at a time; waiting for the witnesses does not hold the next tick back.
-    const run = this.running.then(() => this.tickNow(opts));
-    this.running = run.catch(() => {});
-    const t = await run;
+    const t = await this.seal(opts);
     if (!t.signed || this.witnesses.length === 0) return t;
     const w0 = performance.now();
-    const failures = await this.witnessed(t.upto, opts.witnessTimeoutMs ?? 30_000);
+    const { failures } = await this.witnessed(t.upto, opts.witnessTimeoutMs ?? 30_000);
     const witnessMs = performance.now() - w0;
     return { ...t, failures: [...t.failures, ...failures], witnessMs, oldestToWitnessedMs: t.oldestToSealMs + witnessMs };
   }
 
+  /** Sealing runs one tick at a time, the regular ones and those a change asks for; waiting for witnesses does not. */
+  private seal(opts: { nextDay?: number }): Promise<Tick> {
+    const run = this.running.then(() => this.tickNow(opts));
+    this.running = run.catch(() => {});
+    return run;
+  }
+
   /**
    * Each witness's pump: one publication in flight at a time, always of the
-   * newest head (a witness needs only that: it proves the ones between), and a
-   * failed one tried again with the next tick's head.
+   * newest head (a witness needs only that: it proves the ones between). A
+   * failed one is tried again with the next tick's head, or the same head on a
+   * tick that seals nothing. `cosigned` is the newest head it cosigned.
    */
-  private pumps = new Map<Witness, { busy: boolean; next: { note: string; head: Checkpoint } | null; acked: bigint; waiters: { upto: bigint; done: (failure: string | null) => void }[] }>();
+  private pumps = new Map<Witness, Pump>();
+
+  private pump(w: Witness): Pump {
+    let p = this.pumps.get(w);
+    if (p === undefined) this.pumps.set(w, (p = { busy: false, next: null, acked: -1n, cosigned: null, waiters: [] }));
+    return p;
+  }
 
   private publish(note: string, head: Checkpoint): void {
     for (const w of this.witnesses) {
-      let p = this.pumps.get(w);
-      if (p === undefined) this.pumps.set(w, (p = { busy: false, next: null, acked: -1n, waiters: [] }));
+      const p = this.pump(w);
       p.next = { note, head };
       if (!p.busy) void this.drain(w, p);
     }
   }
 
-  private async drain(w: Witness, p: NonNullable<ReturnType<typeof this.pumps.get>>): Promise<void> {
+  private async drain(w: Witness, p: Pump): Promise<void> {
     p.busy = true;
     while (p.next !== null) {
       const { note, head } = p.next;
       p.next = null;
       const a: WitnessAnswer = await w.publish(note, (from) => this.consistency(from, head.size))
         .catch((e: Error) => ({ ok: false, reason: `unreachable: ${e.message}` }));
-      if (a.ok) p.acked = BigInt(head.upto);
       const upto = BigInt(head.upto);
+      if (a.ok && upto > p.acked) {
+        p.acked = upto;
+        p.cosigned = a.cosigned ?? null;
+      }
       p.waiters = p.waiters.filter((x) => {
         if (a.ok && x.upto <= p.acked) x.done(null);
         else if (!a.ok && x.upto <= upto) x.done(`witness ${w.name}: ${a.reason}`);
@@ -235,37 +263,43 @@ export class Checkpointer {
     p.busy = false;
   }
 
-  /** Whether every witness holds a head sealing `upto`, within the deadline: the failures, if not. */
-  private async witnessed(upto: string, deadline: number): Promise<string[]> {
+  /** Whether every witness holds a head sealing `upto`, within the deadline: the failures, if not, and the cosigned heads. */
+  private async witnessed(upto: string, deadline: number): Promise<{ failures: string[]; cosigned: string[] }> {
     const answers = await Promise.all(this.witnesses.map((w) => {
-      const p = this.pumps.get(w);
-      if (p !== undefined && p.acked >= BigInt(upto)) return null;
+      const p = this.pump(w);
+      if (p.acked >= BigInt(upto)) return null;
       return new Promise<string | null>((resolve) => {
         const timer = setTimeout(() => resolve(`witness ${w.name}: no answer within ${deadline} ms`), deadline);
         timer.unref();
-        p?.waiters.push({ upto: BigInt(upto), done: (f) => { clearTimeout(timer); resolve(f); } });
+        p.waiters.push({ upto: BigInt(upto), done: (f) => { clearTimeout(timer); resolve(f); } });
       });
     }));
-    return answers.filter((a): a is string => a !== null);
+    const cosigned = this.witnesses.map((w) => this.pump(w)).filter((p) => p.acked >= BigInt(upto) && p.cosigned !== null).map((p) => p.cosigned!);
+    return { failures: answers.filter((a): a is string => a !== null), cosigned };
   }
 
   /**
    * A change answers once its entry is sealed and, where witnesses are set up,
-   * witnessed (the rule Erwin approved for W209): seal now, unless a checkpoint
-   * already covers it. Returns the head that seals it and whether every
-   * witness took it within the deadline.
+   * witnessed (R51): seal now, unless a checkpoint already covers it, then wait
+   * for every witness to hold a head that covers it, whichever tick sealed it.
+   * A tick that cannot seal (an entry failing its MAC) fails the change's wait
+   * rather than spinning.
    */
-  async sealThrough(number: string, witnessTimeoutMs = 2000): Promise<{ head: Checkpoint; witnessed: boolean; failures: string[] }> {
-    let t: Tick | null = null;
-    while (BigInt(this.head.upto) < BigInt(number)) t = await this.tick({ witnessTimeoutMs });
-    return { head: this.head, witnessed: t === null || t.failures.length === 0, failures: t?.failures ?? [] };
+  async sealThrough(number: string, witnessTimeoutMs = 2000): Promise<{ head: Checkpoint; note: string; witnessed: boolean; failures: string[]; cosigned: string[] }> {
+    while (BigInt(this.head.upto) < BigInt(number)) {
+      const before = this.head.upto;
+      const t = await this.seal({});
+      if (this.head.upto === before) throw new Error(`cannot seal ${number}: ${t.failures.join('; ') || 'nothing to seal'}`);
+    }
+    const { failures, cosigned } = await this.witnessed(number, witnessTimeoutMs);
+    return { head: this.head, note: this.note, witnessed: failures.length === 0, failures, cosigned };
   }
 
   private async tickNow(opts: { nextDay?: number; witnessTimeoutMs?: number }): Promise<Tick> {
     const cpu0 = process.cpuUsage();
     const t0 = performance.now();
     const { rows } = await this.db.query({
-      name: 'seal_window', text: 'SELECT upto::text, number::text, at::text, principal, credential, kind, request_id, payload, seal, mac, written_at FROM seal_window($1, $2)',
+      name: 'seal_window', text: 'SELECT upto::text, newest::text, number::text, at::text, principal, credential, kind, request_id, payload, seal, mac, written_at FROM seal_window($1, $2)',
       values: [this.head.upto, opts.nextDay ?? null],
     });
     const sealMs = performance.now() - t0;
@@ -273,6 +307,9 @@ export class Checkpointer {
     const upto = first!.upto;
     const entries = found.map(toEntry);
     const failures = entries.filter((e) => !entryMac(this.keys.mac, e).equals(e.mac)).map((e) => `${e.number}: mac`);
+    // A running signer seals from the head it holds and never takes the database's word for it; but the database's
+    // newest row must still be that head. Rows deleted since show here, within a tick; nothing is signed over them.
+    if (first!.newest !== this.head.upto) failures.push(`the database's newest checkpoint is ${first!.newest ?? 'gone'}, the signer's head is at ${this.head.upto}`);
     const empty: Tick = {
       upto: this.head.upto, size: this.edge.size, entries: entries.length, signed: false, sealMs, writeMs: 0, cpuMs: 0,
       oldestToSealMs: 0, oldestToWitnessedMs: 0, newestToSealMs: 0, witnessMs: 0, tilesWritten: 0, failures,
@@ -284,6 +321,11 @@ export class Checkpointer {
       if (opts.nextDay !== undefined) {
         await this.db.query('UPDATE checkpoints SET closed_day = $1 WHERE upto = $2', [opts.nextDay - 1, upto]);
         await this.recordDay(opts.nextDay - 1, this.head);
+      }
+      // A quiet log: hand the newest head again to any witness that failed to take it.
+      for (const w of this.witnesses) {
+        const p = this.pump(w);
+        if (p.acked < BigInt(this.head.upto) && !p.busy) this.publish(this.note, this.head);
       }
       return empty;
     }
@@ -305,6 +347,7 @@ export class Checkpointer {
     const sealedAt = Date.now();
     const writeMs = performance.now() - t1;
     this.head = head;
+    this.note = note;
     if (opts.nextDay !== undefined) await this.recordDay(opts.nextDay - 1, head);
     this.publish(note, head);
     const oldest = found.length === 0 ? sealedAt : Math.min(...found.map((r) => r.written_at.getTime()));
@@ -328,12 +371,14 @@ export class Checkpointer {
       `SELECT a.payload FROM audit_changes a WHERE a.payload LIKE '{"action":"audit.day"%' ORDER BY a.number DESC LIMIT 1`,
     );
     const last = prev === undefined ? null : (JSON.parse(prev.payload) as DayRecord);
+    // Once per day: closing it again (a retried barrier, a clock stepped back) records nothing.
+    if (last !== null && last.day >= day) return;
     const record: DayRecord = {
       action: 'audit.day', day,
       first: last === null ? '1' : String(BigInt(last.last) + 1n), last: closing.upto,
       firstLeaf: last === null ? 0 : last.lastLeaf + 1, lastLeaf: closing.size - 1,
     };
-    await append(this.db, this.keys, { at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `day-${day}-${closing.upto}`, payload: JSON.stringify(record) });
+    await append(this.db, this.keys, { at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `day-${day}`, payload: JSON.stringify(record) });
   }
 
   /** A consistency proof between two sizes of the tree, from the tiles. */

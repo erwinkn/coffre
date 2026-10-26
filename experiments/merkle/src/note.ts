@@ -22,10 +22,12 @@ export function checkpointBody(c: Checkpoint): string {
 
 export function parseCheckpoint(body: string): Checkpoint {
   const [origin, size, root, upto, at] = body.split('\n');
-  if (origin === undefined || !/^\d+$/.test(size ?? '') || root === undefined || !upto?.startsWith('upto ') || !at?.startsWith('at ')) {
+  const hash = Buffer.from(root ?? '', 'base64');
+  if (!origin || !/^\d{1,15}$/.test(size ?? '') || hash.length !== 32 || hash.toString('base64') !== root
+    || !/^upto \d{1,19}$/.test(upto ?? '') || !/^at \d{1,15}$/.test(at ?? '')) {
     throw new Error('not a checkpoint');
   }
-  return { origin, size: Number(size), root: Buffer.from(root, 'base64'), upto: upto.slice(5), at: Number(at.slice(3)) };
+  return { origin, size: Number(size), root: hash, upto: upto!.slice(5), at: Number(at!.slice(3)) };
 }
 
 const ED25519 = 1;
@@ -89,6 +91,14 @@ export function splitNote(note: string): { text: string; signatures: { name: str
     return { name: m[1]!, id: raw.subarray(0, 4), signature: raw.subarray(4) };
   });
   return { text, signatures };
+}
+
+/** A checkpoint if `verifier` signed it and it names that log as its origin, else null. */
+export async function openCheckpoint(note: string, verifier: Verifier): Promise<Checkpoint | null> {
+  const text = await openNote(note, verifier);
+  if (text === null) return null;
+  const c = parseCheckpoint(text);
+  return c.origin === verifier.name ? c : null;
 }
 
 /** The note's text if `verifier` signed it, else null. */

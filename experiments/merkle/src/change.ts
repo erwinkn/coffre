@@ -19,6 +19,8 @@ import { append, proveNumber, type Checkpointer, type Db, type Fields, type Incl
  */
 export type ChangeAnswer = {
   number: string; witnessed: boolean; failures: string[]; proof: InclusionProof;
+  /** The head that seals it, as the log signed it, and as each witness that took it in time cosigned it. */
+  checkpoint: string; cosigned: string[];
   commitMs: number; sealMs: number; totalMs: number;
 };
 
@@ -28,6 +30,7 @@ export async function changeAndSeal(db: Db, keys: Keys, cp: Checkpointer, f: Fie
   const t1 = performance.now();
   const sealed = await cp.sealThrough(number, witnessTimeoutMs);
   const t2 = performance.now();
-  const proof = (await proveNumber(db, number))!;
-  return { number, witnessed: sealed.witnessed, failures: sealed.failures, proof, commitMs: t1 - t0, sealMs: t2 - t1, totalMs: performance.now() - t0 };
+  // The proof against the head that sealed it (a later one may be in the database already).
+  const proof = (await proveNumber(db, number, sealed.head.size))!;
+  return { number, witnessed: sealed.witnessed, failures: sealed.failures, proof, checkpoint: sealed.note, cosigned: sealed.cosigned, commitMs: t1 - t0, sealMs: t2 - t1, totalMs: performance.now() - t0 };
 }
