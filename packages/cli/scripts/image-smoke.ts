@@ -27,6 +27,8 @@ assert.equal(docker('run', '--rm', image, '--version'), version);
 const main = '/usr/local/lib/node_modules/@coffre/cli/dist/main.js';
 const probe = `const fs = require('node:fs'); let writable = true; try { fs.accessSync('${main}', fs.constants.W_OK) } catch { writable = false } console.log(process.getuid(), fs.statSync('${main}').uid, writable)`;
 assert.equal(docker('run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', probe), '65532 0 false');
+// `node` is on the path, for a probe's `node -e` (docs/workloads.md).
+assert.match(docker('run', '--rm', '--entrypoint', 'node', image, '-p', 'process.version'), /^v24\./);
 console.log(`${image}: coffre ${version}, as uid 65532, which cannot change it`);
 
 const coffre = await fakeCoffre();

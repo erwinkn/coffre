@@ -8,7 +8,7 @@ on:
   push:
     tags: ['v*']
   # The image alone, for a version npm already has: a release from before
-  # the image, or one whose image job failed. Run it from main, whose
+  # the image, or one whose image job failed. Only from main, whose
   # Dockerfile builds it:
   #   gh workflow run release.yml --ref main -f version=0.14.5
   workflow_dispatch:
@@ -89,7 +89,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.version }}
+        # A branch's own release.yml could drop this check, and any workflow
+        # in the repository can push and attest with its token: what makes an
+        # image official is its attestation's signer, this file on main or on
+        # a v* tag, which docs/workloads.md has verifiers require. This keeps
+        # a mistaken dispatch from a branch from publishing.
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::publish an image from main, not $GITHUB_REF: gh workflow run release.yml --ref main -f version=<version>"
+            exit 1
+          fi
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then version="${GITHUB_REF_NAME#v}"; else version="$REQUESTED"; fi
           if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::$version is no version"
@@ -152,7 +161,8 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "$IMAGE:$VERSION@$digest, tagged $(paste -sd ' ' "$RUNNER_TEMP/tags")" >> "$GITHUB_STEP_SUMMARY"
 
-      # `gh attestation verify oci://ghcr.io/erwinkn/coffre-cli@<digest> --owner erwinkn`
+      # Its signer is this workflow at this run's ref, which verifiers pin
+      # (docs/workloads.md, "The image").
       - name: Attest the image's provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
