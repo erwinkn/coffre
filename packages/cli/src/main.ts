@@ -269,12 +269,16 @@ function unavailableWait(attempt: number): number | undefined {
 /**
  * Whether the instance answered 503 for a while it says passes: it could
  * not reach its database or its vault (`unavailable`, no reason), count
- * exchanges (`busy`), or reach the issuer's keys (`issuer_unavailable`).
- * Not one that waits on an operator, such as `wrong_kek` or
- * `vault_outdated`, nor the proxy's own answers, nor Cloudflare's page.
+ * exchanges (`busy`), or reach the issuer's keys (`issuer_unavailable`),
+ * or it is moving to its new app key (`rotating`). Not one that waits on
+ * an operator or a deploy (`wrong_kek`, `vault_outdated`, `app_key`,
+ * `migrating`), nor the proxy's own answers, nor Cloudflare's page.
  */
 function momentary(status: number, body: { error?: unknown; reason?: unknown } | null): boolean {
-  return status === 503 && body?.error === 'unavailable' && (body.reason === undefined || body.reason === 'busy' || body.reason === 'issuer_unavailable');
+  if (status !== 503) return false;
+  // An instance moving to its new app key, which it says takes a second.
+  if (body?.error === 'rotating') return true;
+  return body?.error === 'unavailable' && (body.reason === undefined || body.reason === 'busy' || body.reason === 'issuer_unavailable');
 }
 
 /**
@@ -2092,7 +2096,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   folders: (args) => manage.folders(connect, args),
   'folders rename': (args) => manage.foldersRename(connect, args),
   'folders remove': (args) => manage.foldersRemove(connect, args),
-  missing: (args) => manage.missing(connect, args),
+  // A read of key names, asked again as reads of values are: the Action's `require-complete: true` gate.
+  missing: (args) => manage.missing(() => client(target(), undefined, [], reading), args),
   'missing dismiss': (args) => manage.missingDismiss(connect, args, true),
   'missing restore': (args) => manage.missingDismiss(connect, args, false),
   projects: (args) => manage.projects(connect, args),
