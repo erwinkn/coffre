@@ -101,7 +101,9 @@ either component as the owner or give the runtime logins additional roles.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
 existing role, on every run that names it. Coffre never makes the role,
 and never revokes the group: a run without the flag leaves the membership
-as it is.
+as it is. Revoke it as the owner, `REVOKE coffre_backup FROM <role>`, or as
+a superuser with `GRANTED BY <owner>`: Postgres records who granted it, and a
+superuser's plain `REVOKE` only warns.
 
 ## Upgrading
 

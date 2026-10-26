@@ -30,6 +30,15 @@ export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promi
   END $$`);
 }
 
+/** Why `login` cannot be the backup login, before anything runs, or null when it may. */
+export function backupLoginProblem(login: string): string | null {
+  if (login === '') return 'the backup login is empty: name the role to grant coffre_backup';
+  if (['coffre_backup', 'coffre_app', 'coffre_vault', 'coffre_runtime', 'coffre_vault_runtime'].includes(login)) {
+    return `the backup login is ${login}, one of coffre's own roles: name the login that backs up`;
+  }
+  return null;
+}
+
 /**
  * The migrations are applied, by this run or an earlier one, and their
  * ledger checked, but reasserting the privileges after them failed: unlike
@@ -376,10 +385,8 @@ export async function migrateDatabase(
   { onPlan, backupLogin }: { onPlan?: (plan: MigrationPlan) => void | Promise<void>; backupLogin?: string } = {},
 ): Promise<void> {
   const engine = engineOfUrl(url);
-  if (backupLogin === '') throw new Error('the backup login is empty: name a role');
-  if (backupLogin !== undefined && ['coffre_backup', 'coffre_app', 'coffre_vault', 'coffre_runtime', 'coffre_vault_runtime'].includes(backupLogin)) {
-    throw new Error(`the backup login is ${backupLogin}, one of coffre's own roles: name the login that backs up`);
-  }
+  const problem = backupLogin === undefined ? null : backupLoginProblem(backupLogin);
+  if (problem !== null) throw new Error(problem);
   if (engine === 'sqlite' && backupLogin !== undefined) throw new Error('SQLite has no roles, so no backup login');
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);

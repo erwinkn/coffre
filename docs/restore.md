@@ -119,8 +119,11 @@ CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROL
 then run `pnpm exec coffre migrate --backup-login coffre_backup_login` in
 the deployment's directory, which grants the login its group. Passing it on
 every run, as a pipeline does, is harmless. Coffre never makes the login and
-never revokes its group: revoke it yourself when it should go. `$BACKUP_URL`
-is the owner's URL with that login's name and password:
+never revokes its group: revoke it yourself when it should go, as the owner,
+`REVOKE coffre_backup FROM coffre_backup_login`. Postgres records who
+granted it, so a superuser's plain `REVOKE` only warns, and the login keeps
+reading: as a superuser, add `GRANTED BY <owner>`. `$BACKUP_URL` is the
+owner's URL with that login's name and password:
 
 ```sh
 pg_dump --enable-row-security --format=custom --dbname="$BACKUP_URL" --file=coffre-$(date -u +%Y%m%dT%H%MZ).dump

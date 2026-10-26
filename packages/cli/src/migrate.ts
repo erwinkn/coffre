@@ -18,7 +18,7 @@ import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { AfterMigrations, DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, backupLoginProblem, DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
@@ -365,7 +365,8 @@ function parseOptions(args: string[]): Options {
     );
   }
   const backupLogin = values['backup-login'];
-  if (backupLogin === '') throw new MigrateError('--backup-login is empty: name the role to grant coffre_backup');
+  const problem = backupLogin === undefined ? null : backupLoginProblem(backupLogin);
+  if (problem !== null) throw new MigrateError(problem);
   return { yes: values.yes, ...(backupLogin === undefined ? {} : { backupLogin }) };
 }
 
