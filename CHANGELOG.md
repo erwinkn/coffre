@@ -21,7 +21,7 @@
   the entry: the edit stayed unflagged until the rehash of the past found
   it again, within two laps. Now, while a refusal stands, a checkpoint
   whose walk began after the entry it names checks that entry again under
-  the head, its hash, its link and the vault's MAC, and refuses while it
+  the head, its hash, its links and the vault's MAC, and refuses while it
   is still broken (T104, found by `formal/Audit.tla`). A refusal that
   names no entry, or a lap of the rehash ending on a hash other than the
   one signed, is cleared by the next signature as before, and found again
