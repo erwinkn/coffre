@@ -138,6 +138,9 @@ const PENDING_TTL_SECONDS = 10 * 60;
 
 export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
+/** What a credential is issued with, beyond its kind and principal. */
+type CredentialOptions = { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[] };
+
 /** A service or personal token as issued: its value, once, and what it reaches, by path. */
 export type IssuedToken = IssuedCredential & TokenPlan;
 
@@ -620,8 +623,15 @@ export class SigninService {
     tx: Transaction,
     kind: CredentialKind,
     principal: PrincipalRef,
-    options: { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[] },
+    options: CredentialOptions,
   ): Promise<IssuedCredential> {
+    const { row, issued } = this.#credential(kind, principal, options);
+    await insert(tx, credentials, row);
+    return issued;
+  }
+
+  /** A credential's row, signed, and what its holder is given: written by whoever issues it. */
+  #credential(kind: CredentialKind, principal: PrincipalRef, options: CredentialOptions): { row: typeof credentials.$inferInsert; issued: IssuedCredential } {
     const token = generateToken(kind);
     const id = randomUUID();
     const row = {
@@ -639,8 +649,7 @@ export class SigninService {
       places: options.places === undefined ? null : JSON.stringify(options.places.map(({ environmentId, personal }) => ({ environmentId, personal }))),
       revokedAt: null,
     };
-    await insert(tx, credentials, { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) });
-    return { id, token, expiresAt: options.expiresAt.toISOString() };
+    return { row: { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) }, issued: { id, token, expiresAt: options.expiresAt.toISOString() } };
   }
 
   // --- verifying ------------------------------------------------------------
@@ -1128,16 +1137,16 @@ export class SigninService {
 
   /**
    * A credential for a CI run, which a trust binding vouched for
-   * (`WorkloadService.exchange`): in the transaction that holds the log's
-   * head, its member checked under it. It names its binding in
-   * `created_by`, under its MAC, and dies with it.
+   * (`WorkloadService.exchange`): its row, which the exchange writes as it
+   * spends the token (`exchangeToken`), under the log's head, its member
+   * checked under it. It names its binding in `created_by`, under its MAC,
+   * and dies with it.
    */
-  async issueExchanged(
-    tx: Transaction,
+  exchangedCredential(
     service: string,
     options: { generation: number; bindingId: string; label: string | null; expiresAt: Date },
-  ): Promise<IssuedCredential> {
-    return this.#issue(tx, 'service', { type: 'service', id: service }, {
+  ): { row: typeof credentials.$inferInsert; issued: IssuedCredential } {
+    return this.#credential('service', { type: 'service', id: service }, {
       generation: options.generation,
       identityId: null,
       label: options.label,

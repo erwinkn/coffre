@@ -1,6 +1,6 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type pg from 'pg';
@@ -16,7 +16,7 @@ import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
 import { runScheduled } from '../src/app.ts';
-import { exchangeCandidates, exchangesSince, pruneSpentTokens } from '../src/db/queries.ts';
+import { exchangeCandidates, exchangesSince, exchangeStill, pruneSpentTokens } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -518,8 +518,8 @@ test("an exchange's first read visits the live bindings only, whatever the retir
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const seen: Statement[] = [];
   try {
-    const candidates = await exchangeCandidates(createDatabase(counted(pool, seen)), deps.chainKey, MEMBER, ISSUER, 16);
-    assert.deepEqual(candidates.map((candidate) => candidate.id), [live!.id]);
+    const { bindings } = await exchangeCandidates(createDatabase(counted(pool, seen)), deps.chainKey, MEMBER, ISSUER, 16, randomBytes(32));
+    assert.deepEqual(bindings.map((candidate) => candidate.id), [live!.id]);
     const plan = await planOf(pool, seen.find((statement) => /from "service_bindings"/i.test(statement.text))!, 'service_bindings');
     assert.ok(plan.indexes.includes('service_bindings_live_idx'), plan.indexes.join(', '));
     assert.ok(plan.visited <= 2, `visited ${plan.visited} binding rows for one live binding`);
@@ -540,11 +540,17 @@ test("a binding's rate is counted over its last minute, whatever the credentials
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const seen: Statement[] = [];
   try {
-    const recent = await exchangesSince(createDatabase(counted(pool, seen)), MEMBER, `binding:${binding!.id}`, new Date(Date.now() - 60_000), 60);
-    assert.equal(recent, 1);
-    const plan = await planOf(pool, seen.find((statement) => /from "credentials"/i.test(statement.text))!, 'credentials');
-    assert.ok(plan.indexes.includes('credentials_issued_by_idx'), plan.indexes.join(', '));
-    assert.ok(plan.visited <= 2, `visited ${plan.visited} credential rows for one recent credential`);
+    // As the exchange counts it, with its member and binding, and as a workload's sign-in does, on its own.
+    const counting = createDatabase(counted(pool, seen));
+    const since = new Date(Date.now() - 60_000);
+    assert.deepEqual(await exchangeStill(counting, deps.chainKey, binding!, since, 60), { stands: true, recent: 1 });
+    assert.equal(await exchangesSince(counting, MEMBER, `binding:${binding!.id}`, since, 60), 1);
+    assert.equal(seen.length, 2);
+    for (const statement of seen) {
+      const plan = await planOf(pool, statement, 'credentials');
+      assert.ok(plan.indexes.includes('credentials_issued_by_idx'), plan.indexes.join(', '));
+      assert.ok(plan.visited <= 2, `visited ${plan.visited} credential rows for one recent credential`);
+    }
   } finally {
     await pool.end();
   }
@@ -556,7 +562,7 @@ test('removing a binding revokes only what is live: its expired history costs no
   const over = new Date(Date.now() - 3_600_000);
   await db.owner.transaction(async (tx) => {
     for (let i = 0; i < 1000; i++) {
-      await runtime.signin!.issueExchanged(tx, SERVICE, { generation: binding!.generation, bindingId: binding!.id, label: null, expiresAt: over });
+      await tx.insert(credentials).values(runtime.signin!.exchangedCredential(SERVICE, { generation: binding!.generation, bindingId: binding!.id, label: null, expiresAt: over }).row);
     }
   });
   // Issued then, too, outside the binding's rate; the MAC does not cover when.

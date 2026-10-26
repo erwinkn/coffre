@@ -10,9 +10,9 @@ import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
-import { and, asc, count, countDistinct, desc, eq, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
-import { authMac, checkAuthRow, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
+import { authMac, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads returning all
@@ -1153,12 +1153,31 @@ export function hasTombstone(db: Queryable, id: SQL | string): SQL {
  * (docs/design/workload-access.md, section 4.1). A service holds at most
  * `MAX_BINDINGS`, made so under the log's head; more than that here is a
  * database changed around the app, and matches nothing.
+ *
+ * With them, so that a token one may take costs no read of its own: whether
+ * the token, by its signing input's hash, was exchanged already, and the
+ * newest `policy.change`, read before the vault is asked about the
+ * service. Uncached, as `tokenConsumed` is. With no candidate, neither is
+ * read: the token is refused.
  */
-export async function exchangeCandidates(db: Queryable, chainKey: Buffer, principal: string, issuer: string, max: number): Promise<BindingRow[]> {
-  const { serviceBindings, vaultMembers } = tablesOf(db);
+export async function exchangeCandidates(
+  db: Queryable,
+  chainKey: Buffer,
+  principal: string,
+  issuer: string,
+  max: number,
+  token: Buffer,
+): Promise<{ bindings: BindingRow[]; spent: boolean; policySeq: bigint | null }> {
+  const { consumedTokens, serviceBindings, vaultMembers } = tablesOf(db);
   const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
+  const spent = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, token));
   const rows = await db
-    .select({ binding: serviceBindings })
+    .select({
+      binding: serviceBindings,
+      spent: truth(exists(spent)),
+      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
+      now: clock(db),
+    })
     .from(serviceBindings)
     .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
     .where(and(
@@ -1173,9 +1192,14 @@ export async function exchangeCandidates(db: Queryable, chainKey: Buffer, princi
     .limit(max + 1);
   if (rows.length > max) {
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
-    return [];
+    return { bindings: [], spent: false, policySeq: null };
   }
-  return rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  const seq = rows[0]?.policySeq ?? null;
+  return {
+    bindings: rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row)),
+    spent: rows[0]?.spent ?? false,
+    policySeq: seq === null ? null : BigInt(seq),
+  };
 }
 
 /**
@@ -1193,10 +1217,46 @@ export async function standingBinding(db: Queryable, chainKey: Buffer, bindingId
     .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(db, bindingId)), now: clock(db) })
     .from(serviceBindings)
     .where(eq(serviceBindings.id, bindingId));
-  const stands = row !== undefined && !row.tombstoned && row.binding.revokedAt === null
+  return row !== undefined && bindingStands(chainKey, row, principal, generation) ? row.binding : null;
+}
+
+/** Whether a binding's row, read with its tombstone, still stands for `principal` in `generation` (`standingBinding`). */
+function bindingStands(chainKey: Buffer, row: { binding: BindingRow; tombstoned: boolean }, principal: string, generation: number): boolean {
+  return !row.tombstoned && row.binding.revokedAt === null
     && row.binding.principal === principal && row.binding.generation === generation
     && checkAuthRow(chainKey, 'service_bindings', row.binding);
-  return stands ? row.binding : null;
+}
+
+/**
+ * What an exchange checks again under the log's head, in one read: that
+ * its member is still active in `generation` (`memberStanding`), that its
+ * binding still stands (`standingBinding`), and how many credentials the
+ * binding issued since `since`, up to `atMost` (`exchangesSince`).
+ */
+export async function exchangeStill(
+  db: Queryable,
+  chainKey: Buffer,
+  binding: { id: string; principal: string; generation: number },
+  since: Date,
+  atMost: number,
+): Promise<{ stands: boolean; recent: number }> {
+  const { serviceBindings, vaultMembers } = tablesOf(db);
+  const recent = issuedSince(db, binding.principal, issuedBy(binding.id), since, atMost);
+  const [row] = await db
+    .select({
+      binding: serviceBindings,
+      tombstoned: truth(hasTombstone(db, binding.id)),
+      status: vaultMembers.status,
+      generation: vaultMembers.generation,
+      recent: sql`(SELECT count(*) FROM ${recent} AS recent)`.mapWith(Number),
+      now: clock(db),
+    })
+    .from(serviceBindings)
+    .leftJoin(vaultMembers, eq(vaultMembers.principal, binding.principal))
+    .where(eq(serviceBindings.id, binding.id));
+  if (row === undefined) return { stands: false, recent: 0 };
+  const member = row.status === 'active' && row.generation === binding.generation;
+  return { stands: member && bindingStands(chainKey, row, binding.principal, binding.generation), recent: row.recent };
 }
 
 /**
@@ -1283,13 +1343,45 @@ export const SPENT_TOKENS_KEPT_MS = 2 * 60 * 60 * 1000;
  * binding's last minute, not the expired history a CI service runs up.
  */
 export async function exchangesSince(db: Queryable, principal: string, createdBy: string, since: Date, atMost: number): Promise<number> {
+  return (await issuedSince(db, principal, createdBy, since, atMost)).length;
+}
+
+/** `exchangesSince`'s query, to run or to count inside another (`exchangeStill`). */
+function issuedSince(db: Queryable, principal: string, createdBy: string, since: Date, atMost: number) {
   const { credentials } = tablesOf(db);
-  const rows = await db
+  return db
     .select({ id: credentials.id })
     .from(credentials)
     .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, createdBy), gt(credentials.createdAt, since)))
     .limit(atMost);
-  return rows.length;
+}
+
+/**
+ * Spend a token and, only if this spent it, insert the credential its
+ * exchange issues and stamp the binding's last use: false, and nothing
+ * written, when it was spent already, which the primary key decides. One
+ * statement on Postgres, under the log's head; SQLite, with no
+ * data-modifying CTE, runs them in turn.
+ */
+export async function exchangeToken(db: Queryable, token: Buffer, credential: NewRow<Tables['credentials']>, bindingId: string, at: Date): Promise<boolean> {
+  const { consumedTokens, credentials, serviceBindings } = tablesOf(db);
+  if (dialect.engineOf(db) === 'sqlite') {
+    if (!(await consumeToken(db, token))) return false;
+    await insert(db, credentials, credential);
+    await update(db, serviceBindings, { id: bindingId }, { lastUsedAt: at });
+    return true;
+  }
+  const spend = db.insert(consumedTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: consumedTokens.hash });
+  // The credential's row once for each token spent: none, or one. Its other columns take their defaults.
+  const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
+  const names = sql.join(columns.map(([, column]) => sql.identifier(column.name)), sql`, `);
+  const values = sql.join(columns.map(([name, column]) => sql.param(credential[name as keyof typeof credential], column)), sql`, `);
+  const stamp = db.update(serviceBindings).set({ lastUsedAt: at }).where(and(eq(serviceBindings.id, bindingId), sql`EXISTS (SELECT 1 FROM spent)`));
+  const [row] = await dialect.rowsOf<{ spent: boolean }>(db, sql`WITH spent AS (${spend.getSQL()}),
+    issued AS (INSERT INTO ${credentials} (${names}) SELECT ${values} FROM spent),
+    stamped AS (${stamp.getSQL()})
+    SELECT EXISTS (SELECT 1 FROM spent) AS spent`);
+  return row!.spent;
 }
 
 export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['serviceBindings']>, 'authMac'> & {
