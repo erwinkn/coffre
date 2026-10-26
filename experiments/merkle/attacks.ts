@@ -329,26 +329,24 @@ for (const tamper of [false, true]) {
 
 // Review r3's reproductions, each now caught.
 {
-  console.log('(s) a use copied before its day is dropped, replayed after the retention cut');
+  console.log('(s) a use copied before its day is dropped, replayed after the retention cut, the rows between deleted');
   await createLog(pool);
-  const cp = await Checkpointer.open(pool, keys);
+  // The demo's day lasts a second; a real one is dropped weeks later. The bound is 10 minutes, here 200 ms.
+  const cp = await Checkpointer.open(pool, keys, { freshMs: 200 });
   for (let e = 0; e < 20; e += 1) await use();
   await cp.tick();
-  await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE number = 5');
+  await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE number = 20');
   await new Promise((r) => setTimeout(r, 400));
   await pool.query('SELECT new_day(1)');
   await cp.tick({ nextDay: 1 });
   await cp.tick();
   const { retainDay } = await import('./src/retention.ts');
-  await retainDay(pool, keys, 0);
+  const r = await retainDay(pool, keys, 0);
   await cp.tick();
+  await pool.query('DELETE FROM checkpoints WHERE upto > $1', [r.retention.cutUpto]);
   await pool.query("INSERT INTO audit (number, at, principal, credential, kind, request_id, payload, seal, mac) SELECT nextval('audit_number'), at, principal, credential, kind, request_id, payload, seal, mac FROM saved");
-  await cp.tick();
-  // The demo's day lasted a second; a real one is dropped weeks after: the bound is 10 minutes, here 200 ms.
-  const v = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, macKey: keys.mac, freshMs: 200 });
-  expect('verifier, freshness bound', !v.ok, true, v.problems[0] ?? '');
-  const lookupOnly = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, macKey: keys.mac, freshMs: 1e12 });
-  expect('the same, without the bound (the lookup alone)', !lookupOnly.ok, false, 'its original is gone with its day');
+  const t = await cp.tick().catch((e: Error) => ({ failures: [e.message] }));
+  expect('the signer', t.failures.some((f) => /replay/.test(f)), true, t.failures.find((f) => /replay/.test(f)) ?? t.failures[0] ?? '', ['refuses to seal it', 'seals it']);
 }
 {
   console.log('(t) a witness that always refuses: how often it is asked once the change has answered');
@@ -375,6 +373,29 @@ for (const tamper of [false, true]) {
   await cp.tick();
   const v = await verdict();
   expect('the next head', v.ok, true, v.problems[0] ?? `${v.sealed} sealed`, ['holds', 'is wrong']);
+}
+
+// Review r4's reproduction.
+{
+  console.log('(v) writing a head fails, then putting the tree back fails too, then the database recovers');
+  const { path } = await fresh(true);
+  let down = false;
+  const flaky = { query: (q: string | { name: string }, p?: unknown[]) => {
+    if (typeof q === 'object' && q.name === 'write_checkpoint') { down = true; return Promise.reject(new Error('down')); }
+    if (down && typeof q === 'object' && q.name === 'read_tiles') return Promise.reject(new Error('still down'));
+    return pool.query(q as string, p);
+  } };
+  const cp = await Checkpointer.open(flaky, keys, { memory: fileMemory(path) });
+  for (let e = 0; e < 5; e += 1) await use();
+  await cp.tick().catch(() => {});
+  down = false;
+  for (let e = 0; e < 5; e += 1) await use();
+  const again = await cp.tick().then(() => '', (e: Error) => e.message);
+  expect('the same checkpointer', again !== '', true, again, ['refuses until reopened', 'signs on']);
+  const reopened = await Checkpointer.open(pool, keys, { memory: fileMemory(path) });
+  await reopened.tick();
+  const v = await verdict();
+  expect('reopened, the log', v.ok, true, v.problems[0] ?? `${v.sealed} sealed`, ['holds', 'is wrong']);
 }
 
 rmSync(scratch, { recursive: true, force: true });

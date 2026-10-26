@@ -85,6 +85,13 @@ type Pump = {
   waiters: { upto: bigint; done: (failure: string | null) => void }[];
 };
 
+/**
+ * How much older than the signer's head an entry it seals may be. The bound assumes what W208's one-statement
+ * append gives: a use stamps `at` and takes its number within one statement's timeout (seconds, far under this),
+ * and the Workers' clocks and the signer's agree to well within it (NTP: milliseconds).
+ */
+export const FRESH_MS = 10 * 60_000;
+
 /** A closed day, as its signed entry records it. */
 export type DayRecord = { action: 'audit.day'; day: number; first: string; last: string; firstLeaf: number; lastLeaf: number };
 
@@ -109,7 +116,11 @@ export class Checkpointer {
   private memory: Memory | null;
   private witnesses: Witness[];
 
-  private constructor(db: Db, keys: Keys, edge: Edge, head: Checkpoint, note: string, memory: Memory | null, witnesses: Witness[]) {
+  /** FRESH_MS, shorter in the demos. */
+  private freshMs: number;
+
+  private constructor(db: Db, keys: Keys, edge: Edge, head: Checkpoint, note: string, memory: Memory | null, witnesses: Witness[], freshMs: number) {
+    this.freshMs = freshMs;
     this.db = db;
     this.keys = keys;
     this.edge = edge;
@@ -137,7 +148,7 @@ export class Checkpointer {
    * database lost entries the signer sealed, and it refuses to go on. A
    * database beside the memory (another head at the same place) is refused too.
    */
-  static async open(db: Db, keys: Keys, opts: { memory?: Memory; witnesses?: Witness[] } = {}): Promise<Checkpointer> {
+  static async open(db: Db, keys: Keys, opts: { memory?: Memory; witnesses?: Witness[]; freshMs?: number } = {}): Promise<Checkpointer> {
     const memory = opts.memory ?? null;
     const verifier = await verifierFrom(keys.signer.verifierKey);
     // What the signer remembers comes first: nothing is signed or remembered before it is compared.
@@ -157,7 +168,7 @@ export class Checkpointer {
       const note = await signNote(checkpointBody(head), [keys.signer]);
       await memory?.remember(note);
       await db.query('INSERT INTO checkpoints (upto, size, root, note) VALUES ($1, 0, $2, $3)', [head.upto, head.root, note]);
-      return new Checkpointer(db, keys, Edge.empty(), head, note, memory, opts.witnesses ?? []);
+      return new Checkpointer(db, keys, Edge.empty(), head, note, memory, opts.witnesses ?? [], opts.freshMs ?? FRESH_MS);
     }
     const newest = await openCheckpoint(last.note, verifier);
     if (newest === null) throw new Error('the last checkpoint is not signed by this log');
@@ -192,7 +203,7 @@ export class Checkpointer {
       }
       edge = await loadEdge(db, head.size);
     }
-    return new Checkpointer(db, keys, edge, head, note, memory, opts.witnesses ?? []);
+    return new Checkpointer(db, keys, edge, head, note, memory, opts.witnesses ?? [], opts.freshMs ?? FRESH_MS);
   }
 
   private running: Promise<unknown> = Promise.resolve();
@@ -201,7 +212,8 @@ export class Checkpointer {
    * One checkpoint: seal what has committed, sign it, store it, publish it.
    * `nextDay` also moves the sequence to that day (number days) and records the
    * day just closed in a signed `audit.day` entry. A witness slower than
-   * `witnessTimeoutMs` is reported as such; its publication carries on.
+   * `witnessTimeoutMs` is reported as such; its publication carries on. Without
+   * `witnessTimeoutMs`, the tick does not wait and reports nothing of witnesses.
    */
   async tick(opts: { nextDay?: number; witnessTimeoutMs?: number } = {}): Promise<Tick> {
     const t = await this.seal(opts);
@@ -322,7 +334,11 @@ export class Checkpointer {
     return { head: this.head, note: this.note, witnessed: this.witnesses.length === 0 ? null : failures.length === 0, failures, cosigned };
   }
 
+  /** Set when the in-memory tree could not be put back after a failed tick: every later tick refuses. */
+  private broken = false;
+
   private async tickNow(opts: { nextDay?: number; witnessTimeoutMs?: number }): Promise<Tick> {
+    if (this.broken) throw new Error('the checkpointer lost track of its tree after a failure: reopen it');
     const cpu0 = process.cpuUsage();
     const t0 = performance.now();
     const { rows } = await this.db.query({
@@ -334,6 +350,10 @@ export class Checkpointer {
     const upto = first!.upto;
     const entries = found.map(toEntry);
     const failures = entries.filter((e) => !entryMac(this.keys.mac, e).equals(e.mac)).map((e) => `${e.number}: mac`);
+    // Nothing older than the head the signer holds, less FRESH_MS, is sealed: a use stamps `at` (which its MAC
+    // covers) one statement before it takes its number, so an older one is a replay, e.g. the copy of a use whose day
+    // retention dropped, which no lookup can match. The bound is the signer's own head, not a row a writer can delete.
+    for (const e of entries) if (e.at < this.head.at - this.freshMs) failures.push(`${e.number}: at ${e.at}, older than the signer's head (${this.head.at}): a replay`);
     // A running signer seals from the head it holds and never takes the database's word for it; but the database's
     // newest row must still be that head. Rows deleted since show here, within a tick; nothing is signed over them.
     if (first!.newest !== this.head.upto) failures.push(`the database's newest checkpoint is ${first!.newest ?? 'gone'}, the signer's head is at ${this.head.upto}`);
@@ -370,7 +390,12 @@ export class Checkpointer {
     } catch (error) {
       // The edge has moved on in memory but not in the database, whichever step failed: start again from what the
       // database holds. (A head remembered but not written is the memory being ahead, which the next tick extends.)
-      this.edge = await loadEdge(this.db, this.head.size);
+      // If that read fails too, the edge cannot be trusted: this checkpointer signs nothing more until reopened.
+      try {
+        this.edge = await loadEdge(this.db, this.head.size);
+      } catch {
+        this.broken = true;
+      }
       throw error;
     }
     const sealedAt = Date.now();

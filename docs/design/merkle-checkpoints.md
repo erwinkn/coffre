@@ -292,18 +292,24 @@ fresh log of 8 checkpoints (all as expected):
 | (p) a garbage checkpoint row; a malformed retention entry | **a failing verdict**, not a crash | | |
 | (q) a witness that refuses once, then recovers, while a change waits | | the change answers witnessed: the witness is asked again within the deadline | |
 | (r) no witness set up | | | the change answers `witnessed: null`, never "witnessed" |
-| (s) a use copied before its day is dropped, replayed after the retention cut | **caught**: "older than the checkpoint before it: a replay" (the request-ID lookup alone cannot: the original is gone) | | |
+| (s) a use copied before its day is dropped, replayed after the retention cut, the checkpoint rows between deleted | the verifier warns only (rows are the writer's) | | **the signer refuses to seal it**: "older than the signer's head: a replay" (the request-ID lookup cannot: the original is gone) |
 | (t) a witness that always refuses, after the change has answered | | asked 4 times until the answer (300 ms), 0 after | |
 | (u) remembering a head fails once | | | the next tick's head holds |
+| (v) writing a head fails, then putting the tree back fails too | | | the checkpointer refuses every tick until reopened; reopened, the log holds |
 
-Rows (f) to (u) came from three review rounds: (g) to (l), (n) to (r) and
-(s) to (u) are the reviewer's own reproductions, each of which got through
-the version before. Round three found:
+Rows (f) to (v) came from four review rounds: (g) to (l), (n) to (r),
+(s) to (u) and (v) are the reviewer's own reproductions, each of which got
+through the version before. Round four found:
+- round three's freshness rule measured age against checkpoint rows, which
+  the writer can delete. The signer now enforces it against its own head;
+  the verifier keeps the row check as a warning;
+- a failed tree reload let the next tick sign on a corrupted tree; the
+  checkpointer now refuses until reopened.
+
+Round three found:
 - a forked head below the start passed if a tile was deleted too: a missing
   tile is now an excuse only below a real retention cut;
-- a dropped use could be replayed after its cut: entries now must be no
-  older than the checkpoint before them, less 10 minutes (the MAC covers
-  `at`);
+- a dropped use could be replayed after its cut (fixed in round four, below);
 - the witness retries outlived the change that waited on them;
 - a failed `remember` left the in-memory tree ahead of the database.
 
@@ -599,9 +605,18 @@ also do two things:
   both are sealed, the verifier flags the duplicate request ID, including
   against entries below an incremental check's start (one indexed lookup
   per chunk). A copy of a use whose day was dropped has no original left to
-  match, so the verifier also requires every entry to be no older than the
-  checkpoint before it, less 10 minutes. The MAC covers `at`, so a copy keeps
-  its old time. The append
+  match. So the signer refuses to seal any entry more than 10 minutes older
+  than its own head (`FRESH_MS`). The MAC covers `at`, so a copy keeps its old
+  time, and the signer's head is its own, checked against its memory, not a
+  row a writer can delete. The verifier repeats the check against the rows,
+  as a warning only.
+  - **The bound's assumptions:** a use stamps `at` and takes its number
+    within one statement's timeout (W208's one-statement append: seconds),
+    and the Workers' clocks agree with the signer's to well under 10 minutes
+    (NTP: milliseconds).
+  - **What breaks it:** a stamp held back longer, say a request suspended
+    for ten minutes between stamping and appending. The signer then refuses
+    the window and raises the alarm: a false alarm, never a silent pass. The append
   therefore has to be **idempotent by request ID**: a unique index on
   `request_id` within each partition, with `ON CONFLICT` returning the
   existing number. Otherwise an honest transport replay (Hyperdrive

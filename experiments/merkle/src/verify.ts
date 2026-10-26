@@ -1,4 +1,4 @@
-import { entryMac, leafOf, proveConsistency, readTiles, type Db, type Entry } from './log.ts';
+import { entryMac, FRESH_MS, leafOf, proveConsistency, readTiles, type Db, type Entry } from './log.ts';
 import { entriesBetween, retentions } from './retention.ts';
 import { referenceHash, verifyConsistency } from './tree.ts';
 import { openCheckpoint, verifierFrom, type Checkpoint } from './note.ts';
@@ -26,11 +26,10 @@ export type Verdict = { ok: boolean; problems: string[]; warnings: string[]; che
 const SKEW_MS = 5000;
 
 /**
- * How much older than the checkpoint before it an entry sealed after it may be: a use's `at` is stamped when its
- * request arrives, a round trip before its number. An entry older than that is a replay, whatever its number: in
- * particular the copy of a use whose original a retention cut dropped, which no lookup could find any more.
+ * The signer refuses to seal an entry much older than its own head (FRESH_MS in log.ts): that is the protection
+ * against replays of uses whose day was dropped. The verifier repeats the check against the checkpoint rows as a
+ * warning only: rows are the database's, and a writer who deletes some widens the gap it measures.
  */
-const FRESH_MS = 10 * 60_000;
 
 const GENESIS_UPTO = '0';
 
@@ -189,7 +188,7 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
       const window: Entry[] = [];
       while (at < entries.length && BigInt(entries[at]!.number) <= BigInt(c.upto)) window.push(entries[at++]!);
       window.forEach(check);
-      for (const e of window) if (e.at < since - fresh) problems.push(`${e.number}: at ${e.at}, older than the checkpoint before it (${since}): a replay`);
+      for (const e of window) if (e.at < since - fresh) warnings.push(`${e.number}: at ${e.at}, older than the checkpoint before it (${since}): a replay, or a stamp held back`);
       if (row) since = c.at;
       edge.append(window.map(leafOf));
       sealed += window.length;
@@ -204,6 +203,6 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
   const above = await entriesBetween(db, last.upto, '9223372036854775807');
   await replaysBelow(above, start.upto);
   above.forEach(check);
-  for (const e of above) if (e.at < last.at - fresh) problems.push(`${e.number}: at ${e.at}, older than the newest checkpoint (${last.at}): a replay`);
+  for (const e of above) if (e.at < last.at - fresh) warnings.push(`${e.number}: at ${e.at}, older than the newest checkpoint (${last.at}): a replay, or a stamp held back`);
   return done(heads.size, sealed, above.length);
 }
