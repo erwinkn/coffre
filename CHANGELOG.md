@@ -2,24 +2,19 @@
 
 ## Unreleased
 
-- **Every "not signed in" error says how `coffre login` works.** It always
-  runs the device flow: it prints a link and a code and waits, and opens a
-  browser only on a terminal. Someone over SSH, or an agent, could not tell
-  that it works there, nor that it blocks until the link is approved (10
-  minutes), so an agent that ran it in the foreground hit its own timeout
-  before the person saw the link. The first line is as it was, ``not signed
-  in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` ``,
-  and four lines under it say: open the link on any device where you are
-  signed in to coffre, check the code, press Approve; from an agent or a
-  script, run it in the background, pass the link and code on, and wait; it
-  returns once approved, fails at once if declined, or fails after 10 minutes (`DEVICE_TTL_SECONDS`,
-  now in `@coffre/core/access`, which the server expires the code by). One
-  function, `signInHint` in `packages/cli/src/instance.ts`, builds it for
-  every such error: a command with no session, a session ended or unknown
-  to the instance, `coffre use`, `coffre verify instance`. An instance
-  not signed in to yet gets a line saying that behind Cloudflare Access,
-  which signs in with cloudflared, there is no code; one that signs in
-  with cloudflared already gets no hint.
+- **Every "not signed in" error is two lines.** `coffre login` runs the
+  device flow: it prints a link and waits for it to be approved, so an agent
+  that ran it in the foreground hit its own timeout before the person saw
+  the link. The error is now
+  ``not signed in: run `coffre login https://coffre.acme.example` ``, and under
+  it, `agents: run the command in the background and provide the link it
+  prints to the user`. The URL lives in the command, so the first line no
+  longer starts `not signed in to <url>` (a clone's `coffre.json` adds
+  `(named by /path/coffre.json)` to it). One constant, `SIGN_IN_HINT` in
+  `packages/cli/src/instance.ts`, is the second line of every such error: a
+  command with no session, a session ended or unknown to the instance, a
+  code that expired, `coffre use`, `coffre verify instance`. An instance
+  behind Cloudflare Access, which signs in with cloudflared, gets no hint.
   `coffre login` also says how long it waits: "Waiting for you to approve
   it; the code expires in 10 minutes…".
 - **`coffre update` updates an npm global whose prefix npm no longer has as

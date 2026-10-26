@@ -967,7 +967,7 @@ function use(args: string[]): void {
     return;
   }
   const origin = attempt(() => instanceOrigin(args[0]));
-  if (!(origin in store.instances)) fail(signInError(`not signed in to ${origin}: run \`coffre login ${origin}\``));
+  if (!(origin in store.instances)) fail(signInError(`not signed in: run \`coffre login ${origin}\``));
   writeStore({ ...store, current: origin });
   process.stdout.write(`Now using ${origin} by default\n`);
   if (local !== null && local.origin !== origin) {
