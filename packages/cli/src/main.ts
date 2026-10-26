@@ -12,12 +12,13 @@ import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpath
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
-import { exchange, idToken, keyBound, proofOf } from './workload.ts';
+import { exchange, ExchangeFailed, idToken, keyBound, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
@@ -241,25 +242,75 @@ function http(input: string | Request, init?: RequestInit): Promise<Response> {
 }
 
 /**
- * A CI run's credential, and the ID token it was traded for: asked for once
+ * A CI run's credential, and the ID tokens asked for to buy it: asked for once
  * in this process, before its first request, and kept in memory only.
  */
-let exchanged: Promise<{ credential: string; idToken: string }> | null = null;
+let exchanged: Promise<{ credential: string; idTokens: string[] }> | null = null;
 
-function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idToken: string }> {
-  exchanged ??= (async () => {
-    const token = await idToken(undefined, process.env, origin, fetching(origin));
-    const issued = await exchange(origin, workload.service, token, http);
-    return { credential: issued.token, idToken: token };
-  })().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idTokens: string[] }> {
+  exchanged ??= signIn(origin, workload.service)
+    .then(({ issued, idTokens }) => ({ credential: issued.token, idTokens }))
+    .catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   return exchanged;
 }
 
-/** What GitHub must hide from the job's log, beside the values: the run's ID token and credential, if it used them. */
+/**
+ * How long a request waits before each time it asks again, while the
+ * instance cannot answer it yet (`momentary`): twice, each wait between
+ * half and one and a half of these, so that the jobs of one run that
+ * failed together do not all ask again together. Then its answer stands.
+ */
+const UNAVAILABLE_RETRY_MS = [2000, 5000];
+
+function unavailableWait(attempt: number): number | undefined {
+  const wait = UNAVAILABLE_RETRY_MS[attempt];
+  return wait === undefined ? undefined : Math.round(wait * (0.5 + Math.random()));
+}
+
+/**
+ * Whether the instance answered 503 for a while it says passes: it could
+ * not reach its database or its vault (`unavailable`, no reason), count
+ * exchanges (`busy`), or reach the issuer's keys (`issuer_unavailable`),
+ * or it is moving to its new app key (`rotating`). Not one that waits on
+ * an operator or a deploy (`wrong_kek`, `vault_outdated`, `app_key`,
+ * `migrating`), nor the proxy's own answers, nor Cloudflare's page.
+ */
+function momentary(status: number, body: { error?: unknown; reason?: unknown } | null): boolean {
+  if (status !== 503) return false;
+  // An instance moving to its new app key, which it says takes a second.
+  if (body?.error === 'rotating') return true;
+  return body?.error === 'unavailable' && (body.reason === undefined || body.reason === 'busy' || body.reason === 'issuer_unavailable');
+}
+
+/**
+ * A CI run signed in as `service`: its ID token, the one given or a fresh
+ * one from GitHub's runner, traded for a credential. Asked again while the
+ * instance cannot answer it yet (`momentary`), each time with a fresh
+ * ID token from GitHub: an exchange that committed and lost its answer has
+ * spent the one before (docs/design/oidc.md, section 3).
+ */
+async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idTokens: string[] }> {
+  // Each ID token it asked for, to hide from the log: one whose exchange failed may still be good until it expires.
+  const idTokens: string[] = [];
+  for (let attempt = 0; ; attempt++) {
+    const token = await idToken(given, process.env, origin, fetching(origin));
+    idTokens.push(token);
+    try {
+      return { issued: await exchange(origin, service, token, http), idTokens };
+    } catch (error) {
+      const wait = unavailableWait(attempt);
+      if (wait === undefined || !(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
+      if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
+      await sleep(wait);
+    }
+  }
+}
+
+/** What GitHub must hide from the job's log, beside the values: the run's ID tokens and credential, if it used them. */
 async function workloadSecrets(): Promise<[string, string][]> {
   if (exchanged === null) return [];
-  const { credential, idToken: token } = await exchanged;
-  return [['', token], ['', credential]];
+  const { credential, idTokens } = await exchanged;
+  return [...[...new Set(idTokens)].map((token): [string, string] => ['', token]), ['', credential]];
 }
 
 async function headersFor(to: Target): Promise<Record<string, string>> {
@@ -287,7 +338,7 @@ function client(to: Target = target(), hint?: Hint, handled: readonly number[] =
   });
 }
 
-/** How `send` puts a request to the instance: `once`, or `retryingPolicyChange`. */
+/** How `send` puts a request to the instance: `once`, `retryingPolicyChange` or `reading`. */
 type Ask = (request: Request) => Promise<Response>;
 
 /**
@@ -316,13 +367,31 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
   const body = (await response.clone().json().catch(() => null)) as { reason?: unknown } | null;
   if (body?.reason !== 'policy_changed') return response;
   if (sessionFlags.verbose) stderr(`the access policy changed while ${requestLine(request.method, new URL(request.url))} was answered: asking again in ${took(POLICY_RETRY_MS)}`);
-  await new Promise((resolve) => setTimeout(resolve, POLICY_RETRY_MS));
+  await sleep(POLICY_RETRY_MS);
   return once(again);
 }
 
-/** `client`, for the values `get`, `run` and `export` read: each request is `retryingPolicyChange`. */
+/**
+ * A read of values, `retryingPolicyChange`, asked again too while the
+ * instance cannot answer it yet (`momentary`). Each read the vault
+ * answered is in the audit log, the one whose answer was lost included.
+ */
+async function reading(request: Request): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const again = request.clone();
+    const response = await retryingPolicyChange(request);
+    const wait = unavailableWait(attempt);
+    // The status first: a body is parsed only when it may say the instance cannot answer yet.
+    if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
+    if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);
+    await sleep(wait);
+    request = again;
+  }
+}
+
+/** `client`, for the values `get`, `run` and `export` read: each request is `reading`. */
 function reader(handled: readonly number[] = []): CoffreClient {
-  return client(target(), undefined, handled, retryingPolicyChange);
+  return client(target(), undefined, handled, reading);
 }
 
 /**
@@ -686,7 +755,8 @@ function openBrowser(url: string): void {
  * replaces another run's session there, never a person's (`login`).
  */
 async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtainedAt'>): Promise<void> {
-  const me = await client(to).me();
+  // Who it is, asked again as a read is: a sign-in that went through is not lost to a moment's 503 after it.
+  const me = await client(to, undefined, [], reading).me();
   writeStore(withSession(readStore(), to.origin, { ...session, principal: me.principal, obtainedAt: new Date().toISOString() }));
   process.stdout.write(`Signed in to ${to.origin} as ${me.principal.id}\n`);
   printMe(me);
@@ -720,9 +790,7 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
   const given = ask
     ? await readSecret({ label: 'ID token', hint: `The run's ID token, for the audience ${origin}. Hidden as you type.` }).catch((error: unknown) => fail((error as Error).message))
     : undefined;
-  const issued = await (async () => exchange(origin, service, await idToken(given, process.env, origin, fetching(origin)), http))().catch((error: unknown) =>
-    fail(error instanceof Error ? error.message : String(error)),
-  );
+  const { issued } = await signIn(origin, service, given).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   await saveRun(
     { origin, mode: 'signin', by: 'run', credential: { kind: 'token', token: issued.token } },
     { mode: 'signin', kind: 'run', token: issued.token, expiresAt: issued.expiresAt },
@@ -2034,7 +2102,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   folders: (args) => manage.folders(connect, args),
   'folders rename': (args) => manage.foldersRename(connect, args),
   'folders remove': (args) => manage.foldersRemove(connect, args),
-  missing: (args) => manage.missing(connect, args),
+  // A read of key names, asked again as reads of values are: the Action's `require-complete: true` gate.
+  missing: (args) => manage.missing(() => client(target(), undefined, [], reading), args),
   'missing dismiss': (args) => manage.missingDismiss(connect, args, true),
   'missing restore': (args) => manage.missingDismiss(connect, args, false),
   projects: (args) => manage.projects(connect, args),
