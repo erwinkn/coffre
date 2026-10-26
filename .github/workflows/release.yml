@@ -63,6 +63,12 @@ jobs:
     needs: publish
     # On a tag, once npm has the release; by hand, without publishing.
     if: ${{ !cancelled() && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.publish.result == 'skipped')) }}
+    # One at a time, so that each decides its tags from npm with the others'
+    # pushed: an older release's image never moves `latest` back. GitHub
+    # keeps one run waiting; a third cancels it, and a dispatch redoes it.
+    concurrency:
+      group: coffre-cli-image
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -93,7 +99,10 @@ jobs:
         # in the repository can push and attest with its token: what makes an
         # image official is its attestation's signer, this file on main or on
         # a v* tag, which docs/workloads.md has verifiers require. This keeps
-        # a mistaken dispatch from a branch from publishing.
+        # a mistaken dispatch from a branch from publishing. The revision is
+        # the CLI's, its release tag's commit, as OCI defines it; the
+        # attestation names the commit that built the image, main's for a
+        # dispatch.
         run: |
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
             echo "::error::publish an image from main, not $GITHUB_REF: gh workflow run release.yml --ref main -f version=<version>"
@@ -104,7 +113,10 @@ jobs:
             echo "::error::$version is no version"
             exit 1
           fi
-          revision="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$version" --jq .sha)"
+          if ! revision="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$version" --jq .sha)"; then
+            echo "::error::no tag v$version: an image is of a tagged release"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
@@ -127,7 +139,13 @@ jobs:
           actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
           [[ "$actual" == "$integrity" ]] || { echo "::error::the tarball is $actual, npm's integrity $integrity"; exit 1; }
           mv "$tarball" "$RUNNER_TEMP/context/coffre-cli.tgz"
-          node scripts/image-tags.mjs "$VERSION" | tee "$RUNNER_TEMP/tags"
+          # npm's list of versions may lag the version's own document.
+          for _ in $(seq 30); do
+            node scripts/image-tags.mjs "$VERSION" > "$RUNNER_TEMP/tags" && break
+            sleep 10
+          done
+          [[ -s "$RUNNER_TEMP/tags" ]] || { echo "::error::npm does not list @coffre/cli@$VERSION among its versions"; exit 1; }
+          cat "$RUNNER_TEMP/tags"
 
       # Both platforms in one index, which needs BuildKit in a container: its
       # image, and the SBOM's scanner, pinned like the actions.

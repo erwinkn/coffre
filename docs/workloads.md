@@ -605,15 +605,23 @@ patch of it) and `latest` (the newest release). A tag can move; pin the
 digest in anything that runs, as the Kubernetes example does.
 `docker buildx imagetools inspect ghcr.io/erwinkn/coffre-cli:0.14.5`
 prints it. Its signed provenance names the workflow run and the commit
-that built it; check that its signer is coffre's release workflow, on
-`main` or a release tag, since any workflow in the repository could sign:
+that built it. Check that its signer is coffre's release workflow, since
+any workflow in the repository could sign: on a release tag, as each
+release builds its image, or on `main`, where an image is published again
+for a version npm already has (a release from before the image, or a
+failed image job). `main` takes changes only through pull requests that
+pass Validate (admins aside), where a tag may name any commit, so `main` is no weaker a
+signer than a tag:
 
 ```sh
 gh attestation verify oci://ghcr.io/erwinkn/coffre-cli@sha256:… --repo erwinkn/coffre \
   --cert-identity-regex '^https://github\.com/erwinkn/coffre/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9][0-9.]*(-[0-9A-Za-z.-]+)?)$'
 ```
 
-Each image also carries its SBOM
+The image's label `org.opencontainers.image.revision` names the CLI's
+commit, its release tag's, and the attestation the commit that built the
+image: the same for a release, `main`'s for an image published again. Each
+image also carries its SBOM
 (`docker buildx imagetools inspect … --format '{{json .SBOM}}'`).
 
 Inside is npm's own tarball of that version, checked against its
