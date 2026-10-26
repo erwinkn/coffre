@@ -15,9 +15,11 @@
 // released the value.
 //
 // Then a replayed call (its answer lost, sent again as it was): a use's
-// replay fails on its (at, request_id) and the Worker answers 503 (it must
-// not decide again); a change's replay answers its number; neither writes a
-// second entry.
+// retry (through one.use, with the same request id and time) fails on its
+// (at, request_id) and answers 503 `replayed` (it must not decide again); a
+// change's retry (one.change with the same request) answers its number;
+// neither writes a second entry. Last, a use whose `at` is below the floor
+// the last barrier set writes nothing (else a checkpoint could miss it).
 //
 //   node experiments/lanes/fence-one.ts --url postgresql://user:password@host:port/db (a server where a scratch database may be made)
 import { execFileSync } from 'node:child_process';
@@ -102,28 +104,26 @@ try {
   execFileSync(process.execPath, [new URL('./seed-one.ts', import.meta.url).pathname, '--url', scratch.toString(), '--principals', '2'], { stdio: 'ignore' });
   const db = new pg.Client({ connectionString: scratch.toString() });
   await db.connect();
+  // Through the API, as a Worker retrying a request whose answer it lost: the same request id and time.
   const at = Date.now();
-  const payload = usePayload(input);
-  const mac = entryMac(keys.log, { at, kind: 'use', principal: input.principal, credential: input.credential, requestId: 'replay-1', payload, seal: null });
-  const call = async () => {
-    try {
-      return (await db.query('SELECT use_credential($1, $2, $3, $4, $5, $6, $7) AS v', [input.principal, input.credential, 'replay-1', String(at), payload, mac, String(at + 3000)])).rows[0].v;
-    } catch (error) {
-      return { replayed: (error as { code?: string }).code === '23505', constraint: (error as { constraint?: string }).constraint };
-    }
-  };
-  const first = await call();
-  const again = await call();
-  const changeArgs = ['svc-1', 'replay-2', String(at), '{"op":"credential.revoke","credential":"cred-svc-1"}'];
-  const { rows: [m] } = await db.query("SELECT seal FROM members WHERE principal = 'svc-1'");
-  const cmac = entryMac(keys.log, { at, kind: 'change', principal: 'svc-1', credential: 'cred-svc-1', requestId: 'replay-2', payload: changeArgs[3]!, seal: m.seal });
-  const changed = async () => (await db.query('SELECT change_member($1, $2, $3, $4, $5, $5, $6)::text AS n', [...changeArgs, m.seal, cmac])).rows[0].n;
-  const c1 = await changed();
-  const c2 = await changed();
+  const request = { ...input, requestId: 'replay-1', at };
+  const first = await use(db, keys, request);
+  const again = await use(db, keys, request);
+  const revoke = { op: 'credential.revoke', credential: 'cred-svc-1' } as const;
+  const c1 = (await change(db, keys, 'svc-1', revoke, { requestId: 'replay-2', at })).number;
+  const c2 = (await change(db, keys, 'svc-1', revoke, { requestId: 'replay-2', at })).number;
   const { rows: [{ uses, changes }] } = await db.query("SELECT count(*) FILTER (WHERE request_id = 'replay-1')::int AS uses, count(*) FILTER (WHERE request_id = 'replay-2')::int AS changes FROM entries");
-  const replays = again.replayed === true && c1 === c2 && uses === 1 && changes === 1;
+  const replays = !again.ok && again.code === 'replayed' && c1 === c2 && uses === 1 && changes === 1;
   if (!replays) wrong += 1;
-  console.log(`replay   a use's replay ${again.replayed ? `failed on ${again.constraint}` : 'got a fresh decision'} (the first is #${first.number}); a change's #${c2} (first #${c1}); entries: ${uses} use, ${changes} change${replays ? '' : '  UNEXPECTED'}`);
+  console.log(`replay   a use retried answered ${again.ok ? 'a fresh decision' : again.code} (the first is #${first.number}); a change's #${c2} (first #${c1}); entries: ${uses} use, ${changes} change${replays ? '' : '  UNEXPECTED'}`);
+  // The floor of `at`, as a barrier taken before Postgres's clock stepped back leaves it: above the
+  // time of a use whose deadline still passes. The use must write nothing, or a checkpoint would miss it.
+  await db.query('UPDATE fence SET at_floor = $1', [String(Date.now() + 60_000)]);
+  const below = await use(db, keys, { ...input, requestId: 'floor-1' });
+  const { rows: [{ n: floored }] } = await db.query("SELECT count(*)::int AS n FROM entries WHERE request_id = 'floor-1'");
+  const floorHolds = !below.ok && below.code === 'late' && floored === 0;
+  if (!floorHolds) wrong += 1;
+  console.log(`floor    a use below the barrier's floor of \`at\` answered ${below.ok ? 'allowed' : below.code}, entries: ${floored}${floorHolds ? '' : '  UNEXPECTED'}`);
   await db.end();
 } finally {
   await admin.query('DROP DATABASE IF EXISTS w208_fence WITH (FORCE)');

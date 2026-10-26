@@ -112,7 +112,9 @@ try {
 
   const { rows: [{ last }] } = await client.query("SELECT pg_sequence_last_value('entry_number')::text AS last");
   const genesis = checkpointHash(Buffer.alloc(32), []);
-  await client.query("INSERT INTO checkpoints VALUES ($1, $1, 0, $2, $3, (extract(epoch FROM clock_timestamp()) * 1000)::bigint, $4)",
+  // The floor of `at` starts below every use to come; the first barrier raises it.
+  await client.query("INSERT INTO fence VALUES (true, (extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max())");
+  await client.query('INSERT INTO checkpoints SELECT $1, $1, 0, $2, $3, at_floor, $4 FROM fence',
     [last, genesis, checkpointSignature(keys.log, last, last, genesis), String(now)]);
 
   // The uses' login, with the hot path's limits.

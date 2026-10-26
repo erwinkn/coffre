@@ -45,10 +45,13 @@ Every number below is labelled **measured** (with where) or **reasoned**.
   same day as a `seq` rerun):
   - at 1,000/s for 5 min: p50 **2.6 ms** against `seq`'s 5.2 ms, p99 6.1
     against 9.2; 1 statement and 1 round trip against 2 and 2;
-  - ceiling about **5,000/s** against `seq`'s ~2,500;
+  - served without loss (under 1% refused, 20 s steps): `one` 4,000/s
+    (5,000/s before review r1 added one row read per use), `seq` 3,000/s.
+    Postgres CPU per use at the top: 0.37–0.38 ms against 0.52 ms, so about
+    **1.3–1.6×** the uses on the same 2 vCPU;
   - Postgres CPU per use about the same at 1,000/s (0.30–0.35 ms against
-    0.36), and it stays flat up to the ceiling, where `seq`'s rises
-    (0.64 ms at 2,500/s).
+    0.36), and it stays flat as load rises, where `seq`'s does not (0.52–0.64
+    ms at 2,500–3,000/s).
 - **Measured, on Cloudflare** (Worker in WAW, Hyperdrive, same evening as a
   `seq` rerun):
   - at 1,000/s for 5 min, pool 100: Worker p50 **37 ms** against `seq`'s 70,
@@ -56,16 +59,18 @@ Every number below is labelled **measured** (with where) or **reasoned**.
   - at Equisafe's pool of 40: **~1,040/s** served against `seq`'s ~500/s. One
     round trip doubles what a pool serves.
 - **Overload:**
-  - **Locally,** at twice the ceiling: with a cap and a deadline, `one` served
-    4,991/s at p50 3.8 ms and refused the rest at once (503, `Retry-After`).
-    Without them, `seq` collapsed to 243/s.
+  - **Locally,** past the ceiling (8,000/s offered to `one`, 5,000/s to
+    `seq`, 1.6–1.7× each): with a cap and a deadline, `one` served 4,991/s at
+    p50 3.8 ms and refused the rest at once (503, `Retry-After`). Without
+    them, `seq` collapsed to 243/s.
   - **On Workers,** a deadline carried into Postgres keeps goodput at the pool's
     ceiling, because calls held too long do nothing. But a per-isolate cap
-    does not refuse fast: Cloudflare spread the load over ~150 isolates. A
-    bound shared by all isolates is still open.
-- **Flat to 10M entries** (R48), with a log partitioned by day. Retention is
-  `DETACH` and `DROP` of a day: 3 ms and 52 ms for a day of 1M entries, under
-  load, with no effect on uses.
+    does not refuse fast: Cloudflare spread the load over at least ~150
+    isolates. A bound shared by all isolates is still open.
+- **About flat to 10M entries** (R48), with a log partitioned by day: 14.6–15.5
+  buffers per use and p50 2.6 ms at 10k, 1M and 10M. Retention is `DETACH` and
+  `DROP` of a day: 3 ms and 26–52 ms for a day of 1M entries, under load, with
+  no effect on uses.
 - **Bytes per use:** 341 as prototyped, **158** in a slim row (141 with a
   16-byte MAC). At 1,000/s, that is 29, 13.6 and 12.2 GB a day (measured at
   1M rows, heap and index).
@@ -83,7 +88,7 @@ Worker   authenticate the caller (CPU only)
 Worker   MAC (principal, credential, request id, time, what it asks for)
 call     SELECT use_credential(principal, credential, request id, time, payload, mac, deadline)
            pg_advisory_xact_lock_shared(208)                    shared with every other use
-           too late for its deadline? write nothing, answer null
+           past its deadline, or its time below the floor? write nothing, answer null
            one statement: INSERT the entry (nextval) and read     one snapshot, taken after the lock
              member, grants, the member's newest change, credential,
              environment, secret and its wrapped key
@@ -197,10 +202,22 @@ removed breaks it:
   revoke").
 - `DurableBeforeRelease`: a value leaves only with its entry flushed.
 
-**What it does not cover:** any number of uses (a proof would); liveness;
-tampering by someone with database write access (below); one grant stands
-for every decision input, so every writer of one must be a change like
-`change_member` (W201's point, unchanged).
+**What it does not cover:**
+- **Scale:** two uses (three with covers), one principal, credential and
+  secret, one isolate. Any number of uses would need a proof.
+- **Liveness.**
+- **No clocks, deadlines, floors, request ids, replays, partitions, seals or
+  expiry.** Those are argued above and tested on Postgres (`fence-one.ts`),
+  not modelled.
+- **Tampering** by someone with database write access (below).
+- **One grant stands for every decision input,** so every writer of one must
+  be a change like `change_member` (W201's point, unchanged).
+- **`ReplayAgrees` adds nothing to `TotalOrder` in the model:** an entry's
+  decision is built from what it saw. The independent check of live against
+  replay is `verify-one.ts`, on the real runs.
+- **Covers:** the cover is invalidated by any change (one principal), and
+  the check and the read are one step. In the code they are one statement
+  under the shared lock, which no change can commit through.
 
 ### The outcome, recomputed
 
@@ -248,12 +265,14 @@ grants; credentials, secrets and environments need the same treatment
 ### Replays
 
 A call whose answer is lost may be sent again (W201 saw 190 such appends on a
-slow network). A use's entry is unique on (time, request id), both under its
-MAC, so the replay fails on that index, writes nothing and the Worker answers
-503. It must not decide again: on today's state, after a revoke, it could
+slow network), by Hyperdrive or by the Worker retrying the request. A request
+carries its id and its time from the start, and a retry reuses both
+(`UseInput.at`, `change(…, request)`). A use's entry is unique on (time,
+request id), both under its MAC, so the retry fails on that index, writes
+nothing and the Worker answers 503 `replayed`. It must not decide again: on today's state, after a revoke, it could
 allow a use the log puts before the revoke. A change's replay finds its entry
-under the lock and returns its number. `fence-one.ts` checks both (measured:
-one entry each). The verifier rejects two entries with one request id, so a
+under the lock and returns its number. `fence-one.ts` checks both, retrying
+through `one.use` and `one.change` (measured: one entry each). The verifier rejects two entries with one request id, so a
 copied entry is caught. A replay or a failed call uses up a number, so the
 numbers have gaps, and a gap is not a deletion: only checkpoints prove
 completeness.
@@ -262,40 +281,53 @@ completeness.
 speculative insertion doubled a use's buffers and WAL records, measured
 12 → 24 and 2 → 4. The plain unique index costs nothing extra.)
 
-### Deadlines, and one index per use row
+### Deadlines, the floor of `at`, and one index per use row
 
 Every use carries a deadline, at most 3 s after its time, set when the
-request arrives. The call does nothing if it gets its lock later. That does
-two things:
+request arrives. The call does nothing if it gets its lock later (and a
+missing or longer deadline is answered the same way: 503 `late`). So a call
+Hyperdrive held while the Worker gave up does no work when it finally runs.
 
-- **Overload:** a call Hyperdrive held while the Worker gave up does no work
-  when it finally runs.
-- **It bounds where an entry can be:** an entry is written only while
-  `time ≥ now − 3 s`. Every use numbered after a checkpoint's barrier was
-  written after it, so its time is no earlier than the barrier's time less
-  3 s, whatever the clocks: the Worker stamps the time and the deadline,
-  Postgres compares the deadline with its own clock. The checkpointer finds
-  its window through the (time, request id) index from there.
+The checkpointer needs to find the uses numbered after its last barrier
+without an index on the number. Each barrier, under the lock exclusive,
+raises a floor, `fence.at_floor`, to its own clock less 3 s, and never lowers
+it. A use whose time is below the floor writes nothing (`late`). So every use
+numbered after a barrier has a time at or above that barrier's floor, by
+what the rows say. The checkpointer reads its window through the (time,
+request id) index from there.
+
+- **Clocks:** the Worker stamps the time; Postgres stamps the floor. Skew
+  between them, or Postgres's clock stepping back, can only refuse uses
+  (`late`), never let one be written below the floor where a checkpoint
+  would miss it. `fence-one.ts` checks it: a floor set ahead of the clock,
+  then a use whose deadline still passes: `late`, no entry (measured).
+- **Cost:** the use reads one more row (the floor), and the barrier writes
+  it, once a tick.
 
 So a use row has **one index**, the replay's, and no index on its number.
-W209 gets a bound for free: an entry's number cannot run against its time by
-more than 3 s.
 
-A first version used a BRIN index on the number. At 10M entries the seeded
+A first version had a BRIN index on the number. At 10M entries the seeded
 days' BRIN ranges were not summarised, the checkpointer scanned all of them
-(11.8 s a tick), and R48 failed (measured). The deadline bound has no such
-state.
+(11.8 s a tick), and R48 failed (measured). A second version bounded the
+window by the barrier's clock and the 3 s deadline alone; review r1 found it
+missed a use if Postgres's clock stepped back. The floor holds whatever the
+clocks do.
 
 ### Checkpoints: no lag
 
 The checkpointer (W201's flat hash, kept so the load compares; W209 replaces
 it with Merkle checkpoints) closes its window with a barrier: the lock
-exclusive for one statement that reads the sequence's last value and
-Postgres's clock. With every number taken under the lock, nothing at or below
-that value can still commit. W201 needed a 5-tick lag and a floor check in
-every append. `one` needs neither: an entry is sealed by the next tick. The
-barrier writes nothing, so it holds the lock for microseconds (measured:
-0.1–0.3 ms mean server time for the barrier, lock wait included).
+exclusive for one statement that raises the floor of `at` and reads the
+sequence's last value. With every number taken under the lock, nothing at or
+below that value can still commit. W201 needed a 5-tick lag and a number
+check in every append. `one` needs neither: an entry is sealed by the next
+tick.
+
+The barrier waits for the uses in flight, and new uses queue behind it while
+it waits. Its mean server time, lock wait included, is load-dependent
+(measured, `pg_stat_statements`): 0.15 ms at 1,000/s, 0.32 ms at 4,000/s,
+6.4 ms at 5,000/s, and 11–30 ms past saturation, where the uses it waits for
+are themselves waiting for CPU. That stall comes once a tick.
 
 ### The log's tables
 
@@ -341,7 +373,7 @@ rows. Three ways were weighed:
 
 | | how | verdict |
 |---|---|---|
-| **a. covers** (built) | after an allowed use writes entry #k, the isolate passes k with the next uses of the same credential and secret, for a window. Under the same shared lock, the call writes nothing if no change to the member was numbered after k. The first use after any change is a fresh entry | **built and measured** |
+| **a. covers** (built) | after an allowed use writes entry #k, the isolate passes k with the next uses of the same credential and secret, for a window. In the statement that reads (one snapshot, under the same shared lock), the call writes nothing if no change to the member was numbered after k. The first use after any change to the member is a fresh entry | **built and measured** |
 | b. a per-tick counter row | one row per (credential, secret, tick), its count updated by every use | **rejected (reasoned):** every use of a hot key updates one row, one at a time under its row lock, which R44 forbids; and an update writes a whole new row version, so WAL does not shrink |
 | c. a shared dedup table | covers kept in Postgres, so every isolate shares them | **not built:** a cover row would have to be MAC'd (else a database writer could make uses skip logging), written by a second statement after the first use, and read by every use. Worth it only if per-isolate covers prove too weak on Workers (below) |
 
@@ -351,10 +383,16 @@ What a cover keeps:
   entry is on disk.
 - **No serialization:** a repeat is a read-only transaction; no row is
   written, so there is no lock to wait on and no WAL.
-- **Revocation:** a repeat on a cover from before a change is impossible, so
-  a use after a confirmed revoke is a fresh entry, refused, and provably so.
-  TLC holds `RepeatsAreTheirCover` (96.5M states) and breaks it without the
-  change check or without the shared lock.
+- **Revocation:** a repeat on a cover from before a change to the member is
+  impossible, so a use after a confirmed revoke is a fresh entry, refused,
+  and provably so. TLC holds `RepeatsAreTheirCover` (96.5M states) and breaks
+  it without the change check or without the shared lock.
+- **Scope, as built:** "a change to the member" means what `change_member`
+  writes: the member, its grants, its credentials. A secret rotated, moved or
+  deleted, or an environment deleted, writes no change entry for the member,
+  so a cover would not see it. Before covers ship, every other decision input
+  must be a change the cover check can see (its own number, compared the same
+  way).
 - **Expiry:** a cover ends at the credential's expiry, so the first use after
   it is a fresh, logged refusal.
 
@@ -374,7 +412,9 @@ The CPU barely moves: a repeat still reads everything, and Postgres's cost
 per call is mostly protocol and plpgsql, not the insert. The win is rows,
 bytes and WAL.
 
-**How it scales with the window:** covers are per isolate, in memory: one
+**How it scales with the window (R52 keeps the bulk cap's window a
+parameter; the cover window is one too, `--cover-ms`):** covers are per
+isolate, in memory: one
 entry per (isolate, credential, secret) per window. A 1-day window holds as
 many as there are distinct keys an isolate saw that day, and costs nothing in
 Postgres. A cover never outlives a change or an expiry, so a long window
@@ -410,7 +450,10 @@ The slim row drops:
 - **The environment:** the secret's.
 - **`written_at`:** only the benches use it.
 
-A 64-bit random request id is unique enough within one millisecond. Of a
+A 64-bit random request id need only be unique within its millisecond: at
+5,000 uses a second, about 5 share one, so a collision is about one in 10^18
+per millisecond. A collision would answer one use 503 `replayed`, and its
+retry, with a new id, would pass. Of a
 row's 158 B, about 24 B is the tuple header and 32 B the MAC; the rest is
 three bigints and two uuids. The prototype keeps its readable columns; the
 slim row is measured, not wired through (reasoned: the decision, the replay
@@ -432,6 +475,14 @@ One artifact of the rig: Docker's CPU quota freezes Postgres for the rest of a
 100 ms period once it has used its 200 ms. The ~100–250 ms p99 at high load,
 for both variants, comes from that; a VM with 2 vCPUs would queue instead.
 
+Every number below comes from a run kept in this thread's storage
+(`w208-raw/`): `main-seq-1000.txt` and `main3-one-1000.txt` (the 5-minute
+runs), `cap-*.txt` and `cap3-*.txt` (ceilings), `matrix2.log`, `matrix3.log`,
+`matrix4.log` and `rev4-seq-own.txt` (overload, revocation, R48, covers), and
+`cf-matrix1.txt` and `cf-matrix2.txt` (Cloudflare). The `one` runs before
+review r1 (`main3`, `cap3`, `matrix3`) ran without the floor of `at`. The
+runs after it (`matrix4.log`) add it: one more row read per use (below).
+
 ### Local, 1,000/s for 5 minutes
 
 | | served | p50 | p99 | statements and round trips per use | Postgres CPU per use | server time per use | buffers per use | revoke | live = replay |
@@ -449,12 +500,27 @@ instead of JSON would trim it (reasoned).
 | | offered | served | p50 | p99 | refused, and how fast |
 |---|---|---|---|---|---|
 | `seq` | 2,500/s | 2,493/s | 5.7 ms | 110 ms | 0 |
-| `seq` | 3,000/s | 2,993/s | 6.1 ms | 438 ms | 264 after waiting 250 ms for a connection |
+| `seq` | 3,000/s | 2,993/s | 6.1 ms | 438 ms | 264 (0.4%) after waiting 250 ms for a connection |
 | `one` | 4,000/s | 3,991/s | 2.9 ms | 196 ms | 0 |
-| `one` | 5,000/s | 4,967/s | 3.3 ms | 225 ms | 121 after 250 ms |
-| `seq`, no admission | **5,000/s (2×)** | **243/s** | 487 ms | 619 ms | 142,777, after 250–566 ms |
+| `one` | 5,000/s | 4,967/s | 3.3 ms | 225 ms | 121 (0.1%) after 250 ms |
+
+After review r1 (the floor of `at`, one more row read per use;
+`matrix4.log`):
+
+| | offered | served | p50 | p99 | refused |
+|---|---|---|---|---|---|
+| `one` | 4,000/s | 3,980/s | 2.9 ms | 212 ms | 1 |
+| `one` | 5,000/s | 4,678/s | 226 ms | 267 ms | 4,607 (9%) after 250 ms |
+| `one`, cap 48 + deadline | 8,000/s | 4,554/s | 3.8 ms | 50 ms | 102,879, at once |
+
+**Ceiling, defined as** the highest rate offered in 20 s steps that is served
+with under 1% refused: `seq` 3,000/s (at 0.52 ms of Postgres CPU per use);
+`one` 5,000/s before review r1 (0.37 ms) and 4,000/s after it (0.38 ms).
+Neither was stepped beyond without admission control. On CPU alone, 2 vCPU
+would carry ~3,800 and ~5,000–5,400 uses a second: **about 1.3–1.6×**.
+| `seq`, no admission | **5,000/s (1.7×)** | **243/s** | 487 ms | 619 ms | 142,777, after 250–566 ms |
 | `seq`, cap 48 + deadline | 5,000/s | 4,249/s | 7.2 ms | 36 ms | 21,893, **at once** |
-| `one`, no admission | **8,000/s (~2×)** | 5,230/s | 243 ms | 292 ms | 80,336, after 250 ms |
+| `one`, no admission | **8,000/s (1.6×)** | 5,230/s | 243 ms | 292 ms | 80,336, after 250 ms |
 | **`one`, cap 48 + deadline** | 8,000/s | **4,991/s** | **3.8 ms** | **46 ms** | 88,966, **at once** |
 
 - **Admission control matters most under overload,** for either design.
@@ -464,9 +530,12 @@ instead of JSON would trim it (reasoned).
   half-done use to waste. But its latency is the queue's (~250 ms), not the
   database's.
 - **`seq` near its ceiling is metastable.** At 2,400/s with a revocation, it
-  fell into a 450 ms queue in 4 of 5 runs (527–2,046/s served; one run started
-  clean and tipped at the revocation). `one` at 3,800/s, ~80% of its ceiling,
-  held in all 4 runs.
+  fell into a 450 ms queue in 4 of 5 runs: 527/s and 2,046/s served
+  (`matrix2.log`, own pool and shared), 885/s (`matrix3.log`, own pool),
+  1,632/s (`rev4-seq-own.txt`, which started clean and tipped at the
+  revocation), and 2,392/s once, clean (`matrix3.log`, shared). `one` at
+  3,800/s, ~76% of its ceiling, held in all 4 runs (`matrix2.log`,
+  `matrix3.log`).
 
 ### Local, revocation under load
 
@@ -475,8 +544,10 @@ uses' pool:
 
 | | load | own pool | uses' pool |
 |---|---|---|---|
-| `one` | 3,800/s | 22.5 ms | 7.5 ms |
-| `seq` | 2,400/s | 119 ms (in a collapsing run) | 7.1 ms |
+| `one` | 3,800/s | 25.5 ms, 22.5 ms | 6.4 ms, 7.5 ms |
+| `seq` | 2,400/s | 162 ms, 119 ms (in collapsing runs) | 7.1 ms, 7.1 ms |
+
+Two runs each, `matrix2.log` then `matrix3.log`.
 
 0 uses allowed after the answer in every run, and 0 entries numbered before
 the revoke and written after it. Locally the pool is never the bottleneck, so
@@ -484,21 +555,34 @@ its own pool saves nothing here; on Cloudflare it does (below).
 
 ### Local, flat as the log grows (R48)
 
-1,000/s for 30 s, on a log seeded with 10k, 1M or 10M uses over 10 days:
+1,000/s for 30 s, on a log seeded with 10k, 1M or 10M uses over 10 days
+(`matrix3.log` before review r1; `r1-r48-10k.txt`, `r1-r48-1m.txt`,
+`matrix4.log` after it):
 
-| log | use: server time, buffers | p50 / p99 | checkpoint: db time p50 / max |
-|---|---|---|---|
-| 10k | 0.42 ms, 13.7 | 2.6 / 32 ms | 4.6 / 10 ms |
-| 1M | 0.34 ms, 13.4 | 2.7 / 24 ms | 5.5 / 22 ms |
-| 10M | 0.50 ms, 13.9 | 2.6 / 109 ms | 4.3 / 12 ms |
+| log | use: server time, buffers (before r1) | after r1 | p50 / p99 after r1 | checkpoint db time p50 / max |
+|---|---|---|---|---|
+| 10k | 0.42 ms, 13.7 | 0.43 ms, 14.7 | 2.6 / 32 ms | 4.6 / 10 ms |
+| 1M | 0.34 ms, 13.4 | 0.50 ms, 14.6 | 2.6 / 77 ms | 5.5 / 22 ms |
+| 10M | 0.50 ms, 13.9 | 0.64 ms, 15.5 | 2.6 / 110 ms | 4.5 / 19 ms |
+
+- **Buffers:** the floor adds about one buffer per use. The 10M run after r1
+  reads about one more again, which the runs before r1 did not. It was not
+  investigated; one guess is autovacuum on the freshly seeded partitions
+  invalidating cached plans.
+- **Server time** varies between runs on this shared host (0.34–0.64 ms) with
+  no trend in size; p50 latency is 2.6 ms at every size.
+- **No statement reads history:** the use reads its member's newest change
+  (an index probe) and inserts into today's partition; the checkpointer reads
+  its window from the floor.
 
 Retention under load, at 10M: a day's partition made in 12 ms; the oldest day
-(1M entries) detached in 3 ms and dropped in 52 ms; uses in the 5 s after it:
-p50 2.6 ms, max 25 ms.
+(1M entries) detached in 3 ms and dropped in 26–52 ms; uses in the 5 s after
+it: p50 2.6 ms, max 12–25 ms.
 
 ### Cloudflare
 
-Same rig as W201: a Worker in Warsaw (WAW), Hyperdrive with caching off, a
+Run on the code before review r1 (81a39ebb: no floor of `at`, which adds one
+row read per use). Same rig as W201: a Worker in Warsaw (WAW), Hyperdrive with caching off, a
 Cloudflare Tunnel (connectors in Helsinki and dme05) to the same container,
 load from this machine with `load.mjs`, the checkpointer beside each run. As
 for W201, each Worker connection gets one of two network paths to Postgres:
@@ -524,8 +608,9 @@ is that path, not the design. One run each.
   its deadline does nothing when it runs (`late`), so the database does no
   wasted work. `seq` collapses and its clients time out.
 - **A per-isolate cap does not bound the whole.** Cloudflare spread this
-  load over about 150 isolates. The covers run counted them: 14,817 covers for
-  100 keys in 60 s. A cap of 8 each still admitted ~1,000 calls at once, and
+  load over many isolates: the covers run made 14,817 covers for 100 keys in
+  60 s, which is at least ~150 isolates' worth (an isolate that saw fewer
+  keys makes fewer covers, so the count is a lower bound). A cap of 8 each still admitted ~1,000 calls at once, and
   the Worker waited ~1 s in Hyperdrive's queue. Fast refusal on Workers needs
   a bound that all isolates share. That is not measured here; it is the open
   part of R44.
@@ -600,14 +685,19 @@ Against W201's `seq`, for someone with database write access but no key:
 - **The MAC does not cover the number** (the vault calls before it knows
   it). Until a checkpoint seals it, two entries' numbers can be swapped, or an
   entry copied under a new number:
-  - The deadline bound limits a swap to 3 s of request time.
+  - Any two unsealed entries can be swapped: the window is the unsealed one
+    (a tick, or longer if the checkpointer stalls), not a bound on time.
   - A copy is caught by the unique (time, request id) index, and by the
     verifier's check.
   - A swap across a revoke moves a use to the other side of it. That is
     inside the ~1-tick window R51 accepts for uses.
   - Once sealed, nothing moves: W209's leaves hash the whole entry.
-- **Rollback of decision inputs:** refused by the seal check (above), for
-  the member and its grants.
+- **Rollback of decision inputs:** refused by the seal check (above) for the
+  member and its grants only. Rolling back a credential's `revoked`, a
+  secret's wrapped key or an environment's `deleted` changes the live
+  decision with nothing to see it: the outcome is not stored, so no replay
+  disagrees. **Open until every decision input is sealed to its newest
+  change.**
 - **Unchanged from W201:** everything a database writer could already do,
   such as change a grant directly. That is authorisation state, and the
   replay catches it afterwards only if the row is sealed to the log.
@@ -635,8 +725,9 @@ Against W201's `seq`, for someone with database write access but no key:
 5. **The slim row** (158 B, or 141 with a 16-byte MAC): worth wiring through.
    A 16-byte MAC keeps 128 bits against forgery, which is what HMAC
    truncation guidance allows.
-6. **A use must carry a deadline ≤ 3 s.** It bounds overload work and where
-   the checkpointer looks; a longer request than that gets no entry and a 503.
+6. **A use must carry a deadline ≤ 3 s.** It bounds overload work; a request
+   with a longer one, or with a time below the barrier's floor, gets no entry
+   and a 503 `late`.
 
 ## Reproducing
 

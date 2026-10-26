@@ -32,7 +32,11 @@ export function nameStatements(on: boolean): void {
 }
 const run = (db: Db, name: string, text: string, values: unknown[]) => (named ? db.query({ name, text, values }) : db.query(text, values));
 
-export type UseInput = { principal: string; credential: string; environmentId: string; secretId: string; requestId: string };
+/**
+ * A request: its id and, once stamped, its time. A retry of the same request (its answer lost)
+ * passes both unchanged, so that its call finds the entry the first one wrote.
+ */
+export type UseInput = { principal: string; credential: string; environmentId: string; secretId: string; requestId: string; at?: number };
 export type UseAnswer =
   | { ok: true; value: string; number: string; statements: number; covered?: true }
   | { ok: false; code: string; number?: string; retryAfter?: number; statements: number };
@@ -108,7 +112,7 @@ export const DEADLINE_MAX = 3000;
  * while the Worker gave up).
  */
 export async function use(db: Db, keys: Keys, input: UseInput, deadline?: number, covers?: Covers): Promise<UseAnswer> {
-  const at = Date.now();
+  const at = input.at ?? Date.now();
   deadline ??= at + DEADLINE_MAX;
   const key = `${input.credential}\n${input.secretId}`;
   const held = covers?.held.get(key);
@@ -131,7 +135,7 @@ export async function use(db: Db, keys: Keys, input: UseInput, deadline?: number
   if (v.covered !== null && refused !== null) {
     // Refused on a cover (its expiry, or a change the cover could not see): logged as an entry of its own.
     covers!.held.delete(key);
-    const fresh = await use(db, keys, input, deadline, covers);
+    const fresh = await use(db, keys, { ...input, at }, deadline, covers);
     return { ...fresh, statements: fresh.statements + 1 };
   }
   if (refused !== null) {
@@ -173,13 +177,14 @@ const MEMBER = `
  * another change moved the member's seal in between (then read again). It
  * answers only once committed.
  */
-export async function change(db: Db, keys: Keys, principal: string, op: Op): Promise<{ number: string; tries: number }> {
+export async function change(db: Db, keys: Keys, principal: string, op: Op, request?: { requestId: string; at: number }): Promise<{ number: string; tries: number }> {
   for (let tries = 1; tries <= 20; tries += 1) {
     const { rows: [r] } = await db.query(MEMBER, [principal]);
     if (r === undefined) throw new Error(`no member ${principal}`);
     const seal = memberSeal(keys.row, r.member, grantsAfter(r.grants, op));
-    const at = Date.now();
-    const requestId = randomUUID();
+    // A retry of the same change (`request`) finds its entry; a try refused on a moved seal wrote nothing.
+    const at = request?.at ?? Date.now();
+    const requestId = request?.requestId ?? randomUUID();
     const payload = JSON.stringify(op);
     const credential = 'credential' in op ? op.credential : null;
     const mac = entryMac(keys.log, { at, kind: 'change', principal, credential, requestId, payload, seal });
@@ -193,8 +198,8 @@ export async function change(db: Db, keys: Keys, principal: string, op: Op): Pro
 /* The checkpointer: as simple.ts's, with no lag. */
 
 export type Checkpoint = { upto: string; from: string; entries: number; statements: number; dbMs: number; verifyMs: number; signed: boolean; failures: string[] };
-/** Where the last checkpoint ended, its hash, and its barrier's time (Postgres's clock, ms). */
-export type CheckpointState = { upto: string; hash: Buffer; barrierAt: string };
+/** Where the last checkpoint ended, its hash, and the floor of `at` its barrier set. */
+export type CheckpointState = { upto: string; hash: Buffer; atFloor: string };
 
 export type Row = {
   number: string; at: string; kind: 'use' | 'change'; principal: string; credential: string | null; request_id: string; payload: string;
@@ -203,16 +208,15 @@ export type Row = {
 /**
  * The entries numbered in ($1, $2], in number order. Changes by their
  * number; uses, which have no index on it, through their (at, request_id)
- * index from $3: the barrier's time that closed $1, less DEADLINE_MAX. A
- * use numbered after that barrier was written after it, before its
- * deadline, so its `at` is no earlier than that (schema-one.sql).
+ * index from $3: the floor of `at` the barrier that closed $1 set. A use
+ * numbered after that barrier was written after it, and a use below the
+ * floor writes nothing, so none is missed (schema-one.sql).
  */
 export const ENTRIES = `SELECT number::text, at::text, kind, principal, credential, request_id, payload, seal, mac FROM (
     SELECT * FROM entries_changes c WHERE c.number > $1 AND c.number <= $2
     UNION ALL
     SELECT * FROM entries_uses u WHERE u.at >= $3 AND u.number > $1 AND u.number <= $2
   ) w ORDER BY w.number`;
-export const windowFrom = (barrierAt: string) => String(BigInt(barrierAt) - BigInt(DEADLINE_MAX));
 
 export const rowEntry = (r: Row): Entry => ({
   at: Number(r.at), kind: r.kind, principal: r.principal, credential: r.credential, requestId: r.request_id, payload: r.payload, seal: r.seal,
@@ -231,9 +235,9 @@ export function checkpointSignature(key: Buffer, from: string, upto: string, has
 }
 
 export async function loadCheckpointState(db: Db): Promise<CheckpointState> {
-  const { rows: [last] } = await db.query('SELECT upto::text, hash, barrier_at::text FROM checkpoints c ORDER BY c.upto DESC LIMIT 1');
+  const { rows: [last] } = await db.query('SELECT upto::text, hash, at_floor::text FROM checkpoints c ORDER BY c.upto DESC LIMIT 1');
   if (last === undefined) throw new Error('no checkpoint to go on from: seed the database');
-  return { upto: last.upto, hash: last.hash, barrierAt: last.barrier_at };
+  return { upto: last.upto, hash: last.hash, atFloor: last.at_floor };
 }
 
 /** Each entry's MAC. */
@@ -251,12 +255,12 @@ export function verifyEntries(keys: Keys, rows: readonly Row[]): string[] {
 export async function checkpoint(db: Db, keys: Keys, state: CheckpointState): Promise<Checkpoint> {
   const started = performance.now();
   const from = state.upto;
-  const { rows: [c] } = await db.query('SELECT upto::text, barrier_at::text FROM close_one()');
+  const { rows: [c] } = await db.query('SELECT upto::text, at_floor::text FROM close_one()');
   const upto: string = c.upto ?? from;
   let statements = 1;
   const empty = { upto: from, from, entries: 0, statements, dbMs: performance.now() - started, verifyMs: 0, signed: false, failures: [] };
   if (BigInt(upto) <= BigInt(from)) return empty;
-  const { rows } = await db.query(ENTRIES, [from, upto, windowFrom(state.barrierAt)]);
+  const { rows } = await db.query(ENTRIES, [from, upto, state.atFloor]);
   statements += 1;
   const dbMs = performance.now() - started;
   const verifying = performance.now();
@@ -265,11 +269,11 @@ export async function checkpoint(db: Db, keys: Keys, state: CheckpointState): Pr
   const hash = checkpointHash(state.hash, rows as Row[]);
   const signature = checkpointSignature(keys.log, from, upto, hash);
   const verifyMs = performance.now() - verifying;
-  await db.query('INSERT INTO checkpoints (upto, from_number, entries, hash, signature, barrier_at, at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-    [upto, from, rows.length, hash, signature, c.barrier_at, String(Date.now())]);
+  await db.query('INSERT INTO checkpoints (upto, from_number, entries, hash, signature, at_floor, at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    [upto, from, rows.length, hash, signature, c.at_floor, String(Date.now())]);
   statements += 1;
   state.upto = upto;
   state.hash = hash;
-  state.barrierAt = c.barrier_at;
+  state.atFloor = c.at_floor;
   return { upto, from, entries: rows.length, statements, dbMs, verifyMs, signed: true, failures };
 }

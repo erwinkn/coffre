@@ -24,7 +24,7 @@ import pg from 'pg';
 
 import { keysFrom } from './src/model.ts';
 import {
-  checkpointHash, checkpointSignature, decide, ENTRIES, entryMac, windowFrom, grantsAfter, memberSeal, rowEntry, type Grant, type Member, type Op, type Row, type View,
+  checkpointHash, checkpointSignature, decide, ENTRIES, entryMac, grantsAfter, memberSeal, rowEntry, type Grant, type Member, type Op, type Row, type View,
 } from './src/one.ts';
 
 const { values } = parseArgs({ options: { url: { type: 'string' }, outcomes: { type: 'string' }, seed: { type: 'string', default: 'w194-synthetic' } } });
@@ -131,7 +131,7 @@ function walk(rows: readonly Row[], checkMac: boolean): void {
 
 const started = performance.now();
 try {
-  const { rows: checkpoints } = await client.query('SELECT upto::text, from_number::text, entries, hash, signature, barrier_at::text FROM checkpoints c ORDER BY c.upto');
+  const { rows: checkpoints } = await client.query('SELECT upto::text, from_number::text, entries, hash, signature, at_floor::text FROM checkpoints c ORDER BY c.upto');
   if (checkpoints.length === 0) throw new Error('no checkpoint');
   const [genesis, ...rest] = checkpoints;
   if (genesis.from_number !== genesis.upto || genesis.entries !== 0) failures.push('the first checkpoint is not an empty one');
@@ -145,7 +145,7 @@ try {
   let sealed = 0;
   for (const c of rest) {
     if (c.from_number !== prev.upto) failures.push(`checkpoint ${c.upto}: starts at ${c.from_number}, not at ${prev.upto}`);
-    const { rows } = await client.query(ENTRIES, [c.from_number, c.upto, windowFrom(prev.barrier_at)]);
+    const { rows } = await client.query(ENTRIES, [c.from_number, c.upto, prev.at_floor]);
     if (rows.length !== c.entries) failures.push(`checkpoint ${c.upto}: ${rows.length} entries, signed ${c.entries}`);
     if (!checkpointHash(prev.hash, rows as Row[]).equals(c.hash)) failures.push(`checkpoint ${c.upto}: hash`);
     if (!checkpointSignature(keys.log, c.from_number, c.upto, c.hash).equals(c.signature)) failures.push(`checkpoint ${c.upto}: signature`);
@@ -153,7 +153,7 @@ try {
     sealed += rows.length;
     prev = c;
   }
-  const { rows: open } = await client.query(ENTRIES, [prev.upto, '9223372036854775807', windowFrom(prev.barrier_at)]);
+  const { rows: open } = await client.query(ENTRIES, [prev.upto, '9223372036854775807', prev.at_floor]);
   walk(open as Row[], true);
   if (sealMismatches > 0) failures.push(`${sealMismatches} change(s) whose seal is not the member the replay has`);
   const disagree = replay.disagree.length;

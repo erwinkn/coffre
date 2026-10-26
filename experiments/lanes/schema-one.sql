@@ -51,13 +51,17 @@ CREATE TABLE entries_changes PARTITION OF entries FOR VALUES IN ('change');
 CREATE TABLE entries_uses PARTITION OF entries FOR VALUES IN ('use') PARTITION BY RANGE (at);
 -- A use row has one index, its replay's: `at` first, so that inserts go to the index's right edge.
 -- A unique index on a partitioned table must include its partition key, so a use's `number` is unique
--- by the sequence alone (the verifier checks it), and has no index: a use is written only before its
--- deadline, at most deadline_max() after its `at` (use_credential), so every use numbered after a
--- checkpoint's barrier has an `at` later than the barrier's time less deadline_max(), and the next
--- checkpoint finds its window through this index (`entries` in src/one.ts).
+-- by the sequence alone (the verifier checks it), and has no index: every checkpoint barrier raises
+-- `fence.at_floor`, under the lock exclusive, and a use whose `at` is below it writes nothing
+-- (use_credential). So every use numbered after a barrier has an `at` at or above that barrier's
+-- floor, and the next checkpoint finds its window through this index from there (`ENTRIES` in
+-- src/one.ts). This holds by what the rows say, whatever any clock does: a clock that steps back
+-- can only refuse uses, never hide one from a checkpoint.
 ALTER TABLE entries_changes ADD PRIMARY KEY (number);
 CREATE UNIQUE INDEX entries_uses_request ON entries_uses (at, request_id);
 CREATE OR REPLACE FUNCTION deadline_max() RETURNS bigint LANGUAGE sql IMMUTABLE AS 'SELECT 3000::bigint';
+-- The lowest `at` a use may still be written with: raised by each barrier, never lowered.
+CREATE TABLE fence (only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row), at_floor bigint NOT NULL);
 CREATE UNIQUE INDEX entries_changes_request ON entries_changes (request_id);
 CREATE INDEX entries_changes_principal ON entries_changes (principal, number);
 
@@ -77,17 +81,15 @@ BEGIN
   RETURN name;
 END $$;
 -- A checkpoint: the vault's signature over every entry in (from, upto], in number order, chained to the one before.
--- barrier_at: Postgres's clock (ms) at the barrier that closed it: the next window's uses have an `at`
--- later than it less deadline_max().
+-- at_floor: the floor its barrier set: the next window's uses have an `at` at or above it.
 CREATE TABLE checkpoints (upto bigint PRIMARY KEY, from_number bigint NOT NULL, entries int NOT NULL, hash bytea NOT NULL, signature bytea NOT NULL,
-  barrier_at bigint NOT NULL, at bigint NOT NULL);
+  at_floor bigint NOT NULL, at bigint NOT NULL);
 
 -- A use: the lock shared; then, in a statement of its own (a volatile function's statements each
 -- take a new snapshot under READ COMMITTED, after the lock), everything the decision reads and the
 -- entry, numbered now. The lock goes with the commit. A call that comes after its deadline (Hyperdrive
--- held it while the Worker gave up) writes nothing and answers null. Every use has a deadline, at most
--- deadline_max() after its `at`: so a use is written only while its `at` is that recent, which bounds
--- where the checkpointer looks for it. A replay of a call that did
+-- held it while the Worker gave up) writes nothing and answers null, as does one with no deadline, a
+-- deadline more than deadline_max() after its `at`, or an `at` below the barrier's floor. A replay of a call that did
 -- write fails on (at, request_id), 23505, and the Worker answers 503: deciding again on today's state
 -- could allow, after a revocation, a use the log has before it. (Not ON CONFLICT: its speculative
 -- insertion doubles a use's buffers and WAL records, for the rare replay.)
@@ -95,27 +97,28 @@ CREATE TABLE checkpoints (upto bigint PRIMARY KEY, from_number bigint NOT NULL, 
 -- p_cover (fewer rows): the number of an allowed use of the same credential and secret that this
 -- isolate wrote earlier. If no change to the member was numbered after it, the use is a repeat of
 -- it: nothing is written (a read-only transaction, no WAL), and the Worker still decides on what was
--- read. The first use after any change writes its own entry (formal/HotPathOne.tla, Covers).
+-- read. The first use after any change writes its own entry (formal/HotPathOne.tla, Covers). The
+-- check is in the statement that reads, so one snapshot answers both (the shared lock already keeps
+-- any change from committing in between).
 CREATE OR REPLACE FUNCTION use_credential(p_principal text, p_credential text, p_request text, p_at bigint, p_payload text, p_mac bytea,
   p_deadline bigint, p_cover bigint DEFAULT NULL) RETURNS json LANGUAGE plpgsql AS $$
 DECLARE
   v json;
-  covered boolean := false;
 BEGIN
-  IF p_deadline IS NULL OR p_deadline > p_at + deadline_max() THEN RAISE EXCEPTION 'a use needs a deadline at most % ms after its time', deadline_max(); END IF;
+  IF p_deadline IS NULL OR p_deadline > p_at + deadline_max() THEN RETURN NULL; END IF;
   PERFORM pg_advisory_xact_lock_shared(208);
-  IF (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN RETURN NULL; END IF;
-  IF p_cover IS NOT NULL THEN
-    covered := p_cover > coalesce((SELECT max(number) FROM entries_changes WHERE principal = p_principal), 0);
-  END IF;
-  WITH e AS (
+  IF (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline OR p_at < (SELECT at_floor FROM fence WHERE only_row) THEN RETURN NULL; END IF;
+  WITH c AS (
+    SELECT p_cover IS NOT NULL AND p_cover > coalesce((SELECT max(number) FROM entries_changes WHERE principal = p_principal), 0) AS covered
+  ),
+  e AS (
     INSERT INTO entries_uses (number, at, kind, principal, credential, request_id, payload, mac)
-    SELECT nextval('entry_number'), p_at, 'use', p_principal, p_credential, p_request, p_payload, p_mac WHERE NOT covered
+    SELECT nextval('entry_number'), p_at, 'use', p_principal, p_credential, p_request, p_payload, p_mac FROM c WHERE NOT c.covered
     RETURNING number
   )
   SELECT json_build_object(
     'number', (SELECT number FROM e)::text,
-    'covered', CASE WHEN covered THEN p_cover::text END,
+    'covered', (SELECT CASE WHEN c.covered THEN p_cover::text END FROM c),
     'member', (SELECT json_build_object('principal', principal, 'status', status, 'role', role, 'seal', encode(seal, 'hex')) FROM members WHERE principal = p_principal),
     'grants', (SELECT coalesce(json_agg(json_build_object('environment_id', environment_id, 'role', role)), '[]') FROM grants WHERE principal = p_principal),
     'lastSeal', (SELECT encode(seal, 'hex') FROM entries_changes WHERE principal = p_principal ORDER BY number DESC LIMIT 1),
@@ -160,10 +163,11 @@ END $$;
 
 -- The checkpointer's barrier: under the lock exclusive, no use or change is in flight, so every
 -- number handed out so far is final (committed, or a gap for good). It returns the last one: the
--- next checkpoint closes up to it, and its clock, read under the lock. No lag, and no check in the
--- uses. It writes nothing, so its commit, and the lock with it, is immediate.
-CREATE OR REPLACE FUNCTION close_one() RETURNS TABLE (upto bigint, barrier_at bigint) LANGUAGE plpgsql AS $$
+-- next checkpoint closes up to it. No lag, and no number check in the uses. It raises the floor of
+-- `at` to its clock less deadline_max() (never lowers it), which the uses after it are held to.
+CREATE OR REPLACE FUNCTION close_one() RETURNS TABLE (upto bigint, at_floor bigint) LANGUAGE plpgsql AS $$
 BEGIN
   PERFORM pg_advisory_xact_lock(208);
-  RETURN QUERY SELECT pg_sequence_last_value('entry_number'), (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+  UPDATE fence f SET at_floor = greatest(f.at_floor, (extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max()) WHERE only_row;
+  RETURN QUERY SELECT pg_sequence_last_value('entry_number'), f.at_floor FROM fence f WHERE only_row;
 END $$;
