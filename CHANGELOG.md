@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.5, in short.** One migration, `0021_prune_vault_releases`
+  (Postgres only; SQLite has none). It adds one function,
+  `prune_vault_releases`, and grants `EXECUTE` on it to `coffre_vault`, the
+  vault's runtime login: no table, no new role, nothing changes in your
+  config, and it runs in a moment. Deploy in the usual order: `coffre
+  migrate`, the vault Worker, then the app ([deploy.md](docs/deploy.md)):
+  a vault older than 0.14.5 does not name a use back, and the app appends
+  it as before. 0.14.4 runs on the new schema, which never calls the
+  function, so rolling back needs no database step; the one caveat is a
+  `bulkLimit.windowMinutes` over a day, which 0.14.4 accepted and 0.14.5
+  refuses to start with, and which would count only a day after rows were
+  pruned. The server fixes are the last two entries: a proxied use that
+  takes the log's head once, and a read under load that answers within
+  seconds.
+
 - **Every "not signed in" error is two lines.** `coffre login` runs the
   device flow: it prints a link and waits for it to be approved, so an agent
   that ran it in the foreground hit its own timeout before the person saw
@@ -71,8 +86,9 @@
   release and its place, which must be the place the read was at (the
   fork it is read in, a reference's holder, or the value's own): another
   is refused as a bad claim, logged, with no use appended. Where the use
-  went, its credential and host, are the app's word, as they were. A vault older than 0.14.5 does not name the use
-  back, and the app appends it as before; so does a use of plain values
+  went, its credential and host, are the app's word, as they were. A vault
+  older than 0.14.5 does not name the use back, and the app appends it as
+  before; so does a use of plain values
   only, which asks no vault, and one whose record is longer than the
   vault takes (16 KiB, a use naming hundreds of keys). Deploy the vault
   first, as ever. No migration ([formal.md](docs/formal.md), `Proxying`).
