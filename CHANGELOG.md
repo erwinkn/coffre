@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.4, in short.** One migration, `0020_vault_releases`
+  (`0017` on SQLite). It adds a table, a trigger on `audit_log` and its
+  function, owned by the login that runs `coffre migrate`, as the other
+  tables are. It needs no new role or privilege, and nothing changes in
+  your config. Audit appends wait while it fills the table from the log:
+  2.1 s on a log of 119k entries, about 5.5 s at a million. Deploy the
+  vault Worker before the app, as [deploy.md](docs/deploy.md) says. 0.14.2
+  and 0.14.3 run on the new schema, and their reads keep the table too,
+  so rolling back needs no step. The fix this release is for: the first
+  entry below.
+
 - **A read costs the database the same however much its reader has read
   before.** The bulk limit's count read every `secret.read` the reader had
   ever made, not only the window's. Its bound, `clock_timestamp()`, is
