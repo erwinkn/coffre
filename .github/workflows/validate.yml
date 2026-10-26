@@ -119,20 +119,25 @@ jobs:
           if grep -qx full-formal <<< "$labels"; then
             echo "The full-formal label asks for a full run."
           else
-            # Newest first. A key counts only if the run in it is one of this workflow's, its
-            # commit holds the very files the key hashes (so a doctored workflow's run, which
-            # saved a key of its choosing, is no source) and, in some attempt, its `Formal
-            # model` job ran the step named for this very key and run (the last step below,
-            # which runs only after every shard held). Jobs of every attempt.
+            # Newest first. A key counts only if the run in it is one of this workflow's; in
+            # some attempt, its `Formal model` job ran the step named for this very key, run
+            # and merge commit (the last step below, which runs only after every shard held);
+            # and that commit holds the very files the key hashes, so a doctored workflow's
+            # run, which saved a key of its choosing, is no source. Jobs of every attempt.
             candidates="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
               jq -r --arg prefix "$key-" '.actions_caches[] | select(.key | startswith($prefix)) | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')" || candidates=""
+            [ -n "$candidates" ] || echo "No cache of $key-*."
+            ours="$(git ls-tree -r HEAD -- formal scripts/formal.sh scripts/formal-trace.mjs scripts/formal-key.sh .github/workflows/validate.yml |
+              sed -E 's/^[0-9]+ blob ([0-9a-f]+)\t(.*)$/\2 \1/' | grep -E '^formal/[^/ ]+\.(tla|cfg) |^scripts/|^\.github/' | sort)"
             while read -r id cref created; do
-              [[ "$id" =~ ^[0-9]+$ ]] || continue
-              { read -r path; read -r sha; } < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq '.path, .head_sha') || continue
-              [ "$path" = .github/workflows/validate.yml ] || continue
-              git fetch -q --depth=1 origin "$sha" || continue
-              git diff --quiet HEAD "$sha" -- 'formal/*.tla' 'formal/*.cfg' scripts/formal.sh scripts/formal-trace.mjs scripts/formal-key.sh .github/workflows/validate.yml || continue
-              gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -qxF "Save it as $key-$id" || continue
+              [ -n "$id" ] || continue
+              [[ "$id" =~ ^[0-9]+$ ]] || { echo "Cache $id: not a run id."; continue; }
+              path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || { echo "Run $id: not readable."; continue; }
+              [ "$path" = .github/workflows/validate.yml ] || { echo "Run $id: $path, not validate.yml."; continue; }
+              step="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -xE "Save it as $key-$id at [0-9a-f]{40}" | head -n 1)" || step=""
+              [ -n "$step" ] || { echo "Run $id: no passed step saved $key."; continue; }
+              theirs="$(gh api "repos/$GITHUB_REPOSITORY/git/trees/${step##* }?recursive=1" --jq '.tree[] | select(.type == "blob" and (.path | test("^formal/[^/]+\\.(tla|cfg)$") or . == "scripts/formal.sh" or . == "scripts/formal-trace.mjs" or . == "scripts/formal-key.sh" or . == ".github/workflows/validate.yml")) | "\(.path) \(.sha)"' | sort)" || theirs=""
+              [ "$theirs" = "$ours" ] && [ -n "$ours" ] || { echo "Run $id: its commit ${step##* } holds other model, script or workflow files."; continue; }
               hit=true
               run="$id"
               ref="$cref"
@@ -196,7 +201,7 @@ jobs:
         # Only after every shard held, and not when the plan found a green run already.
         if: ${{ needs.formal-plan.outputs.hit != 'true' }}
         run: echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/formal-green"
-      - name: Save it as ${{ needs.formal-plan.outputs.key }}-${{ github.run_id }}
+      - name: Save it as ${{ needs.formal-plan.outputs.key }}-${{ github.run_id }} at ${{ github.sha }}
         if: ${{ needs.formal-plan.outputs.hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
