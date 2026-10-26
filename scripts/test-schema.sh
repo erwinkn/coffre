@@ -33,5 +33,8 @@ docker compose exec -T \
 # Managed hosts give the owner CREATEROLE, not superuser.
 ./scripts/test-schema-owner.sh
 
+# The backup role dumps everything and writes nothing, on a cluster of its own.
+./scripts/test-backup-role.sh
+
 # And `coffre setup`, which makes the logins and migrates, on one of its own.
 ./scripts/test-setup.sh

@@ -105,11 +105,45 @@ not the privileges on the database itself. Provision the roles before
 restoring; `coffre migrate` reasserts the database privileges afterwards.
 This is what the drill runs.
 
-Back up, as the owner, as often as you can afford to lose:
+Back up as a login of its own, here `coffre_backup_login`, as often as you
+can afford to lose. Its group, `coffre_backup`, which the migrations make,
+reads every row, the audit log's included, and writes none, so the backup
+job never holds the owner's password. Make the login once, the same way as
+the runtime logins:
+
+```sql
+CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+\password coffre_backup_login
+```
+
+then run `pnpm exec coffre migrate --backup-login coffre_backup_login` in
+the deployment's directory, which grants the login its group. Passing it on
+every run, as a pipeline does, is harmless. Coffre never makes the login and
+never revokes its group: revoke it yourself when it should go. Postgres
+keeps one membership per grantor, the role whose `ADMIN OPTION` granted it
+(the owner, when a member of the owner migrated). A `REVOKE` naming no
+grantor removes only the caller's own, and anyone else's, a superuser's
+included, only warns while the login keeps reading.
+List the grantors, then revoke each, as a superuser or that grantor:
+
+```sql
+SELECT grantor::regrole FROM pg_auth_members
+ WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole;
+REVOKE coffre_backup FROM coffre_backup_login GRANTED BY <grantor>;
+```
+
+`$BACKUP_URL` is the owner's URL with that login's name and password:
 
 ```sh
-pg_dump --format=custom --dbname="$OWNER_URL" --file=coffre-$(date -u +%Y%m%dT%H%MZ).dump
+pg_dump --enable-row-security --format=custom --dbname="$BACKUP_URL" --file=coffre-$(date -u +%Y%m%dT%H%MZ).dump
 ```
+
+The audit log has row-level security: without `--enable-row-security`,
+`pg_dump` stops at it ("query would be affected by row-level security
+policy"); with it, the log's policy for `coffre_backup` shows every entry.
+A table in the database that coffre's migrations did not make,
+`coffre_backup` cannot read: leave it out (`--exclude-table=<name>`), or
+grant it `SELECT`.
 
 Restore:
 
@@ -124,9 +158,11 @@ Restore:
    \password coffre_vault_runtime
    ```
 
-   The group roles, `coffre_app` and `coffre_vault`, and the logins'
-   membership in them must exist too: run `pnpm exec coffre migrate` once
-   against an empty database on this server if they do not.
+   The group roles, `coffre_app`, `coffre_vault` and `coffre_backup`, and
+   the runtime logins' membership in them must exist too: run
+   `pnpm exec coffre migrate` once against an empty database on this server
+   if they do not. Make `coffre_backup_login` too, to back the restored
+   database up: step 4 grants it its group.
 3. Create an empty database owned by the owner, and restore into it:
 
    ```sh
@@ -138,13 +174,13 @@ Restore:
    URL for the restored database:
 
    ```sh
-   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | pnpm exec coffre migrate --yes
+   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | pnpm exec coffre migrate --yes --backup-login coffre_backup_login
    ```
 
    Besides applying missing migrations, every run revokes `CREATE` and
-   `TEMPORARY` on that database from `PUBLIC`, both runtime logins and their
-   group roles. This repairs the defaults a one-database dump leaves out,
-   even when no schema migration is pending.
+   `TEMPORARY` on that database from `PUBLIC`, both runtime logins and the
+   group roles. This repairs what a one-database dump leaves out, even when
+   no schema migration is pending.
 5. Check the app's login has exactly its privileges:
 
    ```sh
@@ -263,7 +299,8 @@ this machine, against the compose Postgres, after `pnpm build`:
    sign-in and `.env.dev`'s keys. It seeds it, writes a canary, grants a
    member access, removes another whose browser session it keeps, issues a
    service token, and lets two heartbeats checkpoint the log.
-2. It backs the database up with `pg_dump --format=custom`.
+2. It backs the database up as `coffre_backup_login`, with
+   `pg_dump --enable-row-security --format=custom`.
 3. It restores into `coffre_drill_restored`, provisions the logins, runs
    migrate to reassert database privileges, and checks the app login's
    privileges.

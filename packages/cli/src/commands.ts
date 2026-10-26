@@ -46,11 +46,14 @@ export const SECTIONS = [
       { command: 'update', usage: ['update [--yes]'], about: ['this CLI, and in a deployment, its coffre packages'] },
       {
         command: 'migrate',
-        usage: ['migrate [--yes]'],
+        usage: ['migrate [--yes] [--backup-login <role>]'],
         about: [
           "in a deployment's folder, its database to the schema of",
           "the version it pins; asks for the owner's connection",
-          'string (piped in, and --yes, without a terminal)',
+          'string (piped in, and --yes, without a terminal, to apply);',
+          '--backup-login grants that existing role coffre_backup,',
+          'which reads every row for pg_dump, on every run; coffre',
+          'never makes the role, nor revokes it when the flag is left off',
         ],
       },
     ],

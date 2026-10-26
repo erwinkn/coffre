@@ -361,10 +361,12 @@ async function run(
     });
     await step(1, async (progress) => {
       let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
-      await migrateDatabase(administrator.href, (planned) => {
-        plan = planned;
-        const pending = planned.total - planned.applied;
-        progress.note(pending === 0 ? 'Checking the database is up to date' : `Migrating the database: ${count(pending, 'migration')} to apply`);
+      await migrateDatabase(administrator.href, {
+        onPlan(planned) {
+          plan = planned;
+          const pending = planned.total - planned.applied;
+          progress.note(pending === 0 ? 'Checking the database is up to date' : `Migrating the database: ${count(pending, 'migration')} to apply`);
+        },
       });
       const pending = plan.total - plan.applied;
       return pending === 0

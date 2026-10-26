@@ -24,10 +24,31 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
 export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promise<void> {
   await client.query(`DO $$ BEGIN
     EXECUTE format(
-      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime',
+      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
       current_database()
     );
   END $$`);
+}
+
+/** Why `login` cannot be the backup login, before anything runs, or null when it may. */
+export function backupLoginProblem(login: string): string | null {
+  if (login === '') return 'the backup login is empty: name the role to grant coffre_backup';
+  if (['coffre_backup', 'coffre_app', 'coffre_vault', 'coffre_runtime', 'coffre_vault_runtime'].includes(login)) {
+    return `the backup login is ${login}, one of coffre's own roles: name the login that backs up`;
+  }
+  return null;
+}
+
+/**
+ * The migrations are applied, by this run or an earlier one, and their
+ * ledger checked, but reasserting the privileges after them failed: unlike
+ * a migration's failure, this one may have changed the database.
+ */
+export class AfterMigrations extends Error {
+  constructor(error: unknown) {
+    super(`the database is at the migrated schema, but reasserting its privileges failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    this.name = 'AfterMigrations';
+  }
 }
 
 interface JournalEntry {
@@ -55,8 +76,8 @@ interface Migrator {
   lock(): Promise<void>;
   unlock(): Promise<void>;
   migrate(migrationsFolder: string): Promise<void>;
-  /** Reassert privileges a one-database backup does not carry. */
-  restrict(): Promise<void>;
+  /** Reassert privileges a one-database backup does not carry, and grant `backupLogin` the backup group (0019_backup_role.sql). */
+  restrict(backupLogin: string | undefined): Promise<void>;
   /** Why this login cannot change the objects migrations change, `managed` among them, or null when it can. */
   notOwner(managed: Managed): Promise<NotOwner | null>;
   close(): Promise<void>;
@@ -264,7 +285,15 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       await client.query('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
     migrate: (migrationsFolder) => migrate(drizzle(client), { migrationsFolder }),
-    restrict: () => restrictDatabase(client),
+    async restrict(backupLogin) {
+      await restrictDatabase(client);
+      if (backupLogin !== undefined) {
+        // Compared as text: as a name, Postgres would cut it to 63 bytes, and grant whichever role bears the cut.
+        const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname::text = $1', [backupLogin]);
+        if (rowCount === 0) throw new Error(`role ${client.escapeIdentifier(backupLogin)} does not exist: make it, coffre never does`);
+        await client.query(`GRANT coffre_backup TO ${client.escapeIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
+      }
+    },
     async notOwner({ relations, functions }) {
       const { rows } = await client.query<{ owner: string; member: boolean; login: string; grants_inherit: boolean; inherits: boolean }>(FOREIGN_OWNERS, [relations, functions]);
       if (rows.length === 0) return null;
@@ -342,17 +371,23 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
 }
 
 /**
- * Apply missing migrations, check their history and reassert database
- * privileges, as a login that can change coffre's objects: another is
- * refused, NotOwner, before anything changes. `onPlan` hears what there is to apply before it is, under
+ * Apply missing migrations, check their history, and reassert database
+ * privileges, on every run, even with nothing to apply, as a login that can
+ * change coffre's objects: another is refused, NotOwner, before anything
+ * changes. `onPlan` hears what there is to apply before it is, under
  * the migration lock, and may stop the run by throwing: all of it then goes
- * in one call, with no word of each.
+ * in one call, with no word of each. `backupLogin` names an existing role to
+ * grant the backup group, `coffre_backup`, on Postgres; it is never made, and
+ * never revoked when a later run names none.
  */
 export async function migrateDatabase(
   url: string,
-  onPlan?: (plan: MigrationPlan) => void | Promise<void>,
+  { onPlan, backupLogin }: { onPlan?: (plan: MigrationPlan) => void | Promise<void>; backupLogin?: string } = {},
 ): Promise<void> {
   const engine = engineOfUrl(url);
+  const problem = backupLogin === undefined ? null : backupLoginProblem(backupLogin);
+  if (problem !== null) throw new Error(problem);
+  if (engine === 'sqlite' && backupLogin !== undefined) throw new Error('SQLite has no roles, so no backup login');
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
   let locked = false;
@@ -369,7 +404,11 @@ export async function migrateDatabase(
     await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
     await migrator.migrate(migrationsFolder(engine));
     verifyHistory(expected, await migrator.applied(), true);
-    await migrator.restrict();
+    try {
+      await migrator.restrict(backupLogin);
+    } catch (error) {
+      throw new AfterMigrations(error);
+    }
   } finally {
     try {
       if (locked) await migrator.unlock();

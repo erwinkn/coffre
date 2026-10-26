@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **Backups need not hold the owner's password.** The new group
+  `coffre_backup` reads every row and writes none: no insert, update,
+  delete or truncate, no `CREATE` or `TEMPORARY`, no function that writes as
+  its owner. The audit log's row-level security let only the app's and the
+  vault's groups read it, so `pg_dump` as any other role, even one in
+  `pg_read_all_data`, stopped at the log, or dumped none of its entries
+  with `--enable-row-security`; a policy now shows `coffre_backup` every
+  entry. `coffre migrate --backup-login <role>` grants the group to that
+  role, which you make, as you make the runtime logins; pass it on every
+  run, as a pipeline does, and it changes nothing once granted. A role that
+  does not exist fails the run, named. Coffre never makes the role and
+  never revokes the group: a run without the flag leaves the membership as
+  it is. Back up with `pg_dump --enable-row-security` as that login
+  ([restore.md](docs/restore.md#on-plain-postgres)). `coffre migrate`, in a
+  deployment's folder, as a login that owns coffre's tables, now reasserts
+  the database's privileges even when nothing is pending; before, it stopped at "up to date", and a restored
+  database kept the privileges its dump left out until the next migration.
+  `migrateDatabase` takes its `onPlan` callback in an options object now,
+  beside `backupLogin`. A failure after the migrations committed no longer
+  says that nothing was changed.
+  - **Upgrading: one migration**, `0019_backup_role`, Postgres only, which
+    only adds the group, read grants and the log's read policy for it:
+    the release before never meets them. It grants only on coffre's own
+    tables, by name: another table in `public` is left as it is, whichever
+    login migrates, a superuser included. A `coffre_backup` made before
+    keeps no other privilege on coffre's tables, and is refused if it is a
+    member of another role or owns an object. Its members are yours, as
+    `coffre_app`'s are: the groups are the server's, shared by every
+    database on it. It makes a role, as no migration since the
+    baseline did: the login that migrates needs `CREATEROLE`, which a
+    member of the owner does not inherit, unless `coffre_backup` exists
+    already, made by a login that has it, which then grants the migrating
+    login `ADMIN` on it: `CREATE ROLE coffre_backup NOLOGIN; GRANT
+    coffre_backup TO <login> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`.
+    `--backup-login` needs that `ADMIN`, and nothing on the role it names.
+
 - **A CI run asks again when the instance cannot answer it yet.** When
   the instance answered 503 `unavailable` (it could not reach its database
   or its vault, a busy one say, and says to try again in a moment), the

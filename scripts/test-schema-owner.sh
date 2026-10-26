@@ -61,20 +61,21 @@ for database in fresh existing; do
         psql_owner -d postgres <<'SQL'
 ALTER ROLE coffre_app LOGIN NOINHERIT CREATEDB CREATEROLE;
 ALTER ROLE coffre_vault LOGIN NOINHERIT CREATEDB CREATEROLE;
+ALTER ROLE coffre_backup LOGIN NOINHERIT CREATEDB CREATEROLE;
 SQL
     fi
     migrate "$database"
     # A restore loses database privileges: the same owner must reassert them.
-    psql_owner -d "$database" -c "GRANT CREATE, TEMPORARY ON DATABASE $database TO PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime"
+    psql_owner -d "$database" -c "GRANT CREATE, TEMPORARY ON DATABASE $database TO PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup"
     migrate "$database"
     psql_owner -d "$database" <<'SQL'
 DO $$ BEGIN
     IF EXISTS (
-        SELECT 1 FROM pg_roles WHERE rolname IN ('coffre_app', 'coffre_vault')
+        SELECT 1 FROM pg_roles WHERE rolname IN ('coffre_app', 'coffre_vault', 'coffre_backup')
         AND (rolcanlogin OR NOT rolinherit OR rolcreatedb OR rolcreaterole OR rolsuper OR rolreplication OR rolbypassrls)
     ) THEN RAISE EXCEPTION 'group roles were not hardened'; END IF;
     IF EXISTS (
-        SELECT 1 FROM unnest(ARRAY['coffre_app', 'coffre_runtime', 'coffre_vault', 'coffre_vault_runtime']) AS role
+        SELECT 1 FROM unnest(ARRAY['coffre_app', 'coffre_backup', 'coffre_runtime', 'coffre_vault', 'coffre_vault_runtime']) AS role
         WHERE has_database_privilege(role, current_database(), 'CREATE')
            OR has_database_privilege(role, current_database(), 'TEMPORARY')
     ) THEN RAISE EXCEPTION 'database privileges were not restricted'; END IF;
