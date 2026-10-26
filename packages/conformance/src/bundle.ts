@@ -27,6 +27,7 @@ export const SERVER_TABLES = [
   'service_bindings',
   'vault_grants',
   'vault_members',
+  'vault_releases',
 ];
 
 /** What only server code carries. */

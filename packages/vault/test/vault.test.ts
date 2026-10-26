@@ -2878,7 +2878,7 @@ test('the database holds no key', async () => {
   assert.ok(wrap.ok);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: wrap.wrapped[0] }]) });
   const everything = [];
-  for (const table of ['audit_log', 'audit_chain_head', 'vault_members', 'vault_grants']) {
+  for (const table of ['audit_log', 'audit_chain_head', 'vault_members', 'vault_grants', 'vault_releases']) {
     everything.push(...(await rows<Record<string, unknown>>(db.owner, sql.raw(`SELECT * FROM ${table}`))));
   }
   const dump = Buffer.concat(

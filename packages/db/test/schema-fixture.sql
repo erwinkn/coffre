@@ -5,6 +5,7 @@ DELETE FROM secret_references;
 ALTER TABLE audit_log DISABLE TRIGGER USER;
 DELETE FROM audit_log;
 ALTER TABLE audit_log ENABLE TRIGGER USER;
+DELETE FROM vault_releases;
 UPDATE audit_chain_head
    SET next_seq = 0,
        head_hash = decode(repeat('00', 32), 'hex');

@@ -124,8 +124,10 @@ fi
 # on a database the owner made), and revokes the write.
 tree="$scratch/migrations-0018"
 cp -r packages/db/src/migrations/postgres "$tree"
-rm "$tree/0019_backup_role.sql" "$tree/meta/0019_snapshot.json"
-node -e 'const fs = require("fs"), f = process.argv[1], j = JSON.parse(fs.readFileSync(f, "utf8")); j.entries = j.entries.filter((e) => e.tag !== "0019_backup_role"); fs.writeFileSync(f, JSON.stringify(j))' "$tree/meta/_journal.json"
+# Every migration from 0019 on goes: the journal's indexes must run without a gap.
+node -e 'const fs = require("fs"), path = require("path"), tree = process.argv[1], f = path.join(tree, "meta/_journal.json"), j = JSON.parse(fs.readFileSync(f, "utf8"));
+for (const e of j.entries.filter((e) => e.idx >= 19)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`)); }
+j.entries = j.entries.filter((e) => e.idx < 19); fs.writeFileSync(f, JSON.stringify(j))' "$tree"
 as_superuser -c 'CREATE ROLE reporting NOLOGIN'
 for logins in migration_owner:local-owner-only,migration_owner:local-owner-only postgres:local-bootstrap-only,postgres:local-bootstrap-only \
     migration_owner:local-owner-only,migration_member:local-member-only; do

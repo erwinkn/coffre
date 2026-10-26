@@ -14,8 +14,11 @@
 (*                                                                         *)
 (* There is no counter: each decision counts the distinct keys of the      *)
 (* reader's `secret.read` entries stamped inside the window, with the keys *)
-(* it would release (vault snapshot.postgres.ts, the bulk count). Time is  *)
-(* a clock that ticks: an entry stamped at t counts until t + Window.      *)
+(* it would release (vault snapshot.postgres.ts, the bulk count). The code *)
+(* reads them from vault_releases, each key's newest stamp, which a        *)
+(* trigger keeps from those entries in their own transaction: the same     *)
+(* count. Time is a clock that ticks: an entry stamped at t counts until   *)
+(* t + Window.                                                             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -33,8 +36,8 @@ CONSTANTS
     \* keys are open, in the statement that takes it (vault.ts, #keys, the
     \* check run again with `late`), not only before the key service.
     BulkRecountUnderHead,
-    \* The count takes in the keys the read would release (the count's
-    \* `UNION ALL SELECT unnest($keys)`), not only those released before.
+    \* The count takes in the keys the read would release (the count adds
+    \* the distinct keys asked for), not only those released before.
     CountsTheRequest,
     \* The count is the principal's, all their credentials' together (the
     \* entries' `actor`), not the credential's.

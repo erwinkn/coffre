@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.4, in short.** One migration, `0020_vault_releases`
+  (`0017` on SQLite). It adds a table, a trigger on `audit_log` and its
+  function, owned by the login that runs `coffre migrate`, as the other
+  tables are. It needs no new role or privilege, and nothing changes in
+  your config. Audit appends wait while it fills the table from the log:
+  2.1 s on a log of 119k entries, about 5.5 s at a million. Deploy the
+  vault Worker before the app, as [deploy.md](docs/deploy.md) says. 0.14.2
+  and 0.14.3 run on the new schema, and their reads keep the table too,
+  so rolling back needs no step. The fix this release is for: the first
+  entry below.
+
+- **A read costs the database the same however much its reader has read
+  before.** The bulk limit's count read every `secret.read` the reader had
+  ever made, not only the window's. Its bound, `clock_timestamp()`, is
+  volatile, so Postgres could not use it on the index and fetched each
+  entry. On a copy of Equisafe's log (119k entries), the busiest reader's
+  decision cost 17 ms and 18,882 pages of the database, and it grew every
+  day. 0.14.3 let one principal's reads decide side by side, so a burst of
+  50 ran it 50 times at once on a 2-vCPU database. Each then ran past the
+  3 s a read's statement may take (57014), holding a Hyperdrive
+  connection, and calls on every principal waited for one. The count now
+  reads `vault_releases`: a row per principal and key, with when it was
+  last released. A trigger on `audit_log` keeps it from the log, in each
+  read's own transaction. No login writes it, and the vault and backups
+  read it. The count reads one row per key the principal was ever
+  released, deleted keys included, however often they read it: 0.5 ms
+  and 22 pages on the same copy, and as many pages on a log of a million
+  entries. Nothing prunes the table yet: its size follows the instance's
+  keys, not the log. The limit counts exactly what it did.
+  A test now holds every statement of the hot requests to the same pages
+  on a log ten times longer.
+
+  Migration `0020_vault_releases` (Postgres; `0017` on SQLite) makes the
+  table and the trigger, then fills it from the log, in one transaction.
+  Audit appends wait for it: 2.1 s on the 119k-entry copy, 7.7 s with the
+  log grown to a million, the whole `coffre migrate` run on 2 vCPUs. A
+  read waits at most 3 s, so on a log that large some reads answer 503
+  `unavailable` meanwhile: migrate in a quiet minute. The release before
+  keeps working on it, and its reads keep the table too.
+
 - **A CI run's sign-in holds the audit log's head for fewer round trips.**
   `POST /api/auth/oidc` ran 14 app statements, 10 of them while its
   transaction held the head that every audited write on the instance

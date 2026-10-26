@@ -280,6 +280,10 @@ BEGIN
         'DELETE FROM vault_grants',
         'TRUNCATE vault_grants',
         'UPDATE vault_grants SET role = role',
+        'INSERT INTO vault_releases VALUES (''user:admin@acme.example'', ''forged'', 0)',
+        'UPDATE vault_releases SET released_at = 0',
+        'DELETE FROM vault_releases',
+        'TRUNCATE vault_releases',
         'SET ROLE coffre_vault'
     ] LOOP
         BEGIN
@@ -289,7 +293,7 @@ BEGIN
             WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    RAISE NOTICE 'PASS: coffre_app cannot delete, empty or update members and grants, nor act as the vault';
+    RAISE NOTICE 'PASS: coffre_app cannot delete, empty or update members, grants and releases, nor act as the vault';
 END
 $$;
 

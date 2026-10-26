@@ -120,6 +120,13 @@
       "when": 1792835446455,
       "tag": "0016_capped_alerts",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1793017781451,
+      "tag": "0017_vault_releases",
+      "breakpoints": true
     }
   ]
 }
