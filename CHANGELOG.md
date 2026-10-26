@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.3, in short.** One migration, `0019_backup_role`,
+  Postgres only, which adds the group `coffre_backup` and its read grants:
+  the release before never meets them. It makes a role, so the login that
+  runs `coffre migrate` needs `CREATEROLE` (or to be a superuser), unless
+  `coffre_backup` exists already and that login holds it `WITH ADMIN`
+  (below); without either the migration fails, saying what to run, and
+  changes nothing. Check before you deploy, as the migrating login: `SELECT
+  rolsuper OR rolcreaterole FROM pg_roles WHERE rolname = current_user`.
+  Nothing to change in your config.
+  Deploy the vault Worker before the app, as [deploy.md](docs/deploy.md)
+  says, and keep your Hyperdrive limits. The fix this release is for: one
+  member's reads no longer queue behind each other on their own row, which
+  failed a busy service's `/use` and reveals with 503 after 15 s. It also
+  brings a credential proxy that opens a lapsing entry once, not once per
+  request; a CLI and Action that ask again on 503; `verify` and `hmac()`
+  for inbound webhooks; and backups as a login of their own, with `coffre
+  backup`, `coffre restore` and `coffre verify backup`.
+
 - **One member's reads no longer queue behind each other.** Every vault
   decision took its member's row `FOR NO KEY UPDATE`, which reads did too:
   a service reading values eight times a second as one principal, through
@@ -27,7 +45,10 @@
     instances of the release before still run, their changes to a member
     take no place in the queue, and a stream of that member's reads can
     hold one off until its 15 s bound: a few 503s during the rollout, gone
-    once it completes.
+    once it completes. Afterwards too, a change to a member waits for their
+    reads at the key service, 5 s at most; their reads that arrive
+    meanwhile wait behind it, and fail as 503 after 3 s if the key service
+    is that slow.
 
 - **Backups need not hold the owner's password.** The new group
   `coffre_backup` reads every row and writes none: no insert, update,

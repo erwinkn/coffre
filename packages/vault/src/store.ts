@@ -175,8 +175,11 @@ export async function lockMembers(tx: Transaction, principals: readonly string[]
 /**
  * The first key of the members' queues, Postgres's advisory locks: the
  * second is the principal's hash, and the pair is in a space of its own,
- * apart from the migrator's single key. A hash two principals share only
- * queues one behind the other's writer.
+ * apart from the migrator's single key. A hash two principals share queues
+ * one behind the other's writer; and two changes that each lock two
+ * members, where one's first and the other's second share it, can wait on
+ * each other, which Postgres ends after a second by failing one of them
+ * (40P01): about n² / 2³³ for an instance of n members.
  */
 const MEMBER_QUEUE = 0x636f666d;
 
