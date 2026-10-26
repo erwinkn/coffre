@@ -609,8 +609,8 @@ that built it. Check that its signer is coffre's release workflow, since
 any workflow in the repository could sign: on a release tag, as each
 release builds its image, or on `main`, where an image is published again
 for a version npm already has (a release from before the image, or a
-failed image job). `main` takes changes only through pull requests that
-pass Validate (admins aside), where a tag may name any commit, so `main` is no weaker a
+failed image job). `main`, as its branch protection stands, takes changes only through pull
+requests that pass Validate (admins aside), where a tag may name any commit, so `main` is no weaker a
 signer than a tag:
 
 ```sh

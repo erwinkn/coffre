@@ -144,7 +144,7 @@ jobs:
             node scripts/image-tags.mjs "$VERSION" > "$RUNNER_TEMP/tags" && break
             sleep 10
           done
-          [[ -s "$RUNNER_TEMP/tags" ]] || { echo "::error::npm does not list @coffre/cli@$VERSION among its versions"; exit 1; }
+          [[ -s "$RUNNER_TEMP/tags" ]] || { echo "::error::no tags for $VERSION after 5 minutes: image-tags.mjs's last error is above"; exit 1; }
           cat "$RUNNER_TEMP/tags"
 
       # Both platforms in one index, which needs BuildKit in a container: its
