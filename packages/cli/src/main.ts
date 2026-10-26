@@ -263,9 +263,18 @@ function workloadCredential(origin: string, workload: Extract<Credential, { kind
  */
 const UNAVAILABLE_RETRY_MS = [2000, 5000];
 
-function unavailableWait(attempt: number): number | undefined {
+/** The longest the instance's `Retry-After` makes a run wait, each time: a CI step, not a daemon. */
+const MAX_RETRY_AFTER_MS = 15_000;
+
+/** The wait before asking again the `attempt`th time, or none left: at least what the instance's `Retry-After` (seconds) says, up to `MAX_RETRY_AFTER_MS`. */
+function unavailableWait(attempt: number, retryAfter: string | null): number | undefined {
   const wait = UNAVAILABLE_RETRY_MS[attempt];
-  return wait === undefined ? undefined : Math.round(wait * (0.5 + Math.random()));
+  if (wait === undefined) return undefined;
+  const said = Number(retryAfter);
+  const asked = retryAfter !== null && Number.isFinite(said) && said > 0 ? Math.min(said * 1000, MAX_RETRY_AFTER_MS) : 0;
+  const jittered = wait * (0.5 + Math.random());
+  // Never sooner than asked, and spread past it as the schedule is.
+  return Math.round(asked === 0 ? jittered : Math.max(jittered, asked * (1 + Math.random() / 2)));
 }
 
 /**
@@ -299,8 +308,9 @@ async function signIn(origin: string, service: string, given?: string): Promise<
     try {
       return { issued: await exchange(origin, service, token, http), idTokens };
     } catch (error) {
-      const wait = unavailableWait(attempt);
-      if (wait === undefined || !(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
+      if (!(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
+      const wait = unavailableWait(attempt, error.retryAfter);
+      if (wait === undefined) throw error;
       if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
       await sleep(wait);
     }
@@ -381,7 +391,7 @@ async function reading(request: Request): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const again = request.clone();
     const response = await retryingPolicyChange(request);
-    const wait = unavailableWait(attempt);
+    const wait = unavailableWait(attempt, response.headers.get('retry-after'));
     // The status first: a body is parsed only when it may say the instance cannot answer yet.
     if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
     if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);

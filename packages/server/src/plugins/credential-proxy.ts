@@ -48,6 +48,7 @@ import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
+import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
@@ -1906,7 +1907,11 @@ function answer(body: unknown): Response {
 function failure(status: number, message: string, reason?: string): Response {
   return new Response(JSON.stringify({ error: 'credential_proxy', message, ...(reason === undefined ? {} : { reason }) }), {
     status,
-    headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'coffre-proxy': 'refused' },
+    headers: {
+      'content-type': 'application/json', 'cache-control': 'no-store', 'coffre-proxy': 'refused',
+      // coffre could not answer for a moment (`errorResponse`): the app's client hears when to ask again.
+      ...(status === 503 && reason === 'unavailable' ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
+    },
   });
 }
 

@@ -54,6 +54,16 @@
   `pg_dump` and `pg_restore` on `PATH` ([restore.md](docs/restore.md#on-plain-postgres)).
   The restore drill now runs them.
 
+- **A 503 `unavailable` says when to ask again.** When coffre could not
+  reach its database or its vault in time (a lock or a connection it
+  waited on gave up after 15 s), the API and the credential proxy now
+  answer `Retry-After: 5`, as the app already did while it could not reach
+  its database at all: a caller back sooner joins the queue it left. The
+  CLI waits at least that long before it asks again (15 s at most), and
+  so does the workload SDK, `coffre serve` included, before it proves a
+  session again. An app's own client behind the proxy, the sidecar's
+  included, sees the header as coffre sent it.
+
 - **A CI run asks again when the instance cannot answer it yet.** When
   the instance answered 503 `unavailable` (it could not reach its database
   or its vault, a busy one say, and says to try again in a moment), the

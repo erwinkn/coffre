@@ -45,6 +45,8 @@ type Environment = {
   conflicts?: string[];
   /** Its lists' and reads' 503 answers, one apiece, before any other: `unavailable` with its reason or none, or a whole body (`{ error: 'migrating' }`, or `'<html>'`, as Cloudflare's page). */
   unavailable?: (string | null | Record<string, string>)[];
+  /** The `Retry-After` its 503s say, in seconds. */
+  retryAfter?: string;
   /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
   rotateAfterDays?: number | null | 'unsaid';
   /** Read whole, whatever keys it is asked for, as an instance before 0.12. */
@@ -73,6 +75,7 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     if (unavailable === '<html>') return res.writeHead(503, { 'content-type': 'text/html' }).end('<html>Service Unavailable</html>');
     if (typeof unavailable === 'object' && unavailable !== null) return send(503, unavailable);
     if (unavailable !== undefined) {
+      if (environment.retryAfter !== undefined) res.setHeader('retry-after', environment.retryAfter);
       return send(503, { error: 'unavailable', message: 'coffre cannot reach what it depends on right now; try again in a moment', ...(unavailable === null ? {} : { reason: unavailable }) });
     }
     if (missing !== null) return send(200, { missing: Object.keys(environment.values).map((key) => ({ key, in: ['prod'], folder: null })), dismissed: [] });
@@ -457,6 +460,15 @@ test('a read the instance cannot answer three times ends as a refusal does, and 
     assert.deepEqual(coffre.requests, Array(reads).fill('reveal deploy/prod/TOKEN'), JSON.stringify(unavailable));
     if (reads === 3) assert.ok(performance.now() - started >= 3500, 'it asked again at once');
   }
+});
+
+test("a read waits at least the instance's Retry-After before it asks again", async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [null], retryAfter: '4' } });
+  const started = performance.now();
+  const read = await coffre.coffre(['--verbose', 'get', 'deploy/prod/TOKEN'], {}, 20_000);
+  assert.equal(read.code, 0, read.stderr);
+  assert.ok(performance.now() - started >= 4000, 'it asked again before the instance said');
+  assert.match(read.stderr, /asking again in (4\.\d|5\.\d|6\.0) s/);
 });
 
 test("an instance moving to its new key is asked again, and so is the Action's gate, missing --check", async (t) => {

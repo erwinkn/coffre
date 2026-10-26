@@ -54,15 +54,17 @@ export async function idToken(given: string | undefined, runner: Runner, audienc
   );
 }
 
-/** An exchange the instance refused, or could not answer: its status, and its body's code and reason. */
+/** An exchange the instance refused, or could not answer: its status, its body's code and reason, and its `Retry-After`. */
 export class ExchangeFailed extends Error {
   readonly status: number;
   readonly body: { error?: unknown; reason?: unknown } | null;
+  readonly retryAfter: string | null;
 
-  constructor(message: string, status: number, body: { error?: unknown; reason?: unknown } | null) {
+  constructor(message: string, status: number, body: { error?: unknown; reason?: unknown } | null, retryAfter: string | null) {
     super(message);
     this.status = status;
     this.body = body;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -79,7 +81,7 @@ export async function exchange(origin: string, service: string, token: string, f
   }
   const why = typeof body?.message === 'string' ? body.message : `status ${response.status}`;
   const reason = typeof body?.reason === 'string' ? ` (${body.reason})` : '';
-  throw new ExchangeFailed(`${origin} would not sign this run in as ${service}${reason}: ${why}`, response.status, body);
+  throw new ExchangeFailed(`${origin} would not sign this run in as ${service}${reason}: ${why}`, response.status, body, response.headers.get('retry-after'));
 }
 
 /**

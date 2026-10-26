@@ -1,6 +1,6 @@
 import type { CoffreClient } from '@coffre/client';
 
-import { ApiError, badRequest, UNAVAILABLE } from './api/errors.ts';
+import { ApiError, badRequest, UNAVAILABLE, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { narrowWorkload } from './api/narrow.ts';
 import {
   finishSignin,
@@ -288,7 +288,7 @@ function wrongKey(request: Request): Response {
 
 /** The answer while the database cannot say where the app's key stands: nothing is checked under a key it has not settled. */
 function unreachable(): Response {
-  return errorResponse(new ApiError('unavailable', UNAVAILABLE), { 'retry-after': '5' });
+  return errorResponse(new ApiError('unavailable', UNAVAILABLE), { 'retry-after': UNAVAILABLE_RETRY_AFTER });
 }
 
 const refusals = new WeakMap<object, string>();

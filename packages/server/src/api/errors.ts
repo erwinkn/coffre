@@ -109,6 +109,14 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
  */
 export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; try again in a moment';
 
+/**
+ * How long, in seconds, a 503 `unavailable` tells its caller to wait
+ * (`Retry-After`): what it waited on, a lock or a connection, gives up
+ * after 15 s, and a caller back sooner than a few seconds joins the same
+ * queue it left.
+ */
+export const UNAVAILABLE_RETRY_AFTER = '5';
+
 /** The status and body for anything a handler throws. */
 export function toErrorBody(error: unknown): { status: number; body: ErrorBody } {
   if (error instanceof ApiError) {

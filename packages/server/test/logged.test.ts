@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import { isUnavailable } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
-import { toErrorBody } from '../src/api/errors.ts';
+import { ApiError, toErrorBody } from '../src/api/errors.ts';
+import { errorResponse } from '../src/http.ts';
 import { openTestDatabase } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
@@ -65,3 +66,17 @@ test("a database that does not answer is 503 unavailable, the request's to ask a
   assert.equal(isUnavailable(violation), false);
   assert.equal(toErrorBody(violation).status, 500);
 });
+
+test('a moment\'s 503 says when to ask again, 5 seconds, and nothing else does', (t) => {
+  t.mock.method(console, 'error', () => undefined);
+  const lock = new Error('Failed query: select "principal" …', { cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }) });
+  for (const error of [lock, new ApiError('unavailable', 'coffre cannot check who you are right now')]) {
+    const response = errorResponse(error, { 'x-kept': 'yes' });
+    assert.deepEqual([response.status, response.headers.get('retry-after'), response.headers.get('x-kept')], [503, '5', 'yes']);
+  }
+  // One that waits on an operator, or that says its own wait, is left as it is.
+  assert.equal(errorResponse(new ApiError('unavailable', 'the vault holds another key', 'wrong_kek')).headers.get('retry-after'), null);
+  assert.equal(errorResponse(new ApiError('unavailable', 'coffre cannot reach what it depends on right now'), { 'retry-after': '30' }).headers.get('retry-after'), '30');
+  assert.equal(errorResponse(new ApiError('forbidden', 'no')).headers.get('retry-after'), null);
+});
+
