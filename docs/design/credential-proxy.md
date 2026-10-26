@@ -1254,13 +1254,113 @@ before the request reaches `cloudflared`'s origin is not documented;
 assume Schuman sees them. No helper ships for this: it is eight lines,
 and a VPC Service needs none.
 
-**Later: `verify`, HMAC, and SDK credential files.** Other secrets used
-for computation get helpers of the same kind: an HMAC that signs or
-verifies a webhook (a signer of another kind, `hmac('WEBHOOK_SECRET')`), a
-JWT signed with a service account's key. An SDK that reads a credentials
-file (Google's service-account JSON) gets a file whose private key is a
+**Verifying, and HMAC (0.14.3, built).** An inbound webhook carries a
+signature its provider made with a secret the app shares, an HMAC of the
+body. The secret stays in coffre, and the app asks whether a signature is
+its. The deployment names the key, how the provider writes the signature,
+and whether the app may only check signatures or also make them:
+
+```ts
+credentialProxy({
+  credentials: { … },
+  verifiers: {
+    yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }),
+    dfns: hmac('DFNS_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }),
+    lemonway: hmac('LEMONWAY_WEBHOOK_SECRET', { encoding: 'hex' }),
+  },
+  signers: { 'iframe-token': hmac('IFRAME_TOKEN_SECRET', { encoding: 'base64url' }) },
+})
+```
+
+The app passes the body as it came and the header as it is:
+
+```ts
+const valid = await coffre.credential('yousign').verify(request.rawBody, request.headers['x-yousign-signature-256']);
+if (!valid) throw new UnauthorizedException();
+```
+
+That is `POST /use/<project>/<env>` with `{ verify: { credential, message,
+signature } }`, the message base64url, through `coffre serve`'s listener
+(`http://127.0.0.1:7300/use/market/prod`) or the SDK, and the answer is
+`{ "valid": true }` or `{ "valid": false }`. A person's app under `coffre
+run` calls the same `credential(name).verify` from
+`@coffre/client/credential`, with its handle.
+
+| Provider | Header | `hmac(…)` |
+|---|---|---|
+| Yousign | `x-yousign-signature-256: sha256=<hex>` | `{ encoding: 'hex', prefix: 'sha256=' }` |
+| DFNS | `x-dfns-webhook-signature: sha256=<hex>` | `{ encoding: 'hex', prefix: 'sha256=' }` |
+| Lemonway, as Equisafe's code checks it | `x-signature: <hex>` | `{ encoding: 'hex' }` |
+
+- **HMAC-SHA256, and nothing more general.** The key is the value's UTF-8
+  bytes, as `createHmac('sha256', value)` takes a string. The signature
+  is written in `hex` (read in either case), `base64` or `base64url`
+  (read with or without padding), after an optional `prefix`, compared
+  exactly. coffre decodes it and asks WebCrypto's `verify`, which compares
+  in constant time on Node and in workerd (BoringSSL's `CRYPTO_memcmp`).
+  A signature of the wrong prefix, encoding or length is `valid: false`,
+  and the answer says nothing else. A scheme of another shape (Stripe's
+  `t=…,v1=…`, which signs a timestamp with the body) gets a helper of its
+  own when someone needs one, never a template language.
+- **The raw body, byte for byte.** A provider signs the bytes it sent. An
+  app that parses the JSON and writes it again (`JSON.stringify(req.body)`)
+  hashes other bytes whenever the provider's spacing, key order or number
+  format differ. Equisafe's DFNS and Lemonway guards do that today, and
+  pass the raw body when they move to coffre; its Yousign guard already
+  does.
+- **Freshness stays in the app.** DFNS puts `timestampSent` in the signed
+  body, and its docs refuse an event more than five minutes old. The app
+  parses the body anyway, so it checks the time after `valid`, failing
+  closed when the field is missing: `Math.abs(now - timestampSent) > 300`
+  is false for `NaN`, so write `!(Math.abs(now - timestampSent) <= 300)`.
+  coffre answers about the bytes only.
+- **A verifier never signs.** A webhook's secret that the app could sign
+  with would let whoever holds its session forge the provider's calls to
+  the app's own public endpoint, a payment notification included. So
+  `sign` refuses a verifier (404). An HMAC among `signers` signs, as its
+  scheme writes it (`{ signature: '<prefix><encoded>' }`), and verifies
+  too, since it could check a signature by making one: the app's own keys,
+  Equisafe's `IFRAME_TOKEN_SECRET` (`payload.signature`, base64url) and
+  `DELEGATED_SESSION_SECRET` (an HS256 JWT: the HMAC of
+  `<header>.<payload>`, base64url).
+- **Bounded.** A message is 64 KiB at most: Equisafe's largest webhook in
+  90 days of production was DFNS's, 5,234 bytes (p99 2,272), Yousign's
+  2,013. `hmac(…, { maxBytes })` takes up to 16 MiB for a provider whose
+  bodies run longer; coffre reads a request up to what the longest of its
+  signers and verifiers takes, and refuses past it with 413, before
+  anything is opened. The CPU is the body's: about 0.2 ms at 4 KiB, 3 ms
+  at 512 KiB and 5 ms at 1 MiB on Node, which a Worker on the Free plan
+  (10 ms) should keep under 512 KiB.
+- **Opened as a credential's values are, logged once a minute.** A
+  webhook comes on a request's path, and the vault is the instance's
+  narrowest point, so a verify or an HMAC signature opens its secret as a
+  request through a credential opens its key: once per handle or session,
+  environment and name for `cacheSeconds` (60), one `secret.read` and one
+  `credential.use` entry (`hmac: true`) each time. A warm verify by a
+  workload costs its session's one statement and its gate's check, and
+  nothing of the vault's; by a handle, nothing of the database's. A cold
+  one costs what a proxied request does: one vault call and its
+  entries (`request-cost.test.ts`). A private key's signatures stay logged
+  one by one, each naming its message: what DFNS's key signs moves money.
+- **Not yet.** `POLICY_SEAL_KEY` seals with HMAC-SHA256 too (`v1:` and
+  hex), but keyed with the 32 bytes its hex value decodes to, not its
+  text: that needs an option saying how the value is written (`key:
+  'hex'`), which nobody uses yet. The AES-GCM key Equisafe derives from it
+  with HKDF is encryption, which neither `sign` nor `verify` covers.
+
+Lemonway documents no signature on its notifications: its webhook pages
+describe a URL, a method and a content type, form-encoded or JSON, with
+flat fields (`NotifCategory`, `IntId`, `ExtId`, `Status`), and no header,
+secret or algorithm. Equisafe's check (`x-signature`, hex HMAC-SHA256)
+matches no scheme Lemonway publishes; Lemon Squeezy, another company,
+signs exactly so. Whether Lemonway sends it at all is for Lemonway's
+support to say, before the app relies on it.
+
+**Later: SDK credential files.** A JWT signed with a service account's
+key, and an SDK that reads a credentials file (Google's service-account
+JSON), get helpers of the same kind: a file whose private key is a
 placeholder and whose `token_uri` points at coffre, which signs the token
-exchange with the real key. Both change app code or its configuration.
+exchange with the real key. That changes app code or its configuration.
 
 ## 6. Security
 
@@ -1649,6 +1749,22 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     reaches costs nothing. *Alternative:* leave it to the docs, at the
     cost of a wrangler migration each deployment writes by hand.
 
+33. **An HMAC's secret is opened as a credential's values are, and logged
+    once a minute, where a private key's signatures are logged one by one
+    (W189).** A webhook's check is on a request's path, as many a minute as
+    the provider sends, and an entry each would be an append to the log,
+    under its head, per webhook: the lock every write of the instance
+    waits for. The cache holds the secret no longer than a credential's
+    key (`cacheSeconds`), and a revoked handle or a frozen session stops
+    at once or within it, as for requests. *Alternative:* an entry per
+    verify, naming the body's SHA-256, as `sign` with a private key does.
+
+34. **A verifier is not a signer (W189).** `verifiers` only check; an
+    HMAC among `signers` also checks. A webhook's secret that signs would
+    let a stolen session forge the provider. *Alternative:* one map, each
+    `hmac()` saying what it may do, which reads worse and defaults
+    somewhere.
+
 ## 9. Plan
 
 | PR | What |
@@ -1659,7 +1775,7 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
 | 0.9 E | The stable URL, `/use/<credential>`, from the environments a handle keeps (`0010_handle_places`); `baseUrl` removed. Built |
 | 3b | The tunnel on Workers (`WebSocketPair`, `connect()`), one Durable Object per run and database, paced by credit; through a VPC Network binding (`connect`). Built (0.11); to check on a deployed Worker. The privileged-role warning, not yet |
 | 4 | Redis through the tunnel |
-| 5 | `presign` (built in 0.8.1) and `sign` (0.9 D); `verify`, HMAC, SDK credential files |
+| 5 | `presign` (built in 0.8.1) and `sign` (0.9 D); `verify` and `hmac()` (built in 0.14.3); SDK credential files |
 | 0.9 C | Shaped placeholders, `jwt({ claims })` and `prefix(…)`: DFNS's token through the proxy. Built |
 | 0.9 A | Plain values (`0011_plain_values`, `coffre set --plain`, the page's Plain toggle), which deprecate `identifiers`. Built |
 | 0.9 B | Values of a person's own: `generate`, reads through `<env>@me`, `coffre run` making them by recipe. Built |

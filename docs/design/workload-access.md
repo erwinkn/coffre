@@ -1199,18 +1199,20 @@ differences:
 
 ### 7.2 New uses
 
-**`verify`**, for inbound webhooks: `POST /use/<project>/<env>` with
-`{ "verify": { "credential": "stripe-webhook", "message": "<base64url>", "signature": "<as received>" } }`
+**`verify`** (built in 0.14.3), for inbound webhooks: `POST /use/<project>/<env>` with
+`{ "verify": { "credential": "yousign", "message": "<base64url>", "signature": "<as received>" } }`
 answers `{ "valid": true | false }`. It is configured beside `signers`:
 
 ```ts
-verifiers: { 'stripe-webhook': hmac('STRIPE_WEBHOOK_SECRET', { hash: 'SHA-256', encoding: 'hex' }) }
+verifiers: { yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) }
 ```
 
-The comparison runs in constant time. Stripe's own scheme, `t=…,v1=…` with
-its tolerance, is `stripeSignature('STRIPE_WEBHOOK_SECRET')`, because that is
-the webhook most apps verify. With `verify`, a webhook secret no longer has to
-be read.
+HMAC-SHA256 of the raw body, compared in constant time, each secret opened
+once a minute as a credential's key is
+([credential-proxy.md](credential-proxy.md), section 5, "Verifying, and
+HMAC"). Stripe's own scheme, `t=…,v1=…` with its tolerance, would be
+`stripeSignature('STRIPE_WEBHOOK_SECRET')`, not built yet. With `verify`, a
+webhook secret no longer has to be read.
 
 **Minting.** A credential that issues short-lived children keeps its parent
 key in the vault, as R7 allows. Coffre mints the children itself:
@@ -1819,7 +1821,7 @@ line of registration after the owner has merged:
 | **4. Freeze and narrow** | the freeze routes and `coffre freeze`/`unfreeze`; `narrow` | `packages/server/src/api/freezes.ts` (new), `…/api/narrow.ts` (new), `packages/cli/src/freeze.ts` (new) | Freeze, then the next request is refused on HTTP, and on a tunnel within one recheck; lift restores; who may freeze or lift each target; narrow ⊆ parent; a child dies with any ancestor; a child cannot read, mint or renew; `/v1/refunds/%2e%2e/charges`, `/v1/refunds/..;/charges` and `/v1/refundsX` refused for a child of `/v1/refunds`; such a child refused `sign` and the tunnel; a child of `credentials: ['stripe']` refused `sign('dfns-key')`. |
 | **5. SDK and sidecar** | `@coffre/client/workload` and its proofs; `fromCoffre`; `…/workload/postgres`; `coffre serve`; `coffre run --service` in key-bound mode; the CLI's tunnel listener speaking DPoP | `packages/client/src/workload.ts` (new), `…/workload-proofs.ts` (new), `…/workload-postgres.ts` (new), `packages/client/package.json` (its exports), `packages/cli/src/serve.ts` (new), `packages/cli/src/workload.ts`, `packages/cli/src/tunnels.ts` | Against a fake server first (this doc's wire format), then the real one once PRs 1a and 1d land: renewal (hourly, and every 30 s for enrollment), re-proof before `notAfter`, the nonce retry and the freshest nonce, `full` retries, waiting out a spent projected token; `hdr` and `req` match what the server recomputes; OpenAI's SDK through `coffre.fetch`; `pg` through `connect`; the key is non-extractable (`exportKey` rejects); nothing written to disk or env. The packed client still loads on Node 20, 22 and 24 (`test:consumer`). **Live:** a GitHub Actions workflow in a scratch repository of erwinkn, and `kind` in Docker with the sidecar. |
 | **6. Cloudflare** | `CoffreWorkload` (`WorkerEntrypoint` with `props`): `fetch` (the proxy) and the RPC methods `sign`, `verify` and `presign`; then, after PR 7, `mint`. No `narrow` over RPC: a Cloudflare caller has no session row to be a child's root. The `cloudflare` binding's server side; its example wiring, after 1b | `packages/server/src/cloudflare-workload.ts` (new); after 1b merges, the entrypoint's export lines in `examples/workers` and `init.ts` | A miniflare test with two Workers, props naming a service with and without a binding; each RPC method; freeze; limits. Conformance: a Worker with props for an unbound service gets nothing. **Live:** two throwaway Workers on Erwin's personal account (`d56cef42…`), `coffre-ovn-<W#>-*`, including whether a preview version keeps `props`; deleted and verified gone. |
-| **7. Minting and `verify`** | `minters` (`assumeRole`, `githubInstallation`, `r2Temporary`); `{mint:…}` in rules; `sigv4({ minted })`; the `mint` and `verify` operations; `hmac` and `stripeSignature` | `packages/server/src/plugins/mint/*.ts` (new), `…/plugins/verify.ts` (new); after 1d, the `mint` and `verify` cases of `credential-proxy.ts`'s `compute` | A fake STS and a fake GitHub; caching until 60 s before expiry, settled values only; delivered mint refused unless listed, and refused for a sensitive parent without R32's flag; `credential.mint` entries; Stripe's own test vectors for `stripeSignature`. **Live:** `AssumeRole` into a throwaway role (`coffre-ovn-<W#>`), deleted after. |
+| **7. Minting and `verify`** | `minters` (`assumeRole`, `githubInstallation`, `r2Temporary`); `{mint:…}` in rules; `sigv4({ minted })`; the `mint` and `verify` operations; `hmac` and `stripeSignature`. Built: `verify` and `hmac` (0.14.3, in `plugins/hmac.ts` and `credential-proxy.ts`'s `compute`) | `packages/server/src/plugins/mint/*.ts` (new), `…/plugins/verify.ts` (new); after 1d, the `mint` and `verify` cases of `credential-proxy.ts`'s `compute` | A fake STS and a fake GitHub; caching until 60 s before expiry, settled values only; delivered mint refused unless listed, and refused for a sensitive parent without R32's flag; `credential.mint` entries; Stripe's own test vectors for `stripeSignature`. **Live:** `AssumeRole` into a throwaway role (`coffre-ovn-<W#>`), deleted after. |
 | **8. Formal** | `formal/Workload.tla` and its configurations; `docs/formal.md`'s section | `formal/Workload*.tla`, `formal/Workload*.cfg`, `docs/formal.md` | Section 12.1: each invariant holds, and each fails without its protection. |
 | **9. Pages** | the binding forms for the new profiles; `reads` flagged per platform; a service's sessions, with their last address; codes and their scope; the Freeze buttons; the alert filter | `packages/ui/src/pages/*` (the service page and its dialogs) | The UI suite. The page shows "exposed if <platform> is breached" for every listed key. |
 

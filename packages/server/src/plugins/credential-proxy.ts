@@ -6,13 +6,14 @@
  * the proxy swaps in the real value at the edge, for the credential's own
  * upstream only. In the deployment's configuration:
  *
- *   import { credentialProxy, header, privateKey, sigv4 } from '@coffre/server/plugins/credential-proxy';
+ *   import { credentialProxy, header, hmac, privateKey, sigv4 } from '@coffre/server/plugins/credential-proxy';
  *   plugins: [credentialProxy({
  *     credentials: {
  *       schumann: { upstream: 'https://api.schumann.example/v1', inject: header('x-api-key', '{SCHUMANN_API_KEY}') },
  *       s3: { upstream: 'https://s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
  *     },
  *     signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY') },
+ *     verifiers: { yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) },
  *   })],
  *
  * and its app's route, `routes/use.$.ts`, `createFileRoute('/use/$')({ ...plugin })`.
@@ -21,7 +22,7 @@
  *   GET /use/market/dev                     what the app's environment holds: placeholders, and the values its person reads
  *   ANY /use/schumann/<path>                the request, sent to https://api.schumann.example/v1/<path> with market/dev's key
  *   ANY /use/market/dev/schumann/<path>     the same, naming the environment
- *   POST /use/market/dev                    a presigned URL, or a signature by a signer's key, made with the values and never them
+ *   POST /use/market/dev                    a presigned URL, a signature by a signer's key, or whether a webhook's signature is a verifier's, made with the values and never them
  *
  * The first is the stable URL, the same for every environment, which the
  * app's own config names: its environment is the one the handle was made
@@ -48,6 +49,7 @@ import { recipeProblem } from '@coffre/core/recipe';
 
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
+import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
@@ -208,8 +210,8 @@ export function postgres(key: string, options: { hosts?: readonly string[]; conn
   return { kind: 'postgres', key, ...options };
 }
 
-/** A private key coffre signs with for the app, which never holds it: the key that holds it, a PKCS#8 PEM, and how often a workload may sign with it. */
-export type Signer = { kind: 'private-key'; key: string; limit?: Limits };
+/** A key coffre signs with for the app, which never holds it: a private key, `privateKey(…)`, or an HMAC secret, `hmac(…)`. */
+export type Signer = { kind: 'private-key'; key: string; limit?: Limits } | Hmac;
 
 /**
  * A private key the app signs with through coffre, `credential(name).sign(message)`:
@@ -222,13 +224,37 @@ export function privateKey(key: string, options: { limit?: Limits } = {}): Signe
   return { kind: 'private-key', key, ...options };
 }
 
+export type { Encoding };
+
+/** An HMAC-SHA256 secret coffre signs or checks signatures with for the app: the key that holds it, how its signatures are written, and how often a workload may use it. */
+export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: string; maxBytes?: number; limit?: Limits };
+
+/**
+ * An HMAC-SHA256 secret the app never holds: an inbound webhook's, among
+ * `verifiers`, which the app asks whether a signature is the secret's
+ * (`credential(name).verify(body, signature)`), or a key of the app's own
+ * among `signers`, which also signs (`credential(name).sign(message)`).
+ * The key is the environment's value, as its UTF-8 bytes; the signature
+ * is written in `encoding`, `hex`, `base64` or `base64url`, after
+ * `prefix`: `hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' })`
+ * checks Yousign's `x-yousign-signature-256`. `maxBytes` is the longest
+ * message it signs or checks, 64 KiB unless set, up to 16 MiB: a 1 MiB
+ * body costs about 5 ms of CPU, of a Worker's 10 ms on the Free plan.
+ * `limit`, as a credential's.
+ */
+export function hmac(key: string, options: { encoding: Encoding; prefix?: string; maxBytes?: number; limit?: Limits }): Hmac {
+  return { kind: 'hmac', key, ...options };
+}
+
 export type CredentialProxyOptions = {
   /** By name, as the proxy's URLs say it: lowercase letters, digits and dashes. */
   credentials: Record<string, Credential>;
   /** Databases, by name as credentials are, which `coffre run` tunnels to: `{ db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) }`. */
   tunnels?: Record<string, Tunnel>;
-  /** Private keys, by name as credentials are, that coffre signs with for the app: `{ 'dfns-key': privateKey('DFNS_PRIVATE_KEY') }`. */
+  /** Private keys and HMAC secrets, by name as credentials are, that coffre signs with for the app: `{ 'dfns-key': privateKey('DFNS_PRIVATE_KEY') }`. */
   signers?: Record<string, Signer>;
+  /** HMAC secrets, by name as credentials are, that coffre checks signatures with for the app, and never signs with: an inbound webhook's, `{ yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) }`. */
+  verifiers?: Record<string, Hmac>;
   /**
    * How often an open tunnel checks its handle still stands, ending when it
    * does not: 60 seconds unless set. A workload's tunnel stops within 15
@@ -275,6 +301,14 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** An AWS-signed upload streams through, up to S3's own limit for one request; past it, a multipart upload's parts each pass. */
 const MAX_STREAM_BYTES = 5 * 1024 ** 3;
 const HANDLE_LENGTH = 'coffre_use_'.length + 43;
+/**
+ * The longest message `sign` and `verify` take, raw, unless an `hmac()`
+ * says `maxBytes`: an inbound webhook's body. Equisafe's largest in 90 days
+ * of production was DFNS's, 5,234 bytes, and this is twelve times that
+ * (docs/design/credential-proxy.md, section 5). What asks carries the
+ * message as base64url, in JSON beside the rest.
+ */
+const MESSAGE_BYTES = 64 * 1024;
 /** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
 const UNSIGNED = base64url(new TextEncoder().encode('{"alg":"none","typ":"JWT"}'));
 /** Values shorter than this are not redacted from answers: too short to tell from the text around them. */
@@ -303,7 +337,9 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   }
   const generate = checkListed('generate', options.generate ?? {});
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
-  const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels)]));
+  const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels, new Map(), 'signer')]));
+  const verifiers = new Map(Object.entries(options.verifiers ?? {}).map(([name, verifier]) => [name, checkSigner(name, verifier, credentials, tunnels, signers, 'verifier') as Hmac]));
+  const messageBytes = Math.max(...[...signers.values(), ...verifiers.values()].map(longest), MESSAGE_BYTES);
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
@@ -318,7 +354,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
+          return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -326,7 +362,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, signers, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
+          return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -356,6 +392,10 @@ type Proxy = {
   groups: Map<string, Group>;
   tunnels: Map<string, Tunnel>;
   signers: Map<string, Signer>;
+  /** HMAC secrets that check signatures and make none. */
+  verifiers: Map<string, Hmac>;
+  /** The longest message any signer or verifier takes. */
+  messageBytes: number;
   insecure: boolean;
   recheckMs: number;
   generate: Map<string, 'all' | readonly string[]>;
@@ -420,6 +460,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (raw.length < 3) return failure(404, 'name /use/<credential>/<path>, or /use/<project>/<environment>/<credential>/<path>');
   const credential = proxy.credentials.get(place[2]!);
   if (credential === undefined && proxy.signers.has(place[2]!)) return failure(404, `${place[2]} is a signer, which reaches no upstream: credential(${JSON.stringify(place[2])}).sign(message)`);
+  if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
   if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search);
 }
@@ -441,6 +482,11 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
     proxy.handles.set(handle, { paths, until: Math.min(now + proxy.cacheMs, Date.parse(expiresAt)) });
   }
   return paths;
+}
+
+/** The signers and verifiers, by name: each a key the app holds the handle for, which coffre computes with. */
+function keyed(proxy: Proxy): [string, Signer][] {
+  return [...proxy.signers, ...proxy.verifiers];
 }
 
 /**
@@ -473,14 +519,14 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       resolved = rows;
       personal = environment.personal;
       const using = covering(rows.map((row) => row.key));
-      const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key), ...[...proxy.signers.values()].map((signer) => signer.key)]);
-      // What the proxy fills in itself, a tunnel's URL or a signer's handle, never the value the environment holds; and a
+      const covered = new Set([...using.flatMap((credential) => credential.keys), ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key), ...keyed(proxy).map(([, signer]) => signer.key)]);
+      // What the proxy fills in itself, a tunnel's URL or a signer's or verifier's handle, never the value the environment holds; and a
       // credential's plain keys where giving them would leave the handle nowhere the proxy finds it: S3's access key id,
       // which the SDK sends as `Credential=`, or every key of a header's. Those stay placeholders, as secrets do.
       const asTheyAre = new Set(rows.filter((row) => row.plain).map((row) => row.key));
       const filled = new Set([
         ...[...proxy.tunnels.values()].map((tunnel) => tunnel.key),
-        ...[...proxy.signers.values()].map((signer) => signer.key),
+        ...keyed(proxy).map(([, signer]) => signer.key),
         ...using.filter((credential) => !carriesHandle(credential.inject, asTheyAre)).flatMap((credential) => credential.keys),
       ]);
       return rows
@@ -506,8 +552,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     env[key] = value;
     covered.add(key);
   }
-  // A signer's key the handle, and the signer where `credential(name)` finds it: the key never leaves coffre.
-  for (const [name, signer] of proxy.signers) {
+  // A signer's or verifier's key the handle, and its name where `credential(name)` finds it: the key never leaves coffre.
+  for (const [name, signer] of keyed(proxy)) {
     if (!held.keys.includes(signer.key)) continue;
     credentials[name] = `${coffre.publicUrl}/use/${path}/${name}`;
     env[signer.key] = handle;
@@ -559,7 +605,7 @@ async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: Workloa
   return answer({
     environment: held.environment.path,
     values: { ...held.values },
-    credentials: [...[...proxy.credentials.values()].filter((credential) => holds(credential.keys)).map((credential) => credential.name), ...[...proxy.signers].filter(([, signer]) => holds([signer.key])).map(([name]) => name)],
+    credentials: [...[...proxy.credentials.values()].filter((credential) => holds(credential.keys)).map((credential) => credential.name), ...keyed(proxy).filter(([, signer]) => holds([signer.key])).map(([name]) => name)],
     tunnels: Object.fromEntries([...proxy.tunnels].filter(([, tunnel]) => holds([tunnel.key])).map(([name, tunnel]) => [name, { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` }])),
     useOnly: held.keys.filter((key) => !Object.hasOwn(held.values, key)),
     mints: [],
@@ -636,7 +682,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
   const { expiresAt } = await coffre.handle(handle);
   let fresh = false;
-  const { values } = await valuesFor(coffre, proxy, handle, path, { name, keys: [tunnel.key] }, null, () => (fresh = true));
+  const { values } = await valuesFor(coffre, proxy, handle, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
   const db = dialled(proxy, path, name, tunnel, values[tunnel.key]!);
   if (db instanceof Response) return db;
   const key = cacheKey(handle, path, name);
@@ -678,7 +724,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
   let fresh = false;
   let opened: Opened;
   try {
-    opened = await valuesFor(coffre, proxy, caller, path, { name, keys: [tunnel.key] }, null, () => (fresh = true));
+    opened = await valuesFor(coffre, proxy, caller, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
     return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
@@ -805,33 +851,42 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  * What a caller asks coffre to make with an environment's values, which it
  * never hands back: `POST /use/<project>/<env>`, or `POST /use` for a
  * workload that reaches one environment, with `{ presign: {…} }` for a
- * presigned URL, or `{ sign: {…} }` for a signature. A handle's holder
- * sends it as a bearer token; a workload's proof signs the body, so nobody
- * on the way can change what is signed. PR 7 adds `verify` and `mint`
- * beside them, each naming the credential it uses, as these do.
+ * presigned URL, `{ sign: {…} }` for a signature, or `{ verify: {…} }`
+ * for whether a signature is a verifier's. A handle's holder sends it as a
+ * bearer token; a workload's proof signs the body, so nobody on the way
+ * can change what is signed or checked. PR 7 adds `mint` beside them,
+ * naming the credential it uses, as these do.
  */
 async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
-  const raw = await boundedBody(request, 65_536);
-  type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown> };
+  // Read up to what the longest message takes, as base64url in JSON beside the rest.
+  const raw = await boundedBody(request, Math.ceil(proxy.messageBytes / 3) * 4 + 4096);
+  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here: an hmac()'s maxBytes takes a longer one`);
+  type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown>; verify?: Record<string, unknown> };
   let asked: Asked | null = null;
   try {
-    const parsed: unknown = raw === null ? null : JSON.parse(new TextDecoder().decode(raw ?? new Uint8Array(0)));
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(raw ?? new Uint8Array(0)));
     if (typeof parsed === 'object' && parsed !== null) asked = parsed as Asked;
   } catch {
     asked = null;
   }
   // What it asks for, and the credential or signer it uses, which a workload's `credential:` freeze and limits name.
-  const operation = asked?.presign !== undefined ? 'presign' : asked?.sign !== undefined ? 'sign' : null;
-  if (asked === null || operation === null) return failure(400, 'send { presign: { credential, path, method, expiresIn } } or { sign: { credential, message } } as JSON, 64 KiB at most');
+  const operation = asked?.presign !== undefined ? 'presign' : asked?.sign !== undefined ? 'sign' : asked?.verify !== undefined ? 'verify' : null;
+  if (asked === null || operation === null) {
+    return failure(400, `send { presign: { credential, path, method, expiresIn } }, { sign: { credential, message } } or { verify: { credential, message, signature } } as JSON`);
+  }
   const given = asked[operation] ?? {};
   const name = typeof given.credential === 'string' ? given.credential : '';
-  const signer = operation === 'sign' ? proxy.signers.get(name) : undefined;
+  // A verifier verifies, and an HMAC signer too, which could check a signature by making it: a private key's is no HMAC.
+  const signer = operation === 'sign' ? proxy.signers.get(name) : operation === 'verify' ? (proxy.verifiers.get(name) ?? proxy.signers.get(name)) : undefined;
   const credential = operation === 'presign' ? proxy.credentials.get(name) : undefined;
-  if (operation === 'sign' && signer === undefined) return failure(404, 'sign names a signer of this instance\'s: its deployment\'s credentialProxy names them, signers: { … }');
+  if (operation === 'sign' && signer === undefined) {
+    return failure(404, `sign names a signer of this instance's: its deployment's credentialProxy names them, signers: { … }${proxy.verifiers.has(name) ? `; ${name} is a verifier, which checks signatures and makes none` : ''}`);
+  }
+  if (operation === 'verify' && signer?.kind !== 'hmac') return failure(404, 'verify names a verifier of this instance\'s, or a signer of its that is hmac(…): its deployment\'s credentialProxy names them, verifiers: { … }');
   if (operation === 'presign' && credential?.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
   const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? credential!).limit) });
   if (caller instanceof Response) return caller;
-  const run = (who: User, at: string) => (operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : presign(coffre, proxy, at, who, credential!, given));
+  const run = (who: User, at: string) => (operation === 'presign' ? presign(coffre, proxy, at, who, credential!, given) : operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : verify(coffre, proxy, at, who, name, signer as Hmac, given));
   if (caller !== null) return answering(caller, async () => (caller.path === null ? failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone') : run(caller, caller.path)));
   if (path === null) return failure(405, 'GET only: a handle names its environment, POST /use/<project>/<environment>');
   const handle = bearer(request);
@@ -840,18 +895,25 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
 }
 
 /**
- * A signature by a signer's private key, for the app that holds the
- * handle, or the workload: `{ sign: { credential, message } }`, the message
- * base64url. coffre opens the key, signs as Node's `crypto.sign(undefined,
- * message, key)` does (`signWith`), and answers `{ signature }`, base64url.
- * The key never leaves coffre. Each signature is one use in the log, naming
- * the message by its SHA-256, never served from the cache.
+ * A signature by a signer's key, for the app that holds the handle, or the
+ * workload: `{ sign: { credential, message } }`, the message base64url.
+ * The key never leaves coffre. A private key signs as Node's
+ * `crypto.sign(undefined, message, key)` does (`signWith`), and answers
+ * `{ signature }`, base64url: each signature one use in the log, naming the
+ * message by its SHA-256, never served from the cache. An HMAC secret
+ * answers the signature as its scheme writes it (`hmacSign`), opened as a
+ * credential's values are: logged once a minute, on a request's path.
  */
 async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, signer: Signer, asked: { message?: unknown }): Promise<Response> {
-  if (typeof asked.message !== 'string' || !/^[A-Za-z0-9_-]*$/.test(asked.message) || asked.message.length % 4 === 1) return failure(400, 'sign a message given as base64url');
+  const message = messageOf(asked.message);
+  if (message === null) return failure(400, 'sign a message given as base64url');
+  if (message.byteLength > longest(signer)) return failure(413, `${name} signs a message of ${sized(longest(signer))} at most${signer.kind === 'hmac' ? ': its hmac()\'s maxBytes takes a longer one' : ''}`);
   // A narrowed session's signers are named, and one limited to methods or paths signs nothing: no request to check them on.
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
-  const message = Uint8Array.from(atob(asked.message.replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0));
+  if (signer.kind === 'hmac') {
+    const secret = await hmacSecret(coffre, proxy, path, who, name, signer);
+    return answer({ signature: await hmacSign(secret, message, { encoding: signer.encoding, prefix: signer.prefix ?? '' }) });
+  }
   const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
   const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: [signer.key], purpose: 'use', logged: { credential: name, sign: { sha256 } } });
   const pem = used.values[signer.key];
@@ -862,6 +924,44 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
     // What is wrong with the key is said, never the key: neither the platform's error nor its message goes anywhere.
     return failure(409, `${used.environment.path}'s ${signer.key} ${error instanceof SigningKeyError ? error.message : 'signs nothing'}`);
   }
+}
+
+/**
+ * Whether a signature is an HMAC secret's, for the app that holds the
+ * handle, or the workload: `{ verify: { credential, message, signature } }`,
+ * the message base64url, an inbound webhook's body as it came, byte for
+ * byte, and the signature as its header carried it, `sha256=…`. coffre
+ * opens the secret as a credential's values are, logged once a minute, and
+ * answers `{ valid }`, compared in constant time (`hmacVerify`): no more,
+ * whatever is wrong with the signature. The secret never leaves coffre.
+ */
+async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, verifier: Hmac, asked: { message?: unknown; signature?: unknown }): Promise<Response> {
+  const message = messageOf(asked.message);
+  if (message === null) return failure(400, 'verify a message given as base64url: the body as it came, byte for byte');
+  if (message.byteLength > longest(verifier)) return failure(413, `${name} checks a message of ${sized(longest(verifier))} at most: its hmac()'s maxBytes takes a longer one`);
+  if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
+  if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not verify with ${name}`, 'narrowed');
+  const secret = await hmacSecret(coffre, proxy, path, who, name, verifier);
+  return answer({ valid: await hmacVerify(secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
+}
+
+/** The longest message a signer or verifier takes. */
+function longest(signer: Signer): number {
+  return signer.kind === 'hmac' ? (signer.maxBytes ?? MESSAGE_BYTES) : MESSAGE_BYTES;
+}
+
+const sized = (bytes: number) => (bytes % 1024 === 0 ? `${bytes / 1024} KiB` : `${bytes} bytes`);
+
+/** A message given as base64url, as its bytes: null for anything else. Buffer's decoder, several times faster than atob's string. */
+function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {
+  if (typeof given !== 'string' || !/^[A-Za-z0-9_-]*$/.test(given) || given.length % 4 === 1) return null;
+  return Buffer.from(given, 'base64url');
+}
+
+/** An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheSeconds`, logged as one use when opened. */
+async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<string> {
+  const { values } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
+  return values[hmac.key]!;
 }
 
 /**
@@ -1020,7 +1120,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
   const content = await carried(request, credential);
   if (content instanceof Response) return content;
-  const opened = await valuesFor(coffre, proxy, handle, path, credential, target.host);
+  const opened = await valuesFor(coffre, proxy, handle, path, credential, { host: target.host });
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
@@ -1126,7 +1226,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     if (!constraintsAllow(workload.constraints, { place: workload.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
     }
-    const opened = await valuesFor(coffre, proxy, workload, workload.path, credential, aimed.target.host);
+    const opened = await valuesFor(coffre, proxy, workload, workload.path, credential, { host: aimed.target.host });
     // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
     const headers = new Headers();
     for (const [name, value] of request.headers) if ((workload.hdr === null || workload.hdr.includes(name)) && sent(name)) headers.set(name, value);
@@ -1381,7 +1481,8 @@ async function valuesFor(
   user: User,
   path: string,
   credential: { name: string; keys: readonly string[]; egress?: Egress },
-  host: string | null,
+  /** What the use is, for its entry in the log: the upstream's host, `{ tunnel: true }` or `{ hmac: true }`. */
+  through: { host: string } | { tunnel: true } | { hmac: true },
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
 ): Promise<Opened> {
@@ -1389,7 +1490,7 @@ async function valuesFor(
   const now = Date.now();
   const kept = proxy.cache.get(key);
   if (kept !== undefined && kept.until > now) return kept;
-  const used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...(host === null ? { tunnel: true } : { host }), ...(credential.egress === undefined ? {} : { egress: true }) } });
+  const used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) } });
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
   decided?.();
@@ -1646,11 +1747,22 @@ function through(network: Network): Connect {
   };
 }
 
-function checkSigner(name: string, signer: Signer, credentials: Map<string, Resolved>, tunnels: Map<string, Tunnel>): Signer {
-  if (!NAME.test(name)) throw new Error(`credentialProxy: a signer's name is lowercase letters, digits and dashes; got ${JSON.stringify(name)}`);
-  if (credentials.has(name) || tunnels.has(name)) throw new Error(`credentialProxy: ${name} names a ${credentials.has(name) ? 'credential' : 'tunnel'} and a signer`);
-  if (signer.kind !== 'private-key') throw new Error(`credentialProxy: signer ${name} is privateKey(…), the only kind there is`);
-  if (!KEY.test(signer.key)) throw new Error(`credentialProxy: signer ${name} names the key that holds its private key, DFNS_PRIVATE_KEY`);
+function checkSigner(name: string, signer: Signer, credentials: Map<string, Resolved>, tunnels: Map<string, Tunnel>, signers: Map<string, Signer>, what: 'signer' | 'verifier'): Signer {
+  if (!NAME.test(name)) throw new Error(`credentialProxy: a ${what}'s name is lowercase letters, digits and dashes; got ${JSON.stringify(name)}`);
+  const taken = credentials.has(name) ? 'credential' : tunnels.has(name) ? 'tunnel' : signers.has(name) ? 'signer' : null;
+  if (taken !== null) throw new Error(`credentialProxy: ${name} names a ${taken} and a ${what}`);
+  if (what === 'verifier' ? signer.kind !== 'hmac' : signer.kind !== 'private-key' && signer.kind !== 'hmac') {
+    throw new Error(`credentialProxy: ${what} ${name} is ${what === 'verifier' ? 'hmac(…), the only kind there is' : 'privateKey(…) or hmac(…)'}`);
+  }
+  if (!KEY.test(signer.key)) throw new Error(`credentialProxy: ${what} ${name} names the key that holds its ${signer.kind === 'hmac' ? 'secret, YOUSIGN_WEBHOOK_SECRET' : 'private key, DFNS_PRIVATE_KEY'}`);
+  if (signer.kind === 'hmac') {
+    // HMAC-SHA256 alone, written as these schemes write it: a key it does not know is refused, never ignored.
+    const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'encoding', 'prefix', 'maxBytes', 'limit'].includes(option));
+    if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, maxBytes and limit, and signs with SHA-256 alone; got ${unknown}`);
+    if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_BODY_BYTES)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, 16 MiB at most`);
+    if (signer.encoding !== 'hex' && signer.encoding !== 'base64' && signer.encoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() writes its signatures in hex, base64 or base64url`);
+    if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !/^[\x21-\x7e]{1,32}$/.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
+  }
   limited(name, signer.limit);
   // The app holds one value for a key, and a signer's is the handle as it is.
   const shaped = [...credentials.values()].find((credential) => credential.placeholder !== undefined && credential.keys.includes(signer.key));

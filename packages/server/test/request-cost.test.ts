@@ -9,7 +9,7 @@
 // `pnpm bench:workers` measures the CPU itself (packages/conformance/scripts/bench.ts).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
@@ -30,7 +30,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import { appLogKey, CHAIN_WALK } from '../src/db/audit.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
-import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, header, hmac } from '../src/plugins/credential-proxy.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testAnchor, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -99,6 +99,9 @@ let reader: CoffreClient;
 let service: CoffreClient;
 /** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
 let workload: () => Promise<void>;
+/** A workload's check of an inbound webhook's signature, `verify`, at the proxy; and at one that remembers nothing. */
+let verify: () => Promise<void>;
+let coldVerify: () => Promise<void>;
 /** The same, at a proxy that remembers nothing: what each request costs once its cache has lapsed, on a warm isolate. */
 let coldWorkload: () => Promise<void>;
 /** The same through a Cloudflare service binding, its caller the binding's `props`. */
@@ -163,7 +166,7 @@ before(async () => {
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   for (const path of ['market/dev', 'market/prod', 'market/busy']) await root.environments.create(path, { name: path });
-  await root.secrets.set('market/dev', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
+  await root.secrets.set('market/dev', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake', WEBHOOK_SECRET: 'fake-webhook-secret' });
   await root.members.add(`user:${READER}`);
   await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
   await root.members.add(SERVICE);
@@ -201,16 +204,17 @@ before(async () => {
   const background: Promise<unknown>[] = [];
   // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
   const credentials = { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } };
+  const verifiers = { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) };
   const proxied = {
     ...runtime,
     waitUntil: (promise: Promise<unknown>) => void background.push(promise),
     auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10, total: 10 }) } }).resolve(ORIGIN),
     gates: () => gate,
-    plugins: checkPlugins([credentialProxy({ credentials })]),
+    plugins: checkPlugins([credentialProxy({ credentials, verifiers })]),
   } satisfies CoffreRuntime;
   const forgetful = {
     ...proxied,
-    plugins: checkPlugins([credentialProxy({ cacheSeconds: 0, credentials })]),
+    plugins: checkPlugins([credentialProxy({ cacheSeconds: 0, credentials, verifiers })]),
   } satisfies CoffreRuntime;
   const through = (at: CoffreRuntime) => async () => {
     const url = `${ORIGIN}/use/stripe/v1/charges`;
@@ -222,6 +226,18 @@ before(async () => {
     await Promise.all(background.splice(0));
   };
   workload = through(proxied);
+  const verifying = (at: CoffreRuntime) => async () => {
+    const url = `${ORIGIN}/use`;
+    const message = Buffer.from('{"event_name":"signature_request.done"}');
+    const body = JSON.stringify({ verify: { credential: 'webhook', message: message.toString('base64url'), signature: `sha256=${createHmac('sha256', 'fake-webhook-secret').update(message).digest('hex')}` } });
+    const headers = { 'content-type': 'application/json' };
+    const proof = await createProof(key, { method: 'POST', url, token, nonce: 'g1.cost', content: { headers, body: await bodyDigest(body) } });
+    const answered = await pluginRoute(new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${token}`, dpop: proof }, body }), at, null);
+    if (answered?.status !== 200 || (await answered.json() as { valid?: boolean }).valid !== true) throw new Error('the verify was refused');
+    await Promise.all(background.splice(0));
+  };
+  verify = verifying(proxied);
+  coldVerify = verifying(forgetful);
   coldWorkload = through(forgetful);
   await insertBinding(deps.db, deps.chainKey, {
     id: randomUUID(), principal: SERVICE, generation: standing.generation, profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
@@ -268,6 +284,8 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked, its
   // decision warm in the proxy's cache.
   "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
+  // The same for an inbound webhook's signature: the secret warm in the proxy's cache, no entry in the log.
+  "a workload's verify at the proxy": { request: () => verify(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
   // A Cloudflare call naming its environment: its binding, member, place and freezes in one statement; the vault's decision warm.
   "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
@@ -294,6 +312,13 @@ test('each hot request runs exactly its budget of statements, on as many connect
 test("a workload's request at a proxy whose cache lapsed runs its budget", POSTGRES, async () => {
   await coldWorkload();
   const spent = await cost(coldWorkload);
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+});
+
+/** A workload's verify at a proxy whose cache has lapsed: what a proxied request costs then, the secret opened and its use logged. */
+test("a workload's verify at a proxy whose cache lapsed runs a proxied request's budget", POSTGRES, async () => {
+  await coldVerify();
+  const spent = await cost(coldVerify);
   assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
 });
 
