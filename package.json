@@ -26,6 +26,7 @@
     "bench:node": "node --conditions=coffre:source packages/conformance/scripts/bench.ts node examples/node",
     "test:consumer": "./scripts/consumer-test.sh",
     "test:compat": "./scripts/compat-check.sh",
+    "test:image": "./scripts/test-image.sh",
     "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
     "bump": "node scripts/bump.mjs",

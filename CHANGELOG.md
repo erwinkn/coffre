@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The CLI is an image.** Each release now publishes
+  `ghcr.io/erwinkn/coffre-cli` for amd64 and arm64, tagged `<version>`,
+  `<major>.<minor>` and `latest`, after npm: npm's own tarball of the
+  version, checked against its integrity, on distroless Node 24, as uid
+  65532, with `coffre` as its entrypoint, signed build provenance and an
+  SBOM. A sidecar runs `coffre serve` from it, pinned by digest, with no
+  image of its own ([workloads.md](docs/workloads.md#the-image), which
+  also shows Compose). The release workflow's `workflow_dispatch`
+  publishes the image alone for a version already on npm, and Validate
+  builds both platforms from the revision's packed CLI and runs
+  `coffre serve` in the image against a fake coffre (`pnpm test:image`).
+
 ## 0.14.5 (2026-10-26)
 
 - **Upgrading to 0.14.5, in short.** One migration, `0021_prune_vault_releases`

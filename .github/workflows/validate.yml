@@ -315,10 +315,28 @@ jobs:
       - name: The newest release, migrated with this revision's migrations
         run: pnpm test:compat --kind ${{ matrix.kind }}
 
+  image:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    name: CLI image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+        with:
+          # The script builds the CLI and what it bundles, no more.
+          build: 'false'
+      # This revision's packed CLI, in the image the release publishes; the
+      # release's own holds npm's tarball of the same version.
+      - name: Build the CLI image for amd64 and arm64, and smoke-test it
+        run: pnpm test:image
+
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, checks, tests, schema, formal, proofs, workers, node, consumer, compat]
+    needs: [changes, checks, tests, schema, formal, proofs, workers, node, consumer, compat, image]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump

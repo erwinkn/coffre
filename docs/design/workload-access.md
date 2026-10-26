@@ -1583,7 +1583,7 @@ spec:
   serviceAccountName: api
   initContainers:
     - name: coffre
-      image: registry.acme.example/coffre-cli:0.12   # any image with the coffre CLI
+      image: ghcr.io/erwinkn/coffre-cli:0.14.5@sha256:…   # coffre's image, by its digest (docs/workloads.md)
       restartPolicy: Always            # a native sidecar: an app restart keeps the session
       args: [serve, --url, https://secrets.acme.example, --service, api-prod, --proof, 'kubernetes:/var/run/secrets/coffre/token', --listen, '127.0.0.1:7300']
       volumeMounts: [{ name: coffre-token, mountPath: /var/run/secrets/coffre, readOnly: true }]

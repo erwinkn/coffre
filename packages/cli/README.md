@@ -19,6 +19,11 @@ It bundles everything it runs, so it installs with no dependencies:
 migrations, at the CLI's version. A deployment pins it among its
 devDependencies, so its pipeline migrates with the version it deploys.
 
+Each release is also an image, `ghcr.io/erwinkn/coffre-cli:<version>`,
+whose entrypoint is `coffre`: `docker run --rm ghcr.io/erwinkn/coffre-cli:<version> serve …`
+runs a workload's sidecar
+([workloads.md](https://github.com/erwinkn/coffre/blob/main/docs/workloads.md#the-image)).
+
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
 deploy as a small project of your own. Its eight `@coffre/*` packages are
 released together, at one version. MIT licensed.
