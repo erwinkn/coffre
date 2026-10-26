@@ -118,15 +118,17 @@ jobs:
           if grep -qx full-formal <<< "$labels"; then
             echo "The full-formal label asks for a full run."
           else
-            # Newest first; a key counts only if its run is one of this workflow's, whose
-            # `Formal model` job passed: a cache a branch saved by hand is not a green run.
+            # Newest first. A key counts only if the run in it is one of this workflow's and,
+            # in some attempt, its `Formal model` job ran the step named for this very key and
+            # run (the last step below, which runs only after every shard held): a cache saved
+            # by hand, or under another run's id, names no such step. Jobs of every attempt.
             candidates="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
               jq -r --arg prefix "$key-" '.actions_caches[] | select(.key | startswith($prefix)) | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')"
             while read -r id cref created; do
               [[ "$id" =~ ^[0-9]+$ ]] || continue
               path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || continue
               [ "$path" = .github/workflows/validate.yml ] || continue
-              gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" --jq '.jobs[] | select(.name == "Formal model") | .conclusion' | grep -qx success || continue
+              gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -qxF "Save it as $key-$id" || continue
               hit=true
               run="$id"
               ref="$cref"
@@ -164,7 +166,7 @@ jobs:
           KEY: ${{ needs.formal-plan.outputs.key }}
         run: |
           mine="$(scripts/formal-key.sh | tail -n 1)"
-          [ "$mine" = "$KEY" ] || { echo "::error::This runner's key is $mine, the plan's $KEY: another Java, or another checkout"; exit 1; }
+          [ "$mine" = "$KEY" ] || { echo "::error::This runner's key is $mine, the plan's $KEY: another Java, or another checkout. Re-run all jobs, not only the failed ones."; exit 1; }
       - name: Model-check the shard
         # TLC, pinned by its checksum in the script, on the runner's Java (docs/formal.md).
         run: scripts/formal.sh --workers 4 --heap 4g --shard ${{ matrix.shard }}
@@ -190,7 +192,7 @@ jobs:
         # Only after every shard held, and not when the plan found a green run already.
         if: ${{ needs.formal-plan.outputs.hit != 'true' }}
         run: echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/formal-green"
-      - name: Save it under the inputs' key
+      - name: Save it as ${{ needs.formal-plan.outputs.key }}-${{ github.run_id }}
         if: ${{ needs.formal-plan.outputs.hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
