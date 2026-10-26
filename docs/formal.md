@@ -167,6 +167,12 @@ Traces are shortened here; the script prints every step.
   - a member's row, taken one row at a time, in principal order: alone,
     or shared by a read or a wrap with others like it;
   - the log's head.
+- **Giving up.** A read waiting for the head another holds may give up
+  instead (`ReadGivesUp`): its statement's bound ran out, its call's
+  deadline passed, or every place in the head's line was taken
+  (`lockLogHeadQueued`). It rolls back having written nothing, and every
+  invariant holds with or without the step. The model's other waits never
+  give up; in the code they do, at fifteen seconds, the same way.
 
   A process whose next step takes a lock that another holds simply cannot
   take it until that lock is released: that is the wait. A share lock also

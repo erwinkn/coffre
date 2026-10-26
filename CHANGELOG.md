@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **A read under load answers within seconds: read, or 503 at once.** A
+  read's whole vault call, its retries, the entries of a refusal and a key
+  service's intent included, is due five seconds after its first
+  decision. Each transaction's waits are bounded by what is left, and past
+  the deadline it fails as unavailable rather than start another; a
+  refused read's entries no longer wait fifteen seconds for the log's
+  head. At most sixteen reads wait for the head at once, each holding one
+  of its places in line, an advisory lock that is tried and never waited
+  for. The next answers 503 `unavailable` with `Retry-After` in one round
+  trip, and holds no connection while it would have waited. The place is
+  taken in the statement that already waited for the head, and only when
+  another holds it: no statement more. On a burst of 50 reads of one
+  principal, with 8 reads a second from three others, a 30 ms round trip,
+  a 40-connection pool and a long read history: p99 2.1 s (4.4 s on
+  0.14.4), no answer after 2.2 s (4.5 s), and every other principal read
+  within 2.2 s. 35 of 290 reads were refused at once (20 failed after
+  about 4.5 s on 0.14.4). The CLI and SDK ask again after `Retry-After`.
+  No migration ([formal.md](docs/formal.md): a read that gives up its wait
+  breaks no invariant).
+
 ## 0.14.4 (2026-10-26)
 
 - **Upgrading to 0.14.4, in short.** One migration, `0020_vault_releases`

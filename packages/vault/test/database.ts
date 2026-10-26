@@ -61,14 +61,17 @@ export async function openLocalVault(...args: Parameters<typeof openRawVault>): 
   return speaking(await openRawVault(...args));
 }
 
-export type TestDatabase = { owner: Database; vault: Database; connect(): Promise<Database>; close(): Promise<void> };
+export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; close(): Promise<void> };
 
-/** The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would. */
+/**
+ * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
+ * up to `connections` at once (pg's 10 unless set).
+ */
 export async function openTestDatabase(): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
-  const open = async (login: string): Promise<Database> => {
+  const open = async (login: string, connections?: number): Promise<Database> => {
     if (ENGINE === 'postgres') {
-      const pool = new pg.Pool({ connectionString: login });
+      const pool = new pg.Pool({ connectionString: login, ...(connections === undefined ? {} : { max: connections }) });
       opened.push(() => pool.end());
       return createDatabase(pool);
     }
@@ -81,7 +84,7 @@ export async function openTestDatabase(): Promise<TestDatabase> {
   return {
     owner: await open(OWNER_URL),
     vault: await open(VAULT_URL),
-    connect: () => open(VAULT_URL),
+    connect: (connections) => open(VAULT_URL, connections),
     close: async () => {
       await Promise.all(opened.map((close) => close()));
     },

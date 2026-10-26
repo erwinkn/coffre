@@ -1,6 +1,6 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { Queryable, Transaction } from '@coffre/db';
-import { LogHeadMismatch, lockLogHead } from '@coffre/db/log';
+import { LogHeadMismatch, lockLogHead, lockLogHeadQueued } from '@coffre/db/log';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import type { GrantRow } from '@coffre/db/grants';
 
@@ -83,6 +83,12 @@ export type Asked = {
   released?: { principal: string; keys: readonly string[]; windowMs: number; clockOffsetMs: number; cap: number };
   /** Lock the log's head first. */
   head?: boolean;
+  /**
+   * Held by another, wait for the head only in one of this many places in
+   * line, and refuse at once when none is free (`lockLogHeadQueued`); with
+   * none, wait as long as the transaction's bound lets.
+   */
+  waiters?: number;
 };
 
 /** One statement's read, as `Snapshot` says; with the head, two more when another holds it. */
@@ -94,7 +100,7 @@ export async function snapshot(db: Queryable, asked: Asked): Promise<Snapshot> {
   if (asked.head !== true || (first.head !== null && current(first.head))) return first;
   // Held by another, or moved in the instant before the lock: everything again, once the head is this transaction's.
   // Asked for the head, `db` is a transaction (the overloads above).
-  if (first.head === null) await lockLogHead(db as Transaction);
+  if (first.head === null) await (asked.waiters === undefined ? lockLogHead(db as Transaction) : lockLogHeadQueued(db as Transaction, asked.waiters));
   const again = await read();
   if (again.head === null) throw new Error("the log's head, held by this transaction, was read as held by another");
   // Held, nothing appends: a head that names another last entry was moved, or the log written, around it (`appendEntries`).
