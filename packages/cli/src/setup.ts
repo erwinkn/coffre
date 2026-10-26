@@ -399,8 +399,9 @@ async function run(
         const allowed = login.url === null ? await granted(client, login.role) : await probed(login.url);
         details.push(checked(component, login, allowed));
       }
-      const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null);
+      const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null && login.password === 'kept');
       if (kept.length > 0) details.push(`${listed(kept.map(({ role }) => role), 'and')}: from the catalog, with no new password to log in with`);
+      if (logins.backup.url === null && logins.backup.password !== 'kept') details.push(`${logins.backup.role}: from the catalog, its password still to come`);
       used = await holdsData(client);
       return { text: 'Each login holds only its rights', details };
     });
@@ -523,17 +524,31 @@ async function changeRole(client: pg.Client, user: string, role: string, sql: st
   }
 }
 
-/** On Cloudflare, the backup login's password, once the screen has shown it and it is saved: on a connection of its own, the run's having sat idle through Cloudflare's steps. */
+/**
+ * On Cloudflare, the backup login's password, once the screen has shown it
+ * and it is saved: on a connection of its own, the run's having sat idle
+ * through Cloudflare's steps; then checked as the login, as the boundary
+ * step checks the others.
+ */
 async function activate(administrator: URL, backup: Login, out: Output, clean: (error: unknown) => string): Promise<void> {
   const user = decodeURIComponent(administrator.username);
   const steps = new Steps(out, [`Give ${backup.role} the password shown`], () => null, clean);
   const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
   try {
     await steps.run(0, async () => {
-      await client.connect();
-      const verifier = client.escapeLiteral(scramVerifier(decodeURIComponent(new URL(backup.url!).password)));
-      await changeRole(client, user, backup.role, `ALTER ROLE ${client.escapeIdentifier(backup.role)} LOGIN PASSWORD ${verifier}`);
-      return `${backup.role} logs in with the password shown`;
+      try {
+        await client.connect();
+        const verifier = client.escapeLiteral(scramVerifier(decodeURIComponent(new URL(backup.url!).password)));
+        await changeRole(client, user, backup.role, `ALTER ROLE ${client.escapeIdentifier(backup.role)} LOGIN PASSWORD ${verifier}`);
+      } catch (error) {
+        throw new SetupError(
+          `${clean(error)}. The password shown is not in effect: ${backup.role} ` +
+            (backup.password === 'created' ? 'cannot log in, and coffre setup run again shows another.' : 'keeps its earlier one, and coffre setup --reset-passwords shows another.'),
+        );
+      }
+      const allowed = await probed(backup.url!);
+      checked('backup', backup, allowed);
+      return `${backup.role} logs in with the password shown, and reads the log`;
     });
   } finally {
     steps.end();

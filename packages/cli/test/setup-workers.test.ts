@@ -216,7 +216,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.match(text, /✓ coffre's address {2}secrets\.acme\.test/);
   assert.match(text, /✓ First Owner {2}ops@acme\.test/);
   assert.match(text, /✓ Created coffre_runtime and coffre_vault_runtime\n\s+coffre_backup_login: made, unable to log in until you have saved the password the screen shows\n/);
-  assert.match(text, /✓ coffre_backup_login logs in with the password shown\n[\s\S]*✓ Deployed the vault/);
+  assert.match(text, /✓ coffre_backup_login logs in with the password shown, and reads the log\n[\s\S]*✓ Deployed the vault/);
   assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, a connection limit of 20 each\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime\n\s+max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20\n/);
   assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
   // Its logo, which only its page sets: the file from the deployment's own CLI, and where it goes.
