@@ -132,6 +132,9 @@ needs only its address:
 ```sh
 coffre setup                                # a new deployment's logins, migrations and keys; on Workers, Cloudflare and deploys on push (docs/deploy.md)
 pnpm exec coffre migrate --yes              # in a deployment, before its deploy: its pinned version's migrations
+coffre backup                               # the database, with pg_dump, as coffre_backup_login, and a manifest of it (docs/restore.md)
+coffre verify backup coffre-….dump          # restored into an empty scratch database and checked: rows, migrations, the log's chain
+coffre restore coffre-….dump --keys         # into an empty database, then checked, every value opened; says what is left to do
 coffre login https://secrets.acme.example   # a device login: approve it in the browser; pins this directory to it
 coffre whoami                               # who you are, where, and why there
 coffre use                                  # the instances you are signed in to, and the directories pinned to each

@@ -33,6 +33,7 @@ import { serve } from './serve.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { interval, replaceFile, watch } from './watch.ts';
+import { BACKUP_USAGE, RESTORE_USAGE, VERIFY_BACKUP_USAGE } from './backup-help.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   choose,
@@ -1991,6 +1992,9 @@ async function verify(args: string[]): Promise<void> {
     case 'log':
       if (more.length > 0) fail('usage: coffre verify log');
       return verifyLog();
+    case 'backup':
+      // Its own chunk, as restore's: the database driver loads only for it.
+      return (await import('./restore.ts')).verifyBackup(more);
     default:
       process.stderr.write(`coffre: no check named ${check}\n${VERIFY_USAGE}\n`);
       process.exit(2);
@@ -2072,6 +2076,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   setup: async (args) => (await import('./setup.ts')).setup(args),
   update: async (args) => (await import('./update.ts')).update(args),
   migrate: async (args) => (await import('./migrate.ts')).migrate(args),
+  backup: async (args) => (await import('./backup.ts')).backup(args),
+  restore: async (args) => (await import('./restore.ts')).restore(args),
   login,
   logout,
   whoami,
@@ -2149,6 +2155,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'verify instance': (args) => verify(['instance', ...args]),
   'verify keys': (args) => verify(['keys', ...args]),
   'verify log': (args) => verify(['log', ...args]),
+  'verify backup': (args) => verify(['backup', ...args]),
 };
 
 /** The commands whose --help says more than their line in `coffre help`. */
@@ -2157,6 +2164,9 @@ const HELP: Partial<Record<Command, string>> = {
   verify: VERIFY_USAGE,
   'verify instance': INSTANCE_USAGE,
   'verify keys': KEYS_USAGE,
+  'verify backup': VERIFY_BACKUP_USAGE,
+  backup: BACKUP_USAGE,
+  restore: RESTORE_USAGE,
 };
 
 /** A command's help, or a group's. */

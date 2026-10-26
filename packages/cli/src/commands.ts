@@ -59,6 +59,21 @@ export const SECTIONS = [
     ],
   },
   {
+    title: 'Backup',
+    entries: [
+      {
+        command: 'backup',
+        usage: ['backup [<file>]'],
+        about: ['the database, with pg_dump, as the backup login, and a', 'manifest of what it holds beside it'],
+      },
+      {
+        command: 'restore',
+        usage: ['restore <dump> [--keys]'],
+        about: ['into an empty database, then checked against its', 'manifest; with --keys, every value opened too'],
+      },
+    ],
+  },
+  {
     title: 'Session',
     entries: [
       { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in; use <url> in this directory and below,', 'and by default'] },
@@ -436,6 +451,11 @@ export const SECTIONS = [
         about: ['the vault key and app key you keep, checked on this machine'],
       },
       { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an auditor, admin or owner of all of it'] },
+      {
+        command: 'verify backup',
+        usage: ['verify backup <dump> [--keys]'],
+        about: ['a backup, restored into an empty scratch database and', 'checked as restore does; needs no coffre role'],
+      },
     ],
   },
 ] as const satisfies readonly Section[];

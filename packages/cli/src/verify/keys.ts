@@ -37,7 +37,7 @@ export type KeyMaterial = RouteOutput<'GET /audit/keys'>;
  * more. Node's decoder, which the deployment uses, stops where it can, so a
  * key pasted twice would decode to the key: the text must be the key's own.
  */
-function decoded(text: string): Buffer | null {
+export function decoded(text: string): Buffer | null {
   const key = Buffer.from(text, 'base64');
   const unpadded = text.replace(/=+$/, '');
   return key.length === 32 && (unpadded === key.toString('base64').replace(/=+$/, '') || unpadded === key.toString('base64url')) ? key : null;

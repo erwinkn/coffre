@@ -37,6 +37,22 @@
     login `ADMIN` on it: `CREATE ROLE coffre_backup NOLOGIN; GRANT
     coffre_backup TO <login> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`.
     `--backup-login` needs that `ADMIN`, and nothing on the role it names.
+- **`coffre backup`, `coffre restore` and `coffre verify backup`.** Backup
+  dumps the database with `pg_dump` as a backup login, a member of
+  `coffre_backup`, in one snapshot, and writes a manifest beside the dump: each table's rows,
+  counted and hashed, the newest migration, the audit log's head and the
+  dump's SHA-256. It refuses a login whose row-level security would hide
+  rows of any table from the dump, the trap a `pg_read_all_data` login
+  falls into at the audit log. Restore brings a dump back into an empty database, in one
+  transaction, then checks it against the manifest, the log's chain from
+  its first entry to the head included, and lists what is left: passwords,
+  both Hyperdrive configs, the redeploy, `coffre verify log`. `verify
+  backup` restores a copy without grants or row policies, for a nightly
+  check on a server with none of coffre's roles. With `--keys`, both also
+  open every value with the vault key and authenticate every log entry its
+  author signed under the keys given. Postgres only; they need PostgreSQL's
+  `pg_dump` and `pg_restore` on `PATH` ([restore.md](docs/restore.md#on-plain-postgres)).
+  The restore drill now runs them.
 
 - **A CI run asks again when the instance cannot answer it yet.** When
   the instance answered 503 `unavailable` (it could not reach its database

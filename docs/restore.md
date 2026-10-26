@@ -4,8 +4,9 @@ Everything coffre knows is in one Postgres database: values (encrypted),
 wrapped data keys, members and grants, sessions and tokens, and the audit
 log with its head. A backup of that database and two keys bring all of it
 back, including a log that verifies. This page says what to keep, how to
-restore on PlanetScale Postgres or plain Postgres, how to check the result,
-and what the local drill (`scripts/restore-drill.sh`) shows.
+back up and restore on PlanetScale Postgres or plain Postgres (`coffre
+backup`, `coffre restore`), how to check a backup and the result, and what
+the local drill (`scripts/restore-drill.sh`) shows.
 
 ## What to keep, and where
 
@@ -99,17 +100,29 @@ role logs in to the new branch as `<role>.<new branch id>`.
 
 ## On plain Postgres
 
-A `pg_dump` is a logical copy of one database: its tables, rows, privileges
-and row-level policies, but not the cluster's roles or their passwords, and
+A dump is a logical copy of one database: its tables, rows, privileges and
+row-level policies, but not the cluster's roles or their passwords, and
 not the privileges on the database itself. Provision the roles before
 restoring; `coffre migrate` reasserts the database privileges afterwards.
-This is what the drill runs.
+This is what the drill runs. Postgres only: a SQLite database, which only
+tests and local development use, is one file, copied whole with
+`sqlite3 coffre.db ".backup coffre-copy.db"`.
+
+`coffre backup`, `coffre restore` and `coffre verify backup` run
+PostgreSQL's own `pg_dump` and `pg_restore`, which must be on `PATH`:
+`pg_dump` of the server's major version or newer, `pg_restore` of the
+server's own (a newer one sends settings an older server lacks, and the
+restore stops at once, restoring nothing). Each asks for its connection
+string at a hidden prompt, or reads it from stdin, never an argument, and
+hands it to the tool with the password in `PGPASSWORD`.
+
+### Backing up
 
 Back up as a login of its own, here `coffre_backup_login`, as often as you
 can afford to lose. Its group, `coffre_backup`, which the migrations make,
 reads every row, the audit log's included, and writes none, so the backup
-job never holds the owner's password. Make the login once, the same way as
-the runtime logins:
+job never holds the owner's password. `coffre setup` does not make this
+login yet: make it once, as the owner, the same way as the runtime logins:
 
 ```sql
 CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -135,17 +148,49 @@ REVOKE coffre_backup FROM coffre_backup_login GRANTED BY <grantor>;
 `$BACKUP_URL` is the owner's URL with that login's name and password:
 
 ```sh
-pg_dump --enable-row-security --format=custom --dbname="$BACKUP_URL" --file=coffre-$(date -u +%Y%m%dT%H%MZ).dump
+printf '%s' "$BACKUP_URL" | coffre backup coffre-$(date -u +%Y%m%dT%H%MZ).dump
 ```
 
-The audit log has row-level security: without `--enable-row-security`,
-`pg_dump` stops at it ("query would be affected by row-level security
-policy"); with it, the log's policy for `coffre_backup` shows every entry.
-A table in the database that coffre's migrations did not make,
-`coffre_backup` cannot read: leave it out (`--exclude-table=<name>`), or
-grant it `SELECT`.
+It opens one snapshot, reads in it what the dump must hold, and has
+`pg_dump --snapshot --enable-row-security` dump exactly that snapshot. Beside
+the dump, `coffre-….manifest.json` says what it holds: each table's rows,
+counted and hashed in any order, the newest migration, the audit log's
+head, and the dump's size and SHA-256. Neither file holds a key, but plain
+values are in the clear: both are written for their owner alone. Keep the
+manifest with the dump: `coffre restore` and `coffre verify backup` need it.
 
-Restore:
+The audit log has row-level security: a login it applies to sees only
+the entries a policy shows it, and `pg_dump --enable-row-security` dumps
+only those, without a word (without the flag it stops at the log, "query
+would be affected by row-level security policy"). `coffre backup` refuses,
+before dumping anything, a login row-level security hides rows of any
+table from: one no permissive policy shows a whole table, such as a login
+in `pg_read_all_data` before the log, or one a restrictive policy hides
+rows from. The log is the one table with row-level security today. A table in the database that coffre's migrations
+did not make, `coffre_backup` cannot read, and the backup stops at it:
+grant it `SELECT`, or move it to another database. While the snapshot is
+open, a migration that wants an exclusive lock waits behind it, and the
+app's writes behind the migration: the snapshot waits 30 seconds at most
+for a lock, and so does `pg_dump`, and the server ends the session if it
+sits idle for 10 minutes, which it never does while `pg_dump` runs: once
+the backup's process is gone.
+
+### Checking a backup
+
+`coffre verify backup <dump>` restores it into an empty scratch database,
+without owners, grants or row policies, so it needs none of coffre's roles,
+and checks it as a restore does (below). Run it after every backup, on any
+Postgres of the server's major version: a CI service container will do.
+The copy stays in that database, for you to drop.
+
+With `--keys`, it also asks for the vault keys and the app keys, and opens
+every version of every value, a plain one compared with its text, and
+authenticates every log entry the app and the vault signed under those
+keys (below). That puts both keys and every value on the machine that
+runs it: the job that backs up every night is no place for them. Run it in
+a drill, on your own machine.
+
+### Restoring
 
 1. Stop both components (or both Workers).
 2. Create the runtime logins if this server lacks them, and set their
@@ -163,15 +208,53 @@ Restore:
    `pnpm exec coffre migrate` once against an empty database on this server
    if they do not. Make `coffre_backup_login` too, to back the restored
    database up: step 4 grants it its group.
-3. Create an empty database owned by the owner, and restore into it:
+3. Create an empty database, and restore into it as the owner:
 
    ```sh
    createdb --owner=coffre_owner coffre_restored
-   pg_restore --exit-on-error --dbname="$OWNER_URL_OF_COFFRE_RESTORED" coffre-….dump
+   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | coffre restore coffre-….dump
    ```
 
+   It refuses a database that holds anything of coffre's already, and
+   restores in one transaction, so a restore that fails leaves the database
+   empty. Every object belongs to the login that restores, the one the
+   deployment migrates as, whoever owned it before; the grants and row
+   policies come back as they were. The database's default privileges name
+   the role that owned it (`ALTER DEFAULT PRIVILEGES FOR ROLE coffre_owner`),
+   so restore as that role, or as a member of it, on a server that has it. Then it checks the database against the
+   manifest:
+   - the dump is the one the manifest describes, byte for byte;
+   - every table holds the rows it held, by count and by a hash of them;
+   - the same migrations ran, the newest the same;
+   - the audit log's head is the one backed up, and the chain runs from the
+     first entry to it with no gap: every link and every hash. Without the
+     keys, this says nothing about who wrote an entry: anyone who can write
+     rows can link one.
+
+   The walk also holds each author to its keys' order, as `coffre verify
+   log` does, which needs no key: the app's key writes nothing from the
+   first entry that moves on from it (`key.reseal`, `key.rotate`), and the
+   vault never goes back to a key it left.
+
+   With `--keys`, it asks at hidden prompts for the vault keys, then the
+   app keys, separated by spaces (on stdin, the second and third lines
+   after the connection string): first the one each signs with now, then
+   any it replaced. Either line may be blank, not both. A vault whose
+   config gives a `signingKey` of its own signs with it: give it first,
+   then the vault keys. It then also opens every version of every value,
+   each under the vault key its vault ID names, and counts those deleted
+   for good, which hold no value any more; and it authenticates each log
+   entry under its author's keys. Entries under a key not given pass by
+   their place in the chain alone, and are counted; but each author's
+   newest entries must be under the first key given, and once that key has
+   written, no other may write after it, as the online verifiers require.
+   Only local vault keys: one in a key service, AWS KMS, never leaves it,
+   so values wrapped there are counted, not opened.
+
+   It ends by listing what is left, the steps below.
 4. In the deployment's directory, run `coffre migrate` with the owner's
-   URL for the restored database:
+   URL for the restored database, or `coffre setup --reset-passwords` if
+   the runtime logins' passwords changed:
 
    ```sh
    printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | pnpm exec coffre migrate --yes --backup-login coffre_backup_login
@@ -192,6 +275,10 @@ Restore:
    both Hyperdrive configs on Workers, or `DATABASE_URL` in `.env` and
    `vault.env` on Node. Keep the same keys and settings.
 7. Restart both processes, or redeploy both Workers.
+
+A dump `pg_dump` made by hand, without a manifest, restores with
+`pg_restore --no-owner --exit-on-error --single-transaction` into an empty
+database, as the owner; nothing checks it then but the steps below.
 
 ## Checking the result
 
@@ -292,18 +379,24 @@ vault key configured for …". Keep earlier vault keys in `previousKeks`.
 ## The local drill
 
 `scripts/restore-drill.sh` runs the plain-Postgres restore end to end on
-this machine, against the compose Postgres, after `pnpm build`:
+this machine, against the compose Postgres, after `pnpm build`, with
+PostgreSQL 16's `pg_dump` and `pg_restore` on `PATH`, the compose server's
+version:
 
 1. It builds the Workers example (as `coffre init` writes it) and starts it
    under `wrangler dev`, over a new database, `coffre_drill`, with the dev IdP for
    sign-in and `.env.dev`'s keys. It seeds it, writes a canary, grants a
    member access, removes another whose browser session it keeps, issues a
    service token, and lets two heartbeats checkpoint the log.
-2. It backs the database up as `coffre_backup_login`, with
-   `pg_dump --enable-row-security --format=custom`.
-3. It restores into `coffre_drill_restored`, provisions the logins, runs
-   migrate to reassert database privileges, and checks the app login's
-   privileges.
+2. It backs the database up with `coffre backup`, as `coffre_backup_login`,
+   which migrate granted `coffre_backup` (`--backup-login`).
+3. It restores into `coffre_drill_restored` with `coffre restore --keys`,
+   whose checks must all pass, every value opened and every entry
+   authenticated; provisions the logins, runs migrate to reassert database
+   privileges, and checks the app login's privileges. Then it checks the
+   backup again with `coffre verify backup --keys` and a random vault key,
+   into `coffre_drill_scratch`, which must fail: no value opens, and no
+   vault entry is under that key.
 4. It starts the example over the restored database with the same keys, and
    checks:
    - verification passes through the newest entry, and the backup's last
@@ -318,7 +411,7 @@ this machine, against the compose Postgres, after `pnpm build`:
    that its Owner cannot sign in, that reading the canary and a new write,
    with the restored token, both answer 503, and that `/readyz` turns red.
 
-It drops both databases and stops what it started, however it ends. It
+It drops its databases and stops what it started, however it ends. It
 does not drill a PlanetScale branch: there, the steps that differ are the
 restore itself and the login names, and a physical restore brings back the
 roles and database privileges. The local drill provisions the roles and

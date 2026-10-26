@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # The restore drill of docs/restore.md, on this machine: run the Workers
-# example over a seeded database, back the database up with pg_dump,
-# restore it into a new one, and run the example over that with the same
-# keys, checking everything came back; then once more with the wrong KEK.
+# example over a seeded database, back the database up with `coffre backup`,
+# restore it into a new one with `coffre restore --keys`, and run the
+# example over that with the same keys, checking everything came back; then
+# `coffre verify backup` with the wrong vault key, and the example once more
+# with the wrong KEK.
 #
 #   pnpm build && ./scripts/restore-drill.sh
 #
 # It uses the compose Postgres, the dev IdP for sign-in and .env.dev's keys,
 # on ports 3400 to 3402 and 8481 (COFFRE_DEV_PORT, COFFRE_DEV_IDP_PORT), over
-# coffre_drill and coffre_drill_restored (COFFRE_DRILL_DATABASE names the
-# first). The two databases, the processes and the dump go when it ends,
-# however it ends.
+# coffre_drill, coffre_drill_restored and coffre_drill_scratch
+# (COFFRE_DRILL_DATABASE names the first), and PostgreSQL's pg_dump and
+# pg_restore on PATH, of the compose server's major version, 16. The
+# databases, the processes and the dump go when it ends, however it ends.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,6 +28,7 @@ port="${COFFRE_DEV_PORT:-3400}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8481}"
 source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
 restored_db="${source_db}_restored"
+scratch_db="${source_db}_scratch"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
 export COFFRE_DEV_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
 # The drill's stack is never behind a tunnel, whatever the shell exports.
@@ -42,7 +46,7 @@ stop_coffre() {
 cleanup() {
     stop_coffre
     if [ -n "$idp" ]; then kill "$idp" 2>/dev/null || true; fi
-    for db in "$source_db" "$restored_db"; do
+    for db in "$source_db" "$restored_db" "$scratch_db"; do
         psql_as_owner -d postgres -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" || true
     done
     rm -rf "$scratch"
@@ -92,16 +96,30 @@ DATABASE_URL="$(owner_url "$source_db")" node dev/seed.mjs >/dev/null
 node scripts/restore-drill.mjs prepare >"$scratch/state.json"
 stop_coffre
 
-log "backing up $source_db with pg_dump, as coffre_backup_login"
-docker compose exec -T -e PGPASSWORD=local-backup-only postgres \
-    pg_dump -h 127.0.0.1 -U coffre_backup_login --enable-row-security --format=custom --dbname="$source_db" >"$scratch/backup.dump"
+# Every connection string and key reaches the CLI on stdin, as in a pipeline; never an argument.
+cli() { HOME="$scratch/home" node --conditions=coffre:source packages/cli/src/main.ts "$@"; }
+mkdir -p "$scratch/home"
 
-log "restoring into $restored_db"
+log "backing up $source_db with coffre backup, as coffre_backup_login"
+backup_url="postgresql://coffre_backup_login:local-backup-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$source_db"
+printf '%s' "$backup_url" | cli backup "$scratch/backup.dump"
+
+log "restoring into $restored_db with coffre restore, checked with the keys"
 # The logins and their passwords, which a dump of one database leaves out.
 node scripts/ensure-database.mjs "$restored_db"
-docker compose exec -T postgres pg_restore -U coffre_owner --dbname="$restored_db" --exit-on-error <"$scratch/backup.dump"
+printf '%s\n%s\n%s\n' "$(owner_url "$restored_db")" "$COFFRE_VAULT_KEY" "$COFFRE_APP_KEY" | cli restore "$scratch/backup.dump" --keys
+
+log 'checking the backup again, with the wrong vault key'
+node scripts/ensure-database.mjs "$scratch_db"
+if printf '%s\n%s\n%s\n' "$(owner_url "$scratch_db")" "$(openssl rand -base64 32)" "$COFFRE_APP_KEY" | cli verify backup "$scratch/backup.dump" --keys >"$scratch/wrong-key.log" 2>&1; then
+    cat "$scratch/wrong-key.log" >&2
+    echo 'coffre verify backup passed with the wrong vault key' >&2
+    exit 1
+fi
+grep "none of the vault keys given is this instance's" "$scratch/wrong-key.log" || { cat "$scratch/wrong-key.log" >&2; exit 1; }
+
 # Migrate reasserts database privileges, which a dump of one database leaves out.
-DATABASE_URL="$(owner_url "$restored_db")" pnpm --dir packages/db run db:migrate >/dev/null
+DATABASE_URL="$(owner_url "$restored_db")" pnpm --dir packages/db run db:migrate --backup-login coffre_backup_login >/dev/null
 COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$restored_db" \
     pnpm --dir packages/db run db:verify:runtime >/dev/null
 
@@ -111,8 +129,6 @@ node scripts/restore-drill.mjs check "$scratch/state.json"
 # As CI does: the token piped to `coffre login --token`, in a home of the
 # drill's own, then the canary's value to the check; never an argument.
 state() { node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).$1"; }
-cli() { HOME="$scratch/home" node --conditions=coffre:source packages/cli/src/main.ts "$@"; }
-mkdir -p "$scratch/home"
 state token | cli login "$COFFRE_DEV_URL" --token >/dev/null
 state canary | cli verify instance "$COFFRE_DEV_URL" --canary market/prod/DRILL_CANARY
 stop_coffre

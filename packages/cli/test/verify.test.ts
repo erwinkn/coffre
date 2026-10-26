@@ -246,7 +246,7 @@ test('coffre verify alone, without a terminal, lists the checks and exits 2', as
   const run = await coffre(['verify'], home);
   assert.equal(run.code, 2);
   assert.equal(run.stdout, '');
-  assert.match(run.stderr, /^usage: coffre verify instance \| keys \| log\n\n {2}instance {2}.+\n {2}keys {6}.+\n {2}log {7}.+\n/);
+  assert.match(run.stderr, /^usage: coffre verify instance \| keys \| log \| backup <dump>\n\n {2}instance {2}.+\n {2}keys {6}.+\n {2}log {7}.+\n {2}backup {4}.+\n/);
 });
 
 test('coffre verify alone, on a terminal, asks which check, and runs the one chosen', { skip: ptySkip }, async (t) => {
