@@ -159,6 +159,9 @@ async function answer(terminal: Session, address = ''): Promise<void> {
   terminal.send('\r');
 }
 
+/** Whether the backup login may log in, as the catalog has it. */
+const canLogIn = () => asSuperuser('postgres', async (client) => (await client.query("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'coffre_backup_login'")).rows);
+
 /** Every secret this deployment has, none of which may reach the main screen, nor wrangler's arguments. */
 const secrets = new Set<string>();
 
@@ -202,6 +205,8 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     await terminal.waitFor('Backup database URL');
     terminal.send('q');
     await terminal.waitFor('Have you saved all four values?');
+    // Shown, not saved yet: the backup login cannot log in with it until then.
+    assert.deepEqual(await canLogIn(), [{ rolcanlogin: false }]);
     terminal.send('y');
     await terminal.waitFor('Deploy the app');
   });
@@ -210,7 +215,8 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.match(text, /✓ Signed in to Cloudflare as ops@acme\.test, account Acme/);
   assert.match(text, /✓ coffre's address {2}secrets\.acme\.test/);
   assert.match(text, /✓ First Owner {2}ops@acme\.test/);
-  assert.match(text, /✓ Created coffre_runtime, coffre_vault_runtime and coffre_backup_login/);
+  assert.match(text, /✓ Created coffre_runtime and coffre_vault_runtime\n\s+coffre_backup_login: made, unable to log in until you have saved the password the screen shows\n/);
+  assert.match(text, /✓ coffre_backup_login logs in with the password shown\n[\s\S]*✓ Deployed the vault/);
   assert.match(text, /✓ Hyperdrive configs coffre and coffre-vault, caching off, a connection limit of 20 each\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime\n\s+max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20\n/);
   assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
   // Its logo, which only its page sets: the file from the deployment's own CLI, and where it goes.
@@ -386,13 +392,10 @@ test("a Hyperdrive config deleted during a run, its login's password kept: setup
   await asSuperuser('postgres', (client) => client.query('DROP ROLE coffre_backup_login'));
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);
-  assert.match(text, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; created coffre_backup_login\n/);
+  assert.match(text, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords\n\s+coffre_backup_login: made, unable to log in until you have saved the password the screen shows\n/);
   assert.ok(!output.includes(ENTER_ALT), 'no screen');
   // So it cannot log in yet, with no password anyone has seen: the next run gives it one, and shows it.
-  assert.deepEqual(
-    await asSuperuser('postgres', async (client) => (await client.query("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'coffre_backup_login'")).rows),
-    [{ rolcanlogin: false }],
-  );
+  assert.deepEqual(await canLogIn(), [{ rolcanlogin: false }]);
   assert.equal(code, 1, text);
   assert.match(text, /✗ Point Hyperdrive at the database\n\s+The Hyperdrive config coffre was deleted during this run\. coffre_runtime kept its password/);
   assert.match(text, /run\s+setup\s+again,\s+which\s+gives\s+coffre_runtime\s+a\s+new\s+password\s+and\s+makes\s+the\s+config\s+with\s+it\./);
@@ -422,13 +425,13 @@ test("the run after, the vault's config deleted under its update: both configs m
   );
   const text = mainText(output);
   assert.equal(code, 0, text);
-  assert.match(text, /✓ Set new passwords for coffre_runtime, coffre_vault_runtime and coffre_backup_login/);
+  assert.match(text, /✓ Set new passwords for coffre_runtime and coffre_vault_runtime\n\s+coffre_backup_login: as it was until you have saved the password the screen shows\n/);
+  assert.match(text, /✓ coffre_backup_login logs in with the password shown/);
   assert.ok(!/(App|Vault) (key|database URL)/.test(alternateText(output)), 'only the backup URL');
   assert.match(alternateText(output), /Backup database URL/);
   const backup = /postgresql:\/\/coffre_backup_login:([A-Za-z0-9_-]{32})@[^\s']+/.exec(alternateText(output))!;
   secrets.add(backup[1]!);
   assert.ok(await connects(backup[0]), 'the login the run before left unable to log in, with its password now');
-  assert.match(text, /coffre_backup_login: from the catalog, its password set last, right before it is shown\n/);
   assert.match(text, /The backup database URL shown is only in your password manager now/);
   assert.match(text, /Backups\s+the backup database URL in your backup job's secrets, for coffre backup: docs\/restore\.md\./);
   assert.match(text, /coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made again: the config coffre-vault was deleted during this run\n/);

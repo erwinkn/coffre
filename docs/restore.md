@@ -127,7 +127,7 @@ job never holds the owner's password. `coffre setup` makes it, grants it
 its group and shows its URL once, as `Backup database URL`; `coffre setup
 --reset-passwords` gives it a new password, as it does the others. A login
 is the server's: on a server another deployment set up first, setup keeps
-the login that deployment made, password and all. On a database set up by
+the login that deployment made, password and all, unless it cannot log in. On a database set up by
 hand, make it once, as the owner, the same way as the runtime logins:
 
 ```sql

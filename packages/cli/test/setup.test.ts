@@ -535,6 +535,14 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   login.password = 'by-hand-p4ss';
   assert.deepEqual(await logEntries(login.href), []);
   assert.deepEqual(await membership('setup_later'), [{ admin: false, inherit: true, set: false }]);
+
+  // One another role made, unable to log in: on Postgres 16, the owner may not change it without its ADMIN. Said so, before the others change.
+  await asSuperuser('setup_later', (client) => client.query('ALTER ROLE coffre_backup_login NOLOGIN'));
+  const refused = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /✗ Make the three logins\n\s+setup_owner may not change coffre_backup_login, which another role made: have that role grant setup_owner ADMIN on coffre_backup_login, or drop coffre_backup_login, then run coffre setup again/);
+  assert.ok(await connects(first.app.DATABASE_URL!), 'the app keeps its password');
+  assert.ok(await connects(first.vault.DATABASE_URL!), 'the vault keeps its password');
 });
 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {

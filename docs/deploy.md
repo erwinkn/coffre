@@ -73,9 +73,10 @@ secret.
 
 Run again, setup changes nothing it need not. Logins that exist keep their
 passwords, unless you agree to new ones at its prompt or pass
-`--reset-passwords`. A migrated database stays as it is. Keys come only with
-new passwords, and only for a database that holds no data yet; one that does
-has its keys already. Without a terminal, setup refuses rather than print
+`--reset-passwords`; a backup login that cannot log in, as a run stopped
+before you saved its password leaves it, gets one. A migrated database
+stays as it is. Keys come only with new passwords, and only for a database
+that holds no data yet; one that does has its keys already. Without a terminal, setup refuses rather than print
 the values; `--json` prints them to stdout for a script, with a warning on
 stderr.
 

@@ -61,7 +61,8 @@
   it: the screen shows it beside the keys, for your backup job's secrets.
   `--reset-passwords` gives it a new password with the others; a run
   without leaves one that exists as it is, a login made by hand included,
-  and grants it the group. A deployment set up before gets the login the
+  and grants it the group; one that cannot log in gets a password. With
+  Cloudflare, the login takes its password only once you have saved it. A deployment set up before gets the login the
   next time it runs setup, the others kept.
 
 - **A CI run asks again when the instance cannot answer it yet.** When
