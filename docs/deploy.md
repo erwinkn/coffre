@@ -103,8 +103,8 @@ existing role, on every run that names it. Coffre never makes the role,
 and never revokes the group: a run without the flag leaves the membership
 as it is. To take it away, revoke each grantor's membership
 ([restore.md](restore.md#on-plain-postgres) shows how): Postgres keeps one
-per grantor, and a `REVOKE` naming no grantor, a superuser's included,
-only warns.
+per grantor, and a `REVOKE` naming no grantor removes only the caller's
+own: anyone else's, a superuser's included, only warns.
 
 ## Upgrading
 

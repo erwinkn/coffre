@@ -121,8 +121,9 @@ the deployment's directory, which grants the login its group. Passing it on
 every run, as a pipeline does, is harmless. Coffre never makes the login and
 never revokes its group: revoke it yourself when it should go. Postgres
 keeps one membership per grantor, the role whose `ADMIN OPTION` granted it
-(the owner, when a member of the owner migrated), and a `REVOKE` naming no
-grantor, a superuser's included, only warns while the login keeps reading.
+(the owner, when a member of the owner migrated). A `REVOKE` naming no
+grantor removes only the caller's own, and anyone else's, a superuser's
+included, only warns while the login keeps reading.
 List the grantors, then revoke each, as a superuser or that grantor:
 
 ```sql
