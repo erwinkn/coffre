@@ -447,7 +447,7 @@ over 20,000 more, one per transaction, commit records included
 
 | row | heap | index | total | WAL | at 1,000/s |
 |---|---|---|---|---|---|
-| as prototyped: text ids, JSON payload, `kind`, `written_at` | 273 B | 68 B | **341 B** | 441 B | 29 GB/day |
+| as prototyped: text ids, JSON payload, `kind`, `written_at` | 273 B | 68 B | **341 B** | 442 B | 29 GB/day |
 | slim: number, time, request id (random bigint), credential (uuid), secret (uuid), MAC (32 B) | 126 B | 32 B | **158 B** | 260 B | 13.6 GB/day |
 | slim, MAC truncated to 16 B | 109 B | 32 B | **141 B** | 244 B | 12.2 GB/day |
 | slim, 80% repeats on covers | | | **~34 B** | ~56 B | 2.9 GB/day |

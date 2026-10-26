@@ -99,7 +99,8 @@ function walk(rows: readonly Row[], checkMac: boolean): void {
     const n = BigInt(r.number);
     if (n <= lastNumber) failures.push(`${r.number}: number repeats or goes back (after ${lastNumber})`);
     lastNumber = n;
-    const request = `${r.kind}:${r.request_id}`;
+    // A use is one request per (at, request_id), as its unique index says (the MAC covers both, so a copy keeps both).
+    const request = r.kind === 'use' ? `use:${r.at}:${r.request_id}` : `change:${r.request_id}`;
     if (requests.has(request)) failures.push(`${r.number}: request ${r.request_id} has another entry`);
     requests.add(request);
     if (checkMac && !entryMac(keys.log, rowEntry(r)).equals(r.mac)) failures.push(`${r.number}: mac`);

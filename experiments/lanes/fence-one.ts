@@ -112,10 +112,13 @@ try {
   const revoke = { op: 'credential.revoke', credential: 'cred-svc-1' } as const;
   const c1 = (await change(db, keys, 'svc-1', revoke, { requestId: 'replay-2', at })).number;
   const c2 = (await change(db, keys, 'svc-1', revoke, { requestId: 'replay-2', at })).number;
+  // A request id names one change: another payload under it is refused, and writes nothing.
+  const other = await change(db, keys, 'svc-1', { op: 'access.revoke', environment: ENVIRONMENT }, { requestId: 'replay-2', at }).then(
+    () => 'accepted', (error: Error) => (/names another change/.test(error.message) ? 'refused' : error.message));
   const { rows: [{ uses, changes }] } = await db.query("SELECT count(*) FILTER (WHERE request_id = 'replay-1')::int AS uses, count(*) FILTER (WHERE request_id = 'replay-2')::int AS changes FROM entries");
-  const replays = !again.ok && again.code === 'replayed' && c1 === c2 && uses === 1 && changes === 1;
+  const replays = !again.ok && again.code === 'replayed' && c1 === c2 && other === 'refused' && uses === 1 && changes === 1;
   if (!replays) wrong += 1;
-  console.log(`replay   a use retried answered ${again.ok ? 'a fresh decision' : again.code} (the first is #${first.number}); a change's #${c2} (first #${c1}); entries: ${uses} use, ${changes} change${replays ? '' : '  UNEXPECTED'}`);
+  console.log(`replay   a use retried answered ${again.ok ? 'a fresh decision' : again.code} (the first is #${first.number}); a change's #${c2} (first #${c1}), another change under its id ${other}; entries: ${uses} use, ${changes} change${replays ? '' : '  UNEXPECTED'}`);
   // A retry that comes after its deadline answers `late`, and writes nothing more: the first entry stands.
   const lateAt = Date.now() - 2_900;
   const lateRequest = { ...input, requestId: 'replay-late', at: lateAt };
