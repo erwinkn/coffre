@@ -2620,6 +2620,19 @@ class VaultService implements Vault {
   }
 
   /**
+   * Forget the releases no window can count again (T111): those kept a day
+   * and an hour (`RELEASES_KEPT_MS`), longer than any bulk limit window,
+   * up to `RELEASES_PRUNED` of them, the oldest first, in one statement of
+   * its own, holding no lock any read takes but the rows it deletes, which
+   * only an append moves on, a row at a time. What is kept is the
+   * database's to say, not the caller's: no login forgets a release a
+   * window counts.
+   */
+  async #pruneReleases(): Promise<number> {
+    return store.pruneReleases(this.#db, RELEASES_PRUNED);
+  }
+
+  /**
    * Sign the log up to its last entry, from the newest checkpoint's tally.
    *
    * Without the log's lock, so that no append waits on it, and in one short
@@ -2638,19 +2651,6 @@ class VaultService implements Vault {
    * from the first entry, one walk a call, and `/readyz` stays red until the
    * checkpoints reach the newest heartbeat.
    */
-  /**
-   * Forget the releases no window can count again (T111): those kept a day
-   * and an hour (`RELEASES_KEPT_MS`), longer than any bulk limit window,
-   * up to `RELEASES_PRUNED` of them, the oldest first, in one statement of
-   * its own, holding no lock any read takes but the rows it deletes, which
-   * only an append moves on, a row at a time. What is kept is the
-   * database's to say, not the caller's: no login forgets a release a
-   * window counts.
-   */
-  async #pruneReleases(): Promise<number> {
-    return store.pruneReleases(this.#db, RELEASES_PRUNED);
-  }
-
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
     await this.#settled();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
@@ -2764,9 +2764,11 @@ class VaultService implements Vault {
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
-    // Then the bulk count's upkeep, which no read waits on: a failure leaves it to the next checkpoint, and says so.
+    // Then the bulk count's upkeep, which no read waits on, after a checkpoint signed, never instead of a refusal:
+    // a failure leaves it to the next checkpoint, and says so.
+    if (!decided.ok) return decided;
     const pruned = await this.#pruneReleases().then(() => null, (error: Error) => `the releases the bulk limit counts were not pruned, and the next checkpoint tries again: ${error.message}`);
-    if (pruned === null || !decided.ok) return decided;
+    if (pruned === null) return decided;
     return { ...decided, warning: decided.warning === undefined ? pruned : `${decided.warning}; ${pruned}` };
   }
 

@@ -8,7 +8,9 @@ CREATE FUNCTION prune_vault_releases(at_most integer) RETURNS integer
         DELETE FROM public.vault_releases
          WHERE released_at < (SELECT before FROM bound)
            AND ctid IN (
+            -- A row an append holds is left to the next run, rather than waited for.
             SELECT ctid FROM public.vault_releases WHERE released_at < (SELECT before FROM bound) ORDER BY released_at LIMIT at_most
+               FOR UPDATE SKIP LOCKED
            )
         RETURNING 1
     )

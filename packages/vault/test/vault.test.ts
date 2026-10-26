@@ -1226,6 +1226,21 @@ test('a checkpoint forgets the releases a day and an hour old, longer than any w
   assert.equal(counted.released, 1);
 });
 
+test('a checkpoint whose prune fails signs all the same, and says so', postgresOnly('the function is Postgres\'s'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) })).ok);
+  await db.owner.execute(sql`REVOKE EXECUTE ON FUNCTION prune_vault_releases(integer) FROM coffre_vault`);
+  try {
+    const signed = await w.vault.checkpoint();
+    assert.ok(signed.ok, JSON.stringify(signed));
+    assert.match(signed.warning ?? '', /the releases the bulk limit counts were not pruned/);
+  } finally {
+    await db.owner.execute(sql`GRANT EXECUTE ON FUNCTION prune_vault_releases(integer) TO coffre_vault`);
+  }
+});
+
 // --- the KEK -------------------------------------------------------------------
 
 /** The vault's records of a KEK's check value. */
@@ -3215,6 +3230,9 @@ test('configuration', () => {
   assert.deepEqual(resolved.bulkLimit, { count: 20, windowMs: 30_000 });
   assert.deepEqual(resolveVaultConfig(base).bulkLimit, { count: 1000, windowMs: 900_000 });
   assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 0, windowMinutes: 1 } }), /bulkLimit/);
+  // A window of a day at most: its releases are kept a day and an hour (prune_vault_releases).
+  assert.deepEqual(resolveVaultConfig({ ...base, bulkLimit: { count: 1000, windowMinutes: 24 * 60 } }).bulkLimit, { count: 1000, windowMs: 24 * 3_600_000 });
+  assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 1000, windowMinutes: 24 * 60 + 1 } }), /a day \(1440\) at most/);
   assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek-1', key: 'c2hvcnQ=' } }), /32 bytes/);
   assert.throws(() => resolveVaultConfig({ ...base, signingKey: '' }), /signing key/);
   assert.throws(() => resolveVaultConfig({ ...base, previousKeks: [{ id: 'kek-1', key }] }), /share an id/);
