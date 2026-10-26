@@ -28,7 +28,7 @@ import { insertSession } from '../src/db/workloads.ts';
 import { processGates, type Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
-import { credentialProxy, header, hmac, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, header, hmac, json, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -731,4 +731,43 @@ test("a workload's use reads the environment its statement checked: a path that 
   assert.equal(answered!.status, 409);
   assert.equal((await entries('credential.use')).length, used, 'nothing logged');
   assert.equal(unwraps, 0, 'nothing opened');
+});
+
+test("a form or JSON rule fills its field whatever the app put there, once the proof holds for the body as sent; the Content-Digest that goes on is the new body's", async () => {
+  runtime = makeRuntime({
+    plugins: checkPlugins([credentialProxy({
+      credentials: {
+        turnstile: { upstream: `${upstreamAt}/turnstile`, inject: json('secret', '{STRIPE_KEY}') },
+        gather: { upstream: `${upstreamAt}/gather`, inject: form('refresh_token', '{STRIPE_KEY}') },
+      },
+      insecureUpstreams: true,
+    })]),
+  });
+  await bind();
+  const held = await session();
+  const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+  // As the SDK and `coffre serve` send it: the body's digest declared, and signed with the rest.
+  const body = '{"secret":"coffre","response":"XXXX.DUMMY.TOKEN"}';
+  const headers = { 'content-type': 'application/json', 'content-digest': contentDigest(await bodyDigest(body)) };
+  const sent = await use(held, 'POST', '/use/turnstile/siteverify', { headers, body });
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  const filled = JSON.stringify({ secret: STRIPE_KEY, response: 'XXXX.DUMMY.TOKEN' });
+  assert.deepEqual([reached[0]!.sha256, reached[0]!.length], [sha256(filled), filled.length]);
+  assert.equal(reached[0]!.headers['content-digest'], contentDigest(sha256(filled)));
+  assert.equal((await use(held, 'POST', '/use/market/prod/gather/token', { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=refresh_token&refresh_token=' })).status, 200);
+  assert.equal(reached[1]!.sha256, sha256(`grant_type=refresh_token&refresh_token=${STRIPE_KEY}`));
+
+  // A body changed on the way is the proof's to refuse, before anything is filled; the field missing, or the session token anywhere else, coffre's.
+  const changed = await use(held, 'POST', '/use/turnstile/siteverify', { headers: { 'content-type': 'application/json' }, body: '{"secret":"x","response":"other"}', signed: { body } });
+  assert.deepEqual([changed.status, changed.body.reason], [401, 'req']);
+  const missing = await use(held, 'POST', '/use/turnstile/siteverify', { headers: { 'content-type': 'application/json' }, body: '{"response":"x"}' });
+  assert.equal(missing.status, 400, JSON.stringify(missing.body));
+  for (const leak of [JSON.stringify({ secret: 'x', note: held.token }), `{"secret":"x","note":"\\u0063${held.token.slice(1)}"}`]) {
+    const leaked = await use(held, 'POST', '/use/turnstile/siteverify', { headers: { 'content-type': 'application/json' }, body: leak });
+    assert.equal(leaked.status, 400, JSON.stringify(leaked.body));
+    assert.match(leaked.body.message as string, /session token/);
+  }
+  const encoded = await use(held, 'POST', '/use/gather/token', { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `refresh_token=x&note=${held.token.replace('_', '%5F')}` });
+  assert.equal(encoded.status, 400, JSON.stringify(encoded.body));
+  assert.equal(reached.length, 2);
 });

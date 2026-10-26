@@ -136,6 +136,26 @@ verifier never signs, so a stolen session cannot forge the provider's calls.
 The details, and each provider's scheme, are in
 [credential-proxy.md](design/credential-proxy.md), section 5.
 
+### A key in the body
+
+Some upstreams take their key in a body field: Turnstile's siteverify takes
+its `secret` there, and Firebase's token refresh its `refresh_token`. The
+credential names that field, `form('secret', '{TURNSTILE_SECRET_KEY}')` or
+`json('secret', …)`. The app sends its usual body, of the rule's type, with
+anything in that field, and coffre replaces it. For the `form()` rule:
+
+```ts
+const verdict = await coffre.credential('turnstile').fetch('/siteverify', {
+  method: 'POST',
+  body: new URLSearchParams({ secret: 'coffre', response: token, remoteip }),
+});
+```
+
+The field must be there exactly once, in a body of the rule's type, 64 KiB
+and 256 fields at most. Every other byte goes on as the app sent it. The proof signs the
+body as sent, and coffre recomputes the `Content-Digest` of the body that
+goes out ([credential-proxy.md, section 5](design/credential-proxy.md#5-the-other-shapes)).
+
 ### `read`: the escape hatch
 
 ```ts

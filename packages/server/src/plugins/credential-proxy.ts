@@ -43,7 +43,7 @@
 import { createHash } from 'node:crypto';
 
 import { CoffreError } from '@coffre/client';
-import { bodyDigest, bodyLine, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
@@ -57,10 +57,11 @@ import { presignV4, signV4 } from './sigv4.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
-/** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
+/** How a credential's values reach its upstream: in a header, a query parameter, a field of a form or JSON body, Basic authentication, or an AWS signature. */
 export type Inject =
   | { kind: 'header'; name: string; template: string }
   | { kind: 'query'; name: string; template: string }
+  | { kind: 'form' | 'json'; name: string; template: string }
   | { kind: 'basic'; user: string; password: string }
   | ({ kind: 'sigv4' } & SigV4);
 
@@ -75,6 +76,27 @@ export function header(name: string, template: string): Inject {
 /** A query parameter the upstream reads its key from: `query('key', '{MAPS_API_KEY}')`. */
 export function query(name: string, template: string): Inject {
   return { kind: 'query', name, template };
+}
+
+/**
+ * A field of a form body (`application/x-www-form-urlencoded`) the upstream
+ * reads its key from: `form('refresh_token', '{GATHER_REFRESH_TOKEN}')`. The
+ * app sends the body with the handle as that field's value, once; coffre
+ * puts the value in its place and leaves every other byte as it was. A
+ * body of 64 KiB at most, read whole.
+ */
+export function form(name: string, template: string): Inject {
+  return { kind: 'form', name, template };
+}
+
+/**
+ * A field at the top of a JSON body's object the upstream reads its key
+ * from, as a string: `json('secret', '{TURNSTILE_SECRET_KEY}')`. As `form`,
+ * the handle is that field's value, once, and every other byte stays as it
+ * was.
+ */
+export function json(name: string, template: string): Inject {
+  return { kind: 'json', name, template };
 }
 
 /** HTTP Basic authentication: `basic('{TWILIO_SID}', '{TWILIO_TOKEN}')`. */
@@ -149,7 +171,7 @@ export type Credential = {
    * for every environment and fork alike.
    */
   identifiers?: 'gone in 0.10: mark each key plain instead, coffre set <env>/<KEY> <value> --plain';
-  /** The shape of what the app holds for its key, `jwt(…)` or `prefix(…)`, where a header or query rule carries that one key: the handle as it is, unless set. */
+  /** The shape of what the app holds for its key, `jwt(…)` or `prefix(…)`, where a header, query, form or JSON rule carries that one key: the handle as it is, unless set. */
   placeholder?: Placeholder;
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. */
   methods?: readonly string[];
@@ -303,6 +325,15 @@ const TEMPLATE_KEY = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
 /** A request's body that declares no digest is read whole before it is sent on: an API call's, not an upload's. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
+/** A body a form or JSON rule fills a field of is read whole, and parsed: a token refresh's or a siteverify's, never an upload's. */
+const MAX_FIELD_BODY = 64 * 1024;
+/**
+ * And it holds a few fields, a siteverify's four: past this many, or nested
+ * this deep, it is refused before it is parsed, so a body made to cost the
+ * most, 65,000 empty pairs, costs no more than a real one, unauthenticated.
+ */
+const MAX_FIELDS = 256;
+const MAX_DEPTH = 32;
 /** An AWS-signed upload streams through, up to S3's own limit for one request; past it, a multipart upload's parts each pass. */
 const MAX_STREAM_BYTES = 5 * 1024 ** 3;
 const HANDLE_LENGTH = 'coffre_use_'.length + 43;
@@ -321,6 +352,8 @@ const MESSAGE_BYTES = 64 * 1024;
  * credential's, and the CPU within a Worker's Free plan.
  */
 const MAX_MESSAGE_BYTES = 1024 * 1024;
+/** What `binary` decodes bytes widened to UTF-16 units with: before anything below calls it. */
+const UTF16 = new TextDecoder('utf-16le');
 /** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
 const UNSIGNED = base64url(new TextEncoder().encode('{"alg":"none","typ":"JWT"}'));
 /** Values shorter than this are not redacted from answers: too short to tell from the text around them. */
@@ -471,12 +504,22 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     const used = await workloadForward(request, coffre, proxy, stable !== undefined ? null : `${place[0]}/${place[1]}`, (stable ?? named)!, raw.slice(stable !== undefined ? 1 : 3), url.search);
     if (used !== null) return used;
   }
+  // A form or JSON rule's body, as the stable URL read it to find the handle: what the route then sends, read once.
+  const peeked = new Map<Resolved, Fillable>();
   // `/use/<credential>/<path>`, the stable URL, for the environment the handle was made for; unless `<a>/<b>` is an
   // environment the handle was made for, which `/use/<project>/<env>/…` names below. Never a guess: the URL and the handle decide.
   if (stable !== undefined) {
     const named = place[2] === undefined ? undefined : proxy.credentials.get(place[2]);
-    const handle = handleIn(request, stable, url) ?? (named === undefined ? null : handleIn(request, named, url)) ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? null;
-    if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${stable.name} takes its key, or as x-coffre-handle`);
+    // A form or JSON rule's refusal of the body, which says more than that no handle came: the named credential's, if both refuse.
+    let refused: Response | null = null;
+    const found = async (credential: Resolved) => {
+      const read = await peekField(request, credential);
+      if (read instanceof Response) refused = read;
+      else if (read !== null) peeked.set(credential, read);
+      return handleIn(request, credential, url, read instanceof Response ? null : (read?.field.value ?? null));
+    };
+    const handle = (await found(stable)) ?? (named === undefined ? null : await found(named)) ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? null;
+    if (handle === null) return refused ?? failure(401, `send the handle \`coffre run\` gave your app where ${stable.name} takes its key, or as x-coffre-handle`);
     const paths = await madeFor(coffre, proxy, handle);
     if (raw.length === 1 || !(paths ?? []).includes(`${place[0]}/${place[1]}`)) {
       if (paths === null) return failure(409, `this handle was made before coffre 0.9 and names no environment: run the app with \`coffre run\` again, or name the environment, ${coffre.publicUrl}/use/<project>/<environment>/${stable.name}`);
@@ -487,7 +530,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
         return failure(409, `this handle stands in for ${paths.length} environments, and the stable URL is for a run of one: name it${live.length === 0 ? '' : `, ${urls}`}`);
       }
       if (live.length === 0) return failure(409, 'the environment this handle was made for is gone');
-      return forward(request, coffre, proxy, live[0]!, stable, raw.slice(1), url.search);
+      return forward(request, coffre, proxy, live[0]!, stable, raw.slice(1), url.search, peeked.get(stable));
     }
   }
   if (raw.length === 2) {
@@ -500,7 +543,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (credential === undefined && proxy.signers.has(place[2]!)) return failure(404, `${place[2]} is a signer, which reaches no upstream: credential(${JSON.stringify(place[2])}).sign(message)`);
   if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
   if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
-  return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search);
+  return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search, peeked.get(credential));
 }
 
 /**
@@ -1121,6 +1164,8 @@ type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; d
 
 async function carried(request: Request, credential: Resolved): Promise<Carried | Response> {
   const declared = request.headers.get('content-length') ?? '';
+  // A body whose field coffre fills is read whole, and small: it is parsed, and changed.
+  const field = inBody(credential.inject);
   const amz = credential.inject.kind === 'sigv4' && request.headers.has('x-amz-content-sha256');
   let digest: string | null = null;
   try {
@@ -1129,12 +1174,13 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
     return failure(400, (error as Error).message);
   }
   // An empty body is checked before anything goes: with no last byte to hold back, its request is whole once its headers are.
-  const streamed = (amz || (digest !== null && Number(declared) > 0)) && request.body !== null && /^\d+$/.test(declared);
+  const streamed = !field && (amz || (digest !== null && Number(declared) > 0)) && request.body !== null && /^\d+$/.test(declared);
   if (streamed && amz && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
   if (streamed && !amz && Number(declared) > MAX_DIGESTED_BODY) {
     return failure(413, `a body that declares its digest streams through the proxy up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes: send a larger one in parts`);
   }
-  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request);
+  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request, field ? MAX_FIELD_BODY : MAX_BODY_BYTES);
+  if (body === null && field) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
   if (body === null) {
     return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB read whole; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
   }
@@ -1143,14 +1189,24 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
   return { body, streamed, declared: streamed ? String(Number(declared)) : declared, digest };
 }
 
-/** One request through a credential, a handle's: the handle checked, its values opened (or remembered), the request sent on with them. */
-async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string): Promise<Response> {
+/**
+ * One request through a credential, a handle's: the handle checked, its
+ * values opened (or remembered), the request sent on with them. `peeked`,
+ * a form or JSON rule's body as the stable URL already read it.
+ */
+async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
   const { target } = aimed;
   const inject = credential.inject;
-  const handle = handleIn(request, credential, target);
+  // A form or JSON rule's handle is in the body's field: the body read whole first, and the field found.
+  const early = peeked ?? (inBody(inject) ? await fillable(request, credential, inject) : null);
+  if (early instanceof Response) return early;
+  const field = early?.field ?? null;
+  const handle = handleIn(request, credential, target, field?.value ?? null);
   if (handle === null) return failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`);
+  // The field holds the handle the request is let in on, x-coffre-handle's too: the value goes nowhere the app did not put it.
+  if (field !== null && handleOf(credential, field.value) !== handle) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
   // A query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
   // under the upstream gives back. Otherwise the placeholder's shape around the handle, which the proxy reads as the app's own
   // (`e30` is `{}`: the proxy reads no claim).
@@ -1158,14 +1214,14 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const back = inject.kind !== 'query' ? null : given !== null && handleOf(credential, given) === handle ? given
     : credential.placeholder === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.placeholder.kind === 'prefix' ? `${credential.placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
-  const content = await carried(request, credential);
+  const content = early?.content ?? (await carried(request, credential));
   if (content instanceof Response) return content;
   const opened = await valuesFor(coffre, proxy, handle, path, credential, { host: target.host });
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
   // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
-  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${path}/${credential.name}`, back, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
+  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${path}/${credential.name}`, back, field, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
 }
 
 /** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */
@@ -1263,6 +1319,9 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
       return failure(400, `${declaring} says what binds the body, so the proof signs it: name it in hdr`);
     }
     if (workload.path === null) return failure(409, 'the environment this session reaches is gone');
+    // A form or JSON rule's field, whatever the app put there, as a header rule's header: it holds no handle.
+    const field = inBody(credential.inject) ? fieldIn(request, content.body, credential.name, credential.inject) : null;
+    if (field instanceof Response) return field;
     if (!constraintsAllow(workload.constraints, { place: workload.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
     }
@@ -1272,7 +1331,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     for (const [name, value] of request.headers) if ((workload.hdr === null || workload.hdr.includes(name)) && sent(name)) headers.set(name, value);
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
     const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
-    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: null, secret, ...(payload === undefined ? {} : { payload }) });
+    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: null, field, secret, ...(payload === undefined ? {} : { payload }) });
   });
 }
 
@@ -1294,6 +1353,8 @@ type Sending = Aim & Carried & {
   proxied: string;
   /** A query rule's parameter, the app's placeholder, put back on a redirect to the proxy. */
   back: string | null;
+  /** A form or JSON rule's field, which the body goes out with the value in. */
+  field: Field | null;
   /** What authenticated the request to coffre and goes no further: the handle, a workload's session token; null for a Cloudflare call. */
   secret: { pattern: RegExp; length: number; what: string } | null;
   /** The payload hash a sigv4 credential signs, as a session's proof bound it (its body line); else the request's own, or its bytes'. */
@@ -1306,7 +1367,8 @@ type Sending = Aim & Carried & {
  * authenticated the request to coffre goes nowhere upstream.
  */
 async function send(request: Request, credential: Resolved, out: Sending): Promise<Response> {
-  const { target, under, body, streamed, declared, digest, headers, opened: { values, plain }, secret } = out;
+  const { target, under, streamed, declared, digest, headers, opened: { values, plain }, secret } = out;
+  let { body } = out;
   const inject = credential.inject;
   // A streamed body says its length itself, which S3 requires of a PutObject.
   if (streamed) headers.set('content-length', declared);
@@ -1314,6 +1376,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     if (inject.kind === 'header') headers.set(inject.name, render(inject.template, values));
     if (inject.kind === 'basic') headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(inject.user, values)}:${render(inject.password, values)}`)))}`);
     if (inject.kind === 'query') target.searchParams.set(inject.name, render(inject.template, values));
+    if (inject.kind === 'form' || inject.kind === 'json') body = out.field!.fill(render(inject.template, values));
     if (inject.kind === 'sigv4') {
       // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
       for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
@@ -1331,10 +1394,16 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     // The platform's error quotes the value it refused: neither it nor its message goes anywhere, a log included.
     return failure(409, `${credential.name}'s value is no valid ${inject.kind === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
   }
-  // What authenticated the request goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64.
+  // The body changed: a digest of it is made again, of what goes out, and Content-Length is fetch's.
+  if (out.field !== null) {
+    for (const name of ['repr-digest', 'digest', 'content-md5']) headers.delete(name);
+    if (headers.has('content-digest')) headers.set('content-digest', contentDigest(await bodyDigest(body!)));
+  }
+  // What authenticated the request goes no further than coffre: anywhere else the app put it, the request stops, as it is or in Basic's base64,
+  // or, in a form or JSON body, decoded.
   if (secret !== null) {
     const leaked = [...headers].find(([, value]) => carries(value, secret.pattern)) ?? (carries(bytesOf(target.href), secret.pattern) ? ['URL'] : undefined)
-      ?? (body !== undefined && secret.pattern.test(LATIN1.decode(body)) ? ['body'] : undefined);
+      ?? ((body !== undefined && secret.pattern.test(LATIN1.decode(body))) || (out.field !== null && secret.pattern.test(out.field.rest)) ? ['body'] : undefined);
     if (leaked !== undefined) {
       return failure(400, `${secret.what} is somewhere ${credential.name} does not take its key: ${leaked[0] === 'URL' || leaked[0] === 'body' ? `the ${leaked[0]}` : `the ${leaked[0]} header`}`);
     }
@@ -1343,7 +1412,8 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   // What the request carried: each secret value, and what the rule made of them, Basic's base64, as stored and as they went
   // out (`Headers` trims a value's surrounding whitespace), in each form an honest upstream may echo it in (`echoed`). A plain
   // value is no secret, and an upstream quotes an account's id back as a matter of course: it stays.
-  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
+  const injected = inject.kind === 'header' ? headers.get(inject.name)! : inject.kind === 'form' || inject.kind === 'json' ? render(inject.template, values)
+    : inject.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
     : inject.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(inject.name)!;
   const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
   // What the rule made of them too, unless it is made of plain values alone: an account's id in a header is quoted back.
@@ -1422,14 +1492,24 @@ function echoed(value: string): string[] {
   ];
 }
 
-/** Bytes as a string of one character each, U+0000 to U+00FF: what the redaction scans, in any charset. */
+/**
+ * Bytes as a string of one character each, U+0000 to U+00FF: what the
+ * redaction scans, in any charset. Each byte widened to a UTF-16 unit and
+ * decoded natively, a twentieth of the CPU `String.fromCharCode` takes;
+ * never `latin1`, which WHATWG decodes as windows-1252 (0x80 is €).
+ */
 function binary(bytes: Uint8Array): string {
-  let text = '';
-  for (let at = 0; at < bytes.length; at += 8192) text += String.fromCharCode(...bytes.subarray(at, at + 8192));
-  return text;
+  return UTF16.decode(Uint16Array.from(bytes));
 }
 
 const LATIN1 = new TextDecoder('latin1');
+
+/** A string of one character a byte, U+0000 to U+00FF, as its bytes: `binary`'s inverse. */
+function binaryBytes(text: string): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(text.length);
+  for (let at = 0; at < text.length; at++) bytes[at] = text.charCodeAt(at);
+  return bytes;
+}
 
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
@@ -1595,14 +1675,15 @@ function carriesHandle(inject: Inject, plain: ReadonlySet<string>): boolean {
   return slots.some((slot) => [...slot.matchAll(TEMPLATE_KEY)].some((match) => !plain.has(match[1]!)));
 }
 
-/** The handle, where the app sends it: `x-coffre-handle` (the `credential(name)` helper), or where the credential takes its key. */
-function handleIn(request: Request, credential: Resolved, target: URL): string | null {
+/** The handle, where the app sends it: `x-coffre-handle` (the `credential(name)` helper), or where the credential takes its key, a form or JSON rule's `field`. */
+function handleIn(request: Request, credential: Resolved, target: URL, field: string | null = null): string | null {
   const explicit = request.headers.get('x-coffre-handle');
   if (explicit !== null) return HANDLE.exec(explicit)?.[0] ?? null;
   const inject = credential.inject;
   let slot: string | null = null;
   if (inject.kind === 'header') slot = request.headers.get(inject.name);
   if (inject.kind === 'query') slot = target.searchParams.get(inject.name);
+  if (inject.kind === 'form' || inject.kind === 'json') slot = field;
   // The SDK's `Credential=<access key id>/…`: the handle, as the access key it signed with.
   if (inject.kind === 'sigv4') slot = /Credential=([^/,\s]+)\//.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
   if (inject.kind === 'basic') {
@@ -1625,6 +1706,177 @@ function bearer(request: Request): string | null {
   return /^Bearer\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
 }
 
+/** A rule that fills a field of the body, a form's or a JSON object's. */
+type BodyRule = Extract<Inject, { kind: 'form' | 'json' }>;
+
+function inBody(inject: Inject): inject is BodyRule {
+  return inject.kind === 'form' || inject.kind === 'json';
+}
+
+/**
+ * A form or JSON rule's field in the request's body: what the app put there,
+ * decoded; every other name and value in the body, decoded, a line each,
+ * which nothing that authenticated the request may be in; and the body with
+ * a value in the field's place, every other byte as it was.
+ */
+type Field = { value: string; rest: string; fill: (value: string) => Uint8Array<ArrayBuffer> };
+
+/**
+ * The field a form or JSON rule fills, in a body of the type it names, in
+ * UTF-8 and not compressed, or the refusal: no field, the field twice,
+ * which upstreams read differently, or a JSON field that holds no string.
+ * Nothing of the body is quoted: the handle, or another secret, may be in it.
+ */
+function fieldIn(request: Request, body: Uint8Array | undefined, name: string, inject: BodyRule): Field | Response {
+  const type = inject.kind === 'form' ? 'application/x-www-form-urlencoded' : 'application/json';
+  if (body === undefined || body.length === 0) return failure(400, `${name} takes its key in the ${inject.name} field of the body: send one, ${type}, with a POST or the like`);
+  const [media, ...parameters] = (request.headers.get('content-type') ?? '').split(';').map((part) => part.trim().toLowerCase());
+  const charset = parameters.find((parameter) => parameter.startsWith('charset='))?.slice('charset='.length).replace(/^"(.*)"$/, '$1');
+  if (media !== type || (charset !== undefined && charset !== 'utf-8') || !/^(identity)?$/i.test(request.headers.get('content-encoding') ?? '')) {
+    return failure(415, `${name} takes its key in the ${inject.name} field of an ${type} body, UTF-8 and not compressed`);
+  }
+  const found = (inject.kind === 'form' ? formField : jsonField)(body, inject.name);
+  return typeof found === 'string' ? failure(400, `the body ${found}, where ${name} takes its key`) : found;
+}
+
+/**
+ * A field's name as some upstream's parser may read it, the same as
+ * another's: up to a `[` (PHP's and qs's arrays, `refresh_token[0]`),
+ * case folded (Go's JSON, `SECRET` and `ſecret`), and its letters and
+ * digits alone (PHP's `.` and space, `refresh.token`). Another name alike
+ * the field's is the field twice, which upstreams read differently.
+ */
+function alike(name: string): string {
+  return name.split('[', 1)[0]!.toUpperCase().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * A form's field, as WHATWG's parser reads one: `&`-separated pairs, the
+ * name up to the first `=`, `+` a space and `%XX` a byte. Filled, the pair
+ * keeps its name as written and takes the value form-encoded. Scanned as
+ * bytes, one character each, so every other byte goes on as it came.
+ */
+function formField(bytes: Uint8Array, name: string): Field | string {
+  const pairs = binary(bytes).split('&', MAX_FIELDS + 1);
+  if (pairs.length > MAX_FIELDS) return `has more than ${MAX_FIELDS} fields`;
+  const decoded = (part: string) => bytesOf(part.replace(/\+/g, ' '));
+  // A name is the field's as written, or once decoded, where it has anything to decode; one `alike` it makes it twice.
+  const names = pairs.map((pair) => {
+    const equals = pair.indexOf('=');
+    const key = equals === -1 ? pair : pair.slice(0, equals);
+    return /[%+]/.test(key) ? decoded(key) : key;
+  });
+  const at = names.flatMap((key, index) => (key === name ? [index] : []));
+  if (at.length === 0) return `has no ${name} field`;
+  const as = alike(name);
+  if (at.length > 1) return `has the ${name} field more than once`;
+  if (names.filter((key) => alike(key) === as).length > 1) return `has a name alike ${name}, which some upstreams read as it`;
+  const index = at[0]!;
+  const pair = pairs[index]!;
+  const equals = pair.indexOf('=');
+  const written = equals === -1 ? pair : pair.slice(0, equals);
+  const value = new TextDecoder().decode(binaryBytes(decoded(equals === -1 ? '' : pair.slice(equals + 1))));
+  return {
+    value,
+    rest: decoded(pairs.filter((_, other) => other !== index).join('\n')),
+    fill: (filled) => binaryBytes(pairs.map((other, at) => (at === index ? `${written}=${new URLSearchParams([['', filled]]).toString().slice(1)}` : other)).join('&')),
+  };
+}
+
+/**
+ * A JSON object's field, at its top, whose value is a string. Each string
+ * in the document is found in order, keys included, with how deep it lies:
+ * in valid JSON, a quote outside a string opens one. The scan stops at
+ * `MAX_FIELDS` and `MAX_DEPTH`, before `JSON.parse` holds it to JSON at
+ * all. Filled, the value's string is replaced, and nothing else is written
+ * again: a number too long for a double keeps every digit.
+ */
+function jsonField(bytes: Uint8Array, name: string): Field | string {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return 'is no JSON';
+  }
+  let depth = 0;
+  let from = 0;
+  let strings = 0;
+  // Whether the last string was the field's name, its value next; and where that value lies.
+  let named = false;
+  let found: { start: number; end: number; value: string } | null = null;
+  const rest: string[] = [];
+  const as = alike(name);
+  const colon = /\s*:/y;
+  /** Whether what lies between two strings takes the document past `MAX_DEPTH`. */
+  const deeper = (gap: string): boolean => {
+    for (const char of gap) {
+      depth += char === '{' || char === '[' ? 1 : char === '}' || char === ']' ? -1 : 0;
+      if (depth > MAX_DEPTH) return true;
+    }
+    return false;
+  };
+  let parsed: unknown;
+  try {
+    for (const match of text.matchAll(/"[^"\\]*(?:\\.[^"\\]*)*"/g)) {
+      const gap = text.slice(from, match.index);
+      if (deeper(gap)) return `nests deeper than ${MAX_DEPTH}`;
+      // A name and a value each.
+      if (++strings > 2 * MAX_FIELDS) return `has more than ${MAX_FIELDS} fields`;
+      from = match.index + match[0].length;
+      const string = match[0].includes('\\') ? (JSON.parse(match[0]) as string) : match[0].slice(1, -1);
+      if (named) {
+        if (!/^\s*:\s*$/.test(gap)) return `gives ${name} as no string`;
+        found = { start: match.index, end: from, value: string };
+        named = false;
+      } else if (depth === 1 && ((colon.lastIndex = from), colon.test(text))) {
+        // A name at the top: the field's, once; any other `alike` it makes it twice.
+        if (string === name && found === null) named = true;
+        else if (alike(string) === as) return string === name ? `has the ${name} field more than once` : `has a name alike ${name}, which some upstreams read as it`;
+        else rest.push(string);
+      } else rest.push(string);
+    }
+    if (deeper(text.slice(from))) return `nests deeper than ${MAX_DEPTH}`;
+    // A byte order mark, which JSON.parse refuses and a parser of the web skips, kept where it is.
+    parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch {
+    return 'is no JSON';
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return 'is no JSON object';
+  if (named) return `gives ${name} as no string`;
+  if (found === null) return `has no ${name} field at its top`;
+  const { start, end, value } = found;
+  return { value, rest: rest.join('\n'), fill: (filled) => new TextEncoder().encode(`${text.slice(0, start)}${JSON.stringify(filled)}${text.slice(end)}`) };
+}
+
+/** A form or JSON rule's body, read whole, and its field in it. */
+type Fillable = { content: Carried; field: Field };
+
+async function fillable(request: Request, credential: Resolved, inject: BodyRule): Promise<Fillable | Response> {
+  const content = await carried(request, credential);
+  if (content instanceof Response) return content;
+  const field = fieldIn(request, content.body, credential.name, inject);
+  return field instanceof Response ? field : { content, field };
+}
+
+/**
+ * A form or JSON rule's body and field, or its refusal of the body, for the
+ * stable URL, which needs the handle before it knows the route: read from a
+ * copy, which the route sends if it goes through this credential. A route
+ * through one that was not peeked, a header rule's, reads the request itself.
+ * Null for any other rule.
+ */
+async function peekField(request: Request, credential: Resolved): Promise<Fillable | Response | null> {
+  const inject = credential.inject;
+  if (!inBody(inject)) return null;
+  const copy = request.clone();
+  try {
+    return await fillable(copy, credential, inject);
+  } finally {
+    // A copy left unread would keep every byte the request's own body is read for: cancelled, and not waited for, as `boundedBody` does.
+    if (!copy.bodyUsed) void copy.body?.cancel().catch(() => undefined);
+  }
+}
+
 /** The body, read whole up to `max` bytes, and no further: null past it, the rest left unread. */
 async function boundedBody(request: Request, max = MAX_BODY_BYTES): Promise<Uint8Array<ArrayBuffer> | undefined | null> {
   if (Number(request.headers.get('content-length') ?? '0') > max) return null;
@@ -1637,7 +1889,8 @@ async function boundedBody(request: Request, max = MAX_BODY_BYTES): Promise<Uint
     if (done) break;
     size += value.byteLength;
     if (size > max) {
-      await reader.cancel();
+      // Not waited for: a copy's (`peekField`) settles only once the request's own body is done with too.
+      void reader.cancel().catch(() => undefined);
       return null;
     }
     chunks.push(value);
@@ -1756,6 +2009,7 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
     : inject.kind === 'sigv4' ? [inject.accessKeyId, inject.secretAccessKey, ...(inject.sessionToken === undefined ? [] : [inject.sessionToken])]
     : [inject.template];
   if ((inject.kind === 'header' || inject.kind === 'query') && !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
+  if (inBody(inject) && !/^(?=.*[A-Za-z0-9])[A-Za-z0-9_.-]{1,128}$/.test(inject.name)) throw new Error(`credentialProxy: ${name} fills the field ${JSON.stringify(inject.name)}, which is no field name: letters, digits and _.-, a letter or digit among them, at the top of the body`);
   if (inject.kind === 'sigv4' && (!/^[a-z0-9-]{1,32}$/.test(inject.region) || !/^[a-z0-9-]{1,32}$/.test(inject.service))) throw new Error(`credentialProxy: ${name} signs for a region and a service, eu-west-3 and s3`);
   const keys = [...new Set(templates.flatMap((template) => [...template.matchAll(TEMPLATE_KEY)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);
@@ -1781,14 +2035,14 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
 
 /**
  * The slot a shaped placeholder fills, as a pattern: the rule's template, the
- * placeholder where its key goes, the handle its one group. Only a header or
- * a query parameter that carries one key, once, takes a shaped placeholder:
+ * placeholder where its key goes, the handle its one group. Only a header, a
+ * query parameter or a body's field that carries one key, once, takes a shaped placeholder:
  * Basic's pair, and an AWS key pair, are no one token to shape.
  */
 function placeholderShape(name: string, placeholder: Placeholder, inject: Inject): RegExp {
   if (placeholder.kind !== 'jwt' && placeholder.kind !== 'prefix') throw new Error(`credentialProxy: ${name}'s placeholder is jwt(…) or prefix(…)`);
-  if ((inject.kind !== 'header' && inject.kind !== 'query') || [...inject.template.matchAll(TEMPLATE_KEY)].length !== 1) {
-    throw new Error(`credentialProxy: ${name}'s placeholder shapes the one key a header or query rule carries, header('authorization', 'Bearer {TOKEN}'), not a ${inject.kind === 'basic' || inject.kind === 'sigv4' ? `${inject.kind}() rule` : 'template with several keys, or one twice'}`);
+  if (inject.kind === 'basic' || inject.kind === 'sigv4' || [...inject.template.matchAll(TEMPLATE_KEY)].length !== 1) {
+    throw new Error(`credentialProxy: ${name}'s placeholder shapes the one key a header, query, form or JSON rule carries, header('authorization', 'Bearer {TOKEN}'), not a ${inject.kind === 'basic' || inject.kind === 'sigv4' ? `${inject.kind}() rule` : 'template with several keys, or one twice'}`);
   }
   if (placeholder.kind === 'jwt' && (!Array.isArray(placeholder.claims) || placeholder.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === 'exp'))) {
     throw new Error(`credentialProxy: ${name}'s jwt() names the claims it copies from the real token, each a string; exp is the handle's end, never copied`);

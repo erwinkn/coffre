@@ -15,6 +15,25 @@
   once from 943 ms to 707 ms at p99, and ten at once from 2,473 ms to
   1,514 ms. No migration.
 
+- **A credential can put its key in one field of a small form or JSON
+  body.** `form('refresh_token', '{GATHER_REFRESH_TOKEN}')` and
+  `json('secret', '{TURNSTILE_SECRET_KEY}')`, from
+  `@coffre/server/plugins/credential-proxy`, sit beside `header()` and
+  `query()`. They cover Firebase's token refresh and Turnstile's siteverify.
+  The app sends its usual body with its handle in that field (a workload
+  puts anything there). coffre reads the body whole, 64 KiB and 256
+  fields at most, replaces only that field's value and forwards every
+  other byte as sent, with `Content-Length`, and any `Content-Digest`,
+  computed again. It refuses, sending nothing:
+  - a body of another type, charset or encoding;
+  - a body that is too large or malformed;
+  - a body without the field, or with it twice;
+  - a handle anywhere else in the body, however it is encoded.
+
+  SigV4 credentials take no body rule. Nothing to migrate, and no new
+  query ([credential-proxy.md](docs/design/credential-proxy.md), section 5,
+  "A field of the body").
+
 ## 0.14.3 (2026-10-26)
 
 - **Upgrading to 0.14.3, in short.** One migration, `0019_backup_role`,
