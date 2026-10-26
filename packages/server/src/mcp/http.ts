@@ -3,9 +3,8 @@
 // without a good token (docs/design/mcp.md, section 4). `app.ts` routes to
 // them and checks the method.
 import { MCP_SCOPES } from '@coffre/core/mcp';
-import { isUnavailable } from '@coffre/db/dialect';
 
-import { ApiError, notFound, UNAVAILABLE, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
+import { ApiError, notFound, toErrorBody, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { bearerToken } from '../auth.ts';
 import { errorResponse, jsonResponse, readLimitedJson, readLimitedText } from '../http.ts';
 import { logged } from '../logged.ts';
@@ -70,16 +69,16 @@ function oauthError(error: unknown): Response {
       ...(error.status === 429 ? { 'retry-after': '60' } : error.status === 503 ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
     });
   }
-  // coffre not answering for a moment, as the API says it (`toErrorBody`): a lock or a connection that gave up included.
-  if ((error instanceof ApiError && error.code === 'unavailable') || isUnavailable(error)) {
-    if (!(error instanceof ApiError)) console.error('a dependency did not answer', logged(error));
-    const passing = !(error instanceof ApiError) || error.reason === undefined;
-    return jsonResponse({ error: 'temporarily_unavailable', error_description: error instanceof ApiError ? error.message : UNAVAILABLE }, 503, passing ? { ...NO_STORE, 'retry-after': UNAVAILABLE_RETRY_AFTER } : NO_STORE);
+  // Anything else as the API maps and logs it (`toErrorBody`): coffre not answering for a moment, a lock or a connection
+  // that gave up included, is the client's to ask again; a request that is wrong is the client's to fix.
+  const { status, body } = toErrorBody(error);
+  if (status === 503) {
+    const passing = body.error === 'unavailable' && body.reason === undefined;
+    return jsonResponse({ error: 'temporarily_unavailable', error_description: body.message }, 503, passing ? { ...NO_STORE, 'retry-after': UNAVAILABLE_RETRY_AFTER } : NO_STORE);
   }
-  if (error instanceof ApiError && error.code === 'bad_request') {
-    return jsonResponse({ error: 'invalid_request', error_description: error.message }, 400, NO_STORE);
-  }
-  console.error('oauth endpoint failed', logged(error));
+  if (status === 400) return jsonResponse({ error: 'invalid_request', error_description: body.message }, 400, NO_STORE);
+  // `toErrorBody` logged what it did not know; a refusal of the API's has no place here, and is logged as a failure.
+  if (status !== 500) console.error('oauth endpoint failed', logged(error));
   return jsonResponse({ error: 'server_error', error_description: 'something went wrong; see the server log' }, 500, NO_STORE);
 }
 

@@ -471,6 +471,13 @@ test("a read waits at least the instance's Retry-After before it asks again", as
   assert.match(read.stderr, /asking again in (4\.\d|5\.\d|6\.0) s/);
 });
 
+test('a read told to come back later than a run waits is not asked again', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [null], retryAfter: '60' } });
+  const read = await coffre.coffre(['get', 'deploy/prod/TOKEN']);
+  assert.equal(read.code, 1);
+  assert.deepEqual(coffre.requests, ['reveal deploy/prod/TOKEN']);
+});
+
 test("an instance moving to its new key is asked again, and so is the Action's gate, missing --check", async (t) => {
   const rotating = { error: 'rotating', message: 'coffre is moving to its new app key' };
   const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [rotating] } });

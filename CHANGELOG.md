@@ -60,7 +60,8 @@
   answer `Retry-After: 5`, as the app already did while it could not reach
   its database at all: a caller back sooner joins the queue it left. The
   CLI waits at least that long before it asks again (up to 10 s), each of
-  its waits 15 s at most. The workload SDK, `coffre serve` included, waits
+  its waits 15 s at most; told to come back later than that, it does not
+  ask again. The workload SDK, `coffre serve` included, waits
   at least that long before it proves a session again. MCP's OAuth
   endpoints, a socket coffre took too long to admit, and vault-kv say it
   too. The exchange's own 503s say 5 s where nothing makes a longer wait
