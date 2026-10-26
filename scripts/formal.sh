@@ -9,7 +9,12 @@
 #
 #   scripts/formal.sh                 every scenario
 #   scripts/formal.sh Deletion        one, and its runs without a protection
+#   scripts/formal.sh Deletion Locks  several
+#   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
+#                                     large or rest
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
+#   scripts/formal.sh --heap 4g       TLC's JVM heap (default 1g)
+#   scripts/formal.sh --list          what would run, not running TLC
 set -euo pipefail
 
 # TLA+ tools 1.7.4 (2024-08-05), the latest stable release. Not 1.8.0, a
@@ -112,18 +117,37 @@ REMOVALS=(
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
 )
 
+# CI's shards, balanced by what each scenario took on a runner (seconds,
+# `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
+# `rest`, every other scenario, about 260. A scenario in no case below is in `rest`.
+shard_of() {
+  case "$1" in
+    Tampering) echo tampering ;;
+    Overtaking|Walking|Sharing|Rows|Mixed) echo large ;;
+    *) echo rest ;;
+  esac
+}
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 workers=2
-only=""
+heap=1g
+list=""
+shard=""
+only=" "
 while [ $# -gt 0 ]; do
   case "$1" in
     --workers) workers="$2"; shift 2 ;;
-    *) only="$1"; shift ;;
+    --heap) heap="$2"; shift 2 ;;
+    --list) list=1; shift ;;
+    --shard)
+      case "$2" in tampering|large|rest) shard="$2" ;; *) echo "no shard $2 (tampering, large or rest)" >&2; exit 2 ;; esac
+      shift 2 ;;
+    *) only="$only$1 "; shift ;;
   esac
 done
 
 jar="${XDG_CACHE_HOME:-$HOME/.cache}/coffre/tla2tools-$TLA_VERSION.jar"
-if ! echo "$TLA_SHA256  $jar" | sha256sum -c --status 2>/dev/null; then
+if [ -z "$list" ] && ! echo "$TLA_SHA256  $jar" | sha256sum -c --status 2>/dev/null; then
   mkdir -p "$(dirname "$jar")"
   curl -fsSL --retry 3 -o "$jar.part" "$TLA_URL"
   echo "$TLA_SHA256  $jar.part" | sha256sum -c --quiet
@@ -143,7 +167,7 @@ tlc() {
   # TLC names its states directory by the second it starts: two runs in one
   # second would share it, and the second fail.
   rm -rf "$work/states"
-  (cd "$work" && java -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -nowarning -difftrace \
+  (cd "$work" && java -XX:+UseParallelGC -Xmx$heap -cp "$jar" tlc2.TLC -nowarning -difftrace \
     -workers "$workers" -metadir "$work/states" -config "$1" "${module:-MC}.tla") >"$work/out.txt" 2>&1 || true
 }
 
@@ -151,8 +175,19 @@ failed=0
 scenarios=()
 for cfg in "$root"/formal/*.cfg; do scenarios+=("$(basename "$cfg" .cfg)"); done
 
+for name in $only; do
+  [ -f "$root/formal/$name.cfg" ] || { echo "no scenario $name: formal/$name.cfg" >&2; exit 2; }
+done
+
+# Whether this run covers a scenario: one named, one in the shard, or all.
+wanted() {
+  case "$only" in *" $1 "*) return 0 ;; esac
+  if [ -n "$shard" ]; then [ "$(shard_of "$1")" = "$shard" ]; else [ "$only" = " " ]; fi
+}
+
 for scenario in "${scenarios[@]}"; do
-  [ -n "$only" ] && [ "$only" != "$scenario" ] && continue
+  wanted "$scenario" || continue
+  [ -z "$list" ] || { echo "holds    $scenario"; continue; }
   started=$SECONDS
   tlc "$scenario.cfg"
   if grep -q '^Model checking completed. No error has been found.' "$work/out.txt"; then
@@ -168,7 +203,8 @@ done
 
 for removal in "${REMOVALS[@]}"; do
   read -r scenario protection invariant <<<"$removal"
-  [ -n "$only" ] && [ "$only" != "$scenario" ] && continue
+  wanted "$scenario" || continue
+  [ -z "$list" ] || { echo "without  $scenario $protection"; continue; }
   # The scenario with the protections off, holding to the one invariant they keep.
   cp "$work/$scenario.cfg" "$work/without.cfg"
   missing=""

@@ -5,7 +5,7 @@ import test from 'node:test';
 
 // Exercise the expression the real final job runs, including rejected states.
 const workflow = readFileSync(new URL('../.github/workflows/validate.yml', import.meta.url), 'utf8');
-const expression = workflow.match(/jq -e '([\s\S]*?)' <<</)[1];
+const expression = workflow.match(/Require full validation[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
 const jobs = ['checks', 'tests', 'schema', 'formal', 'proofs', 'workers', 'node', 'consumer', 'compat'];
 function needs(fast) {
     return {
@@ -61,10 +61,11 @@ test('missing or unknown detector output requires every normal job to pass', () 
 });
 
 // These job predicates use only the shared JS/GitHub boolean operators and
-// string comparisons. Evaluate the actual nine expressions with known states.
+// string comparisons. Evaluate the actual ten expressions with known states:
+// the nine jobs Validate waits on, and the Formal model's plan beside them.
 test('every heavy lane runs unless classification succeeds with a true output', () => {
-    const predicates = [...workflow.matchAll(/    if: \$\{\{ (.*?) \}\}/g)].map((match) => match[1]);
-    assert.equal(predicates.length, jobs.length);
+    const predicates = [...workflow.matchAll(/    if: \$\{\{ (always\(\).*?) \}\}/g)].map((match) => match[1]);
+    assert.equal(predicates.length, jobs.length + 1);
     for (const expression of predicates) {
         const run = new Function('needs', 'always', 'cancelled', `return (${expression});`);
         assert.equal(run(needs(true), () => true, () => false), false);
@@ -74,4 +75,45 @@ test('every heavy lane runs unless classification succeeds with a true output', 
         assert.equal(run(failed, () => true, () => false), true);
         assert.equal(run(needs(false), () => true, () => true), false);
     }
+});
+
+// `Formal model` answers for its plan and shards: the shards ran and held, or
+// the plan found a green run of the same inputs and they were skipped.
+const formalGate = workflow.match(/Require every shard[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
+function formalAccepted(plan, shard) {
+    const input = { 'formal-plan': plan, 'formal-shard': { result: shard } };
+    const result = spawnSync('jq', ['-e', formalGate], { input: JSON.stringify(input), encoding: 'utf8', timeout: 5000 });
+    assert.ok([0, 1].includes(result.status), result.stderr);
+    return result.status === 0;
+}
+
+test('Formal model passes on held shards or a hit, and on nothing else', () => {
+    const planned = (hit) => ({ result: 'success', outputs: { hit } });
+    assert.equal(formalAccepted(planned('false'), 'success'), true);
+    assert.equal(formalAccepted(planned('true'), 'skipped'), true);
+    for (const result of ['failure', 'cancelled', 'skipped']) {
+        assert.equal(formalAccepted(planned('false'), result), false, `shards ${result}`);
+    }
+    for (const result of ['success', 'failure', 'cancelled']) {
+        assert.equal(formalAccepted(planned('true'), result), false, `hit, shards ${result}`);
+    }
+    // A plan with no answer is no hit: the shards must have held.
+    assert.equal(formalAccepted({ result: 'success', outputs: {} }, 'skipped'), false);
+    assert.equal(formalAccepted({ result: 'success', outputs: {} }, 'success'), true);
+    for (const result of ['failure', 'cancelled', 'skipped']) {
+        assert.equal(formalAccepted({ result, outputs: { hit: 'true' } }, 'skipped'), false, `plan ${result}`);
+        assert.equal(formalAccepted({ result, outputs: { hit: 'false' } }, 'success'), false, `plan ${result}`);
+    }
+});
+
+test('the shards partition formal.sh and the workflow runs each of them', () => {
+    const list = (...args) => spawnSync('scripts/formal.sh', ['--list', ...args], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname });
+    const all = list().stdout.trim().split('\n');
+    assert.ok(all.length > 100);
+    const matrix = workflow.match(/shard: \[([a-z, ]+)\]/)[1].split(', ');
+    assert.deepEqual(matrix, ['tampering', 'large', 'rest']);
+    const sharded = matrix.flatMap((shard) => list('--shard', shard).stdout.trim().split('\n'));
+    assert.deepEqual([...sharded].sort(), [...all].sort());
+    const tampering = list('--shard', 'tampering').stdout.trim().split('\n');
+    assert.ok(tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
 });

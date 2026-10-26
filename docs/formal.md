@@ -44,7 +44,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
   counterexample one step per line.
 
-CI runs it in the *Formal model* job of `validate.yml`.
+CI runs it in the *Formal model* job of `validate.yml`, and skips TLC when
+the model's inputs are unchanged ([below](#in-ci)).
 
 ## What it checks
 
@@ -1104,6 +1105,39 @@ shortest one.
   - Apalache checks symbolically, by trace length, and is much larger.
   - Quint's simulator samples traces rather than covering every one, and
     its exhaustive mode downloads Apalache at run time.
+
+### In CI
+
+Run in order, the 125 TLC runs took 22 minutes, twice the tests. Two things
+cut that, and `Formal model` is still the one job `Validate` asks about, on
+every pull request that is not a version-only bump:
+
+- **A green run of the same inputs is not run again.** TLC's answer depends
+  on what it is given and nothing else, so `Formal model plan` hashes that,
+  [`scripts/formal-key.sh`](../scripts/formal-key.sh): `formal/*.tla` and
+  `formal/*.cfg` (all `formal.sh` copies; the Lean proofs are
+  `formal-lean`'s), `formal.sh` itself, which pins TLC's jar by checksum,
+  `formal-trace.mjs`, the workflow, and the runner's Java (vendor and exact
+  build). A full green run saves that key, with its run id, in Actions' cache,
+  only after every shard has held. The next run of a key that has one logs
+  "TLC skipped" with the key and the run that held, and finishes in
+  seconds. The plan reads the repository's whole cache list, not a restore,
+  which would see only the pull request's own and `main`'s: a model merged
+  from a pull request is a hit for the next. GitHub drops a cache a week
+  after it was made, so after a quiet week the first run is a full one. To
+  trust nothing, label the pull request `full-formal` and re-run the plan.
+  The cache is an assertion by whoever may run workflows here, as the check
+  itself is.
+- **A run is three jobs in parallel.** `scripts/formal.sh --shard
+  tampering|large|rest` runs the scenarios of one (`shard_of`), each with its
+  runs without a protection, balanced by what they took: Tampering's 7
+  minutes (17.5 million states) alone, Overtaking, Walking, Sharing, Rows and
+  Mixed together, and the rest. A new scenario is in `rest`. `--list` prints
+  what a run would run, without TLC; a test holds the three to a partition
+  of it. A shard that fails fails `Formal model`, and each prints its own
+  counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
+  default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g
+  or 8g, on a 4-core, 16 GB runner.
 
 # Proofs in Lean
 
