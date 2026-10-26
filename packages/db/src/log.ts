@@ -178,7 +178,8 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
  * connections wait for the head, or hold it, through here, and a burst
  * beyond them answers in one round trip rather than seconds later, holding
  * a connection all the while. One statement: the place, then, only if one
- * was free, the head. SQLite's transactions hold the whole file.
+ * was free, the head; refused, one more says whether the head is there at
+ * all. SQLite's transactions hold the whole file.
  */
 export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promise<{ nextSeq: bigint; headHash: Buffer }> {
   if (engineOf(tx) === 'sqlite') return lockLogHead(tx);

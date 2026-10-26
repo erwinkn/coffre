@@ -5,8 +5,9 @@
 - **A read under load answers within seconds: read, or 503 at once.** A
   read's whole vault call, its retries, the entries of a refusal, the
   record of a vault key's check and a key service's intent included, is
-  due five seconds after it starts (with a key service, plus its own
-  five-second budget, spent from the same deadline). Each transaction's
+  due five seconds after its key decision starts (with a key service, plus
+  its own five-second budget, spent from the same deadline). Settling the
+  vault's keys after a rotation, once, is not bound by it. Each transaction's
   waits are bounded by what is left, and past the deadline it fails as
   unavailable rather than start another; a refused read's entries take a
   place in line too, and no longer wait fifteen seconds for the log's

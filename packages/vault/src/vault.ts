@@ -2481,7 +2481,9 @@ class VaultService implements Vault {
     const checks = await this.#checkValues(this.#db);
     const budget = this.#prepared.options.keyBudgetMs;
     for (const kek of this.#config.keks.all) {
-      const operation = { deadline: Date.now() + budget, signal: AbortSignal.timeout(budget) };
+      // A read's, within what is left of its deadline.
+      const spend = within(deadline, budget);
+      const operation = { deadline: Date.now() + spend, signal: AbortSignal.timeout(spend) };
       const opens = async (wrapped: WrappedDek, context: SecretContext, expected?: Buffer) => {
         try {
           const key = await kek.unwrap(wrapped, context, operation);
