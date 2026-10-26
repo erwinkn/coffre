@@ -21,13 +21,13 @@
   operation follows it, and no value is handed back; when it finds the
   policy changed under a use that also holds plain values, the use
   answers 409 and hands back nothing, and the entry stands as the
-  release's record alone. A vault older than
-  0.14.5 does not name the use back, and the app appends it as before; so
-  does a use of plain values only, which asks no vault, and one whose
-  record is longer than the vault takes (16 KiB, a use naming hundreds of
-  keys). Deploy
-  the vault first, as ever. No migration
-  ([formal.md](docs/formal.md), `Proxying`).
+  release's record alone. The vault vouches for the actor, the time and
+  the release; where the use went, its credential and host, are the app's
+  word, as they were. A vault older than 0.14.5 does not name the use
+  back, and the app appends it as before; so does a use of plain values
+  only, which asks no vault, and one whose record is longer than the
+  vault takes (16 KiB, a use naming hundreds of keys). Deploy the vault
+  first, as ever. No migration ([formal.md](docs/formal.md), `Proxying`).
 
 - **A read under load answers within seconds: read, or 503 at once.** A
   read's whole vault call, its retries, the entries of a refusal, the

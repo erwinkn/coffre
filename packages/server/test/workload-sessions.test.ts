@@ -953,8 +953,8 @@ test('a Cloudflare binding unbound while its use waits for the head releases not
   });
   await held;
   const using = seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
-  // Until the use waits for the head, then the unbind commits.
-  const waiting = async () => (await deps.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted`)).rows[0]!.n;
+  // Until the use waits for the head, in this database (a row lock's wait names a transaction, not a database), then the unbind commits.
+  const waiting = async () => (await deps.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`)).rows[0]!.n;
   for (let tries = 0; (await waiting()) === 0; tries++) {
     assert.ok(tries < 200, 'the use never waited for the head');
     await sleep(10);

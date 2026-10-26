@@ -3164,6 +3164,10 @@ function useEntry(principal: string, correlation: Correlation, use: UseRecord): 
     if (value !== null && (typeof value !== 'string' || !UUID.test(value))) throw new Error(`a use's ${name} must be a lowercase UUID or null`);
     return value;
   };
+  // The bound first: nothing past it is read.
+  if (typeof use.metadata !== 'string' || use.metadata.length > USE_METADATA_LENGTH) {
+    throw new Error(`a use's metadata must be a JSON object of at most ${USE_METADATA_LENGTH} characters`);
+  }
   if (use.sourceIp !== null) validateText(use.sourceIp);
   validateText(use.metadata);
   let metadata: unknown;
@@ -3172,7 +3176,7 @@ function useEntry(principal: string, correlation: Correlation, use: UseRecord): 
   } catch {
     metadata = undefined;
   }
-  if (use.metadata.length > USE_METADATA_LENGTH || typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
     throw new Error(`a use's metadata must be a JSON object of at most ${USE_METADATA_LENGTH} characters`);
   }
   return {

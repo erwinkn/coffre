@@ -351,9 +351,9 @@ UseCommit(p) ==
               /\ Goto(p, "use.answer")
               /\ UNCHANGED <<rows, op, l, left, history>>
 
-\* An export: nothing more to commit, the fence read alone, unlocked: a
-\* revocation committed before it is seen, and one after came after the
-\* release.
+\* An export, or a proxied use the vault logged: nothing more to commit,
+\* the fence read alone, unlocked: a revocation committed before it is
+\* seen, and one after came after the release.
 UseFence(p) ==
     /\ pc[p] = "use.fence"
     /\ IF CredentialFenceUnlocked /\ ~StillLive(Cred(l[p].cred))
