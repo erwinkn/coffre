@@ -101,6 +101,24 @@
   ([credential-proxy.md](docs/design/credential-proxy.md),
   section 5, "Verifying, and HMAC"; [workloads.md](docs/workloads.md)).
 
+- **A busy caller of the credential proxy no longer turns a lapse into a
+  vault call per request.** The proxy keeps a credential's opened values
+  for `cacheSeconds` (60 by default), per session or handle, in each
+  isolate. When an entry lapsed, every request that came before the vault
+  answered asked the vault too: on 2026-10-26 at 04:00Z one backend job's
+  8.5 requests a second, as one service, made thousands of vault calls in
+  ten minutes, each waiting on that service's member row, and 3,787 of
+  5,079 requests answered 503. In an entry's last quarter (15 seconds at
+  most), one request at a time now opens the values again, holding the
+  others off 5 seconds at most, while they are served the entry; if the
+  vault does not answer, it is served the entry too, and another asks a
+  second later. An entry serves `cacheSeconds` from when the vault was
+  asked, never past it, so revocation and lost grants take effect as
+  before; a refusal ends the entry. A steady caller now opens a key about
+  every 45 seconds rather than every minute, so the audit log has about a
+  third more `use` entries. The stable URL's lookup of a handle's environments
+  (`/use/<credential>`) still lapses each minute.
+
 ## 0.14.2 (2026-10-26)
 
 - **Upgrading to 0.14.2, in short.** No migration, and nothing to change in

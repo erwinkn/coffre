@@ -933,6 +933,14 @@ the proxy caches a handle's today. So:
   removal** take effect on the next request. Supersession takes effect
   within 90 seconds, the old deployment's drain.
 - **A lost grant** takes effect within `cacheSeconds`, as for handles.
+- **An entry about to lapse** is opened again in its last quarter (15
+  seconds at most), by one request at a time, each holding the others off
+  5 seconds at most, while the others are served it: a steady caller makes
+  a vault call about every 45 seconds a key, not one for each request that
+  comes while the vault answers. An entry serves `cacheSeconds` from when
+  the vault was asked, never past it. If the vault does not answer, the
+  one asking is served the entry and another asks a second later; if it
+  refuses, the entry goes.
 - **A warm request** therefore costs one SQL statement, one gate call and
   one ES256 verify, with no vault call. A cold one adds `vault.access` and
   the opening, through the vault's own connection: two Postgres

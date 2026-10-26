@@ -509,7 +509,8 @@ $ coffre run market/dev-eu -- pnpm dev     # → dev-eu's, or the key it inherit
   whose environments' paths are asked of coffre (the handle's check, and
   one read of their names) and kept for `cacheSeconds`, as values are. Its
   values are opened and kept as an environment URL's are, in the same
-  cache, so both URLs of one environment share one opening a minute.
+  cache, so both URLs of one environment share one opening about every
+  45 seconds.
 
   The other rule is a reserved segment, one no project slug can be:
   `/use/-/schumann/…`, as GitLab's `/-/` keeps its own routes apart from
@@ -1439,11 +1440,14 @@ the developer's machine to coffre and from coffre to the upstream, which
 for a provider in the same region as coffre is close to what the app
 would have spent anyway.
 
-**Audit volume.** One opening of a credential's keys per handle per
-minute: a vault `secret.read` naming the keys (purpose `use`, the bulk
-shape of #242), and a `credential.use` entry naming the credential and
-its host, sharing its operation id. A dev loop that calls Schumann 500
-times a minute writes 2 entries a minute for it, not 1,000. A call per
+**Audit volume.** One opening of a credential's keys per handle about
+every 45 seconds while it is used: a vault `secret.read` naming the keys
+(purpose `use`, the bulk shape of #242), and a `credential.use` entry
+naming the credential and its host, sharing its operation id. An entry
+serves a minute (`cacheSeconds`) from when the vault was asked, and in its
+last quarter one request opens the keys again while the others are served
+it, so a steady caller meets no lapse. A dev loop that calls Schumann 500
+times a minute writes under 3 entries a minute for it, not 1,000. A call per
 entry would also take the log's head once per call, which serializes every
 request of the instance. And it would run into the vault's bulk limit
 (1,000 keys per 15 minutes per person) in under a minute of
@@ -1555,8 +1559,9 @@ is reversible.
    more than the extra rows.
 5. **12 hours, a week at most, never past the personal token that made
    it.**
-6. **Logged per credential per handle per minute** (`cacheSeconds: 60`),
-   not per call: see the audit volume above.
+6. **Logged per credential per handle about every 45 seconds while used**
+   (`cacheSeconds: 60`, opened again in its last quarter), not per call:
+   see the audit volume above.
 7. **Handles need coffre's sign-in.** Behind Cloudflare Access the proxy
    has no handles. *Later:* keep handles in coffre's own table whatever the
    sign-in, minted by an Access-authenticated person, with `/use/*`

@@ -35,8 +35,8 @@
  * Service binding, for an upstream that allowlists the addresses it lets
  * in), its redirects never followed, and a value the upstream echoes is
  * redacted from its answer. A handle opens values for its person as a read
- * does, by their grants and its scope, logged once per credential a minute
- * (`cacheSeconds`), never handed back. The app holds as they are the
+ * does, by their grants and its scope, logged once per credential about
+ * every 45 seconds while used (`cacheSeconds`), never handed back. The app holds as they are the
  * values its person may read, plain and secret ones, never a sensitive one
  * (docs/design/credential-proxy.md, section 2).
  */
@@ -46,13 +46,15 @@ import { CoffreError } from '@coffre/client';
 import { bodyDigest, bodyLine, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
+import { isUnavailable } from '@coffre/db/dialect';
 
-import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
+import { logged } from '../logged.ts';
 
 /** How a credential's values reach its upstream: in a header, a query parameter, Basic authentication, or an AWS signature. */
 export type Inject =
@@ -285,7 +287,9 @@ export type CredentialProxyOptions = {
    * How long a credential's values, once opened for a handle, serve its
    * next requests from this process's memory: 60 seconds unless set, 0 for
    * a read per request. Each opening is one entry in the log; a revoked
-   * handle's values serve no longer than this.
+   * handle's values serve no longer than this. In its last quarter (15
+   * seconds at most), one request at a time opens them again while the
+   * others are served, so a lapse does not become a vault call per request.
    */
   cacheSeconds?: number;
 };
@@ -352,7 +356,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
-  const cache = new Map<string, Opened & { until: number }>();
+  const cache = new Map<string, Kept>();
   const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
   const groups = new Map<string, Group>();
   return {
@@ -407,13 +411,39 @@ type Proxy = {
   recheckMs: number;
   generate: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
-  cache: Map<string, Opened & { until: number }>;
+  cache: Map<string, Kept>;
   /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). A workload's are its statement's to say. */
   handles: Map<string, { paths: readonly (string | null)[] | null; until: number }>;
 };
 
 /** A credential's values, opened, and which keys of it are plain, no secret: what the answer's redaction leaves as it is. */
 type Opened = { values: Record<string, string>; plain: readonly string[] };
+
+/**
+ * Opened values as the cache keeps them: until when they serve, from when
+ * they are asked for again (`refreshFrom`), and until when no other
+ * request asks (`hold`), a time, never the pending read: one asking that
+ * never answers, its caller gone, holds no one off for long.
+ */
+type Kept = Opened & { until: number; refreshFrom: number; hold?: number };
+
+/**
+ * How long before its values stop serving a cache entry is asked for
+ * again, by one request at a time while the others are served it: a
+ * quarter of `cacheSeconds`, 15 s at most.
+ */
+function refreshWindow(cacheMs: number): number {
+  return Math.min(cacheMs / 4, 15_000);
+}
+
+/** How long one request asking again holds the others off, at most: a slow or abandoned one is followed by another before the entry ends. */
+const REFRESH_ATTEMPT_MS = 5000;
+
+/** How soon after a refresh the vault did not answer another request asks. */
+const REFRESH_RETRY_MS = 1000;
+
+/** What the vault says when it refuses, which ends an entry; anything else, it did not answer. */
+const REFUSED = new Set([401, 403, 404, 409]);
 
 async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response> {
   const url = new URL(request.url);
@@ -1483,7 +1513,16 @@ function cacheKey(user: User, path: string, name: string): string {
   return `\u0001${user.profile === 'cloudflare' ? `binding:${user.bindingId}` : user.credentialId}\u0000${user.place}\u0000${name}`;
 }
 
-/** The credential's values for the handle or workload: remembered for `cacheSeconds`, or opened now, logged as one use. */
+/**
+ * The credential's values for the handle or workload: remembered for
+ * `cacheSeconds` from when the vault was asked, or opened now, logged as
+ * one use. In the last `refreshWindow` of an entry, one request at a time
+ * asks the vault again, for `REFRESH_ATTEMPT_MS` at most, and every other
+ * is served the entry meanwhile, so a steady caller does not turn a lapse
+ * into a call per request. The one asking is served the entry too should
+ * the vault not answer, and a second later another asks; refused, the
+ * entry goes. Nothing serves past `until`.
+ */
 async function valuesFor(
   coffre: PluginContext,
   proxy: Proxy,
@@ -1498,15 +1537,48 @@ async function valuesFor(
   const key = cacheKey(user, path, credential.name);
   const now = Date.now();
   const kept = proxy.cache.get(key);
-  if (kept !== undefined && kept.until > now) return kept;
-  const used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) } });
+  const live = kept !== undefined && kept.until > now ? kept : undefined;
+  // Until when this request holds the others off, should it ask.
+  const hold = now + Math.min(REFRESH_ATTEMPT_MS, refreshWindow(proxy.cacheMs) / 2);
+  if (live !== undefined) {
+    if (now < live.refreshFrom || (live.hold !== undefined && now < live.hold)) return live;
+    live.hold = hold;
+  }
+  let used: Used;
+  try {
+    used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) } });
+  } catch (error) {
+    const held = proxy.cache.get(key);
+    // Refused: whatever the key holds goes, an answer another request kept meanwhile included; at worst it asks again.
+    if (error instanceof CoffreError && REFUSED.has(error.status)) {
+      proxy.cache.delete(key);
+      throw error;
+    }
+    // The vault, or the database, did not answer: the entry held now still serves, whichever request made it. Anything else is no answer of theirs.
+    const unanswered = isUnavailable(error) || (error instanceof CoffreError && error.status === 503);
+    if (live === undefined || !unanswered || held === undefined || held.until <= Date.now()) throw error;
+    console.error("the proxy's cache asked the vault again, unanswered; serving what it holds", logged(error));
+    // Another a second on, unless one already asks after it, whose hold stands.
+    if (held === live && live.hold === hold) live.hold = Date.now() + REFRESH_RETRY_MS;
+    return held;
+  }
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
-  if (missing.length > 0) throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
+  if (missing.length > 0) {
+    proxy.cache.delete(key);
+    throw new CoffreError(409, 'conflict', `${used.environment.path} holds no ${missing.join(', ')}, which ${credential.name} needs`);
+  }
   decided?.();
-  if (proxy.cacheMs > 0) {
+  // Kept only over the entry it set out from: an older answer replaces no newer one, brings back none a refusal ended, and none a tunnel's end removed.
+  if (proxy.cacheMs > 0 && (live === undefined || proxy.cache.get(key) === live)) {
+    // Its own entry out first, so that it goes last in line, and replacing it makes no room at another's cost.
+    proxy.cache.delete(key);
     // A handful of handles in a dev loop: past a thousand, the oldest go.
     if (proxy.cache.size >= 1000) for (const [old, entry] of proxy.cache) if (entry.until <= now || proxy.cache.size >= 1000) proxy.cache.delete(old);
-    proxy.cache.set(key, { values: used.values, plain: used.plain, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
+    // From when the vault was asked, not when it answered: a revoked handle serves no longer than `cacheSeconds`.
+    const until = Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt));
+    // An answer that serves no longer than the last (the handle's or session's end) is not asked for again.
+    const refreshFrom = live !== undefined && until <= live.until ? until : until - refreshWindow(proxy.cacheMs);
+    proxy.cache.set(key, { values: used.values, plain: used.plain, until, refreshFrom });
   }
   return { values: used.values, plain: used.plain };
 }
