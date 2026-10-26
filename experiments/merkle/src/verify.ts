@@ -1,6 +1,6 @@
-import { entryMac, leafOf, readTiles, type Db, type Entry } from './log.ts';
+import { entryMac, leafOf, proveConsistency, readTiles, type Db, type Entry } from './log.ts';
 import { entriesBetween, retentions } from './retention.ts';
-import { referenceHash } from './tree.ts';
+import { referenceHash, verifyConsistency } from './tree.ts';
 import { openCheckpoint, verifierFrom, type Checkpoint } from './note.ts';
 import { Edge, edgeOf, tileMap } from './tiles.ts';
 
@@ -32,6 +32,15 @@ export async function verifyLog(
   opts: { verifierKey: string; macKey?: Buffer; anchors?: string[]; from?: string },
 ): Promise<Verdict> {
   const started = performance.now();
+  // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
+  try {
+    return await walk(db, opts, started);
+  } catch (error) {
+    return { ok: false, problems: [`verification stopped on what the database holds: ${(error as Error).message}`], warnings: [], checkpoints: 0, sealed: 0, unsealed: 0, ms: performance.now() - started };
+  }
+}
+
+async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchors?: string[]; from?: string }, started: number): Promise<Verdict> {
   const verifier = await verifierFrom(opts.verifierKey);
   const problems: string[] = [];
   const warnings: string[] = [];
@@ -51,6 +60,14 @@ export async function verifyLog(
     // Numbers swapped before sealing (the MAC does not cover them) show as an `at` running back; so does a skewed clock.
     if (e.at < latest - SKEW_MS) warnings.push(`${e.number}: at ${e.at}, ${latest - e.at} ms before an entry numbered earlier`);
     latest = Math.max(latest, e.at);
+  };
+
+  // A request walked here and also logged below the start (verified before, or kept below a cut) is a replay too: one
+  // indexed lookup per chunk, never a scan of history.
+  const replaysBelow = async (entries: readonly Entry[], below: string) => {
+    if (entries.length === 0 || below === GENESIS_UPTO) return;
+    const { rows: dup } = await db.query('SELECT a.request_id, a.number::text FROM audit a WHERE a.request_id = ANY($1) AND a.number <= $2', [entries.map((e) => e.requestId), below]);
+    for (const d of dup) problems.push(`request ${d.request_id} logged twice: at ${d.number}, below the start, and again after it`);
   };
 
   // Every signed checkpoint row.
@@ -74,6 +91,10 @@ export async function verifyLog(
   const cuts = await retentions(db);
   let prevCut = GENESIS_UPTO;
   for (const r of cuts) {
+    const decimal = (x: unknown) => typeof x === 'string' && /^\d{1,19}$/.test(x);
+    if (!decimal(r.prevCutUpto) || !decimal(r.cutUpto) || !Number.isSafeInteger(r.cutSize) || !Number.isSafeInteger(r.kept) || typeof r.keptRoot !== 'string') {
+      return { ...done(heads.size), ok: false, problems: [...problems, `retention entry ${r.number}: malformed`] };
+    }
     if (r.prevCutUpto !== prevCut || BigInt(r.cutUpto) <= BigInt(prevCut)) problems.push(`retention of day ${r.day}: its cut does not follow the one before (${prevCut})`);
     if (BigInt(r.number) <= BigInt(r.cutUpto)) problems.push(`retention of day ${r.day}: written below its own cut`);
     if (BigInt(r.number) > BigInt(last.upto)) problems.push(`retention of day ${r.day}: not sealed yet`);
@@ -92,7 +113,9 @@ export async function verifyLog(
   const cut = cuts.at(-1);
   if (trusted !== null) {
     const t = trusted;
-    if (cut !== undefined && BigInt(t.upto) < BigInt(cut.cutUpto)) problems.push(`the head to start from (${t.upto}) is below the retention cut (${cut.cutUpto})`);
+    if (cut !== undefined && BigInt(t.upto) < BigInt(cut.cutUpto)) {
+      return { ...done(heads.size), ok: false, problems: [...problems, `the head to start from (${t.upto}) is below the retention cut (${cut.cutUpto})`] };
+    }
     expected = { upto: t.upto, size: t.size, root: t.root };
   } else if (cut !== undefined) {
     expected = { upto: cut.cutUpto, size: cut.cutSize };
@@ -116,9 +139,18 @@ export async function verifyLog(
       problems.push('a head held outside is not signed by the log');
       continue;
     }
-    // Heads below the start speak of leaves the walk does not rebuild (dropped by retention, or verified before).
+    // Heads below the start: the walk does not rebuild their leaves (verified before, or dropped by retention), but each
+    // must still be the signed row at its place, if there is one, and a prefix of the start (a consistency proof from
+    // the tiles, which retention keeps above level 0 only: then it cannot be checked, and says so).
     if (BigInt(a.upto) <= BigInt(start.upto)) {
-      if (a.upto === start.upto && !(a.size === start.size && a.root.equals(start.root))) problems.push(`checkpoint ${a.upto}: not the head held outside for that place: a second history`);
+      const row = heads.get(a.upto);
+      if (row !== undefined && !(row.size === a.size && row.root.equals(a.root))) problems.push(`checkpoint ${a.upto}: not the head held outside for that place: a second history`);
+      else if (a.size > start.size) problems.push(`the head held outside at ${a.upto} has more leaves than the start: a second history`);
+      else {
+        const proof = await proveConsistency(db, a.size, start.size).catch(() => null);
+        if (proof === null) warnings.push(`the head held outside at ${a.upto} lies below the retention cut: not checked`);
+        else if (!verifyConsistency(a.size, start.size, a.root, start.root, proof)) problems.push(`the head held outside at ${a.upto} is not a prefix of the start: a second history`);
+      }
       continue;
     }
     const row = stops.get(a.upto);
@@ -136,6 +168,7 @@ export async function verifyLog(
     const chunk: Stop[] = [];
     while (i < ordered.length && (chunk.length === 0 || ordered[i]!.head.size - edge.size < 50_000)) chunk.push(ordered[i++]!);
     const entries = await entriesBetween(db, cursor, chunk.at(-1)!.head.upto);
+    await replaysBelow(entries, start.upto);
     let at = 0;
     for (const { head: c, row } of chunk) {
       const before = edge.size;
@@ -153,6 +186,7 @@ export async function verifyLog(
     }
   }
   const above = await entriesBetween(db, last.upto, '9223372036854775807');
+  await replaysBelow(above, start.upto);
   above.forEach(check);
   return done(heads.size, sealed, above.length);
 }

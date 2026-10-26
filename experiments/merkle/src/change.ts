@@ -18,7 +18,8 @@ import { append, proveNumber, type Checkpointer, type Db, type Fields, type Incl
  * can also reset the checkpointer's own memory.
  */
 export type ChangeAnswer = {
-  number: string; witnessed: boolean; failures: string[]; proof: InclusionProof;
+  /** null when no witness is set up. */
+  number: string; witnessed: boolean | null; failures: string[]; proof: InclusionProof;
   /** The head that seals it, as the log signed it, and as each witness that took it in time cosigned it. */
   checkpoint: string; cosigned: string[];
   commitMs: number; sealMs: number; totalMs: number;

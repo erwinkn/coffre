@@ -81,7 +81,7 @@ export type Witness = { name: string; publish(note: string, proofFrom: (size: nu
 export type WitnessAnswer = { ok: true; cosigned?: string } | { ok: false; reason: string };
 
 type Pump = {
-  busy: boolean; next: { note: string; head: Checkpoint } | null; acked: bigint; cosigned: string | null;
+  busy: boolean; next: { note: string; head: Checkpoint } | null; acked: bigint; cosigned: string | null; failure: string | null;
   waiters: { upto: bigint; done: (failure: string | null) => void }[];
 };
 
@@ -229,7 +229,7 @@ export class Checkpointer {
 
   private pump(w: Witness): Pump {
     let p = this.pumps.get(w);
-    if (p === undefined) this.pumps.set(w, (p = { busy: false, next: null, acked: -1n, cosigned: null, waiters: [] }));
+    if (p === undefined) this.pumps.set(w, (p = { busy: false, next: null, acked: -1n, cosigned: null, failure: null, waiters: [] }));
     return p;
   }
 
@@ -253,26 +253,45 @@ export class Checkpointer {
         p.acked = upto;
         p.cosigned = a.cosigned ?? null;
       }
+      p.failure = a.ok ? null : a.reason;
       p.waiters = p.waiters.filter((x) => {
         if (a.ok && x.upto <= p.acked) x.done(null);
-        else if (!a.ok && x.upto <= upto) x.done(`witness ${w.name}: ${a.reason}`);
         else return true;
         return false;
       });
     }
     p.busy = false;
+    // Someone still waits on this witness after a failed try: try again shortly, with the newest head.
+    if (p.waiters.length > 0 && p.failure !== null) {
+      setTimeout(() => {
+        if (!p.busy && p.waiters.length > 0) {
+          p.next = { note: this.note, head: this.head };
+          void this.drain(w, p);
+        }
+      }, 100).unref();
+    }
   }
 
-  /** Whether every witness holds a head sealing `upto`, within the deadline: the failures, if not, and the cosigned heads. */
+  /**
+   * Whether every witness holds a head sealing `upto`, within the deadline: the
+   * failures, if not, and the cosigned heads. A witness that is behind and idle
+   * (its last try failed) is asked again now, with the newest head; at the
+   * deadline the answer names its last failure, if it had one.
+   */
   private async witnessed(upto: string, deadline: number): Promise<{ failures: string[]; cosigned: string[] }> {
     const answers = await Promise.all(this.witnesses.map((w) => {
       const p = this.pump(w);
       if (p.acked >= BigInt(upto)) return null;
-      return new Promise<string | null>((resolve) => {
-        const timer = setTimeout(() => resolve(`witness ${w.name}: no answer within ${deadline} ms`), deadline);
+      const answer = new Promise<string | null>((resolve) => {
+        const timer = setTimeout(() => resolve(`witness ${w.name}: no answer within ${deadline} ms${p.failure === null ? '' : ` (last: ${p.failure})`}`), deadline);
         timer.unref();
         p.waiters.push({ upto: BigInt(upto), done: (f) => { clearTimeout(timer); resolve(f); } });
       });
+      if (!p.busy && BigInt(this.head.upto) >= BigInt(upto)) {
+        p.next = { note: this.note, head: this.head };
+        void this.drain(w, p);
+      }
+      return answer;
     }));
     const cosigned = this.witnesses.map((w) => this.pump(w)).filter((p) => p.acked >= BigInt(upto) && p.cosigned !== null).map((p) => p.cosigned!);
     return { failures: answers.filter((a): a is string => a !== null), cosigned };
@@ -285,14 +304,15 @@ export class Checkpointer {
    * A tick that cannot seal (an entry failing its MAC) fails the change's wait
    * rather than spinning.
    */
-  async sealThrough(number: string, witnessTimeoutMs = 2000): Promise<{ head: Checkpoint; note: string; witnessed: boolean; failures: string[]; cosigned: string[] }> {
+  async sealThrough(number: string, witnessTimeoutMs = 2000): Promise<{ head: Checkpoint; note: string; witnessed: boolean | null; failures: string[]; cosigned: string[] }> {
     while (BigInt(this.head.upto) < BigInt(number)) {
       const before = this.head.upto;
       const t = await this.seal({});
       if (this.head.upto === before) throw new Error(`cannot seal ${number}: ${t.failures.join('; ') || 'nothing to seal'}`);
     }
     const { failures, cosigned } = await this.witnessed(number, witnessTimeoutMs);
-    return { head: this.head, note: this.note, witnessed: failures.length === 0, failures, cosigned };
+    // `witnessed`: null when no witness is set up (R40 without the plugin), so nothing reads "witnessed" there.
+    return { head: this.head, note: this.note, witnessed: this.witnesses.length === 0 ? null : failures.length === 0, failures, cosigned };
   }
 
   private async tickNow(opts: { nextDay?: number; witnessTimeoutMs?: number }): Promise<Tick> {

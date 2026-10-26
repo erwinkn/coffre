@@ -287,10 +287,24 @@ fresh log of 8 checkpoints (all as expected):
 | (k) a change sealed by a background tick, the witness slower than the deadline | | the change answers `witnessed: false` at the deadline | |
 | (l) a forged entry in the window, then a change waits for its seal | | | the change fails with the MAC alarm instead of waiting forever |
 | (m) the newest row and its entries deleted under a running signer, no traffic after | | | **caught** at the next tick: "the database's newest checkpoint is 0, the signer's head is at 20" |
+| (n) a replay of an entry sealed before the head an incremental check starts from | **caught**: "request … logged twice: at 4, below the start, and again after it" | | |
+| (o) a forked head below where the walk starts, held outside; then its row deleted too | | **caught**: against the row at its place, else by a consistency proof to the start | |
+| (p) a garbage checkpoint row; a malformed retention entry | **a failing verdict**, not a crash | | |
+| (q) a witness that refuses once, then recovers, while a change waits | | the change answers witnessed: the witness is asked again within the deadline | |
+| (r) no witness set up | | | the change answers `witnessed: null`, never "witnessed" |
 
-Rows (f) to (l) came from review: (g) to (l) are the reviewer's own
-reproductions, each of which got through the first version. What that
-version did wrong:
+Rows (f) to (r) came from two review rounds: (g) to (l) and (n) to (r) are
+the reviewer's own reproductions, each of which got through the version
+before. Round two found:
+- incremental checks missed replays of entries sealed before their start;
+  they now look up each walked request ID below the start, one indexed
+  query per chunk;
+- heads held outside, below the start, went unchecked;
+- the verifier could be crashed by rows it could not parse; it now always
+  returns a verdict;
+- a witness that failed once was not asked again while a change waited.
+
+Round one found:
 - the signer signed a fresh genesis, and overwrote its memory with it,
   before comparing that memory with an empty checkpoint table;
 - the verifier started at whatever checkpoint row came first, and trusted
@@ -298,7 +312,7 @@ version did wrong:
 - `sealThrough` reported `witnessed` when another tick had sealed the change;
 - a database ahead of the memory was accepted at equal size.
 
-All are fixed, as follows:
+Round one's fixes:
 - the memory is read first;
 - the verifier starts only from the genesis head, from a retention cut
   named by a sealed, chained retention entry, or from a head the caller
@@ -401,7 +415,7 @@ fixes; the first run gave the same within noise (DO witness 68 / 600 ms):
 | none (R40 without the plugin) | 1 / 2 ms | 5 / 53 ms | **7 / 58 ms** | n/a |
 | Cloudflare DO witness, from this host | 1 / 2 ms | 63 / 518 ms | **65 / 531 ms** | 40 of 40 |
 | slow witness (answers after 3 s) | 1 / 1 ms | 2,004 / 2,077 ms | 2,008 / 2,082 ms | 0 of 20: "no answer within 2000 ms" |
-| unreachable (connection refused) | 1 / 2 ms | 5 / 77 ms | 7 / 82 ms | 0 of 20: "unreachable" |
+| unreachable (connection refused) | 1 / 2 ms | 2,006 / 2,071 ms | 2,009 / 2,077 ms | 0 of 20: "no answer within 2000 ms (last: unreachable: fetch failed)"; asked again every 100 ms until the deadline (after review r2; before, it answered in 7 / 82 ms, unwitnessed, without retrying) |
 | unreachable (no route; packets dropped) | 1 / 1 ms | 2,004 / 2,078 ms | 2,006 / 2,083 ms | 0 of 20: "no answer within 2000 ms" |
 
 The first version waited for witnesses inside the serialized tick, so a
@@ -413,7 +427,10 @@ acknowledgement.
 **When the witness is slow or unreachable**, two options:
 
 - **(A) Answer after the deadline, marked unwitnessed** (`witnessed: false`,
-  shown in the UI, alerted), while the checkpointer keeps publishing.
+  shown in the UI, alerted), while the checkpointer keeps publishing. A
+  witness that fails is asked again every 100 ms until the deadline, so a
+  dropped request costs a retry, not an unwitnessed change. With no witness
+  set up, `witnessed` is null.
   *Recommended.* The change has committed and is in force either way: the
   revocation already stops uses. A 503 would tell the admin it failed when
   it didn't, and invite a retry of a change that already happened. And the

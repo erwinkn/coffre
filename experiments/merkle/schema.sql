@@ -36,6 +36,8 @@ CREATE TABLE audit (
   written_at timestamptz NOT NULL DEFAULT clock_timestamp()
 ) PARTITION BY LIST (kind);
 CREATE INDEX audit_number_idx ON audit (number);
+-- The verifier's replay check, and W208's idempotent append (unique within a partition there).
+CREATE INDEX audit_request_idx ON audit (request_id);
 CREATE TABLE audit_changes PARTITION OF audit FOR VALUES IN ('change');
 
 CREATE TABLE audit_layout (only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row), mode text NOT NULL, day_ms bigint NOT NULL);

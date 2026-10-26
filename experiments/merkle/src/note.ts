@@ -95,10 +95,15 @@ export function splitNote(note: string): { text: string; signatures: { name: str
 
 /** A checkpoint if `verifier` signed it and it names that log as its origin, else null. */
 export async function openCheckpoint(note: string, verifier: Verifier): Promise<Checkpoint | null> {
-  const text = await openNote(note, verifier);
-  if (text === null) return null;
-  const c = parseCheckpoint(text);
-  return c.origin === verifier.name ? c : null;
+  try {
+    const text = await openNote(note, verifier);
+    if (text === null) return null;
+    const c = parseCheckpoint(text);
+    return c.origin === verifier.name ? c : null;
+  } catch {
+    // Not a signed note, or not a checkpoint: not this log's either way.
+    return null;
+  }
 }
 
 /** The note's text if `verifier` signed it, else null. */

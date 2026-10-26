@@ -55,7 +55,7 @@ load.kill();
 const pct = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)]!;
 const f = (k: 'commitMs' | 'sealMs' | 'totalMs') => `${pct(answers.map((a) => a[k]), 50).toFixed(0)}/${pct(answers.map((a) => a[k]), 99).toFixed(0)}`;
 const failures = [...new Set(answers.flatMap((a) => a.failures.map((x) => x.replace(/\d+ leaves at \d+/g, '…'))))];
-console.log(`${values.label.padEnd(14)} ${changes} changes under ${values.rate} uses/s, tick ${values.every} ms: commit p50/p99 ${f('commitMs')} ms, seal+witness ${f('sealMs')} ms, total ${f('totalMs')} ms; witnessed ${answers.filter((a) => a.witnessed).length}/${changes}${failures.length > 0 ? `; ${failures.slice(0, 2).join('; ')}` : ''}`);
+console.log(`${values.label.padEnd(14)} ${changes} changes under ${values.rate} uses/s, tick ${values.every} ms: commit p50/p99 ${f('commitMs')} ms, seal+witness ${f('sealMs')} ms, total ${f('totalMs')} ms; witnessed ${values.witness === undefined ? 'n/a (none set up)' : `${answers.filter((a) => a.witnessed === true).length}/${changes}`}${failures.length > 0 ? `; ${failures.slice(0, 2).join('; ')}` : ''}`);
 rmSync(scratch, { recursive: true, force: true });
 await pool.end();
 process.exit(0);

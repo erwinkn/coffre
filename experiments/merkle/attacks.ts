@@ -235,7 +235,7 @@ for (const tamper of [false, true]) {
   await new Promise((r) => setTimeout(r, 100));
   const t0 = performance.now();
   const r = await cp.sealThrough(n, 300);
-  expect(`sealThrough after ${(performance.now() - t0).toFixed(0)} ms reports witnessed`, r.witnessed, false, r.failures[0] ?? '', ['yes', 'no']);
+  expect(`sealThrough after ${(performance.now() - t0).toFixed(0)} ms reports witnessed`, r.witnessed === true, false, r.failures[0] ?? '', ['yes', 'no']);
   await new Promise((r) => setTimeout(r, 1600));
 }
 {
@@ -259,6 +259,72 @@ for (const tamper of [false, true]) {
   await pool.query('DELETE FROM audit WHERE number > 0');
   const t = await cp.tick();
   expect('the next tick', t.failures.length > 0, true, t.failures[0] ?? '');
+}
+
+// Review r2's reproductions, each now caught.
+{
+  console.log('(n) a replay of an entry sealed before the head an incremental check starts from');
+  await createLog(pool);
+  const cp = await Checkpointer.open(pool, keys);
+  for (let e = 0; e < 10; e += 1) await use();
+  await cp.tick();
+  const head1 = await latestNote();
+  await pool.query("INSERT INTO audit (number, at, principal, credential, kind, request_id, payload, seal, mac) SELECT nextval('audit_number'), at, principal, credential, kind, request_id, payload, seal, mac FROM audit WHERE number = 4");
+  await cp.tick();
+  const v = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, from: head1 });
+  expect('verifier, from the earlier head', !v.ok, true, v.problems[0] ?? '');
+}
+{
+  console.log('(o) a fork below where the walk starts, held outside');
+  await createLog(pool);
+  const cp = await Checkpointer.open(pool, keys);
+  for (let c = 0; c < 4; c += 1) {
+    for (let e = 0; e < 10; e += 1) await use();
+    await cp.tick();
+  }
+  const { rows: [h2] } = await pool.query('SELECT c.note FROM checkpoints c ORDER BY c.upto OFFSET 2 LIMIT 1');
+  // The fork: the same place, a head over different leaves, as a stateless signer would sign after a rollback.
+  const forked = parseCheckpoint((await openNote(h2.note, verifier))!);
+  const { checkpointBody, signNote } = await import('./src/note.ts');
+  const fork = await signNote(checkpointBody({ ...forked, root: Buffer.alloc(32, 1) }), [keys.signer]);
+  const newest = await latestNote();
+  let v = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, from: newest, anchors: [fork] });
+  expect('verifier, from the newest head', !v.ok, true, v.problems[0] ?? '');
+  await pool.query('DELETE FROM checkpoints WHERE upto = $1', [forked.upto]);
+  v = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, from: newest, anchors: [fork] });
+  expect('the same, its row deleted too', !v.ok, true, v.problems[0] ?? '');
+}
+{
+  console.log('(p) a garbage checkpoint row, then a malformed retention entry');
+  await fresh(true);
+  await pool.query("INSERT INTO checkpoints (upto, size, root, note) VALUES (999999, 1, '\\x00', 'garbage')");
+  let v = await verdict();
+  expect('verifier returns a verdict', !v.ok, true, v.problems[0] ?? '', ['and fails', 'and passes']);
+  await pool.query('DELETE FROM checkpoints WHERE upto = 999999');
+  await pool.query("INSERT INTO audit (number, at, principal, kind, request_id, payload, mac) VALUES (nextval('audit_number'), 0, 'vault', 'change', 'bad-retention', '{\"action\":\"audit.retention\"}', '\\x00')");
+  v = await verdict();
+  expect('verifier returns a verdict', !v.ok, true, v.problems[0] ?? '', ['and fails', 'and passes']);
+}
+{
+  console.log('(q) a witness that refuses once, then recovers, while a change waits');
+  await createLog(pool);
+  let refusals = 1;
+  const inner = localWitness('w', verifier, keys.witness);
+  const flaky: import('./src/log.ts').Witness = {
+    name: 'flaky', publish: async (note, proofFrom) => (refusals-- > 0 ? { ok: false, reason: 'refused once' } : inner.publish(note, proofFrom)),
+  };
+  const cp = await Checkpointer.open(pool, keys, { witnesses: [flaky] });
+  const n = await append(pool, keys, { at: Date.now(), principal: 'svc-0', credential: null, kind: 'change', requestId: 'q-1', payload: '{}' });
+  const r = await cp.sealThrough(n, 1000);
+  expect('the change', r.witnessed === true, true, `${r.cosigned.length} cosigned head(s)`, ['answers witnessed', 'answers unwitnessed']);
+}
+{
+  console.log('(r) no witness set up');
+  await createLog(pool);
+  const cp = await Checkpointer.open(pool, keys);
+  const n = await append(pool, keys, { at: Date.now(), principal: 'svc-0', credential: null, kind: 'change', requestId: 'r-1', payload: '{}' });
+  const r = await cp.sealThrough(n);
+  expect('the change answers witnessed: null', r.witnessed === null, true, '', ['yes', 'no']);
 }
 
 rmSync(scratch, { recursive: true, force: true });
