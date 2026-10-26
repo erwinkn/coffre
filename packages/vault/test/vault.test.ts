@@ -1212,16 +1212,16 @@ test('a checkpoint forgets the releases a day and an hour old, longer than any w
   const { vaultReleases } = tablesOf(db.owner);
   const released = async () => (await db.owner.select().from(vaultReleases).where(eq(vaultReleases.principal, ADA))).length;
   assert.equal(await released(), 3);
-  // By the database's clock, which the prune reads: one released a day, an hour and a minute ago; one a day ago.
+  // By the database's clock, which the prune reads: one released a day, an hour and a minute ago; one a minute short.
   const now = await store.now(db.owner);
   const [first, second] = await db.owner.select({ key: vaultReleases.key }).from(vaultReleases).where(eq(vaultReleases.principal, ADA));
   await db.owner.update(vaultReleases).set({ releasedAt: now - store.RELEASES_KEPT_MS - 60_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, first!.key)));
-  await db.owner.update(vaultReleases).set({ releasedAt: now - 24 * 3_600_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, second!.key)));
+  await db.owner.update(vaultReleases).set({ releasedAt: now - store.RELEASES_KEPT_MS + 60_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, second!.key)));
   const signed = await w.vault.checkpoint();
   assert.ok(signed.ok && signed.warning === undefined, JSON.stringify(signed));
   assert.equal(await released(), 2, 'the one past a day and an hour went');
   assert.deepEqual((await db.owner.select({ key: vaultReleases.key }).from(vaultReleases).where(eq(vaultReleases.key, first!.key))), []);
-  // What the window holds is still counted: the one read just now; the one a day old is kept, but past the window.
+  // What the window holds is still counted: the one read just now; the one a minute short is kept, but past the window.
   const counted = await readSnapshot(db.owner, { principals: [ADA], released: { principal: ADA, keys: [], windowMs: 15 * 60_000, clockOffsetMs: 0, cap: 1000 } });
   assert.equal(counted.released, 1);
 });

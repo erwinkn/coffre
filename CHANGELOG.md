@@ -5,8 +5,8 @@
 - **The bulk count's table keeps only a day of keys.** Since 0.14.4,
   `vault_releases` held a row for every key a principal was ever released,
   deleted keys included, and the count read them all. Each scheduled run's
-  checkpoint now forgets those released over a day and an hour before, the
-  oldest first, up to 10,000 a run, in one statement of its own, off every
+  checkpoint now forgets those released over a day and an hour before, up
+  to 10,000 a run, in one statement of its own, off every
   read's path. A failure leaves them to the next run and says so: the
   checkpoint's `warning`, which the audit watch reports. The day is the
   longest window `bulkLimit.windowMinutes` now takes (1,440; a vault given
