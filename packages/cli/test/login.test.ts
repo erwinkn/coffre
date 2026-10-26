@@ -68,9 +68,10 @@ for (const linked of [false, true]) {
  * and signs a person in by a device login approved at once, and keeps every
  * request. It plays GitHub's runner too, at /runner: an ID token for its
  * own origin alone. Its first `unavailable` exchanges answer 503
- * `unavailable`, each with its reason, or none.
+ * `unavailable`, each with its reason, or none; so do its first
+ * `meUnavailable` answers at /api/me.
  */
-async function ciInstance(t: test.TestContext, { unavailable = [] as (string | null)[] } = {}) {
+async function ciInstance(t: test.TestContext, { unavailable = [] as (string | null)[], meUnavailable = 0 } = {}) {
   const seen: { method: string; url: string; headers: Record<string, string | string[] | undefined>; body: string }[] = [];
   let origin = '';
   const server = createServer(async (req, res) => {
@@ -97,6 +98,10 @@ async function ciInstance(t: test.TestContext, { unavailable = [] as (string | n
       req.headers.authorization === 'Bearer coffre_cli_ada' ||
       req.headers.authorization === 'Bearer coffre_svc_run' ||
       (req.headers['cf-access-client-id'] === 'id.access' && req.headers['cf-access-client-secret'] === 'shh');
+    if (req.url === '/api/me' && meUnavailable > 0) {
+      meUnavailable -= 1;
+      return send(503, { error: 'unavailable', message: 'coffre cannot check who you are right now' });
+    }
     if (req.url === '/api/me' && req.headers.authorization === 'Bearer coffre_cli_busy') return send(500, { error: 'internal', message: 'something went wrong' });
     if (req.url === '/api/me' && known) return send(200, { principal: { type: 'service', id: 'deploy' }, registered: true, features: { mcp: null, workloads: true }, environments: [] });
     if (req.method === 'PATCH' && req.url === '/api/secrets/app/prod' && known) return send(200, { operationId: 'op', keys: { KEY: { version: 1 } } });
@@ -148,6 +153,13 @@ test('a CI run the instance cannot sign in yet asks again, with a fresh ID token
     'coffre: GET /runner: 200 in t',
     'coffre: POST /api/auth/oidc: 200 in t',
   ]);
+
+  // Signed in, then unable for a moment to say who as: login asks who again, and keeps the session.
+  const unsure = await ciInstance(t, { meUnavailable: 1 });
+  const kept = await cli(home, ['login', unsure.origin, '--service', 'deploy', '--id-token'], 'id.token.ok\n');
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.match(kept.stdout, new RegExp(`^Signed in to ${unsure.origin} as deploy\\n`));
+  assert.deepEqual(unsure.seen.map(({ url }) => url), ['/api/auth/oidc', '/api/me', '/api/me']);
 
   // Three times unable, it fails as it did; a 503 an operator must fix, at once. Login asks again the same way.
   for (const [unavailable, exchanges] of [[[null, 'busy', null], 3], [['wrong_kek'], 1]] as const) {

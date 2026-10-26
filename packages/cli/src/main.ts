@@ -377,6 +377,7 @@ async function reading(request: Request): Promise<Response> {
     const again = request.clone();
     const response = await retryingPolicyChange(request);
     const wait = unavailableWait(attempt);
+    // The status first: a body is parsed only when it may say the instance cannot answer yet.
     if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
     if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);
     await new Promise((resolve) => setTimeout(resolve, wait));
@@ -750,7 +751,8 @@ function openBrowser(url: string): void {
  * replaces another run's session there, never a person's (`login`).
  */
 async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtainedAt'>): Promise<void> {
-  const me = await client(to).me();
+  // Who it is, asked again as a read is: a sign-in that went through is not lost to a moment's 503 after it.
+  const me = await client(to, undefined, [], reading).me();
   writeStore(withSession(readStore(), to.origin, { ...session, principal: me.principal, obtainedAt: new Date().toISOString() }));
   process.stdout.write(`Signed in to ${to.origin} as ${me.principal.id}\n`);
   printMe(me);

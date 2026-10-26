@@ -76,7 +76,7 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
       return send(503, { error: 'unavailable', message: 'coffre cannot reach what it depends on right now; try again in a moment', ...(unavailable === null ? {} : { reason: unavailable }) });
     }
     if (missing !== null) return send(200, { missing: Object.keys(environment.values).map((key) => ({ key, in: ['prod'], folder: null })), dismissed: [] });
-    if (listing !== null && missing === null) {
+    if (listing !== null) {
       const keys = environment.listed ?? Object.keys(environment.values).map((key) => ({ key, version: 1 }));
       return send(200, {
         permissions: ['secret.read'],
@@ -461,11 +461,11 @@ test('a read the instance cannot answer three times ends as a refusal does, and 
 
 test("an instance moving to its new key is asked again, and so is the Action's gate, missing --check", async (t) => {
   const rotating = { error: 'rotating', message: 'coffre is moving to its new app key' };
-  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [rotating, null] } });
-  const read = await coffre.coffre(['get', 'deploy/prod/TOKEN'], {}, 20_000);
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [rotating] } });
+  const read = await coffre.coffre(['get', 'deploy/prod/TOKEN']);
   assert.equal(read.code, 0, read.stderr);
   assert.equal(read.stdout, 'deploy-token-value');
-  assert.deepEqual(coffre.requests, Array(3).fill('reveal deploy/prod/TOKEN'));
+  assert.deepEqual(coffre.requests, Array(2).fill('reveal deploy/prod/TOKEN'));
 
   const gate = await instance(t, { 'deploy/prod': { values: { TOKEN: 'x' }, unavailable: [null] } });
   const checked = await gate.coffre(['missing', 'deploy/prod', '--check']);

@@ -35,7 +35,8 @@
   sign-in this way while a third, signing in the same second, went on. A
   run's sign-in (`--service` and `login --service`), each read of values
   (`get`, `export`, `run` after `login --service`, the Action's read) and
-  the Action's `require-complete` check (`missing`) are now asked again,
+  the Action's `require-complete` check (`missing`) and the check of who
+  a new session is (`login`, the Action's `token:`) are now asked again,
   about 2 s and then 5 s later, each wait varied by up to half so that a
   run's jobs do not ask again together, before the answer stands; each
   sign-in asks GitHub for a fresh ID token. So are the exchange's own
@@ -44,8 +45,8 @@
   (`rotating`). `--verbose`, which the Action passes, says each time it
   asks again. A 503 an operator or a deploy must clear (`wrong_kek`,
   `vault_outdated`, `app_key`, `migrating`) is not asked again, nor is
-  anything that writes, nor yet `coffre --service <name> run`, which
-  signs in with a key-bound session.
+  anything that writes, nor yet `coffre --service <name> run` where the
+  instance signs it in with a key-bound session.
 
 ## 0.14.1 (2026-10-25)
 
