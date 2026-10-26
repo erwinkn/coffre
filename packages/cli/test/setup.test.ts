@@ -11,7 +11,7 @@ import pg from 'pg';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 import { cappedLimit, hyperdriveLimit, limitReason, tooFewConnections } from '../src/connections.ts';
-import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, type SetupResult } from '../src/setup.ts';
+import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, summary, type SetupResult } from '../src/setup.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, SMALL_CLUSTER } from './cluster.ts';
 import { fakeOpener, fakeWrangler } from './fakes.ts';
@@ -54,6 +54,7 @@ function json(run: Run) {
   return JSON.parse(run.stdout) as {
     app: { APP_KEY?: string; DATABASE_URL?: string };
     vault: { VAULT_KEY_ID?: string; VAULT_KEY?: string; DATABASE_URL?: string };
+    backup: { DATABASE_URL?: string };
     logins: Record<string, { login: string; password: string }>;
   };
 }
@@ -128,14 +129,15 @@ const made: SetupResult = {
   keys: { APP_KEY: 'A'.repeat(43) + '=', VAULT_KEY_ID: 'vault-2026-10-02-abcdef', VAULT_KEY: 'K'.repeat(43) + '=' },
   app: { role: 'coffre_runtime', login: 'coffre_runtime', password: 'created', url: 'postgresql://coffre_runtime:p1@db.example.com:5432/coffre?sslmode=verify-full' },
   vault: { role: 'coffre_vault_runtime', login: 'coffre_vault_runtime', password: 'created', url: 'postgresql://coffre_vault_runtime:p2@db.example.com:5432/coffre?sslmode=verify-full' },
+  backup: { role: 'coffre_backup_login', login: 'coffre_backup_login', password: 'created', url: 'postgresql://coffre_backup_login:p3@db.example.com:5432/coffre?sslmode=verify-full' },
   version: '0.1.3',
   // PlanetScale's smallest cluster, by the count third parties give: 9 connections for each config.
   connections: { max: 25, reserved: 3 },
 };
 
 test('--json carries the same values as the screen, under the names the examples give them', () => {
-  const { app, vault } = setupValues(made);
-  const onScreen = Object.fromEntries([...app, ...vault].map(({ label, value }) => [label, value]));
+  const { app, vault, backup } = setupValues(made);
+  const onScreen = Object.fromEntries([...app, ...vault, ...backup].map(({ label, value }) => [label, value]));
   const printed = asJson(made);
   assert.deepEqual(onScreen, {
     'App key': printed.app.APP_KEY,
@@ -143,11 +145,36 @@ test('--json carries the same values as the screen, under the names the examples
     'Vault ID': printed.vault.VAULT_KEY_ID,
     'Vault key': printed.vault.VAULT_KEY,
     'Vault database URL': printed.vault.DATABASE_URL,
+    'Backup database URL': printed.backup.DATABASE_URL,
   });
   assert.deepEqual(setupScreen(made).sections.map(({ title, values }) => [title, values.map(({ label }) => label)]), [
     ['App', ['App key', 'App database URL']],
     ['Vault', ['Vault ID', 'Vault key', 'Vault database URL']],
+    ['Backup', ['Backup database URL']],
   ]);
+  assert.deepEqual(setupScreen(made).guide.map(({ title }) => title), ['On Cloudflare Workers', 'On Node', 'Backups']);
+});
+
+test("only the backup login new, as when a deployment set up before it reruns setup: its URL alone, and where it goes, with nothing to do to the app or the vault", () => {
+  const kept = (login: SetupResult['app']) => ({ ...login, password: 'kept' as const, url: null });
+  const later: SetupResult = { ...made, keys: null, app: kept(made.app), vault: kept(made.vault) };
+  const screen = setupScreen(later);
+  assert.deepEqual(screen.sections.map(({ title, values }) => [title, values.map(({ label }) => label)]), [['Backup', ['Backup database URL']]]);
+  assert.deepEqual(screen.guide.map(({ title }) => title), ['Backups']);
+  assert.deepEqual(asJson(later), {
+    app: {},
+    vault: {},
+    backup: { DATABASE_URL: made.backup.url },
+    logins: {
+      coffre_runtime: { login: 'coffre_runtime', password: 'kept' },
+      coffre_vault_runtime: { login: 'coffre_vault_runtime', password: 'kept' },
+      coffre_backup_login: { login: 'coffre_backup_login', password: 'created' },
+    },
+  });
+  const text = summary(later, { write: () => true, isTTY: false, columns: 200 } as never);
+  assert.match(text, /✓ The backup database URL was shown once\.\n\s+It isn't stored anywhere\./);
+  assert.match(text, /Backups\s+the backup database URL in your backup job's secrets, for coffre backup: docs\/restore\.md\./);
+  assert.doesNotMatch(text, /Workers|Node/, 'the app and the vault go on as they were');
 });
 
 test('where the values go: new Hyperdrive configs, or after a reset, the ones to update, never with a password in the command', () => {
@@ -157,7 +184,7 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
     hyperdriveCommand('create coffre --caching-disabled', 9),
     hyperdriveCommand('create coffre-vault --caching-disabled', 9),
   ]);
-  const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const } };
+  const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const }, backup: { ...made.backup, password: 'reset' as const } };
   assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>", 9), hyperdriveCommand("update <the vault's config id>", 9)]);
   for (const command of commands(reset)) assert.match(command, / --origin-connection-limit=9 /);
   // Setup can't see what each config allows now: the screen says the updates set it, why that matters, and when to keep one lower.
@@ -172,7 +199,7 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   assert.ok(!commands(small).some((command) => command.includes('hyperdrive')));
   assert.deepEqual(lines(small).slice(0, 1), [`No Hyperdrive config for each database URL: ${tooFewConnections(small.connections)}.`]);
   for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|postgresql:/.test(command), command);
-  assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL']);
+  assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL', 'Backup database URL']);
 });
 
 test("each Hyperdrive config's connection limit is an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
@@ -312,6 +339,27 @@ test('when its install fails, setup says why in a sentence, and runs nothing of 
 
 // --- against a disposable cluster -------------------------------------------------------
 
+/** coffre_backup_login's memberships in coffre_backup, one per grantor. */
+function membership(name: string) {
+  return asSuperuser(name, async (client) =>
+    (await client.query<{ admin: boolean; inherit: boolean; set: boolean }>(
+      `SELECT admin_option AS admin, inherit_option AS inherit, set_option AS set FROM pg_auth_members
+        WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole`,
+    )).rows,
+  );
+}
+
+/** The log's entries, by action, as `url`'s login sees them. */
+async function logEntries(url: string): Promise<string[]> {
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    return (await client.query<{ action: string }>('SELECT action FROM audit_log ORDER BY seq')).rows.map(({ action }) => action);
+  } finally {
+    await client.end();
+  }
+}
+
 beforeEach(async () => {
   if (CLUSTER !== undefined) await emptyCluster();
 });
@@ -322,14 +370,22 @@ for (const as of ['superuser', 'owner'] as const) {
     const first = setup(['--json'], { stdin: `${url}\n` });
     const shown = json(first);
     assertNoAdministrator(first, url);
-    assert.match(first.stderr, /✓ Created coffre_runtime and coffre_vault_runtime\n/);
+    assert.match(first.stderr, /✓ Created coffre_runtime, coffre_vault_runtime and coffre_backup_login\n/);
     const count = KNOWN_MIGRATIONS.postgres.length;
     assert.match(first.stderr, new RegExp(`✓ Migrated the database to coffre \\S+'s schema: ${count} migration${count === 1 ? '' : 's'} applied\n`));
-    assert.match(first.stderr, /coffre_runtime\s+cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can write members; cannot delete log entries or create tables\n/);
+    assert.match(first.stderr, /\n\s+coffre_backup_login is a member of coffre_backup, which reads every row and writes none\n/);
+    assert.match(
+      first.stderr,
+      /coffre_runtime\s+can read the log; cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/,
+    );
     assert.deepEqual(shown.logins, {
       coffre_runtime: { login: 'coffre_runtime', password: 'created' },
       coffre_vault_runtime: { login: 'coffre_vault_runtime', password: 'created' },
+      coffre_backup_login: { login: 'coffre_backup_login', password: 'created' },
     });
+    assert.equal(new URL(shown.backup.DATABASE_URL!).username, 'coffre_backup_login');
+    assert.ok(await connects(shown.backup.DATABASE_URL!));
+    assert.deepEqual(await membership(`setup_${as}`), [{ admin: false, inherit: true, set: false }], 'a member of coffre_backup, as --backup-login grants it');
     assert.match(shown.vault.VAULT_KEY_ID!, /^vault-\d{4}-\d{2}-\d{2}-[a-z2-7]{6}$/);
     for (const key of [shown.vault.VAULT_KEY!, shown.app.APP_KEY!]) assert.equal(Buffer.from(key, 'base64').length, 32);
     assert.equal(new URL(shown.app.DATABASE_URL!).username, 'coffre_runtime');
@@ -338,10 +394,11 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.ok(await connects(shown.vault.DATABASE_URL!));
     const stored = await asSuperuser(`setup_${as}`, async (client) => ({
       verifiers: (await client.query<{ rolpassword: string }>(
-        "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime') ORDER BY rolname",
+        "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_backup_login') ORDER BY rolname",
       )).rows.map((row) => row.rolpassword),
       migrations: (await client.query('SELECT hash FROM drizzle.__drizzle_migrations')).rowCount,
     }));
+    assert.equal(stored.verifiers.length, 3);
     for (const verifier of stored.verifiers) assert.match(verifier, /^SCRAM-SHA-256\$4096:/);
     assert.ok(stored.migrations! > 0);
 
@@ -350,32 +407,38 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.deepEqual(json(again), {
       app: {},
       vault: {},
+      backup: {},
       logins: {
         coffre_runtime: { login: 'coffre_runtime', password: 'kept' },
         coffre_vault_runtime: { login: 'coffre_vault_runtime', password: 'kept' },
+        coffre_backup_login: { login: 'coffre_backup_login', password: 'kept' },
       },
     });
-    assert.match(again.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords/);
+    assert.match(again.stderr, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_backup_login, with their passwords/);
     assert.match(again.stderr, /✓ The database is up to date/);
-    assert.match(again.stderr, /coffre_runtime and coffre_vault_runtime: from the catalog, with no new password to log in with/);
+    assert.match(again.stderr, /coffre_runtime, coffre_vault_runtime and coffre_backup_login: from the catalog, with no new password to log in with/);
     assertNoAdministrator(again, url);
     assert.deepEqual(
       await asSuperuser(`setup_${as}`, async (client) => ({
         verifiers: (await client.query<{ rolpassword: string }>(
-          "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime') ORDER BY rolname",
+          "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_backup_login') ORDER BY rolname",
         )).rows.map((row) => row.rolpassword),
         migrations: (await client.query('SELECT hash FROM drizzle.__drizzle_migrations')).rowCount,
       })),
       stored,
     );
+    assert.deepEqual(await membership(`setup_${as}`), [{ admin: false, inherit: true, set: false }], 'granted again, not twice');
     assert.ok(await connects(shown.app.DATABASE_URL!), 'the first passwords still work');
 
     // With --reset-passwords: new ones, and the old stop working. The database is still unused, so new keys come with them.
     const reset = json(setup(['--reset-passwords', '--json'], { stdin: `${url}\n` }));
     assert.equal(reset.logins.coffre_runtime!.password, 'reset');
+    assert.equal(reset.logins.coffre_backup_login!.password, 'reset');
     assert.ok(await connects(reset.app.DATABASE_URL!));
     assert.ok(await connects(reset.vault.DATABASE_URL!));
+    assert.ok(await connects(reset.backup.DATABASE_URL!));
     assert.equal(await connects(shown.app.DATABASE_URL!), false);
+    assert.equal(await connects(shown.backup.DATABASE_URL!), false);
     assert.ok(reset.vault.VAULT_KEY !== undefined && reset.vault.VAULT_KEY !== shown.vault.VAULT_KEY);
   });
 }
@@ -431,6 +494,38 @@ test('a database that holds data gets new passwords but no keys: its keys are th
   assert.deepEqual(Object.keys(after.app), ['DATABASE_URL']);
   assert.deepEqual(Object.keys(after.vault), ['DATABASE_URL']);
   assert.ok(await connects(after.vault.DATABASE_URL!));
+  // The backup login reads the vault's entry, through coffre_backup's policy on the log.
+  assert.deepEqual(await logEntries(after.backup.DATABASE_URL!), ['key.check']);
+});
+
+test('a deployment set up before setup made the backup login: a rerun makes it, or takes one made by hand, and grants it its group, the others kept', needsCluster, async () => {
+  const url = await database('setup_later', 'owner');
+  const first = json(setup(['--json'], { stdin: `${url}\n` }));
+  // As a deployment set up before has it: no backup login.
+  await asSuperuser('setup_later', (client) => client.query('DROP ROLE coffre_backup_login'));
+  const made = setup(['--json'], { stdin: `${url}\n` });
+  const shown = json(made);
+  assert.match(made.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; created coffre_backup_login\n/);
+  assert.deepEqual(Object.keys(shown.app), [], 'no key for a deployment that has its own');
+  assert.deepEqual(Object.keys(shown.vault), []);
+  assert.deepEqual(Object.keys(shown.backup), ['DATABASE_URL']);
+  assert.ok(await connects(first.app.DATABASE_URL!), 'the app keeps its password');
+  assert.deepEqual(await logEntries(shown.backup.DATABASE_URL!), []);
+  assert.deepEqual(await membership('setup_later'), [{ admin: false, inherit: true, set: false }]);
+
+  // Made by hand, as Terraform does, with no group: kept as it is, its password included, and granted the group.
+  await asSuperuser('setup_later', async (client) => {
+    await client.query('DROP ROLE coffre_backup_login');
+    await client.query("CREATE ROLE coffre_backup_login LOGIN PASSWORD 'by-hand-p4ss'");
+  });
+  const byHand = setup(['--json'], { stdin: `${url}\n` });
+  assert.equal(json(byHand).logins.coffre_backup_login!.password, 'kept');
+  assert.match(byHand.stderr, /coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/);
+  const login = new URL(url);
+  login.username = 'coffre_backup_login';
+  login.password = 'by-hand-p4ss';
+  assert.deepEqual(await logEntries(login.href), []);
+  assert.deepEqual(await membership('setup_later'), [{ admin: false, inherit: true, set: false }]);
 });
 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
@@ -472,16 +567,16 @@ test('on a terminal: the steps on the main screen, the values on the alternate s
     terminal.send('R');
     await terminal.waitFor('Vault database URL');
     terminal.send('q');
-    await terminal.waitFor('Have you saved all five values?');
+    await terminal.waitFor('Have you saved all six values?');
     terminal.send('y');
     await terminal.waitFor('were shown once');
   }));
   assert.equal(code, 0);
   const { main, alternate } = screens(output);
   assert.match(visible(main), /✓ Each login holds only its rights/);
-  const urls = [...new Set(visible(alternate).match(/postgresql:\/\/coffre_(?:vault_)?runtime:[A-Za-z0-9_-]{32}@[^\s']+/g))];
+  const urls = [...new Set(visible(alternate).match(/postgresql:\/\/coffre_(?:(?:vault_)?runtime|backup_login):[A-Za-z0-9_-]{32}@[^\s']+/g))];
   const keys = [...new Set(visible(alternate).match(/[A-Za-z0-9+/]{43}=/g))];
-  assert.equal(urls.length, 2);
+  assert.equal(urls.length, 3);
   assert.equal(keys.length, 2);
   for (const secret of [...urls.map((each) => new URL(each).password), ...keys]) assert.ok(!main.includes(secret), 'a secret on the main screen');
   for (const each of urls) assert.ok(await connects(each), 'a URL shown that does not connect');

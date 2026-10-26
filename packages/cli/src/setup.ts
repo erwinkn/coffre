@@ -1,8 +1,9 @@
 // `coffre setup`: a deployment's database and keys, in one go. It asks for
 // the database administrator's connection string, never on the command line;
-// makes the two runtime logins, with fresh passwords that reach the database
-// only as SCRAM verifiers; migrates as the administrator, with the
-// migrations this CLI was built with; checks the boundary by connecting as
+// makes the two runtime logins and the backup login, with fresh passwords
+// that reach the database only as SCRAM verifiers; migrates as the
+// administrator, with the migrations this CLI was built with, granting the
+// backup login its read-only group; checks the boundary by connecting as
 // each login; then shows every value once, on a screen of their own, and
 // writes no file.
 //
@@ -25,16 +26,23 @@ import { readDatabaseUrl } from './database-url.ts';
 import { deploymentKind, install, installAsLocked, installed } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
 import { generateKeys, jsonWarning, keyGuide, keyValues, needsTerminal, type Keys } from './keys.ts';
-import { type Screen, showSecrets, type Value } from './secrets.ts';
+import { type GuideBlock, type Screen, showSecrets, type Value } from './secrets.ts';
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
 import { Cloudflare, type Database, deployedSummary, Later } from './workers.ts';
 
-/** The two runtime roles, as the migration names them, and the Hyperdrive config each gets on Workers. */
-const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime' } as const;
+/**
+ * The two runtime roles, as the migration names them, and the Hyperdrive
+ * config each gets on Workers; and the backup login, which `coffre_backup`
+ * lets read every row for `coffre backup`, and which no Worker uses.
+ */
+const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime', backup: 'coffre_backup_login' } as const;
 const HYPERDRIVE = { app: 'coffre', vault: 'coffre-vault' } as const;
 type Component = keyof typeof ROLES;
+const COMPONENTS = ['app', 'vault', 'backup'] as const;
+/** The components that run, each with a database login of its own. */
+type Runtime = Exclude<Component, 'backup'>;
 
 /** What happened to a login's password: set on a new login, set again on one that existed, or left alone. */
 export type Password = 'created' | 'reset' | 'kept';
@@ -52,6 +60,7 @@ export type SetupResult = {
   keys: Keys | null;
   app: Login;
   vault: Login;
+  backup: Login;
   version: string;
   /** What the database lets in, which each Hyperdrive config's limit is a share of (`hyperdriveLimit`). */
   connections: Connections;
@@ -156,13 +165,13 @@ export async function setup(args: string[]): Promise<void> {
     }
     const result = await run(administrator, out, questions, { resetPasswords: options.resetPasswords, cloudflare, connections: database.connections }, secrets, clean);
     if (cloudflare !== null) {
-      if (cloudflare.keys !== null) await showSecrets(terminal!, cloudflare.screen());
+      if (cloudflare.keys !== null || result.backup.url !== null) await showSecrets(terminal!, cloudflare.screen(result.backup.url === null ? null : { values: backupValues(result.backup), guide: BACKUP_GUIDE }));
       await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
       out.write(deployedSummary(cloudflare, out));
     } else if (options.json) {
       jsonWarning(process.stderr, listed(shownNames(result), 'and'));
       process.stdout.write(`${JSON.stringify(asJson(result))}\n`);
-    } else if (result.keys === null && result.app.url === null && result.vault.url === null) {
+    } else if (result.keys === null && COMPONENTS.every((component) => result[component].url === null)) {
       out.write(nothingToSave(out));
     } else {
       await showSecrets(terminal!, setupScreen(result));
@@ -243,7 +252,7 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
   return kind;
 }
 
-/** The database as setup finds it: what it lets in, whether it holds data, and which runtime logins exist. */
+/** The database as setup finds it: what it lets in, whether it holds data, and which of its logins exist. */
 type Inspected = { connections: Connections; used: boolean; existing: ReadonlySet<string> };
 
 /**
@@ -326,7 +335,7 @@ async function run(
   const steps = new Steps(
     out,
     [
-      'Make the two logins',
+      'Make the three logins',
       'Migrate the database',
       "Check each login's rights",
       ...(cloudflare === null ? [] : Cloudflare.TITLES),
@@ -348,13 +357,14 @@ async function run(
               const all =
                 options.resetPasswords ||
                 (existing.size > 0 &&
-                  (await progress.ask(existing.size === 1 ? `${[...existing][0]} exists already. Set new passwords?` : 'Both logins exist already. Set new passwords?')));
+                  (await progress.ask(`${listed(COMPONENTS.map((component) => ROLES[component]).filter((role) => existing.has(role)), 'and')} ${existing.size === 1 ? 'exists' : 'exist'} already. Set new passwords?`)));
               return () => all;
             }
           : async (existing: ReadonlySet<string>) => {
               // Cloudflare's refusals again, against the database as it is now: it may have changed while setup asked its questions.
               cloudflare.recheck(asRead(administrator, await holdsData(client), existing));
-              return (component: Component) => cloudflare.newPasswords[component];
+              // No Hyperdrive config holds the backup login's password: only --reset-passwords sets a new one.
+              return (component: Component) => (component === 'backup' ? options.resetPasswords : cloudflare.newPasswords[component]);
             };
       logins = await provision(client, administrator, user, reset, secrets);
       return described(logins);
@@ -362,6 +372,7 @@ async function run(
     await step(1, async (progress) => {
       let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
       await migrateDatabase(administrator.href, {
+        backupLogin: ROLES.backup,
         onPlan(planned) {
           plan = planned;
           const pending = planned.total - planned.applied;
@@ -369,19 +380,23 @@ async function run(
         },
       });
       const pending = plan.total - plan.applied;
-      return pending === 0
-        ? `The database is up to date, at coffre ${version}'s schema`
-        : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`;
+      return {
+        text:
+          pending === 0
+            ? `The database is up to date, at coffre ${version}'s schema`
+            : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`,
+        details: [`${ROLES.backup} is a member of coffre_backup, which reads every row and writes none`],
+      };
     });
     let used = false;
     await step(2, async () => {
       const details: string[] = [];
-      for (const component of ['app', 'vault'] as const) {
+      for (const component of COMPONENTS) {
         const login = logins[component];
         const allowed = login.url === null ? await granted(client, login.role) : await probed(login.url);
         details.push(checked(component, login, allowed));
       }
-      const kept = [logins.app, logins.vault].filter((login) => login.url === null);
+      const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null);
       if (kept.length > 0) details.push(`${listed(kept.map(({ role }) => role), 'and')}: from the catalog, with no new password to log in with`);
       used = await holdsData(client);
       return { text: 'Each login holds only its rights', details };
@@ -431,18 +446,18 @@ async function holdsData(client: pg.Client): Promise<boolean> {
 /** The database as Cloudflare's checks take it (`Database`). */
 function asRead(administrator: URL, used: boolean, existing: ReadonlySet<string>): Database {
   const user = decodeURIComponent(administrator.username);
-  const login = (component: Component) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
+  const login = (component: Runtime) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
   return { administrator, used, logins: { app: login('app'), vault: login('vault') } };
 }
 
-/** The runtime logins that exist, by role. */
+/** Coffre's logins that exist, by role. */
 async function existingLogins(client: pg.Client): Promise<Set<string>> {
   const { rows } = await client.query<{ rolname: string }>('SELECT rolname FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)]);
   return new Set(rows.map(({ rolname }) => rolname));
 }
 
 /**
- * Each runtime login, created with a fresh password, or, if it exists, its
+ * Each login, created with a fresh password, or, if it exists, its
  * password set again when `reset`, given the logins that exist, says so;
  * otherwise left as it is.
  */
@@ -456,7 +471,7 @@ async function provision(
   const existing = await existingLogins(client);
   const resets = await reset(existing);
   const logins = {} as Record<Component, Login>;
-  for (const component of ['app', 'vault'] as const) {
+  for (const component of COMPONENTS) {
     const role = ROLES[component];
     const login = loginFor(role, user);
     const create = !existing.has(role);
@@ -478,14 +493,19 @@ async function provision(
   return logins;
 }
 
-/** The logins step's line: what happened to each, and what they log in as on PlanetScale. */
+/** The logins step's line: what happened to each, those alike together, and what they log in as on PlanetScale. */
 function described(logins: Record<Component, Login>): { text: string; details: string[] } {
   const verbs = { created: 'Created', reset: 'Set new passwords for', kept: 'Kept' } as const;
-  const both = logins.app.password === logins.vault.password;
-  const text = both
-    ? `${verbs[logins.app.password]} ${logins.app.role} and ${logins.vault.role}${logins.app.password === 'kept' ? ', with their passwords' : ''}`
-    : `${verbs[logins.app.password]} ${logins.app.role}; ${verbs[logins.vault.password].toLowerCase()} ${logins.vault.role}`;
-  const branch = logins.app.login !== logins.app.role ? [`They log in as ${logins.app.login} and ${logins.vault.login}`] : [];
+  const all = COMPONENTS.map((component) => logins[component]);
+  const happened = [...new Set(all.map(({ password }) => password))];
+  const text = happened
+    .map((password, i) => {
+      const roles = all.filter((login) => login.password === password).map(({ role }) => role);
+      const verb = i === 0 ? verbs[password] : verbs[password].toLowerCase();
+      return `${verb} ${listed(roles, 'and')}${password === 'kept' ? `, with ${roles.length === 1 ? 'its password' : 'their passwords'}` : ''}`;
+    })
+    .join('; ');
+  const branch = logins.app.login !== logins.app.role ? [`They log in as ${listed(all.map(({ login }) => login), 'and')}`] : [];
   return { text, details: branch };
 }
 
@@ -494,8 +514,15 @@ function described(logins: Record<Component, Login>): { text: string; details: s
 /** What each login may do that matters, and what it must answer. */
 const BOUNDARY = [
   {
+    // The backup login's, through coffre_backup: --backup-login granted it.
+    what: 'read the log',
+    expected: { app: true, vault: true, backup: true },
+    sql: 'SELECT 1 FROM audit_log LIMIT 1',
+    privilege: "has_table_privilege($1, 'public.audit_log', 'SELECT')",
+  },
+  {
     what: 'write members',
-    expected: { app: false, vault: true },
+    expected: { app: false, vault: true, backup: false },
     // A whole row, so that only a privilege can refuse it.
     sql: `INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
           VALUES ('user:coffre-setup@probe.invalid', 'active', false, 0, 0, 'system:coffre-setup', 0, 'system:coffre-setup', 0, decode(repeat('00', 32), 'hex'))`,
@@ -503,13 +530,13 @@ const BOUNDARY = [
   },
   {
     what: 'delete log entries',
-    expected: { app: false, vault: false },
+    expected: { app: false, vault: false, backup: false },
     sql: 'DELETE FROM audit_log',
     privilege: "has_table_privilege($1, 'public.audit_log', 'DELETE')",
   },
   {
     what: 'create tables',
-    expected: { app: false, vault: false },
+    expected: { app: false, vault: false, backup: false },
     sql: 'CREATE TABLE coffre_setup_probe (probe integer)',
     privilege: "has_schema_privilege($1, 'public', 'CREATE') OR has_database_privilege($1, current_database(), 'CREATE')",
   },
@@ -566,10 +593,24 @@ function checked(component: Component, login: Login, allowed: boolean[]): string
 
 // --- what it shows -----------------------------------------------------------------
 
-/** The values to save, by component: the app's key and URL, the vault's ID, key and URL, as this run made them. */
-export function setupValues({ keys, app, vault }: SetupResult): { app: Value[]; vault: Value[] } {
+/** The backup login's URL, when this run set its password: for the backup job, never a Worker or a process. */
+export function backupValues(backup: Login): Value[] {
+  return backup.url === null
+    ? []
+    : [
+        {
+          label: 'Backup database URL',
+          value: backup.url,
+          mask: 'password',
+          about: "The backup login's: reads every row, the log's included, and writes none. Goes where coffre backup runs, as a secret.",
+        },
+      ];
+}
+
+/** The values to save, by component: the app's key and URL, the vault's ID, key and URL, and the backup's URL, as this run made them. */
+export function setupValues({ keys, app, vault, backup }: SetupResult): Record<Component, Value[]> {
   const made = keys === null ? { app: [], vault: [] } : keyValues(keys);
-  const database = (login: Login, component: Component): Value[] =>
+  const database = (login: Login, component: Runtime): Value[] =>
     login.url === null
       ? []
       : [
@@ -583,12 +624,21 @@ export function setupValues({ keys, app, vault }: SetupResult): { app: Value[]; 
   return {
     app: [...made.app, ...database(app, 'app')],
     vault: [...made.vault, ...database(vault, 'vault')],
+    backup: backupValues(backup),
   };
 }
 
+/** Where the backup login's URL goes, on any platform. */
+export const BACKUP_GUIDE: GuideBlock = {
+  title: 'Backups',
+  lines: [
+    "The backup database URL goes in your backup job's secrets, never in a Worker or in .env: the job pipes it to coffre backup, which reads it on stdin. docs/restore.md has the job.",
+  ],
+};
+
 /** The screen: the values, and where each goes, with the Hyperdrive commands to copy. */
 export function setupScreen(result: SetupResult): Screen {
-  const { app, vault } = setupValues(result);
+  const { app, vault, backup } = setupValues(result);
   const set = (['app', 'vault'] as const).filter((component) => result[component].url !== null);
   const created = set.some((component) => result[component].password === 'created');
   const keys = keyGuide();
@@ -629,35 +679,40 @@ export function setupScreen(result: SetupResult): Screen {
     sections: [
       ...(app.length > 0 ? [{ title: 'App', values: app }] : []),
       ...(vault.length > 0 ? [{ title: 'Vault', values: vault }] : []),
+      ...(backup.length > 0 ? [{ title: 'Backup', values: backup }] : []),
     ],
     guide: [
-      { title: 'On Cloudflare Workers', lines: workers },
-      { title: 'On Node', lines: node },
+      ...(app.length + vault.length > 0
+        ? [
+            { title: 'On Cloudflare Workers', lines: workers },
+            { title: 'On Node', lines: node },
+          ]
+        : []),
+      ...(backup.length > 0 ? [BACKUP_GUIDE] : []),
     ],
   };
 }
 
 /** What the values were, by name, for the --json warning. */
 function shownNames(result: SetupResult): string[] {
-  const { app, vault } = setupValues(result);
-  return [...app, ...vault].filter(({ mask }) => mask !== 'none').map(({ label }) => `the ${label.replace(/^[A-Z]/, (c) => c.toLowerCase())}`);
+  return Object.values(setupValues(result)).flat().filter(({ mask }) => mask !== 'none').map(({ label }) => `the ${label.replace(/^[A-Z]/, (c) => c.toLowerCase())}`);
 }
 
 /** The same values, for a script: each component's, under the examples' names, and what happened to each login. */
-export function asJson({ keys, app, vault }: SetupResult) {
+export function asJson({ keys, app, vault, backup }: SetupResult) {
   const database = (login: Login) => (login.url === null ? {} : { DATABASE_URL: login.url });
   return {
     app: { ...(keys === null ? {} : { APP_KEY: keys.APP_KEY }), ...database(app) },
     vault: { ...(keys === null ? {} : { VAULT_KEY_ID: keys.VAULT_KEY_ID, VAULT_KEY: keys.VAULT_KEY }), ...database(vault) },
-    logins: Object.fromEntries([app, vault].map(({ role, login, password }) => [role, { login, password }])),
+    backup: database(backup),
+    logins: Object.fromEntries([app, vault, backup].map(({ role, login, password }) => [role, { login, password }])),
   };
 }
 
 /** After the screen: what happened, and what comes next, with no secret in it. */
 export function summary(result: SetupResult, out: Output): string {
   const s = style(out);
-  const { app, vault } = setupValues(result);
-  const names = [...app, ...vault].filter(({ mask }) => mask !== 'none').map(({ label }) => label.replace(/^[A-Z]/, (c) => c.toLowerCase()));
+  const names = Object.values(setupValues(result)).flat().filter(({ mask }) => mask !== 'none').map(({ label }) => label.replace(/^[A-Z]/, (c) => c.toLowerCase()));
   const created = result.app.password === 'created' || result.vault.password === 'created';
   const reset = result.app.password === 'reset' || result.vault.password === 'reset';
   const workers = [
@@ -665,15 +720,22 @@ export function summary(result: SetupResult, out: Output): string {
     ...(result.keys === null ? [] : ['VAULT_KEY_ID under vars', 'APP_KEY and VAULT_KEY as secrets']),
   ];
   const fresh = created || result.keys !== null;
+  // Only the backup login's URL, new: the app and the vault go on as they were.
+  const runtime = result.keys !== null || result.app.url !== null || result.vault.url !== null;
   return [
     '',
-    `  ${s.green('✓')} ${s.bold(`The ${listed(names, 'and')} were shown once.`)}`,
-    s.dim(paragraph(out, "They aren't stored anywhere. A lost database URL comes back with coffre setup --reset-passwords; a lost key can't be recovered.", 4)),
+    `  ${s.green('✓')} ${s.bold(`The ${listed(names, 'and')} ${names.length === 1 ? 'was' : 'were'} shown once.`)}`,
+    s.dim(paragraph(out, `${names.length === 1 ? "It isn't" : "They aren't"} stored anywhere. A lost database URL comes back with coffre setup --reset-passwords; a lost key can't be recovered.`, 4)),
     '',
     ...(result.keys === null ? [] : [row(out, s, 'Vault ID', `${result.keys.VAULT_KEY_ID}, not a secret`), '']),
     `    ${s.bold('Next')}`,
-    row(out, s, 'Workers', `${workers.join('; ')}${fresh ? '; then pnpm run deploy' : ', which needs no redeploy'}.`),
-    row(out, s, 'Node', fresh ? '.env and vault.env, then pnpm vault and pnpm start.' : 'each DATABASE_URL updated, then both processes restarted.'),
+    ...(runtime
+      ? [
+          row(out, s, 'Workers', `${workers.join('; ')}${fresh ? '; then pnpm run deploy' : ', which needs no redeploy'}.`),
+          row(out, s, 'Node', fresh ? '.env and vault.env, then pnpm vault and pnpm start.' : 'each DATABASE_URL updated, then both processes restarted.'),
+        ]
+      : []),
+    ...(result.backup.url === null ? [] : [row(out, s, 'Backups', "the backup database URL in your backup job's secrets, for coffre backup: docs/restore.md.")]),
     s.dim(paragraph(out, 'After every upgrade of coffre, pnpm exec coffre migrate --yes here first, then the deploy or the restart: until it runs, the new version serves nothing. docs/deploy.md has each step.', 4)),
     '',
     '',
