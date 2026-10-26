@@ -22,7 +22,10 @@
   it again, within two laps. Now, while a refusal stands, a checkpoint
   whose walk began after the entry it names checks that entry again under
   the head, its hash, its link and the vault's MAC, and refuses while it
-  is still broken (T104, found by `formal/Audit.tla`).
+  is still broken (T104, found by `formal/Audit.tla`). A refusal that
+  names no entry, or a lap of the rehash ending on a hash other than the
+  one signed, is cleared by the next signature as before, and found again
+  by the rehash.
 
 ## 0.14.3 (2026-10-26)
 

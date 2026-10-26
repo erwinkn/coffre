@@ -950,11 +950,16 @@ What it does not claim, as the code does not:
 - **The vault signs over app entries it cannot check.** A rewrite of the
   app's entries alone, past the last vault entry, is signed. The beat's
   walk finds it and the anchor keeps the finding (`FoundEditStaysRed`).
-- **A refusal of the vault's stands only until it signs again**, which
-  takes the entry it names whole again: a call whose walk began after that
-  entry checks it again under the head before it signs (T104). One that
-  names no entry, a prefix rewritten or a head moved, is found again by
-  the next call's own checks of the prefix it resumes from and the head.
+- **A refusal of the vault's stands only until it signs again.** A call
+  whose walk began after the entry a refusal names checks that entry again
+  under the head, as the walk checks each, and refuses while it is broken
+  (T104). Two refusals this holds no further: one that names no entry, a
+  prefix not the one signed or a head not naming the last entry, which a
+  call's own checks find again only where they reach (the hash of the
+  prefix it resumes from, and the head); and a lap of the scrub ending on
+  a hash other than the one signed, whose entry, on its own, holds. The
+  next signature clears either, and the scrub finds the change again
+  within two laps.
 - **A rewrite that stops short of the anchor's checkpoint.** The model's
   rewrite hashes the chain again to the head. One of entries 400 to 499,
   each hashed again, under a checkpoint at 500, leaves 500's hash, which
