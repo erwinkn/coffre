@@ -94,9 +94,9 @@ export interface Workload {
 export interface UsedCredential {
   /** `<credential's URL>/<path>`, signed: the proxy forwards it to the upstream with the real key. */
   fetch(path: string, init?: RequestInit): Promise<Response>;
-  /** A signature by a signer's private key, which stays in coffre: base64url, as `credential.sign` gives. */
+  /** A signature by a signer's key, which stays in coffre: a private key's base64url, an HMAC secret's as its `hmac()` writes it. */
   sign(message: string | Uint8Array): Promise<string>;
-  /** Whether `signature` is a verifier's over `message`: an inbound webhook's, checked without reading its secret. */
+  /** Whether `signature`, as its header carried it, is a verifier's HMAC of `message`, an inbound webhook's body as it came: checked without reading its secret. */
   verify(message: string | Uint8Array, signature: string): Promise<boolean>;
   /** A presigned GET or HEAD of `path` under an AWS-signed credential's upstream: the upstream's own URL, for anyone until `expiresAt`. */
   presign(path: string, options?: { expiresIn?: number; method?: 'GET' | 'HEAD'; query?: Record<string, string> }): Promise<{ url: string; expiresAt: string }>;

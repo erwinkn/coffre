@@ -27,7 +27,8 @@ The design, its threat model and every rule behind this guide are in
 **What is built.** The SDK, `coffre serve` and key-bound `coffre run` are.
 The server side lands in its own changes: the exchange and sessions, the new
 `coffre trust` flags, enrollment codes (`coffre enroll`), freeze and
-`narrow`, the Workers binding, minting and `verify`. Until an instance
+`narrow`, the Workers binding and minting. `verify` is built (0.14.3,
+[below](#inbound-webhooks-verify)). Until an instance
 answers the workload exchange, `coffre --service … run` falls back to the
 bearer exchange [ci.md](ci.md) describes.
 
@@ -88,6 +89,52 @@ it (`/../stripe/…`, from an object key or a file name) is refused before
 anything is sent. `presign` gives the upstream's own URL, usable by anyone
 until `expiresAt`.
 `mint` answers only where the binding's `reads` lists the minter.
+
+### Inbound webhooks: `verify`
+
+A provider signs each webhook with a secret it shares with the app. With
+`verify`, the secret stays in coffre: the deployment lists it among the
+credential proxy's `verifiers`, with how the provider writes its signature,
+
+```ts
+verifiers: {
+  yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }),   // x-yousign-signature-256
+  dfns: hmac('DFNS_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }),         // x-dfns-webhook-signature
+},
+```
+
+and the app hands coffre the body exactly as it came, with the header:
+
+```ts
+// NestFactory.create(AppModule, { rawBody: true }), so that req.rawBody is the bytes the provider signed.
+const signature = req.headers['x-dfns-webhook-signature'];
+if (typeof signature !== 'string' || !(await coffre.credential('dfns').verify(req.rawBody, signature))) throw new UnauthorizedException();
+const { timestampSent } = JSON.parse(req.rawBody.toString());
+if (!(Math.abs(Date.now() / 1000 - timestampSent) <= 300)) throw new UnauthorizedException();
+```
+
+- **The raw body.** `JSON.stringify(req.body)` is not what the provider
+  signed whenever its spacing or key order differ: pass the bytes.
+- **The answer is yes or no.** Coffre compares in constant time and says
+  nothing more, whatever is wrong with the signature. A replay check, such
+  as DFNS's five minutes on `timestampSent`, stays in the app, which reads
+  the body anyway; write it to fail when the field is missing.
+- **From any language,** through `coffre serve`: `POST
+  http://127.0.0.1:7300/use/market/prod` with `{"verify": {"credential":
+  "dfns", "message": "<the body, base64url>", "signature": "<the header>"}}`
+  answers `{"valid": true}` or `{"valid": false}`.
+- **Bounded.** A body is 64 KiB at most unless the `hmac()` says `maxBytes`,
+  up to 1 MiB; past it, 413, and `verify` throws: answer the provider 413
+  too, so that it does not retry a body that will never pass.
+- **Cheap.** The secret is opened once a minute per session and logged
+  then, as a credential's key is: a warm `verify` is one statement and no
+  vault call.
+
+An HMAC among `signers` signs too (`credential('iframe-token').sign(payload)`,
+as its scheme writes the signature) and checks its own signatures. A
+verifier never signs, so a stolen session cannot forge the provider's calls.
+The details, and each provider's scheme, are in
+[credential-proxy.md](design/credential-proxy.md), section 5.
 
 ### `read`: the escape hatch
 

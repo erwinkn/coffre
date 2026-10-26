@@ -27,10 +27,18 @@ export type ProxiedCredential = {
   presign(path: string, options?: { method?: 'GET' | 'HEAD'; expiresIn?: number; query?: Record<string, string> }): Promise<{ url: string; expiresAt: string }>;
   /**
    * A signature of `message` (a string signs as its UTF-8) by a signer's
-   * private key, which stays in coffre: what Node's `crypto.sign(undefined,
-   * message, key)` gives, base64url. Each is one use in coffre's log.
+   * key, which stays in coffre: a private key's, what Node's
+   * `crypto.sign(undefined, message, key)` gives, base64url, each one use
+   * in coffre's log; an HMAC secret's, as its `hmac()` writes it.
    */
   sign(message: Uint8Array | string): Promise<string>;
+  /**
+   * Whether `signature`, as its header carried it (`sha256=…`), is a
+   * verifier's HMAC of `message`: an inbound webhook's body, the bytes as
+   * they came, never the JSON parsed and written again. The secret stays
+   * in coffre, which compares in constant time and says only yes or no.
+   */
+  verify(message: Uint8Array | string, signature: string): Promise<boolean>;
 };
 
 type Env = Record<string, string | undefined>;
@@ -59,7 +67,13 @@ export function credential(
       headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' },
       body: JSON.stringify(asked),
     });
-    return { answer, body: (await answer.json()) as { url?: string; expiresAt?: string; signature?: string; message?: string } };
+    return { answer, body: (await answer.json()) as { url?: string; expiresAt?: string; signature?: string; valid?: boolean; message?: string } };
+  };
+  const bytesOf = (message: Uint8Array | string) => {
+    const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   };
   return {
     url,
@@ -74,12 +88,14 @@ export function credential(
       return { url: body.url, expiresAt: body.expiresAt! };
     },
     sign: async (message) => {
-      const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
-      let binary = '';
-      for (const byte of bytes) binary += String.fromCharCode(byte);
-      const { answer, body } = await compute({ sign: { credential: name, message: btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') } });
+      const { answer, body } = await compute({ sign: { credential: name, message: bytesOf(message) } });
       if (!answer.ok || body.signature === undefined) throw new Error(`coffre signed nothing: ${body.message ?? answer.status}`);
       return body.signature;
+    },
+    verify: async (message, signature) => {
+      const { answer, body } = await compute({ verify: { credential: name, message: bytesOf(message), signature } });
+      if (!answer.ok || typeof body.valid !== 'boolean') throw new Error(`coffre verified nothing: ${body.message ?? answer.status}`);
+      return body.valid;
     },
   };
 }
