@@ -12,6 +12,7 @@ import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpath
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
@@ -241,14 +242,14 @@ function http(input: string | Request, init?: RequestInit): Promise<Response> {
 }
 
 /**
- * A CI run's credential, and the ID token it was traded for: asked for once
+ * A CI run's credential, and the ID tokens asked for to buy it: asked for once
  * in this process, before its first request, and kept in memory only.
  */
-let exchanged: Promise<{ credential: string; idToken: string }> | null = null;
+let exchanged: Promise<{ credential: string; idTokens: string[] }> | null = null;
 
-function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idToken: string }> {
+function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idTokens: string[] }> {
   exchanged ??= signIn(origin, workload.service)
-    .then(({ issued, idToken: token }) => ({ credential: issued.token, idToken: token }))
+    .then(({ issued, idTokens }) => ({ credential: issued.token, idTokens }))
     .catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   return exchanged;
 }
@@ -288,25 +289,28 @@ function momentary(status: number, body: { error?: unknown; reason?: unknown } |
  * ID token from GitHub: an exchange that committed and lost its answer has
  * spent the one before (docs/design/oidc.md, section 3).
  */
-async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idToken: string }> {
+async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idTokens: string[] }> {
+  // Each ID token it asked for, to hide from the log: one whose exchange failed may still be good until it expires.
+  const idTokens: string[] = [];
   for (let attempt = 0; ; attempt++) {
     const token = await idToken(given, process.env, origin, fetching(origin));
+    idTokens.push(token);
     try {
-      return { issued: await exchange(origin, service, token, http), idToken: token };
+      return { issued: await exchange(origin, service, token, http), idTokens };
     } catch (error) {
       const wait = unavailableWait(attempt);
       if (wait === undefined || !(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
       if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
-      await new Promise((resolve) => setTimeout(resolve, wait));
+      await sleep(wait);
     }
   }
 }
 
-/** What GitHub must hide from the job's log, beside the values: the run's ID token and credential, if it used them. */
+/** What GitHub must hide from the job's log, beside the values: the run's ID tokens and credential, if it used them. */
 async function workloadSecrets(): Promise<[string, string][]> {
   if (exchanged === null) return [];
-  const { credential, idToken: token } = await exchanged;
-  return [['', token], ['', credential]];
+  const { credential, idTokens } = await exchanged;
+  return [...[...new Set(idTokens)].map((token): [string, string] => ['', token]), ['', credential]];
 }
 
 async function headersFor(to: Target): Promise<Record<string, string>> {
@@ -363,7 +367,7 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
   const body = (await response.clone().json().catch(() => null)) as { reason?: unknown } | null;
   if (body?.reason !== 'policy_changed') return response;
   if (sessionFlags.verbose) stderr(`the access policy changed while ${requestLine(request.method, new URL(request.url))} was answered: asking again in ${took(POLICY_RETRY_MS)}`);
-  await new Promise((resolve) => setTimeout(resolve, POLICY_RETRY_MS));
+  await sleep(POLICY_RETRY_MS);
   return once(again);
 }
 
@@ -380,7 +384,7 @@ async function reading(request: Request): Promise<Response> {
     // The status first: a body is parsed only when it may say the instance cannot answer yet.
     if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
     if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);
-    await new Promise((resolve) => setTimeout(resolve, wait));
+    await sleep(wait);
     request = again;
   }
 }
