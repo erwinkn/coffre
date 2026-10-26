@@ -8,18 +8,20 @@
 // It asks for the database owner's direct URL, at a hidden prompt or on
 // stdin, never the command line; shows what it will apply; and applies it
 // under the migration lock, with the privileges reasserted. Without a
-// terminal, only with --yes.
+// terminal, only with --yes. --backup-login <role> grants that existing role
+// the read-only group coffre_backup, on every run; coffre never makes the
+// role, and never revokes the group from it.
 import { parseArgs } from 'node:util';
 
 import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { AfterMigrations, backupLoginNote, DatabaseAhead, migrateDatabase, type MigrationRun, migrationStatus, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
-import { type Outcome, type Step, StepFailed, Steps } from './steps.ts';
+import { type Step, StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
 
@@ -69,7 +71,7 @@ export function migrationFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-type Options = { yes: boolean };
+type Options = { yes: boolean; backupLogin?: string };
 
 export async function migrate(args: string[]): Promise<void> {
   const secrets: string[] = [];
@@ -145,15 +147,12 @@ async function migrateDeployment(
       return;
     }
     // What every run does with nothing to apply: the privileges a restore leaves out, and the backup login's group.
-    let run: MigrationRun;
     try {
-      run = await migrateDatabase(url.href);
+      await migrateDatabase(url.href, { backupLogin: options.backupLogin });
     } catch (error) {
       throw new MigrateError(migrationFailure(error));
     }
-    out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}; reasserted the database's privileges\n`);
-    const note = backupLoginNote(run);
-    if (note !== null) out.write(`  ${s.dim(note)}\n`);
+    out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}; ${reasserted(options)}\n`);
     out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
@@ -164,7 +163,7 @@ async function migrateDeployment(
   out.write(`  ${count(pending.length, 'migration')} to apply to ${where}, for coffre ${deployment.version}: ${listed(pending, 'and')}\n\n`);
   const steps = new Steps(out, [`Apply ${listed(pending, 'and')}`], () => terminal?.keys ?? null, clean);
   try {
-    await steps.run(0, (step) => apply(url, where, pending, step, options.yes));
+    await steps.run(0, (step) => apply(url, where, pending, step, options));
   } finally {
     steps.end();
   }
@@ -321,38 +320,45 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
 }
 
 /** Apply `pending` to the database, asking first unless told yes. */
-async function apply(url: URL, where: string, pending: string[], step: Step, yes: boolean): Promise<Outcome> {
-  if (!yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
+async function apply(url: URL, where: string, pending: string[], step: Step, options: Options): Promise<string> {
+  if (!options.yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
   step.note(`Applying ${listed(pending, 'and')}`);
-  let run: MigrationRun;
   try {
-    run = await migrateDatabase(url.href, (plan) => {
-      // Under the lock now: what was read before, or another run got there first.
-      if (plan.pending.join() !== pending.join()) {
-        throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
-      }
+    await migrateDatabase(url.href, {
+      backupLogin: options.backupLogin,
+      onPlan(plan) {
+        // Under the lock now: what was read before, or another run got there first.
+        if (plan.pending.join() !== pending.join()) {
+          throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
+        }
+      },
     });
   } catch (error) {
     if (error instanceof MigrateError) throw error;
     throw new MigrateError(migrationFailure(error));
   }
-  const note = backupLoginNote(run);
-  return { text: `Applied ${listed(pending, 'and')}, and reasserted the database's privileges`, details: note === null ? [] : [note] };
+  return `Applied ${listed(pending, 'and')}, and ${reasserted(options)}`;
+}
+
+function reasserted({ backupLogin }: Options): string {
+  return `reasserted the database's privileges${backupLogin === undefined ? '' : ` and ${backupLogin}'s membership in coffre_backup`}`;
 }
 
 function parseOptions(args: string[]): Options {
   try {
     const { values } = parseArgs({
       args,
-      options: { yes: { type: 'boolean', default: false } },
+      options: { yes: { type: 'boolean', default: false }, 'backup-login': { type: 'string' } },
       strict: true,
     });
-    return { yes: values.yes };
+    const backupLogin = values['backup-login'];
+    if (backupLogin === '') throw new Error('empty backup login');
+    return { yes: values.yes, ...(backupLogin === undefined ? {} : { backupLogin }) };
   } catch {
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
     throw new MigrateError(
-      'coffre migrate takes only --yes. ' +
+      'coffre migrate takes only --yes and --backup-login <role>. ' +
         `It asks for the database owner's connection string, at a hidden prompt or on stdin, ` +
         `never from the command line, where the shell's history and other users can read it.` +
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),

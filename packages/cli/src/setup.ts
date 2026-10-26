@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { postgresConnection } from '@coffre/db/connect';
-import { backupLoginNote, migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
+import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import pg from 'pg';
 
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
@@ -361,19 +361,17 @@ async function run(
     });
     await step(1, async (progress) => {
       let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
-      const run = await migrateDatabase(administrator.href, (planned) => {
-        plan = planned;
-        const pending = planned.total - planned.applied;
-        progress.note(pending === 0 ? 'Checking the database is up to date' : `Migrating the database: ${count(pending, 'migration')} to apply`);
+      await migrateDatabase(administrator.href, {
+        onPlan(planned) {
+          plan = planned;
+          const pending = planned.total - planned.applied;
+          progress.note(pending === 0 ? 'Checking the database is up to date' : `Migrating the database: ${count(pending, 'migration')} to apply`);
+        },
       });
       const pending = plan.total - plan.applied;
-      const note = backupLoginNote(run);
-      return {
-        text: pending === 0
-          ? `The database is up to date, at coffre ${version}'s schema`
-          : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`,
-        details: note === null ? [] : [note],
-      };
+      return pending === 0
+        ? `The database is up to date, at coffre ${version}'s schema`
+        : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`;
     });
     let used = false;
     await step(2, async () => {

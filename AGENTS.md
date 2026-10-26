@@ -118,7 +118,9 @@ new code never meets the old schema: below its migrations, the app answers
 everything but `/livez` and `/readyz` with 503 `migrating`, at one door
 (`respond` in `packages/server/src/app.ts`), so no code checks whether a
 migration has run. So a migration adds: tables, columns that are nullable
-or have a default, indexes, grants. What removes or tightens (dropping or
+or have a default, indexes, grants. A migration that makes a table grants
+`SELECT` on it to `coffre_backup`, by name, as it grants `coffre_app`;
+`pnpm test:schema` fails on a table the backup cannot read. What removes or tightens (dropping or
 renaming a table or a column, NOT NULL on an existing column, a narrower
 check or type, a unique or foreign key the old code may break) ships one
 release after the code stops using it. 0.4.0 is a clean break: one baseline

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # The backup role (docs/restore.md) on a disposable cluster, since roles are
 # cluster-wide: coffre_backup, the group 0019_backup_role.sql makes, and
-# coffre_backup_login, provisioned outside the migrations, which every
-# migrate grants the group. The login, made after the migrations, gets the
-# group at the next run; runs with nothing to apply, two at once, change
-# nothing; it then dumps the whole database, every audit entry included, the
-# dump restores to the same rows, and it writes nothing. A login that may not
-# grant the group says so, and the run still succeeds.
+# coffre_backup_login, made by a superuser as a host's control plane would,
+# which a migrate run by the non-superuser owner grants the group only when
+# --backup-login names it. Runs with nothing to apply, two at once, change
+# nothing; the login then dumps the whole database, every audit entry
+# included, the dump restores to the same rows, and it writes nothing. A role
+# that does not exist, or an owner that may not grant the group, fails the run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
@@ -31,14 +31,10 @@ as_owner() { docker exec -i -e PGPASSWORD=local-owner-only "$container" psql -X 
 as_backup() { docker exec -i -e PGPASSWORD=local-backup-only "$container" "$@" -h 127.0.0.1 -U coffre_backup_login; }
 migrate() {
     DATABASE_URL="postgresql://migration_owner:local-owner-only@127.0.0.1:$port/$1" \
-        pnpm --filter @coffre/db run db:migrate
+        pnpm --filter @coffre/db run db:migrate "${@:2}"
 }
 # A login that migrates as a member of the owner, as the CLI's NotOwner advice makes one: its privileges, never its CREATEROLE.
 as_member() { docker exec -i -e PGPASSWORD=local-member-only "$container" psql -X -v ON_ERROR_STOP=1 -q -h 127.0.0.1 -U migration_member "$@"; }
-migrate_as_member() {
-    DATABASE_URL="postgresql://migration_member:local-member-only@127.0.0.1:$port/$1" \
-        pnpm --filter @coffre/db run db:migrate
-}
 
 # Managed hosts give the owner CREATEROLE, not superuser.
 as_superuser -c "CREATE ROLE migration_owner LOGIN CREATEROLE CREATEDB PASSWORD 'local-owner-only'"
@@ -94,17 +90,6 @@ if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup is a member of another
     exit 1
 fi
 
-# Nor one that has members besides the backup login, who would read every row.
-as_owner -d postgres -c 'CREATE DATABASE unsafe_members'
-as_superuser -c 'CREATE ROLE mallory NOLOGIN' -c 'GRANT coffre_backup TO mallory'
-accepted=false
-if migrate unsafe_members >"$scratch/unsafe.log" 2>&1; then accepted=true; fi
-as_superuser -c 'REVOKE coffre_backup FROM mallory'
-if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup has members other than coffre_backup_login' "$scratch/unsafe.log"; then
-    cat "$scratch/unsafe.log" >&2
-    exit 1
-fi
-
 # Databases at 0018, the schema before this migration, whose public holds a
 # table of another role, as migrate.test.ts's reporting table, and in which
 # the group was granted a write. 0019 then grants coffre's tables, and only
@@ -143,18 +128,8 @@ SQL
         || { echo "0019, as ${login%%:*}, granted the group another role's table" >&2; exit 1; }
 done
 
-# A table a later migration makes as the member, whose CREATE TABLE names it
-# as one of coffre's (capped_alerts, made again here): its next run grants
-# the group it, and still not the other role's table.
-as_member -d at_0018_migration_owner -c 'DROP TABLE capped_alerts; CREATE TABLE capped_alerts (service text)'
-migrate_as_member at_0018_migration_owner >/dev/null
-[[ "$(as_superuser -d at_0018_migration_owner -At -c "SELECT has_table_privilege('coffre_backup', 'capped_alerts', 'SELECT') AND NOT has_table_privilege('coffre_backup', 'reporting_rows', 'SELECT')")" == t ]] \
-    || { echo "migrate did not grant the group exactly coffre's table the member made" >&2; exit 1; }
-
-# Before the login exists, each run says there is none to back up as.
 as_owner -d postgres -c 'CREATE DATABASE backed_up'
-migrate backed_up >"$scratch/migrate.log"
-grep -Fq 'no backup login: coffre_backup_login does not exist' "$scratch/migrate.log" || { cat "$scratch/migrate.log" >&2; exit 1; }
+migrate backed_up >/dev/null
 
 # Rows in every table the fixture fills, and entries by both authors.
 as_owner -d backed_up < packages/db/test/schema-fixture.sql
@@ -165,12 +140,40 @@ SELECT seq, CASE WHEN seq % 2 = 0 THEN 'app' ELSE 'vault' END, 'fixture', seq, '
   FROM generate_series(1, 40) AS seq;
 SQL
 
-# The login, made after the migrations by someone else, as a deployment's
-# Terraform makes it: the next run grants it the group, and says nothing of
-# its absence.
+member() {
+    as_superuser -d postgres -At -c "SELECT string_agg(format('%s|%s|%s|%s', grantor::regrole, admin_option, inherit_option, set_option), ',')
+        FROM pg_auth_members WHERE roleid = 'coffre_backup'::regrole AND member = (SELECT oid FROM pg_roles WHERE rolname = '$1')"
+}
+
+# The login, made after the migrations by the superuser, as a host's control
+# plane makes it: a run that names no backup login grants it nothing, and one
+# that names it grants it the group, the owner holding nothing on the login.
 as_superuser -c "CREATE ROLE coffre_backup_login LOGIN PASSWORD 'local-backup-only'"
-migrate backed_up >"$scratch/migrate.log"
-if grep -Fq 'no backup login' "$scratch/migrate.log"; then cat "$scratch/migrate.log" >&2; exit 1; fi
+[[ "$(as_superuser -d postgres -At -c "SELECT pg_has_role('migration_owner', 'coffre_backup_login', 'MEMBER')")" == f ]] || { echo 'the owner holds the login' >&2; exit 1; }
+migrate backed_up >/dev/null
+[[ -z "$(member coffre_backup_login)" ]] || { echo 'a run without --backup-login granted the group' >&2; exit 1; }
+migrate backed_up --backup-login coffre_backup_login >/dev/null
+[[ "$(member coffre_backup_login)" == 'migration_owner|f|t|f' ]] || { echo "migrate did not grant coffre_backup_login its group: $(member coffre_backup_login)" >&2; exit 1; }
+
+# A role that does not exist fails the run, named, and is not made.
+if migrate backed_up --backup-login coffre_backup_logn >"$scratch/absent.log" 2>&1 \
+    || ! grep -Fq 'role "coffre_backup_logn" does not exist' "$scratch/absent.log"; then
+    cat "$scratch/absent.log" >&2
+    exit 1
+fi
+[[ "$(as_superuser -d postgres -At -c "SELECT count(*) FROM pg_roles WHERE rolname = 'coffre_backup_logn'")" == 0 ]] || { echo 'migrate made the missing role' >&2; exit 1; }
+
+# The name is one identifier, quoted, whatever it holds.
+odd='Backup "x"; GRANT pg_write_all_data TO coffre_backup; --'
+as_superuser -v odd="$odd" <<'SQL'
+CREATE ROLE :"odd" NOLOGIN;
+SQL
+migrate backed_up --backup-login "$odd" >/dev/null
+[[ "$(member "$odd")" == 'migration_owner|f|t|f' ]] || { echo 'migrate did not grant the oddly named role its group' >&2; exit 1; }
+[[ "$(as_superuser -d postgres -At -c "SELECT count(*) FROM pg_auth_members WHERE member = 'coffre_backup'::regrole")" == 0 ]] || { echo 'the name was run as SQL' >&2; exit 1; }
+as_superuser -v odd="$odd" <<'SQL'
+DROP ROLE :"odd";
+SQL
 
 # Everything the run may change, and the roles: a run after changes none of it.
 catalog() {
@@ -222,10 +225,11 @@ physical backed_up >"$scratch/before.physical"
 versions backed_up >"$scratch/before.versions"
 # As two deploys' builds may, both Workers' each: with the migration lock
 # held (packages/db/src/migrate.ts), both runs queue on it, then each takes
-# its turn, and both succeed.
+# its turn, and both succeed. One names the login again, the other none:
+# neither changes its membership.
 as_owner -d backed_up -c 'SELECT pg_advisory_lock(7165058122361679213), pg_sleep(30)' >/dev/null 2>&1 &
 holder=$!
-migrate backed_up >"$scratch/first.log" 2>&1 &
+migrate backed_up --backup-login coffre_backup_login >"$scratch/first.log" 2>&1 &
 first=$!
 migrate backed_up >"$scratch/second.log" 2>&1 &
 second=$!
@@ -283,11 +287,13 @@ catalog restored >"$scratch/restored.catalog"
 diff "$scratch/after.catalog" "$scratch/restored.catalog"
 grep -q '^audit_log|audit_log_backup_read|SELECT|{coffre_backup}|true|$' "$scratch/restored.catalog" || { echo 'the restore lacks the backup read policy' >&2; exit 1; }
 # An owner without ADMIN OPTION on the group, which someone else took away:
-# the run cannot grant the login, says so, and succeeds.
+# a run that names the login fails, saying why; one that names none succeeds.
 as_superuser -c 'REVOKE ADMIN OPTION FOR coffre_backup FROM migration_owner GRANTED BY postgres CASCADE'
-[[ "$(as_superuser -d postgres -At -c "SELECT pg_has_role('coffre_backup_login', 'coffre_backup', 'USAGE')")" == f ]] \
-    || { echo 'the login kept its group' >&2; exit 1; }
-migrate backed_up >"$scratch/refused.log" 2>&1 || { cat "$scratch/refused.log" >&2; exit 1; }
-grep -Fq 'coffre_backup_login does not inherit coffre_backup, and this login may not grant it' "$scratch/refused.log" \
-    || { cat "$scratch/refused.log" >&2; exit 1; }
+[[ -z "$(member coffre_backup_login)" ]] || { echo 'the login kept its group' >&2; exit 1; }
+if migrate backed_up --backup-login coffre_backup_login >"$scratch/refused.log" 2>&1 \
+    || ! grep -Fq 'permission denied to grant role "coffre_backup"' "$scratch/refused.log"; then
+    cat "$scratch/refused.log" >&2
+    exit 1
+fi
+migrate backed_up >/dev/null
 echo 'coffre_backup_login dumps every row, the audit log whole, and writes nothing'

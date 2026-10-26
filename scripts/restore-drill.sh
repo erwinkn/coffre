@@ -86,7 +86,7 @@ app_config="$(node packages/conformance/src/draining.ts examples/workers/app/dis
 
 log "a seeded instance over $source_db"
 node scripts/ensure-database.mjs "$source_db"
-DATABASE_URL="$(owner_url "$source_db")" pnpm --dir packages/db run db:migrate >/dev/null
+DATABASE_URL="$(owner_url "$source_db")" pnpm --dir packages/db run db:migrate --backup-login coffre_backup_login >/dev/null
 start_coffre "$source_db" "$COFFRE_VAULT_KEY"
 DATABASE_URL="$(owner_url "$source_db")" node dev/seed.mjs >/dev/null
 node scripts/restore-drill.mjs prepare >"$scratch/state.json"

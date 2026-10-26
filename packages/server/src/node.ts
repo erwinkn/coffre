@@ -31,7 +31,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
 import { openDatabase } from '@coffre/db/connect';
-import { migrateDatabase, type MigrationRun } from '@coffre/db/migrate';
+import { migrateDatabase } from '@coffre/db/migrate';
 
 import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
@@ -49,8 +49,8 @@ export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './s
 /** Limits for workload exchanges that count in this process: `signin({ workloads: { limits: processLimits() } })`. */
 export { processLimits } from './workloads/limits.ts';
 
-/** Bring the database up to date: what `coffre-server migrate` runs. It says whether it found the backup login to grant its group (`backupLogin`). */
-export function migrate(database: string): Promise<MigrationRun> {
+/** Bring the database up to date: what `coffre-server migrate` runs. */
+export function migrate(database: string): Promise<void> {
   return migrateDatabase(database);
 }
 

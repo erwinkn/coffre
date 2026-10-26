@@ -360,22 +360,28 @@ test("in a deployment's folder, its pipeline migrates a new database before the 
   const run = await migrateIn(dir, url);
   assert.equal(run.code, 0, run.output);
   assert.match(run.output, new RegExp(`${KNOWN.length === 1 ? '1 migration' : `${KNOWN.length} migrations`} to apply to \\S+, for coffre ${cliVersion().replace(/\./g, '\\.')}: ${KNOWN[0]}`));
-  assert.match(run.output, /✓ Applied .*, and reasserted the database's privileges\n\s+no backup login: coffre_backup_login does not exist/);
+  assert.match(run.output, /✓ Applied .*, and reasserted the database's privileges\n/);
   // As a CI log keeps it: plain lines, no escape codes, no spinner, no password.
   assert.doesNotMatch(run.output, /\x1b\[/);
   assert.doesNotMatch(run.output, SPINNER);
   assert.ok(!run.output.includes(new URL(url).password), 'the password is never shown');
   assert.equal(await applied(url), KNOWN.length);
 
-  // The backup login, made after the migrations: the next run, with nothing to apply, grants it its group.
+  // The backup login, made after the migrations: a run with nothing to apply grants it its group when named.
   await asSuperuser('postgres', (client) => client.query("CREATE ROLE coffre_backup_login LOGIN PASSWORD 'backup'"));
+  const membership = () => asSuperuser('postgres', async (client) =>
+    (await client.query("SELECT admin_option, inherit_option, set_option FROM pg_auth_members WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole")).rows);
   const again = await migrateIn(dir, url);
   assert.equal(again.code, 0, again.output);
   assert.match(again.output, new RegExp(`✓ \\S+ is up to date, at coffre \\S+'s schema: ${KNOWN.length === 1 ? '1 migration' : `${KNOWN.length} migrations`}, the last ${KNOWN.at(-1)}; reasserted the database's privileges\n`));
-  assert.doesNotMatch(again.output, /no backup login/);
-  const member = await asSuperuser('postgres', async (client) =>
-    (await client.query("SELECT admin_option, inherit_option, set_option FROM pg_auth_members WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole")).rows);
-  assert.deepEqual(member, [{ admin_option: false, inherit_option: true, set_option: false }]);
+  assert.deepEqual(await membership(), []);
+  const granted = await migrateIn(dir, url, ['--yes', '--backup-login', 'coffre_backup_login']);
+  assert.equal(granted.code, 0, granted.output);
+  assert.match(granted.output, /; reasserted the database's privileges and coffre_backup_login's membership in coffre_backup\n/);
+  assert.deepEqual(await membership(), [{ admin_option: false, inherit_option: true, set_option: false }]);
+  const absent = await migrateIn(dir, url, ['--yes', '--backup-login', 'nobody_here']);
+  assert.equal(absent.code, 1, absent.output);
+  assert.match(absent.output, /reasserting the database's privileges after them failed: role "nobody_here" does not exist/);
 });
 
 test("a database a newer coffre migrated is refused in a deployment's folder, its unknown migration named, and nothing changes", needsCluster, async () => {

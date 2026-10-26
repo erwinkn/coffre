@@ -86,20 +86,22 @@ migrator use Node's default trusted CAs for that value. They require
 refuses an untrusted certificate or a hostname mismatch. Other
 `sslrootcert` values remain certificate file paths.
 
-The migrations create three group roles and grant their membership:
+The migrations create three group roles, and grant the first two to their logins:
 
 | Login | Group | Rights |
 |---|---|---|
 | `coffre_runtime` | `coffre_app` | app data and sessions; app entries in the log; read-only access to members and grants |
 | `coffre_vault_runtime` | `coffre_vault` | members and grants; read the secret context it decides on; vault entries in the log |
-| `coffre_backup_login`, optional | `coffre_backup` | read every row, the log's included, for `pg_dump` ([restore.md](restore.md#on-plain-postgres)); write nothing |
+| yours, optional | `coffre_backup` | read every row, the log's included, for `pg_dump` ([restore.md](restore.md#on-plain-postgres)); write nothing |
 
 Neither runtime login owns tables or may change or delete audit entries.
 Row-level security permits each to append only as its own author. Do not run
 either component as the owner or give the runtime logins additional roles.
 
-Every `coffre migrate` grants `coffre_backup_login` its group when that
-login exists, so it may be made before or after migrating.
+`coffre migrate --backup-login <role>` grants `coffre_backup` to that
+existing role, on every run that names it. Coffre never makes the role,
+and never revokes the group: a run without the flag leaves the membership
+as it is.
 
 ## Upgrading
 
@@ -1263,12 +1265,13 @@ CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
 \q
 ```
 
-To back up with `pg_dump`, make a third login, `coffre_backup_login`, the
-same way, before or after migrating: every migration run grants it the
-group that reads every row ([restore.md](restore.md#on-plain-postgres)).
-Nothing checks that login's own rights: keep it as plain as the two above.
-Every run grants the group to whichever role bears that name, so on a server
-where others may create roles, make it before they can.
+To back up with `pg_dump`, make a third login the same way, say
+`coffre_backup_login`, and name it to `coffre migrate --backup-login`,
+which grants it the group that reads every row
+([restore.md](restore.md#on-plain-postgres)). Nothing checks that login's
+own rights: keep it as plain as the two above. The grant needs `ADMIN
+OPTION` on `coffre_backup`, which the login that made the group holds, and
+nothing on the login it names.
 
 New roles default to no superuser, replication or RLS-bypass rights. The
 migration checks those rights and refuses unsafe roles. It hardens existing

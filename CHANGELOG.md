@@ -9,20 +9,18 @@
   vault's groups read it, so `pg_dump` as any other role, even one in
   `pg_read_all_data`, stopped at the log, or dumped none of its entries
   with `--enable-row-security`; a policy now shows `coffre_backup` every
-  entry. A deployment makes the login, `coffre_backup_login`, as it makes
-  the runtime logins, and every `coffre migrate` grants it the group, the
-  run after the login is made included, and says so when it finds no
-  login. Back up with `pg_dump --enable-row-security` as that login
+  entry. `coffre migrate --backup-login <role>` grants the group to that
+  role, which you make, as you make the runtime logins; pass it on every
+  run, as a pipeline does, and it changes nothing once granted. A role that
+  does not exist fails the run, named. Coffre never makes the role and
+  never revokes the group: a run without the flag leaves the membership as
+  it is. Back up with `pg_dump --enable-row-security` as that login
   ([restore.md](docs/restore.md#on-plain-postgres)). `coffre migrate`, in a
-  deployment's folder, now reasserts the database's privileges and grants
-  the backup login even when nothing is pending; before, it stopped at "up
-  to date", and a restored database kept the privileges its dump left out
-  until the next migration. `migrateDatabase`, and `migrate` from
-  `@coffre/server/node`, now say whether they found the backup login
-  (`backupLogin`), and, should it lack the right to grant it the group,
-  they say so too, and do not fail. Each run also grants the group any of
-  coffre's tables it cannot read yet, by the names coffre's migrations
-  give them, whichever login made them. A failure after the migrations committed no longer
+  deployment's folder, now reasserts the database's privileges even when
+  nothing is pending; before, it stopped at "up to date", and a restored
+  database kept the privileges its dump left out until the next migration.
+  `migrateDatabase` takes its `onPlan` callback in an options object now,
+  beside `backupLogin`. A failure after the migrations committed no longer
   says that nothing was changed.
   - **Upgrading: one migration**, `0019_backup_role`, Postgres only, which
     only adds the group, read grants and the log's read policy for it:
@@ -30,13 +28,13 @@
     tables, by name: another table in `public` is left as it is, whichever
     login migrates, a superuser included. A `coffre_backup` made before
     keeps no other privilege on coffre's tables, and is refused if it is a
-    member of another role, or has members besides the backup login. It
-    makes a role, as no migration since the baseline did: the login that
-    migrates needs `CREATEROLE`, which a member of the owner does not
-    inherit, unless `coffre_backup` exists already, made by a login that has
-    it, which then grants the migrating login `ADMIN` on it: `CREATE ROLE
-    coffre_backup NOLOGIN; GRANT coffre_backup TO <login> WITH ADMIN TRUE,
-    INHERIT FALSE, SET FALSE`.
+    member of another role. It makes a role, as no migration since the
+    baseline did: the login that migrates needs `CREATEROLE`, which a
+    member of the owner does not inherit, unless `coffre_backup` exists
+    already, made by a login that has it, which then grants the migrating
+    login `ADMIN` on it: `CREATE ROLE coffre_backup NOLOGIN; GRANT
+    coffre_backup TO <login> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`.
+    `--backup-login` needs that `ADMIN`, and nothing on the role it names.
 
 ## 0.14.1 (2026-10-25)
 

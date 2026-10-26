@@ -105,20 +105,22 @@ not the privileges on the database itself. Provision the roles before
 restoring; `coffre migrate` reasserts the database privileges afterwards.
 This is what the drill runs.
 
-Back up as `coffre_backup_login`, as often as you can afford to lose. Its
-group, `coffre_backup`, which the migrations make, reads every row, the
-audit log's included, and writes none, so the backup job never holds the
-owner's password. Make the login once, as the owner, the same way as the
-runtime logins:
+Back up as a login of its own, here `coffre_backup_login`, as often as you
+can afford to lose. Its group, `coffre_backup`, which the migrations make,
+reads every row, the audit log's included, and writes none, so the backup
+job never holds the owner's password. Make the login once, the same way as
+the runtime logins:
 
 ```sql
 CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 \password coffre_backup_login
 ```
 
-then run `pnpm exec coffre migrate` in the deployment's directory: every run
-grants the login its group, and says so when there is no login to grant.
-`$BACKUP_URL` is the owner's URL with that login's name and password:
+then run `pnpm exec coffre migrate --backup-login coffre_backup_login` in
+the deployment's directory, which grants the login its group. Passing it on
+every run, as a pipeline does, is harmless. Coffre never makes the login and
+never revokes its group: revoke it yourself when it should go. `$BACKUP_URL`
+is the owner's URL with that login's name and password:
 
 ```sh
 pg_dump --enable-row-security --format=custom --dbname="$BACKUP_URL" --file=coffre-$(date -u +%Y%m%dT%H%MZ).dump
@@ -148,7 +150,7 @@ Restore:
    the runtime logins' membership in them must exist too: run
    `pnpm exec coffre migrate` once against an empty database on this server
    if they do not. Make `coffre_backup_login` too, to back the restored
-   database up.
+   database up, and pass `--backup-login coffre_backup_login` in step 4.
 3. Create an empty database owned by the owner, and restore into it:
 
    ```sh
@@ -165,9 +167,8 @@ Restore:
 
    Besides applying missing migrations, every run revokes `CREATE` and
    `TEMPORARY` on that database from `PUBLIC`, both runtime logins and the
-   group roles, and grants `coffre_backup_login` its group. This repairs
-   what a one-database dump leaves out, even when no schema migration is
-   pending.
+   group roles. This repairs what a one-database dump leaves out, even when
+   no schema migration is pending.
 5. Check the app's login has exactly its privileges:
 
    ```sh
