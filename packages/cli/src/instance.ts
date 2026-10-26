@@ -31,32 +31,17 @@
 
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { apiMember, type AuthInfo } from '@coffre/client';
-import { DEVICE_TTL_SECONDS } from '@coffre/core/access';
+
+/** What an agent does with `coffre login`, which waits for a person to approve a link: it must not block on it. */
+export const SIGN_IN_HINT = 'agents: run the command in the background and provide the link it prints to the user';
 
 /**
- * What `coffre login` asks of whoever runs it, said under every message that
- * tells them to: the device flow is the same for a person at a terminal, over
- * SSH, and for an agent, which must not wait on it in the foreground.
- */
-export function signInHint(known = false): string {
-  const minutes = Math.round(DEVICE_TTL_SECONDS / 60);
-  return [
-    '  `coffre login` prints a link and a code, then waits. Open the link on any device where you are signed in to coffre',
-    '  (it works over SSH too), check that it shows that code, and press Approve.',
-    '  From an agent or a script: run it in the background, pass the link and code on, and wait.',
-    `  It returns once approved, fails at once if declined, or fails after ${minutes} minute${minutes === 1 ? '' : 's'}.`,
-    // Which sign-in an instance has is only known once it was signed in to, or named by --auth-mode.
-    ...(known ? [] : ['  (An instance behind Cloudflare Access signs in through cloudflared instead: no code, no link.)']),
-  ].join('\n');
-}
-
-/**
- * A sign-in error: `message`, which names the command, and what the command asks of whoever runs it.
+ * A sign-in error: `message`, which names the command, and the hint under it.
  * `mode`, how the instance signs in when that is known, from --auth-mode or a session signed in again:
- * Cloudflare Access signs in with cloudflared, not a code, and gets no hint; unknown, it is hedged.
+ * Cloudflare Access signs in with cloudflared, not a link, and gets no hint.
  */
 export function signInError(message: string, mode?: AuthMode): string {
-  return mode === 'cloudflare' ? message : `${message}\n${signInHint(mode === 'signin')}`;
+  return mode === 'cloudflare' ? message : `${message}\n${SIGN_IN_HINT}`;
 }
 
 /** `--auth-mode`, if it is one: a mode it is not is for the command to refuse, not for a hint to. */
@@ -418,17 +403,17 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
   const relogin = `run \`coffre login ${origin}\``;
   if (stored === undefined || stored.mode !== mode) {
     // A clone's first command: where the instance came from, so that a URL the repository chose is not taken for one you did.
-    const named = choice.by === 'file' ? `, which ${join(choice.directory, REPO_FILE)} names` : '';
-    throw new Error(signInError(`not signed in to ${origin}${named}: ${relogin}`, explicitMode));
+    const named = choice.by === 'file' ? ` (named by ${join(choice.directory, REPO_FILE)})` : '';
+    throw new Error(signInError(`not signed in: ${relogin}${named}`, explicitMode));
   }
   const by = stored.kind ?? 'person';
   if (mode === 'cloudflare') {
     if (by !== 'access') return { origin, mode, by, credential: { kind: 'cloudflared' } };
-    if (!stored.clientId || !stored.clientSecret) throw new Error(`not signed in to ${origin}: ${relogin}`);
+    if (!stored.clientId || !stored.clientSecret) throw new Error(`not signed in: ${relogin}`);
     return { origin, mode, by, credential: { kind: 'access-service-token', clientId: stored.clientId, clientSecret: stored.clientSecret } };
   }
   if (!stored.token) {
-    const message = `not signed in to ${origin}: ${relogin}`;
+    const message = `not signed in: ${relogin}`;
     throw new Error(by === 'person' ? signInError(message, 'signin') : message);
   }
   if (stored.expiresAt && Date.parse(stored.expiresAt) <= now.getTime()) {

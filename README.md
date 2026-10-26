@@ -270,8 +270,8 @@ of what it read, which the watch compares the next with.
 `coffre login` prints a link and a code and waits, up to 10 minutes: open
 the link on any device where you are signed in to coffre (it works over SSH,
 and opens a browser itself only on a terminal), check the code, and press
-Approve. An agent or a script runs it in the background, passes the link and
-code on, and waits for it to return. Every "not signed in" error says so.
+Approve. An agent runs it in the background and passes the link to the
+user; every "not signed in" error says so.
 
 A session lasts 30 days, is kept per instance in `~/.coffre/credentials.json`
 (mode 0600), and can be revoked from the account page.
@@ -317,8 +317,8 @@ first in the same directory, and a `coffre.json` in your home or above it
 is ignored. The file only picks where commands go. What they carry is
 still that instance's own session, so a clone that names another URL
 reaches nothing you are signed in to. A fresh clone's first command says
-so, `not signed in to https://secrets.acme.example, which
-/home/ada/Code/acme/coffre.json names`, and `coffre login`, with no URL, signs in
+so, ``not signed in: run `coffre login https://secrets.acme.example`
+(named by /home/ada/Code/acme/coffre.json)``, and `coffre login`, with no URL, signs in
 there after saying which file named it. That login pins nothing, as the
 file already routes the repository; `whoami` and `use` say `named by
 ~/Code/acme/coffre.json`. A secret handed to `coffre login` (`--token`,
