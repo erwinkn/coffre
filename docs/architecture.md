@@ -599,10 +599,11 @@ and each key's outcome is logged: the keys of a place that came out alike in
 one entry, each its item of the intent. Removal waits for a read already in
 flight; the next read is refused before KMS is called. A read asked while a
 removal waits queues behind it, so a steady stream of reads never holds a
-removal off. Each statement of a read runs at most three seconds, a wait
-for a lock included, then fails as unavailable: a statement, not a lock
-timeout, since a waiter for the log's head waits again on each new version
-of it. A change waits up to fifteen seconds for each lock.
+removal off. Each statement of a read's decision runs at most three
+seconds, a wait for a lock included, then fails as unavailable: a
+statement, not a lock timeout, since a waiter for the log's head waits
+again on each new version of it. A change waits up to fifteen seconds for
+each lock, and so does the entry of a refused read.
 
 ### The bulk limit
 

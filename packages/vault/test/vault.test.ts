@@ -1064,37 +1064,41 @@ test('one member\'s reads at the key service run side by side, not one behind th
   assert.ok((await w.vault.verifyLog({})).ok);
 });
 
-test('a removal amid a steady stream of one member\'s reads is not starved: it lands in turn, and no read is released after it', postgresOnly('SQLite runs one writer at a time'), async () => {
-  // Postgres lets a share lock join those held even while a writer waits: without a queue, a removal waits until
-  // the reads stop, here for good (`lockMembers`).
-  const { keks } = service({ delayMs: 150 });
-  const w = await world({ keks });
-  const other = await w.twin();
-  await member(w, ADA, [[w.dev, 'viewer']]);
-  const secret = await w.secret(w.dev);
-  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
-  const reads: Promise<unknown>[] = [];
-  const stream = (async () => {
-    // For three seconds, a read every 40 ms, each 150 ms at the key service: three or four at a time hold her row.
-    for (const until = Date.now() + 3_000; Date.now() < until; await sleep(40)) {
-      reads.push(w.vault.unwrap({ principal: ADA, purpose: 'run', items }));
-    }
-  })();
-  await sleep(500);
-  const started = Date.now();
-  const removed = await other.remove({ actor: ROOT, principal: ADA });
-  const took = Date.now() - started;
-  await stream;
-  await Promise.all(reads);
-  assert.equal(removed.ok, true);
-  assert.ok(took < 1_500, `the removal waited ${took} ms for reads that kept coming`);
-  const log = await vaultLog(w);
-  const removal = log.find((entry) => entry.action === 'member.remove')!;
-  assert.ok(log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow' && entry.seq < removal.seq), 'reads were released before it');
-  assert.ok(!log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow' && entry.seq > removal.seq), 'and none after it');
-  assert.ok(log.some((entry) => entry.action === 'secret.read' && entry.code === 'removed' && entry.seq > removal.seq), 'the reads after it are refused');
-  assert.ok((await w.vault.verifyLog({})).ok);
-});
+for (const [change, action, code] of [['removal', 'member.remove', 'removed'], ['revocation', 'access.revoke', 'no_grant']] as const) {
+  test(`a ${change} amid a steady stream of one member's reads is not starved: it lands in turn, and no read is released after it`, postgresOnly('SQLite runs one writer at a time'), async () => {
+    // Postgres lets a share lock join those held even while a writer waits: without a queue, a change waits until
+    // the reads stop, here for good (`lockMembers`). A revocation locks two rows, its actor's and hers, in order.
+    const { keks } = service({ delayMs: 150 });
+    const w = await world({ keks });
+    const other = await w.twin();
+    await member(w, ADA, [[w.dev, 'viewer']]);
+    const secret = await w.secret(w.dev);
+    const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+    const reads: Promise<unknown>[] = [];
+    const stream = (async () => {
+      // For three seconds, a read every 40 ms, each 150 ms at the key service: three or four at a time hold her row.
+      for (const until = Date.now() + 3_000; Date.now() < until; await sleep(40)) {
+        reads.push(w.vault.unwrap({ principal: ADA, purpose: 'run', items }));
+      }
+    })();
+    await sleep(500);
+    const started = Date.now();
+    const changed = change === 'removal'
+      ? await other.remove({ actor: ROOT, principal: ADA })
+      : await other.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] });
+    const took = Date.now() - started;
+    await stream;
+    await Promise.all(reads);
+    assert.equal(changed.ok, true);
+    assert.ok(took < 1_500, `the ${change} waited ${took} ms for reads that kept coming`);
+    const log = await vaultLog(w);
+    const landed = log.find((entry) => entry.action === action)!;
+    assert.ok(log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow' && entry.seq < landed.seq), 'reads were released before it');
+    assert.ok(!log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow' && entry.seq > landed.seq), 'and none after it');
+    assert.ok(log.some((entry) => entry.action === 'secret.read' && entry.code === code && entry.seq > landed.seq), 'the reads after it are refused');
+    assert.ok((await w.vault.verifyLog({})).ok);
+  });
+}
 
 test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
   const w = await world();

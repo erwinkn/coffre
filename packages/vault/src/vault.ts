@@ -204,10 +204,11 @@ const KEY_BUDGET_MS = 5_000;
 const LOCK_TIMEOUT_MS = 15_000;
 
 /**
- * How long a read's statement runs, a wait for a lock included: a read waits
- * only for what changes its reader, and for the log's head. Longer is a
- * queue, which holds the read's connection while it waits; refused, it
- * fails as unavailable at once, and its caller tries again later.
+ * How long a statement of a read's decision runs, a wait for a lock
+ * included: a read waits only for what changes its reader, and for the
+ * log's head. Longer is a queue, which holds the read's connection while it
+ * waits; refused, it fails as unavailable at once, and its caller tries
+ * again later.
  */
 const READ_LOCK_TIMEOUT_MS = 3_000;
 
@@ -537,10 +538,9 @@ class VaultService implements Vault {
   }
 
   async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false }: How): Promise<Outcome<T>> {
-    const timeout = shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS;
     try {
       const result = await this.#db.transaction(async (tx) => {
-        await store.boundLockWaits(tx, timeout, shared);
+        await store.boundLockWaits(tx, shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS, shared);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals, shared);
         // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
         const reads = await this.#snapshot(tx, principals, asked, !late);
@@ -577,8 +577,9 @@ class VaultService implements Vault {
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
       const entries = [...reports, ...readsByPlace(error.entries)];
       if (entries.length > 0) {
+        // A refusal's entries are written whatever the decision's bound: it answers only once they are.
         await this.#db.transaction(async (tx) => {
-          await store.boundLockWaits(tx, timeout, shared);
+          await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
           await this.#append(tx, entries);
         });
       }

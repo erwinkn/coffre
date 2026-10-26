@@ -14,15 +14,20 @@
   Postgres lets a share lock join those held even while a change waits for
   them, so each row now comes with an advisory lock on its principal, in
   the same statement, which queues: a steady stream of reads cannot hold a
-  removal off. Each statement of a read now runs at most 3 s, a wait for
-  the log's head included, then fails as 503 `unavailable`, which the CLI
-  and the Action ask again; a change still waits up to 15 s for each lock.
+  removal off. Each statement of a read's decision now runs at most 3 s, a
+  wait for the log's head included, then fails as 503 `unavailable`, which
+  the CLI and the Action ask again; a change still waits up to 15 s for
+  each lock, and so does the entry of a refused read.
   The bulk limit is counted under the log's head, exact as before. No
   query is added. The log's head is now the queue under heavy load from
   one member: with a key service and Hyperdrive far from the database,
   some reads of a long burst fail fast rather than all of them slowly.
   - **Upgrading:** no migration of its own. Deploy the vault before the
-    app, as always; keep Hyperdrive's connection limit where it is.
+    app, as always; keep Hyperdrive's connection limit where it is. While
+    instances of the release before still run, their changes to a member
+    take no place in the queue, and a stream of that member's reads can
+    hold one off until its 15 s bound: a few 503s during the rollout, gone
+    once it completes.
 
 - **Backups need not hold the owner's password.** The new group
   `coffre_backup` reads every row and writes none: no insert, update,
