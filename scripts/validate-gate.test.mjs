@@ -117,3 +117,15 @@ test('the shards partition formal.sh and the workflow runs each of them', () => 
     const tampering = list('--shard', 'tampering').stdout.trim().split('\n');
     assert.ok(tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
 });
+
+test('formal-key.sh is deterministic, keyed on the models and names the Java', () => {
+    const cwd = new URL('..', import.meta.url).pathname;
+    const key = () => spawnSync('scripts/formal-key.sh', { encoding: 'utf8', cwd });
+    const first = key();
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(key().stdout, first.stdout);
+    assert.match(first.stdout, /\nformal-[0-9a-f]{64}\n$/);
+    for (const line of ['formal/Coffre.tla', 'formal/Tampering.cfg', 'scripts/formal.sh', '.github/workflows/validate.yml', 'java.version = ', 'java.vendor = ', 'os.arch = ']) {
+        assert.ok(first.stdout.includes(line), line);
+    }
+});

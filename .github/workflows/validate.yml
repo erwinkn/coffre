@@ -114,16 +114,24 @@ jobs:
           # merged from a PR is a hit for the next one.
           hit=false
           run=""
-          labels="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')"
+          labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')"
           if grep -qx full-formal <<< "$labels"; then
             echo "The full-formal label asks for a full run."
           else
-            found="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
-              jq -r --arg prefix "$key-" '[.actions_caches[] | select(.key | startswith($prefix))] | first // empty | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')"
-            if [ -n "$found" ]; then
-              read -r run ref created <<< "$found"
+            # Newest first; a key counts only if its run is one of this workflow's, whose
+            # `Formal model` job passed: a cache a branch saved by hand is not a green run.
+            candidates="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
+              jq -r --arg prefix "$key-" '.actions_caches[] | select(.key | startswith($prefix)) | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')"
+            while read -r id cref created; do
+              [[ "$id" =~ ^[0-9]+$ ]] || continue
+              path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || continue
+              [ "$path" = .github/workflows/validate.yml ] || continue
+              gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" --jq '.jobs[] | select(.name == "Formal model") | .conclusion' | grep -qx success || continue
               hit=true
-            fi
+              run="$id"
+              ref="$cref"
+              break
+            done <<< "$candidates"
           fi
           echo "hit=$hit" >> "$GITHUB_OUTPUT"
           echo "run=$run" >> "$GITHUB_OUTPUT"
@@ -143,7 +151,7 @@ jobs:
       # Every shard's counterexamples in one run, rather than the first failing's.
       fail-fast: false
       matrix:
-        # scripts/formal.sh shard_of; the longest, Tampering, is 7 minutes. 4g, not the script's 1g: Tampering
+        # scripts/formal.sh shard_of; the longest, Tampering, is 7 to 11 minutes. 4g, not the script's 1g: Tampering
         # took 11 on a 4-core, 16 GB runner at 1g and 7 at 4g or 8g, and 11 to 12 at 12g, or at 8g with 2 or 8 workers.
         shard: [tampering, large, rest]
     runs-on: ubuntu-24.04
@@ -151,6 +159,12 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Hold this runner's Java to the plan's
+        env:
+          KEY: ${{ needs.formal-plan.outputs.key }}
+        run: |
+          mine="$(scripts/formal-key.sh | tail -n 1)"
+          [ "$mine" = "$KEY" ] || { echo "::error::This runner's key is $mine, the plan's $KEY: another Java, or another checkout"; exit 1; }
       - name: Model-check the shard
         # TLC, pinned by its checksum in the script, on the runner's Java (docs/formal.md).
         run: scripts/formal.sh --workers 4 --heap 4g --shard ${{ matrix.shard }}

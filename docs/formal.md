@@ -1126,18 +1126,20 @@ every pull request that is not a version-only bump:
   from a pull request is a hit for the next. GitHub drops a cache a week
   after it was made, so after a quiet week the first run is a full one. To
   trust nothing, label the pull request `full-formal` and re-run the plan.
-  The cache is an assertion by whoever may run workflows here, as the check
-  itself is.
+  A cache counts only if the run it names is one of
+  `validate.yml`'s whose *Formal model* job passed, and each shard checks
+  that its own Java gives the plan's key; what is left to trust is whoever
+  can merge a workflow change, as the check itself is.
 - **A run is three jobs in parallel.** `scripts/formal.sh --shard
   tampering|large|rest` runs the scenarios of one (`shard_of`), each with its
-  runs without a protection, balanced by what they took: Tampering's 7
+  runs without a protection, balanced by what they took: Tampering's 7 to 11
   minutes (17.5 million states) alone, Overtaking, Walking, Sharing, Rows and
   Mixed together, and the rest. A new scenario is in `rest`. `--list` prints
   what a run would run, without TLC; a test holds the three to a partition
   of it. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
   default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g
-  or 8g, on a 4-core, 16 GB runner.
+  or 8g in a benchmark on a 4-core, 16 GB runner (10.7 in its first CI run).
 
 # Proofs in Lean
 

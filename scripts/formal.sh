@@ -135,9 +135,12 @@ list=""
 shard=""
 only=" "
 while [ $# -gt 0 ]; do
+  case "$1" in --workers|--heap|--shard) [ $# -ge 2 ] || { echo "$1 takes a value" >&2; exit 2; } ;; esac
   case "$1" in
     --workers) workers="$2"; shift 2 ;;
-    --heap) heap="$2"; shift 2 ;;
+    --heap)
+      [[ "$2" =~ ^[0-9]+[kKmMgG]$ ]] || { echo "--heap $2: expected a size such as 4g" >&2; exit 2; }
+      heap="$2"; shift 2 ;;
     --list) list=1; shift ;;
     --shard)
       case "$2" in tampering|large|rest) shard="$2" ;; *) echo "no shard $2 (tampering, large or rest)" >&2; exit 2 ;; esac
