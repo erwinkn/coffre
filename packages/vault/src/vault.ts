@@ -91,6 +91,8 @@ import {
   type Settings,
   type Through,
   type UnwrapInput,
+  type Unwrapped,
+  type UseRecord,
   type Wrapped,
   type Vault,
   type Via,
@@ -977,8 +979,9 @@ class VaultService implements Vault {
 
   // Raw DEKs are cleared on every path. JSON and base64 leave strings that
   // cannot be wiped, so this is best-effort memory hygiene.
-  async unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[]; accessRevision?: string }>> {
+  async unwrap(input: UnwrapInput): Promise<Outcome<Unwrapped>> {
     const { principal } = input;
+    const use = input.use === undefined ? null : useEntry(principal, input, input.use);
     validateText(input.purpose);
     if (input.keepsSensitive !== undefined && typeof input.keepsSensitive !== 'boolean') throw new Error('keepsSensitive is true, false or absent');
     if (input.accessRevision !== undefined && typeof input.accessRevision !== 'string') throw new Error('accessRevision names an answer of access, or is absent');
@@ -1042,6 +1045,7 @@ class VaultService implements Vault {
         remote,
         entry,
         input,
+        ...(use === null ? {} : { also: [use] }),
       },
       (contextOf) =>
         items.map(({ secret, wrapped }) => async (operation: KeyOperation) => {
@@ -1058,6 +1062,8 @@ class VaultService implements Vault {
         }),
         // Named back: the read was decided on that answer, which this vault checked.
         ...(input.accessRevision === undefined ? {} : { accessRevision: input.accessRevision }),
+        // And the use, appended with the read: the app has nothing left to append.
+        ...(use === null ? {} : { used: true as const }),
       }),
     );
   }
@@ -1273,6 +1279,8 @@ class VaultService implements Vault {
       viaReference?: readonly boolean[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
+      /** Entries appended with the release, after its own, only once the keys are released: the app's record of a use. */
+      also?: readonly NewEntry[];
       input: Correlation & Through & { purpose?: string; keepsSensitive?: boolean; accessRevision?: string };
     },
     /**
@@ -1442,7 +1450,7 @@ class VaultService implements Vault {
           }
         }
         const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
-        d.log.push(...released);
+        d.log.push(...released, ...(call.also ?? []));
         const answer = result(done);
         // A wrap's answer names its entries, which the app's writes refer to.
         if (action !== 'secret.read') d.after.push((seqOf) => Object.assign(answer as object, { seqs: released.map(seqOf) }));
@@ -3143,6 +3151,44 @@ function validateText(value: string): void {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** How long the app's record of a use may be, its metadata's JSON: a credential's name and where it went, never a value. */
+const USE_METADATA_LENGTH = 16_384;
+
+/**
+ * The app's `credential.use` entry, as the vault appends it beside a read
+ * (`UnwrapInput.use`): what the app wrote, checked to be what an entry
+ * holds, in its reader's name. The app wrote it under the head itself
+ * before 0.14.5; it describes the read, and decides nothing.
+ */
+function useEntry(principal: string, correlation: Correlation, use: UseRecord): NewEntry {
+  const id = (value: unknown, name: string) => {
+    if (value !== null && (typeof value !== 'string' || !UUID.test(value))) throw new Error(`a use's ${name} must be a lowercase UUID or null`);
+    return value;
+  };
+  if (use.sourceIp !== null) validateText(use.sourceIp);
+  validateText(use.metadata);
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(use.metadata);
+  } catch {
+    metadata = undefined;
+  }
+  if (use.metadata.length > USE_METADATA_LENGTH || typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+    throw new Error(`a use's metadata must be a JSON object of at most ${USE_METADATA_LENGTH} characters`);
+  }
+  return {
+    actor: principal,
+    action: 'credential.use',
+    decision: 'allow',
+    projectId: id(use.projectId, 'projectId'),
+    environmentId: id(use.environmentId, 'environmentId'),
+    operationId: correlation.operationId ?? null,
+    requestId: correlation.requestId ?? null,
+    sourceIp: use.sourceIp,
+    metadata: use.metadata,
+  };
+}
 
 /** The caller's ids go into the log as they are: a request id is text, an operation id a lowercase UUID. */
 function validateCorrelation(input: Correlation): void {

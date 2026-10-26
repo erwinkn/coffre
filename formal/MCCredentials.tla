@@ -37,4 +37,16 @@ RevokingOps == [p \in RevokingProcs |->
       [] p = "admin" -> {Op("restore", None, None, None, FALSE)}]
 RevokingBudget == [p \in RevokingProcs |-> IF p = "reader" THEN 2 ELSE 1]
 
+-----------------------------------------------------------------------------
+(* Proxying: a reader uses its token through the credential proxy alone,
+   twice, the vault logging the use or the app, while an owner revokes the
+   token or removes the account: each fence is shown needed on the proxy's
+   own path, not only on an export's. *)
+
+ProxyingProcs == {"reader", "owner"}
+ProxyingOps == [p \in ProxyingProcs |->
+    CASE p = "reader" -> {Op("use", "tok", None, None, TRUE)}
+      [] p = "owner" -> {Op("revoke", "tok", None, None, FALSE), Op("remove", None, None, None, FALSE)}]
+ProxyingBudget == [p \in ProxyingProcs |-> IF p = "reader" THEN 2 ELSE 1]
+
 =============================================================================

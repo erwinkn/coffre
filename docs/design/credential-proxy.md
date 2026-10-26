@@ -555,7 +555,8 @@ request sent on:
 3. **What.** The credential's keys, from the cache for the handle,
    environment and credential, or opened now: `use(handle, …)`, the API's
    read in process, purpose `use`. That is one vault entry naming the keys,
-   and one `credential.use` entry naming the credential and the upstream's
+   and one `credential.use` entry (the vault appends it beside its read
+   since 0.14.5, so a use takes the log's head once) naming the credential and the upstream's
    host, and `egress: true` where it leaves through one (section 5). A key
    the environment lacks is a 409.
 4. **Sent on.** Every header but those about the hop, coffre's caller,

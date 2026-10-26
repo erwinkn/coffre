@@ -42,7 +42,7 @@ import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
-import { openValues, plain, rewrapValue, rewrapValues, sealValues } from './keys.ts';
+import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
@@ -1800,7 +1800,10 @@ export async function reveal(
         denied(ctx, 'secret.read', 'not_owner_issued', { ...environment, operationId, metadata: { keys } }),
       );
     }
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows, ctx.caller.recalled);
+    // Which credential the values go into, and where: the vault's entry names the keys, this one what they were for. The
+    // vault appends it beside its reads, under the head it holds for them; an older vault, or no vault call, leaves it to us.
+    const used = use === undefined ? null : allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } });
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows, ctx.caller.recalled, used === null ? undefined : useRecord(used));
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
@@ -1809,9 +1812,9 @@ export async function reveal(
     // opened them itself, as no vault call did: handed back only as the policy is now (`fenced`).
     const plainKeys = rows.filter(plain).map((row) => row.key);
     if (plainKeys.length > 0) fence();
-    if (use !== undefined) {
-      // Which credential the values went into, and where: the vault's entry names the keys, this one what they were for.
-      log.push(allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } }));
+    if (used !== null) {
+      // Appended by the vault already, the app has nothing to append: its fence takes no lock (`recorded`).
+      if (opened.used !== true) log.push(used);
       return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: null, environment: named, keys: read.items.map((item) => item.key) };
     }
     if (rows.length === 0) {

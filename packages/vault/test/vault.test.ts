@@ -1171,6 +1171,32 @@ test("a burst of reads at a held head: those past its places in line are refused
   assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'the head free, the next read reads');
 });
 
+test("a read given the app's record of a use appends it beside its read, names it back, and appends none when refused", async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const metadata = JSON.stringify({ purpose: 'use', keys: ['API_KEY'], credential: 'stripe', host: 'api.stripe.com' });
+  const use = { projectId: w.project, environmentId: w.dev, sourceIp: '203.0.113.9', metadata };
+  const operationId = randomUUID();
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'use', items, use, operationId });
+  assert.ok(read.ok && read.used === true, JSON.stringify(read));
+  const [opened, used] = (await vaultLog(w)).slice(-2);
+  assert.deepEqual([opened!.action, used!.action, used!.outcome, used!.actor], ['secret.read', 'credential.use', 'allow', ADA]);
+  const [row] = await db.owner.select().from(tablesOf(db.owner).auditLog).where(eq(tablesOf(db.owner).auditLog.action, 'credential.use'));
+  assert.deepEqual([row!.metadata, row!.sourceIp, row!.operationId, row!.environmentId], [metadata, '203.0.113.9', operationId, w.dev]);
+  // Without one, nothing is named back; refused, no use is appended.
+  const plain = await w.vault.unwrap({ principal: ADA, purpose: 'use', items });
+  assert.ok(plain.ok && plain.used === undefined);
+  const refused = await w.vault.unwrap({ principal: BOB, purpose: 'use', items, use });
+  assert.equal(refused.ok, false);
+  assert.equal((await vaultLog(w)).filter((entry) => entry.action === 'credential.use').length, 1);
+  // A record that is not one is refused before anything is logged.
+  for (const bad of [{ ...use, metadata: '[1]' }, { ...use, metadata: 'x'.repeat(20_000) }, { ...use, environmentId: 'prod' }]) {
+    await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'use', items, use: bad }));
+  }
+});
+
 // --- the KEK -------------------------------------------------------------------
 
 /** The vault's records of a KEK's check value. */

@@ -344,7 +344,11 @@ Each CI run holds an ID token, good for one credential.
   3. the vault's decision, under the account's row and the head; on a
      kept answer that is no longer the vault's, none: the use starts
      over, asking (`#keys`, `accessRevision`; `AccessChanged`);
-  4. through the credential proxy, `credential.use` under the head;
+  4. through the credential proxy, `credential.use`: appended by the vault
+     beside its read, in its decision (`unwrap`'s `use`), and the
+     credential then checked again with no lock, as an export's; or,
+     with a vault older than 0.14.5 or plain values only, by the app,
+     under the head, the credential checked again under it;
   5. the value answered.
 - **Ending one:**
   - revoking it (`revokeCredential`);
@@ -476,7 +480,8 @@ window of fifteen minutes. #292's review.
 | Scenario | Who runs what | States |
 |---|---|---|
 | `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
-| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 145 thousand |
+| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 162 thousand |
+| `Proxying` | A reader uses its token through the credential proxy alone, its use logged by the vault or by the app, while an owner revokes the token or removes the account: each fence shown needed on the proxy's own path | 505 |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 

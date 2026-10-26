@@ -413,25 +413,27 @@ test('each hot request runs exactly its budget of statements, on as many connect
 
 /**
  * A workload's request at a proxy whose cache has lapsed, on an isolate
- * that has served one before: the session's statement, the path and the environment's rows,
- * the vault's unwrap, on the answer about the service kept from its last
- * request, then its `credential.use` entry, under the
- * head: BEGIN, the head, the policy (the protected environments' rows with
- * the newest change, one statement), the credential still, the head again
- * with the clock and the last entry, the entries and the head, COMMIT. Six
- * of its statements hold the head, which every append in the instance waits for.
+ * that has served one before: the session's statement, the path and the
+ * environment's rows, the vault's unwrap, on the answer about the service
+ * kept from its last request, which appends the proxy's `credential.use`
+ * beside its read, under the head it holds for it; then the credential
+ * still, with no lock. The app takes the head not at all: before 0.14.5 it
+ * did, for its own entry, for six statements more, which every append in
+ * the instance waited for.
  */
-test("a workload's request at a proxy whose cache lapsed runs its budget", POSTGRES, async () => {
+test("a workload's request at a proxy whose cache lapsed runs its budget, and the app takes no lock", POSTGRES, async () => {
   await coldWorkload();
+  const held = { ...app.held };
   const spent = await cost(coldWorkload);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
+  assert.equal(app.held.statements - held.statements, 0, 'no statement of the app\'s in a transaction, and so none under the head');
 });
 
 /** A workload's verify at a proxy whose cache has lapsed: what a proxied request costs then, the secret opened and its use logged. */
 test("a workload's verify at a proxy whose cache lapsed runs a proxied request's budget", POSTGRES, async () => {
   await coldVerify();
   const spent = await cost(coldVerify);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
 });
 
 /**
@@ -450,7 +452,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
   const after = await cost(coldWorkload);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   assert.equal(changed.vaultCalls, 3);
-  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 10, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {

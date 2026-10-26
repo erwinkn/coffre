@@ -97,7 +97,8 @@ export type PluginContext = {
    * handed to their app (docs/design/credential-proxy.md). The API's read,
    * in process and nowhere else: the same checks, its person's grants and
    * the handle's scope, one vault entry naming the keys, and one
-   * `credential.use` entry of the app's, with `logged` in it. Only the keys
+   * `credential.use` entry, with `logged` in it, which the vault appends
+   * beside it (an older vault: the app, under the head). Only the keys
    * asked for, or chosen, those the environment holds; `environment` is the
    * one the read resolved to (`market/dev@me` may be a personal config). A
    * refusal throws a `CoffreError`. In place of a handle, the workload

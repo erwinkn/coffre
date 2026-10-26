@@ -33,7 +33,7 @@ export interface Vault {
    * refuses `access_changed` and logs no read, and says, by naming it back,
    * that it checked. A vault older than 0.14.1 names none: it checked none.
    */
-  unwrap(input: UnwrapInput): Promise<Outcome<{ keys: string[]; accessRevision?: string }>>;
+  unwrap(input: UnwrapInput): Promise<Outcome<Unwrapped>>;
   /**
    * Wrap fresh data keys for new versions `principal` writes: all, or none.
    * `seqs` are the `key.wrap` entries, one per key, which the app's
@@ -408,7 +408,23 @@ export type UnwrapInput = Correlation & Through & {
    * logs the read there too, and decides on the value's own environment.
    */
   items: { secretVersionId: string; via?: Via; through?: string }[];
+  /**
+   * The credential proxy's record of what the values go into, the app's
+   * `credential.use` entry: the vault appends it beside its reads, once it
+   * releases them, under the log's head it already holds, so that the app
+   * takes the head no more for it. Where it was, from where, and its
+   * metadata, JSON, as the app wrote them; its actor is `principal`. Named
+   * back (`used`) once appended: a vault older than 0.14.5 names nothing,
+   * and the app appends it itself.
+   */
+  use?: UseRecord;
 };
+
+/** The app's `credential.use` entry, for the vault to append (`UnwrapInput.use`). */
+export type UseRecord = { projectId: string | null; environmentId: string | null; sourceIp: string | null; metadata: string };
+
+/** An unwrap's answer: each item's key, the answer it was decided on, and whether it appended the use it was given. */
+export type Unwrapped = { keys: string[]; accessRevision?: string; used?: true };
 
 /** A reference, as a read names it: its id, and the seq of the vault's `reference.create` entry. */
 export type Via = { reference: string; seq: number };
