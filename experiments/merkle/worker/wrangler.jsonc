@@ -1,0 +1,14 @@
+// W209's Worker, deployed to a personal account for the experiment only, and deleted after.
+// SEED and LOG_KEY are synthetic and public.
+{
+  "name": "coffre-w209-anchor",
+  "main": "index.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": { "SEED": "w209-synthetic", "ORIGIN": "coffre.example/audit", "LOG_KEY": "coffre.example/audit+44eeb047+AbKlgzoS9N5/asCRwVTT6woWzxtrEGwuTMmbVJw+1uhG" },
+  "durable_objects": { "bindings": [{ "name": "WITNESS", "class_name": "Witness" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Witness"] }],
+  "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "coffre-w209-anchor" }]
+}

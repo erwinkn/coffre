@@ -1,0 +1,141 @@
+// Retention, both ways (W209): days of uses dropped once sealed, changes kept,
+// and the log still verifying from the cut; what stays below it tampered with
+// fails. W209_URL names a scratch database it may wipe.
+//
+//   W209_URL=postgresql://… node --test experiments/merkle/test/retention.test.ts
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+
+import pg from 'pg';
+
+import { append, Checkpointer, createLog, keysFrom, leafOf, proveNumber } from '../src/log.ts';
+import { openNote, parseCheckpoint, verifierFrom } from '../src/note.ts';
+import { fileMemory } from '../src/memory.ts';
+import { retainDay, retentions } from '../src/retention.ts';
+import { verifyInclusion } from '../src/tree.ts';
+import { verifyLog } from '../src/verify.ts';
+
+const url = process.env.W209_URL;
+if (url === undefined) throw new Error('W209_URL names a scratch database');
+const pool = new pg.Pool({ connectionString: url, max: 10 });
+const scratch = mkdtempSync(join(homedir(), 'scratch', 'w209', 'retention-'));
+after(() => { rmSync(scratch, { recursive: true, force: true }); return pool.end(); });
+const keys = await keysFrom('w209-synthetic');
+const verify = () => verifyLog(pool, { verifierKey: keys.signer.verifierKey, macKey: keys.mac });
+
+let i = 0;
+const entry = (kind: 'use' | 'change', at = Date.now()) => append(pool, keys, {
+  at, principal: `svc-${i % 3}`, credential: `cred-${i % 3}`, kind, requestId: `r${i++}`, payload: '{}', seal: kind === 'change' ? Buffer.alloc(32, i % 256) : null,
+});
+
+for (const mode of ['number', 'at'] as const) {
+  test(`${mode} days: a sealed day dropped, the changes kept, the log verifying from the cut`, async () => {
+    // Days of real time, a second long, and a freshness bound to match: retention drops a day only below a head
+    // signed two bounds after its cut, and the signer seals nothing stamped a bound before its head.
+    const dayMs = 1000;
+    const freshMs = mode === 'number' ? 50 : 1500;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    await createLog(pool, mode, dayMs);
+    const cp = await Checkpointer.open(pool, keys, { freshMs, memory: fileMemory(join(scratch, `memory-${mode}`)) });
+    // `at` days start on a day boundary, so day d0 holds what follows.
+    if (mode === 'at') while (Date.now() % dayMs > 20) await sleep(1);
+    const d0 = mode === 'number' ? 0 : Math.floor(Date.now() / dayMs);
+    if (mode === 'at') for (const d of [d0 + 1, d0 + 2]) await pool.query('SELECT new_day($1)', [d]);
+    for (let r = 0; r < 4; r += 1) {
+      for (let e = 0; e < 40; e += 1) await entry(e % 13 === 0 ? 'change' : 'use');
+      await cp.tick();
+    }
+    // With `at` days, a straggler: a use stamped in day d0, numbered after day d0 + 1 began.
+    const stamped = Date.now();
+    if (mode === 'number') {
+      await pool.query('SELECT new_day(1)');
+      await cp.tick({ nextDay: 1 });
+    } else {
+      while (Math.floor(Date.now() / dayMs) === d0) await sleep(5);
+    }
+    for (let e = 0; e < 30; e += 1) await entry(e % 10 === 0 ? 'change' : 'use');
+    if (mode === 'at') await entry('use', stamped);
+    await cp.tick();
+    assert.ok((await verify()).ok);
+
+    // An ended day with no uses (`at` days: a quiet day): its partition goes, with no cut and no entry. Today's, never.
+    if (mode === 'at') {
+      await pool.query('SELECT new_day($1)', [d0 - 5]);
+      const empty = await retainDay(pool, keys, d0 - 5, cp);
+      assert.equal(empty.retention, null);
+      assert.deepEqual((await verify()).problems, []);
+      const today = Math.floor(Date.now() / dayMs);
+      await pool.query('SELECT new_day($1)', [today]);
+      await assert.rejects(retainDay(pool, keys, today, cp), /has not ended/);
+    }
+    // Too early first: refused, and tried again later, as an operator would.
+    await assert.rejects(retainDay(pool, keys, d0, cp), /too recently/);
+    await sleep(2 * freshMs + 100);
+    const r = await retainDay(pool, keys, d0, cp);
+    assert.ok(r.retention !== null);
+    await cp.tick();
+    const v = await verify();
+    assert.deepEqual(v.problems, []);
+    assert.ok(r.dropped > 100 && r.retention!.kept >= 12, `dropped ${r.dropped}, kept ${r.retention!.kept}`);
+    // Proofs of what came after the cut still verify: the tiles they read are kept.
+    const verifier = await verifierFrom(keys.signer.verifierKey);
+    const { rows } = await pool.query('SELECT a.number::text FROM audit a WHERE a.number > $1 AND a.number <= $2', [r.retention!.cutUpto, cp.upto]);
+    for (const { number } of rows) {
+      const p = (await proveNumber(pool, number))!;
+      const head = parseCheckpoint((await openNote(p.checkpoint, verifier))!);
+      assert.ok(verifyInclusion(leafOf(p.entry), p.index, head.size, p.proof, head.root), `after the cut: ${number}`);
+    }
+
+    // A kept change below the cut deleted: caught by the retention entry's head.
+    const { rows: [kept] } = await pool.query("SELECT a.number::text FROM audit_changes a WHERE a.number <= $1 AND a.payload = '{}' LIMIT 1", [r.retention!.cutUpto]);
+    await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE false');
+    await pool.query('WITH d AS (DELETE FROM audit WHERE number = $1 RETURNING *) INSERT INTO saved SELECT * FROM d', [kept.number]);
+    assert.match((await verify()).problems.join(';'), /retention of day/);
+    await pool.query('INSERT INTO audit SELECT * FROM saved');
+    assert.ok((await verify()).ok);
+    // Days go in order.
+    await assert.rejects(retainDay(pool, keys, d0 - 1, cp), /day order/);
+    // The next day too (`at` days: one tick sealed the end of day d0 with the start of d0 + 1, so d0's cut lies
+    // above some of d0 + 1's uses): the log still verifies once both are gone.
+    if (mode === 'at') {
+      await sleep(2 * freshMs + 100);
+      const next = await retainDay(pool, keys, d0 + 1, cp);
+      assert.ok(next.dropped > 0, `dropped ${next.dropped}`);
+      await cp.tick();
+      assert.deepEqual((await verify()).problems, []);
+    }
+    // The retention entry itself deleted: the walk then starts below the cut, where leaves are gone.
+    const [ret] = await retentions(pool);
+    await pool.query('DELETE FROM audit WHERE number = $1', [ret!.number]);
+    assert.ok(!(await verify()).ok);
+  });
+}
+
+test('retention refuses to bless a sealed change deleted just before it, and finishes after a crash between its entry and the drop', async () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  await createLog(pool, 'number');
+  const cp = await Checkpointer.open(pool, keys, { freshMs: 50, memory: fileMemory(join(scratch, 'memory-r9')) });
+  for (let e = 0; e < 20; e += 1) await entry(e % 5 === 0 ? 'change' : 'use');
+  await cp.tick();
+  await pool.query('SELECT new_day(1)');
+  await cp.tick({ nextDay: 1 });
+  await cp.tick();
+  await sleep(200);
+  // A sealed change deleted: the verifier sees it now, and retention must not make it unseeable.
+  await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE false');
+  await pool.query("WITH d AS (DELETE FROM audit WHERE number = (SELECT min(number) FROM audit_changes) RETURNING *) INSERT INTO saved SELECT * FROM d");
+  await assert.rejects(retainDay(pool, keys, 0, cp), /not what was sealed there/);
+  await pool.query('INSERT INTO audit SELECT * FROM saved');
+  // A crash after the entry, before the drop: a retry finishes the drop, and the log verifies.
+  const crashing = { query: (q: string | { name: string }, p?: unknown[]) => (typeof q === 'string' && q.startsWith('DROP TABLE audit_uses_d0') ? Promise.reject(new Error('crash')) : pool.query(q as string, p)) };
+  await assert.rejects(retainDay(crashing, keys, 0, cp), /crash/);
+  await cp.tick();
+  assert.deepEqual((await verify()).problems, []);
+  const resumed = await retainDay(pool, keys, 0, cp);
+  assert.equal(resumed.dropped, -1);
+  await cp.tick();
+  assert.deepEqual((await verify()).problems, []);
+});
