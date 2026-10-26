@@ -1108,7 +1108,8 @@ shortest one.
 
 ### In CI
 
-Run in order, the 125 TLC runs took 22 minutes, twice the tests. Two things
+Run in order, the 125 TLC runs took 22 minutes, twice the tests. As three shards
+they take 11 (Tampering's), about what the tests do; skipped, seconds. Two things
 cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
 
