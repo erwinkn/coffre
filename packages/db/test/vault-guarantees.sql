@@ -25,6 +25,19 @@ BEGIN
 END
 $$;
 
+-- 1c. And forgets only those older than it asks, through the function made for it (0021).
+DO $$
+DECLARE
+    pruned integer;
+BEGIN
+    SELECT prune_vault_releases(3600000, 10) INTO pruned;
+    IF pruned <> 1 OR EXISTS (SELECT 1 FROM vault_releases WHERE key = 'entry:1') THEN
+        RAISE EXCEPTION 'FAIL: prune_vault_releases did not forget the release at time 0 (pruned %)', pruned;
+    END IF;
+    RAISE NOTICE 'PASS: coffre_vault prunes old releases through prune_vault_releases';
+END
+$$;
+
 -- 2. Only as itself.
 DO $$
 BEGIN

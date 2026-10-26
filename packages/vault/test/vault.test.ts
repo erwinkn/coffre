@@ -30,6 +30,7 @@ import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultC
 import { signer } from '../src/checkpoint.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
+import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
@@ -1197,6 +1198,31 @@ test("a read given the app's record of a use appends it beside its read, names i
     await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'use', items, use: bad }));
   }
   assert.equal((await vaultLog(w)).length, before, 'and nothing was appended for them');
+});
+
+test('a checkpoint forgets the releases no window can count again, an hour past it, and keeps the rest', async () => {
+  const w = await world({ bulkLimit: { count: 1000, windowMs: 15 * 60_000 } });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const keys = [];
+  for (let i = 0; i < 3; i++) {
+    const secret = await w.secret(w.dev);
+    keys.push(...(await versionItems([{ secret, wrapped: await wrapped(w, secret) }])));
+  }
+  for (const item of keys) assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [item] })).ok);
+  const { vaultReleases } = tablesOf(db.owner);
+  const released = async () => (await db.owner.select().from(vaultReleases).where(eq(vaultReleases.principal, ADA))).length;
+  assert.equal(await released(), 3);
+  // One a window and an hour old, and a minute more; one a window and half an hour old: still within the margin.
+  const now = Date.now();
+  const [first, second] = await db.owner.select({ key: vaultReleases.key }).from(vaultReleases).where(eq(vaultReleases.principal, ADA));
+  await db.owner.update(vaultReleases).set({ releasedAt: now - 15 * 60_000 - 61 * 60_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, first!.key)));
+  await db.owner.update(vaultReleases).set({ releasedAt: now - 15 * 60_000 - 30 * 60_000 }).where(and(eq(vaultReleases.principal, ADA), eq(vaultReleases.key, second!.key)));
+  assert.ok((await w.vault.checkpoint()).ok);
+  assert.equal(await released(), 2, 'the one past the margin went');
+  assert.deepEqual((await db.owner.select({ key: vaultReleases.key }).from(vaultReleases).where(eq(vaultReleases.key, first!.key))), []);
+  // What the window holds is still counted: the one read just now; the one half an hour past it is kept, but past the window.
+  const counted = await readSnapshot(db.owner, { principals: [ADA], released: { principal: ADA, keys: [], windowMs: 15 * 60_000, clockOffsetMs: 0, cap: 1000 } });
+  assert.equal(counted.released, 1);
 });
 
 // --- the KEK -------------------------------------------------------------------

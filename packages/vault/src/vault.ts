@@ -235,6 +235,19 @@ export const READ_DEADLINE_MS = 5_000;
  */
 export const READ_HEAD_WAITERS = 16;
 
+/**
+ * How much longer than the bulk limit's window a release is kept before a
+ * checkpoint prunes it (T111): a row the window still counts must never go.
+ * The window is measured on the database's clock, which may step back (a
+ * correction, a failover to a server whose clock is behind) between a
+ * prune and a later count; that step is seconds. An hour is far beyond it,
+ * and keeps the table at about a window and an hour of each reader's keys.
+ */
+const RELEASES_MARGIN_MS = 60 * 60_000;
+
+/** How many releases a checkpoint prunes at most: one short statement, a few each scheduled run. */
+const RELEASES_PRUNED = 10_000;
+
 /** A read's call past its deadline (`READ_DEADLINE_MS`): unavailable, as a statement past its bound (57014) is. */
 class Overdue extends Error {
   readonly code = '57014';
@@ -2635,6 +2648,21 @@ class VaultService implements Vault {
    * from the first entry, one walk a call, and `/readyz` stays red until the
    * checkpoints reach the newest heartbeat.
    */
+  /**
+   * Forget the releases no window can count again (T111): those older than
+   * the bulk limit's window and `RELEASES_MARGIN_MS` besides, up to
+   * `RELEASES_PRUNED` of them, in one statement of their own, holding no
+   * lock any read takes but the rows it deletes, which only an append moves
+   * on, a row at a time. A row the count would read is never older than
+   * the window by the count's own clock, which is the database's, moved on
+   * by `clockOffset`: the margin covers that clock stepping back between
+   * the prune and a later count.
+   */
+  async #pruneReleases(): Promise<number> {
+    const keep = this.#config.bulkLimit.windowMs + RELEASES_MARGIN_MS - this.#prepared.options.clockOffset();
+    return store.pruneReleases(this.#db, Math.max(keep, this.#config.bulkLimit.windowMs), RELEASES_PRUNED);
+  }
+
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
     await this.#settled();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
@@ -2672,7 +2700,7 @@ class VaultService implements Vault {
         stalled = `the rehash of the past did not run, and goes on where it was next time: ${(error as Error).message}`;
       }
     }
-    return this.#decide([], async (d) => {
+    const decided = await this.#decide([], async (d) => {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
@@ -2748,6 +2776,9 @@ class VaultService implements Vault {
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
+    // Then the bulk count's upkeep, which no read waits on: a failure leaves it to the next checkpoint.
+    await this.#pruneReleases().catch((error: Error) => console.error('vault_releases could not be pruned; the next checkpoint tries again', error.message));
+    return decided;
   }
 
   /**

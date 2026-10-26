@@ -67,6 +67,29 @@ export async function boundLockWaits(tx: Transaction, ms: number, statements = f
     : sql.raw(`SET LOCAL lock_timeout = ${bound}`));
 }
 
+/**
+ * Delete up to `atMost` rows of `vault_releases` released over `keepMs`
+ * before the database's clock: what the bulk count can no longer read. On
+ * Postgres the vault's login deletes no row itself, and asks
+ * `prune_vault_releases`, which deletes only those (migration 0021). How
+ * many went.
+ */
+export async function pruneReleases(db: Queryable, keepMs: number, atMost: number): Promise<number> {
+  if (engineOf(db) === 'postgres') {
+    const { rows } = await (db as unknown as { execute(query: SQL): Promise<{ rows: { pruned: number }[] }> }).execute(
+      sql`SELECT prune_vault_releases(${Math.trunc(keepMs)}::bigint, ${atMost}::int) AS pruned`,
+    );
+    return rows[0]!.pruned;
+  }
+  const { vaultReleases } = tablesOf(db);
+  const old = db.select({ principal: vaultReleases.principal, key: vaultReleases.key }).from(vaultReleases)
+    .where(lt(vaultReleases.releasedAt, sql`${clockMillis(db)} - ${Math.trunc(keepMs)}`)).limit(atMost);
+  const gone = await (db as unknown as { run(query: SQL): Promise<{ rowsAffected: number }> }).run(
+    sql`DELETE FROM vault_releases WHERE (principal, key) IN ${old}`,
+  );
+  return gone.rowsAffected;
+}
+
 /** The database's clock, now. */
 export async function now(db: Queryable): Promise<number> {
   const [{ at }] = await clock(db);

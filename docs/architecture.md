@@ -641,9 +641,12 @@ trigger on `audit_log`, in the transaction of each such entry, upserts a row
 for each key it names (an entry that names none, which only a forged one is,
 counts as a key of its own). No login writes the table; the trigger's function
 runs as its owner. Only the key is indexed, so a read moves its keys' times on
-in place (a HOT update) and leaves the table a row a key. So the count reads a
-row for each key the reader was ever released, whatever their history and
-however often they read the same keys: about 25 pages of the database for the
+in place (a HOT update) and leaves the table a row a key. Each checkpoint
+forgets the rows released over the window and an hour before
+(`prune_vault_releases`, 0.14.5): the hour covers the database's clock
+stepping back between a prune and a later count. So the count reads a
+row for each key the reader was released in the window and the hour before
+it, whatever their history and however often they read the same keys: about 25 pages of the database for the
 whole decision's statement, on a log of ten thousand entries as on one of a
 million. Before 0.14.4 it read every entry the reader ever made (the window's
 bound, `clock_timestamp()`, is volatile, so no index could use it): a busy

@@ -148,6 +148,13 @@
       "when": 1793017780802,
       "tag": "0020_vault_releases",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793035191911,
+      "tag": "0021_prune_vault_releases",
+      "breakpoints": true
     }
   ]
 }
