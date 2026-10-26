@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **A CI run asks again when the instance cannot answer it yet.** When
+  the instance answered 503 `unavailable` (it could not reach its database
+  or its vault, a busy one say, and says to try again in a moment), the
+  CLI failed at once: on 2026-10-26, two jobs of one run failed their
+  sign-in this way while a third, signing in the same second, went on.
+  These are now asked again, about 2 s and then 5 s later, each wait
+  varied by up to half so that a run's jobs do not ask again together,
+  before the answer stands:
+  - a run's sign-in (`--service`, `login --service`), each time with a
+    fresh ID token from GitHub;
+  - the check of who a new session is, after `login --service`,
+    `login --token` (the Action's `token:` input) and
+    `login --access-client-id`;
+  - each read of values: `get`, `export`, `run` after `login --service`,
+    and the Action's read;
+  - the Action's `require-complete` check (`missing`).
+
+  So are the exchange's own 503s, when it cannot count exchanges (`busy`)
+  or reach the issuer's keys (`issuer_unavailable`), and an instance moving
+  to its new app key (`rotating`). `--verbose`, which the Action passes,
+  says each time it asks again. A 503 an operator or a deploy must clear
+  (`wrong_kek`, `vault_outdated`, `app_key`, `migrating`) is not asked
+  again, nor is anything that writes, nor yet `coffre --service <name>
+  run` where the instance signs it in with a key-bound session.
+
 ## 0.14.2 (2026-10-26)
 
 - **Upgrading to 0.14.2, in short.** No migration, and nothing to change in
@@ -27,26 +52,6 @@
   safeguard. With 6,000 entries
   to walk, what the beat reads inside the app's transactions went from
   12,010 rows to 2, and its longest transaction from about 115 ms to 3 ms.
-
-- **A CI run asks again when the instance cannot answer it yet.** When
-  the instance answered 503 `unavailable` (it could not reach its database
-  or its vault, a busy one say, and says to try again in a moment), the
-  CLI failed at once: on 2026-10-26, two jobs of one run failed their
-  sign-in this way while a third, signing in the same second, went on. A
-  run's sign-in (`--service` and `login --service`), each read of values
-  (`get`, `export`, `run` after `login --service`, the Action's read) and
-  the Action's `require-complete` check (`missing`) and the check of who
-  a new session is (`login`, the Action's `token:`) are now asked again,
-  about 2 s and then 5 s later, each wait varied by up to half so that a
-  run's jobs do not ask again together, before the answer stands; each
-  sign-in asks GitHub for a fresh ID token. So are the exchange's own
-  503s, when it cannot count exchanges (`busy`) or reach the issuer's keys
-  (`issuer_unavailable`), and an instance moving to its new app key
-  (`rotating`). `--verbose`, which the Action passes, says each time it
-  asks again. A 503 an operator or a deploy must clear (`wrong_kek`,
-  `vault_outdated`, `app_key`, `migrating`) is not asked again, nor is
-  anything that writes, nor yet `coffre --service <name> run` where the
-  instance signs it in with a key-bound session.
 
 ## 0.14.1 (2026-10-25)
 
