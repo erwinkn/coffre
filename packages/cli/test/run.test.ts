@@ -100,10 +100,10 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
   return {
     requests,
     environment,
-    /** `extra` is set over the caller's environment; a key given as undefined is unset in it. */
-    async coffre(args: string[], extra: Record<string, string | undefined> = {}) {
+    /** `extra` is set over the caller's environment; a key given as undefined is unset in it. `timeout`, after which the CLI is stopped. */
+    async coffre(args: string[], extra: Record<string, string | undefined> = {}, timeout = 10_000) {
       const env: Record<string, string | undefined> = Object.assign(environment(), extra);
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000 });
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout });
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
@@ -420,30 +420,31 @@ test('a read the policy changed under twice ends as a refusal does, and another 
   }
 });
 
-test('a read the instance cannot answer is asked again, after 2 s then 5 s, and the step goes on', async (t) => {
+test('a read the instance cannot answer yet is asked again, a second or so later, and the step goes on', async (t) => {
   const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [null] } });
   const read = await coffre.coffre(['--verbose', 'export', 'deploy/prod', '--format', 'json']);
   assert.equal(read.code, 0, read.stderr);
   assert.deepEqual(JSON.parse(read.stdout), { TOKEN: 'deploy-token-value' });
   assert.deepEqual(coffre.requests, ['reveal deploy/prod', 'reveal deploy/prod']);
-  assert.deepEqual(read.stderr.replace(/: (\d+) in \d+(\.\d)? m?s/g, ': $1 in t').split('\n'), [
+  assert.deepEqual(read.stderr.replace(/ in \d+(\.\d)? m?s/g, ' in t').split('\n'), [
     'coffre: POST /api/reveals: 503 in t',
-    'coffre: the instance could not answer POST /api/reveals: asking again in 2.0 s',
+    'coffre: the instance could not answer POST /api/reveals: asking again in t',
     'coffre: POST /api/reveals: 200 in t',
     '',
   ]);
+  assert.match(read.stderr, /asking again in (1\.\d|2\.\d|3\.0) s/);
 });
 
-test('a read the instance cannot answer three times ends as a refusal does, and one with a reason is not asked again', async (t) => {
-  for (const [unavailable, reads] of [[[null, null, null], 3], [['wrong_kek'], 1]] as const) {
+test('a read the instance cannot answer three times ends as a refusal does, and one an operator must fix is not asked again', async (t) => {
+  for (const [unavailable, reads] of [[[null, null, null], 3], [['wrong_kek'], 1], [['vault_outdated'], 1]] as const) {
     const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [...unavailable] } });
     const started = performance.now();
-    const read = await coffre.coffre(['get', 'deploy/prod/TOKEN']);
+    const read = await coffre.coffre(['get', 'deploy/prod/TOKEN'], {}, 20_000);
     assert.equal(read.code, 1);
     assert.equal(read.stdout, '');
     assert.equal(read.stderr, 'coffre: request failed with status 503: coffre cannot reach what it depends on right now; try again in a moment\n');
     assert.deepEqual(coffre.requests, Array(reads).fill('reveal deploy/prod/TOKEN'), unavailable.join(' '));
-    if (reads === 3) assert.ok(performance.now() - started >= 7000, 'it asked again at once');
+    if (reads === 3) assert.ok(performance.now() - started >= 3500, 'it asked again at once');
   }
 });
 

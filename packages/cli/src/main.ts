@@ -17,7 +17,7 @@ import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
-import { exchange, ExchangeFailed, idToken, keyBound, momentary, proofOf } from './workload.ts';
+import { exchange, ExchangeFailed, idToken, keyBound, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
@@ -255,15 +255,32 @@ function workloadCredential(origin: string, workload: Extract<Credential, { kind
 
 /**
  * How long a request waits before each time it asks again, while the
- * instance answers that what it depends on did not answer (`momentary`):
- * twice, then its answer stands.
+ * instance cannot answer it yet (`momentary`): twice, each wait between
+ * half and one and a half of these, so that the jobs of one run that
+ * failed together do not all ask again together. Then its answer stands.
  */
 const UNAVAILABLE_RETRY_MS = [2000, 5000];
+
+function unavailableWait(attempt: number): number | undefined {
+  const wait = UNAVAILABLE_RETRY_MS[attempt];
+  return wait === undefined ? undefined : Math.round(wait * (0.5 + Math.random()));
+}
+
+/**
+ * Whether the instance answered 503 for a while it says passes: it could
+ * not reach its database or its vault (`unavailable`, no reason), count
+ * exchanges (`busy`), or reach the issuer's keys (`issuer_unavailable`).
+ * Not one that waits on an operator, such as `wrong_kek` or
+ * `vault_outdated`, nor the proxy's own answers, nor Cloudflare's page.
+ */
+function momentary(status: number, body: { error?: unknown; reason?: unknown } | null): boolean {
+  return status === 503 && body?.error === 'unavailable' && (body.reason === undefined || body.reason === 'busy' || body.reason === 'issuer_unavailable');
+}
 
 /**
  * A CI run signed in as `service`: its ID token, the one given or a fresh
  * one from GitHub's runner, traded for a credential. Asked again while the
- * instance cannot answer (`UNAVAILABLE_RETRY_MS`), each time with a fresh
+ * instance cannot answer it yet (`momentary`), each time with a fresh
  * ID token from GitHub: an exchange that committed and lost its answer has
  * spent the one before (docs/design/oidc.md, section 3).
  */
@@ -273,8 +290,8 @@ async function signIn(origin: string, service: string, given?: string): Promise<
     try {
       return { issued: await exchange(origin, service, token, http), idToken: token };
     } catch (error) {
-      const wait = UNAVAILABLE_RETRY_MS[attempt];
-      if (wait === undefined || !(error instanceof ExchangeFailed && error.momentary)) throw error;
+      const wait = unavailableWait(attempt);
+      if (wait === undefined || !(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
       if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
@@ -348,15 +365,15 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
 
 /**
  * A read of values, `retryingPolicyChange`, asked again too while the
- * instance cannot answer it (`UNAVAILABLE_RETRY_MS`). Each read the vault
+ * instance cannot answer it yet (`momentary`). Each read the vault
  * answered is in the audit log, the one whose answer was lost included.
  */
 async function reading(request: Request): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const again = request.clone();
     const response = await retryingPolicyChange(request);
-    const wait = UNAVAILABLE_RETRY_MS[attempt];
-    if (wait === undefined || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
+    const wait = unavailableWait(attempt);
+    if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
     if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);
     await new Promise((resolve) => setTimeout(resolve, wait));
     request = again;
@@ -1274,7 +1291,7 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
   if (!(await proxied(to))) return null;
   // A plan reads values too, and is asked again as `run`'s reads are.
   const at = (path: string, headers: Record<string, string>) =>
-    reading(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
+    retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
   // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   // Asked again too: a handle weighed from a policy another change overtook is made from none, and refused to be asked again.

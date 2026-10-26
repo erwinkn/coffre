@@ -54,23 +54,15 @@ export async function idToken(given: string | undefined, runner: Runner, audienc
   );
 }
 
-/**
- * Whether the instance answered that what it depends on did not answer,
- * its database or its vault, and to try again in a moment: 503
- * `unavailable`, with no reason. One with a reason (`wrong_kek`) lasts
- * until an operator acts, and is not asked again.
- */
-export function momentary(status: number, body: { error?: unknown; reason?: unknown } | null): boolean {
-  return status === 503 && body?.error === 'unavailable' && body.reason === undefined;
-}
-
-/** An exchange the instance refused, or could not answer; `momentary` when it said to try again in a moment. */
+/** An exchange the instance refused, or could not answer: its status, and its body's code and reason. */
 export class ExchangeFailed extends Error {
-  readonly momentary: boolean;
+  readonly status: number;
+  readonly body: { error?: unknown; reason?: unknown } | null;
 
-  constructor(message: string, momentary: boolean) {
+  constructor(message: string, status: number, body: { error?: unknown; reason?: unknown } | null) {
     super(message);
-    this.momentary = momentary;
+    this.status = status;
+    this.body = body;
   }
 }
 
@@ -87,7 +79,7 @@ export async function exchange(origin: string, service: string, token: string, f
   }
   const why = typeof body?.message === 'string' ? body.message : `status ${response.status}`;
   const reason = typeof body?.reason === 'string' ? ` (${body.reason})` : '';
-  throw new ExchangeFailed(`${origin} would not sign this run in as ${service}${reason}: ${why}`, momentary(response.status, body));
+  throw new ExchangeFailed(`${origin} would not sign this run in as ${service}${reason}: ${why}`, response.status, body);
 }
 
 /**

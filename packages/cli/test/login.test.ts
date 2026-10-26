@@ -134,22 +134,23 @@ test('a CI run the instance cannot sign in yet asks again, with a fresh ID token
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const signIns = (seen: { url: string }[]) => seen.map(({ url }) => url.split('?')[0]).filter((url) => url === '/runner' || url === '/api/auth/oidc');
 
-  const busy = await ciInstance(t, { unavailable: [null] });
+  // The issuer's keys out of reach for a moment, as its database: asked again.
+  const busy = await ciInstance(t, { unavailable: ['issuer_unavailable'] });
   const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${busy.origin}/runner`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'bearer' };
   const signed = await cli(home, ['--url', busy.origin, '--service', 'deploy', '--verbose', 'whoami'], '', undefined, false, runner);
   assert.equal(signed.status, 0, signed.stderr);
   assert.match(signed.stdout, /^service:deploy \(service account\)/);
   assert.deepEqual(signIns(busy.seen), ['/runner', '/api/auth/oidc', '/runner', '/api/auth/oidc']);
-  assert.deepEqual(signed.stderr.replace(/: (\d+) in \d+(\.\d)? m?s/g, ': $1 in t').split('\n').slice(0, 5), [
+  assert.deepEqual(signed.stderr.replace(/ in \d+(\.\d)? m?s/g, ' in t').split('\n').slice(0, 5), [
     'coffre: GET /runner: 200 in t',
     'coffre: POST /api/auth/oidc: 503 in t',
-    'coffre: the instance could not answer POST /api/auth/oidc: asking again in 2.0 s',
+    'coffre: the instance could not answer POST /api/auth/oidc: asking again in t',
     'coffre: GET /runner: 200 in t',
     'coffre: POST /api/auth/oidc: 200 in t',
   ]);
 
-  // Three times unable, it fails as it did; a 503 with a reason, which lasts, at once. Login asks again the same way.
-  for (const [unavailable, exchanges] of [[[null, null, null], 3], [['wrong_kek'], 1]] as const) {
+  // Three times unable, it fails as it did; a 503 an operator must fix, at once. Login asks again the same way.
+  for (const [unavailable, exchanges] of [[[null, 'busy', null], 3], [['wrong_kek'], 1]] as const) {
     const down = await ciInstance(t, { unavailable: [...unavailable] });
     const login = await cli(home, ['login', down.origin, '--service', 'deploy', '--id-token'], 'id.token.ok\n');
     assert.equal(login.status, 1);

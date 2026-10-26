@@ -34,11 +34,14 @@
   CLI failed at once: on 2026-10-26, two jobs of one run failed their
   sign-in this way while a third, signing in the same second, went on. A
   run's sign-in (`--service`, and `login --service`) and each read of
-  values (`get`, `run`, `export`, the Action's) are now asked again, 2 s
-  and then 5 s later, before the answer stands; each sign-in asks GitHub
-  for a fresh ID token. `--verbose`, which the Action passes, says each
-  time it asks again. A 503 with a reason (`wrong_kek`) is not asked
-  again, and nothing that writes is.
+  values (`get`, `run`, `export`, the Action's) are now asked again, about
+  2 s and then 5 s later, each wait varied by up to half so that a run's
+  jobs do not ask again together, before the answer stands; each sign-in
+  asks GitHub for a fresh ID token. So are the exchange's own 503s, when
+  it cannot count exchanges (`busy`) or reach the issuer's keys
+  (`issuer_unavailable`). `--verbose`, which the Action passes, says each
+  time it asks again. A 503 an operator must fix (`wrong_kek`,
+  `vault_outdated`) is not asked again, and nothing that writes is.
 
 ## 0.14.1 (2026-10-25)
 
