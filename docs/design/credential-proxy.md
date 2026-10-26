@@ -12,7 +12,8 @@ is his to revisit. 0.9 closes the gaps that kept keys on `expose`
 deployment-wide `people` switch and `expose` with one setting per key, its
 sensitivity (section 2). 0.11 (W146) runs the tunnel on Workers, in a
 Durable Object, and through a VPC Network binding to a private database
-(section 5).
+(section 5). After 0.14.3, W190 puts a key in one field of a small form or JSON
+body, `form()` and `json()` (section 5, "A field of the body").
 
 ## 1. What it is for
 
@@ -548,9 +549,9 @@ request sent on:
    of these encoded twice (`%252e%252e`), which a server behind another
    decodes twice. A credential's `methods` and `paths` narrow it further.
 2. **Who.** The handle, from `x-coffre-handle` if present, else from
-   where the rule puts the key: the header, the query parameter, or
-   Basic's user or password. A shaped placeholder's slot must be that shape
-   exactly (section 5). No handle gets a 401.
+   where the rule puts the key: the header, the query parameter, the
+   body's field, or Basic's user or password. A shaped placeholder's slot
+   must be that shape exactly (section 5). No handle gets a 401.
 3. **What.** The credential's keys, from the cache for the handle,
    environment and credential, or opened now: `use(handle, …)`, the API's
    read in process, purpose `use`. That is one vault entry naming the keys,
@@ -559,9 +560,10 @@ request sent on:
    the environment lacks is a 409.
 4. **Sent on.** Every header but those about the hop, coffre's caller,
    its cookies and the handle; then the rule's header, parameter or
-   Basic authorization, filled in. The body is read up to 16 MiB and no
+   Basic authorization, filled in, or the body's field (section 5). The body is read up to 16 MiB and no
    further, unless it declares its digest and says its length, which
-   streams (below, "Declared bodies stream"). If the handle is still anywhere in the
+   streams (below, "Declared bodies stream"); a body whose field coffre
+   fills, up to 64 KiB, and never streamed. If the handle is still anywhere in the
    request (a header, inside another header's Basic base64, the URL, the
    body), it is refused rather than leaked to a third party. The request
    goes out with `redirect: 'manual'`, through the global `fetch` or the
@@ -722,6 +724,82 @@ Each URL is one use in the log, naming the path and its lifetime, never
 served from the cache. Uploads are not presigned: they go through the proxy.
 The SDK's own `getSignedUrl` signs with the handle, so it needs replacing
 by the helper where the app presigns.
+
+**A field of the body (after 0.14.3, built).** A few upstreams take their key in
+the request's body. Firebase's token refresh, which Gather's API uses,
+sends its refresh token as a form field. Cloudflare Turnstile's siteverify
+sends its secret as a form or JSON field. `form()` and `json()` name the
+field, and a template as `header()` does:
+
+```ts
+gather: { upstream: 'https://securetoken.googleapis.com/v1', inject: form('refresh_token', '{GATHER_REFRESH_TOKEN}') },
+turnstile: { upstream: 'https://challenges.cloudflare.com/turnstile/v0', inject: form('secret', '{TURNSTILE_SECRET_KEY}') },
+```
+
+The app sends the body it always did, with its handle as that field's value:
+
+```
+POST /use/gather/token?key=AIzaSy…        grant_type=refresh_token&refresh_token=coffre_use_…
+→ https://securetoken.googleapis.com/v1/token?key=AIzaSy…   grant_type=refresh_token&refresh_token=AMf-vB…%2B…
+```
+
+Firebase's API key is no secret. It stays in the app's config and in the
+query, as the app sends it. coffre reads the body whole, 64 KiB at most,
+finds the field, puts the real value in its place, and leaves every other
+byte as it was. For a form, that means the field's name as written and the
+other pairs untouched, with the value form-encoded. For JSON, only the
+value's string is written again, as `JSON.stringify` writes it, so the
+spacing, the key order and a number too long for a double keep every digit.
+Then fetch sets `Content-Length` from what goes out, and a `Content-Digest`
+the request carried is computed again over it (`Repr-Digest`, `Digest` and
+`Content-MD5` are dropped, since they would no longer match).
+
+A body is refused, with nothing sent and nothing of it quoted back, when:
+
+| The body | Answer |
+|---|---|
+| is of another type than the rule's (`application/x-www-form-urlencoded` or `application/json`), another charset than UTF-8, or compressed (`Content-Encoding`) | 415 |
+| is over 64 KiB | 413 |
+| holds more than 256 fields (a JSON document's strings counting as a name and a value each), or nests deeper than 32, checked before anything is parsed | 400 |
+| is no body at all (a GET) | 400 |
+| is no JSON, or no JSON object, or no UTF-8 (a byte order mark is taken, and kept) | 400 |
+| lacks the field (at the top of a JSON object: `{"data":{"secret":…}}` is no field) | 400 |
+| holds the field twice, or another name at the top alike it, which some upstream reads as the field: the same once decoded (`refresh%5Ftoken`, `"\u0073ecret"`), up to a `[` (`refresh_token[]`, `refresh_token[0]`, as PHP and qs read arrays), in another case (`SECRET`, `ſecret`, as Go's JSON folds), or with other punctuation (`refresh.token`, `refresh token`, as PHP reads them) | 400 |
+| gives a JSON field as anything but a string | 400 |
+| holds the handle anywhere but in the field, in a name or a value, decoded: `%5F` in a form, `\u005f` in JSON, a nested object | 400 |
+| holds no handle in the field, or one other than `x-coffre-handle`'s | 401, or 400 |
+
+The rule decides where the value goes, and the app only decides what fills
+that one field. So a value never lands in a field the upstream echoes back,
+such as Turnstile's `cdata` or a JSON-RPC `id`, however the app writes the
+body, and an upstream that echoes the body anyway is redacted as any
+answer is (section 4). A shaped placeholder (below) works as in a header:
+`json('secret', '{K}')` with `prefix('pk_')` takes `pk_coffre_use_…` in the
+field, and nothing else.
+
+On the stable URL, the handle is in the body before the route is known
+(section 4, "Which route"). coffre reads a copy of the body
+(`request.clone()`) to find it, and sends what it read. So does a route
+through another body rule's credential it read as well
+(`/use/<project>/<env>/<credential>`, the project named like this one).
+A route through any other credential reads the request itself. A workload's session, which carries no handle, has its field
+replaced whatever the app put there, as a header rule replaces the
+`apiKey: 'coffre'` an SDK wanted. Its proof signs the body the app sent,
+whose `Content-Digest` coffre checks before the field is filled, and the
+field must be there once, with no session token anywhere else in the body.
+SigV4 signs the body's hash, so it takes no body rule; no rule mixes the two.
+
+Every body is read before the handle is checked, since the handle is in
+it, so the parse is bounded for anyone at all. A real siteverify or refresh
+body is a few hundred bytes and parses in microseconds. 65,000 empty form
+pairs or 30,000 nested arrays are refused within 0.1 ms, before any
+per-field work. What costs the most is a body under every bound whose 64
+KiB is all `%XX` escapes, which the check for a handle decodes. That takes
+3.5 ms of CPU on Node 24 on a loaded host. The JSON worst case is 0.5 ms.
+A request parses its body once. The one exception is a route
+through another body rule's credential of a project named like this one
+(`/use/<a>/<b>/<c>`, both body rules), which parses it twice. Nothing adds
+a query, and nothing is shared between requests.
 
 Tested two ways. In the suite (`packages/server/test/credential-proxy-s3.test.ts`),
 the AWS SDK v3 puts, gets and lists through the proxy against a fake S3,
@@ -1416,9 +1494,11 @@ VPC Service binding reaches only the host it was made for. A tunnel's
 names the hosts in it its URL may (section 5). On Node, pinning the resolved address is left for
 later (decision 9).
 
-**Injection** goes into headers, the query and Basic only. Nothing is
-injected into a body, so a provider that wants its key in a JSON body
-(rare) is not proxied yet.
+**Injection** goes into headers, the query, Basic, an AWS signature, or one
+named field of a small form or JSON body (section 5). The rule names the
+field, so the app decides only what fills it, never where a value goes: a
+handle anywhere else in the body is refused. A body coffre fills is read
+whole, 64 KiB at most, so a large upload never carries a key in its body.
 
 ## 7. Questions, answered
 
@@ -1774,6 +1854,26 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     `hmac()` saying what it may do, which reads worse and defaults
     somewhere.
 
+35. **A body rule fills one field its credential names, at the top of the
+    body, in a body of 64 KiB, 256 fields and 32 levels at most, every
+    other byte as it was (W190,
+    Erwin approved 2026-10-26).** `form(name, template)` and
+    `json(name, template)`, as `header()` reads. The value replaces the
+    field's whole value, as a header rule replaces the whole header. Two
+    rules, not one `body()` taking either type: the rule says what the
+    upstream takes, and a body of the other type is refused rather than
+    guessed at. A JSON field is a top-level name. No real user needs a path,
+    and a path adds escaping rules (`a.b` as a key) for nothing. Any other
+    name alike the field's (`alike`: up to a `[`, case folded, letters and
+    digits alone) is refused as a duplicate. That is one conservative rule
+    for the ways PHP, qs and Go read two names as one, not a rule per
+    parser. Such an alias never moves the value, which goes only in the
+    field the rule names. It only lets the app's own value shadow it. The JSON
+    is spliced, not parsed and written again, because writing it again
+    changes a number past 2^53 and the bytes a signature or an idempotency
+    check may cover. *Alternatives:* a JSON Pointer path, if an upstream
+    nests its key; a larger bound, if one sends a larger body.
+
 ## 9. Plan
 
 | PR | What |
@@ -1791,3 +1891,4 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
 | 0.10 | Sensitivity per key (`0012_sensitive_values`, `coffre set --sensitive`, `coffre mark`, the page's control); `people`, `expose` and `identifiers` removed. Built |
 | 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |
 | Egress | A credential's `egress`: its requests leave through a VPC Service binding, for an upstream that allowlists addresses (Schuman). Built; untested against a real VPC Service |
+| After 0.14.3 | `form()` and `json()`: a key in one field of a small body (section 5). Built |

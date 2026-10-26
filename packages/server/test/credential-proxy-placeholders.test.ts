@@ -198,10 +198,10 @@ test('a JWT placeholder for a key that holds no JWT fails the plan, saying so an
   assert.equal(text.includes('opaque-secret'), false);
 });
 
-test('a shaped placeholder is for a header or query rule that carries one key: anything else is refused at configuration', () => {
+test('a shaped placeholder is for a header, query, form or JSON rule that carries one key: anything else is refused at configuration', () => {
   const make = (credential: CredentialProxyOptions['credentials'][string]) => () => credentialProxy({ credentials: { a: credential } });
   const upstream = 'https://api.example.com';
-  assert.throws(make({ upstream, inject: basic('{ID}', '{SECRET}'), placeholder: prefix('sk_') }), /a's placeholder shapes the one key a header or query rule carries.*not a basic\(\) rule/);
+  assert.throws(make({ upstream, inject: basic('{ID}', '{SECRET}'), placeholder: prefix('sk_') }), /a's placeholder shapes the one key a header, query, form or JSON rule carries.*not a basic\(\) rule/);
   assert.throws(make({ upstream, inject: sigv4({ accessKeyId: '{A}', secretAccessKey: '{B}', region: 'eu-west-3', service: 's3' }), placeholder: jwt() }), /not a sigv4\(\) rule/);
   assert.throws(make({ upstream, inject: header('authorization', '{ID}:{TOKEN}'), placeholder: jwt() }), /several keys/);
   assert.throws(make({ upstream, inject: header('x', '{K}{K}'), placeholder: prefix('a') }), /several keys, or one twice/);
