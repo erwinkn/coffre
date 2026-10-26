@@ -64,7 +64,7 @@ void loaded.then(() => { running = false; });
 while (running) {
   const due = t0 + (ticks.length + 1) * (every || 1000);
   await new Promise((r) => setTimeout(r, Math.max(0, due - performance.now())));
-  if (every > 0 && running) ticks.push(await cp.tick());
+  if (every > 0 && running) ticks.push(await cp.tick({ witnessTimeoutMs: 5000 }));
 }
 const seconds = (performance.now() - t0) / 1000;
 const pgMs = cpu() - pg0;

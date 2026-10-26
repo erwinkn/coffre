@@ -292,10 +292,22 @@ fresh log of 8 checkpoints (all as expected):
 | (p) a garbage checkpoint row; a malformed retention entry | **a failing verdict**, not a crash | | |
 | (q) a witness that refuses once, then recovers, while a change waits | | the change answers witnessed: the witness is asked again within the deadline | |
 | (r) no witness set up | | | the change answers `witnessed: null`, never "witnessed" |
+| (s) a use copied before its day is dropped, replayed after the retention cut | **caught**: "older than the checkpoint before it: a replay" (the request-ID lookup alone cannot: the original is gone) | | |
+| (t) a witness that always refuses, after the change has answered | | asked 4 times until the answer (300 ms), 0 after | |
+| (u) remembering a head fails once | | | the next tick's head holds |
 
-Rows (f) to (r) came from two review rounds: (g) to (l) and (n) to (r) are
-the reviewer's own reproductions, each of which got through the version
-before. Round two found:
+Rows (f) to (u) came from three review rounds: (g) to (l), (n) to (r) and
+(s) to (u) are the reviewer's own reproductions, each of which got through
+the version before. Round three found:
+- a forked head below the start passed if a tile was deleted too: a missing
+  tile is now an excuse only below a real retention cut;
+- a dropped use could be replayed after its cut: entries now must be no
+  older than the checkpoint before them, less 10 minutes (the MAC covers
+  `at`);
+- the witness retries outlived the change that waited on them;
+- a failed `remember` left the in-memory tree ahead of the database.
+
+Round two found:
 - incremental checks missed replays of entries sealed before their start;
   they now look up each walked request ID below the start, one indexed
   query per chunk;
@@ -429,8 +441,10 @@ acknowledgement.
 - **(A) Answer after the deadline, marked unwitnessed** (`witnessed: false`,
   shown in the UI, alerted), while the checkpointer keeps publishing. A
   witness that fails is asked again every 100 ms until the deadline, so a
-  dropped request costs a retry, not an unwitnessed change. With no witness
-  set up, `witnessed` is null.
+  dropped request costs a retry, not an unwitnessed change. Nothing retries
+  after the answer. The regular ticker never waits for witnesses, so a
+  refusing one cannot set its pace. With no witness set up, `witnessed` is
+  null.
   *Recommended.* The change has committed and is in force either way: the
   revocation already stops uses. A 503 would tell the admin it failed when
   it didn't, and invite a retry of a change that already happened. And the
@@ -582,7 +596,12 @@ The MAC does not cover the number (W208). So before sealing, a writer can
 also do two things:
 
 - **Copy an entry under a fresh number.** The copy has a valid MAC. Once
-  both are sealed, the verifier flags the duplicate request ID. The append
+  both are sealed, the verifier flags the duplicate request ID, including
+  against entries below an incremental check's start (one indexed lookup
+  per chunk). A copy of a use whose day was dropped has no original left to
+  match, so the verifier also requires every entry to be no older than the
+  checkpoint before it, less 10 minutes. The MAC covers `at`, so a copy keeps
+  its old time. The append
   therefore has to be **idempotent by request ID**: a unique index on
   `request_id` within each partition, with `ON CONFLICT` returning the
   existing number. Otherwise an honest transport replay (Hyperdrive

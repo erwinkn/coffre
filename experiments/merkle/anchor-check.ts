@@ -44,7 +44,7 @@ v = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, anchors: [h.ne
 console.log(`  against the archive's newest head: ${v.ok ? 'holds' : `caught: ${v.problems[0]}`}`);
 const stateless = await Checkpointer.open(pool, keys, { witnesses: [httpWitness('do-witness', `${A}/witness`), httpArchive('r2-archive', `${A}/archive`)] });
 for (let i = 0; i < 3; i += 1) await append(pool, keys, { at: Date.now(), principal: 'svc-x', credential: 'cred-x', kind: 'use', requestId: `split-${i}`, payload: '{}' });
-const t = await stateless.tick();
+const t = await stateless.tick({ witnessTimeoutMs: 10_000 });
 console.log(`  a stateless signer seals again (${t.size} leaves at ${t.upto}) and publishes: ${t.failures.length === 0 ? 'accepted everywhere' : t.failures.join('; ')}`);
 h = await heads();
 const all = await Promise.all(h.keys.slice(-8).map((k) => get(`/archive?key=${encodeURIComponent(k)}`)));

@@ -25,11 +25,18 @@ export type Verdict = { ok: boolean; problems: string[]; warnings: string[]; che
 /** How far apart two Workers' clocks may be before an entry's `at` running back against its number is worth a look. */
 const SKEW_MS = 5000;
 
+/**
+ * How much older than the checkpoint before it an entry sealed after it may be: a use's `at` is stamped when its
+ * request arrives, a round trip before its number. An entry older than that is a replay, whatever its number: in
+ * particular the copy of a use whose original a retention cut dropped, which no lookup could find any more.
+ */
+const FRESH_MS = 10 * 60_000;
+
 const GENESIS_UPTO = '0';
 
 export async function verifyLog(
   db: Db,
-  opts: { verifierKey: string; macKey?: Buffer; anchors?: string[]; from?: string },
+  opts: { verifierKey: string; macKey?: Buffer; anchors?: string[]; from?: string; freshMs?: number },
 ): Promise<Verdict> {
   const started = performance.now();
   // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
@@ -40,7 +47,8 @@ export async function verifyLog(
   }
 }
 
-async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchors?: string[]; from?: string }, started: number): Promise<Verdict> {
+async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchors?: string[]; from?: string; freshMs?: number }, started: number): Promise<Verdict> {
+  const fresh = opts.freshMs ?? FRESH_MS;
   const verifier = await verifierFrom(opts.verifierKey);
   const problems: string[] = [];
   const warnings: string[] = [];
@@ -144,11 +152,16 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
     // the tiles, which retention keeps above level 0 only: then it cannot be checked, and says so).
     if (BigInt(a.upto) <= BigInt(start.upto)) {
       const row = heads.get(a.upto);
-      if (row !== undefined && !(row.size === a.size && row.root.equals(a.root))) problems.push(`checkpoint ${a.upto}: not the head held outside for that place: a second history`);
-      else if (a.size > start.size) problems.push(`the head held outside at ${a.upto} has more leaves than the start: a second history`);
-      else {
+      if (row !== undefined) {
+        if (!(row.size === a.size && row.root.equals(a.root))) problems.push(`checkpoint ${a.upto}: not the head held outside for that place: a second history`);
+      } else if (a.size > start.size) {
+        problems.push(`the head held outside at ${a.upto} has more leaves than the start: a second history`);
+      } else {
         const proof = await proveConsistency(db, a.size, start.size).catch(() => null);
-        if (proof === null) warnings.push(`the head held outside at ${a.upto} lies below the retention cut: not checked`);
+        // Only retention removes tiles, and only level 0 below a sealed cut: anywhere else a missing tile is a problem.
+        const belowCut = cut !== undefined && cut.cutSize >= a.size;
+        if (proof === null && belowCut) warnings.push(`the head held outside at ${a.upto} lies below the retention cut: not checked`);
+        else if (proof === null) problems.push(`the head held outside at ${a.upto} cannot be checked: tiles are missing that no retention removed`);
         else if (!verifyConsistency(a.size, start.size, a.root, start.root, proof)) problems.push(`the head held outside at ${a.upto} is not a prefix of the start: a second history`);
       }
       continue;
@@ -163,6 +176,7 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
 
   let sealed = 0;
   let cursor = start.upto;
+  let since = start.at;
   // Walk in chunks of whole windows, a bounded read each.
   for (let i = 0; i < ordered.length;) {
     const chunk: Stop[] = [];
@@ -175,6 +189,8 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
       const window: Entry[] = [];
       while (at < entries.length && BigInt(entries[at]!.number) <= BigInt(c.upto)) window.push(entries[at++]!);
       window.forEach(check);
+      for (const e of window) if (e.at < since - fresh) problems.push(`${e.number}: at ${e.at}, older than the checkpoint before it (${since}): a replay`);
+      if (row) since = c.at;
       edge.append(window.map(leafOf));
       sealed += window.length;
       if (edge.size !== c.size || !edge.root().equals(c.root)) {
@@ -188,5 +204,6 @@ async function walk(db: Db, opts: { verifierKey: string; macKey?: Buffer; anchor
   const above = await entriesBetween(db, last.upto, '9223372036854775807');
   await replaysBelow(above, start.upto);
   above.forEach(check);
+  for (const e of above) if (e.at < last.at - fresh) problems.push(`${e.number}: at ${e.at}, older than the newest checkpoint (${last.at}): a replay`);
   return done(heads.size, sealed, above.length);
 }

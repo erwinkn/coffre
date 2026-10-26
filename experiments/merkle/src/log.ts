@@ -205,9 +205,11 @@ export class Checkpointer {
    */
   async tick(opts: { nextDay?: number; witnessTimeoutMs?: number } = {}): Promise<Tick> {
     const t = await this.seal(opts);
-    if (!t.signed || this.witnesses.length === 0) return t;
+    // The regular ticker does not wait for witnesses (a refusing one would set its pace); a caller that wants to
+    // know, a bench or a change, says how long it waits.
+    if (!t.signed || this.witnesses.length === 0 || opts.witnessTimeoutMs === undefined) return t;
     const w0 = performance.now();
-    const { failures } = await this.witnessed(t.upto, opts.witnessTimeoutMs ?? 30_000);
+    const { failures } = await this.witnessed(t.upto, opts.witnessTimeoutMs);
     const witnessMs = performance.now() - w0;
     return { ...t, failures: [...t.failures, ...failures], witnessMs, oldestToWitnessedMs: t.oldestToSealMs + witnessMs };
   }
@@ -283,9 +285,14 @@ export class Checkpointer {
       const p = this.pump(w);
       if (p.acked >= BigInt(upto)) return null;
       const answer = new Promise<string | null>((resolve) => {
-        const timer = setTimeout(() => resolve(`witness ${w.name}: no answer within ${deadline} ms${p.failure === null ? '' : ` (last: ${p.failure})`}`), deadline);
+        const waiter = { upto: BigInt(upto), done: (f: string | null) => { clearTimeout(timer); resolve(f); } };
+        // At the deadline the waiter goes, so nothing keeps retrying on its behalf after the change has answered.
+        const timer = setTimeout(() => {
+          p.waiters = p.waiters.filter((x) => x !== waiter);
+          resolve(`witness ${w.name}: no answer within ${deadline} ms${p.failure === null ? '' : ` (last: ${p.failure})`}`);
+        }, deadline);
         timer.unref();
-        p.waiters.push({ upto: BigInt(upto), done: (f) => { clearTimeout(timer); resolve(f); } });
+        p.waiters.push(waiter);
       });
       if (!p.busy && BigInt(this.head.upto) >= BigInt(upto)) {
         p.next = { note: this.note, head: this.head };
@@ -349,18 +356,20 @@ export class Checkpointer {
       }
       return empty;
     }
-    const tiles = this.edge.append(entries.map(leafOf));
-    const head: Checkpoint = { origin: this.keys.origin, size: this.edge.size, root: this.edge.root(), upto, at: Date.now() };
-    const note = await signNote(checkpointBody(head), [this.keys.signer]);
-    const cpu1 = process.cpuUsage(cpu0);
-    // Remembered outside the database before the database has it (formal/Seal.tla, RememberFirst): a crash
-    // between the two and a rollback can then never get a second head signed for the same place.
-    await this.memory?.remember(note);
-    const t1 = performance.now();
+    let tiles: Tile[], head: Checkpoint, note: string, cpu1: NodeJS.CpuUsage, t1: number;
     try {
+      tiles = this.edge.append(entries.map(leafOf));
+      head = { origin: this.keys.origin, size: this.edge.size, root: this.edge.root(), upto, at: Date.now() };
+      note = await signNote(checkpointBody(head), [this.keys.signer]);
+      cpu1 = process.cpuUsage(cpu0);
+      // Remembered outside the database before the database has it (formal/Seal.tla, RememberFirst): a crash
+      // between the two and a rollback can then never get a second head signed for the same place.
+      await this.memory?.remember(note);
+      t1 = performance.now();
       await writeCheckpoint(this.db, tiles, head, note, opts.nextDay === undefined ? null : opts.nextDay - 1);
     } catch (error) {
-      // The edge has moved on in memory but not in the database: start again from what the database holds.
+      // The edge has moved on in memory but not in the database, whichever step failed: start again from what the
+      // database holds. (A head remembered but not written is the memory being ahead, which the next tick extends.)
       this.edge = await loadEdge(this.db, this.head.size);
       throw error;
     }

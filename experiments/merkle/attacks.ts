@@ -37,7 +37,7 @@ async function fresh(memory: boolean) {
   const cp = await Checkpointer.open(pool, keys, { memory: memory ? fileMemory(path) : undefined, witnesses: [witness] });
   for (let c = 0; c < 8; c += 1) {
     for (let e = 0; e < 25; e += 1) await use();
-    await cp.tick();
+    await cp.tick({ witnessTimeoutMs: 2000 });
   }
   return { witness, path };
 }
@@ -105,7 +105,7 @@ for (const mode of ['stateless', 'witness', 'memory'] as const) {
   let cp = await Checkpointer.open(pool, keys, opts);
   for (let c = 0; c < 6; c += 1) {
     for (let e = 0; e < 25; e += 1) await use();
-    await cp.tick();
+    await cp.tick({ witnessTimeoutMs: 2000 });
   }
   const readerA = await latestNote();
   const { rows: [keep] } = await pool.query('SELECT c.upto::text FROM checkpoints c ORDER BY c.upto DESC OFFSET 2 LIMIT 1');
@@ -116,7 +116,7 @@ for (const mode of ['stateless', 'witness', 'memory'] as const) {
   try {
     cp = await Checkpointer.open(pool, keys, opts);
     for (let e = 0; e < 5; e += 1) await use();
-    const t = await cp.tick();
+    const t = await cp.tick({ witnessTimeoutMs: 500 });
     if (t.failures.length > 0) refused = t.failures.join('; ');
   } catch (error) {
     refused = (error as Error).message;
@@ -325,6 +325,56 @@ for (const tamper of [false, true]) {
   const n = await append(pool, keys, { at: Date.now(), principal: 'svc-0', credential: null, kind: 'change', requestId: 'r-1', payload: '{}' });
   const r = await cp.sealThrough(n);
   expect('the change answers witnessed: null', r.witnessed === null, true, '', ['yes', 'no']);
+}
+
+// Review r3's reproductions, each now caught.
+{
+  console.log('(s) a use copied before its day is dropped, replayed after the retention cut');
+  await createLog(pool);
+  const cp = await Checkpointer.open(pool, keys);
+  for (let e = 0; e < 20; e += 1) await use();
+  await cp.tick();
+  await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE number = 5');
+  await new Promise((r) => setTimeout(r, 400));
+  await pool.query('SELECT new_day(1)');
+  await cp.tick({ nextDay: 1 });
+  await cp.tick();
+  const { retainDay } = await import('./src/retention.ts');
+  await retainDay(pool, keys, 0);
+  await cp.tick();
+  await pool.query("INSERT INTO audit (number, at, principal, credential, kind, request_id, payload, seal, mac) SELECT nextval('audit_number'), at, principal, credential, kind, request_id, payload, seal, mac FROM saved");
+  await cp.tick();
+  // The demo's day lasted a second; a real one is dropped weeks after: the bound is 10 minutes, here 200 ms.
+  const v = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, macKey: keys.mac, freshMs: 200 });
+  expect('verifier, freshness bound', !v.ok, true, v.problems[0] ?? '');
+  const lookupOnly = await verifyLog(pool, { verifierKey: keys.signer.verifierKey, macKey: keys.mac, freshMs: 1e12 });
+  expect('the same, without the bound (the lookup alone)', !lookupOnly.ok, false, 'its original is gone with its day');
+}
+{
+  console.log('(t) a witness that always refuses: how often it is asked once the change has answered');
+  await createLog(pool);
+  let calls = 0;
+  const refusing: import('./src/log.ts').Witness = { name: 'refusing', publish: async () => { calls += 1; return { ok: false, reason: 'no' }; } };
+  const cp = await Checkpointer.open(pool, keys, { witnesses: [refusing] });
+  const n = await append(pool, keys, { at: Date.now(), principal: 'svc-0', credential: null, kind: 'change', requestId: 't-1', payload: '{}' });
+  await cp.sealThrough(n, 300);
+  const answered = calls;
+  await new Promise((r) => setTimeout(r, 700));
+  expect(`asked ${answered} times until the answer, ${calls - answered} after`, calls - answered <= 1, true, '', ['stops', 'keeps asking']);
+}
+{
+  console.log('(u) remembering a head fails once, and the checkpointer carries on');
+  const { path } = await fresh(true);
+  const real = fileMemory(path);
+  let fail = true;
+  const flaky = { last: () => real.last(), remember: async (note: string) => { if (fail) { fail = false; throw new Error('disk'); } return real.remember(note); } };
+  const cp = await Checkpointer.open(pool, keys, { memory: flaky });
+  for (let e = 0; e < 5; e += 1) await use();
+  await cp.tick().catch(() => {});
+  for (let e = 0; e < 5; e += 1) await use();
+  await cp.tick();
+  const v = await verdict();
+  expect('the next head', v.ok, true, v.problems[0] ?? `${v.sealed} sealed`, ['holds', 'is wrong']);
 }
 
 rmSync(scratch, { recursive: true, force: true });

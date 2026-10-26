@@ -38,7 +38,7 @@ let ticking = true;
 const ticker = (async () => {
   while (ticking) {
     await new Promise((r) => setTimeout(r, Number(values.every)));
-    await cp.tick({ witnessTimeoutMs: Number(values.deadline) }).catch(() => {});
+    await cp.tick().catch(() => {});
   }
 })();
 const answers: ChangeAnswer[] = [];
