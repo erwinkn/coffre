@@ -1,4 +1,4 @@
-import { ApiError, badRequest, toErrorBody } from './api/errors.ts';
+import { ApiError, badRequest, toErrorBody, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 
 export function jsonResponse(
   payload: unknown,
@@ -11,10 +11,11 @@ export function jsonResponse(
   });
 }
 
-/** Anything thrown, as the API's one error shape: `{ error, message }`. */
+/** Anything thrown, as the API's one error shape: `{ error, message }`; a moment's 503 says when to ask again. */
 export function errorResponse(error: unknown, headers: HeadersInit = {}): Response {
   const { status, body } = toErrorBody(error);
-  return jsonResponse(body, status, headers);
+  const momentary = status === 503 && body.error === 'unavailable' && body.reason === undefined && !new Headers(headers).has('retry-after');
+  return jsonResponse(body, status, momentary ? { ...Object.fromEntries(new Headers(headers)), 'retry-after': UNAVAILABLE_RETRY_AFTER } : headers);
 }
 
 export function methodNotAllowed(allowed: readonly string[]): Response {

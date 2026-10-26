@@ -147,11 +147,14 @@ export type ExchangeReason =
 export class ExchangeRefused extends Error {
   readonly reason: ExchangeReason;
   readonly status: 401 | 429 | 503;
-  constructor(reason: ExchangeReason, message: string, status: 401 | 429 | 503 = 401) {
+  /** When to come back, in seconds, where something sets it: an issuer's keys not fetched again for a minute. */
+  readonly retryAfter: string | undefined;
+  constructor(reason: ExchangeReason, message: string, status: 401 | 429 | 503 = 401, retryAfter?: string) {
     super(message);
     this.name = 'ExchangeRefused';
     this.reason = reason;
     this.status = status;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -320,7 +323,8 @@ const OIDC: ProofKind = {
         // Uploaded keys: nothing to fetch, and no issuer to ask whether a token still stands, so none lives past the hour.
         : await verifyWorkloadToken(input, JSON.parse(newest.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
     } catch (error) {
-      if (error instanceof IssuerUnavailable) return new ExchangeRefused('issuer_unavailable', error.message, 503);
+      // Its keys are not fetched again for a minute (`workloads/keys.ts`): no sooner is any use.
+      if (error instanceof IssuerUnavailable) return new ExchangeRefused('issuer_unavailable', error.message, 503, '60');
       if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') return new UnknownKey(ctx.service, newest, issuer, shownKid(decoded.header));
       return refused(error);
     }
@@ -1002,7 +1006,7 @@ export class WorkloadService {
         // Uploaded keys: nothing to fetch, and no issuer to ask whether a token still stands, so none lives past the hour.
         : await verifyWorkloadToken(token, JSON.parse(newest.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
     } catch (error) {
-      if (error instanceof IssuerUnavailable) throw new ExchangeRefused('issuer_unavailable', error.message, 503);
+      if (error instanceof IssuerUnavailable) throw new ExchangeRefused('issuer_unavailable', error.message, 503, '60');
       if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') throw new UnknownKey(member, newest, issuer, shownKid(decoded.header));
       throw refused(error);
     }

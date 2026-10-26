@@ -153,14 +153,14 @@ async function bind(claims: BindingClaims, replaces: string[] = [], profile: Wor
 
 const ui = {} as Pages;
 
-async function exchange(body: unknown, sourceIp: string | null = IP): Promise<{ status: number; body: Record<string, string> }> {
+async function exchange(body: unknown, sourceIp: string | null = IP): Promise<{ status: number; body: Record<string, string>; retryAfter: string | null }> {
   const response = await answer(
     new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) }),
     runtime,
     ui,
     sourceIp,
   );
-  return { status: response.status, body: (await response.json()) as Record<string, string> };
+  return { status: response.status, body: (await response.json()) as Record<string, string>, retryAfter: response.headers.get('retry-after') };
 }
 
 const trade = (jwt: string, service = MEMBER) => exchange({ service, token: jwt });
@@ -285,7 +285,7 @@ test("a binding's scope of the wrong shape is refused before its issuer is asked
 test('a token is spent once used, in any spelling: the ES256 twin of a signature is refused as replayed', async () => {
   const jwt = token(ec);
   assert.equal((await trade(jwt)).status, 200);
-  assert.deepEqual(await trade(jwt), { status: 401, body: { error: 'unauthenticated', reason: 'replayed', message: 'this token was exchanged already: ask your CI for a fresh one' } });
+  assert.deepEqual(await trade(jwt), { status: 401, retryAfter: null, body: { error: 'unauthenticated', reason: 'replayed', message: 'this token was exchanged already: ask your CI for a fresh one' } });
   const [input, signature] = [jwt.slice(0, jwt.lastIndexOf('.')), Buffer.from(jwt.slice(jwt.lastIndexOf('.') + 1), 'base64url')];
   const n = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
   const s = BigInt(`0x${signature.subarray(32).toString('hex')}`);
@@ -627,7 +627,8 @@ test('a key the issuer rotated in is fetched once; while the issuer cannot be re
   assert.equal((await trade(token(rsa))).status, 200);
   forgetKeys();
   const down = await trade(token(rsa));
-  assert.deepEqual([down.status, down.body.reason], [503, 'issuer_unavailable']);
+  // Its keys are not fetched again for a minute: no sooner, it says.
+  assert.deepEqual([down.status, down.body.reason, down.retryAfter], [503, 'issuer_unavailable', '60']);
 });
 
 test('removing a binding ends its credentials at once; a denied attempt changes nothing; rows put back stay dead', async () => {
@@ -782,7 +783,7 @@ test('admission comes first: both limits, a limiter that fails, and the body\'s 
   assert.equal((await trade(token(rsa))).status, 200);
   vaultCalls = 0;
   const limited = await trade(token(rsa));
-  assert.deepEqual([limited.status, limited.body.reason], [429, 'busy']);
+  assert.deepEqual([limited.status, limited.body.reason, limited.retryAfter], [429, 'busy', '60']);
   // Another address has its own allowance, under the same total.
   assert.equal((await exchange({ service: MEMBER, token: token(rsa) }, '198.51.100.4')).status, 200);
   limits = { perSource: processLimits().perSource, total: processLimits({ total: 1 }).total };
@@ -790,7 +791,8 @@ test('admission comes first: both limits, a limiter that fails, and the body\'s 
   assert.equal((await exchange({ service: MEMBER, token: token(rsa) }, '198.51.100.5')).status, 429);
   limits = { perSource: { limit: async () => { throw new Error('binding gone'); } }, total: processLimits().total };
   const failing = await trade(token(rsa));
-  assert.deepEqual([failing.status, failing.body.reason], [503, 'busy']);
+  // A limiter that could not count is coffre not answering for a moment: back in 5 s, not a minute.
+  assert.deepEqual([failing.status, failing.body.reason, failing.retryAfter], [503, 'busy', '5']);
   limits = processLimits();
   assert.equal((await exchange(JSON.stringify({ service: MEMBER, token: 'x'.repeat(17 * 1024) }))).status, 400);
   assert.equal((await exchange({ service: MEMBER, token: token(rsa), extra: true })).status, 400);

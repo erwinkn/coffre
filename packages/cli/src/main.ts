@@ -259,13 +259,28 @@ function workloadCredential(origin: string, workload: Extract<Credential, { kind
  * How long a request waits before each time it asks again, while the
  * instance cannot answer it yet (`momentary`): twice, each wait between
  * half and one and a half of these, so that the jobs of one run that
- * failed together do not all ask again together. Then its answer stands.
+ * failed together do not all ask again together, or at least as long as
+ * the instance's `Retry-After` says (5 s on a 503 `unavailable`), spread
+ * past it as far, and never more than `MAX_RETRY_AFTER_MS`. Then its
+ * answer stands.
  */
 const UNAVAILABLE_RETRY_MS = [2000, 5000];
 
-function unavailableWait(attempt: number): number | undefined {
+/** The longest a run waits before it asks again, each time, whatever the instance's `Retry-After`: a CI step, not a daemon. */
+const MAX_RETRY_AFTER_MS = 15_000;
+
+/** The wait before asking again the `attempt`th time, or none left: at least what the instance's `Retry-After` (seconds) says, up to `MAX_RETRY_AFTER_MS`. */
+function unavailableWait(attempt: number, retryAfter: string | null): number | undefined {
   const wait = UNAVAILABLE_RETRY_MS[attempt];
-  return wait === undefined ? undefined : Math.round(wait * (0.5 + Math.random()));
+  if (wait === undefined) return undefined;
+  const said = Number(retryAfter);
+  // Told to come back later than a run waits, the answer stands: an issuer's keys not fetched again for a minute, say.
+  if (Number.isFinite(said) && said * 1000 > MAX_RETRY_AFTER_MS) return undefined;
+  // Clamped so that the spread past it still fits under the cap: a run's jobs do not all come back at 15 s.
+  const asked = retryAfter !== null && Number.isFinite(said) && said > 0 ? Math.min(said * 1000, MAX_RETRY_AFTER_MS / 1.5) : 0;
+  const jittered = wait * (0.5 + Math.random());
+  // No sooner than asked (up to 10 s), spread past it as the schedule is, and never past the cap.
+  return Math.round(asked === 0 ? jittered : Math.min(MAX_RETRY_AFTER_MS, Math.max(jittered, asked * (1 + Math.random() / 2))));
 }
 
 /**
@@ -299,8 +314,9 @@ async function signIn(origin: string, service: string, given?: string): Promise<
     try {
       return { issued: await exchange(origin, service, token, http), idTokens };
     } catch (error) {
-      const wait = unavailableWait(attempt);
-      if (wait === undefined || !(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
+      if (!(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
+      const wait = unavailableWait(attempt, error.retryAfter);
+      if (wait === undefined) throw error;
       if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
       await sleep(wait);
     }
@@ -381,7 +397,7 @@ async function reading(request: Request): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const again = request.clone();
     const response = await retryingPolicyChange(request);
-    const wait = unavailableWait(attempt);
+    const wait = unavailableWait(attempt, response.headers.get('retry-after'));
     // The status first: a body is parsed only when it may say the instance cannot answer yet.
     if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
     if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);

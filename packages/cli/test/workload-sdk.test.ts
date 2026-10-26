@@ -577,3 +577,20 @@ test('a proof given once, found spent when proving again, is final: no retry sto
   assert.equal(coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length, 2, coffre.log.join('\n'));
   assert.equal(said.filter((line) => /was spent, and it gives no fresh one/.test(line)).length, 1);
 });
+
+test("a session proved again waits at least the Retry-After coffre answers, not its own backoff", async (t) => {
+  // No spread: its backoff its least, coffre's 4 s exactly.
+  t.mock.method(Math, 'random', () => 0);
+  const busy = { status: 503, body: { error: 'unavailable', message: 'coffre cannot reach what it depends on right now' }, headers: { 'retry-after': '4' } };
+  const coffre = await fakeCoffre({ notAfterMs: 1000, exchange: (_proof, _jkt, attempt) => (attempt === 2 || attempt === 3 ? busy : null) });
+  t.after(() => coffre.close());
+  const session = await workload({ url: coffre.url, service: 'api-prod', proof: oidc('id-token'), log: () => undefined });
+  t.after(() => session.close().catch(() => undefined));
+  const exchanges = () => coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length;
+  // Proved again at 90% of its second, refused; lost at its end, proved again at once, refused: then asked again 4 s on,
+  // where its own backoff said 1.5 to 2.5 s; checked before that session's own proof again, at 90% of its second.
+  await sleep(3800);
+  assert.equal(exchanges(), 3, coffre.log.join('\n'));
+  await sleep(1600);
+  assert.equal(exchanges(), 4, coffre.log.join('\n'));
+});

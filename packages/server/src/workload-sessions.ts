@@ -164,7 +164,7 @@ export function signedUrl(request: Request, publicUrl: string): string {
 
 /** The workload gate of `principal`, or a refusal: a deployment that runs none accepts no session, since nothing would stop a replay. */
 export function gateOf(runtime: Pick<CoffreRuntime, 'gates'>, principal: string): Gate {
-  if (runtime.gates === undefined) throw refusal(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
+  if (runtime.gates === undefined) throw refusal(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session', 'no_gate'));
   return runtime.gates(principal);
 }
 

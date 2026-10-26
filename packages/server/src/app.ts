@@ -288,7 +288,8 @@ function wrongKey(request: Request): Response {
 
 /** The answer while the database cannot say where the app's key stands: nothing is checked under a key it has not settled. */
 function unreachable(): Response {
-  return errorResponse(new ApiError('unavailable', UNAVAILABLE), { 'retry-after': '5' });
+  // A moment's 503, which says when to ask again (`errorResponse`).
+  return errorResponse(new ApiError('unavailable', UNAVAILABLE));
 }
 
 const refusals = new WeakMap<object, string>();

@@ -3,7 +3,7 @@ import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
-import { ApiError, notFound } from './api/errors.ts';
+import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import type { SignedInAccount } from './api/signin.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
@@ -119,7 +119,8 @@ const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'u
 
 /** An exchange refused, as its client reads it: 401 with the reason, or 429 and 503 with when to come back (`Retry-After`). */
 function refuseExchange(error: ExchangeRefused, headers: Record<string, string> = {}): Response {
-  const later = error.reason === 'full' ? '30' : '60';
+  // A 503 is coffre, or what it asked, not answering for a moment (`errorResponse`): a limiter that could not count, STS.
+  const later = error.retryAfter ?? (error.status === 503 ? UNAVAILABLE_RETRY_AFTER : error.reason === 'full' ? '30' : '60');
   return jsonResponse(
     { error: REFUSED_CODE[error.status], reason: error.reason, message: error.message },
     error.status,
@@ -215,7 +216,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
   const workloads = runtime.workloads;
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
   // No gate, no session that could be used: nothing is spent for one.
-  if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
+  if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session', 'no_gate'));
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {

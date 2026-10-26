@@ -164,9 +164,13 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   const enrolled = options.proof.kind === 'enrollment';
   const api = apiOf({ origin, base, key, nonces });
 
+  /** How long the last exchange refused was told to wait before asking again (`Retry-After`): the least a retry waits. */
+  let toldToWait = 0;
+
   /** Trade a fresh proof for a session, waiting out what the design says to wait out; throws a refusal, with the server's words. */
   const exchange = async (): Promise<Session> => {
     const start = Date.now();
+    toldToWait = 0;
     const said = new Set<string>();
     const say = (line: string) => void (said.has(line) || (said.add(line), log(line)));
     for (;;) {
@@ -201,6 +205,7 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
         continue;
       }
       if (reason === 'replayed' && options.proof.spent !== undefined && (await options.proof.spent(context))) continue;
+      toldToWait = retryAfter(response, 0);
       throw refusal(response.status, body, `${origin} would not sign ${options.service} in with its ${options.proof.name} proof`);
     }
   };
@@ -269,7 +274,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
         const spent = error instanceof CoffreError && error.reason === 'replayed' && options.proof.spent === undefined;
         if (spent) log(`coffre: ${options.service}'s ${options.proof.name} proof was spent, and it gives no fresh one: the session ends at its expiry`);
         if (spent || (error instanceof CoffreError && FINAL.has(error.reason ?? ''))) final = error;
-        else if (!closed) at('retry', Date.now() + backoff(tries++), () => prove().catch(() => undefined));
+        // At least what coffre said, spread past it as the backoff is, so that a fleet refused together does not come back together.
+        else if (!closed) at('retry', Date.now() + Math.max(backoff(tries++), toldToWait * (1 + Math.random() / 2)), () => prove().catch(() => undefined));
         throw error;
       })
       .finally(() => (attempt = null));

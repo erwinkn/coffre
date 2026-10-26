@@ -415,9 +415,13 @@ When the instance answers 503 for a moment's trouble (it could not reach
 its database or its vault, count exchanges, fetch the issuer's keys, or is
 moving to its new app key), the step's sign-in, its reads of values and
 its `require-complete` check are asked again, about 2 s and then 5 s
-later, before the step fails. Each wait varies by up to half, so that the
-jobs of one run do not all ask again at once, and each sign-in asks GitHub
-for a fresh ID token. A 503 an operator or a deploy must clear
+later, before the step fails. An instance that says `Retry-After` (5 s on
+a 503 `unavailable`) is asked no sooner than that, up to 10 s, and no wait
+is longer than 15 s; one that says to come back later than 15 s (an
+issuer's keys it will not fetch again for a minute) fails the step at
+once. Each wait varies by up to half, so that
+the jobs of one run do not all ask again at once, and each sign-in asks
+GitHub for a fresh ID token. A 503 an operator or a deploy must clear
 (`wrong_kek`, `vault_outdated`, `app_key`, `migrating`) fails the step at
 once. `coffre --service <name> run` against an instance that signs it in
 with a key of its own (a key-bound session) is not asked again yet:
