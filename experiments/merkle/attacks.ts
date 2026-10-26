@@ -330,22 +330,41 @@ for (const tamper of [false, true]) {
 // Review r3's reproductions, each now caught.
 {
   console.log('(s) a use copied before its day is dropped, replayed after the retention cut');
-  for (const variant of ['after a tick, the rows between deleted', "into the retention entry's own tick, on a log quiet since the day closed"]) {
+  const variants = [
+    'after a tick, the rows between deleted',
+    "into the retention entry's own tick, on a log quiet since the day closed",
+    'after the signer restarts with its memory, the rows above the cut deleted',
+    "with the cut row's note swapped for genesis's during retention",
+  ];
+  for (const variant of variants) {
     await createLog(pool);
     // The demo's day lasts a second; a real one is dropped weeks later. The bound is 10 minutes, here 200 ms.
-    const cp = await Checkpointer.open(pool, keys, { freshMs: 200 });
+    const path = join(scratch, `s-${Math.random()}`);
+    let cp = await Checkpointer.open(pool, keys, { freshMs: 200, memory: fileMemory(path) });
     for (let e = 0; e < 20; e += 1) await use();
     await cp.tick();
     await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE number = 20');
     await pool.query('SELECT new_day(1)');
     await cp.tick({ nextDay: 1 });
     await cp.tick();
-    await new Promise((r) => setTimeout(r, 500));
+    const { rows: [genesis] } = await pool.query('SELECT note FROM checkpoints WHERE upto = 0');
+    const { rows: [cutRow] } = await pool.query('SELECT c.upto::text, c.note FROM checkpoints c WHERE c.closed_day = 0');
+    if (variant.includes('swapped')) await pool.query('UPDATE checkpoints SET note = $1 WHERE upto = $2', [genesis.note, cutRow.upto]);
+    else await new Promise((r) => setTimeout(r, 500));
     const { retainDay } = await import('./src/retention.ts');
-    const r = await retainDay(pool, keys, 0, cp);
-    if (variant.startsWith('after')) {
+    const r = await retainDay(pool, keys, 0, cp).catch((e: Error) => e);
+    if (r instanceof Error) {
+      expect(`${variant}: retention`, true, true, r.message, ['refuses', 'drops']);
+      continue;
+    }
+    if (variant.startsWith('after a tick')) {
       await cp.tick();
       await pool.query('DELETE FROM checkpoints WHERE upto > $1', [r.retention.cutUpto]);
+    }
+    if (variant.startsWith('after the signer restarts')) {
+      await cp.tick();
+      await pool.query('DELETE FROM checkpoints WHERE upto > $1', [r.retention.cutUpto]);
+      cp = await Checkpointer.open(pool, keys, { freshMs: 200, memory: fileMemory(path) });
     }
     await pool.query("INSERT INTO audit (number, at, principal, credential, kind, request_id, payload, seal, mac) SELECT nextval('audit_number'), at, principal, credential, kind, request_id, payload, seal, mac FROM saved");
     const t = await cp.tick().catch((e: Error) => ({ failures: [e.message] }));
@@ -400,6 +419,23 @@ for (const tamper of [false, true]) {
   await reopened.tick();
   const v = await verdict();
   expect('reopened, the log', v.ok, true, v.problems[0] ?? `${v.sealed} sealed`, ['holds', 'is wrong']);
+}
+{
+  console.log("(v') writing a head fails, and the tree read back has the right length but wrong hashes");
+  const { path } = await fresh(true);
+  let corrupt = false;
+  const flaky = { query: async (q: string | { name: string }, p?: unknown[]) => {
+    if (typeof q === 'object' && q.name === 'write_checkpoint') { corrupt = true; throw new Error('down'); }
+    const res = await pool.query(q as string, p);
+    if (corrupt && typeof q === 'object' && q.name === 'read_tiles') return { rows: res.rows.map((r) => ({ ...r, hashes: Buffer.alloc(r.hashes.length, 9) })) };
+    return res;
+  } };
+  const cp = await Checkpointer.open(flaky, keys, { memory: fileMemory(path) });
+  for (let e = 0; e < 5; e += 1) await use();
+  await cp.tick().catch(() => {});
+  corrupt = false;
+  const again = await cp.tick().then(() => '', (e: Error) => e.message);
+  expect('the same checkpointer', again !== '', true, again, ['refuses until reopened', 'signs on']);
 }
 
 rmSync(scratch, { recursive: true, force: true });

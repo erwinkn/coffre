@@ -292,14 +292,22 @@ fresh log of 8 checkpoints (all as expected):
 | (p) a garbage checkpoint row; a malformed retention entry | **a failing verdict**, not a crash | | |
 | (q) a witness that refuses once, then recovers, while a change waits | | the change answers witnessed: the witness is asked again within the deadline | |
 | (r) no witness set up | | | the change answers `witnessed: null`, never "witnessed" |
-| (s) a use copied before its day is dropped, replayed after the retention cut: after a tick with the rows between deleted, or slipped into the retention entry's own tick on a log quiet since the day closed | the verifier warns only (rows are the writer's) | | **the signer refuses to seal it**: "older than the signer's head: a replay" (the request-ID lookup cannot: the original is gone) |
+| (s) a use copied before its day is dropped, replayed after the retention cut: after a tick with the rows between deleted; slipped into the retention entry's own tick on a log quiet since the day closed; after the signer restarts with its memory; or with the cut row's note swapped during retention | the verifier warns only (rows are the writer's) | | **the signer refuses to seal it**: "older than the signer's head: a replay" (the request-ID lookup cannot: the original is gone). With the note swapped, retention refuses to drop the day |
 | (t) a witness that always refuses, after the change has answered | | asked 4 times until the answer (300 ms), 0 after | |
 | (u) remembering a head fails once | | | the next tick's head holds |
 | (v) writing a head fails, then putting the tree back fails too | | | the checkpointer refuses every tick until reopened; reopened, the log holds |
+| (v′) the same, the tree read back of the right length but wrong hashes | | | refuses until reopened: the reloaded tree must give the held head |
 
-Rows (f) to (v) came from five review rounds: (g) to (l), (n) to (r),
-(s) to (u), (v) and (s)'s second variant are the reviewer's own
-reproductions, each of which got through the version before. Round five
+Rows (f) to (v′) came from six review rounds: (g) to (l), (n) to (r),
+(s) to (u), (v), (v′) and (s)'s later variants are the reviewer's own
+reproductions, each of which got through the version before. Round six
+confirmed the retention argument below, across restarts and without
+witnesses, and found two slips in its code, both fixed:
+- retention trusted the cut row's note without checking it was that row's;
+- a retention attempt refused as too early, then retried, logged its
+  forcing entry's request ID twice.
+
+Retention now also refuses a checkpointer that keeps no memory. Round five
 found that the signer's freshness bound, measured from its newest head,
 freezes on a quiet log, so a replay slipped into the retention entry's own
 tick passed. Now retention drops a day only after sealing a head at least
@@ -569,7 +577,9 @@ are prototyped ([`retention.ts`](../../experiments/merkle/src/retention.ts),
 In both, retention runs in five steps:
 
 1. Seal a head at least two freshness bounds (20 minutes) after the day's
-   cut: append an `audit.retention.begin` change and wait for its seal.
+   cut: append an `audit.retention.begin` change (a request ID of its own
+   per attempt) and wait for its seal. The checkpointer must keep its
+   memory, and the cut row's note must be that row's.
    From then on the signer refuses any entry stamped before the cut, so a
    copy of a dropped use can never be sealed (see Replays, below).
 2. Drop the day's uses partition once it is sealed.

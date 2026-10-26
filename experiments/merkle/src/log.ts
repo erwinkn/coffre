@@ -138,6 +138,11 @@ export class Checkpointer {
     return this.head.upto;
   }
 
+  /** Whether this checkpointer keeps its head outside the database: what retention's guarantee rests on. */
+  get remembers(): boolean {
+    return this.memory !== null;
+  }
+
   /**
    * From the last checkpoint row, checked against what the signer remembers.
    * The signer remembers a head before the database has it (formal/Seal.tla,

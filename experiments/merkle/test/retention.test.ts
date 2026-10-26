@@ -4,12 +4,16 @@
 //
 //   W209_URL=postgresql://… node --test experiments/merkle/test/retention.test.ts
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { after, test } from 'node:test';
 
 import pg from 'pg';
 
 import { append, Checkpointer, createLog, keysFrom, leafOf, proveNumber } from '../src/log.ts';
 import { openNote, parseCheckpoint, verifierFrom } from '../src/note.ts';
+import { fileMemory } from '../src/memory.ts';
 import { retainDay, retentions } from '../src/retention.ts';
 import { verifyInclusion } from '../src/tree.ts';
 import { verifyLog } from '../src/verify.ts';
@@ -17,7 +21,8 @@ import { verifyLog } from '../src/verify.ts';
 const url = process.env.W209_URL;
 if (url === undefined) throw new Error('W209_URL names a scratch database');
 const pool = new pg.Pool({ connectionString: url, max: 10 });
-after(() => pool.end());
+const scratch = mkdtempSync(join(homedir(), 'scratch', 'w209', 'retention-'));
+after(() => { rmSync(scratch, { recursive: true, force: true }); return pool.end(); });
 const keys = await keysFrom('w209-synthetic');
 const verify = () => verifyLog(pool, { verifierKey: keys.signer.verifierKey, macKey: keys.mac });
 
@@ -34,7 +39,7 @@ for (const mode of ['number', 'at'] as const) {
     const freshMs = mode === 'number' ? 50 : 1500;
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     await createLog(pool, mode, dayMs);
-    const cp = await Checkpointer.open(pool, keys, { freshMs });
+    const cp = await Checkpointer.open(pool, keys, { freshMs, memory: fileMemory(join(scratch, `memory-${mode}`)) });
     // `at` days start on a day boundary, so day d0 holds what follows.
     if (mode === 'at') while (Date.now() % dayMs > 20) await sleep(1);
     const d0 = mode === 'number' ? 0 : Math.floor(Date.now() / dayMs);
@@ -56,6 +61,8 @@ for (const mode of ['number', 'at'] as const) {
     await cp.tick();
     assert.ok((await verify()).ok);
 
+    // Too early first: refused, and tried again later, as an operator would.
+    await assert.rejects(retainDay(pool, keys, d0, cp), /too recently/);
     await sleep(2 * freshMs + 100);
     const r = await retainDay(pool, keys, d0, cp);
     await cp.tick();

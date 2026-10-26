@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { append, entryMac, leafOf, type Checkpointer, type Db, type DayRecord, type Entry, type Keys } from './log.ts';
 import { openCheckpoint, verifierFrom } from './note.ts';
 import { referenceHash } from './tree.ts';
@@ -44,10 +46,13 @@ export async function retainDay(db: Db, keys: Keys, day: number, checkpointer: C
   // before it, less its freshness bound, and every dropped entry was stamped before the cut was signed. So a copy of
   // a dropped use, which no lookup can match once its original is gone, is refused whenever it is slipped in, even
   // into the tick that seals the retention entry, on a log quiet since the day closed (review r5).
+  if (!checkpointer.remembers) throw new Error('retention needs a checkpointer that remembers its head outside the database');
   const cutHead = await openCheckpoint(cut.note, await verifierFrom(keys.signer.verifierKey));
-  if (cutHead === null) throw new Error(`day ${day}: the checkpoint at its cut is not signed by this log`);
+  // The note must be the row's own: a row's columns are the writer's, the note's place and size are signed.
+  if (cutHead === null || cutHead.upto !== cut.upto || cutHead.size !== cut.size) throw new Error(`day ${day}: the checkpoint at its cut is not the one this log signed there`);
+  // A request ID of its own per attempt: an attempt refused below may be tried again later.
   const begin = await append(db, keys, {
-    at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `retention-begin-${day}`, payload: JSON.stringify({ action: 'audit.retention.begin', day }),
+    at: Date.now(), principal: 'vault', credential: null, kind: 'change', requestId: `retention-begin-${day}-${randomUUID()}`, payload: JSON.stringify({ action: 'audit.retention.begin', day }),
   });
   const { head } = await checkpointer.sealThrough(begin);
   const notBefore = cutHead.at + 2 * checkpointer.freshMs;
