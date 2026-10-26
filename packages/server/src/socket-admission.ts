@@ -1,6 +1,7 @@
 // What a plugin's WebSocket passes before it opens, on Node and on Workers
 // alike: the migration and key door, as `respond` keeps it for every other request,
 // then the plugin under the path, which refuses or hands back its session.
+import { UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { keyReady, schemaReady } from './app.ts';
 import { pluginSocket, type SocketSession } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -38,7 +39,7 @@ export async function inTime(decided: Promise<Response | SocketSession>, hold?: 
   let late: ReturnType<typeof setTimeout> | undefined;
   try {
     hold?.(decided);
-    return await Promise.race([decided, new Promise<Response>((resolve) => (late = setTimeout(() => resolve(new Response('coffre took too long to decide', { status: 503 })), ADMISSION_MS)))]);
+    return await Promise.race([decided, new Promise<Response>((resolve) => (late = setTimeout(() => resolve(new Response('coffre took too long to decide', { status: 503, headers: { 'retry-after': UNAVAILABLE_RETRY_AFTER } })), ADMISSION_MS)))]);
   } catch {
     return new Response('the plugin failed', { status: 500 });
   } finally {

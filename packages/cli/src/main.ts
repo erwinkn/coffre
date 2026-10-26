@@ -259,11 +259,14 @@ function workloadCredential(origin: string, workload: Extract<Credential, { kind
  * How long a request waits before each time it asks again, while the
  * instance cannot answer it yet (`momentary`): twice, each wait between
  * half and one and a half of these, so that the jobs of one run that
- * failed together do not all ask again together. Then its answer stands.
+ * failed together do not all ask again together, or at least as long as
+ * the instance's `Retry-After` says (5 s on a 503 `unavailable`), spread
+ * past it as far, and never more than `MAX_RETRY_AFTER_MS`. Then its
+ * answer stands.
  */
 const UNAVAILABLE_RETRY_MS = [2000, 5000];
 
-/** The longest the instance's `Retry-After` makes a run wait, each time: a CI step, not a daemon. */
+/** The longest a run waits before it asks again, each time, whatever the instance's `Retry-After`: a CI step, not a daemon. */
 const MAX_RETRY_AFTER_MS = 15_000;
 
 /** The wait before asking again the `attempt`th time, or none left: at least what the instance's `Retry-After` (seconds) says, up to `MAX_RETRY_AFTER_MS`. */
@@ -273,8 +276,8 @@ function unavailableWait(attempt: number, retryAfter: string | null): number | u
   const said = Number(retryAfter);
   const asked = retryAfter !== null && Number.isFinite(said) && said > 0 ? Math.min(said * 1000, MAX_RETRY_AFTER_MS) : 0;
   const jittered = wait * (0.5 + Math.random());
-  // Never sooner than asked, and spread past it as the schedule is.
-  return Math.round(asked === 0 ? jittered : Math.max(jittered, asked * (1 + Math.random() / 2)));
+  // Never sooner than asked, spread past it as the schedule is, and never past the cap.
+  return Math.round(asked === 0 ? jittered : Math.min(MAX_RETRY_AFTER_MS, Math.max(jittered, asked * (1 + Math.random() / 2))));
 }
 
 /**

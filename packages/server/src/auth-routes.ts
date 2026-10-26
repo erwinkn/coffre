@@ -215,7 +215,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
   const workloads = runtime.workloads;
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
   // No gate, no session that could be used: nothing is spent for one.
-  if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session'));
+  if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session', 'no_gate'));
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {

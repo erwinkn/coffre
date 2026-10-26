@@ -59,7 +59,8 @@
   waited on gave up after 15 s), the API and the credential proxy now
   answer `Retry-After: 5`, as the app already did while it could not reach
   its database at all: a caller back sooner joins the queue it left. The
-  CLI waits at least that long before it asks again (15 s at most), and
+  CLI waits at least that long before it asks again, each wait 15 s at
+  most, and
   so does the workload SDK, `coffre serve` included, before it proves a
   session again. An app's own client behind the proxy, the sidecar's
   included, sees the header as coffre sent it.

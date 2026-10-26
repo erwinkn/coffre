@@ -220,7 +220,9 @@ it uses with its own key.
   Requests in flight finish on the old session.
 - **Recovers a lost session.** If renewal is refused (revoked, frozen) or a
   process slept past expiry, as Lambda does between invocations, it proves
-  again before the next request, with backoff from 1 second to a minute.
+  again before the next request, with backoff from 1 second to a minute,
+  and at least as long as coffre's `Retry-After` when it refused the
+  proof (5 seconds when it could not answer).
   A superseded enrollment code is final.
 - **Signs with the newest nonce**, and sends a request once more if coffre
   asks for a fresh one. A stream cannot be sent twice, so it goes with a

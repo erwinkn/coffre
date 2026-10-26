@@ -4,7 +4,7 @@
 // them and checks the method.
 import { MCP_SCOPES } from '@coffre/core/mcp';
 
-import { ApiError, notFound } from '../api/errors.ts';
+import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { bearerToken } from '../auth.ts';
 import { errorResponse, jsonResponse, readLimitedJson, readLimitedText } from '../http.ts';
 import { logged } from '../logged.ts';
@@ -70,7 +70,7 @@ function oauthError(error: unknown): Response {
     });
   }
   if (error instanceof ApiError && error.code === 'unavailable') {
-    return jsonResponse({ error: 'temporarily_unavailable', error_description: error.message }, 503, NO_STORE);
+    return jsonResponse({ error: 'temporarily_unavailable', error_description: error.message }, 503, { ...NO_STORE, 'retry-after': UNAVAILABLE_RETRY_AFTER });
   }
   if (error instanceof ApiError && error.code === 'bad_request') {
     return jsonResponse({ error: 'invalid_request', error_description: error.message }, 400, NO_STORE);

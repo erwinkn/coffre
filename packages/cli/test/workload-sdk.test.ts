@@ -586,9 +586,9 @@ test("a session proved again waits at least the Retry-After coffre answers, not 
   t.after(() => session.close().catch(() => undefined));
   const exchanges = () => coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length;
   // Proved again at 90% of its second, refused; lost at its end, proved again at once, refused: then asked again 4 s on,
-  // where its own backoff said 1.5 to 2.5 s.
+  // where its own backoff said 1.5 to 2.5 s; checked before that session's own proof again, at 90% of its second.
   await sleep(3800);
   assert.equal(exchanges(), 3, coffre.log.join('\n'));
-  await sleep(2000);
+  await sleep(1600);
   assert.equal(exchanges(), 4, coffre.log.join('\n'));
 });
