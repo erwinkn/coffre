@@ -70,8 +70,10 @@ role logs in to the new branch as `<role>.<new branch id>`.
    pnpm exec coffre setup --reset-passwords
    ```
 
-   It sets both runtime logins' passwords again, which the restore reset,
-   and shows each login's new connection string, under the new branch id.
+   It sets the three logins' passwords again, which the restore reset,
+   and shows each login's new connection string, under the new branch id:
+   the backup login's goes in your backup job's secrets, in place of the
+   old one.
    It migrates: missing migrations are applied, and the database-level
    privileges reasserted, on every run, even when the schema is current; a
    database a newer release migrated is refused. It checks the boundary as
@@ -89,8 +91,8 @@ role logs in to the new branch as `<role>.<new branch id>`.
    out of your shell's history; the Cloudflare dashboard's Hyperdrive page
    does the same.
 
-   By hand, steps 3 and 4 are `\password` for both logins as the owner, the
-   two updates with `coffre_runtime.<branch id>` and
+   By hand, steps 3 and 4 are `\password` for the three logins as the
+   owner, the two updates with `coffre_runtime.<branch id>` and
    `coffre_vault_runtime.<branch id>`, and `pnpm exec coffre migrate`, in
    the deployment's directory, with the owner's URL for the new branch.
 5. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
@@ -121,8 +123,12 @@ hands it to the tool with the password in `PGPASSWORD`.
 Back up as a login of its own, here `coffre_backup_login`, as often as you
 can afford to lose. Its group, `coffre_backup`, which the migrations make,
 reads every row, the audit log's included, and writes none, so the backup
-job never holds the owner's password. `coffre setup` does not make this
-login yet: make it once, as the owner, the same way as the runtime logins:
+job never holds the owner's password. `coffre setup` makes it, grants it
+its group and shows its URL once, as `Backup database URL`; `coffre setup
+--reset-passwords` gives it a new password, as it does the others. A login
+is the server's: on a server another deployment set up first, setup keeps
+the login that deployment made, password and all, unless it cannot log in. On a database set up by
+hand, make it once, as the owner, the same way as the runtime logins:
 
 ```sql
 CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -131,8 +137,8 @@ CREATE ROLE coffre_backup_login LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROL
 
 then run `pnpm exec coffre migrate --backup-login coffre_backup_login` in
 the deployment's directory, which grants the login its group. Passing it on
-every run, as a pipeline does, is harmless. Coffre never makes the login and
-never revokes its group: revoke it yourself when it should go. Postgres
+every run, as a pipeline does, is harmless. Migrate never makes the login
+and never revokes its group: revoke it yourself when it should go. Postgres
 keeps one membership per grantor, the role whose `ADMIN OPTION` granted it
 (the owner, when a member of the owner migrated). A `REVOKE` naming no
 grantor removes only the caller's own, and anyone else's, a superuser's

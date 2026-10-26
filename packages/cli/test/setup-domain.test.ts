@@ -132,14 +132,14 @@ async function start(terminal: Session, address: string, down: number | null = 0
   terminal.send(`\x15${address}\r`);
 }
 
-/** GitHub's app made in the browser, then the keys saved. */
-async function githubAndKeys(terminal: Session, pages: number): Promise<void> {
+/** GitHub's app made in the browser, then the keys saved, and the backup login's URL when the server had no backup login yet. */
+async function githubAndKeys(terminal: Session, pages: number, saved = 'all four values'): Promise<void> {
   await terminal.waitFor("GitHub: create coffre's app");
   const page = await opened('http://127.0.0.1:', pages);
   await fetch(await submitManifest(await (await fetch(page)).text()));
   await terminal.waitFor('reveal all');
   terminal.send('q');
-  await terminal.waitFor('Have you saved all three values?');
+  await terminal.waitFor(`Have you saved ${saved}?`);
   terminal.send('y');
 }
 
@@ -348,7 +348,7 @@ test('a database that comes to hold data while setup asks its questions: setup r
       OTHER_CLUSTER),
     );
     assert.equal(code, 1, text);
-    assert.match(text, /✗ Make the two logins\n\s+The app Worker coffre-late-used has no APP_KEY, but the database already holds data/);
+    assert.match(text, /✗ Make the three logins\n\s+The app Worker coffre-late-used has no APP_KEY, but the database already holds data/);
     assert.deepEqual(writes, [], 'no Hyperdrive config, and no Worker deployed with a new key');
     assert.deepEqual(deploys(), []);
     assert.deepEqual(await verifiers(OTHER_CLUSTER), held, 'the logins keep their passwords');
@@ -378,7 +378,7 @@ test("another deployment's logins made on this server while setup asks its quest
       held = await verifiers(OTHER_CLUSTER);
     });
     assert.equal(code, 1, text);
-    assert.match(text, /✗ Make the two logins\n\s+coffre_runtime is also the login of the Hyperdrive config elsewhere, another deployment's, on this database server/);
+    assert.match(text, /✗ Make the three logins\n\s+coffre_runtime is also the login of the Hyperdrive config elsewhere, another deployment's, on this database server/);
     assert.equal(held.length, 2);
     assert.deepEqual(await verifiers(OTHER_CLUSTER), held, "the other deployment's logins keep their passwords");
     assert.deepEqual(writes, [], 'no Hyperdrive config made');
@@ -458,7 +458,8 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
       await choose(terminal);
       await terminal.waitFor('First Owner');
       terminal.send('\r');
-      await githubAndKeys(terminal, pages);
+      // The server's backup login is the first deployment's, kept: only the keys.
+      await githubAndKeys(terminal, pages, 'all three values');
       await terminal.waitFor('coffre is at', 60_000);
     },
     second,

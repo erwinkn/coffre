@@ -38,24 +38,31 @@ the deployment's `@coffre/server`. It asks for the connection string at a hidden
 pipes it in, or redirects a file to it. It never takes it as an argument or a
 flag, where the shell's history and other users could read it. Then:
 
-1. It makes the two runtime logins, `coffre_runtime` for the app and
-   `coffre_vault_runtime` for the vault, each with a fresh password that
-   reaches the database only as a SCRAM verifier. On PlanetScale Postgres
-   they log in as `coffre_runtime.<branch id>` and
-   `coffre_vault_runtime.<branch id>`, the branch taken from the
-   administrator's own login.
-2. It migrates the database as the administrator, as `coffre migrate` does.
+1. It makes three logins, each with a fresh password that reaches the
+   database only as a SCRAM verifier: the two runtime logins,
+   `coffre_runtime` for the app and `coffre_vault_runtime` for the vault,
+   and `coffre_backup_login`, for backups
+   ([restore.md](restore.md#backing-up)). On PlanetScale Postgres they log
+   in as `<login>.<branch id>`, `coffre_runtime.<branch id>` say, the
+   branch taken from the administrator's own login.
+2. It migrates the database as the administrator, as
+   `coffre migrate --backup-login coffre_backup_login` does: the backup
+   login becomes a member of `coffre_backup`, which reads every row and
+   writes none.
 3. It connects as each login and checks the boundary, in transactions it
-   rolls back: the app's login cannot write members, neither can delete log
-   entries or create tables, and the vault's login can write members.
-4. It shows five values on a screen of their own, the terminal's alternate
+   rolls back: each can read the log; the vault's login can write members,
+   and neither of the others can; none can delete log entries or create
+   tables.
+4. It shows six values on a screen of their own, the terminal's alternate
    screen, which leaves nothing in the scrollback. For the app, the app key
    and its database URL. For the vault, the vault ID, the vault key and its
-   database URL. Each is masked until you reveal it with `r`, and `c` copies
-   it; `w` shows where each goes, on Workers and on Node, with the commands
-   to copy. When setup does Cloudflare too ([below](#setup-does-cloudflare-too)),
-   the database URLs go straight to Hyperdrive, and the screen shows the
-   three keys alone.
+   database URL. For backups, the backup login's database URL. Each is
+   masked until you reveal it with `r`, and `c` copies it; `w` shows where
+   each goes, on Workers and on Node, with the commands to copy. When setup
+   does Cloudflare too ([below](#setup-does-cloudflare-too)), the runtime
+   logins' URLs go straight to Hyperdrive, and the screen shows the three
+   keys and the backup URL, which no Worker gets: it goes in your backup
+   job's secrets.
 
 **Copy each value into your password manager before leaving the screen.**
 They are shown once: coffre keeps no copy, and writes no file. A copy goes
@@ -66,9 +73,10 @@ secret.
 
 Run again, setup changes nothing it need not. Logins that exist keep their
 passwords, unless you agree to new ones at its prompt or pass
-`--reset-passwords`. A migrated database stays as it is. Keys come only with
-new passwords, and only for a database that holds no data yet; one that does
-has its keys already. Without a terminal, setup refuses rather than print
+`--reset-passwords`; a backup login that cannot log in, as a run stopped
+before you saved its password leaves it, gets one. A migrated database
+stays as it is. Keys come only with new passwords, and only for a database
+that holds no data yet; one that does has its keys already. Without a terminal, setup refuses rather than print
 the values; `--json` prints them to stdout for a script, with a warning on
 stderr.
 
@@ -92,14 +100,15 @@ The migrations create three group roles, and grant the first two to their logins
 |---|---|---|
 | `coffre_runtime` | `coffre_app` | app data and sessions; app entries in the log; read-only access to members and grants |
 | `coffre_vault_runtime` | `coffre_vault` | members and grants; read the secret context it decides on; vault entries in the log |
-| yours, optional | `coffre_backup` | read every row, the log's included, for `pg_dump` ([restore.md](restore.md#on-plain-postgres)); write nothing |
+| `coffre_backup_login`, or yours | `coffre_backup` | read every row, the log's included, for `coffre backup` ([restore.md](restore.md#backing-up)); write nothing |
 
 Neither runtime login owns tables or may change or delete audit entries.
 Row-level security permits each to append only as its own author. Do not run
 either component as the owner or give the runtime logins additional roles.
 
+`coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
-existing role, on every run that names it. Coffre never makes the role,
+existing role, on every run that names it. Migrate never makes the role,
 and never revokes the group: a run without the flag leaves the membership
 as it is. To take it away, revoke each grantor's membership
 ([restore.md](restore.md#on-plain-postgres) shows how): Postgres keeps one

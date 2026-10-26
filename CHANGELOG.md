@@ -53,6 +53,17 @@
   author signed under the keys given. Postgres only; they need PostgreSQL's
   `pg_dump` and `pg_restore` on `PATH` ([restore.md](docs/restore.md#on-plain-postgres)).
   The restore drill now runs them.
+- **`coffre setup` makes the backup login.** Beside the runtime logins, it
+  makes `coffre_backup_login`, with a fresh password, migrates with
+  `--backup-login coffre_backup_login`, checks the login can read the log
+  and write nothing, and shows its URL once, as `Backup database URL`
+  (`backup.DATABASE_URL` with `--json`). With Cloudflare, no Worker gets
+  it: the screen shows it beside the keys, for your backup job's secrets.
+  `--reset-passwords` gives it a new password with the others; a run
+  without leaves one that exists as it is, a login made by hand included,
+  and grants it the group; one that cannot log in gets a password. With
+  Cloudflare, the login takes its password only once you have saved it. A deployment set up before gets the login the
+  next time it runs setup, the others kept.
 
 - **A 503 `unavailable` says when to ask again.** When coffre could not
   reach its database or its vault in time (a lock or a connection it
