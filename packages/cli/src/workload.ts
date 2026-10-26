@@ -54,20 +54,32 @@ export async function idToken(given: string | undefined, runner: Runner, audienc
   );
 }
 
-/** Trade an ID token for a credential of `service`, or throw saying why the instance refused. */
+/** An exchange the instance refused, or could not answer: its status, and its body's code and reason. */
+export class ExchangeFailed extends Error {
+  readonly status: number;
+  readonly body: { error?: unknown; reason?: unknown } | null;
+
+  constructor(message: string, status: number, body: { error?: unknown; reason?: unknown } | null) {
+    super(message);
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/** Trade an ID token for a credential of `service`, or throw `ExchangeFailed` saying why the instance refused. */
 export async function exchange(origin: string, service: string, token: string, fetchImpl: Fetch): Promise<{ token: string; expiresAt: string }> {
   const response = await fetchImpl(`${origin}/api/auth/oidc`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ service, token }),
   });
-  const body = (await response.json().catch(() => null)) as { token?: unknown; expiresAt?: unknown; reason?: unknown; message?: unknown } | null;
+  const body = (await response.json().catch(() => null)) as { token?: unknown; expiresAt?: unknown; error?: unknown; reason?: unknown; message?: unknown } | null;
   if (response.ok && typeof body?.token === 'string' && typeof body.expiresAt === 'string') {
     return { token: body.token, expiresAt: body.expiresAt };
   }
   const why = typeof body?.message === 'string' ? body.message : `status ${response.status}`;
   const reason = typeof body?.reason === 'string' ? ` (${body.reason})` : '';
-  throw new Error(`${origin} would not sign this run in as ${service}${reason}: ${why}`);
+  throw new ExchangeFailed(`${origin} would not sign this run in as ${service}${reason}: ${why}`, response.status, body);
 }
 
 /**

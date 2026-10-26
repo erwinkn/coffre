@@ -43,6 +43,8 @@ type Environment = {
   refused?: number;
   /** The reasons its reads answer 409 `conflict` with, one apiece, before it reads as asked. */
   conflicts?: string[];
+  /** Its lists' and reads' 503 answers, one apiece, before any other: `unavailable` with its reason or none, or a whole body (`{ error: 'migrating' }`, or `'<html>'`, as Cloudflare's page). */
+  unavailable?: (string | null | Record<string, string>)[];
   /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
   rotateAfterDays?: number | null | 'unsaid';
   /** Read whole, whatever keys it is asked for, as an instance before 0.12. */
@@ -59,13 +61,21 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     for await (const chunk of req) body += String(chunk);
     assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
-    const listing = /^\/api\/secrets\/([^/]+)\/([^/]+)$/.exec(req.url ?? '');
+    const missing = /^\/api\/projects\/([^/]+)\/([^/]+)\/missing$/.exec(req.url ?? '');
+    const listing = missing ?? /^\/api\/secrets\/([^/]+)\/([^/]+)$/.exec(req.url ?? '');
     const asked = listing === null ? (JSON.parse(body || '{}') as { path?: string; keys?: string[] }) : {};
     const path = listing === null ? asked.path : `${listing[1]}/${listing[2]}`;
-    requests.push(`${listing === null ? 'reveal' : 'list'} ${path}${asked.keys === undefined ? '' : `: ${asked.keys.join(' ')}`}`);
+    requests.push(`${missing !== null ? 'missing' : listing === null ? 'reveal' : 'list'} ${path}${asked.keys === undefined ? '' : `: ${asked.keys.join(' ')}`}`);
     const environment = path === undefined ? undefined : environments[path.split('/').slice(0, 2).join('/')];
     if (environment === undefined) return send(404, { error: 'not_found', message: 'unknown project or environment' });
     if (environment.refused !== undefined) return send(environment.refused, { error: 'forbidden', message: 'you do not have permission to do that' });
+    const unavailable = environment.unavailable?.shift();
+    if (unavailable === '<html>') return res.writeHead(503, { 'content-type': 'text/html' }).end('<html>Service Unavailable</html>');
+    if (typeof unavailable === 'object' && unavailable !== null) return send(503, unavailable);
+    if (unavailable !== undefined) {
+      return send(503, { error: 'unavailable', message: 'coffre cannot reach what it depends on right now; try again in a moment', ...(unavailable === null ? {} : { reason: unavailable }) });
+    }
+    if (missing !== null) return send(200, { missing: Object.keys(environment.values).map((key) => ({ key, in: ['prod'], folder: null })), dismissed: [] });
     if (listing !== null) {
       const keys = environment.listed ?? Object.keys(environment.values).map((key) => ({ key, version: 1 }));
       return send(200, {
@@ -94,10 +104,10 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
   return {
     requests,
     environment,
-    /** `extra` is set over the caller's environment; a key given as undefined is unset in it. */
-    async coffre(args: string[], extra: Record<string, string | undefined> = {}) {
+    /** `extra` is set over the caller's environment; a key given as undefined is unset in it. `timeout`, after which the CLI is stopped. */
+    async coffre(args: string[], extra: Record<string, string | undefined> = {}, timeout = 10_000) {
       const env: Record<string, string | undefined> = Object.assign(environment(), extra);
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout });
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
@@ -412,6 +422,56 @@ test('a read the policy changed under twice ends as a refusal does, and another 
       assert.deepEqual(coffre.requests, Array(reads).fill(`reveal ${args[1]}`), `${args[0]}, ${conflicts.join(' ')}`);
     }
   }
+});
+
+test('a read the instance cannot answer yet is asked again, a second or so later, and the step goes on', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [null] } });
+  const read = await coffre.coffre(['--verbose', 'export', 'deploy/prod', '--format', 'json']);
+  assert.equal(read.code, 0, read.stderr);
+  assert.deepEqual(JSON.parse(read.stdout), { TOKEN: 'deploy-token-value' });
+  assert.deepEqual(coffre.requests, ['reveal deploy/prod', 'reveal deploy/prod']);
+  assert.deepEqual(read.stderr.replace(/ in \d+(\.\d)? m?s/g, ' in t').split('\n'), [
+    'coffre: POST /api/reveals: 503 in t',
+    'coffre: the instance could not answer POST /api/reveals: asking again in t',
+    'coffre: POST /api/reveals: 200 in t',
+    '',
+  ]);
+  assert.match(read.stderr, /asking again in (1\.\d|2\.\d|3\.0) s/);
+});
+
+test('a read the instance cannot answer three times ends as a refusal does, and one an operator must fix is not asked again', async (t) => {
+  const migrating = { error: 'migrating', message: 'coffre is migrating its database' };
+  for (const [unavailable, reads, said] of [
+    [[null, null, null], 3, 'coffre cannot reach what it depends on right now; try again in a moment'],
+    [['wrong_kek'], 1, 'coffre cannot reach what it depends on right now; try again in a moment'],
+    [['vault_outdated'], 1, 'coffre cannot reach what it depends on right now; try again in a moment'],
+    [[migrating], 1, 'coffre is migrating its database'],
+    [['<html>'], 1, null],
+  ] as const) {
+    const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [...unavailable] } });
+    const started = performance.now();
+    const read = await coffre.coffre(['get', 'deploy/prod/TOKEN'], {}, 20_000);
+    assert.equal(read.code, 1);
+    assert.equal(read.stdout, '');
+    assert.equal(read.stderr, said === null ? 'coffre: request failed with status 503\n' : `coffre: request failed with status 503: ${said}\n`);
+    assert.deepEqual(coffre.requests, Array(reads).fill('reveal deploy/prod/TOKEN'), JSON.stringify(unavailable));
+    if (reads === 3) assert.ok(performance.now() - started >= 3500, 'it asked again at once');
+  }
+});
+
+test("an instance moving to its new key is asked again, and so is the Action's gate, missing --check", async (t) => {
+  const rotating = { error: 'rotating', message: 'coffre is moving to its new app key' };
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [rotating] } });
+  const read = await coffre.coffre(['get', 'deploy/prod/TOKEN']);
+  assert.equal(read.code, 0, read.stderr);
+  assert.equal(read.stdout, 'deploy-token-value');
+  assert.deepEqual(coffre.requests, Array(2).fill('reveal deploy/prod/TOKEN'));
+
+  const gate = await instance(t, { 'deploy/prod': { values: { TOKEN: 'x' }, unavailable: [null] } });
+  const checked = await gate.coffre(['missing', 'deploy/prod', '--check']);
+  assert.equal(checked.code, 1);
+  assert.equal(checked.stdout, 'TOKEN                        in prod\n');
+  assert.deepEqual(gate.requests, ['missing deploy/prod', 'missing deploy/prod']);
 });
 
 test("list of a fork says where each key stands to its parent's: inherited, overridden, removed", async (t) => {

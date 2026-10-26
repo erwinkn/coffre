@@ -11,7 +11,6 @@
 // a third-party plugin keeps routes and the API as a caller (R9).
 import type { Checkpoint, CheckpointKey, LogHead, Outcome, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { SNAPSHOT } from '@coffre/db/dialect';
 import { KeyRetired } from '@coffre/db/log';
 
 import { anchorIsOwn, anchorKeyId, sealAnchor, type AnchorFields, type AnchorStore, type AuditAnchor } from './anchor.ts';
@@ -31,11 +30,14 @@ export type WatchActor = Pick<AuditEntry, 'actorType' | 'actorId' | 'requestId' 
 export type WatchContext = {
   log: {
     /**
-     * In one read-only snapshot: each of `held` still at its hash, then the
-     * chain walked from `from` (null: before the first entry) toward entry
-     * `to`, at most `CHAIN_WALK` entries, every link and hash and the app's
-     * MACs (`walkChain`). Where it got to and whether that is `to`; or the
-     * first fault, `held` ones first, the held point's seq for one.
+     * In no transaction, each read as the log is then: each of `held` still
+     * at its hash, then the chain walked from `from` (null: before the first
+     * entry) toward entry `to`, at most `CHAIN_WALK` entries, a batch a
+     * statement, each batch linked to the hash verified last, every link and
+     * hash and the app's MACs (`walkChain`). The caller holds where it ends
+     * to the hash the vault signed there (`advance`), which pins every entry
+     * before it. Where it got to and whether that is `to`; or the first
+     * fault, `held` ones first, the held point's seq for one.
      */
     walk(input: { held: readonly LogHead[]; from: LogHead | null; to: number }): Promise<
       { ok: true; at: LogHead | null; done: boolean } | { ok: false; failedAtSeq: number; reason: string }
@@ -150,17 +152,19 @@ export function watchContext(deps: WatchDeps): WatchContext {
   let signed: ReturnType<Vault['checkpoint']> | undefined;
   return {
     log: {
-      walk: ({ held, from, to }) =>
-        db.transaction(async (tx) => {
-          for (const head of held) {
-            if ((await auditHashAt(tx, BigInt(head.seq))) !== head.hash) return { ok: false as const, failedAtSeq: head.seq, reason: 'changed or cut since the anchor held it' };
-          }
-          const start = from === null ? CHAIN_START : { seq: BigInt(from.seq), hash: Buffer.from(from.hash, 'hex') };
-          const walked = await walkChain(tx, keys, start, { to: BigInt(to) });
-          if (!walked.ok) return { ok: false as const, failedAtSeq: Number(walked.failedAtSeq), reason: walked.reason };
-          const at = walked.at.seq < 0n ? null : { seq: Number(walked.at.seq), hash: walked.at.hash.toString('hex') };
-          return { ok: true as const, at, done: walked.done };
-        }, SNAPSHOT),
+      // In no transaction, a batch a statement, each linked to the hash verified last: no connection is held while it
+      // rehashes, seconds for a long walk. Entries are appended in order and never change, so no snapshot keeps them; and
+      // the walk ends at the hash the vault signed, which pins every entry before it (`advance`).
+      walk: async ({ held, from, to }) => {
+        for (const head of held) {
+          if ((await auditHashAt(db, BigInt(head.seq))) !== head.hash) return { ok: false as const, failedAtSeq: head.seq, reason: 'changed or cut since the anchor held it' };
+        }
+        const start = from === null ? CHAIN_START : { seq: BigInt(from.seq), hash: Buffer.from(from.hash, 'hex') };
+        const walked = await walkChain(db, keys, start, { to: BigInt(to) });
+        if (!walked.ok) return { ok: false as const, failedAtSeq: Number(walked.failedAtSeq), reason: walked.reason };
+        const at = walked.at.seq < 0n ? null : { seq: Number(walked.at.seq), hash: walked.at.hash.toString('hex') };
+        return { ok: true as const, at, done: walked.done };
+      },
       hashAt: (seq) => auditHashAt(db, BigInt(seq)),
       check: async (seq, link) => {
         const [row] = await auditRange(db, BigInt(seq), 1);

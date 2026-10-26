@@ -38,6 +38,57 @@
     coffre_backup TO <login> WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`.
     `--backup-login` needs that `ADMIN`, and nothing on the role it names.
 
+- **A CI run asks again when the instance cannot answer it yet.** When
+  the instance answered 503 `unavailable` (it could not reach its database
+  or its vault, a busy one say, and says to try again in a moment), the
+  CLI failed at once: on 2026-10-26, two jobs of one run failed their
+  sign-in this way while a third, signing in the same second, went on.
+  These are now asked again, about 2 s and then 5 s later, each wait
+  varied by up to half so that a run's jobs do not ask again together,
+  before the answer stands:
+  - a run's sign-in (`--service`, `login --service`), each time with a
+    fresh ID token from GitHub;
+  - the check of who a new session is, after `login --service`,
+    `login --token` (the Action's `token:` input) and
+    `login --access-client-id`;
+  - each read of values: `get`, `export`, `run` after `login --service`,
+    and the Action's read;
+  - the Action's `require-complete` check (`missing`).
+
+  So are the exchange's own 503s, when it cannot count exchanges (`busy`)
+  or reach the issuer's keys (`issuer_unavailable`), and an instance moving
+  to its new app key (`rotating`). `--verbose`, which the Action passes,
+  says each time it asks again. A 503 an operator or a deploy must clear
+  (`wrong_kek`, `vault_outdated`, `app_key`, `migrating`) is not asked
+  again, nor is anything that writes, nor yet `coffre --service <name>
+  run` where the instance signs it in with a key-bound session.
+
+## 0.14.2 (2026-10-26)
+
+- **Upgrading to 0.14.2, in short.** No migration, and nothing to change in
+  your config. Deploy the vault Worker before the app, as
+  [deploy.md](docs/deploy.md) says. This release is 0.14.1 plus one change,
+  the audit watch's beat walking the log outside a transaction, which adds
+  no query. If you come from 0.14.0, it also brings 0.14.1's: a read of
+  values makes one vault call, not two; a decision made from the policy is
+  one statement, not two; and the vault's checkpoint walks the log without
+  holding a connection. Keep both Hyperdrive limits at 20. Nothing here
+  eases a rollback concern of 0.14.0's: after an `APP_KEY` rotation, don't
+  go back to 0.13.x.
+
+- **The audit watch's beat no longer holds the app's connection while it
+  walks.** Each beat walks the log on from where the anchor says the app
+  verified, up to 10,000 entries, checking every hash and the app's MACs.
+  It did so in one read-only transaction, which on Workers held one of the
+  app's Hyperdrive connections for the whole walk, as the vault's
+  checkpoint did until 0.14.1. The walk now reads a batch a statement,
+  outside any transaction, each linked to the hash it verified last, and
+  ends at the hash the vault signed, as before; where the log moved on
+  from a key it replaced is also read from the entries themselves, as a
+  safeguard. With 6,000 entries
+  to walk, what the beat reads inside the app's transactions went from
+  12,010 rows to 2, and its longest transaction from about 115 ms to 3 ms.
+
 ## 0.14.1 (2026-10-25)
 
 - **Upgrading to 0.14.1, in short.** No migration, and nothing to change in

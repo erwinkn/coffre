@@ -497,6 +497,35 @@ test('an anchor sealed under the app key before a change of APP_KEY without a ro
   assert.deepEqual(await anchor.read(), sealed);
 });
 
+/**
+ * The vault, its next checkpoint held back once it has signed until `go`:
+ * a beat paused just before its walk, which it begins as the checkpoint
+ * returns, reading in no transaction.
+ */
+function pausedAfterCheckpoint() {
+  let reached!: () => void;
+  const paused = new Promise<void>((resolve) => (reached = resolve));
+  let go!: () => void;
+  const released = new Promise<void>((resolve) => (go = resolve));
+  let once = true;
+  const pausing = new Proxy(vault, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver) as unknown;
+      if (key !== 'checkpoint' || typeof value !== 'function') return value;
+      return async () => {
+        const signed = await (value as () => Promise<unknown>).apply(target);
+        if (once) {
+          once = false;
+          reached();
+          await released;
+        }
+        return signed;
+      };
+    },
+  });
+  return { vault: pausing, paused, go };
+}
+
 test('a beat that a walk between beats wrote the anchor before goes on from that walk, and writes its own', async () => {
   // More than a walk of the log, which the vault and the beats have caught up with; then the store emptied, and a
   // beat that leaves the re-anchoring's walk to go on.
@@ -506,26 +535,10 @@ test('a beat that a walk between beats wrote the anchor before goes on from that
   assert.equal(await beat(), true, 'a backlog is no failure');
   const before = await anchored();
   assert.ok(before.verified!.seq < before.checkpoint!.seq);
-  // The next beat pauses as it opens its walk; a walk between beats, the Durable Object's alarm, writes meanwhile.
-  let reached!: () => void;
-  const paused = new Promise<void>((resolve) => (reached = resolve));
-  let go!: () => void;
-  const released = new Promise<void>((resolve) => (go = resolve));
-  let n = 0;
-  const pausing = new Proxy(db.runtime, {
-    get(target, key, receiver) {
-      const value = Reflect.get(target, key, receiver) as unknown;
-      if (key !== 'transaction' || typeof value !== 'function') return value;
-      return async (...args: unknown[]) => {
-        if (++n === 2) {
-          reached();
-          await released;
-        }
-        return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
-      };
-    },
-  });
-  const next = writeAuditHeartbeat(pausing, chainKey, vault, anchor, quiet);
+  // The next beat pauses as it opens its walk, its checkpoint signed; a walk between beats, the Durable Object's alarm,
+  // writes meanwhile.
+  const { vault: pausing, paused, go } = pausedAfterCheckpoint();
+  const next = writeAuditHeartbeat(db.runtime, chainKey, pausing, anchor, quiet);
   await paused;
   await walkAuditBacklog(db.runtime, chainKey, vault, anchor);
   const walked = await anchored();
@@ -578,28 +591,10 @@ test('readiness rejects a database without the expected Drizzle schema prefix', 
 test('two beats at once: the one that anchors second loses the compare-and-set, and finds nothing', async () => {
   await beat();
   await append();
-  // Beat A pauses as it opens its walk; beat B runs whole; then A goes on.
-  let reached!: () => void;
-  const paused = new Promise<void>((resolve) => (reached = resolve));
-  let go!: () => void;
-  const released = new Promise<void>((resolve) => (go = resolve));
-  let n = 0;
-  const pausing = new Proxy(db.runtime, {
-    get(target, key, receiver) {
-      const value = Reflect.get(target, key, receiver) as unknown;
-      if (key !== 'transaction' || typeof value !== 'function') return value;
-      return async (...args: unknown[]) => {
-        // The beat's append, then its walk, which reads in a snapshot.
-        if (++n === 2) {
-          reached();
-          await released;
-        }
-        return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
-      };
-    },
-  });
+  // Beat A pauses as it opens its walk, its checkpoint signed; beat B runs whole; then A goes on.
+  const { vault: pausing, paused, go } = pausedAfterCheckpoint();
   const { said, log } = warned();
-  const a = writeAuditHeartbeat(pausing, chainKey, vault, anchor, log);
+  const a = writeAuditHeartbeat(db.runtime, chainKey, pausing, anchor, log);
   await paused;
   assert.equal(await beat(), true);
   const b = await anchored();

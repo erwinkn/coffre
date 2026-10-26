@@ -510,6 +510,32 @@ test("a checkpoint's transactions read the same however far its walk goes", POST
   assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
 });
 
+/**
+ * The beat's own walk, the app's, goes on from where the anchor says the
+ * app verified, up to a walk of entries, a batch a statement, in no
+ * transaction either: on Workers it held one of the app's Hyperdrive
+ * connections for the whole walk. What the beat's transactions read on
+ * the app's side, its row under the head, is the same after a long
+ * backlog as after a short one.
+ */
+test("a beat's transactions read the same however far its walk goes", POSTGRES, async () => {
+  const held = async (count: number) => {
+    assert.equal(await beat(), true);
+    await append(count);
+    const before = { ...app.held };
+    let walked = false;
+    const all = await cost(async () => (walked = await beat()));
+    assert.equal(walked, true, 'the measured beat walked clean');
+    assert.equal((await ready()).ok, true, 'and caught up');
+    return { statements: app.held.statements - before.statements, rows: app.held.rows - before.rows, walked: all.app.rows };
+  };
+  const short = await held(10);
+  // Past a batch: the walk reads two.
+  const long = await held(6000);
+  assert.ok(long.walked > short.walked + 6000, `the long walk read ${long.walked} rows, the short ${short.walked}`);
+  assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
+});
+
 test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows', POSTGRES, async () => {
   assert.equal(await beat(), true);
   await append(1);

@@ -848,11 +848,17 @@ abstracted to the chain's version where it is: a rewrite moves every
 entry from there on to a new one. An entry's MAC binds its content and
 the hash before it, so one rewritten, or after one, fails it, unless it
 was appended after the rewrite. An edit leaves the stored hash, and only
-recomputing it finds the edit. Each of the app's walks, and the
-vault's scrub, runs in a snapshot of its own, so it is one step. The
-vault's checkpoint walks in no transaction, a batch a statement, so as to
-hold no connection while it rehashes: an entry a step, each linked to the
-one before as the walk read it, finer than the code's batches.
+recomputing it finds the edit. The vault's scrub runs in a snapshot of
+its own, so it is one step. The vault's checkpoint and the app's walks
+run in no transaction, a batch a statement, so as to hold no connection
+while they rehash. The checkpoint's walk is an entry a step, each linked
+to the one before as the walk read it, finer than the code's batches.
+The app's walks, in `Tampering`, where the log is rewritten and edited
+while they walk, are a step after the anchor's prefix is read, then two
+entries a step, each batch linked to the hash computed last
+(`AppWalkSteps`, `AppBatch`); in the scenarios about beats and the anchor
+racing each other, one step, as in a snapshot, which keeps their state
+spaces as they were.
 
 The anchor (`anchor.ts`) is out of their reach: one variable, which a
 beat, or a walk between beats, writes by compare-and-set, a step. It holds the newest checkpoint a
@@ -865,9 +871,9 @@ wrote it.
   2. the beat's row, under the head;
   3. the vault's checkpoint, below, which returns the prefix it signed, or
      the newest one, or a refusal;
-  4. in one snapshot, the anchor's prefix still there, by its hash, and
-     no longer than the one the vault returned (`AnchorHeld`), then the
-     walk from where the app verified to, toward that prefix, at most
+  4. the anchor's prefix still there, by its hash, and no longer than
+     the one the vault returned (`AnchorHeld`), then, in no transaction,
+     the walk from where the app verified to, toward that prefix, at most
      `CHAIN_WALK` entries, each link and hash and the app's MACs, ending
      at the hash the vault signed; a finding of the app's that stands is
      checked alone instead, its entry, until it verifies again;
@@ -918,12 +924,14 @@ beat's: readiness says nothing of it.
 | Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
 | A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`); a walk between beats writes how far it got over a beat's later checkpoint (`AnchorNeverBack`, in `Walking`) | this model |
 
-Two protections the code keeps are not needed in the model: the beat's
-walk checking that the anchor's prefix is still there, and that the entry
-it goes on from still has its hash (`AnchorHeld`, `WalkChecksFrom`).
+Three protections the code keeps are not needed in the model: the beat's
+walk checking that the anchor's prefix is still there, that the entry
+it goes on from still has its hash, and that each batch links to the
+hash it computed last (`AnchorHeld`, `WalkChecksFrom`, `AppLinksWalk`).
 Turned off, alone or together, every scenario still holds: the vault's
 own check refuses to sign over a rewrite of the prefix it signed last,
-and readiness reads the anchor's hash. They matter where the model does
+readiness reads the anchor's hash, and a walk ends at the hash the vault
+signed, after the app's MACs of every entry it read. They matter where the model does
 not go: a vault started again after the log was cut back below its
 newest checkpoint, which then resumes from an older one still in the log
 and signs the shorter log afresh (`audit-watch.test.ts`, "a log cut back
@@ -1057,7 +1065,7 @@ anchor, outside the database, is sealed again by compare-and-set before
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 11.7 million |
+| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 16.6 million |
 | `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 249 thousand |
 | `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 4.6 million |
 | `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 2.0 million |

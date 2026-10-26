@@ -67,9 +67,11 @@ for (const linked of [false, true]) {
  * A coffre that knows one credential of each kind a CI run signs in with,
  * and signs a person in by a device login approved at once, and keeps every
  * request. It plays GitHub's runner too, at /runner: an ID token for its
- * own origin alone.
+ * own origin alone. Its first `unavailable` exchanges answer 503
+ * `unavailable`, each with its reason, or none; so do its first
+ * `meUnavailable` answers at /api/me.
  */
-async function ciInstance(t: test.TestContext) {
+async function ciInstance(t: test.TestContext, { unavailable = [] as (string | null)[], meUnavailable = 0 } = {}) {
   const seen: { method: string; url: string; headers: Record<string, string | string[] | undefined>; body: string }[] = [];
   let origin = '';
   const server = createServer(async (req, res) => {
@@ -84,6 +86,10 @@ async function ciInstance(t: test.TestContext) {
       return new URL(req.url, origin).searchParams.get('audience') === origin ? send(200, { value: 'id.token.ok' }) : send(400, {});
     }
     if (req.url === '/api/auth/oidc') {
+      const reason = unavailable.shift();
+      if (reason !== undefined) {
+        return send(503, { error: 'unavailable', message: 'coffre cannot reach what it depends on right now; try again in a moment', ...(reason === null ? {} : { reason }) });
+      }
       const { token } = JSON.parse(body) as { token: string };
       return token === 'id.token.ok' ? send(200, { token: 'coffre_svc_run', expiresAt: '2099-01-01T00:05:00.000Z' }) : send(401, { error: 'unauthenticated', reason: 'no_match', message: 'no' });
     }
@@ -92,6 +98,10 @@ async function ciInstance(t: test.TestContext) {
       req.headers.authorization === 'Bearer coffre_cli_ada' ||
       req.headers.authorization === 'Bearer coffre_svc_run' ||
       (req.headers['cf-access-client-id'] === 'id.access' && req.headers['cf-access-client-secret'] === 'shh');
+    if (req.url === '/api/me' && meUnavailable > 0) {
+      meUnavailable -= 1;
+      return send(503, { error: 'unavailable', message: 'coffre cannot check who you are right now' });
+    }
     if (req.url === '/api/me' && req.headers.authorization === 'Bearer coffre_cli_busy') return send(500, { error: 'internal', message: 'something went wrong' });
     if (req.url === '/api/me' && known) return send(200, { principal: { type: 'service', id: 'deploy' }, registered: true, features: { mcp: null, workloads: true }, environments: [] });
     if (req.method === 'PATCH' && req.url === '/api/secrets/app/prod' && known) return send(200, { operationId: 'op', keys: { KEY: { version: 1 } } });
@@ -123,6 +133,43 @@ async function cli(home: string, args: string[], input: string, cwd?: string, go
   const [status] = (await once(child, 'close')) as [number | null];
   return { status, stdout, stderr };
 }
+
+test('a CI run the instance cannot sign in yet asks again, with a fresh ID token, twice at most', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-login-busy-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const signIns = (seen: { url: string }[]) => seen.map(({ url }) => url.split('?')[0]).filter((url) => url === '/runner' || url === '/api/auth/oidc');
+
+  // The issuer's keys out of reach for a moment, as its database: asked again.
+  const busy = await ciInstance(t, { unavailable: ['issuer_unavailable'] });
+  const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${busy.origin}/runner`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'bearer' };
+  const signed = await cli(home, ['--url', busy.origin, '--service', 'deploy', '--verbose', 'whoami'], '', undefined, false, runner);
+  assert.equal(signed.status, 0, signed.stderr);
+  assert.match(signed.stdout, /^service:deploy \(service account\)/);
+  assert.deepEqual(signIns(busy.seen), ['/runner', '/api/auth/oidc', '/runner', '/api/auth/oidc']);
+  assert.deepEqual(signed.stderr.replace(/ in \d+(\.\d)? m?s/g, ' in t').split('\n').slice(0, 5), [
+    'coffre: GET /runner: 200 in t',
+    'coffre: POST /api/auth/oidc: 503 in t',
+    'coffre: the instance could not answer POST /api/auth/oidc: asking again in t',
+    'coffre: GET /runner: 200 in t',
+    'coffre: POST /api/auth/oidc: 200 in t',
+  ]);
+
+  // Signed in, then unable for a moment to say who as: login asks who again, and keeps the session.
+  const unsure = await ciInstance(t, { meUnavailable: 1 });
+  const kept = await cli(home, ['login', unsure.origin, '--service', 'deploy', '--id-token'], 'id.token.ok\n');
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.match(kept.stdout, new RegExp(`^Signed in to ${unsure.origin} as deploy\\n`));
+  assert.deepEqual(unsure.seen.map(({ url }) => url), ['/api/auth/oidc', '/api/me', '/api/me']);
+
+  // Three times unable, it fails as it did; a 503 an operator must fix, at once. Login asks again the same way.
+  for (const [unavailable, exchanges] of [[[null, 'busy', null], 3], [['wrong_kek'], 1]] as const) {
+    const down = await ciInstance(t, { unavailable: [...unavailable] });
+    const login = await cli(home, ['login', down.origin, '--service', 'deploy', '--id-token'], 'id.token.ok\n');
+    assert.equal(login.status, 1);
+    assert.match(login.stderr, new RegExp(`would not sign this run in as token:deploy${unavailable[0] === null ? '' : ' \\(wrong_kek\\)'}: coffre cannot reach what it depends on right now`));
+    assert.equal(signIns(down.seen).length, exchanges, unavailable.join(' '));
+  }
+});
 
 test('a CI run signs in with what login asks it for, piped in, and later commands use that session', async (t) => {
   const { origin, seen } = await ciInstance(t);

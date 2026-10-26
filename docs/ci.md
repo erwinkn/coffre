@@ -411,6 +411,24 @@ coffre: POST /api/reveals: 200 in 480 ms
 Each `coffre` the step runs starts through `npx` first, which these lines
 do not count: the timestamps GitHub puts on each line of the log show it.
 
+When the instance answers 503 for a moment's trouble (it could not reach
+its database or its vault, count exchanges, fetch the issuer's keys, or is
+moving to its new app key), the step's sign-in, its reads of values and
+its `require-complete` check are asked again, about 2 s and then 5 s
+later, before the step fails. Each wait varies by up to half, so that the
+jobs of one run do not all ask again at once, and each sign-in asks GitHub
+for a fresh ID token. A 503 an operator or a deploy must clear
+(`wrong_kek`, `vault_outdated`, `app_key`, `migrating`) fails the step at
+once. `coffre --service <name> run` against an instance that signs it in
+with a key of its own (a key-bound session) is not asked again yet:
+
+```text
+coffre: POST /api/auth/oidc: 503 in 15.2 s
+coffre: the instance could not answer POST /api/auth/oidc: asking again in 2.3 s
+coffre: GET pipelines.actions.githubusercontent.com: 200 in 205 ms
+coffre: POST /api/auth/oidc: 200 in 1.1 s
+```
+
 To use an installed CLI directly inside a step:
 
 ```sh
