@@ -36,8 +36,8 @@ CONSTANTS
     \* keys are open, in the statement that takes it (vault.ts, #keys, the
     \* check run again with `late`), not only before the key service.
     BulkRecountUnderHead,
-    \* The count takes in the keys the read would release (the count's
-    \* `UNION ALL SELECT unnest($keys)`), not only those released before.
+    \* The count takes in the keys the read would release (the count adds
+    \* the distinct keys asked for), not only those released before.
     CountsTheRequest,
     \* The count is the principal's, all their credentials' together (the
     \* entries' `actor`), not the credential's.

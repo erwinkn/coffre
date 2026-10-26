@@ -100,7 +100,8 @@ class CountingPool {
   /**
    * The shared buffers `statement` touches, read or found in the cache, as
    * this login runs it again now, in a transaction rolled back: null for
-   * one that fails again, as a write of a row it made does.
+   * a write of a row it made, which fails as a duplicate (23505); any other
+   * failure fails the test.
    */
   async work(statement: Statement): Promise<{ pages: number; plan: string } | null> {
     const client = await this.#pool.connect();
@@ -109,8 +110,9 @@ class CountingPool {
       const { rows: [row] } = await client.query({ text: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, values: statement.values });
       const [{ Plan: plan }] = (row as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
       return { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') return null;
+      throw error;
     } finally {
       await client.query('ROLLBACK');
       client.release();

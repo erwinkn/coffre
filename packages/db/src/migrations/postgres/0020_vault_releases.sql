@@ -7,7 +7,7 @@ CREATE TABLE "vault_releases" (
 );
 --> statement-breakpoint
 -- Room in each page for the next version of its rows: a read moves its keys' times on in place (a HOT update), so the
--- table and its key stay a row a key, however often each is read, between vacuums.
+-- table and its key stay a row a key, however often each is read: the page prunes the versions before as it is read.
 ALTER TABLE vault_releases SET (fillfactor = 50);--> statement-breakpoint
 -- Each key the entry names, as the count read them before: the secret, or each item of a read's list at one place, or, for an entry that names none, which only a forged one is, the entry itself. As the owner, so that no login may write the table: the vault's appends reach it only through the log.
 CREATE FUNCTION vault_releases_keep() RETURNS trigger
