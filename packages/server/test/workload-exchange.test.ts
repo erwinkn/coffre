@@ -721,11 +721,12 @@ test('a binding removed, or a member removed or admitted again, while an exchang
   await nothingWritten();
 });
 
-test("the re-check under the head stands only for a member's row at the binding's generation and a binding whose MAC is the app's", async () => {
+test("the re-check under the head stands only for the binding's own principal and a binding whose MAC is the app's", async () => {
   const since = new Date(Date.now() - 60_000);
   const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
   assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: true, recent: 0 });
-  // No member row: a foreign key keeps one for every binding, so the member's columns read null only for a principal not the binding's.
+  // Another principal than the binding's: refused (a foreign key keeps a member row for every binding; the member's status and
+  // generation are driven to refusals through the exchange itself, in the test above).
   assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' }, since, 60), { stands: false, recent: 0 });
   // The member's binding, its MAC not the app's.
   await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32) }).where(eq(serviceBindings.id, bound));

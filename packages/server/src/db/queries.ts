@@ -1372,7 +1372,8 @@ export async function exchangeToken(db: Queryable, token: Buffer, credential: Ne
     return true;
   }
   const spend = db.insert(consumedTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: consumedTokens.hash });
-  // The credential's row once for each token spent: none, or one. Its other columns take their defaults.
+  // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults: a column
+  // added later with a default of Drizzle's own (`$defaultFn`) gets it from `insert` on SQLite, not here.
   const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
   const names = sql.join(columns.map(([, column]) => sql.identifier(column.name)), sql`, `);
   const values = sql.join(columns.map(([name, column]) => sql.param(credential[name as keyof typeof credential], column)), sql`, `);
