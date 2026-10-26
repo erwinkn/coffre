@@ -39,7 +39,8 @@ Every number below is labelled **measured** (with where) or **reasoned**.
   an allowance. The outcome is a function of the changes numbered before the
   entry and of the entry's time, so a replay recomputes it. Every benchmark
   run below was replayed: **every live decision agreed with the replay**
-  (measured: 3.2M uses across the local runs, 0 disagreements).
+  (measured: 3.2M uses across the local runs and 922k on Cloudflare, 0
+  disagreements).
 - **Measured, locally** (2 vCPU / 2 GB Postgres, pool 40, 2 ms round trip,
   same day as a `seq` rerun):
   - at 1,000/s for 5 min: p50 **2.6 ms** against `seq`'s 5.2 ms, p99 6.1
