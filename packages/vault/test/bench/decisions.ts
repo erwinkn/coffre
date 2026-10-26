@@ -172,6 +172,7 @@ try {
         return done;
       }))).flat();
       report(`${callers} at once, ${label}`, runs);
+      if (process.env.BENCH_TAIL) console.log('  slowest:', runs.map((run) => Math.round(run.ms)).sort((x, y) => y - x).slice(0, 12).join(' '));
     }
   }
 } finally {
