@@ -28,6 +28,18 @@
   to walk, what the beat reads inside the app's transactions went from
   12,010 rows to 2, and its longest transaction from about 115 ms to 3 ms.
 
+- **A CI run asks again when the instance cannot answer it yet.** When
+  the instance answered 503 `unavailable` (it could not reach its database
+  or its vault, a busy one say, and says to try again in a moment), the
+  CLI failed at once: on 2026-10-26, two jobs of one run failed their
+  sign-in this way while a third, signing in the same second, went on. A
+  run's sign-in (`--service`, and `login --service`) and each read of
+  values (`get`, `run`, `export`, the Action's) are now asked again, 2 s
+  and then 5 s later, before the answer stands; each sign-in asks GitHub
+  for a fresh ID token. `--verbose`, which the Action passes, says each
+  time it asks again. A 503 with a reason (`wrong_kek`) is not asked
+  again, and nothing that writes is.
+
 ## 0.14.1 (2026-10-25)
 
 - **Upgrading to 0.14.1, in short.** No migration, and nothing to change in

@@ -17,7 +17,7 @@ import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
-import { exchange, idToken, keyBound, proofOf } from './workload.ts';
+import { exchange, ExchangeFailed, idToken, keyBound, momentary, proofOf } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
@@ -247,12 +247,38 @@ function http(input: string | Request, init?: RequestInit): Promise<Response> {
 let exchanged: Promise<{ credential: string; idToken: string }> | null = null;
 
 function workloadCredential(origin: string, workload: Extract<Credential, { kind: 'workload' }>): Promise<{ credential: string; idToken: string }> {
-  exchanged ??= (async () => {
-    const token = await idToken(undefined, process.env, origin, fetching(origin));
-    const issued = await exchange(origin, workload.service, token, http);
-    return { credential: issued.token, idToken: token };
-  })().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+  exchanged ??= signIn(origin, workload.service)
+    .then(({ issued, idToken: token }) => ({ credential: issued.token, idToken: token }))
+    .catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   return exchanged;
+}
+
+/**
+ * How long a request waits before each time it asks again, while the
+ * instance answers that what it depends on did not answer (`momentary`):
+ * twice, then its answer stands.
+ */
+const UNAVAILABLE_RETRY_MS = [2000, 5000];
+
+/**
+ * A CI run signed in as `service`: its ID token, the one given or a fresh
+ * one from GitHub's runner, traded for a credential. Asked again while the
+ * instance cannot answer (`UNAVAILABLE_RETRY_MS`), each time with a fresh
+ * ID token from GitHub: an exchange that committed and lost its answer has
+ * spent the one before (docs/design/oidc.md, section 3).
+ */
+async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idToken: string }> {
+  for (let attempt = 0; ; attempt++) {
+    const token = await idToken(given, process.env, origin, fetching(origin));
+    try {
+      return { issued: await exchange(origin, service, token, http), idToken: token };
+    } catch (error) {
+      const wait = UNAVAILABLE_RETRY_MS[attempt];
+      if (wait === undefined || !(error instanceof ExchangeFailed && error.momentary)) throw error;
+      if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
 }
 
 /** What GitHub must hide from the job's log, beside the values: the run's ID token and credential, if it used them. */
@@ -287,7 +313,7 @@ function client(to: Target = target(), hint?: Hint, handled: readonly number[] =
   });
 }
 
-/** How `send` puts a request to the instance: `once`, or `retryingPolicyChange`. */
+/** How `send` puts a request to the instance: `once`, `retryingPolicyChange` or `reading`. */
 type Ask = (request: Request) => Promise<Response>;
 
 /**
@@ -320,9 +346,26 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
   return once(again);
 }
 
-/** `client`, for the values `get`, `run` and `export` read: each request is `retryingPolicyChange`. */
+/**
+ * A read of values, `retryingPolicyChange`, asked again too while the
+ * instance cannot answer it (`UNAVAILABLE_RETRY_MS`). Each read the vault
+ * answered is in the audit log, the one whose answer was lost included.
+ */
+async function reading(request: Request): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const again = request.clone();
+    const response = await retryingPolicyChange(request);
+    const wait = UNAVAILABLE_RETRY_MS[attempt];
+    if (wait === undefined || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
+    if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    request = again;
+  }
+}
+
+/** `client`, for the values `get`, `run` and `export` read: each request is `reading`. */
 function reader(handled: readonly number[] = []): CoffreClient {
-  return client(target(), undefined, handled, retryingPolicyChange);
+  return client(target(), undefined, handled, reading);
 }
 
 /**
@@ -720,9 +763,7 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
   const given = ask
     ? await readSecret({ label: 'ID token', hint: `The run's ID token, for the audience ${origin}. Hidden as you type.` }).catch((error: unknown) => fail((error as Error).message))
     : undefined;
-  const issued = await (async () => exchange(origin, service, await idToken(given, process.env, origin, fetching(origin)), http))().catch((error: unknown) =>
-    fail(error instanceof Error ? error.message : String(error)),
-  );
+  const { issued } = await signIn(origin, service, given).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   await saveRun(
     { origin, mode: 'signin', by: 'run', credential: { kind: 'token', token: issued.token } },
     { mode: 'signin', kind: 'run', token: issued.token, expiresAt: issued.expiresAt },
@@ -1233,7 +1274,7 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
   if (!(await proxied(to))) return null;
   // A plan reads values too, and is asked again as `run`'s reads are.
   const at = (path: string, headers: Record<string, string>) =>
-    retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
+    reading(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
   // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   // Asked again too: a handle weighed from a policy another change overtook is made from none, and refused to be asked again.

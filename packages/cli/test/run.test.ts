@@ -43,6 +43,8 @@ type Environment = {
   refused?: number;
   /** The reasons its reads answer 409 `conflict` with, one apiece, before it reads as asked. */
   conflicts?: string[];
+  /** Its lists' and reads' 503 `unavailable` answers, one apiece, before any other: each with its reason, or none. */
+  unavailable?: (string | null)[];
   /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
   rotateAfterDays?: number | null | 'unsaid';
   /** Read whole, whatever keys it is asked for, as an instance before 0.12. */
@@ -66,6 +68,10 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     const environment = path === undefined ? undefined : environments[path.split('/').slice(0, 2).join('/')];
     if (environment === undefined) return send(404, { error: 'not_found', message: 'unknown project or environment' });
     if (environment.refused !== undefined) return send(environment.refused, { error: 'forbidden', message: 'you do not have permission to do that' });
+    const unavailable = environment.unavailable?.shift();
+    if (unavailable !== undefined) {
+      return send(503, { error: 'unavailable', message: 'coffre cannot reach what it depends on right now; try again in a moment', ...(unavailable === null ? {} : { reason: unavailable }) });
+    }
     if (listing !== null) {
       const keys = environment.listed ?? Object.keys(environment.values).map((key) => ({ key, version: 1 }));
       return send(200, {
@@ -97,7 +103,7 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     /** `extra` is set over the caller's environment; a key given as undefined is unset in it. */
     async coffre(args: string[], extra: Record<string, string | undefined> = {}) {
       const env: Record<string, string | undefined> = Object.assign(environment(), extra);
-      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+      const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000 });
       let stdout = '';
       let stderr = '';
       child.stdout.setEncoding('utf8').on('data', (data: string) => (stdout += data));
@@ -411,6 +417,33 @@ test('a read the policy changed under twice ends as a refusal does, and another 
       assert.equal(read.stderr, 'coffre: request failed with status 409: the access policy changed while this was answered: try again\n');
       assert.deepEqual(coffre.requests, Array(reads).fill(`reveal ${args[1]}`), `${args[0]}, ${conflicts.join(' ')}`);
     }
+  }
+});
+
+test('a read the instance cannot answer is asked again, after 2 s then 5 s, and the step goes on', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [null] } });
+  const read = await coffre.coffre(['--verbose', 'export', 'deploy/prod', '--format', 'json']);
+  assert.equal(read.code, 0, read.stderr);
+  assert.deepEqual(JSON.parse(read.stdout), { TOKEN: 'deploy-token-value' });
+  assert.deepEqual(coffre.requests, ['reveal deploy/prod', 'reveal deploy/prod']);
+  assert.deepEqual(read.stderr.replace(/: (\d+) in \d+(\.\d)? m?s/g, ': $1 in t').split('\n'), [
+    'coffre: POST /api/reveals: 503 in t',
+    'coffre: the instance could not answer POST /api/reveals: asking again in 2.0 s',
+    'coffre: POST /api/reveals: 200 in t',
+    '',
+  ]);
+});
+
+test('a read the instance cannot answer three times ends as a refusal does, and one with a reason is not asked again', async (t) => {
+  for (const [unavailable, reads] of [[[null, null, null], 3], [['wrong_kek'], 1]] as const) {
+    const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, unavailable: [...unavailable] } });
+    const started = performance.now();
+    const read = await coffre.coffre(['get', 'deploy/prod/TOKEN']);
+    assert.equal(read.code, 1);
+    assert.equal(read.stdout, '');
+    assert.equal(read.stderr, 'coffre: request failed with status 503: coffre cannot reach what it depends on right now; try again in a moment\n');
+    assert.deepEqual(coffre.requests, Array(reads).fill('reveal deploy/prod/TOKEN'), unavailable.join(' '));
+    if (reads === 3) assert.ok(performance.now() - started >= 7000, 'it asked again at once');
   }
 });
 

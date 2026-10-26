@@ -54,20 +54,40 @@ export async function idToken(given: string | undefined, runner: Runner, audienc
   );
 }
 
-/** Trade an ID token for a credential of `service`, or throw saying why the instance refused. */
+/**
+ * Whether the instance answered that what it depends on did not answer,
+ * its database or its vault, and to try again in a moment: 503
+ * `unavailable`, with no reason. One with a reason (`wrong_kek`) lasts
+ * until an operator acts, and is not asked again.
+ */
+export function momentary(status: number, body: { error?: unknown; reason?: unknown } | null): boolean {
+  return status === 503 && body?.error === 'unavailable' && body.reason === undefined;
+}
+
+/** An exchange the instance refused, or could not answer; `momentary` when it said to try again in a moment. */
+export class ExchangeFailed extends Error {
+  readonly momentary: boolean;
+
+  constructor(message: string, momentary: boolean) {
+    super(message);
+    this.momentary = momentary;
+  }
+}
+
+/** Trade an ID token for a credential of `service`, or throw `ExchangeFailed` saying why the instance refused. */
 export async function exchange(origin: string, service: string, token: string, fetchImpl: Fetch): Promise<{ token: string; expiresAt: string }> {
   const response = await fetchImpl(`${origin}/api/auth/oidc`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ service, token }),
   });
-  const body = (await response.json().catch(() => null)) as { token?: unknown; expiresAt?: unknown; reason?: unknown; message?: unknown } | null;
+  const body = (await response.json().catch(() => null)) as { token?: unknown; expiresAt?: unknown; error?: unknown; reason?: unknown; message?: unknown } | null;
   if (response.ok && typeof body?.token === 'string' && typeof body.expiresAt === 'string') {
     return { token: body.token, expiresAt: body.expiresAt };
   }
   const why = typeof body?.message === 'string' ? body.message : `status ${response.status}`;
   const reason = typeof body?.reason === 'string' ? ` (${body.reason})` : '';
-  throw new Error(`${origin} would not sign this run in as ${service}${reason}: ${why}`);
+  throw new ExchangeFailed(`${origin} would not sign this run in as ${service}${reason}: ${why}`, momentary(response.status, body));
 }
 
 /**

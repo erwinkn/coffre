@@ -411,6 +411,19 @@ coffre: POST /api/reveals: 200 in 480 ms
 Each `coffre` the step runs starts through `npx` first, which these lines
 do not count: the timestamps GitHub puts on each line of the log show it.
 
+When the instance answers 503 `unavailable` (it could not reach its
+database or its vault, and says to try again in a moment), the sign-in and
+each read are asked again, 2 s and then 5 s later, before the step fails.
+Each sign-in asks GitHub for a fresh ID token. A 503 that carries a reason
+(`wrong_kek`) waits on an operator, and fails the step at once:
+
+```text
+coffre: POST /api/auth/oidc: 503 in 15.2 s
+coffre: the instance could not answer POST /api/auth/oidc: asking again in 2.0 s
+coffre: GET pipelines.actions.githubusercontent.com: 200 in 205 ms
+coffre: POST /api/auth/oidc: 200 in 1.1 s
+```
+
 To use an installed CLI directly inside a step:
 
 ```sh
