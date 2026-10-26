@@ -79,19 +79,134 @@ jobs:
       - name: Database schema
         run: pnpm test:schema
 
-  formal:
+  # The Formal model is three jobs. The plan hashes everything TLC's answer
+  # depends on (scripts/formal-key.sh) and looks for a green run of that
+  # hash; three shards run TLC when there is none; `Formal model` is the one
+  # job Validate asks about. docs/formal.md, "In CI".
+  formal-plan:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
-    name: Formal model
+    name: Formal model plan
     runs-on: ubuntu-24.04
-    # Audit.tla's checkpoint walks an entry a step: Tampering alone is 11.7 million states, and the job runs 12 to 15 minutes.
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      key: ${{ steps.plan.outputs.key }}
+      hit: ${{ steps.plan.outputs.hit }}
+      run: ${{ steps.plan.outputs.run }}
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Hash the model's inputs and look for a green run of them
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          scripts/formal-key.sh | tee "$RUNNER_TEMP/manifest.txt"
+          key="$(tail -n 1 "$RUNNER_TEMP/manifest.txt")"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          # A green run saves "<key>-<run id>" (the last step of `Formal model`). The cache API
+          # lists every ref's caches, where a restore sees only this PR's and main's: a model
+          # merged from a PR is a hit for the next one.
+          hit=false
+          run=""
+          # A lookup that fails is a full run, the safe way.
+          labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')" || labels=full-formal
+          if grep -qx full-formal <<< "$labels"; then
+            echo "The full-formal label asks for a full run."
+          else
+            # Newest first. A key counts only if the run in it is one of this workflow's; in
+            # some attempt, its `Formal model` job ran the step named for this very key, run
+            # and merge commit (the last step below, which runs only after every shard held);
+            # and that commit holds the very files the key hashes, so a doctored workflow's
+            # run, which saved a key of its choosing, is no source. Jobs of every attempt.
+            candidates="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
+              jq -r --arg prefix "$key-" '.actions_caches[] | select(.key | startswith($prefix)) | "\(.key | ltrimstr($prefix)) \(.ref) \(.created_at)"')" || candidates=""
+            [ -n "$candidates" ] || echo "No cache of $key-*."
+            ours="$(git ls-tree -r HEAD -- formal scripts/formal.sh scripts/formal-trace.mjs scripts/formal-key.sh .github/workflows/validate.yml |
+              sed -E 's/^[0-9]+ blob ([0-9a-f]+)\t(.*)$/\2 \1/' | grep -E '^formal/[^/ ]+\.(tla|cfg) |^scripts/|^\.github/' | sort)"
+            while read -r id cref created; do
+              [ -n "$id" ] || continue
+              [[ "$id" =~ ^[0-9]+$ ]] || { echo "Cache $id: not a run id."; continue; }
+              path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || { echo "Run $id: not readable."; continue; }
+              [ "$path" = .github/workflows/validate.yml ] || { echo "Run $id: $path, not validate.yml."; continue; }
+              step="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -m 1 -xE "Save it as $key-$id at [0-9a-f]{40}")" || step=""
+              [ -n "$step" ] || { echo "Run $id: no passed step saved $key."; continue; }
+              theirs="$(gh api "repos/$GITHUB_REPOSITORY/git/trees/${step##* }?recursive=1" --jq '.tree[] | select(.type == "blob" and (.path | test("^formal/[^/]+\\.(tla|cfg)$") or . == "scripts/formal.sh" or . == "scripts/formal-trace.mjs" or . == "scripts/formal-key.sh" or . == ".github/workflows/validate.yml")) | "\(.path) \(.sha)"' | sort)" || { echo "Run $id: its commit ${step##* } could not be read."; continue; }
+              [ "$theirs" = "$ours" ] && [ -n "$ours" ] || { echo "Run $id: its commit ${step##* } holds other model, script or workflow files."; continue; }
+              hit=true
+              run="$id"
+              ref="$cref"
+              break
+            done <<< "$candidates"
+          fi
+          echo "hit=$hit" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ "$hit" = true ]; then
+            msg="TLC skipped: $key was model-checked green in run $run ($ref, $created): https://github.com/$GITHUB_REPOSITORY/actions/runs/$run"
+          else
+            msg="TLC runs: no green run of $key"
+          fi
+          echo "::notice title=Formal model::$msg"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+
+  formal-shard:
+    needs: formal-plan
+    if: ${{ needs.formal-plan.outputs.hit == 'false' }}
+    name: Formal shard ${{ matrix.shard }}
+    strategy:
+      # Every shard's counterexamples in one run, rather than the first failing's.
+      fail-fast: false
+      matrix:
+        # scripts/formal.sh shard_of; the longest, Tampering, is 7 to 11 minutes. 4g, not the script's 1g: Tampering
+        # took 11 on a 4-core, 16 GB runner at 1g and 7 at 4g or 8g, and 11 to 12 at 12g, or at 8g with 2 or 8 workers.
+        shard: [tampering, large, rest]
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Model-check the locking protocol
+      - name: Hold this runner's Java to the plan's
+        env:
+          KEY: ${{ needs.formal-plan.outputs.key }}
+        run: |
+          mine="$(scripts/formal-key.sh | tail -n 1)"
+          [ "$mine" = "$KEY" ] || { echo "::error::This runner's key is $mine, the plan's $KEY: another Java, or another checkout. Re-run all jobs, not only the failed ones."; exit 1; }
+      - name: Model-check the shard
         # TLC, pinned by its checksum in the script, on the runner's Java (docs/formal.md).
-        run: scripts/formal.sh --workers 4
+        run: scripts/formal.sh --workers 4 --heap 4g --shard ${{ matrix.shard }}
+
+  formal:
+    needs: [changes, formal-plan, formal-shard]
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    name: Formal model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every shard, or a green run of the same inputs
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e '
+            .["formal-plan"].result == "success" and
+            (if .["formal-plan"].outputs.hit == "true"
+              then .["formal-shard"].result == "skipped"
+              else .["formal-shard"].result == "success" end)
+          ' <<< "$RESULTS"
+      - name: Record the green run
+        # Only after every shard held, and not when the plan found a green run already.
+        if: ${{ needs.formal-plan.outputs.hit != 'true' }}
+        run: echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/formal-green"
+      - name: Save it as ${{ needs.formal-plan.outputs.key }}-${{ github.run_id }} at ${{ github.sha }}
+        if: ${{ needs.formal-plan.outputs.hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/formal-green
+          key: ${{ needs.formal-plan.outputs.key }}-${{ github.run_id }}
 
   proofs:
     needs: changes
