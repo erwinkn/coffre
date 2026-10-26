@@ -117,7 +117,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   }
 
   // The session `coffre login` made, and none other: no second sign-in.
-  if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in to ${origin}: run \`coffre login ${origin}\` first`)}`);
+  if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in to ${origin}: run \`coffre login ${origin}\` first`, session.authMode === 'signin')}`);
   let api: CoffreClient;
   try {
     const to = resolveTarget({ ...session, url: origin }, store);
@@ -179,7 +179,7 @@ async function signedIn(api: CoffreClient, origin: string): Promise<{ detail: st
     me = await api.me();
   } catch (error) {
     if (error instanceof CoffreError && error.status === 401) {
-      throw new Failure(`your session on ${origin} is missing, expired or revoked: run \`coffre login ${origin}\`, then again`, signInHint().replace(/^ {2}/gm, ''));
+      throw new Failure(`your session on ${origin} is missing, expired or revoked: run \`coffre login ${origin}\`, then again`, signInHint(true).replace(/^ {2}/gm, ''));
     }
     throw error;
   }

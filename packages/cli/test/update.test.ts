@@ -112,6 +112,26 @@ test("a CLI under a prefix that is no longer npm's own is still an npm global, u
   assert.deepEqual(installOf('/opt/lib/node_modules/@coffre/cli-extras/dist/main.js', none, undefined, shimmed), { kind: 'unknown', path: '/opt/lib/node_modules/@coffre/cli-extras/dist/main.js' });
 });
 
+test("a prefix is npm's by its shim, a link into this very package: not any bin/coffre", { skip: process.platform === 'win32' }, () => {
+  const work = mkdtempSync(join(tmpdir(), 'coffre-prefix-'));
+  try {
+    const none = { npm: null, pnpm: null, pnpmHome: null };
+    const dir = join(realpathSync(work), 'global', 'lib', 'node_modules', '@coffre', 'cli');
+    mkdirSync(join(dir, 'dist'), { recursive: true });
+    writeFileSync(join(dir, 'dist', 'main.js'), '');
+    const main = join(dir, 'dist', 'main.js');
+    assert.deepEqual(installOf(main, none, () => false), { kind: 'unknown', path: main }, 'no shim');
+    mkdirSync(join(work, 'global', 'bin'));
+    writeFileSync(join(work, 'global', 'bin', 'coffre'), '#!/bin/sh\n');
+    assert.equal(installOf(main, none, () => false).kind, 'unknown', "a bin/coffre that is another file's");
+    rmSync(join(work, 'global', 'bin', 'coffre'));
+    symlinkSync(main, join(work, 'global', 'bin', 'coffre'));
+    assert.deepEqual(installOf(main, none, () => false), { kind: 'npm', prefix: join(realpathSync(work), 'global'), dir });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 test('a moved npm prefix is updated by name; npm and pnpm own globals as they were', () => {
   assert.deepEqual(updateCommand({ kind: 'npm' }, '0.14.4'), ['npm', ['install', '-g', '@coffre/cli@0.14.4']]);
   assert.deepEqual(updateCommand({ kind: 'pnpm' }, '0.14.4'), ['pnpm', ['add', '-g', '@coffre/cli@0.14.4']]);

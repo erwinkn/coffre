@@ -52,7 +52,7 @@ export function signInHint(known = false): string {
 
 /**
  * A sign-in error: `message`, which names the command, and what the command asks of whoever runs it.
- * `known`: the instance is one coffre signs in, from a saved session or --auth-mode, not one asked about for the first time.
+ * `known`: the instance is one coffre signs in, said by --auth-mode or by the session being signed in again, not one asked about for the first time.
  */
 export function signInError(message: string, known = false): string {
   return `${message}\n${signInHint(known)}`;
@@ -411,7 +411,7 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
     const named = choice.by === 'file' ? `, which ${join(choice.directory, REPO_FILE)} names` : '';
     const message = `not signed in to ${origin}${named}: ${relogin}`;
     // Access has its own sign-in, cloudflared's, not the device flow the hint explains.
-    throw new Error(mode === 'cloudflare' ? message : signInError(message, explicitMode === 'signin' || stored?.mode === 'signin'));
+    throw new Error(mode === 'cloudflare' ? message : signInError(message, explicitMode === 'signin'));
   }
   const by = stored.kind ?? 'person';
   if (mode === 'cloudflare') {

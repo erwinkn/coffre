@@ -74,7 +74,7 @@ export function installOf(
   path: string,
   globals: Globals,
   isProject: (dir: string) => boolean = dependsOnCli,
-  shimmed: (prefix: string) => boolean = hasShim,
+  shimmed: (prefix: string, dir: string) => boolean = hasShim,
 ): Install {
   const within = (dir: string | null) => dir !== null && (path === dir || path.startsWith(dir + sep));
   if (path.includes(`${sep}_npx${sep}`)) return { kind: 'npx' };
@@ -87,7 +87,7 @@ export function installOf(
   // A prefix npm no longer has as its own, after a Node reinstall: npm lists nothing there, but the layout says it.
   // The layout alone is not npm's: a project's may be the same. The shim npm made beside it says that it is.
   const moved = npmPrefixOf(path);
-  if (moved !== null && shimmed(moved.prefix)) return { kind: 'npm', ...moved };
+  if (moved !== null && shimmed(moved.prefix, moved.dir)) return { kind: 'npm', ...moved };
   if (modules !== -1) return { kind: 'unknown', path };
   if (path.includes(`${sep}packages${sep}cli${sep}`)) return { kind: 'checkout' };
   return { kind: 'unknown', path };
@@ -110,9 +110,17 @@ export function npmPrefixOf(path: string, flavour: typeof posix | typeof win32 =
   return { prefix, dir: parts.slice(0, at + tail.length).join(flavour.sep) };
 }
 
-/** Whether npm's global bin for `coffre` is at `prefix`: `bin/coffre`, on Windows `coffre.cmd` in the prefix itself. */
-function hasShim(prefix: string): boolean {
-  return existsSync(sep === '\\' ? join(prefix, 'coffre.cmd') : join(prefix, 'bin', 'coffre'));
+/**
+ * Whether npm's global bin for `coffre` is at `prefix` and is this package's: `bin/coffre`, a link
+ * into `dir`; on Windows, `coffre.cmd` in the prefix itself, a script, which exists or not.
+ */
+function hasShim(prefix: string, dir: string): boolean {
+  try {
+    if (sep === '\\') return existsSync(join(prefix, 'coffre.cmd'));
+    return realpathSync(join(prefix, 'bin', 'coffre')).startsWith(realpathSync(dir) + sep);
+  } catch {
+    return false;
+  }
 }
 
 /** Whether `dir` is a project with @coffre/cli among its dependencies. */

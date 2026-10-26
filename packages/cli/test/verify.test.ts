@@ -238,7 +238,10 @@ test('coffre verify instance without a session says to sign in first, and checks
   const elsewhere = await coffre(['verify', 'instance', 'https://coffre.acme.example'], home);
   assert.equal(elsewhere.code, 1);
   assert.equal(elsewhere.stderr, `coffre: ${signInError('not signed in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` first')}\n`);
-  assert.equal(nowhere.stdout + elsewhere.stdout, '');
+  // Named a sign-in instance by --auth-mode, it is not hedged about Access.
+  const named = await coffre(['--auth-mode', 'signin', 'verify', 'instance', 'https://coffre.acme.example'], home);
+  assert.equal(named.stderr, `coffre: ${signInError('not signed in to https://coffre.acme.example: run `coffre login https://coffre.acme.example` first', true)}\n`);
+  assert.equal(nowhere.stdout + elsewhere.stdout + named.stdout, '');
 });
 
 test('coffre verify alone, without a terminal, lists the checks and exits 2', async (t) => {
