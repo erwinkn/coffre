@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.4 (2026-10-26)
+
 - **Upgrading to 0.14.4, in short.** One migration, `0020_vault_releases`
   (`0017` on SQLite). It adds a table, a trigger on `audit_log` and its
   function, owned by the login that runs `coffre migrate`, as the other
