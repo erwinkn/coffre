@@ -134,9 +134,9 @@ jobs:
               [[ "$id" =~ ^[0-9]+$ ]] || { echo "Cache $id: not a run id."; continue; }
               path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || { echo "Run $id: not readable."; continue; }
               [ "$path" = .github/workflows/validate.yml ] || { echo "Run $id: $path, not validate.yml."; continue; }
-              step="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -xE "Save it as $key-$id at [0-9a-f]{40}" | head -n 1)" || step=""
+              step="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -m 1 -xE "Save it as $key-$id at [0-9a-f]{40}")" || step=""
               [ -n "$step" ] || { echo "Run $id: no passed step saved $key."; continue; }
-              theirs="$(gh api "repos/$GITHUB_REPOSITORY/git/trees/${step##* }?recursive=1" --jq '.tree[] | select(.type == "blob" and (.path | test("^formal/[^/]+\\.(tla|cfg)$") or . == "scripts/formal.sh" or . == "scripts/formal-trace.mjs" or . == "scripts/formal-key.sh" or . == ".github/workflows/validate.yml")) | "\(.path) \(.sha)"' | sort)" || theirs=""
+              theirs="$(gh api "repos/$GITHUB_REPOSITORY/git/trees/${step##* }?recursive=1" --jq '.tree[] | select(.type == "blob" and (.path | test("^formal/[^/]+\\.(tla|cfg)$") or . == "scripts/formal.sh" or . == "scripts/formal-trace.mjs" or . == "scripts/formal-key.sh" or . == ".github/workflows/validate.yml")) | "\(.path) \(.sha)"' | sort)" || { echo "Run $id: its commit ${step##* } could not be read."; continue; }
               [ "$theirs" = "$ours" ] && [ -n "$ours" ] || { echo "Run $id: its commit ${step##* } holds other model, script or workflow files."; continue; }
               hit=true
               run="$id"
