@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.3 (2026-10-26)
+
 - **Upgrading to 0.14.3, in short.** One migration, `0019_backup_role`,
   Postgres only, which adds the group `coffre_backup` and its read grants:
   the release before never meets them. It makes a role, so the login that
