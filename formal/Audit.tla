@@ -463,8 +463,12 @@ CkptCommit(p) ==
            standing == Newest({"deny"}) > s /\ MacOk(Newest({"deny"}))
            \* The entry the standing refusal names, 0 for none.
            named == IF standing THEN log[Newest({"deny"})].at ELSE 0
-           \* That entry as the walk checks each: its hash, its link to the one before, the vault's MAC.
-           holds(i) == VaultWalkOk(i - 1, i) /\ (i = 1 \/ log[i - 1].ver = log[i].ver)
+           \* That entry as the walk checks each: its hash, its links to the ones either side, the vault's MAC.
+           \* A link is a version here, stricter than the code's: a rewrite from i breaks i's link to i - 1,
+           \* which the code's prevHash keeps; the vault names no such entry, so the two agree.
+           holds(i) == /\ VaultWalkOk(i - 1, i)
+                       /\ i = 1 \/ log[i - 1].ver = log[i].ver
+                       /\ i = Len(log) \/ log[i].ver = log[i + 1].ver
            \* Done, the rest under the head, and the head signed; else where the walk got to, behind it.
            at == IF l[p].done THEN Len(log) ELSE l[p].to
            rest == ~l[p].done \/ VaultWalkOk(l[p].to, Len(log))
@@ -484,6 +488,9 @@ CkptCommit(p) ==
             [] RefusalRecheckedUnderHead /\ named > 0 /\ named <= l[p].from /\ ~holds(named) -> Deny(named)
             \* Nothing since the newest, which signed all before its own.
             [] s > 0 /\ s = Len(log) /\ log[s].at = s - 1 -> Idle
+            \* It names the first entry under the head the vault cannot vouch for, or none. The code names the
+            \* walk's end when that changed (`changed while the vault walked it`): an app entry, whose refusal a
+            \* later call clears either way, as its rewrite is the app's to find (FoundEditStaysRed).
             [] ~(CheckpointChecksVault => Carries(l[p].from, l[p].fromVer))
                \/ ~Carries(l[p].to, l[p].toVer) \/ ~rest
                -> Deny(IF unrest = {} THEN 0 ELSE CHOOSE i \in unrest : \A j \in unrest : i <= j)

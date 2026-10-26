@@ -2731,13 +2731,17 @@ class VaultService implements Vault {
 
   /**
    * Whether entry `seq` is as the walk checks each: there, its hash its
-   * own, linked to the entry before, and the vault's under its MAC.
+   * own, linked to the entry before, and the vault's under its MAC; and the
+   * entry after it, if any, linked to it, for a refusal can name either side
+   * of a broken link (`forward`, at the end of a batch).
    */
   async #entryHolds(db: Queryable, seq: bigint): Promise<boolean> {
-    const found = await store.entriesAt(db, seq === 0n ? [seq] : [seq - 1n, seq]);
+    const found = await store.entriesAt(db, seq === 0n ? [seq, seq + 1n] : [seq - 1n, seq, seq + 1n]);
     const entry = found.get(seq);
     const before = seq === 0n ? { hash: GENESIS_HASH } : found.get(seq - 1n);
     if (entry === undefined || before === undefined) return false;
+    const after = found.get(seq + 1n);
+    if (after !== undefined && !after.prevHash.equals(entry.hash)) return false;
     return verifyEntries([entry], { keys: this.#keysFor(entry), chainOnly: ['app'], startSeq: seq, startPrevHash: before.hash }).ok;
   }
 
