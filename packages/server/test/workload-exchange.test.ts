@@ -16,7 +16,7 @@ import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
 import { runScheduled } from '../src/app.ts';
-import { exchangeCandidates, exchangesSince, exchangeStill, pruneSpentTokens } from '../src/db/queries.ts';
+import { exchangeCandidates, exchangesSince, exchangeStill, exchangeToken, pruneSpentTokens } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -719,6 +719,28 @@ test('a binding removed, or a member removed or admitted again, while an exchang
   };
   assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
   await nothingWritten();
+});
+
+test('the spend writes the credential and stamps the binding only when it spent the token itself', async () => {
+  const [before] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  const row = () => runtime.signin!.exchangedCredential(SERVICE, { generation: before!.generation, bindingId: bound, label: null, expiresAt: new Date(Date.now() + 300_000) }).row;
+  const credentialRows = async (id: string) => (await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.id, id))).length;
+  const lastUsed = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.at?.getTime() ?? null;
+  // A token spent already: refused, no credential, the binding's last use as it was.
+  const spentHash = randomBytes(32);
+  await db.owner.insert(consumedTokens).values({ hash: spentHash });
+  const refused = row();
+  assert.equal(await exchangeToken(db.runtime, spentHash, refused, bound, new Date(Date.now() + 1000)), false);
+  assert.equal(await credentialRows(refused.id!), 0);
+  assert.equal(await lastUsed(), before!.lastUsedAt?.getTime() ?? null);
+  // A fresh one: spent, the credential written, the binding stamped.
+  const fresh = randomBytes(32);
+  const issued = row();
+  const at = new Date(Date.now() + 2000);
+  assert.equal(await exchangeToken(db.runtime, fresh, issued, bound, at), true);
+  assert.equal(await credentialRows(issued.id!), 1);
+  assert.equal((await db.owner.select().from(consumedTokens).where(eq(consumedTokens.hash, fresh))).length, 1);
+  assert.equal(await lastUsed(), at.getTime());
 });
 
 test("the re-check under the head stands only for the binding's own principal and a binding whose MAC is the app's", async () => {

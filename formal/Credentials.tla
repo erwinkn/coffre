@@ -232,7 +232,8 @@ ExCandidates(p) ==
             ELSE Read(p, "ex.spent", [l[p] EXCEPT !.b = b, !.bgen = binding[b].gen,
                                                   !.rate = Cardinality({r \in creds : r.by = b})])
 
-\* Whether the token was spent already, read with the bindings (db/queries.ts, exchangeCandidates).
+\* Whether the token was spent already: in the code, read in the same statement as the bindings
+\* (db/queries.ts, exchangeCandidates); here a step of its own, which allows more interleavings, not fewer.
 ExSpent(p) ==
     /\ pc[p] = "ex.spent"
     /\ IF op[p].token \in consumed THEN Refuse(p) ELSE Read(p, "ex.access", l[p])

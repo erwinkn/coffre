@@ -1002,7 +1002,7 @@ export class WorkloadService {
 
     // The bindings first, so that a token none can take costs this one read.
     const { bindings: candidates, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
-    if (candidates.length === 0) throw unbound();
+    if (candidates.length === 0 || spent === null) throw unbound();
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
     const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };

@@ -1167,7 +1167,7 @@ export async function exchangeCandidates(
   issuer: string,
   max: number,
   token: Buffer,
-): Promise<{ bindings: BindingRow[]; spent: boolean; policySeq: bigint | null }> {
+): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null }> {
   const { consumedTokens, serviceBindings, vaultMembers } = tablesOf(db);
   const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
   const spent = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, token));
@@ -1192,12 +1192,13 @@ export async function exchangeCandidates(
     .limit(max + 1);
   if (rows.length > max) {
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
-    return { bindings: [], spent: false, policySeq: null };
+    return { bindings: [], spent: null, policySeq: null };
   }
   const seq = rows[0]?.policySeq ?? null;
   return {
     bindings: rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row)),
-    spent: rows[0]?.spent ?? false,
+    // Null where nothing was read: no binding, so no row to read it with.
+    spent: rows[0]?.spent ?? null,
     policySeq: seq === null ? null : BigInt(seq),
   };
 }
