@@ -1,5 +1,5 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
-import type { Purpose, Refusal, SecretRef, Through, UseRecord, Vault, Via, WrappedKey } from '@coffre/core/vault';
+import { USE_METADATA_LENGTH, type Purpose, type Refusal, type SecretRef, type Through, type UseRecord, type Vault, type Via, type WrappedKey } from '@coffre/core/vault';
 
 import { AccessChanged, type Recalled } from '../accesses.ts';
 import type { AuditEntry } from '../db/audit.ts';
@@ -115,14 +115,16 @@ export async function openValues(
   return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), ...(use !== undefined && result.used === true ? { used: true as const } : {}) };
 }
 
-/** The app's entry of a use, as the vault appends it (`UnwrapInput.use`): its fields as `appendAudit` would write them. */
-export function useRecord(entry: AuditEntry): UseRecord {
-  return {
-    projectId: entry.projectId ?? null,
-    environmentId: entry.environmentId ?? null,
-    sourceIp: entry.sourceIp ?? null,
-    metadata: JSON.stringify(entry.metadata ?? {}),
-  };
+/**
+ * The app's entry of a use, as the vault appends it (`UnwrapInput.use`): its
+ * fields as `appendAudit` would write them. Undefined for one longer than
+ * the vault takes (`USE_METADATA_LENGTH`), a use naming hundreds of keys,
+ * which the app appends itself.
+ */
+export function useRecord(entry: AuditEntry): UseRecord | undefined {
+  const metadata = JSON.stringify(entry.metadata ?? {});
+  if (metadata.length > USE_METADATA_LENGTH) return undefined;
+  return { projectId: entry.projectId ?? null, environmentId: entry.environmentId ?? null, sourceIp: entry.sourceIp ?? null, metadata };
 }
 
 /**

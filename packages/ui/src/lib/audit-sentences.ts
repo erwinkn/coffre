@@ -263,6 +263,7 @@ const TEMPLATES: Record<string, Template> = {
     },
   },
   // The credential proxy's record beside the vault's read, the vault's own since 0.14.5: which credential the keys went into, where, and by which road.
+  // Like the read, it records the release: a `credential_ended` refusal of the same operation after it says the value was withheld.
   'credential.use': {
     did: ({ entry }) => (entry.metadata.purpose === 'expose' ? 'was given the values of' : 'used the credential'),
     tried: ({ entry }) => (entry.metadata.purpose === 'expose' ? 'be given the values of' : 'use the credential'),

@@ -91,6 +91,7 @@ import {
   type Settings,
   type Through,
   type UnwrapInput,
+  USE_METADATA_LENGTH,
   type Unwrapped,
   type UseRecord,
   type Wrapped,
@@ -3151,9 +3152,6 @@ function validateText(value: string): void {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/** How long the app's record of a use may be, its metadata's JSON: a credential's name and where it went, never a value. */
-const USE_METADATA_LENGTH = 16_384;
 
 /**
  * The app's `credential.use` entry, as the vault appends it beside a read

@@ -420,6 +420,13 @@ export type UnwrapInput = Correlation & Through & {
   use?: UseRecord;
 };
 
+/**
+ * The longest `UseRecord.metadata` the vault appends, in characters: room for
+ * a use naming a few hundred keys. The app appends a longer one itself, under
+ * the head, as before 0.14.5.
+ */
+export const USE_METADATA_LENGTH = 16_384;
+
 /** The app's `credential.use` entry, for the vault to append (`UnwrapInput.use`). */
 export type UseRecord = { projectId: string | null; environmentId: string | null; sourceIp: string | null; metadata: string };
 

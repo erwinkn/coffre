@@ -19,7 +19,7 @@ import {
   type KeyOperation,
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
-import { checkpointMessage, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { checkpointMessage, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
@@ -1192,9 +1192,11 @@ test("a read given the app's record of a use appends it beside its read, names i
   assert.equal(refused.ok, false);
   assert.equal((await vaultLog(w)).filter((entry) => entry.action === 'credential.use').length, 1);
   // A record that is not one is refused before anything is logged.
-  for (const bad of [{ ...use, metadata: '[1]' }, { ...use, metadata: 'x'.repeat(20_000) }, { ...use, environmentId: 'prod' }]) {
+  const before = (await vaultLog(w)).length;
+  for (const bad of [{ ...use, metadata: '[1]' }, { ...use, metadata: JSON.stringify({ note: 'x'.repeat(USE_METADATA_LENGTH) }) }, { ...use, environmentId: 'prod' }]) {
     await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'use', items, use: bad }));
   }
+  assert.equal((await vaultLog(w)).length, before, 'and nothing was appended for them');
 });
 
 // --- the KEK -------------------------------------------------------------------

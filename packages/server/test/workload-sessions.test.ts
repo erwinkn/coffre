@@ -124,10 +124,10 @@ const transport: WorkloadTransport = {
   },
 };
 
-function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: ReturnType<typeof checkPlugins> } = {}): CoffreRuntime {
+function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault'] } = {}): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN,
-    vault: deps.vault,
+    vault: options.vault ?? deps.vault,
     auth: signin({
       providers: [github({ clientId: 'a', clientSecret: 'b' })],
       workloads: {
@@ -139,7 +139,7 @@ function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: 
     auditChainKey: deps.chainKey.toString('base64'),
     ...(options.plugins === undefined ? {} : { plugins: options.plugins }),
   });
-  return createRuntime(config, deps.db, deps.vault, transport, undefined, () => gate);
+  return createRuntime(config, deps.db, options.vault ?? deps.vault, transport, undefined, () => gate);
 }
 
 before(async () => {
@@ -917,8 +917,9 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
   // Checked; then unbound before the vault is asked.
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
-  // The vault released, and logged it; the app withheld the value, and logged that, naming the binding.
-  assert.equal((await newest('vault', 1))[0]!.decision, 'allow');
+  // The vault released, and logged it with the use it was given: a use records the release, as the read does. The
+  // app withheld the value, and logged that, naming the binding, the same operation's entry after it.
+  assert.deepEqual((await newest('vault', 2)).map((entry) => `${entry.action} ${entry.decision}`), ['credential.use allow', 'secret.read allow']);
   const [withheld] = await newest('app', 1);
   assert.deepEqual([withheld!.decision, withheld!.metadata.reason, withheld!.metadata.credentialId], ['deny', 'credential_ended', `binding:${binding}`]);
 });
@@ -961,6 +962,26 @@ test('a Cloudflare binding unbound while its use waits for the head releases not
   commit();
   await unbinding;
   await assert.rejects(using, { status: 401 });
+});
+
+test('a vault older than 0.14.5, which names no use back, and a use too long for it, leave the app to log the use under the head', async () => {
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
+  // An older vault takes no record of the use: it ignores it, and names nothing back.
+  const older = new Proxy(deps.vault, {
+    get: (target, key) => key === 'unwrap'
+      ? async (input: Parameters<typeof target.unwrap>[0]) => target.unwrap({ ...input, use: undefined })
+      : Reflect.get(target, key, target),
+  });
+  await marketProd();
+  await bind('cloudflare', null, {});
+  for (const [vault, logged] of [[older, { credential: 'stripe' }], [deps.vault, { credential: 'stripe', note: 'x'.repeat(20_000) }]] as const) {
+    runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]), vault });
+    assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
+    const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged });
+    assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
+    assert.equal((await newest('vault', 1))[0]!.action, 'secret.read', 'the vault appended no use');
+    assert.equal((await newest('app', 1))[0]!.action, 'credential.use', 'the app did');
+  }
 });
 
 test('a Cloudflare binding with a tombstone, though its row was never revoked, releases nothing', async () => {
