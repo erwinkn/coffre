@@ -301,7 +301,8 @@ test("STS's refusal is the proof's, a redirect or an outage is STS unavailable, 
   const unavailable = async (answer: () => Response) => {
     sts.answer = answer;
     const outcome = await refused(good, 'issuer_unavailable');
-    assert.equal(outcome.status, 503);
+    // STS is asked afresh each time: back as soon as coffre's moments are, not in a minute.
+    assert.deepEqual([outcome.status, outcome.retryAfter], [503, undefined]);
   };
   await unavailable(() => new Response(null, { status: 307, headers: { location: 'https://evil.example/' } }));
   await unavailable(() => new Response('<ErrorResponse/>', { status: 500 }));

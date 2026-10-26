@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as hegel from '@hegeldev/hegel';
+import { CoffreError } from '@coffre/client';
 import * as gs from '@hegeldev/hegel/generators';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -458,3 +459,14 @@ test(`SASLprep keeps RFC 3454's bidi rule on right-to-left letters, punctuation 
   tc.note(JSON.stringify([...password].map((char) => char.codePointAt(0)!.toString(16))));
   assert.equal(saslprep(password), modelSaslprep(password));
 }, settings));
+
+test("the proxy's own 503 says when to ask again, and only when coffre could not answer for a moment", async () => {
+  const failing = (error: CoffreError): PluginContext => ({ ...coffre({ API_KEY: 'k' }), use: async () => { throw error; } });
+  const answer = (context: PluginContext) => credentialProxy({ cacheSeconds: 0, credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}') } } })
+    .routes!.fetch(new Request(`${PUBLIC}/use/stripe/v1/charges`, { headers: { 'x-coffre-handle': HANDLE } }), context);
+  const moment = await answer(failing(new CoffreError(503, 'unavailable', 'coffre cannot check who you are right now')));
+  assert.deepEqual([moment.status, moment.headers.get('retry-after')], [503, '5']);
+  const lasting = await answer(failing(new CoffreError(503, 'unavailable', 'the vault holds another key', 'wrong_kek')));
+  assert.deepEqual([lasting.status, lasting.headers.get('retry-after')], [503, null]);
+});
+

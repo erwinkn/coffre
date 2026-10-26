@@ -627,7 +627,8 @@ test('a key the issuer rotated in is fetched once; while the issuer cannot be re
   assert.equal((await trade(token(rsa))).status, 200);
   forgetKeys();
   const down = await trade(token(rsa));
-  assert.deepEqual([down.status, down.body.reason], [503, 'issuer_unavailable']);
+  // Its keys are not fetched again for a minute: no sooner, it says.
+  assert.deepEqual([down.status, down.body.reason, down.retryAfter], [503, 'issuer_unavailable', '60']);
 });
 
 test('removing a binding ends its credentials at once; a denied attempt changes nothing; rows put back stay dead', async () => {

@@ -3,8 +3,9 @@
 // without a good token (docs/design/mcp.md, section 4). `app.ts` routes to
 // them and checks the method.
 import { MCP_SCOPES } from '@coffre/core/mcp';
+import { isUnavailable } from '@coffre/db/dialect';
 
-import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
+import { ApiError, notFound, UNAVAILABLE, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { bearerToken } from '../auth.ts';
 import { errorResponse, jsonResponse, readLimitedJson, readLimitedText } from '../http.ts';
 import { logged } from '../logged.ts';
@@ -69,8 +70,11 @@ function oauthError(error: unknown): Response {
       ...(error.status === 429 ? { 'retry-after': '60' } : error.status === 503 ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
     });
   }
-  if (error instanceof ApiError && error.code === 'unavailable') {
-    return jsonResponse({ error: 'temporarily_unavailable', error_description: error.message }, 503, { ...NO_STORE, 'retry-after': UNAVAILABLE_RETRY_AFTER });
+  // coffre not answering for a moment, as the API says it (`toErrorBody`): a lock or a connection that gave up included.
+  if ((error instanceof ApiError && error.code === 'unavailable') || isUnavailable(error)) {
+    if (!(error instanceof ApiError)) console.error('a dependency did not answer', logged(error));
+    const passing = !(error instanceof ApiError) || error.reason === undefined;
+    return jsonResponse({ error: 'temporarily_unavailable', error_description: error instanceof ApiError ? error.message : UNAVAILABLE }, 503, passing ? { ...NO_STORE, 'retry-after': UNAVAILABLE_RETRY_AFTER } : NO_STORE);
   }
   if (error instanceof ApiError && error.code === 'bad_request') {
     return jsonResponse({ error: 'invalid_request', error_description: error.message }, 400, NO_STORE);

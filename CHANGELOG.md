@@ -59,9 +59,16 @@
   waited on gave up after 15 s), the API and the credential proxy now
   answer `Retry-After: 5`, as the app already did while it could not reach
   its database at all: a caller back sooner joins the queue it left. The
-  CLI waits at least that long before it asks again, each of its waits
-  15 s at most. The workload SDK, `coffre serve` included, waits at least
-  that long before it proves a session again. An app's own client behind the proxy, the sidecar's
+  CLI waits at least that long before it asks again (up to 10 s), each of
+  its waits 15 s at most. The workload SDK, `coffre serve` included, waits
+  at least that long before it proves a session again. MCP's OAuth
+  endpoints, a socket coffre took too long to admit, and vault-kv say it
+  too. The exchange's own 503s say 5 s where nothing makes a longer wait
+  useful: a limiter that could not count (`busy`, 60 s in 0.14.2) and STS
+  not answering an AWS proof; an issuer's keys not fetched, which coffre
+  does not ask for again within a minute, still say 60. The 503 of a
+  deployment that runs no workload gate now carries the reason `no_gate`:
+  it is configuration, and nothing asks it again. An app's own client behind the proxy, the sidecar's
   included, sees the header as coffre sent it.
 
 - **A CI run asks again when the instance cannot answer it yet.** When
