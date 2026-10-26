@@ -124,7 +124,8 @@ if (!(Math.abs(Date.now() / 1000 - timestampSent) <= 300)) throw new Unauthorize
   "dfns", "message": "<the body, base64url>", "signature": "<the header>"}}`
   answers `{"valid": true}` or `{"valid": false}`.
 - **Bounded.** A body is 64 KiB at most unless the `hmac()` says `maxBytes`,
-  up to 1 MiB; past it, 413.
+  up to 1 MiB; past it, 413, and `verify` throws: answer the provider 413
+  too, so that it does not retry a body that will never pass.
 - **Cheap.** The secret is opened once a minute per session and logged
   then, as a credential's key is: a warm `verify` is one statement and no
   vault call.

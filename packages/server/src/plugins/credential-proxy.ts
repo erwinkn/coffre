@@ -957,7 +957,7 @@ function longest(signer: Signer): number {
   return signer.kind === 'hmac' ? (signer.maxBytes ?? MESSAGE_BYTES) : MESSAGE_BYTES;
 }
 
-const sized = (bytes: number) => (bytes % 1024 === 0 ? `${bytes / 1024} KiB` : `${bytes} bytes`);
+const sized = (bytes: number) => (bytes % 1024 ** 2 === 0 ? `${bytes / 1024 ** 2} MiB` : bytes % 1024 === 0 ? `${bytes / 1024} KiB` : `${bytes} bytes`);
 
 /** A message given as base64url, as its bytes: null for anything else. Buffer's decoder, several times faster than atob's string. */
 function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {

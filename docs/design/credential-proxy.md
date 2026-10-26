@@ -1329,7 +1329,8 @@ run` calls the same `credential(name).verify` from
   2,013. `hmac(…, { maxBytes })` takes up to 1 MiB for a provider whose
   bodies run longer. coffre reads a request up to what the longest of its
   signers and verifiers takes, before it knows who asks, and refuses past
-  it with 413, before anything is opened: so the cap keeps that read far
+  it with 413, before anything is opened (the client's `verify` throws:
+  the app answers the provider 4xx, so it stops retrying): so the cap keeps that read far
   below the 16 MiB a request through a credential is read up to. The CPU
   is the body's: about 0.2 ms at 4 KiB, 3 ms at 512 KiB and 5 ms at 1 MiB
   on Node, within a Worker's 10 ms on the Free plan.
