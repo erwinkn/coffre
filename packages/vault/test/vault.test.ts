@@ -22,7 +22,7 @@ import { EVERYWHERE, type Scope } from '@coffre/core/access';
 import { checkpointMessage, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
-import { SNAPSHOT } from '@coffre/db/dialect';
+import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
 
@@ -1042,6 +1042,88 @@ test('a removal waits for a read in flight at the key service, and the next read
   const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!next.ok && next.refusal.code, 'removed');
   assert.equal(seen.unwrap, asked, 'refused before the key service is asked');
+});
+
+test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  const asked = seen.unwrap;
+  // The first read holds her row at the key service until told to answer; the second gets there all the same.
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
+  const first = w.vault.unwrap({ principal: ADA, purpose: 'run', items });
+  await reached;
+  const second = await w.vault.unwrap({ principal: ADA, purpose: 'run', items }).finally(answer);
+  assert.equal(second.ok, true, 'the second read finishes while the first is still at the key service');
+  assert.equal(seen.unwrap, asked + 2);
+  assert.equal((await first).ok, true);
+  assert.ok((await w.vault.verifyLog({})).ok);
+});
+
+for (const [change, action, code] of [['removal', 'member.remove', 'removed'], ['revocation', 'access.revoke', 'no_grant']] as const) {
+  test(`a ${change} amid a steady stream of one member's reads is not starved: it lands in turn, and no read is released after it`, postgresOnly('SQLite runs one writer at a time'), async () => {
+    // Postgres lets a share lock join those held even while a writer waits: without a queue, a change waits until
+    // the reads stop, here for good (`lockMembers`). A revocation locks two rows, its actor's and hers, in order.
+    const { keks } = service({ delayMs: 150 });
+    const w = await world({ keks });
+    const other = await w.twin();
+    await member(w, ADA, [[w.dev, 'viewer']]);
+    const secret = await w.secret(w.dev);
+    const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+    const reads: Promise<unknown>[] = [];
+    const stream = (async () => {
+      // For three seconds, a read every 40 ms, each 150 ms at the key service: three or four at a time hold her row.
+      for (const until = Date.now() + 3_000; Date.now() < until; await sleep(40)) {
+        reads.push(w.vault.unwrap({ principal: ADA, purpose: 'run', items }));
+      }
+    })();
+    await sleep(500);
+    const started = Date.now();
+    const changed = change === 'removal'
+      ? await other.remove({ actor: ROOT, principal: ADA })
+      : await other.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] });
+    const took = Date.now() - started;
+    await stream;
+    await Promise.all(reads);
+    assert.equal(changed.ok, true);
+    assert.ok(took < 1_500, `the ${change} waited ${took} ms for reads that kept coming`);
+    const log = await vaultLog(w);
+    const landed = log.find((entry) => entry.action === action)!;
+    assert.ok(log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow' && entry.seq < landed.seq), 'reads were released before it');
+    assert.ok(!log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow' && entry.seq > landed.seq), 'and none after it');
+    assert.ok(log.some((entry) => entry.action === 'secret.read' && entry.code === code && entry.seq > landed.seq), 'the reads after it are refused');
+    assert.ok((await w.vault.verifyLog({})).ok);
+  });
+}
+
+test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  // Another transaction holds the head, and keeps it.
+  const holder = await db.connect();
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holds = holder.transaction(async (tx) => {
+    await lockLogHead(tx);
+    holding();
+    await released;
+  });
+  await held;
+  const started = Date.now();
+  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error) => isUnavailable(error));
+  const took = Date.now() - started;
+  release();
+  await holds;
+  assert.ok(took >= 2_500 && took < 6_000, `the read waited ${took} ms`);
+  assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'and the next one, the head free, reads');
 });
 
 // --- the KEK -------------------------------------------------------------------

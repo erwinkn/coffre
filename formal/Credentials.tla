@@ -9,8 +9,10 @@
 (* Coffre.tla. Isolation is READ COMMITTED. Two locks matter, each held to *)
 (* the end of its transaction:                                             *)
 (*                                                                         *)
-(*   - the account's row, vault_members, FOR NO KEY UPDATE, which every    *)
-(*     vault decision about it takes first (vault store.ts, lockMembers);  *)
+(*   - the account's row, vault_members, which every vault decision about  *)
+(*     it takes first (vault store.ts, lockMembers): FOR NO KEY UPDATE, or *)
+(*     FOR SHARE for a read, which its other reads share and a change to   *)
+(*     the account waits for, queued behind a change that asked first;     *)
 (*   - the log's head, audit_chain_head, which every app transaction takes *)
 (*     first (server api/context.ts, audited) and every vault decision     *)
 (*     after the rows (vault vault.ts, #decideOnce).                       *)
@@ -89,7 +91,8 @@ VARIABLES
     \* both
     log,            \* the audit log, in seq order
     \* locks
-    rowLock,        \* the process holding the account's row, or None
+    rowLock,        \* the process holding the account's row alone, or None
+    rowShared,      \* the processes sharing it
     head,           \* the process holding the log's head, or None
     \* processes
     pc, op, l, left,
@@ -98,7 +101,7 @@ VARIABLES
     revealed        \* a record per use whose value reached its caller
 
 rows == <<binding, creds, consumed, status, gen>>
-locks == <<rowLock, head>>
+locks == <<rowLock, rowShared, head>>
 procs == <<pc, op, l, left>>
 history == <<issued, revealed>>
 vars == <<rows, log, locks, procs, history>>
@@ -152,19 +155,29 @@ Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 
 Release(p) ==
     /\ rowLock' = IF rowLock = p THEN None ELSE rowLock
+    /\ rowShared' = rowShared \ {p}
     /\ head' = IF head = p THEN None ELSE head
 
 TakeRow(p, then) ==
     /\ rowLock \in {None, p}
+    /\ rowShared \subseteq {p}
     /\ rowLock' = p
     /\ Goto(p, then)
-    /\ UNCHANGED <<rows, log, head, op, l, left, history>>
+    /\ UNCHANGED <<rows, log, rowShared, head, op, l, left, history>>
+
+\* Share the row, waiting while another holds it alone, or is about to.
+ShareRow(p, then) ==
+    /\ rowLock \in {None, p}
+    /\ ~\E q \in Procs \ {p} : pc[q] \in {"remove.lock", "restore.lock"}
+    /\ rowShared' = rowShared \cup {p}
+    /\ Goto(p, then)
+    /\ UNCHANGED <<rows, log, rowLock, head, op, l, left, history>>
 
 TakeHead(p, then) ==
     /\ head \in {None, p}
     /\ head' = p
     /\ Goto(p, then)
-    /\ UNCHANGED <<rows, log, rowLock, op, l, left, history>>
+    /\ UNCHANGED <<rows, log, rowLock, rowShared, op, l, left, history>>
 
 Read(p, then, locals) ==
     /\ Goto(p, then)
@@ -291,7 +304,7 @@ UseAccess(p) ==
           /\ Cred(l[p].cred).gen <= gen
           /\ Read(p, "use.lock", [l[p] EXCEPT !.recalled = TRUE, !.kept = Cred(l[p].cred).gen])
 
-UseLock(p) == pc[p] = "use.lock" /\ TakeRow(p, "use.head")
+UseLock(p) == pc[p] = "use.lock" /\ ShareRow(p, "use.head")
 
 UseHead(p) == pc[p] = "use.head" /\ TakeHead(p, "use.decide")
 
@@ -460,6 +473,7 @@ Init ==
     /\ gen = 0
     /\ log = <<>>
     /\ rowLock = None
+    /\ rowShared = {}
     /\ head = None
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
@@ -494,6 +508,8 @@ TypeOK ==
     /\ status \in {"active", "removed"}
     /\ consumed \subseteq IdTokens
     /\ rowLock \in Procs \cup {None}
+    /\ rowShared \subseteq Procs
+    /\ rowLock # None => rowShared \subseteq {rowLock}
     /\ head \in Procs \cup {None}
 
 \* An ID token buys one credential, however many runs present it at once.

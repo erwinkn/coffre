@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **Upgrading to 0.14.3, in short.** One migration, `0019_backup_role`,
+  Postgres only, which adds the group `coffre_backup` and its read grants:
+  the release before never meets them. It makes a role, so the login that
+  runs `coffre migrate` needs `CREATEROLE` (or to be a superuser), unless
+  `coffre_backup` exists already and that login holds it `WITH ADMIN`
+  (below); without either the migration fails, saying what to run, and
+  changes nothing. Check before you deploy, as the migrating login: `SELECT
+  rolsuper OR rolcreaterole FROM pg_roles WHERE rolname = current_user`.
+  Nothing to change in your config.
+  Deploy the vault Worker before the app, as [deploy.md](docs/deploy.md)
+  says, and keep your Hyperdrive limits. The fix this release is for: one
+  member's reads no longer queue behind each other on their own row, which
+  failed a busy service's `/use` and reveals with 503 after 15 s. It also
+  brings a credential proxy that opens a lapsing entry once, not once per
+  request; a CLI and Action that ask again on 503; `verify` and `hmac()`
+  for inbound webhooks; and backups as a login of their own, with `coffre
+  backup`, `coffre restore` and `coffre verify backup`.
+
+- **One member's reads no longer queue behind each other.** Every vault
+  decision took its member's row `FOR NO KEY UPDATE`, which reads did too:
+  a service reading values eight times a second as one principal, through
+  `/use` or a reveal, waited on its own row, each read holding its
+  database connection, until the lock timeout failed it after 15 s with
+  503 `unavailable`, as on 2026-10-26. A read (`unwrap`, `wrap`, `rewrap`)
+  changes no member and now takes the row `FOR SHARE`: one member's reads
+  decide side by side, and a revocation, removal, grant change or key
+  rotation still waits for a read already deciding and fences the next.
+  Postgres lets a share lock join those held even while a change waits for
+  them, so each row now comes with an advisory lock on its principal, in
+  the same statement, which queues: a steady stream of reads cannot hold a
+  removal off. Each statement of a read's decision now runs at most 3 s, a
+  wait for the log's head included, then fails as 503 `unavailable`, which
+  the CLI and the Action ask again; a change still waits up to 15 s for
+  each lock, and so does the entry of a refused read.
+  The bulk limit is counted under the log's head, exact as before. No
+  query is added. The log's head is now the queue under heavy load from
+  one member: with a key service and Hyperdrive far from the database,
+  some reads of a long burst fail fast rather than all of them slowly.
+  - **Upgrading:** no migration of its own. Deploy the vault before the
+    app, as always; keep Hyperdrive's connection limit where it is. While
+    instances of the release before still run, their changes to a member
+    take no place in the queue, and a stream of that member's reads can
+    hold one off until its 15 s bound: a few 503s during the rollout, gone
+    once it completes. Afterwards too, a change to a member waits for their
+    reads at the key service, 5 s at most; their reads that arrive
+    meanwhile wait behind it, and fail as 503 after 3 s if the key service
+    is that slow.
+
 - **Backups need not hold the owner's password.** The new group
   `coffre_backup` reads every row and writes none: no insert, update,
   delete or truncate, no `CREATE` or `TEMPORARY`, no function that writes as

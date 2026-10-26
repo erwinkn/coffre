@@ -68,6 +68,22 @@ MembersBudget == [p \in MembersProcs |-> IF p = "rotator" THEN 1 ELSE 2]
 MembersGrants == {[who |-> "ada", at |-> "env"]}
 
 -----------------------------------------------------------------------------
+(* Sharing: a member reads and wraps in two requests at once, each sharing
+   their row with the other, while an owner revokes their grant, gives them
+   another, or removes them. *)
+
+SharingMembers == {"ada", "olga"}
+SharingRank == [m \in SharingMembers |-> AllRanks[m]]
+SharingOwners == {"olga"}
+SharingProcs == {"reader1", "reader2", "admin"}
+SharingOps == [p \in SharingProcs |->
+    IF p = "admin"
+      THEN {Op("remove", "olga", "ada", None), Op("revoke", "olga", "ada", "env"), Op("grant", "olga", "ada", "proj")}
+      ELSE {Op("read", "ada", "ada", "env"), Op("write", "ada", "ada", "env")}]
+SharingBudget == [p \in SharingProcs |-> 2]
+SharingGrants == {[who |-> "ada", at |-> "env"]}
+
+-----------------------------------------------------------------------------
 (* Lock order: two owners change each other's grants while the vault rotates
    its key, which locks every member, and a member reads. *)
 

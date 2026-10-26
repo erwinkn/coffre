@@ -39,11 +39,12 @@ export function engineOf(db: Queryable): Engine {
  *
  * `no key update` is for rows others reference by foreign key: it keeps out
  * every other writer of the row, but not an insert that points at it.
+ * `share` keeps out every writer, but not another `share`.
  */
-export function forUpdate<Query extends { for: (strength: 'update' | 'no key update') => unknown }>(
+export function forUpdate<Query extends { for: (strength: 'update' | 'no key update' | 'share') => unknown }>(
   db: Queryable,
   query: Query,
-  strength: 'update' | 'no key update' = 'update',
+  strength: 'update' | 'no key update' | 'share' = 'update',
 ): ReturnType<Query['for']> {
   if (engineOf(db) === 'sqlite') return query as ReturnType<Query['for']>;
   return query.for(strength) as ReturnType<Query['for']>;
