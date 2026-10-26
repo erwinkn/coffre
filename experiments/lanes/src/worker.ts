@@ -4,6 +4,7 @@ import { seal, sealAll, type Fields } from './chain.ts';
 import { Lane, type Env as LaneEnv, type UseResult } from './lane.ts';
 import { Shard, type ShardAnswer, type ShardEnv } from './shard.ts';
 import { keysFrom, memberMac, refusal, unwrap, type Grant, type Keys, type Member } from './model.ts';
+import * as one from './one.ts';
 import * as simple from './simple.ts';
 import {
   appendChain, chainSnapshotQuery, LANES_SNAPSHOT, LOCK_HEAD, lockLane, readHead, snapshot, UNDER_HEAD, type ChainRead, type Head,
@@ -34,6 +35,11 @@ type Env = LaneEnv & ShardEnv & { HD_CONTROL?: Hyperdrive };
  *   simple W201's Postgres-only path (simple.ts): GET /simple/<head|seq|cas>/use,
  *          one read and one append; POST /simple/<head|seq>/revoke and /grant.
  *          named=1 names (prepares) the hot path's statements.
+ *   one    W208's one-call path (one.ts): GET /simple/one/use, one call;
+ *          POST /simple/one/revoke and /grant. cap=<n> refuses a use at once
+ *          (503) while the isolate has n in flight; deadline=<ms> answers 503
+ *          a use not done by then, and its call does nothing if it gets its
+ *          lock later. cover=<ms>: repeats ride on this isolate's covers.
  *
  * POST /revoke?p=&mode=lanes|chain takes a principal's grant away, and
  * POST /grant gives it back, each a control decision.
@@ -292,6 +298,11 @@ async function leaderDecision(env: Env, vault: Client, principal: string, reques
 
 /** This isolate's calls in flight to each shard: a number, settled, never a promise another call awaits. */
 const inFlight = new Map<number, number>();
+/** `one`: this isolate's uses with a call in flight, answered or not. */
+let oneInFlight = 0;
+/** `one`: this isolate's covers, for cover=<ms>. */
+const oneCovers: one.Covers = { window: 0, held: new Map() };
+const LATE = Symbol('late');
 const ISOLATE_IN_FLIGHT = 64;
 
 /** The isolate's value cache: a value, and the control lane's head it was opened at. */
@@ -362,9 +373,12 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const principal = url.searchParams.get('p') ?? 'svc-0';
-    const requestId = crypto.randomUUID();
+    // r=: the load generator's id for the request, to hold its answer to the log's replay (verify-one.ts).
+    const requestId = url.searchParams.get('r') ?? crypto.randomUUID();
     const meter = new Meter();
     const clients: Client[] = [];
+    // Calls still running after their request was answered (a deadline): their connection closes after them.
+    const lingering: Promise<unknown>[] = [];
     const open = async (hyperdrive?: Hyperdrive) => {
       const client = meter.wrap(await connect(env, hyperdrive));
       clients.push(client);
@@ -465,12 +479,44 @@ export default {
           return Response.json(await Promise.all(Array.from({ length: shards }, (_, i) => stub(i).stats())));
         }
       }
+      if (route === 'simple' && protocol === 'one') {
+        const [, , , action] = url.pathname.split('/');
+        one.nameStatements(url.searchParams.get('named') === '1');
+        if (action === 'use') {
+          const cap = Number(url.searchParams.get('cap') ?? '0');
+          // Admission control, per isolate: refused at once, no connection opened.
+          if (cap > 0 && oneInFlight >= cap) return answer(503, { ok: false, code: 'overloaded' }, meter, { 'retry-after': '1' });
+          const wait = url.searchParams.has('deadline') ? Number(url.searchParams.get('deadline')) : undefined;
+          const deadline = wait === undefined ? undefined : Date.now() + wait;
+          oneInFlight += 1;
+          const covers = url.searchParams.has('cover') ? Object.assign(oneCovers, { window: Number(url.searchParams.get('cover')) }) : undefined;
+          const call = (async () => one.use(await open(), keysOf(env), { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId }, deadline, covers))();
+          const done = call.finally(() => { oneInFlight -= 1; });
+          const result = wait === undefined ? await done : await Promise.race([done, sleep(wait).then((): typeof LATE => LATE)]);
+          if (result === LATE) {
+            lingering.push(done.catch(() => {}));
+            return answer(503, { ok: false, code: 'deadline' }, meter, { 'retry-after': '1' });
+          }
+          if (result.ok) return answer(200, { ok: true, bytes: result.value.length, seq: result.number, ...(result.covered ? { code: 'covered' } : {}) }, meter);
+          if (result.retryAfter !== undefined) return answer(503, { ok: false, code: result.code }, meter, { 'retry-after': String(result.retryAfter) });
+          return answer(403, { ok: false, code: result.code, seq: result.number }, meter);
+        }
+        if (action === 'revoke' || action === 'grant') {
+          // Changes on a Hyperdrive config of their own (HD_CONTROL, when bound and not shared=1).
+          const control = await open(env.HD_CONTROL === undefined || url.searchParams.get('shared') === '1' ? env.HD : env.HD_CONTROL);
+          const op: one.Op = action === 'revoke' ? { op: 'access.revoke', environment: ENVIRONMENT } : { op: 'access.grant', environment: ENVIRONMENT, role: 'viewer' };
+          const done = await one.change(control, keysOf(env), principal, op);
+          return answer(200, { ok: true, seq: done.number, tries: done.tries, at: Date.now() }, meter);
+        }
+      }
       if (route === 'simple') {
         const [, , , action] = url.pathname.split('/');
         const variant = protocol as simple.Variant;
         // A setting of the isolate, not of the request: every request of a run asks the same, so it holds for the run.
         simple.nameStatements(url.searchParams.get('named') === '1');
-        const db = action === 'use' || env.HD_CONTROL === undefined ? await open() : (null as unknown as Client);
+        // shared=1: a change on the uses' own Hyperdrive config, to measure what a config of its own saves.
+        const shared = env.HD_CONTROL === undefined || url.searchParams.get('shared') === '1';
+        const db = action === 'use' || shared ? await open() : (null as unknown as Client);
         if (action === 'use') {
           const result = await simple.use(db, keysOf(env), variant, { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId });
           if (result.ok) return answer(200, { ok: true, bytes: result.value.length, seq: result.seq, tries: result.tries }, meter);
@@ -479,7 +525,7 @@ export default {
         }
         if (action === 'revoke' || action === 'grant') {
           // Changes on a pool of their own (HD_CONTROL, when bound): a revocation never queues behind uses for a connection.
-          const control = env.HD_CONTROL === undefined ? db : await open(env.HD_CONTROL);
+          const control = shared ? db : await open(env.HD_CONTROL);
           const done = await simple.change(control, keysOf(env), variant === 'seq' ? 'seq' : 'head', principal, action === 'grant', ENVIRONMENT);
           return answer(200, { ok: true, ...done, at: Date.now() }, meter);
         }
@@ -534,7 +580,7 @@ export default {
       const busy = code === '55P03' || code === '57014' || code === '53300';
       return answer(busy ? 503 : 500, { ok: false, code: code ?? 'error', message: String((error as Error).message).slice(0, 200) }, meter, busy ? { 'retry-after': '1' } : {});
     } finally {
-      ctx.waitUntil(Promise.all(clients.map((client) => client.end().catch(() => {}))));
+      ctx.waitUntil(Promise.allSettled(lingering).then(() => Promise.all(clients.map((client) => client.end().catch(() => {})))));
     }
   },
 } satisfies ExportedHandler<Env>;

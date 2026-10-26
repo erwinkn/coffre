@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Model-checks 0.15's simple hot path, formal/HotPath.tla, with TLC (W201): a
 # use as one read and one append statement, the revision fence, changes, and
-# ("seq") the checkpoints that close the numbers they sign. As
+# ("seq") the checkpoints that close the numbers they sign; and its one-call
+# variant, formal/HotPathOne.tla (W208): no revision, one call per use. As
 # scripts/formal-shards.sh: every scenario must hold, then each runs again with
 # one of the design's protections turned off, and must fail on the invariant
 # it keeps.
@@ -35,6 +36,25 @@ REMOVALS=(
   "HotPathSeq ReleaseAfterCommit EveryReleaseAudited"
   "HotPathSeq CheckpointLocks CheckpointsHold"
   "HotPathSeq FloorChecked CheckpointsHold"
+  "HotPathOne UseLocks TotalOrder"
+  "HotPathOne UseLocks NothingAllowedAfterAnswer"
+  "HotPathOne StatementSnapshot TotalOrder"
+  "HotPathOne StatementSnapshot ReplayAgrees"
+  "HotPathOne StatementSnapshot NothingAllowedAfterAnswer"
+  "HotPathOne UseNumberUnderLock TotalOrder"
+  "HotPathOne UseNumberUnderLock CheckpointsHold"
+  "HotPathOne ChangeLocks TotalOrder"
+  "HotPathOne ChangeLocks NothingAllowedAfterAnswer"
+  "HotPathOne ChangeNumberUnderLock TotalOrder"
+  "HotPathOne LockToCommit TotalOrder"
+  "HotPathOne LockToCommit NothingAllowedAfterAnswer"
+  "HotPathOne CommitBeforeAnswer NothingAllowedAfterAnswer"
+  "HotPathOne ReleaseAfterCommit DurableBeforeRelease"
+  "HotPathOne SyncCommit DurableBeforeRelease"
+  "HotPathOne SyncCommit NothingAllowedAfterAnswer"
+  "HotPathOne CheckpointLocks CheckpointsHold"
+  "HotPathOneCovers CoverChecksChanges RepeatsAreTheirCover"
+  "HotPathOneCovers UseLocks RepeatsAreTheirCover"
 )
 
 LONG=()

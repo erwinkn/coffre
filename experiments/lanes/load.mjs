@@ -13,6 +13,8 @@
 //   node experiments/lanes/load.mjs --base https://… --path /use/v2 [--rate 100] [--seconds 30] [--principals 50]
 import http from 'node:http';
 import https from 'node:https';
+import { randomUUID } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 const { values } = parseArgs({
@@ -30,6 +32,8 @@ const { values } = parseArgs({
     'revoke-path': { type: 'string' },
     'grant-path': { type: 'string' },
     timeout: { type: 'string', default: '20000' },
+    // W208: each use's answer, as JSON lines keyed by its request id (sent as r=), for verify-one.ts.
+    outcomes: { type: 'string' },
     label: { type: 'string', default: '' },
   },
 });
@@ -83,11 +87,13 @@ let n = 0;
 let next = 0;
 const revokeAt = values['revoke-at'] === undefined ? null : Number(values['revoke-at']) * 1000;
 const sep = values.path.includes('?') ? '&' : '?';
+const RUN = randomUUID().slice(0, 8);
+const withP = (path) => `${path}${path.includes('?') ? '&' : '?'}p=svc-0`;
 while (next < SECONDS * 1000) {
   const wait = start + next - performance.now();
   if (wait > 0) await sleep(wait);
   if (revokeAt !== null && revocation === null && performance.now() - start >= revokeAt) {
-    revocation = call('POST', values['revoke-path'] === undefined ? `/revoke?p=svc-0&mode=${values.mode}` : `${values['revoke-path']}?p=svc-0`).then((r) => {
+    revocation = call('POST', values['revoke-path'] === undefined ? `/revoke?p=svc-0&mode=${values.mode}` : withP(values['revoke-path'])).then((r) => {
       revokedAt = performance.now() - start;
       return r;
     });
@@ -95,7 +101,8 @@ while (next < SECONDS * 1000) {
   const principal = `svc-${OFFSET + (n % PRINCIPALS)}`;
   const sent = performance.now() - start;
   n += 1;
-  pending.push(call('GET', `${values.path}${sep}p=${principal}${values.query}`).then((r) => runs.push({ ...r, sent, principal })));
+  const requestId = `${RUN}-${n}`;
+  pending.push(call('GET', `${values.path}${sep}p=${principal}${values.query}&r=${requestId}`).then((r) => runs.push({ ...r, sent, principal, requestId })));
   next += -Math.log(1 - Math.random()) * (1000 / RATE);
 }
 await Promise.all(pending);
@@ -121,11 +128,13 @@ const line = [
   `max ${(lat.at(-1) ?? NaN).toFixed(0).padStart(5)} ms`,
   `worker p50/p99 ${percentile(server, 50).toFixed(0)}/${percentile(server, 99).toFixed(0)}`,
   `stmts ${statements.toFixed(1)}`,
+  ...(runs.some((r) => r.code === 'covered') ? [`entries/use ${(1 - runs.filter((r) => r.code === 'covered').length / runs.length).toFixed(3)}`] : []),
   `1st/5th p50 ${percentile(fifth(0), 50).toFixed(0)}/${percentile(fifth((SECONDS * 4000) / 5), 50).toFixed(0)}`,
   `failed ${runs.length - ok.length}${failed.size === 0 ? '' : ` ${JSON.stringify(Object.fromEntries(failed))}`}`,
   refusedFast.length === 0 ? '' : `503 p99 ${percentile(refusedFast, 99).toFixed(0)} ms`,
 ].join('  ');
 console.log(line);
+if (values.outcomes !== undefined) writeFileSync(values.outcomes, runs.map((r) => JSON.stringify({ requestId: r.requestId, status: r.status, code: r.code ?? (r.status === 200 ? 'ok' : ''), ...(r.code === 'covered' ? { covered: true, number: JSON.parse(r.body).seq } : {}) })).join('\n') + '\n');
 // Each statement's time at the Worker, where it says (s1, s2: the first and second statement).
 const steps = ['s1', 's2', 's3'].map((name) => [name, ok.map((r) => r.timing[name]).filter((v) => v !== undefined && !Number.isNaN(v)).sort((a, b) => a - b)]).filter(([, v]) => v.length > 0);
 const mean = (v) => v.reduce((a, b) => a + b, 0) / v.length;
@@ -136,6 +145,6 @@ if (revocation !== null) {
   const after = runs.filter((x) => x.principal === 'svc-0' && revokedAt !== null && x.sent > revokedAt);
   const violations = after.filter((x) => x.status === 200);
   console.log(`  revocation: ${r.status} at ${revokedAt?.toFixed(0)} ms (took ${r.ms.toFixed(0)} ms); svc-0 uses sent after it: ${after.length}, allowed: ${violations.length} (must be 0); refused: ${JSON.stringify(Object.fromEntries(after.filter((x) => x.status !== 200).reduce((m, x) => m.set(`${x.status} ${x.code}`, (m.get(`${x.status} ${x.code}`) ?? 0) + 1), new Map())))}`);
-  await call('POST', values['grant-path'] === undefined ? `/grant?p=svc-0&mode=${values.mode}` : `${values['grant-path']}?p=svc-0`);
+  await call('POST', values['grant-path'] === undefined ? `/grant?p=svc-0&mode=${values.mode}` : withP(values['grant-path']));
 }
 agent.destroy();

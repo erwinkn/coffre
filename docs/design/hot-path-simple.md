@@ -11,6 +11,10 @@ for:
 - overload refused fast;
 - a cost per request that stays flat as the log grows (R48).
 
+**Follow-up (W208):** [`hot-path-one.md`](hot-path-one.md) makes a use one
+round trip and drops the revision: `seq`'s read and append become one
+plpgsql call under the same shared lock, with every number taken under it.
+
 It is measured against today (0.14, "v0") and against W194's shards
 (`docs/design/hot-path.md` on [PR #350](https://github.com/erwinkn/coffre/pull/350), "v5"), on the same rig, the same day.
 
