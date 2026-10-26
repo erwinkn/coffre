@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **One member's reads no longer queue behind each other.** Every vault
+  decision took its member's row `FOR NO KEY UPDATE`, which reads did too:
+  a service reading values eight times a second as one principal, through
+  `/use` or a reveal, waited on its own row, each read holding its
+  database connection, until the lock timeout failed it after 15 s with
+  503 `unavailable`, as on 2026-10-26. A read (`unwrap`, `wrap`, `rewrap`)
+  changes no member and now takes the row `FOR SHARE`: one member's reads
+  decide side by side, and a revocation, removal, grant change or key
+  rotation still waits for a read already deciding and fences the next.
+  Postgres lets a share lock join those held even while a change waits for
+  them, so each row now comes with an advisory lock on its principal, in
+  the same statement, which queues: a steady stream of reads cannot hold a
+  removal off. Each statement of a read now runs at most 3 s, a wait for
+  the log's head included, then fails as 503 `unavailable`, which the CLI
+  and the Action ask again; a change still waits up to 15 s for each lock.
+  The bulk limit is counted under the log's head, exact as before. No
+  query is added. The log's head is now the queue under heavy load from
+  one member: with a key service and Hyperdrive far from the database,
+  some reads of a long burst fail fast rather than all of them slowly.
+  - **Upgrading:** no migration of its own. Deploy the vault before the
+    app, as always; keep Hyperdrive's connection limit where it is.
+
 - **Backups need not hold the owner's password.** The new group
   `coffre_backup` reads every row and writes none: no insert, update,
   delete or truncate, no `CREATE` or `TEMPORARY`, no function that writes as

@@ -203,6 +203,14 @@ const KEY_BUDGET_MS = 5_000;
 /** How long a decision waits for a lock: above the key budget, so a removal outwaits a read in flight. */
 const LOCK_TIMEOUT_MS = 15_000;
 
+/**
+ * How long a read's statement runs, a wait for a lock included: a read waits
+ * only for what changes its reader, and for the log's head. Longer is a
+ * queue, which holds the read's connection while it waits; refused, it
+ * fails as unavailable at once, and its caller tries again later.
+ */
+const READ_LOCK_TIMEOUT_MS = 3_000;
+
 /** A member: `user:<email>` or `token:<name>`. */
 const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 
@@ -392,6 +400,13 @@ type Decision = {
  */
 type Reads = Pick<Asked, 'environments' | 'references'> & { released?: { principal: string; keys: readonly string[] } };
 
+/**
+ * How a decision runs: `late` takes the log's head only to append, `asked`
+ * is what it reads besides its members, and `reads` says it changes none
+ * of them (`#decide`).
+ */
+type How = { late?: boolean; asked?: Reads; reads?: boolean };
+
 /** The actions of the entries the vault writes about keys. */
 type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
 
@@ -497,19 +512,21 @@ class VaultService implements Vault {
    * commits: no decision acts on a policy read before it. A key operation
    * alone takes the head later (`late`), once its key service has answered,
    * which it must not wait on holding it, and decides again then (`#keys`).
+   * A read (`reads`) changes no member: it takes their rows shared, so
+   * that one member's reads decide side by side (`lockMembers`).
    */
-  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, late = false, asked: Reads = {}): Promise<Outcome<T>> {
+  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How = {}): Promise<Outcome<T>> {
     const superseded = await this.#settled();
     if (superseded !== null) return { ok: false, refusal: refusal('wrong_kek', superseded) };
-    return this.#decideNow(principals, decide, late, asked);
+    return this.#decideNow(principals, decide, how);
   }
 
   /** `#decide`, once the vault is settled. */
-  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, late = false, asked: Reads = {}): Promise<Outcome<T>> {
+  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How = {}): Promise<Outcome<T>> {
     const reports: NewEntry[] = [];
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.#decideOnce(principals, decide, reports, late, asked);
+        return await this.#decideOnce(principals, decide, reports, how);
       } catch (error) {
         // A member who had no row when this decision locked theirs, and has
         // one now: another decision admitted them meanwhile. Again, with it.
@@ -519,11 +536,12 @@ class VaultService implements Vault {
     }
   }
 
-  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], late: boolean, asked: Reads): Promise<Outcome<T>> {
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false }: How): Promise<Outcome<T>> {
+    const timeout = shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS;
     try {
       const result = await this.#db.transaction(async (tx) => {
-        await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
-        const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
+        await store.boundLockWaits(tx, timeout, shared);
+        const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals, shared);
         // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
         const reads = await this.#snapshot(tx, principals, asked, !late);
         const d: Decision = {
@@ -547,9 +565,10 @@ class VaultService implements Vault {
           for (const then of d.after) then((entry) => seqs.get(entry)!);
         }
         for (const write of d.writes) await write(at);
-        for (const principal of new Set([...d.touched, ...accessSeq.keys()])) {
-          await this.#seal(d, principal, accessSeq.get(principal));
-        }
+        const sealing = new Set([...d.touched, ...accessSeq.keys()]);
+        // Under a share lock, a write to the row would wait for every other read holding it, and they for it.
+        if (shared && sealing.size > 0) throw new Error('a read changes no member, and seals no row');
+        for (const principal of sealing) await this.#seal(d, principal, accessSeq.get(principal));
         return result;
       });
       this.#reported(reports);
@@ -559,7 +578,7 @@ class VaultService implements Vault {
       const entries = [...reports, ...readsByPlace(error.entries)];
       if (entries.length > 0) {
         await this.#db.transaction(async (tx) => {
-          await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+          await store.boundLockWaits(tx, timeout, shared);
           await this.#append(tx, entries);
         });
       }
@@ -1148,7 +1167,7 @@ class VaultService implements Vault {
         if (this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
       }
       throw new Refused(refusal(code, message), entries);
-    });
+    }, { reads: true });
   }
 
   /**
@@ -1299,12 +1318,13 @@ class VaultService implements Vault {
           }),
         }], [], d.reads);
         return { seq: appended.seqStart };
-      }, false, reads);
+      }, { asked: reads, reads: true });
       if (!intent.ok) return intent;
       intentSeq = intent.seq;
     }
 
-    // Under the reader's row: the check, the key operations, and their outcome. With a key in memory, under the
+    // Under the reader's row, which their other reads share and a change to them waits for: the check, the key
+    // operations, and their outcome. With a key in memory, under the
     // log's head too, from the start (`#decideOnce`): what the check read stands until the commit, as every change it
     // reads appends under the head, and the head waits on nothing slow. With a key service, which nothing may wait on
     // holding the head, the head is taken once the keys are open, and what the check read is read again under it.
@@ -1377,14 +1397,16 @@ class VaultService implements Vault {
       } finally {
         for (const value of done) value.wipe();
       }
-    }, late, reads);
+    }, { late, asked: reads, reads: true });
   }
 
   /**
    * Whether this read's keys would take the reader past the bulk limit: the
    * distinct keys released to them in the window, these among them. A key
    * read again exposes nothing new, so it counts once, whatever its version.
-   * Counted under their row's lock, so exactly (`Reads`).
+   * Counted under the log's head, which every release appends under, so
+   * exactly: one reader's reads decide side by side under their row, and
+   * each counts the others' releases again once it holds the head (`#keys`).
    */
   #overBulkLimit(d: Decision): boolean {
     return d.reads.released > this.#config.bulkLimit.count;

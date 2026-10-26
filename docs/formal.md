@@ -66,7 +66,7 @@ models' are [below](#credentials-issuing-and-the-bulk-limit).
 | Renaming, archiving or restoring a key resolves its environment again under the head (`patchSecret`, `checkEnvironment`) | a key renamed in a deleted place, its tombstone's names changed (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
 | Sign-in re-reads the member's generation under the head (`#stillMember`) | a credential issued at a generation a removal had moved past (`CredentialsAtCurrentGeneration`) | |
 | Member rows are locked in principal order (`lockMembers`) | two decisions waiting on each other (`NoWaitCycle`) | |
-| A read decides under the reader's row, which a revocation or a removal locks too (`#keys`, through `#decide`) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`) | |
+| A read decides under the reader's row, shared with their other reads, which a revocation or a removal waits for (`#keys`, through `#decide`, `reads`; `lockMembers`, `FOR SHARE`, not `KEY SHARE`, which they would not wait for) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`, in `Members` and `Sharing`) | |
 | A read through a reference checks again, under the head, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
 | Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
@@ -164,11 +164,17 @@ Traces are shortened here; the script prints every step.
   [single-database.md](design/single-database.md), rule 4). So the model
   takes the lock and the reads in one step, or the lock and then the reads.
 - **Locks.** Two kinds, each held to the end of its transaction:
-  - a member's row, taken one row at a time, in principal order;
+  - a member's row, taken one row at a time, in principal order: alone,
+    or shared by a read or a wrap with others like it;
   - the log's head.
 
   A process whose next step takes a lock that another holds simply cannot
-  take it until that lock is released: that is the wait.
+  take it until that lock is released: that is the wait. A share lock also
+  waits for a process about to take the row alone, as the advisory lock
+  each row comes with queues it (`lockMembers`). That the queue keeps a
+  removal from waiting for ever behind a stream of reads is a matter of
+  how long, which the model's bounded runs do not check: the test `a
+  removal amid a steady stream of one member's reads is not starved` does.
 - **Requests.** Each is a process, which runs a bounded number of
   operations, choosing each from its set:
   - read a value, or write one;
@@ -186,7 +192,7 @@ Traces are shortened here; the script prints every step.
   steps:
   - the app resolves the path outside any transaction;
   - the vault reads the version, unlocked;
-  - the vault locks the reader's row and checks their standing and the place;
+  - the vault shares the reader's row and checks their standing and the place;
   - it takes the head, appends `secret.read` and commits;
   - the app decrypts.
 
@@ -210,6 +216,7 @@ Traces are shortened here; the script prints every step.
 | `Deletion` | One owner deletes a project or an environment, twice. Another grants, revokes, restores or renames, twice | 22 thousand |
 | `Reading` | A place is archived, then deleted. Meanwhile an Owner, a holder of an instance role and a holder of a project grant read and write there, and an owner adds an environment or renames a key, twice | 19 thousand |
 | `Members` | A member signs in, reads and writes, while an owner removes them or changes their grants, and the vault rotates its key | 249 thousand |
+| `Sharing` | A member reads and wraps in two requests at once, each sharing their row, while an owner revokes their grant, gives them another, or removes them | 1.4 million |
 | `Locks` | Two owners change each other's grants and remove a member, while the vault rotates its key, which locks every member's row | 15 thousand |
 | `Mixed` | Two owners run nearly every operation on places and grants, while a member reads, writes, signs in or rotates | 1 million |
 | `References` | A member reads through a reference while an owner breaks it, makes it again, or revokes or removes the reader, and either place is archived, then deleted | 113 thousand |
@@ -226,8 +233,8 @@ reference to that secret in `References`, and none yet elsewhere.
 
 - **App rows.** Each is locked only under the head, which every app
   transaction takes first (`audited`), so they never decide who waits.
-  Foreign-key share locks are compatible with `FOR NO KEY UPDATE` and are
-  left out too.
+  Foreign-key share locks (`KEY SHARE`) are compatible with `FOR NO KEY
+  UPDATE` and with `FOR SHARE`, and are left out too.
 - **Refusal entries.** A refusal rolls back and appends its entries in a
   transaction that takes the head alone. It can wait for nobody and decides
   nothing, so it is left out.
@@ -359,8 +366,8 @@ active to the vault too, at a generation the token was not issued at.
   3. owner     RevokeHead        revoke cred tok            -> revoke.commit   head none -> owner
   5. reader    UseVerify         use cred tok               -> use.access
   6. owner     RevokeCommit      revoke cred tok            -> idle            log +token.revoke cred <<tok, 0>> gen 0 (owner); head owner -> none
-  8. reader    UseLock           use cred tok               -> use.head        rowLock none -> reader
- 10. reader    UseDecide         use cred tok               -> use.fence       log +secret.read cred <<tok, 0>> gen 0 (reader); rowLock reader -> none; head reader -> none
+  8. reader    UseLock           use cred tok               -> use.head        rowShared +reader
+ 10. reader    UseDecide         use cred tok               -> use.fence       log +secret.read cred <<tok, 0>> gen 0 (reader); rowShared -reader; head reader -> none
  12. reader    UseAnswer         use cred tok               -> idle
 ```
 
@@ -416,7 +423,7 @@ those it would release (`snapshot.postgres.ts`).
 
 - **With a local key**, the vault takes the head in the statement that
   counts, right after the row.
-- **With a key service**, it counts under the row, opens the keys, then
+- **With a key service**, it counts without the head, opens the keys, then
   counts again in the statement that takes the head.
 - **Either way**, that last count is the decision, at its statement's
   clock, which stamps the entries; the commit, and the keys handed over,
@@ -424,7 +431,7 @@ those it would release (`snapshot.postgres.ts`).
 
 | Protection, in the code | Turned off, TLC finds |
 |---|---|
-| A read decides under the reader's row (`lockMembers`), and with a key service counts again under the head (`#keys`, `late`): each covers for the other | two reads, each counted before the other's entries, together past the limit (`CapHolds`) |
+| With a key service, a read counts again under the head (`#keys`, `late`): the reader's row, which their reads share, orders none of them | two reads, each counted before the other's entries, together past the limit (`CapHolds`) |
 | The count takes in the keys the read would release | one read past the limit on its own (`CapHolds`) |
 | The count is the principal's, all their credentials' together | two credentials of one principal each up to the limit (`CapHolds`) |
 | The entries are stamped with the clock of the statement that counted last | keys released later than their entries say, which leave the window early (`CapHolds`) |

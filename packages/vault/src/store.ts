@@ -53,10 +53,18 @@ export { newestVaultEntries } from '@coffre/db/log';
 
 /**
  * On Postgres, fail a lock wait in this transaction after `ms`, rather than
- * wait for ever behind a transaction that never ends.
+ * wait for ever behind a transaction that never ends; with `statements`,
+ * any statement that takes longer, too. A queue for a row each holder
+ * updates, as the log's head, is no one wait: a waiter follows each update
+ * to the row's new version and waits again, its lock's clock started over,
+ * so only the statement's own bound ends it.
  */
-export async function boundLockWaits(tx: Transaction, ms: number): Promise<void> {
-  if (engineOf(tx) === 'postgres') await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${Math.trunc(ms)}`));
+export async function boundLockWaits(tx: Transaction, ms: number, statements = false): Promise<void> {
+  if (engineOf(tx) !== 'postgres') return;
+  const bound = String(Math.trunc(ms));
+  await tx.execute(statements
+    ? sql`SELECT set_config('lock_timeout', ${bound}, true), set_config('statement_timeout', ${bound}, true)`
+    : sql.raw(`SET LOCAL lock_timeout = ${bound}`));
 }
 
 /** The database's clock, now. */
@@ -136,21 +144,41 @@ export async function instanceOwners(db: Queryable): Promise<Member[]> {
  * Lock these members' rows for the rest of the transaction, in one order
  * everywhere, and read them: those that have none are not in the map. Every
  * decision about a member takes its row first, so two of them, from any
- * process, never interleave.
+ * process, never interleave; but `shared`, for a decision that writes no
+ * member's row, as a read, takes them as other such decisions do, side by
+ * side, and only what changes the member waits for it, and it for that.
+ *
+ * Postgres lets a share lock join those already held even while a writer
+ * waits for them, so a steady stream of one member's reads would hold a
+ * removal off for ever. So each row comes with an advisory lock on its
+ * principal, which the lock manager queues in order: a read asked after a
+ * writer waits behind it. The same statement takes it, then the row, one
+ * principal after another.
  */
-export async function lockMembers(tx: Transaction, principals: readonly string[]): Promise<Map<string, Member>> {
+export async function lockMembers(tx: Transaction, principals: readonly string[], shared = false): Promise<Map<string, Member>> {
   const { vaultMembers } = tablesOf(tx);
+  const queued: Record<string, SQL> = engineOf(tx) === 'postgres'
+    ? { queued: sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${vaultMembers.principal}))` }
+    : {};
   const rows = await forUpdate(
     tx,
     tx
-      .select(memberColumns(tx))
+      .select({ ...memberColumns(tx), ...queued })
       .from(vaultMembers)
       .where(inArray(vaultMembers.principal, [...new Set(principals)]))
       .orderBy(asc(vaultMembers.principal)),
-    'no key update',
+    shared ? 'share' : 'no key update',
   );
-  return new Map((rows as StoredMember[]).map((row) => [row.principal, memberOf(row)]));
+  return new Map((rows as (StoredMember & { queued?: unknown })[]).map(({ queued: _, ...row }) => [row.principal, memberOf(row)]));
 }
+
+/**
+ * The first key of the members' queues, Postgres's advisory locks: the
+ * second is the principal's hash, and the pair is in a space of its own,
+ * apart from the migrator's single key. A hash two principals share only
+ * queues one behind the other's writer.
+ */
+const MEMBER_QUEUE = 0x636f666d;
 
 /**
  * Add `row`. A principal has one row: when two decisions admit the same

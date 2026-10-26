@@ -482,8 +482,9 @@ refusal.
 The code lives in `packages/vault`: one `Vault` interface, one
 implementation, and a Drizzle store over the shared database. The schemas
 and migrations live in `@coffre/db`. Postgres row locks serialize decisions
-about the same member, so separate vault instances share the bulk count
-and membership generations. The interface:
+that change the same member, so separate vault instances share membership
+generations; one member's reads share their row, and wait only for such a
+change, and the bulk count holds under the log's head. The interface:
 
 | Call | Does |
 |---|---|
@@ -592,10 +593,16 @@ and grant changes commit with their audit entries. With a local vault key, a rea
 is one short transaction, decided once under the member's row and the head.
 With AWS KMS, the intent commits first; the member
 row stays locked across the KMS calls, which settle within five seconds,
+shared with the member's other reads but not with a change to them,
 the head is taken only once they have, and the decision is made again under it;
 and each key's outcome is logged: the keys of a place that came out alike in
 one entry, each its item of the intent. Removal waits for a read already in
-flight; the next read is refused before KMS is called.
+flight; the next read is refused before KMS is called. A read asked while a
+removal waits queues behind it, so a steady stream of reads never holds a
+removal off. Each statement of a read runs at most three seconds, a wait
+for a lock included, then fails as unavailable: a statement, not a lock
+timeout, since a waiter for the log's head waits again on each new version
+of it. A change waits up to fifteen seconds for each lock.
 
 ### The bulk limit
 
@@ -610,8 +617,8 @@ logged and answers 403 `bulk_limit`; the principal reads new keys again as the
 window rolls on.
 
 The vault counts from its own allowed `secret.read` entries in the window,
-under the reader's row lock, in the statement that reads the rest of the
-decision: a read of one key names it in `secret_id`, a read of several at one
+under the log's head, in the statement that reads the rest of the
+decision (with KMS, again in the one that takes the head): a read of one key names it in `secret_id`, a read of several at one
 place lists each in its `secrets`. That is a pass over the reader's own reads in
 the window. On Postgres a full window of 1000 distinct keys costs about 4 ms,
 whether 25 reads of 40 keys or 1000 of one; a read of 40 keys repeated adds

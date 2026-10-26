@@ -12,7 +12,12 @@
 (* statement. Locks are row locks, held to the end of the transaction:     *)
 (*                                                                         *)
 (*   - a member's row, vault_members, FOR NO KEY UPDATE, taken one row at  *)
-(*     a time in principal order (vault store.ts, lockMembers);            *)
+(*     a time in principal order (vault store.ts, lockMembers); or FOR     *)
+(*     SHARE by a decision that changes no member, a read or a wrap, which *)
+(*     others like it share and a change to the member waits for. Each     *)
+(*     row's lock comes with an advisory lock that queues: a share lock    *)
+(*     waits behind a change that asked first, rather than join the ones   *)
+(*     it waits for;                                                       *)
 (*   - the log's head, audit_chain_head, the one row every append and      *)
 (*     every change to a place takes (db log.ts, lockLogHead).             *)
 (*                                                                         *)
@@ -85,8 +90,11 @@ CONSTANTS
     \* Members' rows are locked in principal order (vault store.ts,
     \* lockMembers, `ORDER BY principal`), not in the order a call names them.
     SortedMemberLocks,
-    \* A read decides under the reader's row, which a change to their grants
-    \* or their removal locks too (vault vault.ts, #keys through #decide).
+    \* A read decides under the reader's row, shared with their other reads,
+    \* which a change to their grants or their removal waits for (vault
+    \* vault.ts, #keys through #decide, `reads`; store.ts, lockMembers, FOR
+    \* SHARE). Off, it takes none, as KEY SHARE would be: a lock that a
+    \* writer's FOR NO KEY UPDATE never waits for.
     ReaderRowLocked,
     \* A read through a reference checks again, under the head, that no
     \* `reference.end` committed since it decided (vault vault.ts, unwrap's
@@ -138,7 +146,8 @@ VARIABLES
     log,            \* the audit log, in seq order: the entries the invariants read
     creds,          \* credentials sign-in issued
     \* locks
-    memberLock,     \* memberLock[m]: the process holding m's row, or None
+    memberLock,     \* memberLock[m]: the process holding m's row alone, or None
+    memberShared,   \* memberShared[m]: the processes sharing m's row
     head,           \* the process holding the log's head, or None
     \* processes
     pc, op, l, left,
@@ -151,7 +160,7 @@ VARIABLES
     regens          \* a record per regenerate that committed in the fork
 
 rows == <<slug, archived, held, version, status, gen, grants, owners, refRow, keyName, forkOwn>>
-locks == <<memberLock, head>>
+locks == <<memberLock, memberShared, head>>
 procs == <<pc, op, l, left>>
 history == <<revealed, deletions, everDeleted, excused, declared, regens>>
 vars == <<rows, log, creds, locks, procs, history>>
@@ -269,24 +278,45 @@ Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 \* Commit or roll back: every lock the process holds goes.
 Release(p) ==
     /\ memberLock' = [m \in Members |-> IF memberLock[m] = p THEN None ELSE memberLock[m]]
+    /\ memberShared' = [m \in Members |-> memberShared[m] \ {p}]
     /\ head' = IF head = p THEN None ELSE head
 
-\* Lock the next member's row, waiting while another holds it, and go to
-\* `then` once the last is held.
+\* Lock the next member's row, waiting while another holds it, alone or
+\* shared, and go to `then` once the last is held.
 LockNext(p, then) ==
     LET m == Head(l[p].toLock) IN
     /\ memberLock[m] \in {None, p}
+    /\ memberShared[m] \subseteq {p}
     /\ memberLock' = [memberLock EXCEPT ![m] = p]
     /\ l' = [l EXCEPT ![p].toLock = Tail(@)]
     /\ Goto(p, IF Tail(l[p].toLock) = <<>> THEN then ELSE pc[p])
-    /\ UNCHANGED <<rows, log, creds, head, op, left, history>>
+    /\ UNCHANGED <<rows, log, creds, memberShared, head, op, left, history>>
+
+\* The steps that lock members' rows; of them, those that share them.
+LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
+SharedLabels == {"read.lock", "write.lock"}
+
+\* The processes about to lock m alone, at their step that takes it: a
+\* share lock asked now queues behind them.
+Changing(m) == {q \in Procs : pc[q] \in LockLabels \ SharedLabels /\ l[q].toLock # <<>> /\ Head(l[q].toLock) = m}
+
+\* Share the next member's row with the others sharing it, waiting while
+\* another holds it alone or is about to, as LockNext.
+ShareNext(p, then) ==
+    LET m == Head(l[p].toLock) IN
+    /\ memberLock[m] \in {None, p}
+    /\ Changing(m) \subseteq {p}
+    /\ memberShared' = [memberShared EXCEPT ![m] = @ \cup {p}]
+    /\ l' = [l EXCEPT ![p].toLock = Tail(@)]
+    /\ Goto(p, IF Tail(l[p].toLock) = <<>> THEN then ELSE pc[p])
+    /\ UNCHANGED <<rows, log, creds, memberLock, head, op, left, history>>
 
 \* Lock the log's head, waiting while another holds it.
 TakeHead(p, then) ==
     /\ head \in {None, p}
     /\ head' = p
     /\ Goto(p, then)
-    /\ UNCHANGED <<rows, log, creds, memberLock, op, l, left, history>>
+    /\ UNCHANGED <<rows, log, creds, memberLock, memberShared, op, l, left, history>>
 
 \* A step that only reads, outside any lock.
 Read(p, then, locals) ==
@@ -376,7 +406,7 @@ ReadVersions(p) ==
          THEN Read(p, IF ReaderRowLocked THEN "read.lock" ELSE "read.check", l[p])
          ELSE Refuse(p)
 
-ReadLock(p) == pc[p] = "read.lock" /\ LockNext(p, "read.check")
+ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.check")
 
 \* Under the reader's row: their standing and grants where they read, and
 \* whether either place was deleted (environmentsById); through a
@@ -434,7 +464,7 @@ WriteResolve(p) ==
          THEN Read(p, "write.lock", [l[p] EXCEPT !.named = Named, !.nver = version])
          ELSE Refuse(p)
 
-WriteLock(p) == pc[p] = "write.lock" /\ LockNext(p, "write.check")
+WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.check")
 
 WriteCheck(p) ==
     /\ pc[p] = "write.check"
@@ -992,6 +1022,7 @@ Init ==
     /\ log = <<>>
     /\ creds = {}
     /\ memberLock = [m \in Members |-> None]
+    /\ memberShared = [m \in Members |-> {}]
     /\ head = None
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
@@ -1048,17 +1079,20 @@ TypeOK ==
     /\ owners \subseteq Members
     /\ declared \subseteq Listed
     /\ memberLock \in [Members -> Procs \cup {None}]
+    /\ memberShared \in [Members -> SUBSET Procs]
+    /\ \A m \in Members : memberLock[m] # None => memberShared[m] \subseteq {memberLock[m]}
     /\ head \in Procs \cup {None}
 
-\* The process p waits for: the holder of the lock its next step takes.
-LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
+\* The process p waits for: the holders of the lock its next step takes,
+\* and for a share lock, those queued to take it alone.
 HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
                "delete.head", "patch.head", "addenv.head", "renamekey.head",
                "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
                "regen.tx", "override.head"}
 WaitsFor(p) ==
-    IF pc[p] \in LockLabels /\ l[p].toLock # <<>> /\ memberLock[Head(l[p].toLock)] \notin {None, p}
-      THEN {memberLock[Head(l[p].toLock)]}
+    IF pc[p] \in LockLabels /\ l[p].toLock # <<>>
+      THEN LET m == Head(l[p].toLock) IN
+           (({memberLock[m]} \ {None}) \cup (IF pc[p] \in SharedLabels THEN Changing(m) ELSE memberShared[m])) \ {p}
     ELSE IF pc[p] \in HeadLabels /\ head \notin {None, p}
       THEN {head}
     ELSE {}
