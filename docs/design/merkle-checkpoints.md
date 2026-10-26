@@ -73,7 +73,8 @@ entries, quickly and in a way that no database writer can undo.
 - **Retention** works with the tree in both layouts. A day is dropped only
   below a freshly sealed head. The retention entry is a kept-forever change
   that commits to the changes below the cut. Retention drew a review finding
-  in each of rounds 3 to 8, all fixed. It is the least settled part.
+  in each of rounds 3 to 9, all fixed, the last fix unreviewed. It is the
+  least settled part (see that section).
 
 ## The tree
 
@@ -309,7 +310,14 @@ witnesses, and found two slips in its code, both fixed:
 - a retention attempt refused as too early, then retried, logged its
   forcing entry's request ID twice.
 
-Retention now also refuses a checkpointer that keeps no memory. Round seven
+Retention now also refuses a checkpointer that keeps no memory. Round nine,
+the last (run by agreement with the coordinator, with no round 10), found
+the deepest one. Retention committed to whichever changes remained below
+the cut, so a sealed change deleted just before it was blessed, in both
+layouts. Now retention first rebuilds the window below the cut and requires
+the signed head. It also writes its entry before dropping the partition, so
+a crash between the two is finished by a retry. That fix is not reviewed;
+see "Least settled". Round seven
 found that retaining an ended day with no uses (a quiet `at` day) wrote a
 cut that did not advance, which then failed verification forever. Now a day
 with no uses just loses its empty partition, with no entry, and a cut that
@@ -588,33 +596,38 @@ are prototyped ([`retention.ts`](../../experiments/merkle/src/retention.ts),
     a partition, so days must be dropped well after any clock skew (they
     will be: retention is weeks).
 
-In both, retention runs in five steps:
+In both, retention runs in six steps:
 
-1. Seal a head at least two freshness bounds (20 minutes) after the day's
+1. Check that what lies below the cut is exactly what was sealed there:
+   rebuild the window since the last cut from the entries, on top of the
+   last cut's edge, and require the signed cut head. Otherwise a sealed
+   change deleted just before retention would be blessed by it (review r9,
+   not yet reviewed itself).
+2. Seal a head at least two freshness bounds (20 minutes) after the day's
    cut: append an `audit.retention.begin` change (a request ID of its own
    per attempt) and wait for its seal. The checkpointer must keep its
    memory, and the cut row's note must be that row's.
    From then on the signer refuses any entry stamped before the cut, so a
    copy of a dropped use can never be sealed (see Replays, below).
-2. Drop the day's uses partition once it is sealed. A day with no uses
-   only loses its empty partition: no cut, no entry. A cut must pass the
-   last one, or nothing is dropped.
 3. Append a kept-forever `audit.retention` change: {cut, the changes below
    the cut since the last cut, as a count and the RFC 9162 head of their
    leaves}. Below a cut, only changes are protected. A use still there
    (with `at` days, at most a tick's worth of the next day at each
    midnight) can be deleted unseen until its own day goes. Its copies stay
-   out all the same: the fresh head of step 1 is past its stamp.
-4. Delete the level-0 tiles below the cut.
-5. Keep the higher levels: one hash per 256 leaves, 10 MB a day at a
+   out all the same: the fresh head of step 2 is past its stamp.
+4. Drop the day's uses partition, after the entry, so a crash between the
+   two is finished by a retry. A day with no uses only loses its empty
+   partition: no cut, no entry. A cut must pass the last one, or nothing is
+   dropped.
+5. Delete the level-0 tiles below the cut.
+6. Keep the higher levels: one hash per 256 leaves, 10 MB a day at a
    sustained 1,000/s.
 
 **What a verifier keeps after a drop:**
 
 - **The heads.** Its witnesses' heads, and the archive's for the lock term.
 - **What it checks:**
-  - every retention entry's digest against what stays below its cut
-    (changes, stragglers);
+  - every retention entry's digest against the changes below its cut;
   - everything from the newest cut on, by walking.
 - **What still works:**
   - proofs of entries above the cut (the tiles they read are kept);
@@ -632,10 +645,7 @@ log, so dropping days of uses weeks later never touches it. If it ever
 counted from the log instead, retention would have to keep at least the
 configured window (at most a day) plus a tick.
 
-**Which layout:** `number` days are exact and simpler to verify. `at` days
-work with the digest rule, at the cost of stragglers and the
-dropped-partition caveat. Either fits the tree; W208 picks the one that
-suits `use()`.
+**Which layout:** the two prototypes disagree. See "Least settled", below.
 
 ## Replays and reorders in the window
 
@@ -672,6 +682,59 @@ also do two things:
   entry can move in time, but not within a tick. The model shows this
   (UnsealedReorderDetected is expected to fail). It is the same one-tick
   window as deletion.
+
+## Least settled, and open findings
+
+Nine review rounds ran, each "needs attention". Every finding they made is
+fixed, each with a regression case. What is still open:
+
+- **Retention is the least settled part.** It drew a P2 in every round from
+  3 to 9, a different defect each time, all fixed. The core (tree, sealing,
+  signer memory, verifier walk, R51 change rule) drew none after round 5.
+  Round 9's fix (rebuild the window below the cut before dropping; entry
+  before drop) is not reviewed. Round 9 confirmed, for both layouts, that
+  no copy of a dropped use can be sealed and that honest in-order retention
+  leaves a log that verifies.
+- **The day layout: the two prototypes disagree.** Erwin decides.
+  - **W208 (#366) partitions uses by `at`, on purpose.** Uses are unique on
+    (at, request_id), so a replayed statement lands in the same partition as
+    its original and the append is idempotent. That unique index is the use
+    rows' only index, and W208's checkpointer reads its window from an `at`
+    floor raised under the barrier (`greatest(floor, clock - 3 s)`), which
+    leans on R53's hard 3 s use deadline.
+  - **W209 recommends `number` days.** Days are exact runs of numbers, cut
+    at the barrier and recorded in signed day entries. Retention then has no
+    stragglers, and every `at`-specific review finding (rounds 7 and 8) came
+    from days interleaving at midnight. The checkpointer reads its window by
+    number, which needs an index on number.
+  - **W208 adopting `number` days** would need idempotency outside the
+    partition key. A replay takes a fresh number and may land in the next
+    day's partition at the midnight jump, so a per-partition unique index on
+    request_id misses it. That means a small request-ID table kept for a
+    day: one more index write per use, measured against R44. Its
+    checkpointer would also need the number index.
+  - **W209 adopting `at` days** is what the prototype already supports, with
+    rounds 7 to 9's fixes: changes-only digests, ordered retention of ended
+    days, the window check. It would also mean taking W208's `at`-floor
+    sealing. That replaces "every number ≤ upto is final" with "every entry
+    with `at` ≤ the floor is final", and the bound then depends on the 3 s
+    deadline being enforced inside Postgres, not just in the Worker. A
+    window's leaves are still sealed in number order.
+- **R53, as it lands on this design.**
+  - The hard 3 s use deadline is what the signer's freshness bound assumes
+    (stamp to number well under 10 minutes).
+  - The 16-byte MAC only shortens leaves. A 128-bit MAC still makes a leaf
+    hash unguessable from its content.
+  - Per-isolate covers that skip repeat uses are the dedup option analysed
+    below: a repeat has no leaf, and a receipt for it would name the first
+    entry.
+- **Open P3s.**
+  - Go's cross-check covers the bytes, not how an entry becomes a leaf.
+  - TLA+ does not model retention, freshness or tile edits.
+  - The verifier's row-based freshness check is a warning; the signer
+    enforces it.
+  - A full retention pass hashes the whole day once, in memory, in this
+    prototype; a real one would stream it in chunks.
 
 ## Fewer rows: what aggregation would mean for the tree
 
@@ -899,11 +962,9 @@ Not modelled:
    reveals through the CLI.
 5. **Tree shape:** one growing RFC 9162 tree with C2SP formats
    (recommended), not a tree per window.
-6. **Day layout:** `number` days (exact, recorded in signed day entries)
-   or `at` days (W208's current layout). `number` days are recommended.
-   Every `at`-specific review finding (rounds 7 and 8) came from days
-   interleaving at midnight, which `number` days rule out. W208's call,
-   under the hot path's constraints.
+6. **Day layout:** W208 chose `at` days, for replay idempotency; W209
+   recommends `number` days, for exact retention. What each would need to
+   adopt the other's is in "Least settled".
 7. **External witnesses, if any:** the R2 archive protects against a
    compromised Worker or database, not against the Cloudflare account (lock
    rules can be removed). Protecting against the account needs a witness

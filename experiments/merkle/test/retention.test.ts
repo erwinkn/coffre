@@ -113,3 +113,29 @@ for (const mode of ['number', 'at'] as const) {
     assert.ok(!(await verify()).ok);
   });
 }
+
+test('retention refuses to bless a sealed change deleted just before it, and finishes after a crash between its entry and the drop', async () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  await createLog(pool, 'number');
+  const cp = await Checkpointer.open(pool, keys, { freshMs: 50, memory: fileMemory(join(scratch, 'memory-r9')) });
+  for (let e = 0; e < 20; e += 1) await entry(e % 5 === 0 ? 'change' : 'use');
+  await cp.tick();
+  await pool.query('SELECT new_day(1)');
+  await cp.tick({ nextDay: 1 });
+  await cp.tick();
+  await sleep(200);
+  // A sealed change deleted: the verifier sees it now, and retention must not make it unseeable.
+  await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE false');
+  await pool.query("WITH d AS (DELETE FROM audit WHERE number = (SELECT min(number) FROM audit_changes) RETURNING *) INSERT INTO saved SELECT * FROM d");
+  await assert.rejects(retainDay(pool, keys, 0, cp), /not what was sealed there/);
+  await pool.query('INSERT INTO audit SELECT * FROM saved');
+  // A crash after the entry, before the drop: a retry finishes the drop, and the log verifies.
+  const crashing = { query: (q: string | { name: string }, p?: unknown[]) => (typeof q === 'string' && q.startsWith('DROP TABLE audit_uses_d0') ? Promise.reject(new Error('crash')) : pool.query(q as string, p)) };
+  await assert.rejects(retainDay(crashing, keys, 0, cp), /crash/);
+  await cp.tick();
+  assert.deepEqual((await verify()).problems, []);
+  const resumed = await retainDay(pool, keys, 0, cp);
+  assert.equal(resumed.dropped, -1);
+  await cp.tick();
+  assert.deepEqual((await verify()).problems, []);
+});
