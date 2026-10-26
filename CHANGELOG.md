@@ -16,8 +16,8 @@
   never revokes the group: a run without the flag leaves the membership as
   it is. Back up with `pg_dump --enable-row-security` as that login
   ([restore.md](docs/restore.md#on-plain-postgres)). `coffre migrate`, in a
-  deployment's folder, now reasserts the database's privileges even when
-  nothing is pending; before, it stopped at "up to date", and a restored
+  deployment's folder, as a login that owns coffre's tables, now reasserts
+  the database's privileges even when nothing is pending; before, it stopped at "up to date", and a restored
   database kept the privileges its dump left out until the next migration.
   `migrateDatabase` takes its `onPlan` callback in an options object now,
   beside `backupLogin`. A failure after the migrations committed no longer
@@ -28,7 +28,9 @@
     tables, by name: another table in `public` is left as it is, whichever
     login migrates, a superuser included. A `coffre_backup` made before
     keeps no other privilege on coffre's tables, and is refused if it is a
-    member of another role. It makes a role, as no migration since the
+    member of another role or owns an object. Its members are yours, as
+    `coffre_app`'s are: the groups are the server's, shared by every
+    database on it. It makes a role, as no migration since the
     baseline did: the login that migrates needs `CREATEROLE`, which a
     member of the owner does not inherit, unless `coffre_backup` exists
     already, made by a login that has it, which then grants the migrating

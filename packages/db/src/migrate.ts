@@ -279,6 +279,9 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     async restrict(backupLogin) {
       await restrictDatabase(client);
       if (backupLogin !== undefined) {
+        // Compared as text: as a name, Postgres would cut it to 63 bytes, and grant whichever role bears the cut.
+        const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname::text = $1', [backupLogin]);
+        if (rowCount === 0) throw new Error(`role ${client.escapeIdentifier(backupLogin)} does not exist: make it, coffre never does`);
         await client.query(`GRANT coffre_backup TO ${client.escapeIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
       }
     },

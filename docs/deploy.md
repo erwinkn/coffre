@@ -1272,8 +1272,13 @@ which grants it the group that reads every row
 own rights: keep it as plain as the two above. The grant needs `ADMIN
 OPTION` on `coffre_backup`, which the login that made the group holds, and
 nothing on the login it names. Any role holding that `ADMIN OPTION` may
-grant the group too; the migration refuses a `coffre_backup` that anyone
-already inherits or may set.
+grant the group too.
+
+The three groups belong to the server, and every coffre database on it
+shares them; the migrations harden their attributes but leave their members
+alone. On a server where other roles hold `CREATEROLE`, migrate before they
+could make a group of the same name, and check who belongs to each
+(`\du coffre_*`).
 
 New roles default to no superuser, replication or RLS-bypass rights. The
 migration checks those rights and refuses unsafe roles. It hardens existing

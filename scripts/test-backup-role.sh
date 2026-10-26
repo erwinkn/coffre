@@ -90,19 +90,17 @@ if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup is a member of another
     exit 1
 fi
 
-# Nor one that someone already reads every row through, inheriting or able
-# to set it: only --backup-login grants that.
-for option in 'INHERIT TRUE, SET FALSE' 'INHERIT FALSE, SET TRUE'; do
-    as_owner -d postgres -c 'DROP DATABASE IF EXISTS unsafe_members' -c 'CREATE DATABASE unsafe_members'
-    as_superuser -c 'CREATE ROLE mallory NOLOGIN' -c "GRANT coffre_backup TO mallory WITH $option"
-    accepted=false
-    if migrate unsafe_members >"$scratch/unsafe.log" 2>&1; then accepted=true; fi
-    as_superuser -c 'DROP ROLE mallory'
-    if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup has members, who would read every row' "$scratch/unsafe.log"; then
-        cat "$scratch/unsafe.log" >&2
-        exit 1
-    fi
-done
+# Nor one that owns an object, whose rights no REVOKE takes away, in any
+# database of the cluster.
+as_owner -d postgres -c 'CREATE DATABASE unsafe_owner'
+as_superuser -d postgres -c 'CREATE TABLE planted (n integer)' -c 'ALTER TABLE planted OWNER TO coffre_backup'
+accepted=false
+if migrate unsafe_owner >"$scratch/unsafe.log" 2>&1; then accepted=true; fi
+as_superuser -d postgres -c 'DROP TABLE planted'
+if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup owns database objects' "$scratch/unsafe.log"; then
+    cat "$scratch/unsafe.log" >&2
+    exit 1
+fi
 
 # Databases at 0018, the schema before this migration, whose public holds a
 # table of another role, as migrate.test.ts's reporting table, and in which
@@ -169,13 +167,28 @@ migrate backed_up >/dev/null
 migrate backed_up --backup-login coffre_backup_login >/dev/null
 [[ "$(member coffre_backup_login)" == 'migration_owner|f|t|f' ]] || { echo "migrate did not grant coffre_backup_login its group: $(member coffre_backup_login)" >&2; exit 1; }
 
-# A role that does not exist fails the run, named, and is not made.
+# A role that does not exist fails the run, named, and is not made; nor is
+# the role a longer name's first 63 bytes would be, cut as Postgres cuts names.
 if migrate backed_up --backup-login coffre_backup_logn >"$scratch/absent.log" 2>&1 \
     || ! grep -Fq 'role "coffre_backup_logn" does not exist' "$scratch/absent.log"; then
     cat "$scratch/absent.log" >&2
     exit 1
 fi
 [[ "$(as_superuser -d postgres -At -c "SELECT count(*) FROM pg_roles WHERE rolname = 'coffre_backup_logn'")" == 0 ]] || { echo 'migrate made the missing role' >&2; exit 1; }
+prefix="$(printf 'r%.0s' {1..63})"
+as_superuser -c "CREATE ROLE $prefix NOLOGIN"
+if migrate backed_up --backup-login "${prefix}_more" >"$scratch/long.log" 2>&1 \
+    || ! grep -Fq "role \"${prefix}_more\" does not exist" "$scratch/long.log"; then
+    cat "$scratch/long.log" >&2
+    exit 1
+fi
+[[ -z "$(member "$prefix")" ]] || { echo 'migrate granted the role a long name cuts to' >&2; exit 1; }
+as_superuser -c "DROP ROLE $prefix"
+
+# Roles are the cluster's: a database migrated after the group is granted
+# shares it, and its 0019 accepts the group as it finds it.
+as_owner -d postgres -c 'CREATE DATABASE second'
+migrate second --backup-login coffre_backup_login >/dev/null
 
 # The name is one identifier, quoted, whatever it holds.
 odd='Backup "x"; GRANT pg_write_all_data TO coffre_backup; --'
