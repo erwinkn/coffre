@@ -2603,9 +2603,9 @@ class VaultService implements Vault {
     const { walks } = this.#prepared.options;
     const found: NewEntry[] = [];
     // The newest checkpoint entry, signed or refused, as this call's snapshot found it.
-    let seen: bigint | null = null;
+    let seen: StoredEntry | undefined;
     const resumed = await this.#db.transaction(async (tx) => {
-      seen = (await store.newestCheckpointEntry(tx))?.seq ?? null;
+      seen = await store.newestCheckpointEntry(tx);
       await this.#sweep(tx, found);
       const from = await this.#resume(tx, 'newest');
       if (!from.ok) return from;
@@ -2650,10 +2650,17 @@ class VaultService implements Vault {
       // Another call checkpointed, or refused to, since this one's snapshot, or this one's rehash of the past
       // could not run: what it would sign over is not what it checked. A refusal for a broken log stands,
       // and a checkpoint signed meanwhile is the newest prefix; the next call starts from them.
-      if (stalled !== null || ((await store.newestCheckpointEntry(d.tx))?.seq ?? null) !== seen) {
+      if (stalled !== null || ((await store.newestCheckpointEntry(d.tx))?.seq ?? null) !== (seen?.seq ?? null)) {
         const standing = await this.#standingRefusal(d.tx);
         if (standing !== null) throw refused('log_broken', standing);
         if (stalled === null && newest !== null) return { checkpoint: signedPart(newest) };
+      } else if (seen?.decision === 'deny' && walked.ok) {
+        // A refusal for a broken log stands since this call's snapshot, of an entry before where its walk began, which
+        // it never read: that entry again, as the walk checks each, before anything is signed over it. Still broken,
+        // the refusal stands; whole again, the signature clears it (T104).
+        const standing = await this.#standingRefusal(d.tx);
+        const named = typeof standing?.failedAtSeq === 'number' ? BigInt(standing.failedAtSeq) : null;
+        if (named !== null && named <= walked.from.at.seq && !(await this.#entryHolds(d.tx, named))) throw refused('log_broken', standing!);
       }
       // Nothing since the last one, which signed every entry before its own: it is still the newest prefix.
       if (newest !== null && latest!.seq === head.nextSeq - 1n && latest!.relatedSeq === latest!.seq - 1n) return { checkpoint: signedPart(newest) };
@@ -2745,6 +2752,18 @@ class VaultService implements Vault {
       return { ok: false, failedAtSeq: Number(lap.end.seq), reason: `the log up to entry ${lap.end.seq} is not the prefix a checkpoint signed` };
     }
     return { ok: true, next: null };
+  }
+
+  /**
+   * Whether entry `seq` is as the walk checks each: there, its hash its
+   * own, linked to the entry before, and the vault's under its MAC.
+   */
+  async #entryHolds(db: Queryable, seq: bigint): Promise<boolean> {
+    const found = await store.entriesAt(db, seq === 0n ? [seq] : [seq - 1n, seq]);
+    const entry = found.get(seq);
+    const before = seq === 0n ? { hash: GENESIS_HASH } : found.get(seq - 1n);
+    if (entry === undefined || before === undefined) return false;
+    return verifyEntries([entry], { keys: this.#keysFor(entry), chainOnly: ['app'], startSeq: seq, startPrevHash: before.hash }).ok;
   }
 
   /**

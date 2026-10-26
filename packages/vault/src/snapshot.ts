@@ -141,7 +141,9 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
     ended: new Set(kept.ended.map((seq) => BigInt(seq))),
     released: Number(raw.released ?? 0),
     head,
-    unchanged: postgres && asked.held !== true && head !== null && !current(head) ? stillQuery(asked, row!.stable, at, asked.released?.count ?? 0) : null,
+    unchanged: postgres && asked.held !== true && head !== null && !current(head)
+      ? stillQuery(asked, row!.stable, head.last === null ? 0n : head.last.seq + 1n, Number(raw.released ?? 0), asked.released?.count ?? 0)
+      : null,
   };
 }
 

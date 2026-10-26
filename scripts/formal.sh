@@ -96,6 +96,7 @@ REMOVALS=(
   "Tampering CheckpointChecksVault SignsNoForgedVault"
   "Tampering CheckpointLinksWalk SignsNoForgedVault"
   "Tampering SeenRecheckUnderHead StaysUnsignedOnceFound"
+  "Overtaking RefusalRecheckedUnderHead StaysUnsignedOnceFound"
   "Tampering Scrubs EditFoundByNextScrub"
   "Tampering ReadinessChecksHeld GreenIsReal"
   "Tampering AnchorCas AnchorNeverBack"

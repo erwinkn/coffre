@@ -16,38 +16,50 @@ const ENTRY = sql.raw(`json_build_object(
 const NOW = sql.raw('(extract(epoch from clock_timestamp()) * 1000)::bigint');
 
 /**
- * `snapshot`'s statement on Postgres: one row, `snapshot`, JSON, and
- * `stable`, the part of it what the decision depends on, as text. Each part
- * reads one index range.
+ * `snapshot`'s statement on Postgres: one row, `stable`, the part of what
+ * it reads that the decision depends on, as text, and `snapshot`, JSON.
+ * Each part reads one index range. Postgres works out a row's columns, and
+ * a JSON object's members, in their order: every read first, as of when the
+ * statement began, then, last, the head, waiting for it in its queue, no
+ * longer than `waitMs` when set, which the row's condition sets first, and
+ * the clock once it is held. So the head is held for none of the reading.
  */
 export function snapshotQuery(asked: Asked): SQL {
-  // The head, waiting for it in its queue, no longer than `waitMs` when set, which the row's condition sets first: the
-  // clock is read once it is held, the rest as of when the statement began.
   const queued = asked.waitMs === undefined
     ? QUEUED_FOR_HEAD
     : sql`CASE WHEN set_config('lock_timeout', ${String(Math.trunc(asked.waitMs))}, true) IS NOT NULL THEN ${QUEUED_FOR_HEAD} END`;
   const head = asked.head === true
     ? sql`, head AS (SELECT next_seq, head_hash, ${NOW} AS at FROM (SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row AND ${queued} FOR UPDATE) locked)`
     : sql``;
-  const clock = asked.head === true ? sql`(SELECT at FROM head)` : NOW;
   return sql`
     WITH ${POLICY}${head}
-    SELECT json_build_object(
-      'at', ${clock},
-      'head', ${asked.head === true ? sql`(SELECT json_build_object('nextSeq', next_seq::text, 'hash', encode(head_hash, 'hex')) FROM head)` : sql`NULL`},
+    SELECT (${stable(asked)})::text AS stable, json_build_object(
+      'released', ${released(asked)},
       'last', ${asked.head === true ? sql`(SELECT json_build_object('seq', seq::text, 'hash', encode(hash, 'hex')) FROM audit_log ORDER BY seq DESC LIMIT 1)` : sql`NULL`},
-      'released', ${released(asked, clock)}
-    ) AS snapshot, (${stable(asked)})::text AS stable`;
+      'at', ${asked.head === true ? sql`(SELECT at FROM head)` : NOW},
+      'head', ${asked.head === true ? sql`(SELECT json_build_object('nextSeq', next_seq::text, 'hash', encode(head_hash, 'hex')) FROM head)` : sql`NULL`}
+    ) AS snapshot`;
 }
 
 /**
- * Whether what `asked` read, `read`, is what the database holds now, and
- * the keys its principal holds released as of `at`, the clock its entries
- * are stamped with, still within `cap`: true or false, in a statement that
- * holds the head (`appendEntries`, `unchanged`).
+ * Whether what `asked` read, `read`, as the log stood up to entry `after`,
+ * is what the database holds now, and the keys its principal holds
+ * released, `released` then, still within `cap` with every key the
+ * principal's reads since name, counted again if they repeat: true or
+ * false, in a statement that holds the head (`appendEntries`, `unchanged`).
+ * The count is at least the one the head would give, never less: its
+ * window counted from before the wait, and the keys since added whole.
  */
-export function stillQuery(asked: Asked, read: string, at: number, cap: number): SQL {
-  const count = asked.released === undefined ? sql`true` : sql`${released(asked, sql`${at}::bigint`)} <= ${cap}`;
+export function stillQuery(asked: Asked, read: string, after: bigint, released: number, cap: number): SQL {
+  const principal = asked.released?.principal;
+  const count = principal === undefined ? sql`true` : sql`${released} + (
+    SELECT coalesce(sum(CASE
+      WHEN e.secret_id IS NOT NULL THEN 1
+      WHEN jsonb_typeof(e.metadata::jsonb -> 'secrets') = 'array' THEN greatest(jsonb_array_length(e.metadata::jsonb -> 'secrets'), 1)
+      ELSE 1 END), 0)
+    FROM audit_log e
+    WHERE e.seq >= ${after} AND e.author = 'vault' AND e.actor = ${principal} AND e.action = 'secret.read' AND e.decision = 'allow'
+  ) <= ${cap}`;
   return sql`(WITH ${POLICY} SELECT (${stable(asked)})::text = ${read} AND ${count})`;
 }
 
@@ -117,8 +129,8 @@ function stable(asked: Asked): SQL {
     )`;
 }
 
-/** How many distinct keys `asked.released.principal` holds released as of `clock`, the asked keys among them; 0 unless asked. */
-function released(asked: Asked, clock: SQL): SQL {
+/** How many distinct keys `asked.released.principal` holds released, the asked keys among them; 0 unless asked. */
+function released(asked: Asked): SQL {
   const released = asked.released;
   if (released === undefined) return sql`0`;
   return sql`(
@@ -129,7 +141,7 @@ function released(asked: Asked, clock: SQL): SQL {
       -- Each item of a list, never what lax paths would make of an object; silent, as strict paths fail on what is missing.
       LEFT JOIN LATERAL jsonb_path_query(CASE WHEN e.secret_id IS NULL THEN e.metadata::jsonb END, 'strict $.secrets ? (@.type() == "array")[*]', '{}', true) AS one ON true
       WHERE e.author = 'vault' AND e.actor = ${released.principal} AND e.action = 'secret.read' AND e.decision = 'allow'
-        AND e.occurred_at > ${clock} + ${released.clockOffsetMs} - ${released.windowMs}
+        AND e.occurred_at > ${NOW} + ${released.clockOffsetMs} - ${released.windowMs}
       UNION ALL SELECT unnest(${sql.param([...released.keys])}::text[])
     ) AS released (key)
   )`;
