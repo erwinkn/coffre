@@ -31,13 +31,13 @@ export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promi
 }
 
 /**
- * The migrations are applied, and their ledger checked, but reasserting the
- * privileges after them failed: unlike a migration's failure, this one
- * changed the database.
+ * The migrations are applied, by this run or an earlier one, and their
+ * ledger checked, but reasserting the privileges after them failed: unlike
+ * a migration's failure, this one may have changed the database.
  */
 export class AfterMigrations extends Error {
   constructor(error: unknown) {
-    super(`the migrations are applied, but reasserting the database's privileges after them failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    super(`the database is at the migrated schema, but reasserting its privileges failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     this.name = 'AfterMigrations';
   }
 }

@@ -8,9 +8,10 @@
 // It asks for the database owner's direct URL, at a hidden prompt or on
 // stdin, never the command line; shows what it will apply; and applies it
 // under the migration lock, with the privileges reasserted. Without a
-// terminal, only with --yes. --backup-login <role> grants that existing role
-// the read-only group coffre_backup, on every run; coffre never makes the
-// role, and never revokes the group from it.
+// terminal, only with --yes. With nothing to apply, it asks nothing: it
+// reasserts the privileges, as every run does. --backup-login <role> grants
+// that existing role the read-only group coffre_backup, on every run, asked
+// or not; coffre never makes the role, and never revokes the group from it.
 import { parseArgs } from 'node:util';
 
 import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';

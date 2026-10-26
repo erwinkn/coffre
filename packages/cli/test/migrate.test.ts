@@ -199,7 +199,7 @@ test('a failure after the migrations committed never says nothing was changed', 
   const refusal = Object.assign(new Error('permission denied to grant role "coffre_backup"'), { code: '42501' });
   assert.equal(
     migrationFailure(new AfterMigrations(refusal)),
-    `the migrations are applied, but reasserting the database's privileges after them failed: permission denied to grant role "coffre_backup"`,
+    `the database is at the migrated schema, but reasserting its privileges failed: permission denied to grant role "coffre_backup"`,
   );
 });
 
@@ -381,7 +381,7 @@ test("in a deployment's folder, its pipeline migrates a new database before the 
   assert.deepEqual(await membership(), [{ admin_option: false, inherit_option: true, set_option: false }]);
   const absent = await migrateIn(dir, url, ['--yes', '--backup-login', 'nobody_here']);
   assert.equal(absent.code, 1, absent.output);
-  assert.match(absent.output, /reasserting the database's privileges after them failed: role "nobody_here" does not exist/);
+  assert.match(absent.output, /reasserting its privileges failed: role "nobody_here" does not exist/);
 });
 
 test("a database a newer coffre migrated is refused in a deployment's folder, its unknown migration named, and nothing changes", needsCluster, async () => {
