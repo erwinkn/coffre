@@ -18,7 +18,10 @@
   the audit page says the line was decided by the vault. Like the read
   beside it, it records the vault's release: when the app's check then
   finds the credential ended, a `credential_ended` refusal of the same
-  operation follows it, and no value is handed back. A vault older than
+  operation follows it, and no value is handed back; when it finds the
+  policy changed under a use that also holds plain values, the use
+  answers 409 and hands back nothing, and the entry stands as the
+  release's record alone. A vault older than
   0.14.5 does not name the use back, and the app appends it as before; so
   does a use of plain values only, which asks no vault, and one whose
   record is longer than the vault takes (16 KiB, a use naming hundreds of

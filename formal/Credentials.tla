@@ -328,7 +328,8 @@ UseDecide(p) ==
          \* A release on a kept answer is the model's to see when that answer is not the account's now.
          \* Through the proxy, the vault appends the app's `credential.use` beside its read, in the same step
          \* (vault.ts, unwrap's `use`), and the app checks the credential with no lock, as an export does; or,
-         \* a vault older than 0.14.5 or a use of plain values only, the app appends it under the head itself.
+         \* a vault older than 0.14.5, a use of plain values only or a record too long for the vault, the app appends
+         \* it under the head itself.
          ELSE \E byVault \in (IF op[p].proxy THEN BOOLEAN ELSE {FALSE}) :
               LET read == Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred, !.stale = l[p].recalled /\ gen # l[p].kept])
               IN /\ log' = IF byVault THEN Append(read, [Entry("credential.use", p) EXCEPT !.cred = l[p].cred]) ELSE read

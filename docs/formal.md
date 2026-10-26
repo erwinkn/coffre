@@ -347,7 +347,8 @@ Each CI run holds an ID token, good for one credential.
   4. through the credential proxy, `credential.use`: appended by the vault
      beside its read, in its decision (`unwrap`'s `use`), and the
      credential then checked again with no lock, as an export's; or,
-     with a vault older than 0.14.5 or plain values only, by the app,
+     with a vault older than 0.14.5, plain values only, or a record too
+     long for the vault, by the app,
      under the head, the credential checked again under it;
   5. the value answered.
 - **Ending one:**
