@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A CI run's sign-in holds the audit log's head for fewer round trips.**
+  `POST /api/auth/oidc` ran 14 app statements, 10 of them while its
+  transaction held the head that every audited write on the instance
+  waits for. It now runs 8, 6 under the head: the service's bindings,
+  whether the token was spent and the newest policy change are one read;
+  under the head, the member, the binding and its per-minute rate are
+  one read, and on Postgres the token spent, the credential issued and
+  the binding stamped are one statement, which issues nothing if the
+  token was spent already. The checks and refusals are unchanged. Through
+  a database 25 ms away, one sign-in went from 396 ms to 250 ms, three at
+  once from 943 ms to 707 ms at p99, and ten at once from 2,473 ms to
+  1,514 ms. No migration.
+
 ## 0.14.3 (2026-10-26)
 
 - **Upgrading to 0.14.3, in short.** One migration, `0019_backup_role`,

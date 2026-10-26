@@ -53,6 +53,8 @@ import {
   consumeToken,
   exchangeCandidates,
   exchangesSince,
+  exchangeStill,
+  exchangeToken,
   findBinding,
   insertBinding,
   liveBindings,
@@ -488,9 +490,11 @@ export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; re
 /**
  * A workload's ID token, verified for a service: the binding of the service
  * whose every claim it carries, and its claims as verified. Nothing spent:
- * whoever acts on it spends it (`consumeToken`).
+ * whoever acts on it spends it (`exchangeToken`). Read with the bindings,
+ * whether it was spent already, and the newest policy change, for the
+ * vault's answer about the service that follows (`exchangeCandidates`).
  */
-export type VerifiedWorkload = { binding: BindingRow; claims: Record<string, unknown>; token: DecodedToken };
+export type VerifiedWorkload = { binding: BindingRow; claims: Record<string, unknown>; token: DecodedToken; spent: boolean; policySeq: bigint | null };
 
 /**
  * The IDs a binding names, as an owner would otherwise look them up, under
@@ -950,15 +954,18 @@ export class WorkloadService {
    * then, in order, so that a stranger costs one bounded read at most:
    *
    * 1. the token's shape;
-   * 2. the service's live bindings on its issuer, one read;
+   * 2. the service's live bindings on its issuer, one read, which says too
+   *    whether the token was spent and the newest policy change;
    * 3. its signature under that issuer's keys, then its audience, times and
    *    claims against those bindings (`verify`);
-   * 4. that it is not spent yet, a read;
+   * 4. that it is not spent yet, as that read said;
    * 5. the member, from the vault, outside any transaction, and a binding
    *    0.4 made sealed with what it holds (`sealCredentials`);
-   * 6. in one transaction that holds the log's head: the member and the
-   *    binding again, the times again, the binding's rate, the token spent,
-   *    the credential issued and `token.exchange` logged, or none of it.
+   * 6. in one transaction that holds the log's head: the member, the
+   *    binding and its rate again, one read (`exchangeStill`), the times
+   *    again, the token spent, the credential issued and the binding
+   *    stamped, one write (`exchangeToken`), and `token.exchange` logged,
+   *    or none of it.
    */
   async exchange(request: ExchangeRequest, meta: { requestId: string; sourceIp: string | null }): Promise<Exchanged> {
     if (inFlight >= MAX_IN_FLIGHT) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
@@ -994,8 +1001,8 @@ export class WorkloadService {
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
     // The bindings first, so that a token none can take costs this one read.
-    const candidates = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS);
-    if (candidates.length === 0) throw unbound();
+    const { bindings: candidates, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
+    if (candidates.length === 0 || spent === null) throw unbound();
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
     const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };
@@ -1011,7 +1018,7 @@ export class WorkloadService {
       throw refused(error);
     }
     const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member);
-    return { binding, claims, token: decoded };
+    return { binding, claims, token: decoded, spent, policySeq };
   }
 
   /**
@@ -1188,12 +1195,11 @@ export class WorkloadService {
   async #exchange(request: ExchangeRequest, meta: { requestId: string; sourceIp: string | null }): Promise<Exchanged> {
     const { db, chainKey, vault } = this.#deps;
     const member = request.service;
-    const { binding, claims, token: decoded } = await this.verify(member, request.token);
+    const { binding, claims, token: decoded, spent, policySeq } = await this.verify(member, request.token);
     const issuer = decoded.claims.iss;
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
-    if (await tokenConsumed(db, decoded.signingInputHash)) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
-    const policySeq = await newestPolicySeq(db);
+    if (spent) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
@@ -1205,22 +1211,21 @@ export class WorkloadService {
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
-      if (!(await stillMember(tx, member, standing)) || (await standingBinding(tx, chainKey, binding.id, member, binding.generation)) === null) {
-        throw unbound();
-      }
+      // The member, the binding and its rate, in one read: every statement here holds the head, which every append waits for.
+      const still = await exchangeStill(tx, chainKey, binding, new Date(now.getTime() - 60_000), EXCHANGES_PER_BINDING_MINUTE);
+      if (!still.stands) throw unbound();
       // The times again, should the request have waited.
       const seconds = now.getTime() / 1000;
       if (decoded.claims.exp <= seconds - CLOCK_TOLERANCE_SECONDS) throw new ExchangeRefused('expired', 'the token has expired');
       const issued = issuedRefusal(decoded.claims.iat, seconds);
       if (issued !== null) throw refused(issued);
-      const recent = await exchangesSince(tx, member, issuedBy(binding.id), new Date(now.getTime() - 60_000), EXCHANGES_PER_BINDING_MINUTE);
-      if (recent >= EXCHANGES_PER_BINDING_MINUTE) {
+      if (still.recent >= EXCHANGES_PER_BINDING_MINUTE) {
         throw new ExchangeRefused('busy', `this binding issued ${EXCHANGES_PER_BINDING_MINUTE} credentials in the last minute: try again shortly`, 429);
       }
-      if (!(await consumeToken(tx, decoded.signingInputHash))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
       const expiresAt = new Date(now.getTime() + EXCHANGED_CREDENTIAL_MS);
-      const credential = await this.#deps.signin.issueExchanged(tx, service, { generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt });
-      await update(tx, serviceBindings, { id: binding.id }, { lastUsedAt: now });
+      const { row, issued: credential } = this.#deps.signin.exchangedCredential(service, { generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt });
+      // The token spent, and only then the credential issued and the binding's last use stamped.
+      if (!(await exchangeToken(tx, decoded.signingInputHash, row, binding.id, now))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
       log.push(allowed(ctx, 'token.exchange', {
         metadata: {
           credentialId: credential.id,

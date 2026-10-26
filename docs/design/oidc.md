@@ -445,9 +445,10 @@ in [ci.md](../ci.md#issuers-coffre-cannot-reach), and Kubernetes' in
   `oidc.circleci.com/vcs-origin`, still reads as before.
 - **Verification is one function.** `WorkloadService.verify(member, token)`
   is steps 2 to 4 of section 2 without the spend: the binding that matched
-  and the verified claims. The exchange calls it before it checks for
-  replay and commits. A plugin that signs a workload in another way calls it
-  too.
+  and the verified claims, and, read with the bindings in one statement,
+  whether the token was spent and the newest policy change. The exchange
+  refuses a spent token on that, then commits. A plugin that signs a
+  workload in another way calls it too.
 
 Findings 8 and 9 of the review, for Kubernetes: the UID is a nested claim a
 binding names; there is still no TokenReview, which the recipe says; and a

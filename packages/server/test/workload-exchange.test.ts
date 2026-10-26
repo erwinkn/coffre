@@ -1,6 +1,6 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type pg from 'pg';
@@ -11,18 +11,18 @@ import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProf
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, consumedTokens, credentials, serviceBindings } from './db/tables.ts';
+import { auditLog, consumedTokens, credentials, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
 import { runScheduled } from '../src/app.ts';
-import { exchangeCandidates, exchangesSince, pruneSpentTokens } from '../src/db/queries.ts';
+import { exchangeCandidates, exchangesSince, exchangeStill, exchangeToken, pruneSpentTokens } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
@@ -91,6 +91,8 @@ let limits: { perSource: RateLimiter; total: RateLimiter };
 let vaultCalls: number;
 /** Waited for before the vault is asked about the member: the last step before the commit. */
 let beforeAccess: (() => Promise<void>) | undefined;
+/** Waited for once the vault has answered about the member, before the head is taken: what changes then, only the re-check under the head sees. */
+let afterAccess: (() => Promise<void>) | undefined;
 /** The binding every test starts with, of `deploy.yml` on main. */
 let bound: string;
 
@@ -124,11 +126,14 @@ beforeEach(async () => {
   deps = testDeps(db.runtime, [ROOT]);
   vaultCalls = 0;
   beforeAccess = undefined;
+  afterAccess = undefined;
   const access = deps.vault.access.bind(deps.vault);
   deps.vault.access = async (principal) => {
     vaultCalls++;
     await beforeAccess?.();
-    return access(principal);
+    const answered = await access(principal);
+    await afterAccess?.();
+    return answered;
   };
   config = resolveConfig({
     publicUrl: ORIGIN,
@@ -518,8 +523,8 @@ test("an exchange's first read visits the live bindings only, whatever the retir
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const seen: Statement[] = [];
   try {
-    const candidates = await exchangeCandidates(createDatabase(counted(pool, seen)), deps.chainKey, MEMBER, ISSUER, 16);
-    assert.deepEqual(candidates.map((candidate) => candidate.id), [live!.id]);
+    const { bindings } = await exchangeCandidates(createDatabase(counted(pool, seen)), deps.chainKey, MEMBER, ISSUER, 16, randomBytes(32));
+    assert.deepEqual(bindings.map((candidate) => candidate.id), [live!.id]);
     const plan = await planOf(pool, seen.find((statement) => /from "service_bindings"/i.test(statement.text))!, 'service_bindings');
     assert.ok(plan.indexes.includes('service_bindings_live_idx'), plan.indexes.join(', '));
     assert.ok(plan.visited <= 2, `visited ${plan.visited} binding rows for one live binding`);
@@ -540,11 +545,17 @@ test("a binding's rate is counted over its last minute, whatever the credentials
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const seen: Statement[] = [];
   try {
-    const recent = await exchangesSince(createDatabase(counted(pool, seen)), MEMBER, `binding:${binding!.id}`, new Date(Date.now() - 60_000), 60);
-    assert.equal(recent, 1);
-    const plan = await planOf(pool, seen.find((statement) => /from "credentials"/i.test(statement.text))!, 'credentials');
-    assert.ok(plan.indexes.includes('credentials_issued_by_idx'), plan.indexes.join(', '));
-    assert.ok(plan.visited <= 2, `visited ${plan.visited} credential rows for one recent credential`);
+    // As the exchange counts it, with its member and binding, and as a workload's sign-in does, on its own.
+    const counting = createDatabase(counted(pool, seen));
+    const since = new Date(Date.now() - 60_000);
+    assert.deepEqual(await exchangeStill(counting, deps.chainKey, binding!, since, 60), { stands: true, recent: 1 });
+    assert.equal(await exchangesSince(counting, MEMBER, `binding:${binding!.id}`, since, 60), 1);
+    assert.equal(seen.length, 2);
+    for (const statement of seen) {
+      const plan = await planOf(pool, statement, 'credentials');
+      assert.ok(plan.indexes.includes('credentials_issued_by_idx'), plan.indexes.join(', '));
+      assert.ok(plan.visited <= 2, `visited ${plan.visited} credential rows for one recent credential`);
+    }
   } finally {
     await pool.end();
   }
@@ -556,7 +567,7 @@ test('removing a binding revokes only what is live: its expired history costs no
   const over = new Date(Date.now() - 3_600_000);
   await db.owner.transaction(async (tx) => {
     for (let i = 0; i < 1000; i++) {
-      await runtime.signin!.issueExchanged(tx, SERVICE, { generation: binding!.generation, bindingId: binding!.id, label: null, expiresAt: over });
+      await tx.insert(credentials).values(runtime.signin!.exchangedCredential(SERVICE, { generation: binding!.generation, bindingId: binding!.id, label: null, expiresAt: over }).row);
     }
   });
   // Issued then, too, outside the binding's rate; the MAC does not cover when.
@@ -671,6 +682,77 @@ test('an exchange racing a removal never leaves a credential the removal missed'
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
   assert.equal(await caller(body.token!), 401);
   assert.equal((await trade(token(rsa))).body.reason, 'no_match');
+});
+
+test('a binding removed, or a member removed or admitted again, while an exchange waits for the head: refused there, and nothing written', async () => {
+  const root = await contextFor(deps, ROOT);
+  const nothingWritten = async () => {
+    assert.deepEqual(await db.owner.select().from(credentials), []);
+    assert.deepEqual(await db.owner.select().from(consumedTokens), []);
+  };
+  // Unbound once the bindings were read: the vault still answers for the member, and only the binding's re-check refuses.
+  beforeAccess = async () => {
+    beforeAccess = undefined;
+    await runtime.workloads!.unbind(root, SERVICE, bound);
+  };
+  assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
+  await nothingWritten();
+
+  // Removed once the vault answered that it stands.
+  await bind(DEPLOY);
+  afterAccess = async () => {
+    afterAccess = undefined;
+    assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+  };
+  assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
+  await nothingWritten();
+
+  // Removed and admitted again: active once more, but at a generation the binding and the vault's answer are not.
+  assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+  const [reads] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, `${SERVICE}-reads`));
+  assert.equal((await speaking(deps.vault).setAccess({ actor: `user:${ROOT}`, principal: MEMBER, changes: [{ projectId: reads!.id, environmentId: null, role: 'viewer', expiresAt: null }] })).ok, true);
+  await bind(DEPLOY);
+  afterAccess = async () => {
+    afterAccess = undefined;
+    assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+    assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: MEMBER })).ok, true);
+  };
+  assert.deepEqual((await trade(token(rsa))).body.reason, 'no_match');
+  await nothingWritten();
+});
+
+test('the spend writes the credential and stamps the binding only when it spent the token itself', async () => {
+  const [before] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  const row = () => runtime.signin!.exchangedCredential(SERVICE, { generation: before!.generation, bindingId: bound, label: null, expiresAt: new Date(Date.now() + 300_000) }).row;
+  const credentialRows = async (id: string) => (await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.id, id))).length;
+  const lastUsed = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.at?.getTime() ?? null;
+  // A token spent already: refused, no credential, the binding's last use as it was.
+  const spentHash = randomBytes(32);
+  await db.owner.insert(consumedTokens).values({ hash: spentHash });
+  const refused = row();
+  assert.equal(await exchangeToken(db.runtime, spentHash, refused, bound, new Date(Date.now() + 1000)), false);
+  assert.equal(await credentialRows(refused.id!), 0);
+  assert.equal(await lastUsed(), before!.lastUsedAt?.getTime() ?? null);
+  // A fresh one: spent, the credential written, the binding stamped.
+  const fresh = randomBytes(32);
+  const issued = row();
+  const at = new Date(Date.now() + 2000);
+  assert.equal(await exchangeToken(db.runtime, fresh, issued, bound, at), true);
+  assert.equal(await credentialRows(issued.id!), 1);
+  assert.equal((await db.owner.select().from(consumedTokens).where(eq(consumedTokens.hash, fresh))).length, 1);
+  assert.equal(await lastUsed(), at.getTime());
+});
+
+test("the re-check under the head stands only for the binding's own principal and a binding whose MAC is the app's", async () => {
+  const since = new Date(Date.now() - 60_000);
+  const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: true, recent: 0 });
+  // Another principal than the binding's: refused (a foreign key keeps a member row for every binding; the member's status and
+  // generation are driven to refusals through the exchange itself, in the test above).
+  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' }, since, 60), { stands: false, recent: 0 });
+  // The member's binding, its MAC not the app's.
+  await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32) }).where(eq(serviceBindings.id, bound));
+  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: false, recent: 0 });
 });
 
 test('one binding trusts a workflow on several events: a pull request into its branch, by its own run, and the push, but no other event', async () => {

@@ -9,7 +9,7 @@
 // `pnpm bench:workers` measures the CPU itself (packages/conformance/scripts/bench.ts).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, generateKeyPairSync, randomBytes, randomUUID, sign as signWith } from 'node:crypto';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
@@ -24,6 +24,7 @@ import type pg from 'pg';
 
 import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
+import { WorkloadService } from '../src/api/workloads.ts';
 import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
@@ -33,17 +34,23 @@ import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header, hmac } from '../src/plugins/credential-proxy.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
+import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testAnchor, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { answer, type Pages } from './start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog, credentials as credentialRows } from './db/tables.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const READER = 'reader@acme.example';
 const SERVICE = 'token:ci-web';
+const ISSUER = 'https://token.actions.githubusercontent.com';
+const KEYS = `${ISSUER}/.well-known/jwks`;
+/** What a CI job reveals: seven keys of the environment it reads. */
+const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
 const POSTGRES = postgresOnly("counts what the app's and the vault's Postgres connections run");
 const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }).resolve(ORIGIN);
 
@@ -97,6 +104,13 @@ let vaultCalls = 0;
 let root: CoffreClient;
 let reader: CoffreClient;
 let service: CoffreClient;
+/** A CI run's sign-in, `POST /api/auth/oidc`, with a fresh ID token of its platform's each time. */
+let exchange: () => Promise<void>;
+/** The credential a CI run's sign-in bought, as its next requests hold it, and when it ends. */
+let ci: CoffreClient;
+let ciEnds = 0;
+/** A CI run's credential, bought again: it lives five minutes, and a long run outlasts it. */
+let buyCi: () => Promise<void>;
 /** A workload's request, as its SDK sends it to the credential proxy: a fresh proof each time. */
 let workload: () => Promise<void>;
 /** A workload's check of an inbound webhook's signature, `verify`, at the proxy; and at one that remembers nothing. */
@@ -182,6 +196,47 @@ before(async () => {
   reader = bearer(runtime, polled.credential.token);
   service = bearer(runtime, (await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).token);
 
+  // A CI run's ID token, from an issuer of the test's own, for the binding of its workflow.
+  await root.secrets.set('market/dev', Object.fromEntries(SEVEN.map((key) => [key, `fake-${key.toLowerCase()}`])));
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };
+  const published = new Map<string, unknown>([[`${ISSUER}/.well-known/openid-configuration`, { issuer: ISSUER, jwks_uri: KEYS }], [KEYS, { keys: [jwk] }]]);
+  const transport: WorkloadTransport = {
+    json: async (url) => {
+      if (!published.has(url.href)) throw new FetchRefused(url, 'answered 404');
+      return published.get(url.href);
+    },
+  };
+  const claims = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/market/.github/workflows/build.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const idToken = () => {
+    const now = Math.floor(Date.now() / 1000);
+    const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/main', iat: now - 5, exp: now + 295, jti: randomUUID(), run_id: '7001', ...claims })}`;
+    return `${input}.${signWith('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
+  };
+  const workloadsAuth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }) } }).resolve(ORIGIN);
+  if (workloadsAuth.mode !== 'signin' || workloadsAuth.signin.workloads === null) throw new Error('unreachable');
+  const workloads = new WorkloadService({ db: deps.db, chainKey: deps.chainKey, vault, config: workloadsAuth.signin.workloads, transport, signin: signinService, publicUrl: ORIGIN });
+  const made = await workloads.bind(await contextFor(deps, ROOT), 'ci-web', { profile: 'github', issuer: null, claims, label: 'build', replaces: [] }, { dryRun: false });
+  if (!('binding' in made)) throw new Error('the binding was not made');
+  const trusting = { ...runtime, auth: workloadsAuth, workloads } satisfies CoffreRuntime;
+  const signIn = async () => {
+    const request = new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: SERVICE, token: idToken() }) });
+    const answered = await answer(request, trusting, {} as Pages, '203.0.113.9');
+    if (answered.status !== 200) throw new Error(`the exchange was refused: ${await answered.text()}`);
+    const issued = (await answered.json()) as { token: string; expiresAt: string };
+    // Issued an hour ago, as far as the binding's rate counts, which a long run's sign-ins would pass: the MAC does not cover when.
+    await db.owner.update(credentialRows).set({ createdAt: new Date(Date.now() - 3_600_000) }).where(eq(credentialRows.tokenHash, hashToken(issued.token)));
+    return issued;
+  };
+  exchange = async () => void (await signIn());
+  buyCi = async () => {
+    const issued = await signIn();
+    ci = bearer(runtime, issued.token);
+    ciEnds = Date.parse(issued.expiresAt);
+  };
+  await buyCi();
+
   // A workload's key-bound session of the service, as `/api/auth/workload` makes one, and a plugin that asks for it as the proxy does.
   const standing = (await memberStanding(deps.db, SERVICE))!;
   const bindingId = randomUUID();
@@ -256,6 +311,16 @@ after(async () => {
   await Promise.all([app.end(), vaultPool.end(), db.close()]);
 });
 
+/**
+ * Each request once, unmeasured: what the vault does once per process, or
+ * once a caller's access or the policy changed, is done before a request
+ * is counted. A CI run's credential near its end is bought again first.
+ */
+async function warm(): Promise<void> {
+  if (ciEnds - Date.now() < 120_000) await buyCi();
+  for (const { request } of Object.values(requests)) await request();
+}
+
 async function cost(request: () => Promise<unknown>): Promise<Cost> {
   const before = { app: { ...app.count }, vault: { ...vaultPool.count }, vaultCalls };
   await request();
@@ -275,12 +340,24 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
  * which it checks (`Accesses`): the versions, then BEGIN, its lock
  * timeout, the reader's row locked, the head locked with everything the
  * decision reads, the entries and the head in one statement, COMMIT.
+ *
+ * A CI run's sign-in: its service's bindings on the issuer, with whether
+ * the token was spent and the newest policy change; the vault's `access`;
+ * then BEGIN, the head, the member, binding and rate in one read, the token
+ * spent with the credential issued and the binding stamped in one
+ * statement, the head again with the clock and the last entry, the entry
+ * and the head, COMMIT. Six of its statements hold the head. Its list and
+ * its reveal cost a service token's, and one statement more: its binding's
+ * standing (`standingBinding`).
  */
 const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
   'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
   'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
   'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
+  "a CI run's sign-in": { request: () => exchange(), budget: { app: 8, vault: 1, vaultCalls: 1 } },
+  "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: { app: 4, vault: 1, vaultCalls: 1 } },
+  "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: { app: 5, vault: 7, vaultCalls: 1 } },
   // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked, its
   // decision warm in the proxy's cache.
   "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
@@ -291,8 +368,7 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
 };
 
 test('each hot request runs exactly its budget of statements, on as many connections', POSTGRES, async () => {
-  // Once first, for what the vault does once per process.
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   for (const [name, { request, budget }] of Object.entries(requests)) {
     const spent = await cost(request);
     assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, budget, name);
@@ -342,7 +418,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
 
@@ -358,7 +434,7 @@ test('a request runs the same statements, and reads the same rows, however large
   for (let i = 0; i < 40; i++) await root.environments.protect('market/prod', i % 2 === 1);
 
   // Once first: a request whose caller's access, or the policy, changed since their last asks the vault again, once.
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   for (const [name, { request }] of Object.entries(requests)) {
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
@@ -406,7 +482,7 @@ const growth = gs.record({
 const growthSettings = propertySettings(4, 10);
 
 test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, POSTGRES, async () => {
-  for (const { request } of Object.values(requests)) await request();
+  await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
   // Places made so far: names from a counter, since the instance keeps what every case made. So Hegel's replay of a
@@ -477,7 +553,7 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
       }
     }
     // Once first, as above: a caller whose access, or the policy, changed asks the vault again, once.
-    for (const { request } of Object.values(requests)) await request();
+    await warm();
     for (const [name, { request }] of Object.entries(requests)) {
       const spent = await cost(request);
       const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;
