@@ -150,7 +150,7 @@ Restore:
    the runtime logins' membership in them must exist too: run
    `pnpm exec coffre migrate` once against an empty database on this server
    if they do not. Make `coffre_backup_login` too, to back the restored
-   database up, and pass `--backup-login coffre_backup_login` in step 4.
+   database up: step 4 grants it its group.
 3. Create an empty database owned by the owner, and restore into it:
 
    ```sh
@@ -162,7 +162,7 @@ Restore:
    URL for the restored database:
 
    ```sh
-   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | pnpm exec coffre migrate --yes
+   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | pnpm exec coffre migrate --yes --backup-login coffre_backup_login
    ```
 
    Besides applying missing migrations, every run revokes `CREATE` and

@@ -53,7 +53,7 @@ export const SECTIONS = [
           'string (piped in, and --yes, without a terminal);',
           '--backup-login grants that existing role coffre_backup,',
           'which reads every row for pg_dump, on every run; coffre',
-          'never makes the role, nor revokes it when the flag goes',
+          'never makes the role, nor revokes it when the flag is left off',
         ],
       },
     ],

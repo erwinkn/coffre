@@ -445,6 +445,10 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
   assert.equal(current.code, 0, current.output);
   assert.match(current.output, /is up to date/);
   assert.match(current.output, new RegExp(`The next migration needs another login: ${refusal.source}`));
+  // Asked to grant the backup group, which it may not reassert either, it is refused rather than do nothing.
+  const backup = await migrateIn(dir, deployer.href, ['--yes', '--backup-login', 'setup_deployer']);
+  assert.equal(backup.code, 1, backup.output);
+  assert.match(backup.output, new RegExp(`${refusal.source}\\. Nothing was changed`));
 
   // With a migration to apply, refused before it asks, not "permission denied for schema drizzle".
   const last = await asSuperuser('setup_migrate_owners', async (client) =>

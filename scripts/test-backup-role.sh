@@ -90,6 +90,20 @@ if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup is a member of another
     exit 1
 fi
 
+# Nor one that someone already reads every row through, inheriting or able
+# to set it: only --backup-login grants that.
+for option in 'INHERIT TRUE, SET FALSE' 'INHERIT FALSE, SET TRUE'; do
+    as_owner -d postgres -c 'DROP DATABASE IF EXISTS unsafe_members' -c 'CREATE DATABASE unsafe_members'
+    as_superuser -c 'CREATE ROLE mallory NOLOGIN' -c "GRANT coffre_backup TO mallory WITH $option"
+    accepted=false
+    if migrate unsafe_members >"$scratch/unsafe.log" 2>&1; then accepted=true; fi
+    as_superuser -c 'DROP ROLE mallory'
+    if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup has members, who would read every row' "$scratch/unsafe.log"; then
+        cat "$scratch/unsafe.log" >&2
+        exit 1
+    fi
+done
+
 # Databases at 0018, the schema before this migration, whose public holds a
 # table of another role, as migrate.test.ts's reporting table, and in which
 # the group was granted a write. 0019 then grants coffre's tables, and only

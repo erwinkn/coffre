@@ -1271,7 +1271,9 @@ which grants it the group that reads every row
 ([restore.md](restore.md#on-plain-postgres)). Nothing checks that login's
 own rights: keep it as plain as the two above. The grant needs `ADMIN
 OPTION` on `coffre_backup`, which the login that made the group holds, and
-nothing on the login it names.
+nothing on the login it names. Any role holding that `ADMIN OPTION` may
+grant the group too; the migration refuses a `coffre_backup` that anyone
+already inherits or may set.
 
 New roles default to no superuser, replication or RLS-bypass rights. The
 migration checks those rights and refuses unsafe roles. It hardens existing

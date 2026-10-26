@@ -373,6 +373,7 @@ export async function migrateDatabase(
   { onPlan, backupLogin }: { onPlan?: (plan: MigrationPlan) => void | Promise<void>; backupLogin?: string } = {},
 ): Promise<void> {
   const engine = engineOfUrl(url);
+  if (backupLogin === '') throw new Error('the backup login is empty: name a role');
   if (engine === 'sqlite' && backupLogin !== undefined) throw new Error('SQLite has no roles, so no backup login');
   const expected = await expectedMigrations(engine);
   const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);

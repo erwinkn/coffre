@@ -19,6 +19,13 @@ BEGIN
         IF EXISTS (SELECT 1 FROM pg_auth_members WHERE member = 'coffre_backup'::regrole) THEN
             RAISE EXCEPTION 'coffre_backup is a member of another role, whose privileges its members would inherit: revoke its memberships';
         END IF;
+        -- Whoever made it first must not read every row through it: only `coffre migrate --backup-login` grants that. ADMIN alone, which a role's creator holds, neither inherits nor sets it.
+        IF EXISTS (
+            SELECT 1 FROM pg_auth_members
+             WHERE roleid = 'coffre_backup'::regrole AND (inherit_option OR set_option)
+        ) THEN
+            RAISE EXCEPTION 'coffre_backup has members, who would read every row: revoke their memberships, and grant it with coffre migrate --backup-login <role>';
+        END IF;
         -- Only when it must: altering a role takes CREATEROLE too.
         IF EXISTS (
             SELECT 1 FROM pg_roles WHERE rolname = 'coffre_backup'

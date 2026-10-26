@@ -95,8 +95,9 @@ END
 $$;
 
 -- Row-level security shows coffre_backup the rows of a table only through a
--- policy for it: without one, pg_dump --enable-row-security dumps the table
--- empty, and says nothing.
+-- policy for it that shows every row, and no restrictive one that hides
+-- some: otherwise pg_dump --enable-row-security dumps the table short, and
+-- says nothing.
 DO $$
 DECLARE
     unread text;
@@ -104,11 +105,17 @@ BEGIN
     SELECT string_agg(c.oid::regclass::text, ', ') INTO unread
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname IN ('public', 'drizzle') AND c.relrowsecurity
-       AND NOT EXISTS (
+       AND (NOT EXISTS (
            SELECT 1 FROM pg_policy p
             WHERE p.polrelid = c.oid AND p.polcmd IN ('r', '*') AND p.polpermissive
               AND (p.polroles && ARRAY['coffre_backup'::regrole::oid, 0::oid])
-       );
+              AND pg_get_expr(p.polqual, p.polrelid) = 'true'
+       ) OR EXISTS (
+           SELECT 1 FROM pg_policy p
+            WHERE p.polrelid = c.oid AND p.polcmd IN ('r', '*') AND NOT p.polpermissive
+              AND (p.polroles && ARRAY['coffre_backup'::regrole::oid, 0::oid])
+              AND pg_get_expr(p.polqual, p.polrelid) IS DISTINCT FROM 'true'
+       ));
     IF unread IS NOT NULL THEN
         RAISE EXCEPTION 'no policy shows coffre_backup the rows of %', unread;
     END IF;
