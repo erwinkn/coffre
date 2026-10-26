@@ -43,7 +43,7 @@ REMOVALS=(
   "Referencing SourceRecheckInReference ReferencedSourcesStayLive"
   "Referencing ArchiveRefusedWhileRead ReferencedSourcesStayLive"
   "Referencing ReferenceRereadInDeletion EveryReferenceBreakable"
-  "Owners LastOwnerCheckUnderHead OwnerStays"
+  "Owners LastOwnerCheckUnderHead NoSuchInvariant"
   "Regenerating InheritedRecheckUnderHead RegeneratesReplaceWhatTheyListed"
   "Exchanging SpentTokenInsertedWithCredential SingleUse"
   "Exchanging BindingRecheckUnderHead NoExchangeAfterUnbind"
