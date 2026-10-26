@@ -1,6 +1,4 @@
-import { hkdfSync } from 'node:crypto';
-
-import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
+import { derivedSigningKey, KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
 /** At most `count` distinct data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };
@@ -108,13 +106,7 @@ const KEK_PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** Every row records it, and `provider:keyId` finds the KEK again: visible ASCII, bounded. */
 const KEK_NAME = /^[\x21-\x7e]{1,255}$/;
 
-/** The label no other use of a KEK shares: a local KEK is otherwise only ever an AES-256-GCM key. */
-const SIGNING_KEY_LABEL = 'coffre.vault.signing-key.v1';
-
-/** The signing key a local KEK stands for, when the vault is given none: HKDF-SHA-256 of the KEK. */
-export function derivedSigningKey(kek: Uint8Array): Buffer {
-  return Buffer.from(hkdfSync('sha256', kek, new Uint8Array(0), SIGNING_KEY_LABEL, 32));
-}
+export { derivedSigningKey };
 
 /** A KEK as the registry takes it, and the signing key it stands for when it is one the vault holds. */
 function kek(entry: Kek): { provider: KekProvider; signingKey: Buffer | null } {

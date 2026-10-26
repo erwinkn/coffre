@@ -14,7 +14,7 @@ docker compose exec -T postgres \
 DROP DATABASE IF EXISTS :"database" WITH (FORCE);
 CREATE DATABASE :"database";
 
--- The app's login and the vault's, as a deployment provisions them.
+-- The app's login, the vault's and the backups', as a deployment provisions them.
 DO $$
 DECLARE
     login record;
@@ -23,7 +23,7 @@ BEGIN
     -- lock in ensure-database.mjs rather than racing ALTER ROLE.
     PERFORM pg_advisory_xact_lock(hashtextextended('coffre:local-roles', 0));
     FOR login IN
-        SELECT * FROM (VALUES ('coffre_runtime', 'local-runtime-only'), ('coffre_vault_runtime', 'local-vault-only'))
+        SELECT * FROM (VALUES ('coffre_runtime', 'local-runtime-only'), ('coffre_vault_runtime', 'local-vault-only'), ('coffre_backup_login', 'local-backup-only'))
             AS logins (name, password)
     LOOP
         EXECUTE format(
@@ -38,4 +38,4 @@ $$;
 SQL
 
 DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database" \
-    pnpm --filter @coffre/db run db:migrate >/dev/null
+    pnpm --filter @coffre/db run db:migrate --backup-login coffre_backup_login >/dev/null

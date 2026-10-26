@@ -4,7 +4,7 @@
 // a fingerprint of the key they are signed with. The vault writes the
 // checks; `coffre verify keys` holds an escrowed key to them, on the
 // operator's machine, the key never sent anywhere.
-import { createHash } from 'node:crypto';
+import { createHash, hkdfSync } from 'node:crypto';
 
 import { deriveLogKey } from '../audit/chain.ts';
 import type { SecretContext } from '../context.ts';
@@ -43,4 +43,16 @@ export async function opensKeyCheck(key: Buffer, check: WrappedDek): Promise<boo
 /** The id the log records for entries the app signs with `key`, its APP_KEY. */
 export function appLogKeyId(key: Uint8Array): string {
   return deriveLogKey('app', key).keyId;
+}
+
+/** The label no other use of a vault key shares: a local vault key is otherwise only ever an AES-256-GCM key. */
+const SIGNING_KEY_LABEL = 'coffre.vault.signing-key.v1';
+
+/**
+ * The signing key a local vault key stands for, when the vault is given
+ * none: HKDF-SHA-256 of the key. The vault MACs its log entries and member
+ * rows with what it derives from this one (`vaultLogKey` in @coffre/vault).
+ */
+export function derivedSigningKey(kek: Uint8Array): Buffer {
+  return Buffer.from(hkdfSync('sha256', kek, new Uint8Array(0), SIGNING_KEY_LABEL, 32));
 }

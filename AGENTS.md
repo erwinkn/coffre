@@ -238,11 +238,14 @@ unsupported diff select full validation.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
   (every path, script and link the docs name exists) do not need Postgres.
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
-  stack with `pg_dump`, restores it, and checks it came back, then the
-  wrong-key case, on ports 3400 to 3402 and 8481 and databases `coffre_drill` and
-  `coffre_drill_restored` (`COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT`,
-  `COFFRE_DRILL_DATABASE`; `docs/restore.md`). It drops its databases and stops its
-  processes however it ends.
+  stack with `coffre backup`, restores it with `coffre restore --keys`, and
+  checks it came back, then the wrong-key cases, on ports 3400 to 3402 and 8481
+  and databases `coffre_drill`, `coffre_drill_restored` and `coffre_drill_scratch`
+  (`COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT`, `COFFRE_DRILL_DATABASE`;
+  `docs/restore.md`). It drops its databases and stops its processes however it
+  ends. The commands run `pg_dump` and `pg_restore` from `PATH`, which must be
+  PostgreSQL 16's, the compose server's: a newer `pg_restore` cannot restore into
+  it. `packages/cli/test/backup.test.ts` skips without them.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
   that writes the `dist/` the deployments typecheck against.

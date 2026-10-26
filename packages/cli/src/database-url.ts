@@ -31,7 +31,7 @@ export async function readDatabaseUrl(out: Output, s: Style, asking: Asking): Pr
     if (text === '') throw new DatabaseUrlError(`no connection string: pipe it in, as \`printenv DATABASE_OWNER_URL | ${asking.command} …\`, or run it on a terminal`);
   }
   const url = databaseUrl(text, asking.command);
-  return { url, secrets: url.password === '' ? [text] : [text, url.password, decodeURIComponent(url.password)] };
+  return { url, secrets: urlSecrets(text, url) };
 }
 
 export function databaseUrl(text: string, command: string): URL {
@@ -48,4 +48,10 @@ export function databaseUrl(text: string, command: string): URL {
     throw new DatabaseUrlError('the connection string must name a user, a host and a database');
   }
   return url;
+}
+
+/** Every form of a connection string's secrets: the whole text, its password as typed and decoded, and those in the query, a client key's included. */
+export function urlSecrets(text: string, url: URL): string[] {
+  const query = ['password', 'sslpassword'].map((name) => url.searchParams.get(name)).filter((value) => value !== null && value !== '');
+  return [text, ...(url.password === '' ? [] : [url.password, decodeURIComponent(url.password)]), ...(query as string[])];
 }
