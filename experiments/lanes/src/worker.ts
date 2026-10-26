@@ -183,6 +183,9 @@ async function laneDecision(env: Env, vault: Client, principal: string, requestI
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** How long a change waits for every shard to take its fence before it rolls back. */
+const FENCE_DEADLINE_MS = 5_000;
+
 /** How often a call that is not the leader looks for its entry in the chain. */
 const POLL_MS = 10;
 
@@ -276,6 +279,10 @@ async function leaderDecision(env: Env, vault: Client, principal: string, reques
     if (open) void vault.query('ROLLBACK').catch(() => {});
   }
 }
+
+/** This isolate's calls in flight to each shard: a number, settled, never a promise another call awaits. */
+const inFlight = new Map<number, number>();
+const ISOLATE_IN_FLIGHT = 64;
 
 /** The isolate's value cache: a value, and the control lane's head it was opened at. */
 const cache = new Map<string, { value: string; control: string }>();
@@ -416,8 +423,16 @@ export default {
           const fan = Math.max(1, Number(url.searchParams.get('fan') ?? '1'));
           const spread = fan === 1 ? 0 : Math.floor(Math.random() * fan);
           const i = (laneOf(env, principal, shards) - 1 + spread) % shards;
-          const result = await stub(i).use(i, { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId });
-          return shardAnswer(result, meter);
+          // Upstream of the shard: this isolate's own calls in flight to it, bounded, so that a hot shard is refused here,
+          // fast, before Cloudflare queues it.
+          if ((inFlight.get(i) ?? 0) >= ISOLATE_IN_FLIGHT) return shardAnswer({ ok: false, code: 'overloaded', retryAfter: 1 }, meter);
+          inFlight.set(i, (inFlight.get(i) ?? 0) + 1);
+          try {
+            const result = await stub(i).use(i, { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId });
+            return shardAnswer(result, meter);
+          } finally {
+            inFlight.set(i, inFlight.get(i)! - 1);
+          }
         }
         if (protocol === 'revoke' || protocol === 'grant' || protocol === 'revoke-credential') {
           const client = await open();
@@ -427,6 +442,14 @@ export default {
         if (protocol === 'reset') {
           await Promise.all(Array.from({ length: shards }, (_, i) => stub(i).reset()));
           return Response.json({ ok: true });
+        }
+        if (protocol === 'restore') {
+          // As a restore from backup would: the revision set back, and a new epoch (pass epoch=0 to keep the old one).
+          const client = await open();
+          const back = Number(url.searchParams.get('to') ?? '1');
+          const epoch = url.searchParams.get('epoch') === '0' ? null : crypto.randomUUID();
+          await client.query(`UPDATE revision SET value = $1${epoch === null ? '' : ', epoch = $2'} WHERE only_row`, epoch === null ? [back] : [back, epoch]);
+          return Response.json({ ok: true, revision: back, epoch });
         }
         if (protocol === 'stats') {
           return Response.json(await Promise.all(Array.from({ length: shards }, (_, i) => stub(i).stats())));
@@ -510,11 +533,27 @@ async function change(
   let fenced: number | null = null;
   try {
     await client.query("SET LOCAL statement_timeout = '5s'");
-    const { rows } = await client.query('SELECT value::text AS value FROM revision WHERE only_row FOR UPDATE');
+    // The fence phase is no statement: bound the transaction itself, whatever it waits on.
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '10s'");
+    const { rows } = await client.query('SELECT value::text AS value, epoch FROM revision WHERE only_row FOR UPDATE');
     const next = Number(rows[0].value) + 1;
     const started = Date.now();
     fenced = next;
-    await Promise.all(Array.from({ length: shards }, (_, i) => stub(i).fence(i, next)));
+    // Each fence retried (they are idempotent and only raise the floor), all of them within a deadline.
+    const fence = async (i: number) => {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await stub(i).fence(i, rows[0].epoch, next);
+        } catch (error) {
+          if (attempt >= 4 || Date.now() - started > FENCE_DEADLINE_MS) throw error;
+          await sleep(25 * attempt);
+        }
+      }
+    };
+    await Promise.race([
+      Promise.all(Array.from({ length: shards }, (_, i) => fence(i))),
+      sleep(FENCE_DEADLINE_MS).then(() => { throw new Error('the shards did not all take the fence in time'); }),
+    ]);
     const fenceMs = Date.now() - started;
     if (kind === 'revoke-credential') {
       await client.query('UPDATE credentials SET revoked = true WHERE principal = $1', [principal]);

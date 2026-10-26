@@ -17,12 +17,16 @@ export type ShardAnswer =
  */
 type Standing = {
   revision: number;
+  /** The database's epoch, new at every migration and restore. */
+  epoch: string;
   member: Member | null;
   grants: Grant[];
   /** Credentials of theirs, by id: whether each is live. */
   credentials: Map<string, boolean>;
   /** Their newest access entry on the control lane, which the member row must name. */
   accessSeq: string | null;
+  /** The version of the key asked for, which names the opened key. */
+  version: string;
 };
 
 /** A shard's own lane of the audit log starts at this lane number in Postgres, plus its index. */
@@ -30,6 +34,10 @@ export const SHARD_LANE_BASE = 100;
 
 /** Entries a flush copies to Postgres at most, and how often it runs while some wait. */
 const FLUSH_BATCH = 2000;
+/** Calls a shard takes at once; past it, 503 and Retry-After at once. */
+const MAX_IN_FLIGHT = 256;
+/** A fence younger than this means its change is almost surely in flight: refuse, without probing. */
+const YOUNG_FENCE_MS = 2_000;
 const FLUSH_EVERY_MS = 200;
 
 /**
@@ -59,8 +67,16 @@ export class Shard extends DurableObject<ShardEnv> {
   #floor = 0;
   #standing = new Map<string, Standing>();
   #loading = new Map<string, Promise<Standing>>();
-  /** Opened keys, by secret id. */
+  /** Opened keys, by version (here, the wrapped key itself): a new version is a new key, never the old one served. */
   #values = new Map<string, Buffer>();
+  /** The epoch the floor and every kept standing belong to. */
+  #epoch: string | null = null;
+  #inFlight = 0;
+  #lastFenceAt = 0;
+  /** One probe at a time; calls that find one out refuse. */
+  #probing = false;
+  loads = 0;
+  refused = 0;
   /** One connection for standing reads, one for flushes: a statement on either never waits behind the other's. */
   #client: Client | null = null;
   #flusher: Client | null = null;
@@ -83,12 +99,40 @@ export class Shard extends DurableObject<ShardEnv> {
     // A fence outlives a restart: a shard that forgot it would read standing from before the change that fenced it.
     const floor = sql.exec<{ v: string }>("SELECT v FROM state WHERE k = 'floor'").toArray()[0];
     if (floor !== undefined) this.#floor = Number(floor.v);
+    const epoch = sql.exec<{ v: string }>("SELECT v FROM state WHERE k = 'epoch'").toArray()[0];
+    if (epoch !== undefined) this.#epoch = epoch.v;
     const index = sql.exec<{ v: string }>("SELECT v FROM state WHERE k = 'index'").toArray()[0];
     if (index !== undefined) this.#index = Number(index.v);
   }
 
+  /**
+   * Another epoch: the database was migrated or restored. Nothing kept
+   * counts: not the floor, not a standing, not an opened key.
+   */
+  #adopt(epoch: string, floor: number): void {
+    this.#standing.clear();
+    this.#values.clear();
+    this.#epoch = epoch;
+    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO state VALUES ('epoch', ?)", epoch);
+    this.#setFloor(floor);
+  }
+
   async use(index: number, input: ShardUse): Promise<ShardAnswer> {
     this.#claim(index);
+    // Overload: refuse now, saying when to come back, rather than queue.
+    if (this.#inFlight >= MAX_IN_FLIGHT) {
+      this.refused += 1;
+      return { ok: false, code: 'overloaded', retryAfter: 1 };
+    }
+    this.#inFlight += 1;
+    try {
+      return await this.#use(input);
+    } finally {
+      this.#inFlight -= 1;
+    }
+  }
+
+  async #use(input: ShardUse): Promise<ShardAnswer> {
     this.uses += 1;
     let standing = this.#standing.get(input.principal);
     let loaded = false;
@@ -96,13 +140,15 @@ export class Shard extends DurableObject<ShardEnv> {
       standing = await this.#load(input.principal, input.environmentId, input.secretId);
       loaded = true;
       if (standing.revision < this.#floor) {
+        // A young fence: its change is in flight. Refuse at once; probe only for an old one, one probe at a time.
+        if (Date.now() - this.#lastFenceAt < YOUNG_FENCE_MS || this.#probing) return { ok: false, code: 'changing', retryAfter: 1 };
         if (!(await this.#probe())) return { ok: false, code: 'changing', retryAfter: 1 };
         standing = await this.#load(input.principal, input.environmentId, input.secretId);
         if (standing.revision < this.#floor) return { ok: false, code: 'changing', retryAfter: 1 };
       }
     }
     const why = refusal(this.#keys, standing, input);
-    const key = why === null ? this.#values.get(input.secretId) : undefined;
+    const key = why === null ? this.#values.get(standing.version) : undefined;
     if (why === null && key === undefined) return { ok: false, code: 'missing' };
     const fields: Fields = {
       actor: input.principal,
@@ -119,11 +165,13 @@ export class Shard extends DurableObject<ShardEnv> {
     return { ok: true, value: key!.toString('base64'), seq, shard: this.#index, loaded };
   }
 
-  /** From now, answer only from standing read at `revision` or later. */
-  async fence(index: number, revision: number): Promise<void> {
+  /** From now, answer only from standing read at `revision` or later, in `epoch`. */
+  async fence(index: number, epoch: string, revision: number): Promise<void> {
     this.#claim(index);
     this.#fences += 1;
-    if (revision > this.#floor) this.#setFloor(revision);
+    this.#lastFenceAt = Date.now();
+    if (epoch !== this.#epoch) this.#adopt(epoch, revision);
+    else if (revision > this.#floor) this.#setFloor(revision);
   }
 
   /**
@@ -150,6 +198,16 @@ export class Shard extends DurableObject<ShardEnv> {
    * from before its fence until its commit.
    */
   async #probe(): Promise<boolean> {
+    if (this.#probing) return false;
+    this.#probing = true;
+    try {
+      return await this.#probeOnce();
+    } finally {
+      this.#probing = false;
+    }
+  }
+
+  async #probeOnce(): Promise<boolean> {
     // A transaction of its own, on a connection of its own: never one that other calls' statements queue on.
     const seen = this.#fences;
     const client = new Client({ connectionString: this.env.HD.connectionString });
@@ -157,8 +215,13 @@ export class Shard extends DurableObject<ShardEnv> {
     let value: number;
     try {
       await client.query('BEGIN');
-      const { rows } = await client.query('SELECT value::text AS value FROM revision WHERE only_row FOR UPDATE NOWAIT');
+      const { rows } = await client.query('SELECT value::text AS value, epoch FROM revision WHERE only_row FOR UPDATE NOWAIT');
       value = Number(rows[0].value);
+      if (rows[0].epoch !== this.#epoch) {
+        // Restored or migrated since: start over in its epoch, at its revision.
+        if (this.#fences === seen) this.#adopt(rows[0].epoch, value);
+        return true;
+      }
     } catch (error) {
       if ((error as { code?: string }).code === '55P03') return false;
       throw error;
@@ -173,8 +236,11 @@ export class Shard extends DurableObject<ShardEnv> {
     return true;
   }
 
-  async stats(): Promise<{ index: number; head: number; flushed: number; uses: number; principals: number; floor: number }> {
-    return { index: this.#index, head: this.#head.seq, flushed: this.#flushed, uses: this.uses, principals: this.#standing.size, floor: this.#floor };
+  async stats(): Promise<{ index: number; head: number; flushed: number; uses: number; loads: number; refused: number; principals: number; floor: number }> {
+    return {
+      index: this.#index, head: this.#head.seq, flushed: this.#flushed, uses: this.uses, loads: this.loads, refused: this.refused,
+      principals: this.#standing.size, floor: this.#floor,
+    };
   }
 
   /** Forget everything, storage too: for a load test that starts the database over. */
@@ -190,7 +256,10 @@ export class Shard extends DurableObject<ShardEnv> {
     this.#standing.clear();
     this.#values.clear();
     this.#index = -1;
+    this.#epoch = null;
     this.uses = 0;
+    this.loads = 0;
+    this.refused = 0;
   }
 
   /** Copy what Postgres lacks, then stop: the alarm runs while entries wait. */
@@ -239,20 +308,25 @@ export class Shard extends DurableObject<ShardEnv> {
     const loading = (async () => {
       const client = await this.#connect();
       try {
+        this.loads += 1;
         const { rows } = await client.query(STANDING, [principal, environmentId, secretId]);
         const s = rows[0].s as {
-          revision: string; member: Member | null; grants: Grant[]; credentials: { id: string; revoked: boolean }[];
+          revision: string; epoch: string; member: Member | null; grants: Grant[]; credentials: { id: string; revoked: boolean }[];
           access: { seq: string } | null; secret: { wrapped: string; iv: string } | null;
         };
         const standing: Standing = {
           revision: Number(s.revision),
+          epoch: s.epoch,
           member: s.member,
           grants: s.grants,
           credentials: new Map(s.credentials.map((c) => [c.id, !c.revoked])),
           accessSeq: s.access?.seq ?? null,
+          version: s.secret?.wrapped ?? '',
         };
-        if (s.secret !== null && !this.#values.has(secretId)) {
-          this.#values.set(secretId, unwrap(this.#keys.kek, Buffer.from(s.secret.wrapped, 'hex'), Buffer.from(s.secret.iv, 'hex')));
+        // Another epoch: migrated or restored since anything here was kept. Start over in it, from this read.
+        if (standing.epoch !== this.#epoch) this.#adopt(standing.epoch, standing.revision);
+        if (s.secret !== null && !this.#values.has(standing.version)) {
+          this.#values.set(standing.version, unwrap(this.#keys.kek, Buffer.from(s.secret.wrapped, 'hex'), Buffer.from(s.secret.iv, 'hex')));
         }
         // A fence that came while this read was out may already ask for more: kept only if it is enough.
         if (standing.revision >= this.#floor) this.#standing.set(principal, standing);
@@ -289,26 +363,37 @@ export class Shard extends DurableObject<ShardEnv> {
       }
       const client = this.#flusher;
       const last = rows.at(-1)!;
+      // The hash Postgres's head must hold: the shard's own entry before what it copies.
+      const from = this.#flushed === 0
+        ? GENESIS
+        : Buffer.from(this.ctx.storage.sql.exec<{ hash: ArrayBuffer }>('SELECT hash FROM entries WHERE seq = ?', this.#flushed - 1).one().hash);
       const { rows: done } = await client.query(
         `WITH moved AS (
-           UPDATE lanes SET next_seq = $15, head_hash = $16 WHERE lane = $14 AND next_seq = $17 RETURNING 1
+           UPDATE lanes SET next_seq = $15, head_hash = $16 WHERE lane = $14 AND next_seq = $17 AND head_hash = $18 RETURNING 1
          ),
          appended AS (
            INSERT INTO lane_log (lane, seq, author, actor, action, decision, subject, environment_id, control_seq, occurred_at, metadata, prev_hash, mac, hash)
            SELECT $14, * FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::uuid[], $8::bigint[], $9::bigint[], $10::text[], $11::bytea[], $12::bytea[], $13::bytea[])
            WHERE EXISTS (SELECT 1 FROM moved) RETURNING 1
          )
-         SELECT EXISTS (SELECT 1 FROM moved) AS written, (SELECT next_seq::text FROM lanes WHERE lane = $14) AS head`,
+         SELECT EXISTS (SELECT 1 FROM moved) AS written, (SELECT next_seq::text FROM lanes WHERE lane = $14) AS head,
+           (SELECT head_hash FROM lanes WHERE lane = $14) AS head_hash`,
         [
           rows.map((r) => String(r.seq)), rows.map(() => 'vault'), rows.map((r) => r.actor), rows.map((r) => r.action), rows.map((r) => r.decision),
           rows.map((r) => r.subject), rows.map((r) => r.environment_id), rows.map((r) => r.control_seq), rows.map((r) => String(r.occurred_at)),
           rows.map((r) => r.metadata), rows.map((r) => Buffer.from(r.prev_hash)), rows.map((r) => Buffer.from(r.mac)), rows.map((r) => Buffer.from(r.hash)),
-          lane, String(last.seq + 1), Buffer.from(last.hash), String(this.#flushed),
+          lane, String(last.seq + 1), Buffer.from(last.hash), String(this.#flushed), from,
         ],
       );
-      // Written, or Postgres already has them (a flush whose answer was lost): either way it is at its head.
-      const at = done[0].written ? last.seq + 1 : Number(done[0].head);
-      if (!done[0].written && at < this.#flushed) throw new Error(`Postgres's lane ${lane} is behind what this shard copied: rewound`);
+      let at = last.seq + 1;
+      if (!done[0].written) {
+        // Postgres moved without this flush: adopt its head only if it is this shard's own entry (a flush whose answer
+        // was lost). Behind what was copied is a rewound database; anything else, a lane this shard did not write.
+        at = Number(done[0].head);
+        if (at < this.#flushed) throw new Error(`Postgres's lane ${lane} is behind what this shard copied: rewound`);
+        const own = at > this.#head.seq ? undefined : at === 0 ? GENESIS : this.ctx.storage.sql.exec<{ hash: ArrayBuffer }>('SELECT hash FROM entries WHERE seq = ?', at - 1).toArray()[0]?.hash;
+        if (own === undefined || !Buffer.from(own).equals(done[0].head_hash)) throw new Error(`Postgres's lane ${lane} holds entries this shard did not write: stopped`);
+      }
       this.#flushed = at;
       this.ctx.storage.sql.exec("INSERT OR REPLACE INTO state VALUES ('flushed', ?)", String(at));
     } catch (error) {
@@ -335,6 +420,7 @@ function refusal(keys: Keys, s: Standing, input: ShardUse): string | null {
 const STANDING = `
   SELECT json_build_object(
     'revision', (SELECT value::text FROM revision WHERE only_row),
+    'epoch', (SELECT epoch FROM revision WHERE only_row),
     'member', (SELECT json_build_object('principal', principal, 'status', status, 'role', role, 'access_seq', access_seq::text, 'mac', encode(mac, 'hex')) FROM members WHERE principal = $1),
     'grants', (SELECT coalesce(json_agg(json_build_object('principal', principal, 'environment_id', environment_id, 'role', role)), '[]') FROM grants WHERE principal = $1),
     'credentials', (SELECT coalesce(json_agg(json_build_object('id', id, 'revoked', revoked)), '[]') FROM credentials WHERE principal = $1),

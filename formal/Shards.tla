@@ -49,7 +49,18 @@
                         marker only the change function sets once its
                         fences are acknowledged); off, a writer that does
                         not fence (a 0.14 instance during the deploy, or a
-                        path that forgot) revokes and answers *)
+                        path that forgot) revokes and answers
+     EpochChecked       the revision is (epoch, n), and the migration and a
+                        database restore write a new epoch; fences, standings
+                        and probes carry it, and a shard that meets a newer
+                        epoch drops its floor and standing, adopts it and
+                        reads again (off: a restore sets the revision back,
+                        and floors and standings from before it stand)
+
+   Postgres may be restored once from an earlier backup (Restores): the
+   grant and the revision go back to what the backup holds. The restore
+   fences every shard first, as a change does, at the backup's revision in
+   the new epoch; it is not rolled back once begun. *)
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
@@ -60,17 +71,22 @@ CONSTANTS
   MaxStarts,    \* instances started after the first
   Losses,       \* messages may be lost
   Duplicates,   \* messages may be delivered twice
-  LostCommits   \* the answer to a COMMIT may be lost
+  LostCommits,  \* the answer to a COMMIT may be lost
+  Restores,     \* restores of Postgres from a backup
+  Repeats       \* a use answered arrives again (the client's next request)
 
 CONSTANTS
   FencePersisted, FenceBeforeCommit, AllAcked, FloorChecked, NowaitProbe,
   ProbeKeepsFence, UnfenceProbes, OneSnapshot, DurableBeforeReply, StorageArbiter,
-  FencedWritesOnly
+  FencedWritesOnly, EpochChecked
 
 VARIABLES
   grant,        \* Postgres: whether the principal holds its grant, and how many
                 \* times that changed (a ghost: what a standing was read from)
   revision,     \* Postgres: the committed revision
+  epoch,        \* Postgres: the revision's epoch
+  backup,       \* a backup of Postgres: [taken, on, rev]
+  restores,     \* restores of it
   locked,       \* Postgres: the revision's row is locked by a change
   ch,           \* the changer: [st, rev, kind, acks, n, gen]
   rogue,        \* the writer that does not fence has revoked
@@ -78,19 +94,20 @@ VARIABLES
   net,          \* fences and unfences in flight: [k, rev, s, id]
   inst,         \* each shard's instances, in memory: [alive, floor, standing]
   sFloor,       \* each shard's storage: its floor
+  sEpoch,       \* each shard's storage: its floor's epoch
   sOwner,       \* each shard's storage: the instance whose writes it takes
   sEntries,     \* each shard's storage: its entries, [u, rev, allow]
   starts,       \* instances started
   probes,       \* probes an unfence started: [s, i, free, value, overtaken]
   use           \* each use
 
-vars == <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+vars == <<grant, revision, epoch, backup, restores, sEpoch, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 Max(a, b) == IF a > b THEN a ELSE b
 
 NoGrant == [on |-> FALSE, gen |-> 0]
-NoStanding == [has |-> FALSE, grant |-> NoGrant, rev |-> 0]
-Fresh == [alive |-> FALSE, floor |-> 0, standing |-> NoStanding]
+NoStanding == [has |-> FALSE, grant |-> NoGrant, rev |-> 0, ep |-> 0]
+Fresh == [alive |-> FALSE, floor |-> 0, epoch |-> 0, standing |-> NoStanding]
 First == CHOOSE i \in Slots : \A j \in Slots : i <= j
 
 \* A use between its arrival and its decision, in an instance's memory.
@@ -98,8 +115,8 @@ Out == {"loading", "half", "loaded", "probed"}
 
 \* A use: where it is, what it read, what its probe found, what it was answered.
 Blank == [st |-> "idle", s |-> CHOOSE s \in Shards : TRUE, i |-> First, after |-> 0,
-          rg |-> NoGrant, rr |-> 0, free |-> FALSE, value |-> 0, overtaken |-> FALSE,
-          allow |-> FALSE, gen |-> 0, rev |-> 0, revAt |-> 0]
+          rg |-> NoGrant, rr |-> 0, re |-> 0, free |-> FALSE, value |-> 0, pe |-> 0, overtaken |-> FALSE,
+          allow |-> FALSE, gen |-> 0, rev |-> 0, ep |-> 0, revAt |-> 0, epAt |-> 0]
 
 \* The use tried again: all it keeps is when it arrived.
 Again(r) == [Blank EXCEPT !.st = "new", !.after = r.after]
@@ -107,13 +124,17 @@ Again(r) == [Blank EXCEPT !.st = "new", !.after = r.after]
 Init ==
   /\ grant = [on |-> TRUE, gen |-> 0]
   /\ revision = 0
+  /\ epoch = 0
+  /\ backup = [taken |-> FALSE, on |-> FALSE, rev |-> 0]
+  /\ restores = 0
   /\ locked = FALSE
-  /\ ch = [st |-> "idle", rev |-> 0, kind |-> "none", acks |-> {}, n |-> 0, gen |-> 0]
+  /\ ch = [st |-> "idle", rev |-> 0, ep |-> 0, kind |-> "none", acks |-> {}, n |-> 0, gen |-> 0]
   /\ rogue = FALSE
   /\ lastRevoke = 0
   /\ net = {}
   /\ inst = [s \in Shards |-> [i \in Slots |-> [Fresh EXCEPT !.alive = (i = First)]]]
   /\ sFloor = [s \in Shards |-> 0]
+  /\ sEpoch = [s \in Shards |-> 0]
   /\ sOwner = [s \in Shards |-> First]
   /\ sEntries = [s \in Shards |-> {}]
   /\ starts = 0
@@ -135,50 +156,66 @@ Down(s, i) ==
 -----------------------------------------------------------------------------
 (* The changer: one at a time, under the revision's row. *)
 
-Fences(R, id) == {[k |-> "fence", rev |-> R, s |-> s, id |-> id] : s \in Shards}
+Msg(k, R, e, s, id) == [k |-> k, rev |-> R, ep |-> e, s |-> s, id |-> id]
+Fences(R, e, id) == {Msg("fence", R, e, s, id) : s \in Shards}
+Unfences == {Msg("unfence", ch.rev, ch.ep, s, ch.n) : s \in Shards}
+
+\* What a change does: the opposite of what stands; with restores, either
+\* (a change to anything else raises the revision too), or a restore of
+\* Postgres from the backup, once one is taken and changes followed it.
+Kinds ==
+  (IF Restores > 0 THEN {"revoke", "grant"} ELSE {IF grant.on THEN "revoke" ELSE "grant"})
+  \cup (IF restores < Restores /\ backup.taken /\ backup.rev < revision THEN {"restore"} ELSE {})
 
 \* It takes the row and fences every shard at the next revision; or, without
-\* FenceBeforeCommit, commits first and fences after.
+\* FenceBeforeCommit, commits first and fences after. A restore (`coffre
+\* restore`) fences at the backup's revision in a new epoch (EpochChecked;
+\* off, in the same one), then puts the backup in place.
 Begin ==
   /\ ch.st = "idle" /\ ch.n < MaxChanges /\ ~locked
-  /\ LET R == revision + 1
+  /\ \E kind \in Kinds :
+     LET R == IF kind = "restore" THEN backup.rev ELSE revision + 1
+         e == IF kind = "restore" /\ EpochChecked THEN epoch + 1 ELSE epoch
          id == ch.n + 1
-         kind == IF grant.on THEN "revoke" ELSE "grant"
-     IN /\ net' = net \cup Fences(R, id)
-        /\ IF FenceBeforeCommit
+     IN /\ net' = net \cup Fences(R, e, id)
+        /\ IF FenceBeforeCommit \/ kind = "restore"
            THEN /\ locked' = TRUE
-                /\ ch' = [st |-> "fencing", rev |-> R, kind |-> kind, acks |-> {}, n |-> id, gen |-> 0]
+                /\ ch' = [st |-> "fencing", rev |-> R, ep |-> e, kind |-> kind, acks |-> {}, n |-> id, gen |-> 0]
                 /\ UNCHANGED <<grant, revision>>
            ELSE /\ grant' = [on |-> kind = "grant", gen |-> grant.gen + 1]
                 /\ revision' = R
-                /\ ch' = [st |-> "after", rev |-> R, kind |-> kind, acks |-> {}, n |-> id, gen |-> grant.gen + 1]
+                /\ ch' = [st |-> "after", rev |-> R, ep |-> epoch, kind |-> kind, acks |-> {}, n |-> id, gen |-> grant.gen + 1]
                 /\ UNCHANGED locked
-  /\ UNCHANGED <<rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* A fence not acknowledged is sent again.
 Resend(s) ==
-  LET m == [k |-> "fence", rev |-> ch.rev, s |-> s, id |-> ch.n] IN
+  LET m == Msg("fence", ch.rev, ch.ep, s, ch.n) IN
   /\ ch.st \in {"fencing", "after"} /\ s \notin ch.acks /\ m \notin net
   /\ net' = net \cup {m}
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
-\* The change and the revision commit together.
+\* The change and the revision commit together. A restore puts the backup in
+\* place: the grant as it was (a new generation: what was revoked since may
+\* stand again), its revision, and the new epoch.
 Commit ==
   /\ ch.st = "fencing"
   /\ IF AllAcked THEN ch.acks = Shards ELSE ch.acks # {}
-  /\ grant' = [on |-> ch.kind = "grant", gen |-> grant.gen + 1]
+  /\ grant' = [on |-> IF ch.kind = "restore" THEN backup.on ELSE ch.kind = "grant", gen |-> grant.gen + 1]
   /\ revision' = ch.rev
+  /\ epoch' = ch.ep
+  /\ restores' = IF ch.kind = "restore" THEN restores + 1 ELSE restores
   /\ locked' = FALSE
   /\ ch' = [ch EXCEPT !.st = "committed", !.gen = grant.gen + 1]
-  /\ UNCHANGED <<rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<backup, sEpoch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* The commit's answer is lost: the changer unfences as if it had rolled
 \* back, and tries again with the change's id, which finds it done and
 \* answers.
 Unsure ==
   /\ LostCommits /\ ch.st = "committed"
-  /\ net' = net \cup {[k |-> "unfence", rev |-> ch.rev, s |-> s, id |-> ch.n] : s \in Shards}
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ net' = net \cup Unfences
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* Then it answers: "revoke returned".
 Answer ==
@@ -186,7 +223,7 @@ Answer ==
      \/ ch.st = "after" /\ ch.acks = Shards
   /\ ch' = [ch EXCEPT !.st = "idle"]
   /\ lastRevoke' = IF ch.kind = "revoke" THEN ch.gen ELSE lastRevoke
-  /\ UNCHANGED <<grant, revision, locked, rogue, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, rogue, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* A writer that does not fence revokes, without the revision's row, and
 \* answers. With FencedWritesOnly, Postgres refuses it.
@@ -195,27 +232,49 @@ Unfenced ==
   /\ grant' = [on |-> FALSE, gen |-> grant.gen + 1]
   /\ rogue' = TRUE
   /\ lastRevoke' = grant.gen + 1
-  /\ UNCHANGED <<revision, locked, ch, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, revision, locked, ch, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+
+\* A backup of Postgres is taken.
+Backup ==
+  /\ restores < Restores /\ ~backup.taken
+  /\ backup' = [taken |-> TRUE, on |-> grant.on, rev |-> revision]
+  /\ UNCHANGED <<grant, revision, epoch, restores, sEpoch, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* Anything fails before the commit: it rolls back and unfences, best effort.
 Abort ==
-  /\ ch.st = "fencing"
+  /\ ch.st = "fencing" /\ ch.kind # "restore"
   /\ locked' = FALSE
   /\ ch' = [ch EXCEPT !.st = "idle"]
-  /\ net' = net \cup {[k |-> "unfence", rev |-> ch.rev, s |-> s, id |-> ch.n] : s \in Shards}
-  /\ UNCHANGED <<grant, revision, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ net' = net \cup Unfences
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 -----------------------------------------------------------------------------
 (* The shards. *)
 
-\* A fence raises the floor, writes it to the storage and acknowledges.
+\* A floor and its epoch after a fence: raised in the same epoch; with
+\* EpochChecked, replaced by a newer epoch's, and an older's ignored.
+Fenced(fl, ep, m) ==
+  IF ~EpochChecked \/ m.ep = ep THEN [floor |-> Max(fl, m.rev), epoch |-> ep]
+  ELSE IF m.ep > ep THEN [floor |-> m.rev, epoch |-> m.ep]
+  ELSE [floor |-> fl, epoch |-> ep]
+
+\* A fence raises the floor, writes it to the storage and acknowledges. One
+\* from an older epoch is ignored: its change died with the restore.
 Fence(m, i) ==
-  LET s == m.s IN
+  LET s == m.s
+      me == inst[s][i]
+      mem == Fenced(me.floor, me.epoch, m)
+      sto == Fenced(sFloor[s], sEpoch[s], m)
+  IN
   IF FencePersisted /\ ~Writes(s, i)
   THEN /\ Down(s, i)
-       /\ UNCHANGED <<ch, sFloor>>
-  ELSE /\ inst' = [inst EXCEPT ![s][i].floor = Max(@, m.rev)]
-       /\ sFloor' = IF FencePersisted THEN [sFloor EXCEPT ![s] = Max(@, m.rev)] ELSE sFloor
+       /\ UNCHANGED <<ch, sFloor, sEpoch>>
+  ELSE IF EpochChecked /\ m.ep < me.epoch
+  THEN UNCHANGED <<inst, ch, sFloor, sEpoch, use, probes>>
+  ELSE /\ inst' = [inst EXCEPT ![s][i] = [me EXCEPT !.floor = mem.floor, !.epoch = mem.epoch,
+                                          !.standing = IF mem.epoch = me.epoch THEN me.standing ELSE NoStanding]]
+       /\ sFloor' = IF FencePersisted THEN [sFloor EXCEPT ![s] = sto.floor] ELSE sFloor
+       /\ sEpoch' = IF FencePersisted THEN [sEpoch EXCEPT ![s] = sto.epoch] ELSE sEpoch
        /\ ch' = IF ch.n = m.id /\ ch.st \in {"fencing", "after"} THEN [ch EXCEPT !.acks = @ \cup {s}] ELSE ch
        \* Every probe this instance has out is overtaken.
        /\ use' = [u \in Uses |-> IF use[u].s = s /\ use[u].i = i /\ use[u].st = "probed"
@@ -226,11 +285,11 @@ Fence(m, i) ==
 Unfence(m, i) ==
   LET s == m.s IN
   /\ IF UnfenceProbes
-     THEN /\ probes' = probes \cup {[s |-> s, i |-> i, free |-> ~locked, value |-> revision, overtaken |-> FALSE]}
+     THEN /\ probes' = probes \cup {[s |-> s, i |-> i, free |-> ~locked, value |-> revision, pe |-> epoch, overtaken |-> FALSE]}
           /\ UNCHANGED inst
-     ELSE /\ inst' = [inst EXCEPT ![s][i].floor = IF @ = m.rev THEN m.rev - 1 ELSE @]
+     ELSE /\ inst' = [inst EXCEPT ![s][i].floor = IF @ = m.rev /\ m.ep = inst[s][i].epoch THEN m.rev - 1 ELSE @]
           /\ UNCHANGED probes
-  /\ UNCHANGED <<ch, sFloor, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, ch, sFloor, use>>
 
 \* A message delivered, and kept in flight to be delivered again (Duplicates).
 Keeps == IF Duplicates THEN BOOLEAN ELSE {FALSE}
@@ -239,26 +298,28 @@ Deliver(m, i, keep) ==
   /\ m \in net /\ Alive(m.s, i)
   /\ net' = IF keep THEN net ELSE net \ {m}
   /\ IF m.k = "fence" THEN Fence(m, i) ELSE Unfence(m, i)
-  /\ UNCHANGED <<grant, revision, locked, rogue, lastRevoke, sOwner, sEntries, starts>>
+  /\ UNCHANGED <<epoch, backup, restores, grant, revision, locked, rogue, lastRevoke, sOwner, sEntries, starts>>
 
 Delivered == \E m \in net, i \in Slots, keep \in Keeps : Deliver(m, i, keep)
 
 Drop(m) ==
   /\ Losses /\ m \in net
   /\ net' = net \ {m}
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, inst, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* Lower the floor to what the probe found, if the row was free, below the
-\* floor, and (ProbeKeepsFence) no fence came while the probe was out.
-Lowered(s, i, free, value, overtaken) ==
+\* floor, in the instance's epoch, and (ProbeKeepsFence) no fence came while
+\* the probe was out.
+Lowered(s, i, free, value, pe, overtaken) ==
   LET fl == inst[s][i].floor IN
-  IF free /\ value < fl /\ (~ProbeKeepsFence \/ ~overtaken) THEN value ELSE fl
+  IF free /\ value < fl /\ (~EpochChecked \/ pe = inst[s][i].epoch) /\ (~ProbeKeepsFence \/ ~overtaken)
+  THEN value ELSE fl
 
 ApplyUnfenceProbe(p) ==
   /\ p \in probes /\ Alive(p.s, p.i)
   /\ probes' = probes \ {p}
-  /\ inst' = [inst EXCEPT ![p.s][p.i].floor = Lowered(p.s, p.i, p.free, p.value, p.overtaken)]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, use>>
+  /\ inst' = [inst EXCEPT ![p.s][p.i].floor = Lowered(p.s, p.i, p.free, p.value, p.pe, p.overtaken)]
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, use>>
 
 UnfenceProbed == \E p \in probes : ApplyUnfenceProbe(p)
 
@@ -266,42 +327,43 @@ UnfenceProbed == \E p \in probes : ApplyUnfenceProbe(p)
 Timer(s, i) ==
   /\ ~NowaitProbe /\ Alive(s, i) /\ inst[s][i].floor > revision
   /\ inst' = [inst EXCEPT ![s][i].floor = revision]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, probes, use>>
 
 \* An instance starts, from its storage, and the storage takes its writes
 \* from now: the one running before, if any, still runs until it writes.
 Start(s, i) ==
   /\ ~Alive(s, i) /\ starts < MaxStarts
-  /\ inst' = [inst EXCEPT ![s][i] = [Fresh EXCEPT !.alive = TRUE, !.floor = sFloor[s]]]
+  /\ inst' = [inst EXCEPT ![s][i] = [Fresh EXCEPT !.alive = TRUE, !.floor = sFloor[s], !.epoch = sEpoch[s]]]
   /\ sOwner' = [sOwner EXCEPT ![s] = i]
   /\ starts' = starts + 1
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sEntries, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sEntries, probes, use>>
 
 Crash(s, i) ==
   /\ Alive(s, i) /\ starts < MaxStarts
   /\ Down(s, i)
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts>>
 
 -----------------------------------------------------------------------------
 (* The uses. *)
 
 Invoke(u) ==
-  /\ use[u].st = "idle"
-  /\ use' = [use EXCEPT ![u] = [@ EXCEPT !.st = "new", !.after = lastRevoke]]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
+  /\ \/ use[u].st = "idle"
+     \/ Repeats /\ use[u].st = "replied"
+  /\ use' = [use EXCEPT ![u] = [Blank EXCEPT !.st = "new", !.after = lastRevoke]]
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
 
 Entry(u, g, r) == [u |-> u, rev |-> r, allow |-> g]
 
-\* The decision, on grant g read at revision r, by instance i, whose memory
-\* is then me: an entry in the storage, then the reply. A storage that
-\* refuses the write breaks the instance, and the client tries again.
-Decide(u, s, i, g, r, me) ==
+\* The decision, on grant g read at revision (e, r), by instance i, whose
+\* memory is then me: an entry in the storage, then the reply. A storage
+\* that refuses the write breaks the instance, and the client tries again.
+Decide(u, s, i, g, r, e, me) ==
   LET replied == [Blank EXCEPT !.st = "replied", !.s = s, !.i = i, !.after = use[u].after,
-                               !.allow = g.on, !.gen = g.gen, !.rev = r, !.revAt = revision] IN
+                               !.allow = g.on, !.gen = g.gen, !.rev = r, !.ep = e, !.revAt = revision, !.epAt = epoch] IN
   /\ IF ~DurableBeforeReply
      THEN /\ inst' = [inst EXCEPT ![s][i] = me]
           /\ use' = [use EXCEPT ![u] = replied]
-          /\ UNCHANGED <<sEntries, probes>>
+          /\ UNCHANGED <<epoch, backup, restores, sEpoch, sEntries, probes>>
      ELSE IF Writes(s, i)
      THEN /\ sEntries' = [sEntries EXCEPT ![s] = @ \cup {Entry(u, g.on, r)}]
           /\ inst' = [inst EXCEPT ![s][i] = me]
@@ -309,47 +371,57 @@ Decide(u, s, i, g, r, me) ==
           /\ UNCHANGED probes
      ELSE /\ Down(s, i)
           /\ UNCHANGED sEntries
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, starts>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, starts>>
 
 \* The use reaches an instance: answered from the standing kept, or read again.
 Serve(u, s, i) ==
   LET sd == inst[s][i].standing IN
   /\ use[u].st = "new" /\ Alive(s, i)
   /\ IF sd.has /\ (~FloorChecked \/ sd.rev >= inst[s][i].floor)
-     THEN Decide(u, s, i, sd.grant, sd.rev, inst[s][i])
+     THEN Decide(u, s, i, sd.grant, sd.rev, sd.ep, inst[s][i])
      ELSE /\ use' = [use EXCEPT ![u] = [@ EXCEPT !.st = "loading", !.s = s, !.i = i]]
-          /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
+          /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
 
 \* The standing and the revision, in one statement; or, without OneSnapshot,
 \* the rows first and the revision after.
 Load(u) ==
   /\ use[u].st = "loading" /\ Alive(use[u].s, use[u].i)
-  /\ use' = [use EXCEPT ![u] = IF OneSnapshot THEN [@ EXCEPT !.st = "loaded", !.rg = grant, !.rr = revision]
+  /\ use' = [use EXCEPT ![u] = IF OneSnapshot THEN [@ EXCEPT !.st = "loaded", !.rg = grant, !.rr = revision, !.re = epoch]
                                               ELSE [@ EXCEPT !.st = "half", !.rg = grant]]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
 
 LoadRevision(u) ==
   /\ use[u].st = "half" /\ Alive(use[u].s, use[u].i)
-  /\ use' = [use EXCEPT ![u] = [@ EXCEPT !.st = "loaded", !.rr = revision]]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
+  /\ use' = [use EXCEPT ![u] = [@ EXCEPT !.st = "loaded", !.rr = revision, !.re = epoch]]
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
 
-\* The read is back: at the floor or later, kept and decided on; below it,
-\* the probe (the row taken NOWAIT and let go: whether it was free, and the
-\* revision); without NowaitProbe, 503.
+\* The read is back. With EpochChecked, read in another epoch: a newer one
+\* is adopted (floor and standing dropped), and the use reads again. At the
+\* floor or later, kept and decided on; below it, the probe (the row taken
+\* NOWAIT and let go: whether it was free, and the revision); without
+\* NowaitProbe, 503.
 Check(u) ==
   LET s == use[u].s
       i == use[u].i
-      fl == inst[s][i].floor
+      me == inst[s][i]
+      fl == me.floor
       r == use[u].rr
+      e == use[u].re
       g == use[u].rg
   IN
   /\ use[u].st = "loaded" /\ Alive(s, i)
-  /\ IF ~FloorChecked \/ r >= fl
-     THEN Decide(u, s, i, g, r, [inst[s][i] EXCEPT !.standing = [has |-> TRUE, grant |-> g, rev |-> r]])
+  /\ IF EpochChecked /\ e # me.epoch
+     THEN /\ inst' = IF e > me.epoch
+                     THEN [inst EXCEPT ![s][i] = [me EXCEPT !.epoch = e, !.floor = 0, !.standing = NoStanding]]
+                     ELSE inst
+          /\ use' = [use EXCEPT ![u] = Again(@)]
+          /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, probes>>
+     ELSE IF ~FloorChecked \/ r >= fl
+     THEN Decide(u, s, i, g, r, e, [me EXCEPT !.standing = [has |-> TRUE, grant |-> g, rev |-> r, ep |-> e]])
      ELSE /\ use' = [use EXCEPT ![u] = IF NowaitProbe
-                                      THEN [@ EXCEPT !.st = "probed", !.free = ~locked, !.value = revision, !.overtaken = FALSE]
+                                      THEN [@ EXCEPT !.st = "probed", !.free = ~locked, !.value = revision, !.pe = epoch, !.overtaken = FALSE]
                                       ELSE Again(@)]
-          /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
+          /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, sEntries, starts, probes>>
 
 \* The probe is back: the floor perhaps lower, and the use tried again (read
 \* again, or 503 and the client's retry: the same here).
@@ -358,9 +430,9 @@ ApplyProbe(u) ==
       i == use[u].i
   IN
   /\ use[u].st = "probed" /\ Alive(s, i)
-  /\ inst' = [inst EXCEPT ![s][i].floor = Lowered(s, i, use[u].free, use[u].value, use[u].overtaken)]
+  /\ inst' = [inst EXCEPT ![s][i].floor = Lowered(s, i, use[u].free, use[u].value, use[u].pe, use[u].overtaken)]
   /\ use' = [use EXCEPT ![u] = Again(@)]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, probes>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, sFloor, sOwner, sEntries, starts, probes>>
 
 \* Without DurableBeforeReply, the entry is written after the reply, if the
 \* instance still runs and its storage takes it.
@@ -372,7 +444,7 @@ Persist(u) ==
   /\ use[u].st = "replied" /\ Entry(u, use[u].allow, use[u].rev) \notin sEntries[s]
   /\ Alive(s, i) /\ Writes(s, i)
   /\ sEntries' = [sEntries EXCEPT ![s] = @ \cup {Entry(u, use[u].allow, use[u].rev)}]
-  /\ UNCHANGED <<grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, starts, probes, use>>
+  /\ UNCHANGED <<epoch, backup, restores, sEpoch, grant, revision, locked, ch, rogue, lastRevoke, net, inst, sFloor, sOwner, starts, probes, use>>
 
 -----------------------------------------------------------------------------
 
@@ -381,7 +453,7 @@ UseStep(u) ==
   \/ Load(u) \/ LoadRevision(u) \/ Check(u) \/ ApplyProbe(u) \/ Persist(u)
 
 Next ==
-  \/ Begin \/ Commit \/ Unsure \/ Answer \/ Abort \/ Unfenced
+  \/ Begin \/ Commit \/ Unsure \/ Answer \/ Abort \/ Unfenced \/ Backup
   \/ \E s \in Shards : Resend(s)
   \/ \E m \in net : Drop(m)
   \/ Delivered
@@ -417,7 +489,7 @@ NothingReleasedAfterRevocation ==
 \* A use's entry names revision r: change r committed before it was decided,
 \* and change r + 1 after. Uses and changes are one order.
 UsesOrderedAgainstChanges ==
-  \A u \in Uses : Replied(u) => use[u].rev = use[u].revAt
+  \A u \in Uses : Replied(u) => use[u].rev = use[u].revAt /\ use[u].ep = use[u].epAt
 
 \* A reply with a value has its entry in the shard's storage, or one about
 \* to be written by an instance that runs and whose writes the storage takes.
@@ -430,8 +502,8 @@ EveryReplyAudited ==
 \* that finds the revision more than one below its floor has found a
 \* database restored from an older backup, not a rollback.
 FloorsAtMostNext ==
-  /\ \A s \in Shards : sFloor[s] <= revision + 1
-  /\ \A s \in Shards, i \in Slots : inst[s][i].floor <= revision + 1
+  /\ \A s \in Shards : sEpoch[s] = epoch => sFloor[s] <= revision + 1
+  /\ \A s \in Shards, i \in Slots : inst[s][i].epoch = epoch => inst[s][i].floor <= revision + 1
 
 \* A change begun ends, answered or rolled back.
 ChangesEnd == ch.st # "idle" ~> ch.st = "idle"

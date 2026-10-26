@@ -9,6 +9,7 @@
 #   scripts/formal-shards.sh                  every scenario
 #   scripts/formal-shards.sh ShardsRevoking   one, and its runs without a protection
 #   scripts/formal-shards.sh --workers 4      TLC's worker threads (default 2)
+#   scripts/formal-shards.sh --long           the long scenarios too (LONG)
 set -euo pipefail
 
 # TLA+ tools 1.7.4 (2024-08-05), as scripts/formal.sh.
@@ -28,13 +29,21 @@ REMOVALS=(
   "ShardsRevoking OneSnapshot NothingReleasedAfterRevocation"
   "ShardsRevoking FencedWritesOnly NothingReleasedAfterRevocation"
   "ShardsRevoking FenceBeforeCommit UsesOrderedAgainstChanges"
+  "ShardsRestore EpochChecked NothingReleasedAfterRevocation"
+  "ShardsRestore EpochChecked UsesOrderedAgainstChanges"
   "ShardsFanout AllAcked NothingReleasedAfterRevocation"
   "ShardsRestarting FencePersisted NothingReleasedAfterRevocation"
   "ShardsRestarting StorageArbiter NothingReleasedAfterRevocation"
   "ShardsRestarting DurableBeforeReply EveryReplyAudited"
+  "ShardsCombined FencePersisted NothingReleasedAfterRevocation"
+  "ShardsCombined ProbeKeepsFence NothingReleasedAfterRevocation"
   "ShardsLanes HeadCAS LanesHold"
   "ShardsLanes RewindChecked RewindStops"
   "ShardsLanes FlushGated RewindStops"
+  "ShardsLanesLost AdoptOnlyOwnPrefix LanesHold"
+  "ShardsLanesLost CasComparesHash LanesHold"
+  "ShardsCredentials CredentialRevokeFenced NoUseAfterCredentialRevoked"
+  "ShardsCredentialsLive UnknownCredentialRereads IssuedUsable"
   "ShardsExchange JtiSpentInShard SingleUseExchange"
   "ShardsExchange JtiAtHome SingleUseExchange"
   "ShardsCutover OldLoginRevoked NothingAfterClose"
@@ -48,12 +57,17 @@ REMOVALS=(
   "ShardsContinue ChangeTakesHead+FencedWritesOnly RevocationCarried"
 )
 
+# Scenarios of several minutes, checked with --long or by name.
+LONG=(ShardsCombined)
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 workers=2
 only=""
+long=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --workers) workers="$2"; shift 2 ;;
+    --long) long=1; shift ;;
     *) only="$1"; shift ;;
   esac
 done
@@ -89,6 +103,7 @@ for cfg in "$root"/formal/Shards*.cfg; do scenarios+=("$(basename "$cfg" .cfg)")
 
 for scenario in "${scenarios[@]}"; do
   [ -n "$only" ] && [ "$only" != "$scenario" ] && continue
+  [ -z "$only" ] && [ "$long" = 0 ] && [[ " ${LONG[*]} " == *" $scenario "* ]] && { echo "skip  $scenario (--long)"; continue; }
   started=$SECONDS
   tlc "$scenario.cfg"
   if grep -q '^Model checking completed. No error has been found.' "$work/out.txt"; then
@@ -113,12 +128,21 @@ for removal in "${REMOVALS[@]}"; do
     grep -q "^    $off = FALSE" "$work/without.cfg" || missing="$off"
   done
   [ -z "$missing" ] || { echo "FAIL  $scenario has no $missing"; failed=1; continue; }
-  sed -i -e '/^INVARIANTS/,/^CHECK_DEADLOCK/{/^    /d}' -e "s/^INVARIANTS/INVARIANTS\n    $invariant/" "$work/without.cfg"
+  if sed -n '/^PROPERTIES/,$p' "$work/without.cfg" | grep -q "^    $invariant$"; then
+    # A property: checked alone, without the scenario's invariants.
+    sed -i -e '/^INVARIANTS/,/^CHECK_DEADLOCK/{/^INVARIANTS/d;/^    /d}' -e '/^PROPERTIES/,${/^    /d}' \
+      -e "s/^PROPERTIES/PROPERTIES\n    $invariant/" "$work/without.cfg"
+    broken="^Error: Temporal properties were violated"
+  else
+    sed -i -e '/^INVARIANTS/,/^CHECK_DEADLOCK/{/^    /d}' -e "s/^INVARIANTS/INVARIANTS\n    $invariant/" "$work/without.cfg"
+    broken="^Error: Invariant $invariant is violated"
+  fi
   started=$SECONDS
   tlc without.cfg
-  if grep -q "^Error: Invariant $invariant is violated" "$work/out.txt"; then
+  if grep -q "$broken" "$work/out.txt"; then
     echo "ok    $scenario without ${protection//+/ and } breaks $invariant ($((SECONDS - started))s):"
-    node "$root/scripts/formal-trace.mjs" <"$work/out.txt" | tail -n +2 | sed 's/^/        /'
+    sed 's/^Error: The following behavior constitutes a counter-example:/Error: The behavior up to this point is:/' "$work/out.txt" |
+      node "$root/scripts/formal-trace.mjs" | tail -n +2 | sed 's/^/        /'
   else
     echo "FAIL  $scenario without ${protection//+/ and } should break $invariant"
     cat "$work/out.txt"

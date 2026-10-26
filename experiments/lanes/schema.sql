@@ -51,5 +51,6 @@ CREATE UNIQUE INDEX log_pending ON log (pending_id) WHERE pending_id IS NOT NULL
 
 -- Shards (v5): one revision for everything a use decides on, raised by every change, which fences the shards first.
 DROP TABLE IF EXISTS revision;
-CREATE TABLE revision (only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row), value bigint NOT NULL);
-INSERT INTO revision VALUES (true, 1);
+-- The epoch is new at every migration and every restore: a shard that meets another epoch forgets everything it kept.
+CREATE TABLE revision (only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row), value bigint NOT NULL, epoch text NOT NULL);
+INSERT INTO revision VALUES (true, 1, gen_random_uuid()::text);

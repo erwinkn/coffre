@@ -53,7 +53,7 @@ decides the open questions at the end.
   against each other. A vault-signed checkpoint signs all lane heads
   together.
 - **Overload is refused at once.** A shard that cannot keep up answers 503
-  with `Retry-After` in milliseconds instead of queueing; nothing holds a
+  with `Retry-After` within milliseconds instead of queueing; nothing holds a
   database connection while it waits.
 - **Node runs the same shards in one process,** with Postgres as their
   storage (group commit, sub-millisecond round trips); a standby takes
@@ -95,7 +95,7 @@ waits on that row; the waiters behind it are queued for the head.
 | Members, grants, roles, policy, places, secrets (wrapped), credentials, bindings | Postgres | the vault, as today, in a change (below) | no: the shard keeps what it read |
 | The revision: one number that every change raises | Postgres, one row | each change, under that row's lock | no |
 | A principal's standing (member row, grants, credentials, the revision it was read at) | a copy in its shard's memory | the shard, from one Postgres statement | yes, from memory |
-| Opened data keys | the shard's memory | the shard, opening each once | yes, from memory |
+| Opened data keys, by version | the shard's memory | the shard, opening each version once | yes, from memory |
 | A use's audit entry | the shard's lane: its own storage first, then Postgres | the shard, single writer | written before the answer |
 | Changes' audit entries | the control lane, in Postgres | each change, under the revision's lock | no |
 | Checkpoints | the control lane | the vault, every few seconds | no |
@@ -133,12 +133,19 @@ Every change any use decides on goes through one function:
 
 ```
 BEGIN
-SELECT value FROM revision FOR UPDATE           -- R := value + 1; changes queue here, uses never do
-fence every shard at R                          -- each persists floor := max(floor, R), then acks
+pg_advisory_xact_lock(<changes>)                 -- changes queue here, first come first served; uses never do
+SELECT epoch, value FROM revision FOR UPDATE     -- R := value + 1
+fence every shard at (epoch, R)                  -- each persists floor := max(floor, R), then acks; retried, 5 s deadline
 the change itself, and its control-lane entry
 UPDATE revision SET value = R
-COMMIT                                          -- then, and only then, answer
+COMMIT                                           -- then, and only then, answer
 ```
+
+Changes queue on a transaction advisory lock before they take the
+revision's row: Postgres queues waiters on a row per version of it, and
+every change rewrites the row, so a newcomer arriving at a commit can
+jump the queue, and a burst of changes would starve one of them (W185
+measured it: p99 13 s for 20 waiters). An advisory lock queues in order.
 
 A shard fenced at R answers only from standing read at revision R or
 later. Standing at R exists only once the change has committed. So:
@@ -154,32 +161,67 @@ later. Standing at R exists only once the change has committed. So:
   answers from older standing.
 
 Example, Ada revokes `svc-dfns`'s grant on `market/prod` while it calls
-`/use` 1,000 times a second over 4 shards: each shard is fenced in about
-10 ms; for those few milliseconds, calls on it answer 503 `changing`; the
-change commits; Ada's request returns. Every call made after that is
-refused 403. Measured on the prototype: of 1,076 calls made after the
-answer, none was allowed.
+`/use` 1,000 times a second over 8 shards: each shard is fenced; for the
+second or so that takes under that load, calls on it answer 503
+`changing`; the change commits; Ada's request returns. Every call made
+after that is refused 403. Measured on Cloudflare: of 13,517 calls made
+after the answer, none was allowed.
 
-Three things make it hold when things go wrong:
+Four things make it hold when things go wrong:
 
 - **A fence is durable.** The shard writes its floor to its storage
   before acknowledging. A shard that restarts between a fence and the
   commit would otherwise come back with no floor and read the old
   standing. (The TLA+ model finds that interleaving when the protection
   is removed.)
-- **A change that rolls back lifts its fence**, by an `unfence` sent to
-  every shard. If that message is lost, a shard stuck below its floor
-  probes `SELECT value FROM revision FOR UPDATE NOWAIT`: if it gets the
-  row, no change is in flight, so the fencing change will never commit,
-  and the floor comes down. Exact, and no clock involved.
+- **A change that rolls back lifts its fence**, but never by lowering it
+  directly: an `unfence` only asks the shard to probe. A shard whose
+  standing is below its floor and whose newest fence is older than a few
+  seconds probes `SELECT … FROM revision FOR UPDATE NOWAIT`, one probe at
+  a time: if it gets the row, no change is in flight, so the fencing
+  change will never commit, and the floor comes down, unless a fence
+  arrived while the probe was out (revisions are reused after a
+  rollback, so the same R can be a new change). Exact, no clock. While a
+  fence is young the shard refuses `changing` at once, without probing.
 - **Fences are idempotent and ordered** (floor only goes up), so retried
   or duplicated fences change nothing.
+- **A restore is a change, with a new epoch.** The revision is
+  `(epoch, n)`. `coffre restore` goes through the change function: it
+  fences every shard at (a new epoch, the backup's revision), and only
+  then puts the backup in place; the migration does the same. A shard
+  that meets another epoch, in a fence or in a standing it reads, forgets
+  its floor, its standings and its opened keys, and starts over. Without
+  this, a restore takes the revision backwards while shards keep a floor
+  and standing from after it: the next revocation fences below their
+  floor, and they keep serving the revoked grant (found by review;
+  reproduced and fixed in the prototype). The epoch alone is not enough
+  (the model): a shard with a kept standing reads nothing, so it would go
+  on answering from before the restore until something fenced it; hence
+  the fence before the backup. A probe that finds the revision further
+  below its floor than one, in its own epoch, raises an alarm.
+- **A shard whose storage is lost does not trust its floor.** Starting on
+  empty storage, it probes before it answers anything.
 
-What a change costs: one round trip to each of the 64 shards, in
-parallel (10–40 ms measured), on top of today's change transaction.
-Changes are human or CI actions: a few a minute. Each one also makes
-every shard read the standing of its active principals again, one
-statement each, on their next use.
+What a change costs: one call to each of the 64 shards, in parallel, on
+top of today's change transaction: 10–55 ms on idle shards, 1–1.5 s
+under 1,000 a second (a fence waits behind the calls already queued at a
+busy shard). Changes are human or CI actions: a few a minute. Each one
+also makes every shard read the standing of its active principals again,
+one statement each, on their next use.
+
+A revocation needs every shard to take its fence. A shard Cloudflare
+refuses as overloaded refuses the fence too, which the change retries
+within its deadline, then rolls back (the revocation does not return,
+so the guarantee holds, but the revocation fails). So revoking a
+principal that is flooding its shard depends on the admission control
+below keeping that shard under its limit, and on K.
+
+**Writes outside the change function.** The guarantee holds only if
+every write to a decision input goes through it. The trigger (under
+Guarantees) refuses a write that forgot to fence; it does not stop one
+that sets the marker by hand. A migration or an operator's SQL that
+changes grants, members or credentials must call the change function
+too, or the shards keep their standing until the next change.
 
 ### The audit log as lanes
 
@@ -197,12 +239,21 @@ its entry, and a shard that dies a microsecond later still has it.
 Copied to Postgres behind: every 200 ms while entries wait, the shard
 copies its unflushed tail to Postgres in one statement that inserts the
 entries and moves the lane's head there only if Postgres's head is where
-the shard last left it (`UPDATE … WHERE next_seq = $flushed`). Two live
-instances of one shard (Cloudflare allows it briefly) cannot fork the
-lane: only one of them can commit to the shard's storage, and Postgres's
-compare-and-swap refuses the other. A Postgres head behind what the shard
-copied before is a rewound database, which the shard reports and stops
-on.
+the shard last left it, number and hash (`UPDATE … WHERE next_seq =
+$flushed AND head_hash = $hash`). A flush begins with a write to the
+shard's storage, so an instance that is no longer the shard's cannot get
+it confirmed, and its output gate holds the statement. Two live instances
+of one shard (Cloudflare allows it briefly) cannot fork the lane: only
+one of them can commit to the shard's storage, and Postgres's
+compare-and-swap refuses the other. When the swap fails, the shard
+adopts Postgres's head only if it is one of its own entries (a flush
+whose answer was lost: same number, same hash). A head behind what it
+copied is a rewound database; a head it did not write (its storage lost,
+or reset, while Postgres kept the lane) is a lane it cannot continue.
+Either way it raises an alarm and stops, serving included, until an
+operator looks (the model's choice: the simplest rule that is correct;
+starting a new lane instead would keep it serving, at the price of more
+to model).
 
 What the log promises, compared with today:
 
@@ -222,31 +273,57 @@ checkpoint as today's log does.
 
 ### Overload
 
-A shard counts what it is doing. When a call would wait behind more than
-its budget (100 ms of queued work, or 2,000 calls), it answers 503 with
-`Retry-After: 1` at once. Measured: under a 4,000 a second burst on 64
-shards, the budget never tripped (one failure in 114,000 calls). Nothing
-on the hot path waits on a database lock, so nothing holds a connection
-while it waits.
+Two bounds, each answering 503 with `Retry-After: 1` at once instead of
+queueing:
 
-What did trip was Cloudflare's own limit on one object: one principal at
-1,000 a second on one shard got 57,498 "Durable Object is overloaded"
-errors, Cloudflare's answer when an object's queue is too long, and slow
-(seconds). A shard's own budget only sees calls once they reach it, so
-the real defence is upstream: the app Worker counts its calls in flight
-to each shard and refuses above a bound, and a hot principal is spread
-over K shards before it gets there.
+- **Upstream, in the app Worker**: each isolate counts its own calls in
+  flight to each shard (a plain number, never a shared promise) and
+  refuses above 64.
+- **In the shard**: it counts its calls in flight and refuses above 256.
+
+Nothing on the hot path waits on a database lock, so nothing holds a
+connection while it waits.
+
+Why upstream matters: Cloudflare queues calls to one object before the
+object's code sees them. One principal at 1,000 a second on one shard,
+before these bounds existed, got 57,498 "Durable Object is overloaded"
+errors, slowly (seconds). A shard's own bound only sees calls once they
+reach it. With both bounds in place (measured after the review):
+
+- 4,000 a second over 100 principals: 3,825 served, none refused, Worker
+  p99 548 ms: spread load stays under both bounds.
+- 1,000 a second over 100 principals: 186 calls refused by a shard's
+  bound, but slowly (p99 6 s): they had queued at Cloudflare first.
+- One principal at 1,000 a second on one shard: still 30,412 "Durable
+  Object is overloaded". A per-isolate bound cannot stop hundreds of
+  isolates, each under its own bound, from flooding one object together.
+
+So overload is refused fast only while each shard stays under its
+limit; the defence that works against one hot principal is spreading it
+over K shards (K = 8: 1,000 a second, no failure), sized from
+configuration and, later, from each shard's own measure of its traffic.
+A global per-shard bound would need the isolates to share a count, which
+is a call of its own; open question 7.
 
 ### Hot principals
 
-One Durable Object handles roughly 1,000 simple calls a second. A
-principal with more traffic than a shard can take is spread over K
-shards, chosen per principal in the configuration (`fan: 4`) or when a
-shard sees it dominate its traffic. Each of the K is fenced by every
-change, as every shard is. The bulk cap (R28: 1,000 distinct keys per
-principal per 15 minutes) stays exact: a shard asks the principal's home
-shard only when the principal opens a key it has not opened in the
+Cloudflare cites about 1,000 simple calls a second for one Durable
+Object; with a durable write per call the clean operating point measured
+here is lower: 125 calls a second per shard ran clean, 250 refused 1.5%,
+1,000 refused half. Plan for 125–250 a second per shard until measured
+closer. A principal with more traffic is spread over K shards (K = 8 for
+1,000 a second, measured clean), chosen per principal in the
+configuration (`fan: 8`). Each of the K is fenced by every change, as
+every shard is. The bulk cap (R28: 1,000 distinct keys per principal per
+15 minutes) stays exact: the home shard keeps the principal's window in
+its storage (a restart does not reset it), and another shard asks the
+home shard only when the principal opens a key it has not opened in the
 window, which for a proxy job is once per key.
+
+**What a shard keeps, and for how long.** Standing per principal and
+opened keys per version, both evicted least-recently-used beyond a bound
+(proposed: 10,000 principals, 10,000 keys, a few megabytes), well under a
+Durable Object's 128 MB. An evicted standing is read again on next use.
 
 ### Node
 
@@ -262,15 +339,27 @@ than a Node app's traffic).
 
 ### What else shards change
 
-- **Sign-in (CI OIDC, `token.exchange`).** The principal's shard verifies
-  the token, spends its `jti` in its own storage (single writer, so
-  single use holds without a database lock), issues the credential and
-  writes the entry. The credential row goes to Postgres with the next
-  flush; until then only that shard knows it, which is where it is used.
+- **Sign-in (CI OIDC, `token.exchange`).** The principal's home shard
+  verifies the token, spends its `jti` in its own storage (single writer,
+  so single use holds without a database lock; never a fanned-out shard,
+  and the home must not move while a token can still be presented),
+  writes the credential row to Postgres, then answers: one round trip,
+  at sign-in rate. Issuing widens nothing, so it needs no fence. A shard
+  that meets a credential it does not know checks its MAC first (a
+  credential id is signed with the app's key, so a forged one is refused
+  without a lookup), then reads the principal's standing again, once;
+  the row is there, since it was written before the sign-in answered. A
+  credential's revocation or expiry is a fenced change.
 - **Reveals.** A reveal of 7 keys is one shard call: 7 decisions, 7 keys
   opened once and kept, one entry per environment, as today.
 - **Signing.** The app Worker signs, as today; the private key comes from
   the shard as any value does. Signing CPU stays in stateless Workers.
+- **The app's other entries.** Today the app appends under the head for
+  everything it logs (W185 counted about six statements under the head
+  for a cold `/use`'s). With shards, an entry that records a change is
+  written by the change, in the control lane; one that records anything
+  else (a sign-out, a page that lists names) goes to the actor's shard
+  lane, as a use's does. None holds a Postgres lock.
 
 ## Capacity model
 
@@ -287,8 +376,11 @@ at most 20 / 0.34 s ≈ 59 uses a second even with no lock at all.
 **Any design that puts Postgres statements on the hot path** is capped
 by the pool: with C origin connections, s statements per request and a
 round trip of t, λ ≤ C / (s × t). Measured on this experiment's setup
-(C = 20, t ≈ 35–85 ms through a tunnel): one statement per request
-topped out near 800 a second, two near 400. At Equisafe's 40 connections
+(C = 20, t ≈ 35–85 ms through a tunnel, measured from the Worker): two
+statements per request topped out near 400 a second, one near 800,
+above C / (s × t) because Hyperdrive's pool sits closer to the database
+than the Worker does, so a statement holds an origin connection for less
+than the Worker's round trip. At Equisafe's 40 connections
 and a few milliseconds a round trip the cap is higher, but it is there,
 and every queued request holds a connection while it waits. Hence the
 first rule of this design: **no Postgres statement on a warm request.**
@@ -313,8 +405,8 @@ the head.
 | | 1,000/s | 2,000/s | Limit |
 |---|---|---|---|
 | Shard calls in flight (W ≈ 35 ms) | 35 | 70 | — |
-| Calls per shard, 100 principals spread | ≈ 16/s | ≈ 31/s | ≈ 500/s per shard with a durable write per call (measured: one shard took 516/s of 1,000) |
-| One principal at 1,000/s | K = 4: 250/s per shard, 1.5% refused by Cloudflare; K = 8: 125/s per shard | K = 8 | K × ≈ 400/s with headroom |
+| Calls per shard, 100 principals spread | ≈ 16/s | ≈ 31/s | clean at 125/s per shard; 1.5% refused at 250/s; half at 1,000/s (measured) |
+| One principal at 1,000/s | K = 8: 125/s per shard, clean (measured) | K = 16 | K × 125–250/s |
 | Shard CPU, all shards | 0.8 CPU-s/s | 1.6 CPU-s/s | — |
 | Worker CPU per request | 0.6 ms p50, 1.7 ms p99 | the same | 10 ms (Free), 30 s (Paid) |
 | Postgres flush statements | ≤ 64 a second at a 1 s interval (≤ 320 at 200 ms) | the same: bounded by the interval, not the rate | — |
@@ -373,7 +465,7 @@ stronger, with an example. Nothing below is weakened without saying so.
 | Invariant (today) | 0.15 shards | How, and the example where it differs |
 |---|---|---|
 | **A value never leaves without its durable audit entry** (audit before return, fail closed) | kept, differently | The entry is durable in the shard's own storage before the answer (output gate), and in Postgres up to ~1 s later. Postgres down: warm uses go on, their entries wait in the shards; today they fail. **Decision for Erwin**: let shards keep serving while Postgres is down, bounded (proposed: refuse once a shard's unflushed tail is older than 60 s), or fail closed at once as today. |
-| **A use ordered after a revocation is refused** | kept | By construction: fence every shard, commit, answer. Measured: 0 of 1,076 (v5) and 0 of 1,011 (v2) uses after the answer allowed. Modelled (`NothingReleasedAfterRevocation`), including restarts, lost and duplicated fences, two live instances. |
+| **A use ordered after a revocation is refused** | kept | By construction: fence every shard, commit, answer; a restore starts a new epoch. Measured on Cloudflare: 0 of 14,043 and 0 of 13,517 (v5) and 0 of 1,011 (v2) uses after the answer allowed. Modelled (`NothingReleasedAfterRevocation`): restarts, two live instances, lost, duplicated and retried fences, lost COMMIT answers, rollbacks, restores. Its availability is not unconditional: a revocation fails (and says so) if a shard cannot take its fence in 5 s. |
 | A decision reads one consistent view | kept | Standing is one statement at one revision; the floor refuses standing older than any fenced change. |
 | Every use audited | **changed: stronger** | Today a warm hit in the app's 60–330 s value cache is not logged; only the miss is. With shards, every use is an entry. Volume: 1,000 uses a second is about 26 GB of entries a day; retention or roll-ups become a real question (open question 3). |
 | Revocation reaches cached values | **changed: stronger** | Today the app's value cache outlives a revocation by up to its TTL (330 s at Equisafe). With shards there is no value cache outside the shard, and the shard is fenced. |
@@ -384,27 +476,34 @@ stronger, with an example. Nothing below is weakened without saying so.
 | Audit watch, anchor, re-anchor, accept loss (R39, R40) | kept, differently | The anchor holds the multi-head checkpoint; the walk and re-anchor run per lane. "Accept loss of entries X–Y" names a lane. |
 | Member rows MAC'd over their grants; a row changed around the vault is refused | kept, differently | Checked when a shard reads standing, not at every decision. A row forged in Postgres after a shard read it is not used by that shard (it keeps the genuine one), and is seen at its next read or at the next checkpoint, which checks every row as today. |
 | Access rules R1–R43, natures, sensitive never to people (R16, R32), references, forks, `@me` | kept | The same decision functions (`@coffre/core/access`, `decide.ts`), on standing read at a revision. Every input they read must be written by a fenced change; a trigger enforces it (below). |
-| Bulk cap, 1,000 keys per principal per 15 min (R28) | kept | Counted by the principal's home shard, its single writer. A shard of a fanned-out principal asks the home shard only for a key not yet released in the window. |
+| Bulk cap, 1,000 keys per principal per 15 min (R28) | kept | Counted by the principal's home shard, its single writer, in its storage. A shard of a fanned-out principal asks the home shard only for a key not yet released in the window. Counting per shard instead would allow K × the cap. |
 | Single-use OIDC tokens (`jti`) | kept | Spent by the principal's home shard, in its storage. Never by a fanned-out shard (the TLA+ model shows the double spend otherwise). |
 | APP_KEY rotation (R41) | kept | The app writes only control-lane entries now (changes); `key.rotate` and `key.reseal` are changes like any other. |
 | Vault key rotation | kept, differently | A rotation is a fenced change; each lane's first entry under the new key marks its own `since`. |
-| No app transaction open across a vault call | kept, differently | No app transaction exists on the hot path. A change holds the revision's row across its fence calls; those calls never wait on Postgres (a fence is memory and the shard's own storage), so no cycle through Postgres is possible, and the change has a 5 s statement timeout. |
+| No app transaction open across a vault call | **changed** | No app transaction exists on the hot path. But a change holds its transaction (the advisory lock, the revision's row, a connection) across its calls to the 64 shards, which is exactly what this rule forbids today. Example: under 1,000 uses a second a fence waits 1–1.5 s behind a busy shard's queue, and the next change waits that long for the lock. No cycle through Postgres is possible (a fence never waits on Postgres; shards use only `NOWAIT`), and the fence phase is bounded: a 5 s deadline on the fences, then rollback, and `idle_in_transaction_session_timeout` behind it. |
 | Isolates keep only settled values | kept | Workers keep nothing. A shard shares in-flight work between its own calls (one standing read for many calls), which Durable Objects allow; measured without a cancelled call. |
 | Few queries per action (R42) | kept, much stronger | Warm `/use`: 0 statements (today 1, plus 16 on a miss). Cold: 1. |
 | No instance-wide serialization point on the hot path (R44) | kept | Uses never take a Postgres lock; shards are independent. Changes serialize on the revision row (human-rate). |
 | Overload refused fast with Retry-After (R44) | kept | Per-shard admission control. |
 
-**The fence trigger.** Every write that narrows a decision input (to
-members, grants, policy, places, secret natures and versions, and a
-credential's revocation or expiry) must happen in a fenced change. A
-trigger enforces it: it refuses the write unless the transaction set
-`coffre.fenced` to the revision it is writing, which only the change
-function sets, after its fences succeeded. A 0.14 vault still running
-during the deploy, or a 0.15 code path that forgot to fence, fails closed
-instead of revoking behind the shards' backs. A new credential (a CI
-sign-in, a session) needs no fence: its home shard issues it and knows
-it, and any other shard that meets a credential it does not know reads
-the principal's standing again.
+**The fence trigger.** Shards keep what they read until a change fences
+them, so every write a decision reads must come with a fence, widening
+ones too (a new grant would otherwise go unseen until the next change).
+A trigger enforces it on exactly these writes:
+
+| Table | Fenced |
+|---|---|
+| members, grants, roles, the policy, projects and environments, secrets and secret versions | every INSERT, UPDATE and DELETE |
+| credentials (tokens, sessions, bindings) | UPDATE and DELETE (revocation, expiry); not INSERT |
+
+It refuses the write unless the transaction set `coffre.fenced` to the
+revision it is writing, which only the change function sets, after its
+fences succeeded. A 0.14 vault still running during the deploy, or a
+0.15 code path that forgot to fence, fails closed instead of changing
+what shards decide on behind their backs. Issuing a credential is the
+one write left out: it widens nothing, its row is written before the
+sign-in answers, and a shard that meets a credential it does not know
+reads standing again (above, under "Sign-in").
 
 ## Migration from 0.14
 
@@ -427,11 +526,21 @@ except the trigger, which is what makes the cutover safe: from the moment
 it is installed, a 0.14 instance can no longer change grants, members or
 credentials (it fails with an error), while 0.15 shards start serving.
 The deploy order is migrate, then deploy both Workers, as today. The
-costs, for the release notes: between the two, every 0.14 write to a
-decision input fails (sign-ins that create credentials, revocations,
-secret writes) until the last 0.14 instance is gone; and a 0.14 app
-instance still serves values from its own cache for up to its TTL after
-a 0.15 revocation, as it does today.
+costs, for the release notes: between the two, every 0.14 write the
+trigger covers fails (grants, revocations, secret writes; a sign-in that
+only inserts a credential still works) until the last 0.14 instance is
+gone; and a 0.14 app instance still serves values from its own cache for
+up to its TTL after a 0.15 revocation, as it does today.
+
+Where the shards live, and the deploy window: the `Shard` class is in
+the vault Worker, and the app binds it (`script_name: <vault>`), as it
+binds the vault today. The vault deploys first. Between the two deploys,
+a 0.14 app calls a 0.15 vault whose `unwrap` and `access` are gone: cold
+uses and reveals fail until the app's deploy lands (seconds to a few
+minutes; warm uses served from the 0.14 app's cache go on). Keeping
+0.14's RPC surface in the 0.15 vault for one release would close that
+window, at the price of a compatibility path the clean slate rules out:
+open question 6.
 
 Two cutovers were modelled (`formal/ShardsCutover.tla`):
 
@@ -523,18 +632,28 @@ Exchanging…) keep their invariants and are re-expressed over shards.
      a window, and count repeats in memory, written every second: a crash
      loses up to a second of repeat counts (never a first release).
    - Accept about 30 ms.
+6. **The deploy window.** Accept a few minutes where cold uses fail
+   between the vault's deploy and the app's, or keep 0.14's vault RPC
+   surface for one release?
+7. **Hot principals.** K from configuration only (an operator names the
+   DFNS job), or chosen automatically when a shard sees one principal
+   dominate it (which needs the app to learn the new K, through the
+   shard's answers)?
 
 ## The model
 
 `formal/Shards*.tla` (`scripts/formal-shards.sh`; [Shards.md](../../formal/Shards.md)
-describes it) model the fence, the lanes, CI sign-in and the cutover:
-nine scenarios, every invariant above, 1.3 million states for the
-largest, about 1.5 minutes for the whole suite. Each protection is
-removed in turn and TLC must find the race it closes (23 removals, all
+describes it) model the fence, restores and epochs, the lanes (with lost
+storage and restored databases), credentials, CI sign-in and both
+cutovers: 14 scenarios, every invariant above, about 2 minutes for the
+suite with 4 workers, 1.3 million states for its largest; and one long
+scenario (`--long`, 13.7 million states, 5–6 minutes) that combines two
+instances, restarts, lost, duplicated and resent fences, rollbacks and
+lost COMMIT answers. Each protection is removed in turn and TLC must
+find the race it closes (35 removals, all
 found). Written before the prototype was final, the model found five bugs
 in this design as first written, each now fixed in the design and the
 prototype:
-
 1. **Revisions are reused after a rollback**, so a probe that lowers the
    floor when "the floor did not change" can undo a new change's fence at
    the same revision. Change A fences at 1 and rolls back; a probe finds
@@ -564,6 +683,25 @@ prototype:
    head first, then copies, closes and revokes both logins; or, as
    recommended above, no close at all, and the fence trigger installed in
    the migration that creates the revision.
+
+After the review, it found three more:
+
+6. **A restore needs a fence, not only an epoch** (above): with the epoch
+   alone, a shard keeps answering from its kept standing. Without the
+   epoch, a shorter race: a revocation at 1 answers while a read at 0
+   is still out; Postgres is restored to 0; a probe finds the row free at
+   0, below the floor, takes it for a rolled-back change and lowers the
+   floor; the old read, labelled 0, is served.
+7. **A lane's compare-and-swap must compare the hash**: Postgres restored
+   to empty, the new entry 1 flushed, then restored to a backup holding
+   the old entry 1: the numbers match, and the new entry 2 lands after
+   the old entry 1. And a shard must adopt Postgres's head only if it is
+   its own entry: after a storage loss, it would otherwise take the old
+   entry 1 for its own.
+8. **A credential's revocation must be fenced, and an unknown credential
+   read again**: without the first, a shard keeps serving it; without
+   the second, a credential issued after a shard read the standing is
+   refused there forever.
 
 It also confirmed that a CI sign-in's `jti` must be spent at the
 principal's home shard (two shards would each accept it), and that the
@@ -665,7 +803,9 @@ which adds 20–50 ms of Helsinki-to-Warsaw):
 
 At 2,000 and 4,000 a second the client's p99 is the load generator's own
 queue (one Node process); the Worker's p99 stays near 0.5–0.7 s.
-Postgres statements on the warm path: 0 in every run. Shard CPU (from
+Postgres statements on the use path, counted by the shards (the
+re-measurement below): one standing read per principal per shard, then
+none until a change. Shard CPU (from
 Cloudflare's analytics, the 1,000–2,000/s runs): 0.57 ms p50, 3.0 ms
 p99 per call; Worker CPU 0.62 ms p50, 1.7 ms p99. All 449,387 entries of
 the last runs (and 751,048 of the earlier ones) reached Postgres and
@@ -679,17 +819,35 @@ grant revoked mid-run):
 | v2 DO lanes, 100/s | 1,011 | 0 | 216 ms |
 | v5, K = 4 | 14,043 | 0 | 920 ms |
 | v5, K = 8, with the model's fixes | 13,517 | 0 | 1.4 s |
+| v5, K = 8, after the review | 14,362 | 0 | 683 ms |
 
-In the revocation window the prototype answered 482 calls `503
-changing`, but slowly (p99 14 s), and 7 failed with a Postgres error:
-every waiting call probed on a connection of its own and they queued
-for the pool. The fix, for the real thing: a shard refuses `changing` at
-once while its newest fence is young (a change is almost certainly in
-flight) and runs at most one probe at a time, and only for a fence older
-than a few seconds, which is all the probe is for (an aborted change's
-fence). Refusing is always safe. A fence also waits behind the calls
-queued at a busy shard, which is why a revocation took 1–1.5 s under
-1,000/s; that bounds how long a revocation takes, not whether it holds.
+Before the review, the prototype answered calls in the revocation window
+`503 changing` slowly (p99 14 s), and 7 failed with a Postgres error:
+every waiting call probed on a connection of its own (sharing one with
+other statements, at first), and they queued for the pool. Fixed: a
+shard refuses `changing` at once while its newest fence is young, and
+runs at most one probe at a time, only for an older fence, on its own
+connection. Measured after: 468 calls answered `changing` with p99
+199 ms, no error. A fence also waits behind the calls queued at a busy
+shard, which is why a revocation takes 0.7–1.5 s under 1,000/s; that
+bounds how long a revocation takes, not whether it holds.
+
+**After the review** (the epoch, admission control, the fast `changing`,
+the lane's hash compare, keys by version; shard-side counters):
+
+| Run | Served | p50 | p99 | Failed | Standing reads |
+|---|---|---|---|---|---|
+| 1,000/s, 100 principals, 2 min | 993.4/s | 54 ms (31) | 2.1 s (457) | 186 refused by shards (p99 6 s), 6 connections lost | 100 |
+| 1,000/s, one principal, K = 8, 2 min | 1,000.6/s | 53 ms (30) | 1.2 s (405) | 0 | 20 |
+| 1,000/s, one principal, K = 1, 1 min | 474/s | 1.7 s | 3.6 s | 30,412 "overloaded", 284 refused by the shard | — |
+| 4,000/s, 100 principals, 30 s | 3,825/s | 1.0 s (35) | 7.6 s (548) | 0 | 1 |
+| Revocation, one principal at 1,000/s, K = 8 | — | — | — | 0 of 14,362 allowed after the answer; it took 683 ms; 468 `changing`, p99 199 ms | 79 (after the change) |
+
+"Standing reads" are the shards' own count of Postgres statements on the
+use path (`stats`), the only statements a use can cause: 100 for 120,000
+uses means one per principal, then none. The Worker's `Server-Timing`
+count is 0 by construction (it opens no connection on this path), so it
+is not the measure.
 
 ## Cleanup
 

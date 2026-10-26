@@ -7,7 +7,8 @@ These models check that design before it is built, as `formal/Workload*.tla`
 did for workload access. TLC runs them like the rest:
 
 ```sh
-scripts/formal-shards.sh                  # every scenario, about 1.5 minutes with --workers 4
+scripts/formal-shards.sh                  # every scenario but the long ones, about 2 minutes with --workers 4
+scripts/formal-shards.sh --long           # and ShardsCombined, about 5 minutes more
 scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protection
 ```
 
@@ -24,10 +25,23 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
   standing and a floor, and their instances stop and start. Two instances
   can run at once, and the storage takes only the newer one's writes. Uses
   are answered from the kept standing, or read it again, or probe the
-  revision's row. Fences and unfences are lost, duplicated and delayed.
+  revision's row. Fences and unfences are lost, duplicated, delayed and sent
+  again: a changer resends a fence not yet acknowledged, any number of
+  times, and may roll back between any two tries, which covers "retry a
+  bounded number of times, then roll back". The revision is (epoch, n).
+  Postgres can be restored from an earlier backup: `coffre restore`
+  goes through the changer, fencing every shard at the backup's revision in
+  a new epoch before it puts the backup in place.
 - [`ShardsLanes.tla`](ShardsLanes.tla) models a shard's lane, copied to
-  Postgres by a flusher that compares and swaps the lane's head. Instances
-  restart, a stale instance can still flush, and Postgres can be rewound once.
+  Postgres by a flusher that compares and swaps the lane's head (seq and
+  hash). Instances restart, and a stale instance can still flush. An
+  instance can start with its storage lost while Postgres holds what the old
+  storage flushed. Postgres can be restored from any earlier backup of
+  itself.
+- [`ShardsCredentials.tla`](ShardsCredentials.tla) models credentials at
+  two shards. A sign-in writes the credential's row without a fence, then
+  answers. A shard that meets a credential it doesn't know reads the
+  standing again, and revoking a credential is a fenced change.
 - [`ShardsExchange.tla`](ShardsExchange.tla) models a CI token exchange
   arriving again and again, at a principal served by two shards that restart.
 - [`ShardsCutover.tla`](ShardsCutover.tla) models the cutover from 0.14,
@@ -45,11 +59,16 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
 |---|---|---|---|---|
 | `ShardsRevoking` | 1 shard, 2 uses, 2 changes; losses, duplicates, rollbacks, lost COMMIT answers, a writer that does not fence | 1,281,733 | 24 | 20 s |
 | `ShardsRollback` | as Revoking, with no duplicates and every COMMIT answered: the revision reused after a rollback | 24,335 | 21 | 1 s |
+| `ShardsRestore` | as Rollback, with a backup and one restore among the 2 changes | 142,390 | 22 | 3 s |
 | `ShardsFanout` | 2 shards serve the principal, 1 change | 26,956 | 23 | 1 s |
 | `ShardsRestarting` | 1 shard, 2 instances, 2 starts, 2 changes | 867,878 | 31 | 9 s |
+| `ShardsCombined` (`--long`) | 2 instances and 1 start (a restart, or a second instance), losses, duplicates, resends, rollbacks, lost COMMIT answers; one client sending use after use | 13,716,778 | 39 | 3 min on 8 workers |
 | `ShardsLive` | as Revoking without duplicates, with fairness | 106,951 | 25 | 21 s |
-| `ShardsLanes` | 2 instances, 3 starts, 4 entries, 1 rewind | 19,253 | 17 | 1 s |
-| `ShardsLanesLive` | as Lanes without the rewind, with fairness | 820 | 12 | 1 s |
+| `ShardsLanes` | 2 instances, 3 starts, 4 entries, 1 restore of Postgres | 138,361 | 23 | 2 s |
+| `ShardsLanesLost` | 2 instances, 2 starts, one with the storage lost, 3 entries, 2 restores of Postgres | 55,707 | 19 | 1 s |
+| `ShardsLanesLive` | as Lanes without restores, with fairness | 820 | 12 | 1 s |
+| `ShardsCredentials` | 2 shards, 2 credentials (one issued during the run), 2 uses, 2 revocations | 58,986 | 19 | 2 s |
+| `ShardsCredentialsLive` | the second credential issued and kept, with fairness | 6,686 | 14 | 1 s |
 | `ShardsExchange` | 2 shards, 2 instances each, 3 attempts, 2 starts | 344 | 9 | 1 s |
 | `ShardsCutover` | B: 3 actions by 0.14 instances, then the migration and 0.15 | 170 | 6 | 1 s |
 | `ShardsContinue` | A: 2 actions by 0.14 instances, 2 changes by 0.15, 2 uses at its shard | 48,888 | 20 | 2 s |
@@ -59,11 +78,12 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
 | Name | Kind | Says |
 |---|---|---|
 | `NothingReleasedAfterRevocation` | invariant | (In `ShardsContinue`, this covers 0.14 readers and the 0.15 shard together.) A use that arrives after a revocation's answer is never allowed on a grant read before that revocation. A ghost generation of the grant checks this, not the revision label: content read before a change but labelled after it is caught. |
-| `UsesOrderedAgainstChanges` | invariant | A use's entry names r, the committed revision when it was decided. Change r committed before it, and change r + 1 after it. |
+| `UsesOrderedAgainstChanges` | invariant | A use's entry names (e, r), the committed revision when it was decided. Change r committed before it, and change r + 1 after it. In `ShardsRestore`, this also orders uses against the restore. |
 | `EveryReplyAudited` | invariant | A reply with a value has its entry in the shard's storage, or one about to be written by a live instance whose writes the storage takes. |
-| `FloorsAtMostNext` | invariant | Every floor, in memory or in storage, is at most revision + 1. |
-| `LanesHold` | invariant | (In `ShardsContinue`: the control lane, appended by both versions, is chained.) Postgres's copy of a lane is a prefix of the shard's own: numbered without gap or repeat, chained, and holding nothing the shard did not write. |
-| `RewindStops` | invariant | Once Postgres is rewound below what the shard recorded as flushed, nothing more is written to that lane. |
+| `FloorsAtMostNext` | invariant | Every floor in the current epoch, in memory or in storage, is at most revision + 1. |
+| `LanesHold` | invariant | (In `ShardsContinue`: the control lane, appended by both versions, is chained.) Postgres's copy of a lane is numbered without gap or repeat, each entry is sealed from the one before it, and it holds nothing the shard did not write. No flusher takes for flushed what Postgres does not hold. |
+| `RewindStops` | invariant | While Postgres lacks entries the shard recorded as flushed, nothing more is written to that lane. A rewind from before a storage loss is outside it: the shard kept no record of it, and the signed checkpoints find it. |
+| `NoUseAfterCredentialRevoked` | invariant | No use with a credential whose revocation was answered before the use arrived is allowed. |
 | `SingleUseExchange` | invariant | A jti is spent once. |
 | `NothingAfterClose` | invariant | Nothing lands in the old chain after its closing checkpoint. |
 | `EveryReleaseAudited` | invariant | Every value 0.14 released has its entry in the old chain, before the closing checkpoint. |
@@ -71,6 +91,7 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
 | `ChangesEnd` | property | A change that begins ends, answered or rolled back. |
 | `UsesAnswered` | property | With finitely many changes, every use is answered, with a value or a refusal. No fence refuses forever, a rolled-back one's included, even when its unfence is lost. |
 | `EveryEntryFlushed` | property | Every entry in a shard's storage reaches Postgres. |
+| `IssuedUsable` | property | A credential just issued, and never revoked, is usable at either shard. |
 
 ## Protections, and what TLC finds without each
 
@@ -83,13 +104,18 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
 | `OneSnapshot`: the standing and its revision come from one statement | The rows are read before the commit and the revision after it. The old grant is labelled with the new revision and passes the floor. |
 | `FencedWritesOnly`: Postgres refuses a write to a decision input from a transaction that did not fence | A writer that does not fence (a 0.14 instance, or a path that forgot) revokes and answers. The shard keeps serving its kept standing, whose revision never moved. |
 | `FenceBeforeCommit`: every shard is fenced before the commit | Commit first, then fence, then answer: a use decided between the commit and the fence names revision 0 after change 1 committed (`UsesOrderedAgainstChanges`). It does not break `NothingReleasedAfterRevocation`, because the answer still waits for every fence. |
+| `EpochChecked`: the revision is (epoch, n); the migration and a restore write a new epoch; a shard meeting a newer epoch in a fence or a read drops its floor and standing, adopts it, and reads again | A revocation at 1 commits and is answered, and a use's read at revision 0 from before it is still out. Postgres is restored to its backup at revision 0. A probe finds the row free at 0, below the floor of 1, takes it for a rollback, and lowers the floor. The old read, also labelled 0, passes and is served after the revocation (`NothingReleasedAfterRevocation`). Without the epoch, the two revision 0s are the same. |
 | `AllAcked`: commit only once every shard acknowledged | s1 acknowledges and s2's fence is still in flight. The change commits and answers, and s2 serves its kept standing. |
 | `FencePersisted`: the floor is in storage before the acknowledgement | The fence reaches instance 1 in memory only. Instance 2 starts from storage with floor 0, reads below the change, and serves after the answer. |
 | `StorageArbiter`: storage takes only the newest instance's writes | Instance 2 starts, and the fence reaches the old instance 1, which persists and acknowledges. Instance 2 never saw the fence and serves after the answer. On Node this is a lease epoch checked in every write; a lease timeout alone is not enough. |
 | `DurableBeforeReply`: the entry is durable before the reply leaves | The reply leaves, then the instance loses the storage before its write (`EveryReplyAudited`). |
 | `HeadCAS`: the flush writes only where Postgres's head is | A new instance, whose recorded `flushed` lags, flushes entry 1 again (`LanesHold`). |
+| `CasComparesHash`: the flush's CAS compares the head's hash as well as its seq | Entry 1 is flushed, and a backup holds it. The storage is lost, and the new instance writes its own entries 1 and 2. Postgres is restored to empty, the new entry 1 is flushed, then Postgres is restored to the backup. Its head is at seq 1, where the instance expects it, so without the hash the new entry 2 is appended after the old entry 1 (`LanesHold`). |
+| `AdoptOnlyOwnPrefix`: Postgres ahead is adopted only up to the shard's own head, and only if the hash at that seq is its own | Entry 1 is flushed, and the storage is lost. The new instance writes its own entry 1, finds Postgres ahead, and adopts it by seq, taking the old entry for its own (`LanesHold`). |
 | `RewindChecked`: Postgres behind what was flushed raises the alarm | Postgres is rewound below the recorded head, and the flusher adopts the shorter head and fills it again (`RewindStops`). |
 | `FlushGated`: a flush leaves only once a storage write commits | The stale instance, which last flushed nothing, finds the rewound lane empty, where it expects it, and refills it. The alarm the owner would raise never comes. |
+| `CredentialRevokeFenced`: revoking a credential is a fenced change | The revocation is an UPDATE that answers at once. A shard serves the credential from its kept standing (`NoUseAfterCredentialRevoked`). |
+| `UnknownCredentialRereads`: a shard reads again for a credential it does not know | A shard keeps a standing from before the second credential was issued, and refuses it, every time (`IssuedUsable`). |
 | `JtiSpentInShard`: the spent jti is in storage before the answer | The jti is spent in memory only. A second instance starts and accepts it again. |
 | `JtiAtHome`: an exchange goes to the principal's home shard | s1 and s2 each spend the same jti in their own storage. |
 | `OldLoginRevoked` | A 0.14 vault instance appends after the closing checkpoint (`NothingAfterClose`). |
@@ -133,7 +159,29 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
    takes the old head's row first (REVOKE is transactional in Postgres), or
    order them revoke, copy, close. The `FencedWritesOnly` trigger, installed
    on the old tables at the copy, also closes the second window.
-6. **The jti is spent at the home shard,** never at another shard serving
+6. **A restore fences, as a change does.** The epoch alone is not enough. A
+   shard with a kept standing reads nothing, so it would answer from before
+   the restore until the first change after it. `coffre restore` must fence
+   every shard at (new epoch, the backup's revision) before it puts the
+   backup in place. TLC found that with the epoch checked and the restore
+   not fenced: a use read before the restore and decided after it names the
+   old epoch (`UsesOrderedAgainstChanges`). A restore that fails after
+   fencing leaves shards refusing until it completes. The model does not
+   roll restores back.
+7. **The lane's CAS and adoption compare hashes.** A shard whose storage is
+   lost starts a second history at seq 1. Adopting Postgres's head by seq
+   takes the old history for its own; a CAS by seq alone appends after it.
+   With both comparing the hash, the flusher raises the alarm and the shard
+   stops flushing and serving. That is the simplest correct rule. The
+   alternative, a new lane epoch for the shard (a new lane, chained from
+   genesis, that the checkpoints link), keeps it serving. Entries written
+   between the loss and the alarm stay in the storage until an operator
+   moves them; a new lane epoch would carry them.
+8. **A credential is issued without a fence; its revocation is fenced.** The
+   `FencedWritesOnly` trigger must let a new credential's INSERT through
+   without a fence, while refusing unfenced revocations. A shard meeting an
+   unknown, authentic credential reads again.
+9. **The jti is spent at the home shard,** never at another shard serving
    the same principal. The home must not move while a token can still be
    presented: resharding has to carry the spent set, or the spent set lives
    in Postgres.
@@ -143,8 +191,8 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
 - One principal and one grant. Any change fences every shard, so a global
   revocation and a per-principal one take the same path. The standing is
   one grant plus a ghost generation.
-- The hash chain is sequence numbers, and "chained" means "a prefix of the
-  shard's own lane". MACs and hashes are assumed collision-free.
+- In the lanes, an entry is (seq, hash, previous hash), with a new hash for
+  each write. MACs and hashes are assumed collision-free.
   Checkpoints, apart from the closing one, and verification from the last
   checkpoint (R25) are not modelled.
 - Storage arbitration is an assumption, Cloudflare's: of two live
@@ -157,8 +205,12 @@ scripts/formal-shards.sh ShardsRevoking   # one, with its runs without a protect
   of a Durable Object's actor with synchronous SQL is.
 - An RPC's acknowledgement is the delivery step. A lost acknowledgement is a
   rollback or a resend.
-- The bounds are small: 1 or 2 shards, 2 instances, 2 uses, 2 changes, 2
-  or 3 starts, 4 entries, 3 actions by 0.14 instances. Node's group commit,
+- A storage loss in `Shards.tla` (the floor gone with it) is not modelled.
+  A shard starting on an empty storage should take its floor as unknown,
+  and probe before it answers.
+- The bounds are small: 1 or 2 shards, 2 instances, 2 uses (or one client
+  repeating), 2 changes, 1 to 3 starts, 4 entries, 2 restores of the lane, 1
+  restore of the revision, 3 actions by 0.14 instances. Node's group commit,
   the bulk cap (R28) and R16/R32 are not modelled.
 
 ## Where TLC stops, and Apalache or TLAPS would go further

@@ -44,7 +44,10 @@ try {
     total += entries.length;
   }
   // Every read names a control head that existed: the decision was made under a head the control lane had.
-  const { rows: [{ ahead }] } = await client.query('SELECT count(*)::int AS ahead FROM lane_log WHERE lane > 0 AND control_seq > (SELECT next_seq FROM lanes WHERE lane = 0)');
+  // Lanes 1-99 (v2) name the control lane's head; shard lanes (100 and up, v5) name the revision.
+  const { rows: [{ ahead }] } = await client.query(`SELECT count(*)::int AS ahead FROM lane_log WHERE
+    (lane BETWEEN 1 AND 99 AND control_seq > (SELECT next_seq FROM lanes WHERE lane = 0))
+    OR (lane >= 100 AND control_seq > (SELECT value FROM revision WHERE only_row))`);
   if (ahead > 0) failures.push(`${ahead} reads name a control head ahead of the control lane`);
   const { rows: chain } = await client.query("SELECT *, seq::text AS seq FROM log l ORDER BY l.seq");
   const one = verify(keys.log, 0, GENESIS, (chain as Row[]).map((row) => sealedOf(0, row)));
