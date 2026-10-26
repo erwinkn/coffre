@@ -353,10 +353,12 @@ for (const tamper of [false, true]) {
     else await new Promise((r) => setTimeout(r, 500));
     const { retainDay } = await import('./src/retention.ts');
     const r = await retainDay(pool, keys, 0, cp).catch((e: Error) => e);
-    if (r instanceof Error) {
-      expect(`${variant}: retention`, true, true, r.message, ['refuses', 'drops']);
+    if (variant.includes('swapped')) {
+      // Only this variant may stop at retention, and only for that reason.
+      expect(`${variant}: retention`, r instanceof Error && /not the one this log signed/.test(r.message), true, r instanceof Error ? r.message : 'it dropped the day', ['refuses', 'drops']);
       continue;
     }
+    if (r instanceof Error || r.retention === null) throw new Error(`(s) ${variant}: retention failed: ${r instanceof Error ? r.message : 'empty day'}`);
     if (variant.startsWith('after a tick')) {
       await cp.tick();
       await pool.query('DELETE FROM checkpoints WHERE upto > $1', [r.retention.cutUpto]);
@@ -436,6 +438,10 @@ for (const tamper of [false, true]) {
   corrupt = false;
   const again = await cp.tick().then(() => '', (e: Error) => e.message);
   expect('the same checkpointer', again !== '', true, again, ['refuses until reopened', 'signs on']);
+  const reopened = await Checkpointer.open(pool, keys, { memory: fileMemory(path) });
+  await reopened.tick();
+  const v = await verdict();
+  expect('reopened, the log', v.ok, true, v.problems[0] ?? `${v.sealed} sealed`, ['holds', 'is wrong']);
 }
 
 rmSync(scratch, { recursive: true, force: true });

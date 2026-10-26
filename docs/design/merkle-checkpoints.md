@@ -307,7 +307,11 @@ witnesses, and found two slips in its code, both fixed:
 - a retention attempt refused as too early, then retried, logged its
   forcing entry's request ID twice.
 
-Retention now also refuses a checkpointer that keeps no memory. Round five
+Retention now also refuses a checkpointer that keeps no memory. Round seven
+found that retaining an ended day with no uses (a quiet `at` day) wrote a
+cut that did not advance, which then failed verification forever. Now a day
+with no uses just loses its empty partition, with no entry, and a cut that
+does not pass the last one is refused before anything is dropped. Round five
 found that the signer's freshness bound, measured from its newest head,
 freezes on a quiet log, so a replay slipped into the retention entry's own
 tick passed. Now retention drops a day only after sealing a head at least
@@ -582,7 +586,9 @@ In both, retention runs in five steps:
    memory, and the cut row's note must be that row's.
    From then on the signer refuses any entry stamped before the cut, so a
    copy of a dropped use can never be sealed (see Replays, below).
-2. Drop the day's uses partition once it is sealed.
+2. Drop the day's uses partition once it is sealed. A day with no uses
+   only loses its empty partition: no cut, no entry. A cut must pass the
+   last one, or nothing is dropped.
 3. Append a kept-forever `audit.retention` change: {cut, the entries still
    below the cut since the last cut, as a count and the RFC 9162 head of
    their leaves}.

@@ -65,13 +65,14 @@ for (const mode of ['number', 'at'] as const) {
     await assert.rejects(retainDay(pool, keys, d0, cp), /too recently/);
     await sleep(2 * freshMs + 100);
     const r = await retainDay(pool, keys, d0, cp);
+    assert.ok(r.retention !== null);
     await cp.tick();
     const v = await verify();
     assert.deepEqual(v.problems, []);
-    assert.ok(r.dropped > 100 && r.retention.kept >= 12, `dropped ${r.dropped}, kept ${r.retention.kept}`);
+    assert.ok(r.dropped > 100 && r.retention!.kept >= 12, `dropped ${r.dropped}, kept ${r.retention!.kept}`);
     // Proofs of what came after the cut still verify: the tiles they read are kept.
     const verifier = await verifierFrom(keys.signer.verifierKey);
-    const { rows } = await pool.query('SELECT a.number::text FROM audit a WHERE a.number > $1 AND a.number <= $2', [r.retention.cutUpto, cp.upto]);
+    const { rows } = await pool.query('SELECT a.number::text FROM audit a WHERE a.number > $1 AND a.number <= $2', [r.retention!.cutUpto, cp.upto]);
     for (const { number } of rows) {
       const p = (await proveNumber(pool, number))!;
       const head = parseCheckpoint((await openNote(p.checkpoint, verifier))!);
@@ -79,12 +80,19 @@ for (const mode of ['number', 'at'] as const) {
     }
 
     // A kept change below the cut deleted: caught by the retention entry's head.
-    const { rows: [kept] } = await pool.query("SELECT a.number::text FROM audit_changes a WHERE a.number <= $1 AND a.payload = '{}' LIMIT 1", [r.retention.cutUpto]);
+    const { rows: [kept] } = await pool.query("SELECT a.number::text FROM audit_changes a WHERE a.number <= $1 AND a.payload = '{}' LIMIT 1", [r.retention!.cutUpto]);
     await pool.query('DROP TABLE IF EXISTS saved; CREATE TABLE saved AS SELECT * FROM audit WHERE false');
     await pool.query('WITH d AS (DELETE FROM audit WHERE number = $1 RETURNING *) INSERT INTO saved SELECT * FROM d', [kept.number]);
     assert.match((await verify()).problems.join(';'), /retention of day/);
     await pool.query('INSERT INTO audit SELECT * FROM saved');
     assert.ok((await verify()).ok);
+    // An ended day with no uses (`at` days: a quiet day): its partition goes, with no cut and no entry; the log still verifies.
+    if (mode === 'at') {
+      await pool.query('SELECT new_day($1)', [d0 - 5]);
+      const empty = await retainDay(pool, keys, d0 - 5, cp);
+      assert.equal(empty.retention, null);
+      assert.deepEqual((await verify()).problems, []);
+    }
     // The retention entry itself deleted: the walk then starts below the cut, where leaves are gone.
     const [ret] = await retentions(pool);
     await pool.query('DELETE FROM audit WHERE number = $1', [ret!.number]);
