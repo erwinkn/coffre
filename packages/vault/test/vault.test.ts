@@ -1194,7 +1194,8 @@ test("a read given the app's record of a use appends it beside its read, names i
   assert.equal((await vaultLog(w)).filter((entry) => entry.action === 'credential.use').length, 1);
   // A record that is not one is refused before anything is logged.
   const before = (await vaultLog(w)).length;
-  for (const bad of [{ ...use, metadata: '[1]' }, { ...use, metadata: JSON.stringify({ note: 'x'.repeat(USE_METADATA_LENGTH) }) }, { ...use, environmentId: 'prod' }]) {
+  // Or one that names another place than the read's: the vault vouches for where it says the use was.
+  for (const bad of [{ ...use, metadata: '[1]' }, { ...use, metadata: JSON.stringify({ note: 'x'.repeat(USE_METADATA_LENGTH) }) }, { ...use, environmentId: 'prod' }, { ...use, environmentId: w.prod }, { ...use, projectId: randomUUID() }]) {
     await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'use', items, use: bad }));
   }
   assert.equal((await vaultLog(w)).length, before, 'and nothing was appended for them');

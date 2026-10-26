@@ -1011,6 +1011,16 @@ class VaultService implements Vault {
       const decidedAt = sealed[i]?.holder ?? item.secret;
       return fork !== undefined && !fork.deleted && !fork.archived && fork.projectId === decidedAt.projectId && through !== decidedAt.environmentId;
     });
+    // The app's record of a use names where the read was, which the vault vouches for once it appends it: one of the
+    // places the read is about, a value's own, a reference's holder, or the fork it is read in, with its project.
+    if (use !== null && (use.environmentId !== null || use.projectId !== null)) {
+      const places = items.flatMap((item, i) => {
+        const fork = throughs[i] === null ? undefined : forks.get(throughs[i]!);
+        return [item.secret, sealed[i]?.holder ?? item.secret, ...(fork === undefined ? [] : [{ projectId: fork.projectId, environmentId: throughs[i]! }])];
+      });
+      const named = places.some((place) => (use.environmentId === null || place.environmentId === use.environmentId) && (use.projectId === null || place.projectId === use.projectId));
+      if (!named) throw new Error("a use's place must be one the read is about: a value's own, a reference's holder, or the fork it is read in");
+    }
     const versionIds = new Map(items.map((item) => [item.secret, item.id]));
     const viaOf = new Map(items.map((item, i) => [item.secret, { via: vias[i], sealed: sealed[i], through: throughs[i], throughOk: throughOk[i] }]));
     const entry = (secret: SecretRef, decision: 'allow' | 'deny', code: string | null): NewEntry => {

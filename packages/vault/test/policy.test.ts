@@ -332,12 +332,11 @@ test('a read in flight when an environment is protected is decided as the policy
   hold = new Promise<void>((resolve) => (release = resolve));
   const reading = vault.unwrap({ principal: ADA, purpose: 'reveal', items });
   await new Promise((resolve) => setTimeout(resolve, 100));
-  // Another connection protects prod while the read waits on its key.
+  // Another connection protects prod while the read waits on its key, and commits: it waits on nothing the read holds.
   const twin = await openLocalVault(await db.connect(), config);
-  const protecting = protect(twin, ROOT, where.project, [where.prod]);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  const protectedNow = await protect(twin, ROOT, where.project, [where.prod]);
   release();
-  const [read, protectedNow] = await Promise.all([reading, protecting]);
+  const read = await reading;
   assert.ok(protectedNow.ok);
   assert.equal(!read.ok && read.refusal.code, 'no_grant', 'refused as the policy is when it commits');
 });
