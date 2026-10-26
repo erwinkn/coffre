@@ -1,5 +1,6 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { QUEUED_FOR_HEAD } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asked } from './snapshot.ts';
@@ -20,11 +21,13 @@ const NOW = sql.raw('(extract(epoch from clock_timestamp()) * 1000)::bigint');
  * reads one index range.
  */
 export function snapshotQuery(asked: Asked): SQL {
-  // The head, waiting for it, no longer than `waitMs` when set, which the row's condition sets before it waits: the clock
-  // is read once it is held, the rest as of when the statement began.
-  const bound = asked.waitMs === undefined ? sql`` : sql` AND set_config('lock_timeout', ${String(Math.trunc(asked.waitMs))}, true) IS NOT NULL`;
+  // The head, waiting for it in its queue, no longer than `waitMs` when set, which the row's condition sets first: the
+  // clock is read once it is held, the rest as of when the statement began.
+  const queued = asked.waitMs === undefined
+    ? QUEUED_FOR_HEAD
+    : sql`CASE WHEN set_config('lock_timeout', ${String(Math.trunc(asked.waitMs))}, true) IS NOT NULL THEN ${QUEUED_FOR_HEAD} END`;
   const head = asked.head === true
-    ? sql`, head AS (SELECT next_seq, head_hash, ${NOW} AS at FROM (SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row${bound} FOR UPDATE) locked)`
+    ? sql`, head AS (SELECT next_seq, head_hash, ${NOW} AS at FROM (SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row AND ${queued} FOR UPDATE) locked)`
     : sql``;
   const clock = asked.head === true ? sql`(SELECT at FROM head)` : NOW;
   return sql`

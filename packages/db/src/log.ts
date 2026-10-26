@@ -128,6 +128,28 @@ export function forgetLogHeads(): void {
 }
 
 /**
+ * The queue for the head, on Postgres: a lock of the transaction's in the
+ * database's lock table, under one key, which whoever takes the head waits
+ * for first, in the order they asked, and then the row, free by then. The
+ * row's own lock alone serves no queue: each append writes the row again,
+ * and those waiting on the version they saw lose their places with it, to
+ * whoever asks at the moment it is let go of. Held to the end of the
+ * transaction, as the row is; taking it again in the same one is free.
+ * Every statement that locks the head takes it first, in its condition on
+ * the row, which runs before the row is locked.
+ */
+function headQueue(db: Queryable, wait: 'wait' | 'try' = 'wait'): SQL {
+  if (engineOf(db) === 'sqlite') return sql`true`;
+  return wait === 'wait' ? QUEUED_FOR_HEAD : sql.raw(`pg_try_advisory_xact_lock(${HEAD_QUEUE_KEY})`);
+}
+
+/** The queue's key in the lock table, its own: `hashtextextended('coffre.audit_chain_head', 0)`. */
+const HEAD_QUEUE_KEY = '1045156909993618';
+
+/** `headQueue`, waiting, on Postgres: for a statement written for Postgres alone. */
+export const QUEUED_FOR_HEAD = sql.raw(`pg_advisory_xact_lock(${HEAD_QUEUE_KEY}) IS NOT NULL`);
+
+/**
  * The transactions that hold the head: an append in one reads what it
  * needs under the lock in one statement, where one that does not first
  * takes the lock in another. A savepoint's transaction is another to this
@@ -161,7 +183,7 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
     return held;
   }
   const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(
-    sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`,
+    sql`SELECT next_seq FROM audit_chain_head WHERE only_row AND ${headQueue(tx, 'try')} FOR UPDATE SKIP LOCKED`,
   );
   if (rows.length > 0) holding.add(tx);
   return rows.length > 0;
@@ -171,7 +193,7 @@ const lockedHead = prepared((db) => {
   const { auditChainHead } = tablesOf(db);
   return forUpdate(
     db,
-    db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead).where(eq(auditChainHead.onlyRow, true)),
+    db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead).where(and(eq(auditChainHead.onlyRow, true), headQueue(db))),
   );
 });
 
@@ -338,7 +360,7 @@ const underHead = prepared((db) => {
         retired: sql<boolean | number>`EXISTS (SELECT 1 FROM audit_log moved WHERE moved.author = ${sql.placeholder('author')} AND moved.subject_principal = ${sql.placeholder('keyId')} AND moved.action IN (${moved}))`,
       })
       .from(auditChainHead)
-      .where(eq(auditChainHead.onlyRow, true)),
+      .where(and(eq(auditChainHead.onlyRow, true), headQueue(db))),
   );
 });
 
