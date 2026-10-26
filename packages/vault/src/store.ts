@@ -2,9 +2,11 @@ import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { clockMillis, engineOf, forUpdate, tombstone, truth } from '@coffre/db/dialect';
+import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns, withinBytes } from '@coffre/db/log';
+
+import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -65,6 +67,33 @@ export async function boundLockWaits(tx: Transaction, ms: number, statements = f
   await tx.execute(statements
     ? sql`SELECT set_config('lock_timeout', ${bound}, true), set_config('statement_timeout', ${bound}, true)`
     : sql.raw(`SET LOCAL lock_timeout = ${bound}`));
+}
+
+/**
+ * How long a release is kept: the longest bulk limit window
+ * (`MAX_BULK_WINDOW_MINUTES`, a day), and an hour, a margin for the
+ * database's clock stepping back between a prune and a later count, which
+ * is seconds. Migration 0021's `prune_vault_releases` holds the same, a day
+ * and an hour, in its own SQL: a longer window takes a migration too.
+ */
+export const RELEASES_KEPT_MS = MAX_BULK_WINDOW_MINUTES * 60_000 + 3_600_000;
+
+/**
+ * Delete up to `atMost` rows of `vault_releases` released over
+ * `RELEASES_KEPT_MS` before the database's clock: what no bulk count can
+ * read again. On Postgres the vault's login deletes no row itself, and asks
+ * `prune_vault_releases`, which deletes only those (migration 0021). How
+ * many went.
+ */
+export async function pruneReleases(db: Queryable, atMost: number): Promise<number> {
+  if (engineOf(db) === 'postgres') {
+    const [row] = await rowsOf<{ pruned: number }>(db, sql`SELECT prune_vault_releases(${atMost}::int) AS pruned`);
+    return row!.pruned;
+  }
+  const { vaultReleases } = tablesOf(db);
+  const old = db.select({ principal: vaultReleases.principal, key: vaultReleases.key }).from(vaultReleases)
+    .where(lt(vaultReleases.releasedAt, sql`${clockMillis(db)} - ${RELEASES_KEPT_MS}`)).limit(atMost);
+  return changedRows(await db.delete(vaultReleases).where(sql`(${vaultReleases.principal}, ${vaultReleases.key}) IN ${old}`));
 }
 
 /** The database's clock, now. */

@@ -35,6 +35,23 @@
   `npm install -g --prefix <prefix> @coffre/cli@<version>`. A project's
   dependency, pnpm's globals and npx's cache are told apart first; npm's
   own prefix runs the same command as before.
+- **The bulk count's table keeps only a day of keys.** Since 0.14.4,
+  `vault_releases` held a row for every key a principal was ever released,
+  deleted keys included, and the count read them all. Each scheduled run's
+  checkpoint now forgets those released over a day and an hour before, up
+  to 10,000 a run, in one statement of its own, off every
+  read's path. A failure leaves them to the next run and says so: the
+  checkpoint's `warning`, which the audit watch reports. The day is the
+  longest window `bulkLimit.windowMinutes` now takes (1,440; a vault given
+  more refuses to start, saying so), and the hour a margin for the
+  database's clock stepping back, which is seconds: a release any window
+  counts never goes, and widening the window counts exactly. What is kept
+  is the database's to say, not the caller's: migration
+  `0021_prune_vault_releases` (Postgres only) adds the function the vault
+  calls, `prune_vault_releases(at_most)`, which holds the day and an hour
+  in its own SQL, so the vault's login, which still deletes no row itself,
+  cannot forget a release a window counts. The release before never calls
+  it.
 
 - **A use through the credential proxy takes the log's head once.** The
   vault's read appended its `secret.read` under the head; then the app took
@@ -55,9 +72,11 @@
   operation follows it, and no value is handed back; when it finds the
   policy changed under a use that also holds plain values, the use
   answers 409 and hands back nothing, and the entry stands as the
-  release's record alone. The vault vouches for the actor, the time and
-  the release; where the use went, its credential and host, are the app's
-  word, as they were. A vault older than 0.14.5 does not name the use
+  release's record alone. The vault vouches for the actor, the time, the
+  release and its place, which must be the place the read was at (the
+  fork it is read in, a reference's holder, or the value's own): another
+  is refused as a bad claim, logged, with no use appended. Where the use
+  went, its credential and host, are the app's word, as they were. A vault older than 0.14.5 does not name the use
   back, and the app appends it as before; so does a use of plain values
   only, which asks no vault, and one whose record is longer than the
   vault takes (16 KiB, a use naming hundreds of keys). Deploy the vault

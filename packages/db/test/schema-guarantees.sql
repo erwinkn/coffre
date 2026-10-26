@@ -284,6 +284,7 @@ BEGIN
         'UPDATE vault_releases SET released_at = 0',
         'DELETE FROM vault_releases',
         'TRUNCATE vault_releases',
+        'SELECT prune_vault_releases(1000)',
         'SET ROLE coffre_vault'
     ] LOOP
         BEGIN
