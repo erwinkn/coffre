@@ -6,33 +6,37 @@ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolcreaterole)) THEN
             RAISE EXCEPTION '% may not create roles, and this migration makes coffre_backup: migrate as a login with CREATEROLE, or have one run CREATE ROLE coffre_backup NOLOGIN; GRANT coffre_backup TO % WITH ADMIN TRUE, INHERIT FALSE, SET FALSE first', current_user, current_user;
         END IF;
-        CREATE ROLE coffre_backup NOLOGIN INHERIT NOCREATEDB NOCREATEROLE;
-    ELSE
-        -- Managed owners cannot ALTER the superuser-only attributes, even to turn them off.
-        IF EXISTS (
-            SELECT 1 FROM pg_roles WHERE rolname = 'coffre_backup'
-            AND (rolsuper OR rolreplication OR rolbypassrls)
-        ) THEN
-            RAISE EXCEPTION 'coffre_backup has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off';
-        END IF;
-        -- It would pass on what it is a member of to its members.
-        IF EXISTS (SELECT 1 FROM pg_auth_members WHERE member = 'coffre_backup'::regrole) THEN
-            RAISE EXCEPTION 'coffre_backup is a member of another role, whose privileges its members would inherit: revoke its memberships';
-        END IF;
-        -- Revoking cannot take an owner's rights away: its members would write what it owns.
-        IF EXISTS (
-            SELECT 1 FROM pg_shdepend
-             WHERE refclassid = 'pg_authid'::regclass AND refobjid = 'coffre_backup'::regrole AND deptype = 'o'
-        ) THEN
-            RAISE EXCEPTION 'coffre_backup owns database objects, which its members could change: reassign them';
-        END IF;
-        -- Only when it must: altering a role takes CREATEROLE too.
-        IF EXISTS (
-            SELECT 1 FROM pg_roles WHERE rolname = 'coffre_backup'
-            AND (rolcanlogin OR NOT rolinherit OR rolcreatedb OR rolcreaterole)
-        ) THEN
-            ALTER ROLE coffre_backup NOLOGIN INHERIT NOCREATEDB NOCREATEROLE;
-        END IF;
+        -- Roles are the server's, and the migration lock each database's: another database's 0019 may make it meanwhile.
+        BEGIN
+            CREATE ROLE coffre_backup NOLOGIN INHERIT NOCREATEDB NOCREATEROLE;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN
+            NULL;
+        END;
+    END IF;
+    -- Managed owners cannot ALTER the superuser-only attributes, even to turn them off.
+    IF EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = 'coffre_backup'
+        AND (rolsuper OR rolreplication OR rolbypassrls)
+    ) THEN
+        RAISE EXCEPTION 'coffre_backup has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off';
+    END IF;
+    -- It would pass on what it is a member of to its members.
+    IF EXISTS (SELECT 1 FROM pg_auth_members WHERE member = 'coffre_backup'::regrole) THEN
+        RAISE EXCEPTION 'coffre_backup is a member of another role, whose privileges its members would inherit: revoke its memberships';
+    END IF;
+    -- Revoking cannot take an owner's rights away: its members would write what it owns.
+    IF EXISTS (
+        SELECT 1 FROM pg_shdepend
+         WHERE refclassid = 'pg_authid'::regclass AND refobjid = 'coffre_backup'::regrole AND deptype = 'o'
+    ) THEN
+        RAISE EXCEPTION 'coffre_backup owns database objects, which its members could change: reassign them';
+    END IF;
+    -- Only when it must: altering a role takes CREATEROLE too.
+    IF EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = 'coffre_backup'
+        AND (rolcanlogin OR NOT rolinherit OR rolcreatedb OR rolcreaterole)
+    ) THEN
+        ALTER ROLE coffre_backup NOLOGIN INHERIT NOCREATEDB NOCREATEROLE;
     END IF;
 END
 $$;

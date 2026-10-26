@@ -52,6 +52,21 @@ SQL
 # while it would have to make the group; done, with nothing to alter, once
 # a login with CREATEROLE has made it.
 sed '/--> statement-breakpoint/q' packages/db/src/migrations/postgres/0019_backup_role.sql >"$scratch/0019-role.sql"
+
+# Two databases' first 0019 at once, as two deployments on one server may:
+# the migration lock is each database's, so the second's CREATE ROLE waits on
+# the first's, and then finds the group made. Both succeed.
+as_owner -d postgres -c 'CREATE DATABASE race_a' -c 'CREATE DATABASE race_b'
+{ echo 'BEGIN;'; cat "$scratch/0019-role.sql"; echo 'SELECT pg_sleep(3); COMMIT;'; } | as_owner -d race_a >"$scratch/race_a.log" 2>&1 &
+racer=$!
+for attempt in $(seq 50); do
+    [[ "$(as_superuser -d postgres -At -c "SELECT count(*) FROM pg_stat_activity WHERE datname = 'race_a' AND query LIKE '%pg_sleep(3)%'")" == 1 ]] && break
+    if ((attempt == 50)); then echo 'the first 0019 did not start' >&2; exit 1; fi
+    sleep 0.1
+done
+as_owner -d race_b <"$scratch/0019-role.sql" >"$scratch/race_b.log" 2>&1 || { cat "$scratch/race_b.log" >&2; exit 1; }
+wait "$racer" || { cat "$scratch/race_a.log" >&2; exit 1; }
+as_owner -d postgres -c 'DROP ROLE coffre_backup' -c 'DROP DATABASE race_a' -c 'DROP DATABASE race_b'
 if as_member -d postgres <"$scratch/0019-role.sql" >"$scratch/member.log" 2>&1 \
     || ! grep -Fq 'migration_member may not create roles, and this migration makes coffre_backup' "$scratch/member.log"; then
     cat "$scratch/member.log" >&2

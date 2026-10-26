@@ -346,15 +346,13 @@ function reasserted({ backupLogin }: Options): string {
 }
 
 function parseOptions(args: string[]): Options {
+  let values;
   try {
-    const { values } = parseArgs({
+    ({ values } = parseArgs({
       args,
       options: { yes: { type: 'boolean', default: false }, 'backup-login': { type: 'string' } },
       strict: true,
-    });
-    const backupLogin = values['backup-login'];
-    if (backupLogin === '') throw new Error('empty backup login');
-    return { yes: values.yes, ...(backupLogin === undefined ? {} : { backupLogin }) };
+    }));
   } catch {
     // The error would quote the argument, which may be the connection string itself.
     const leaked = args.some((arg) => /postgres(ql)?:|@/i.test(arg));
@@ -365,6 +363,9 @@ function parseOptions(args: string[]): Options {
         (leaked ? ' One of the arguments looks like one: change that password, which is in your shell history now.' : ''),
     );
   }
+  const backupLogin = values['backup-login'];
+  if (backupLogin === '') throw new MigrateError('--backup-login is empty: name the role to grant coffre_backup');
+  return { yes: values.yes, ...(backupLogin === undefined ? {} : { backupLogin }) };
 }
 
 function count(n: number, word: string): string {

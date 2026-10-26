@@ -1266,8 +1266,8 @@ CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
 ```
 
 To back up with `pg_dump`, make a third login the same way, say
-`coffre_backup_login`, and name it to `coffre migrate --backup-login`,
-which grants it the group that reads every row
+`coffre_backup_login`, and add `--backup-login coffre_backup_login` to the
+migrate command below, which then grants it the group that reads every row
 ([restore.md](restore.md#on-plain-postgres)). Nothing checks that login's
 own rights: keep it as plain as the two above. The grant needs `ADMIN
 OPTION` on `coffre_backup`, which the login that made the group holds, and
