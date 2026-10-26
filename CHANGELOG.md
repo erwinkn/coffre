@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A refusal to checkpoint stands until the entry it found is whole
+  again.** With three checkpoints at once, one could refuse for an entry
+  edited after another had signed past it, and a third, starting after
+  the refusal, resume from the second's checkpoint and sign, never reading
+  the entry: the edit stayed unflagged until the rehash of the past found
+  it again, within two laps. Now, while a refusal stands, a checkpoint
+  whose walk began after the entry it names checks that entry again under
+  the head, its hash, its link and the vault's MAC, and refuses while it
+  is still broken (T104, found by `formal/Audit.tla`).
+
 - **A CI run asks again when the instance cannot answer it yet.** When
   the instance answered 503 `unavailable` (it could not reach its database
   or its vault, a busy one say, and says to try again in a moment), the

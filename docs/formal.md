@@ -920,6 +920,7 @@ beat's: readiness says nothing of it.
 | A checkpoint's walk checks the vault's MACs, and under the head the prefix signed last (`rehash`, `carries`) | a prefix signed over a vault entry chained after a rewrite (`SignsNoForgedVault`) | |
 | The checkpoint's walk, in no transaction, links each batch to the hash it verified last (`rehash`, `startPrevHash`) | a prefix signed over a vault entry the log was rewritten from while the walk read it (`SignsNoForgedVault`) | |
 | Under the head, a call that another overtook signs nothing, and a refusal since the last checkpoint stands (`seen`, `#standingRefusal`) | a checkpoint signed after a refusal for a tamper the vault can find (`StaysUnsignedOnceFound`) | |
+| Under the head, while a refusal stands, a call whose walk began after the entry it names checks that entry again: its hash, its link, the vault's MAC (`#entryHolds`) | three checkpoints at once: one signs past an entry edited after it walked it, another refuses for that entry, and a third resumes from the first's checkpoint and signs, never reading the entry (`StaysUnsignedOnceFound`, in `Overtaking`) | this model, T104 |
 | The scrub recomputes the signed prefix's hashes (`#scrub`, `relink`) | an entry edited in place, signed over again and again (`EditFoundByNextScrub`) | |
 | Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
 | A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`); a walk between beats writes how far it got over a beat's later checkpoint (`AnchorNeverBack`, in `Walking`) | this model |
@@ -942,15 +943,11 @@ What it does not claim, as the code does not:
 - **The vault signs over app entries it cannot check.** A rewrite of the
   app's entries alone, past the last vault entry, is signed. The beat's
   walk finds it and the anchor keeps the finding (`FoundEditStaysRed`).
-- **A refusal of the vault's stands only until it signs again.** Three
-  checkpoints at once break `StaysUnsignedOnceFound`, so `Overtaking`
-  leaves it to `Tampering`. Call b refuses for an entry edited while call
-  a walked; a, which walked past the entry before the edit, has signed
-  over it; call c begins after b's refusal and resumes from a's
-  checkpoint, past the edit, and signs. This is the vault's, unchanged by
-  the anchor, and the scrub finds the edit again within two laps. The
-  anchor clears a refusal once the vault signs, so readiness is green over
-  that edit until then, if the edit is to an entry behind the app's walk.
+- **A refusal of the vault's stands only until it signs again**, which
+  takes the entry it names whole again: a call whose walk began after that
+  entry checks it again under the head before it signs (T104). One that
+  names no entry, a prefix rewritten or a head moved, is found again by
+  the next call's own checks of the prefix it resumes from and the head.
 - **A rewrite that stops short of the anchor's checkpoint.** The model's
   rewrite hashes the chain again to the head. One of entries 400 to 499,
   each hashed again, under a checkpoint at 500, leaves 500's hash, which
