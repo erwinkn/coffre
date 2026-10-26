@@ -344,7 +344,12 @@ Each CI run holds an ID token, good for one credential.
   3. the vault's decision, under the account's row and the head; on a
      kept answer that is no longer the vault's, none: the use starts
      over, asking (`#keys`, `accessRevision`; `AccessChanged`);
-  4. through the credential proxy, `credential.use` under the head;
+  4. through the credential proxy, `credential.use`: appended by the vault
+     beside its read, in its decision (`unwrap`'s `use`), and the
+     credential then checked again with no lock, as an export's; or,
+     with a vault older than 0.14.5, plain values only, or a record too
+     long for the vault, by the app,
+     under the head, the credential checked again under it;
   5. the value answered.
 - **Ending one:**
   - revoking it (`revokeCredential`);
@@ -359,8 +364,8 @@ Each CI run holds an ID token, good for one credential.
 | It reads its binding again under the head (`exchangeStill`) | a credential issued after its binding's `token.unbind` (`NoExchangeAfterUnbind`) | |
 | And the account, in the same read (`exchangeStill`) | a credential at a generation a removal had moved past (`ExchangedAtCurrentGeneration`) | |
 | The binding's rate is counted under the head, in it too (`exchangeStill`) | more credentials in the minute than the rate (`RateHeld`) | |
-| Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head through the proxy | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
-| And with no lock for an export, which commits nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
+| Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head when it appends a use of its own (a vault older than 0.14.5, plain values only, or a record too long for the vault) | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
+| And with no lock for an export, and for a use the vault appended, which commit nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
 | A read on a kept answer is decided only while that is still the vault's answer, under the account's row (`#keys`, `accessRevision`) | a `secret.read` logged on an answer kept from before a removal and an admission (`NoReadOnStaleAnswer`, which states the check itself: a wiring check, as this model carries no grants or policy, what the check is for); the fence still withholds the value, so `NoReleaseAfterEnd` holds without it | |
 | That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
@@ -476,7 +481,8 @@ window of fifteen minutes. #292's review.
 | Scenario | Who runs what | States |
 |---|---|---|
 | `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
-| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 145 thousand |
+| `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 162 thousand |
+| `Proxying` | A reader uses its token through the credential proxy alone, its use logged by the vault or by the app, while an owner revokes the token or removes the account: each fence shown needed on the proxy's own path | 505 |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 

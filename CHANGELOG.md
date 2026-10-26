@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **A use through the credential proxy takes the log's head once.** The
+  vault's read appended its `secret.read` under the head; then the app took
+  the head again for its own `credential.use` entry, for six statements
+  more (the head, the policy, the credential, the head's last entry, the
+  append, the commit). Each `/use` held the head that every audited write
+  waits for about seven round trips, which capped an instance near six
+  uses a second at 20 ms. The app now hands its entry to the vault, which
+  appends it beside its read, in the same decision; the app checks the
+  credential again after the release with no lock, as an export always
+  has. A cold proxied use runs 4 app statements, not 10, none in a
+  transaction. Under 20 concurrent uses at 20 ms, 15.6 uses a second
+  instead of 6.4, p50 1.2 s instead of 3.4 s. The log shows the same
+  `credential.use`, its metadata unchanged; its author is the vault, and
+  the audit page says the line was decided by the vault. Like the read
+  beside it, it records the vault's release: when the app's check then
+  finds the credential ended, a `credential_ended` refusal of the same
+  operation follows it, and no value is handed back; when it finds the
+  policy changed under a use that also holds plain values, the use
+  answers 409 and hands back nothing, and the entry stands as the
+  release's record alone. The vault vouches for the actor, the time and
+  the release; where the use went, its credential and host, are the app's
+  word, as they were. A vault older than 0.14.5 does not name the use
+  back, and the app appends it as before; so does a use of plain values
+  only, which asks no vault, and one whose record is longer than the
+  vault takes (16 KiB, a use naming hundreds of keys). Deploy the vault
+  first, as ever. No migration ([formal.md](docs/formal.md), `Proxying`).
+
 - **A read under load answers within seconds: read, or 503 at once.** A
   read's whole vault call, its retries, the entries of a refusal, the
   record of a vault key's check and a key service's intent included, is

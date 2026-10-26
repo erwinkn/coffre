@@ -61,8 +61,9 @@ CONSTANTS
     \* Once the vault has released a value, the app reads the credential and
     \* the account's generation again before it answers (server
     \* api/context.ts, recorded, credentialStill): under the head when it
-    \* commits entries of its own, as through the proxy, and with no lock
-    \* when it has none, as an export.
+    \* commits entries of its own, as through the proxy when the vault did
+    \* not log its use, and with no lock when it has none, as an export and
+    \* a use the vault logged.
     CredentialFenceUnderHead,
     CredentialFenceUnlocked,
     \* A use may decide on the vault's answer about the account kept from an
@@ -274,8 +275,9 @@ ExCommit(p) ==
 (* Using a credential to read a value (server auth.ts, authenticateRequest; *)
 (* api/signin.ts, verify; api/secrets.ts, reveal; vault vault.ts, unwrap   *)
 (* and #keys; api/context.ts, recorded). Through the credential proxy the  *)
-(* app commits a `credential.use` of its own under the head; an export     *)
-(* commits nothing more.                                                   *)
+(* vault appends the app's `credential.use` with its read, and the app     *)
+(* commits nothing more, as an export; an older vault's use, or one of     *)
+(* plain values only, the app commits itself under the head.               *)
 (***************************************************************************)
 
 \* The credential's row, unlocked (findCredential), and for one a binding
@@ -324,14 +326,20 @@ UseDecide(p) ==
          ELSE IF status # "active"
          THEN Refuse(p)
          \* A release on a kept answer is the model's to see when that answer is not the account's now.
-         ELSE /\ log' = Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred, !.stale = l[p].recalled /\ gen # l[p].kept])
-              /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
-              /\ Release(p)
-              /\ Goto(p, IF op[p].proxy THEN "use.apphead" ELSE "use.fence")
-              /\ UNCHANGED <<rows, op, left, history>>
+         \* Through the proxy, the vault appends the app's `credential.use` beside its read, in the same step
+         \* (vault.ts, unwrap's `use`), and the app checks the credential with no lock, as an export does; or,
+         \* a vault older than 0.14.5, a use of plain values only or a record too long for the vault, the app appends
+         \* it under the head itself.
+         ELSE \E byVault \in (IF op[p].proxy THEN BOOLEAN ELSE {FALSE}) :
+              LET read == Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred, !.stale = l[p].recalled /\ gen # l[p].kept])
+              IN /\ log' = IF byVault THEN Append(read, [Entry("credential.use", p) EXCEPT !.cred = l[p].cred]) ELSE read
+                 /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
+                 /\ Release(p)
+                 /\ Goto(p, IF op[p].proxy /\ ~byVault THEN "use.apphead" ELSE "use.fence")
+                 /\ UNCHANGED <<rows, op, left, history>>
 
-\* Through the proxy: the app's own transaction, under the head, appends
-\* `credential.use`, after the fence.
+\* Through the proxy, its use not logged by the vault: the app's own
+\* transaction, under the head, appends `credential.use`, after the fence.
 UseAppHead(p) == pc[p] = "use.apphead" /\ TakeHead(p, "use.commit")
 
 UseCommit(p) ==
@@ -343,9 +351,9 @@ UseCommit(p) ==
               /\ Goto(p, "use.answer")
               /\ UNCHANGED <<rows, op, l, left, history>>
 
-\* An export: nothing more to commit, the fence read alone, unlocked: a
-\* revocation committed before it is seen, and one after came after the
-\* release.
+\* An export, or a proxied use the vault logged: nothing more to commit,
+\* the fence read alone, unlocked: a revocation committed before it is
+\* seen, and one after came after the release.
 UseFence(p) ==
     /\ pc[p] = "use.fence"
     /\ IF CredentialFenceUnlocked /\ ~StillLive(Cred(l[p].cred))

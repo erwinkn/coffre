@@ -1,7 +1,8 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
-import type { Purpose, Refusal, SecretRef, Through, Vault, Via, WrappedKey } from '@coffre/core/vault';
+import { USE_METADATA_LENGTH, type Purpose, type Refusal, type SecretRef, type Through, type UseRecord, type Vault, type Via, type WrappedKey } from '@coffre/core/vault';
 
 import { AccessChanged, type Recalled } from '../accesses.ts';
+import type { AuditEntry } from '../db/audit.ts';
 import { ApiError } from './errors.ts';
 
 /**
@@ -77,7 +78,13 @@ export async function openValues(
   items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string }[],
   /** The caller's, decided on a kept answer of the vault's: the vault checks it, and says so by naming it back. */
   recalled?: Recalled,
-): Promise<Keyed<string>> {
+  /**
+   * The credential proxy's `credential.use` entry, for the vault to append
+   * beside its reads (`UnwrapInput.use`): `used` says it did, and the app
+   * appends nothing then. Plain values only ask no vault, and log no use.
+   */
+  use?: UseRecord,
+): Promise<Keyed<string> & { used?: true }> {
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const checks = recalled !== undefined && !recalled.confirmed ? recalled.revision : undefined;
@@ -89,6 +96,7 @@ export async function openValues(
       ...(via === undefined ? {} : { via }),
       ...(through === undefined ? {} : { through }),
     })),
+    ...(use === undefined ? {} : { use }),
   });
   if (!result.ok && result.refusal.code === 'access_changed') throw new AccessChanged();
   // A vault older than 0.14.1 names nothing back: it checked nothing, and the request asks before it answers.
@@ -103,7 +111,20 @@ export async function openValues(
     }
   });
   let next = 0;
-  return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)) };
+  // A vault older than 0.14.5 names nothing back: it appended no use, and the app does.
+  return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), ...(use !== undefined && result.used === true ? { used: true as const } : {}) };
+}
+
+/**
+ * The app's entry of a use, as the vault appends it (`UnwrapInput.use`): its
+ * fields as `appendAudit` would write them. Undefined for one longer than
+ * the vault takes (`USE_METADATA_LENGTH`), a use naming hundreds of keys,
+ * which the app appends itself.
+ */
+export function useRecord(entry: AuditEntry): UseRecord | undefined {
+  const metadata = JSON.stringify(entry.metadata ?? {});
+  if (metadata.length > USE_METADATA_LENGTH) return undefined;
+  return { projectId: entry.projectId ?? null, environmentId: entry.environmentId ?? null, sourceIp: entry.sourceIp ?? null, metadata };
 }
 
 /**

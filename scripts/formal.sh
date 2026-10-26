@@ -53,6 +53,8 @@ REMOVALS=(
   "Revoking CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials NoReleaseAfterEnd"
   "Revoking KeptAnswerChecked NoReadOnStaleAnswer"
+  "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"
+  "Proxying CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials+BindingCheckedAtUse UnboundStayUnusable"
   "Issuing IssuerFence SensitiveOnlyFromOwners"
   "Issuing SealIssuerFence SensitiveOnlyFromOwners"

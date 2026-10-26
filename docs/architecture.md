@@ -657,7 +657,12 @@ under a key derived from that author's configuration key, and a public
 SHA-256 hash over its fields and MAC. The app derives its MAC key from
 `auditChainKey`; the vault derives its own from its signing key, which
 comes from its vault key unless it is given one. Neither can authenticate the
-other's entries alone. An entry names the key it was MACed under. A vault
+other's entries alone. One action crosses over: since 0.14.5 the vault
+appends the credential proxy's `credential.use` beside its read, from a
+record the app hands it. Its MAC vouches for the actor, the time and that
+the vault released the keys; where they went, the credential and its host
+in its metadata, and its place, are the app's word, as they were when the
+app wrote the entry. An entry names the key it was MACed under. A vault
 whose vault key was rotated verifies its earlier entries by the key of the vault key it
 keeps in `previousKeks`, but only those before the rotation: at its first
 call under the new vault key, the vault seals every member row again under the new

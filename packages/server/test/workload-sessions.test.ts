@@ -124,10 +124,10 @@ const transport: WorkloadTransport = {
   },
 };
 
-function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: ReturnType<typeof checkPlugins> } = {}): CoffreRuntime {
+function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault'] } = {}): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN,
-    vault: deps.vault,
+    vault: options.vault ?? deps.vault,
     auth: signin({
       providers: [github({ clientId: 'a', clientSecret: 'b' })],
       workloads: {
@@ -139,7 +139,7 @@ function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: 
     auditChainKey: deps.chainKey.toString('base64'),
     ...(options.plugins === undefined ? {} : { plugins: options.plugins }),
   });
-  return createRuntime(config, deps.db, deps.vault, transport, undefined, () => gate);
+  return createRuntime(config, deps.db, options.vault ?? deps.vault, transport, undefined, () => gate);
 }
 
 before(async () => {
@@ -892,7 +892,7 @@ async function newest(author: 'app' | 'vault', count = 5) {
   return rows.map((row) => ({ action: row.action, decision: row.decision, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
 }
 
-test("a Cloudflare call uses its service's values: the vault's entry names no credential, the app's names the binding", async () => {
+test("a Cloudflare call uses its service's values: the vault's read names no credential, the use it appends names the binding", async () => {
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   await marketProd();
@@ -900,11 +900,12 @@ test("a Cloudflare call uses its service's values: the vault's entry names no cr
   assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
   const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
   assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
-  const [opened] = await newest('vault', 1);
-  assert.equal(opened!.decision, 'allow');
+  // The read, then the use the app gave the vault to append beside it, under the same head: the app appends nothing.
+  const [logged, opened] = await newest('vault', 2);
+  assert.deepEqual([opened!.action, opened!.decision, logged!.action], ['secret.read', 'allow', 'credential.use']);
   assert.equal(opened!.metadata.credentialId, undefined, 'the vault is told no credential: the binding has no credentials row');
-  const logged = (await newest('app')).find((entry) => entry.action === 'credential.use');
-  assert.equal(logged?.metadata.credentialId, `binding:${binding}`, 'the app names the binding the call came through');
+  assert.equal(logged!.metadata.credentialId, `binding:${binding}`, 'the use names the binding the call came through');
+  assert.equal((await newest('app')).find((entry) => entry.action === 'credential.use'), undefined);
 });
 
 test('a Cloudflare binding unbound after its call was checked releases nothing: the read is withheld, as for a revoked session', async () => {
@@ -916,10 +917,71 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
   // Checked; then unbound before the vault is asked.
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
-  // The vault released, and logged it; the app withheld the value, and logged that, naming the binding.
-  assert.equal((await newest('vault', 1))[0]!.decision, 'allow');
+  // The vault released, and logged it with the use it was given: a use records the release, as the read does. The
+  // app withheld the value, and logged that, naming the binding, the same operation's entry after it.
+  assert.deepEqual((await newest('vault', 2)).map((entry) => `${entry.action} ${entry.decision}`), ['credential.use allow', 'secret.read allow']);
   const [withheld] = await newest('app', 1);
   assert.deepEqual([withheld!.decision, withheld!.metadata.reason, withheld!.metadata.credentialId], ['deny', 'credential_ended', `binding:${binding}`]);
+});
+
+/**
+ * An unbind that commits while the use waits for the log's head, which the
+ * unbind holds: the vault, once it has the head, decides in a statement of
+ * its own, and the app checks the binding in another after the vault has
+ * released, never in the statement that waited. Under READ COMMITTED, a
+ * statement that waited for a row lock reads only that row again: a check
+ * of another table in it would see the binding as it stood before the wait.
+ * The models (formal/Credentials.tla) take a statement as one step, and
+ * cannot see that; this does.
+ */
+test('a Cloudflare binding unbound while its use waits for the head releases nothing', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
+  runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
+  await marketProd();
+  const binding = await bind('cloudflare', null, {});
+  assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
+  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
+  let commit!: () => void;
+  const committing = new Promise<void>((resolve) => (commit = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  // The unbind's tombstone, under the head, not yet committed.
+  const unbinding = audited({ db: deps.db, chainKey: deps.chainKey }, async (_tx, log) => {
+    log.push(allowed(ctx, 'token.unbind', { metadata: { bindingId: binding } }));
+    holding();
+    await committing;
+  });
+  await held;
+  const using = seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
+  // Until the use waits for the head, in this database (a row lock's wait names a transaction, not a database), then the unbind commits.
+  const waiting = async () => (await deps.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`)).rows[0]!.n;
+  for (let tries = 0; (await waiting()) === 0; tries++) {
+    assert.ok(tries < 200, 'the use never waited for the head');
+    await sleep(10);
+  }
+  commit();
+  await unbinding;
+  await assert.rejects(using, { status: 401 });
+});
+
+test('a vault older than 0.14.5, which names no use back, and a use too long for it, leave the app to log the use under the head', async () => {
+  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
+  // An older vault takes no record of the use: it ignores it, and names nothing back.
+  const older = new Proxy(deps.vault, {
+    get: (target, key) => key === 'unwrap'
+      ? async (input: Parameters<typeof target.unwrap>[0]) => target.unwrap({ ...input, use: undefined })
+      : Reflect.get(target, key, target),
+  });
+  await marketProd();
+  await bind('cloudflare', null, {});
+  for (const [vault, logged] of [[older, { credential: 'stripe' }], [deps.vault, { credential: 'stripe', note: 'x'.repeat(20_000) }]] as const) {
+    runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]), vault });
+    assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
+    const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged });
+    assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
+    assert.equal((await newest('vault', 1))[0]!.action, 'secret.read', 'the vault appended no use');
+    assert.equal((await newest('app', 1))[0]!.action, 'credential.use', 'the app did');
+  }
 });
 
 test('a Cloudflare binding with a tombstone, though its row was never revoked, releases nothing', async () => {
