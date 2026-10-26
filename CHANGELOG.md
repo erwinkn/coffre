@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.5 (2026-10-26)
+
 - **Upgrading to 0.14.5, in short.** One migration, `0021_prune_vault_releases`
   (Postgres only; SQLite has none). It adds one function,
   `prune_vault_releases`, and grants `EXECUTE` on it to `coffre_vault`, the
