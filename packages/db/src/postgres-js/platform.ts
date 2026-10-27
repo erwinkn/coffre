@@ -39,8 +39,8 @@ export type TlsOptions = Omit<ConnectionOptions, 'socket'>;
 
 /** What `#postgres/platform` exports, from either module. */
 export interface Platform {
-  /** A TCP socket to `to`, connecting: it says `connect` once it is, or `error` and `close`. */
-  tcp(to: Address): Socket;
+  /** A TCP socket to `to`, connecting: `connected` is called once it is, heard before it starts; or it says `error` and `close`. */
+  tcp(to: Address, connected: () => void): Socket;
   /** `socket`, now speaking TLS: it says `secureConnect` once the handshake is done. */
   startTls(socket: Socket, options: TlsOptions): Socket;
   /** 4 or 6 for an IP address, 0 for a name. */

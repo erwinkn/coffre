@@ -274,7 +274,7 @@ async function leavesNothingUnhandled(work: () => Promise<void>): Promise<unknow
   return unhandled;
 }
 
-test('an opening the client cannot finish fails its query and closes, with nothing left unhandled: a TLS key it cannot read, a SCRAM message it cannot, a socket it cannot make', { timeout: 10_000 }, async () => {
+test('an opening the client cannot finish fails its query and closes, with nothing left unhandled: a TLS key it cannot read, a SCRAM message it cannot, a sign-in it has not, a socket it cannot make', { timeout: 10_000 }, async () => {
   // TLS: the server says yes to it, and the client's own key is no key.
   const tls = await fakeServer((socket) => socket.write('S'));
   // SCRAM: the server asks for it, then answers the client's first message without its salt.
@@ -282,6 +282,8 @@ test('an opening the client cannot finish fails its query and closes, with nothi
     (socket) => socket.write(message('R', int32(10), Buffer.from('SCRAM-SHA-256\0\0'))),
     (socket) => socket.write(message('R', int32(11), Buffer.from('r=nonce,i=4096'))),
   );
+  // GSSAPI, which the client has not.
+  const gss = await fakeServer((socket) => socket.write(message('R', int32(7))));
   try {
     const unhandled = await leavesNothingUnhandled(async () => {
       // Each fails the query that opened it, closes, and opens again for the next, which fails as well; then the client ends.
@@ -293,6 +295,10 @@ test('an opening the client cannot finish fails its query and closes, with nothi
       await assert.rejects(saltless.unsafe('select 1'));
       await assert.rejects(saltless.unsafe('select 1'));
       await saltless.end();
+      const kerberos = postgres({ ...postgresOptions(gss.url), max: 1, connect_timeout: 0 });
+      await assert.rejects(kerberos.unsafe('select 1'), { code: 'AUTH_TYPE_NOT_SUPPORTED' });
+      await assert.rejects(kerberos.unsafe('select 1'), { code: 'AUTH_TYPE_NOT_SUPPORTED' });
+      await kerberos.end();
       const socketless = postgres({ ...postgresOptions(DATABASE), socket: () => Promise.reject(new Error('no socket')), max: 1 });
       await assert.rejects(socketless.unsafe('select 1'), { message: 'no socket' });
       await assert.rejects(socketless.unsafe('select 1'), { message: 'no socket' });
@@ -302,6 +308,7 @@ test('an opening the client cannot finish fails its query and closes, with nothi
   } finally {
     await tls.close();
     await scram.close();
+    await gss.close();
   }
 });
 

@@ -6,7 +6,7 @@ import tls from 'node:tls';
 
 import type { Platform, Socket } from './platform.ts';
 
-export const tcp: Platform['tcp'] = (to) => ('path' in to ? net.connect(to.path) : net.connect(to.port, to.host)) as Socket;
+export const tcp: Platform['tcp'] = (to, connected) => ('path' in to ? net.connect(to.path, connected) : net.connect(to.port, to.host, connected)) as Socket;
 
 export const startTls: Platform['startTls'] = (socket, options) => tls.connect({ ...options, socket: socket as net.Socket }) as Socket;
 

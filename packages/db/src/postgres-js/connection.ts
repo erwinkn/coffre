@@ -131,11 +131,12 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     try {
       x = options.socket
         ? await options.socket()
-        : platform.tcp(options.path ? { path: options.path } : { host: options.host, port: options.port, tls: ssl !== false });
+        : platform.tcp(options.path ? { path: options.path } : { host: options.host, port: options.port, tls: ssl !== false }, ssl ? () => void secure().catch(openingFailed) : connected);
     } catch (e) {
-      // Coffre: and closes, so that the pool can open it again; upstream left it opening for ever.
+      // Coffre: and closes, so that the pool can open it again, backing off as from a refused connection; upstream left
+      // it opening for ever.
       error(e);
-      void closed();
+      void closed(true);
       return null;
     }
     x.on('error', error);
@@ -224,9 +225,13 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
   async function secure(): Promise<void> {
     if (sslnegotiation !== 'direct') {
+      const at = socket!;
       write(SSLRequest);
       // The server's answer, S or N: TLS is tried either way, and fails against a server that said no.
-      await new Promise<void>((resolve) => socket!.once('data', () => resolve()));
+      await new Promise<void>((resolve) => at.once('data', () => resolve()));
+      // Coffre: unless the socket closed meanwhile (on workerd its answer and its close can come in either order): the
+      // connection may be opening again, for another query.
+      if (socket !== at) return;
     }
 
     const tls: TlsOptions = {
@@ -295,9 +300,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
     connectTimer.start();
 
+    // A socket of the pool's own is opening, heard from `tcp`; the caller's is open.
     if (options.socket) return ssl ? secure().catch(openingFailed) : connected();
-
-    socket.on('connect', ssl ? () => void secure().catch(openingFailed) : connected);
   }
 
   function reconnect(): void {
@@ -311,7 +315,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       if (keep_alive) socket!.setKeepAlive?.(true, 1000 * keep_alive);
       write(StartupMessage());
     } catch (err) {
-      error(err);
+      // Coffre: and closes; upstream left it opening until its connect_timeout, if any.
+      openingFailed(err);
     }
   }
 
@@ -605,7 +610,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       case 10: return SASL();
       case 11: return SASLContinue(x, at);
       case 12: return SASLFinal(x);
-      default: console.error('Postgres.js : Unknown Auth:', type);
+      // Coffre: GSSAPI, SSPI, Kerberos: the connection fails, where upstream logged it and waited.
+      default: throw Errors.generic('AUTH_TYPE_NOT_SUPPORTED', `Postgres asked for an authentication the client has not: type ${type}`);
     }
   }
 

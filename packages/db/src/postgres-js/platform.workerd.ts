@@ -135,9 +135,10 @@ class WorkerdSocket extends EventEmitter {
   }
 }
 
-export const tcp: Platform['tcp'] = (to: Address) => {
+export const tcp: Platform['tcp'] = (to: Address, connected: () => void) => {
   if ('path' in to) throw new Error('a Unix socket cannot be reached from workerd');
   const socket = new WorkerdSocket();
+  socket.once('connect', connected);
   void socket.connect(to.port, to.host, to.tls);
   return socket as Socket;
 };
