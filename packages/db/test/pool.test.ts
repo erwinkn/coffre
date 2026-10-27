@@ -274,7 +274,7 @@ async function leavesNothingUnhandled(work: () => Promise<void>): Promise<unknow
   return unhandled;
 }
 
-test('an opening the client cannot finish fails its query, with nothing left unhandled: a TLS key it cannot read, a SCRAM message it cannot', { timeout: 10_000 }, async () => {
+test('an opening the client cannot finish fails its query and closes, with nothing left unhandled: a TLS key it cannot read, a SCRAM message it cannot, a socket it cannot make', { timeout: 10_000 }, async () => {
   // TLS: the server says yes to it, and the client's own key is no key.
   const tls = await fakeServer((socket) => socket.write('S'));
   // SCRAM: the server asks for it, then answers the client's first message without its salt.
@@ -284,12 +284,19 @@ test('an opening the client cannot finish fails its query, with nothing left unh
   );
   try {
     const unhandled = await leavesNothingUnhandled(async () => {
+      // Each fails the query that opened it, closes, and opens again for the next, which fails as well; then the client ends.
       const keyless = postgres({ ...postgresOptions(tls.url), ssl: { key: 'not a key', cert: 'not a cert' }, max: 1, connect_timeout: 5 });
-      await assert.rejects(keyless.unsafe('select 1'));
-      await keyless.end({ timeout: 0 });
+      await assert.rejects(keyless.unsafe('select 1'), { code: 'ERR_OSSL_PEM_NO_START_LINE' });
+      await assert.rejects(keyless.unsafe('select 1'), { code: 'ERR_OSSL_PEM_NO_START_LINE' });
+      await keyless.end();
       const saltless = postgres({ ...postgresOptions(scram.url), max: 1, connect_timeout: 5 });
       await assert.rejects(saltless.unsafe('select 1'));
-      await saltless.end({ timeout: 0 });
+      await assert.rejects(saltless.unsafe('select 1'));
+      await saltless.end();
+      const socketless = postgres({ ...postgresOptions(DATABASE), socket: () => Promise.reject(new Error('no socket')), max: 1 });
+      await assert.rejects(socketless.unsafe('select 1'), { message: 'no socket' });
+      await assert.rejects(socketless.unsafe('select 1'), { message: 'no socket' });
+      await socketless.end();
     });
     assert.deepEqual(unhandled, []);
   } finally {

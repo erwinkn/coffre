@@ -30,9 +30,13 @@
   - a `reserve()` that opens its connection gets it: without `fetch_types`,
     upstream never gave it;
   - an opening that cannot be finished (TLS with a key it cannot read, a
-    sign-in's hash or a server's SCRAM message) fails the query that waited
-    for it: upstream left an unhandled rejection, which ends a Node
-    process.
+    sign-in's hash or a server's SCRAM message, a `socket` factory that
+    throws) fails the query that waited for it and closes the connection,
+    which opens again for the next: upstream left an unhandled rejection,
+    which ends a Node process, or the connection opening for ever, and
+    every query after it waiting. A sign-in step that finishes after its
+    socket has closed (on Workers, the hashes are asynchronous) does
+    nothing to the connection opened again.
 
   What keeps a session across statements (`coffre migrate`'s lock,
   `coffre backup`'s and `restore`'s snapshot, `coffre setup`'s probes, each

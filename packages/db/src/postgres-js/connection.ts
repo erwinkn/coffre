@@ -133,7 +133,9 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
         ? await options.socket()
         : platform.tcp(options.path ? { path: options.path } : { host: options.host, port: options.port, tls: ssl !== false });
     } catch (e) {
+      // Coffre: and closes, so that the pool can open it again; upstream left it opening for ever.
       error(e);
+      void closed();
       return null;
     }
     x.on('error', error);
@@ -234,8 +236,15 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (sslnegotiation === 'direct') tls.ALPNProtocols = ['postgresql'];
     if (ssl) Object.assign(tls, ssl);
 
-    socket!.removeAllListeners();
-    socket = platform.startTls(socket!, tls);
+    const plain = socket!;
+    plain.removeAllListeners();
+    try {
+      socket = platform.startTls(plain, tls);
+    } catch (e) {
+      // Coffre: TLS options it cannot load (a key, a password): the plain socket closes the connection, as openingFailed destroys it.
+      plain.on('close', closed);
+      throw e;
+    }
     socket.on('secureConnect', connected);
     socket.on('error', error);
     socket.on('close', closed);
@@ -367,13 +376,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     remaining = 0;
     incomings = null;
     platform.clearImmediate(nextWriteTimer);
-    socket!.removeListener('data', data);
-    socket!.removeListener('connect', connected);
     idleTimer.cancel();
     lifeTimer.cancel();
     connectTimer.cancel();
 
-    socket!.removeAllListeners();
+    socket?.removeAllListeners();
     socket = null;
 
     // Coffre: a connection closed while it opened, with no error said, fails the query that opened it, as
@@ -417,7 +424,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       case 49: return; // 1, ParseComplete
       case 116: return ParameterDescription(x); // t
       case 84: return RowDescription(x); // T
-      case 82: return void Authentication(x).catch(openingFailed); // R
+      case 82: return authenticate(x); // R
       case 110: return NoData(); // n
       case 75: return BackendKeyData(x); // K
       case 69: return ErrorResponse(x); // E
@@ -580,14 +587,23 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     result.statement = statement;
   }
 
-  async function Authentication(x: Buffer): Promise<void> {
+  // Coffre: a step that finishes once its socket has closed (on workerd the hashes are WebCrypto's promises) writes
+  // nothing and fails nothing: the connection may be opening again, on another socket, for another query.
+  function authenticate(x: Buffer): void {
+    const at = socket!;
+    Authentication(x, at).catch((err: unknown) => {
+      if (socket === at) openingFailed(err);
+    });
+  }
+
+  async function Authentication(x: Buffer, at: Socket): Promise<void> {
     const type = x.readUInt32BE(5);
     switch (type) {
       case 0: return;
       case 3: return AuthenticationCleartextPassword();
-      case 5: return AuthenticationMD5Password(x);
+      case 5: return AuthenticationMD5Password(x, at);
       case 10: return SASL();
-      case 11: return SASLContinue(x);
+      case 11: return SASLContinue(x, at);
       case 12: return SASLFinal(x);
       default: console.error('Postgres.js : Unknown Auth:', type);
     }
@@ -605,8 +621,9 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     write(b.typed('p').str(options.pass).z(1).end());
   }
 
-  async function AuthenticationMD5Password(x: Buffer): Promise<void> {
+  async function AuthenticationMD5Password(x: Buffer, at: Socket): Promise<void> {
     const payload = 'md5' + (await platform.md5(Buffer.concat([Buffer.from(await platform.md5(options.pass + user)), x.subarray(9)])));
+    if (socket !== at) return;
     write(b.typed('p').str(payload).z(1).end());
   }
 
@@ -617,7 +634,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     write(b.inc(4).str('n,,n=*,r=' + nonce).i32(b.i - i - 4, i).end());
   }
 
-  async function SASLContinue(x: Buffer): Promise<void> {
+  async function SASLContinue(x: Buffer, at: Socket): Promise<void> {
     const res: Record<string, string> = {};
     for (const part of x.toString('utf8', 9).split(',')) res[part[0]!] = part.slice(2);
 
@@ -629,10 +646,12 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       + 'r=' + res.r + ',s=' + res.s + ',i=' + res.i
       + ',c=biws,r=' + res.r;
 
-    serverSignature = (await platform.hmac(await platform.hmac(saltedPassword, 'Server Key'), auth)).toString('base64');
+    const signature = (await platform.hmac(await platform.hmac(saltedPassword, 'Server Key'), auth)).toString('base64');
 
     const payload = 'c=biws,r=' + res.r + ',p=' + xor(clientKey, await platform.hmac(await platform.sha256(clientKey), auth)).toString('base64');
 
+    if (socket !== at) return;
+    serverSignature = signature;
     write(b.typed('p').str(payload).end());
   }
 

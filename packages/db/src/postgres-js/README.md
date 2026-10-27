@@ -90,7 +90,13 @@ Eight, each marked `Coffre:` in the code:
   backend's caches stay cold: Postgres spent ~8% more CPU per use at a pool of
   16 (`packages/db/test/pool.test.ts`).
 - **An opening the client cannot finish fails its connection**
-  (`openingFailed`, in `connection.ts`): its TLS (a key or certificate it
-  cannot read), or its sign-in (a hash that throws, a server's SCRAM message
-  it cannot read), fails what waits for the connection and closes it. Upstream
-  left the error unhandled, which ends a Node process.
+  (`openingFailed`, `secure`, `createSocket` and `authenticate`, in
+  `connection.ts`): its TLS (a key or certificate it cannot read), its sign-in
+  (a hash that throws, a server's SCRAM message it cannot read), or a `socket`
+  factory that throws fails what waits for the connection and closes it, so
+  that it opens again for the next query. Upstream left the error unhandled,
+  which ends a Node process, or the connection opening for ever, every query
+  after it waiting. A sign-in step that finishes once its socket has closed
+  (on workerd, the hashes are WebCrypto's promises) writes nothing and fails
+  nothing: upstream wrote its answer to the connection opened again, or
+  failed on its null socket.
