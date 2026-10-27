@@ -3,7 +3,7 @@ import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
-import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
+import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { newestSeqQuery, newestVaultSeq, withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
@@ -177,7 +177,11 @@ function standing(slug: AnyColumn): SQL {
  * A path's project, environment and secret. Null when the project does not
  * exist; a missing environment or secret comes back as null in its place.
  * A deleted place is missing too, unless asked for its `tombstones`, by
- * which the log is still read: `market~deleted-2026-10-05`.
+ * which the log is still read: `market~deleted-2026-10-05`. Then a deleted
+ * project's environment is named by its slug as it was, `…/dev`, as well as
+ * by its own tombstone: 0.14 leaves it `dev`, 0.15's log makes it
+ * `dev~deleted` (`deletedWithProject`). Never both: no live slug holds a
+ * `~`, and only a project's deletion, once, writes `dev~deleted`.
  */
 export async function resolvePath(
   db: Queryable,
@@ -189,6 +193,8 @@ export async function resolvePath(
   // `dev@me`: dev first, then its personal config owned by whoever asks, and the key in that.
   const personalSlug = path.environment === undefined ? null : personalOf(path.environment);
   const slug = personalSlug ?? path.environment;
+  // A deleted project's environment by its slug as it was: `dev` or `dev~deleted`, the exact one first should both ever be there.
+  const either = tombstones && slug !== undefined && !isTombstone(slug);
   const [row] = await db
     .select({ project: projects, environment: environments, secret: secrets })
     .from(projects)
@@ -196,13 +202,18 @@ export async function resolvePath(
       environments,
       slug === undefined
         ? none
-        : and(eq(environments.projectId, projects.id), eq(environments.slug, slug), alive(environments.slug)),
+        : and(
+          eq(environments.projectId, projects.id),
+          either ? inArray(environments.slug, [slug, deletedWithProject(slug)]) : eq(environments.slug, slug),
+          alive(environments.slug),
+        ),
     )
     .leftJoin(
       secrets,
       path.key === undefined || personalSlug !== null ? none : and(eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
     )
     .where(and(eq(projects.slug, path.project), alive(projects.slug)))
+    .orderBy(...(either ? [sql`CASE WHEN ${environments.slug} = ${slug} THEN 0 ELSE 1 END`] : []))
     .limit(1);
   if (row === undefined) return null;
   const { project } = row;
@@ -562,22 +573,15 @@ export async function liveSecretsUnder(db: Queryable, place: Doomed): Promise<st
 }
 
 /**
- * Each of a deleted project's environments its own tombstone, as
- * `tombstoneSlug` gives one, in one read and one write: under the log's
- * head, which every change of a slug takes first.
+ * Each of a deleted project's environments its tombstone, `dev~deleted`
+ * (`deletedWithProject`), in one write under the log's head, which every
+ * change of a slug takes first. No read: the project is deleted once, so
+ * none of its environments holds such a slug yet.
  */
-export async function tombstoneEnvironments(tx: Transaction, projectId: string, going: readonly { id: string; slug: string }[], day: Date): Promise<void> {
+export async function tombstoneEnvironments(tx: Transaction, going: readonly string[]): Promise<void> {
   if (going.length === 0) return;
   const { environments } = tablesOf(tx);
-  const taken = new Set((await tx.select({ slug: environments.slug }).from(environments)
-    .where(and(eq(environments.projectId, projectId), like(environments.slug, `%${tombstoneOf('', day)}%`)))).map((row) => row.slug));
-  const slugs = going.map(({ id, slug }) => {
-    let n = 1;
-    while (taken.has(tombstoneOf(slug, day, n))) n += 1;
-    taken.add(tombstoneOf(slug, day, n));
-    return sql` WHEN ${id} THEN ${tombstoneOf(slug, day, n)}`;
-  });
-  await tx.update(environments).set({ slug: sql`CASE ${environments.id}${sql.join(slugs)} END` }).where(inArray(environments.id, going.map(({ id }) => id)));
+  await tx.update(environments).set({ slug: sql`${environments.slug} || ${deletedWithProject('')}` }).where(inArray(environments.id, [...going]));
 }
 
 /**

@@ -1096,7 +1096,10 @@ shows what it would take; with `--apply` it deletes:
   live slug has a `~`, so the old one is free, a new `market` is never taken
   for the old one in the log, and every listing, archived ones included,
   leaves out a slug with a `~`. `GET /api/audit?path=market~deleted-2026-10-05`
-  still reads its entries.
+  still reads its entries, and `…/dev` its environment `dev`'s. With 0.15's
+  log a deleted project's environments are renamed too, `dev~deleted`, since
+  0.15's vault reads an environment as deleted by its own slug; the path by
+  its old slug still names it.
 - **Logged:** the app's `project.delete` or `environment.delete`, with what it
   erased and revoked. The log verifies after, as before.
 

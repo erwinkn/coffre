@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
-import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
+import { deletedWithProject, isTombstone, tombstoneOf } from '@coffre/core/schemas';
 import { environments, projects, secrets } from '@coffre/db/schema';
 
 
@@ -704,9 +704,11 @@ class Erasure {
       for (const under of places) live.push(...[...(await secretObjects(ctx.db, { under })).values()].filter((key) => !key.archived));
       read.environments = environments;
       read.keys = live.map((key) => key.columns.id);
+      // The slug its tombstone keeps, as the transaction writes it (the object holds the slug before it either way).
       const day = new Date();
+      const tombstone = (slug: string) => (places[0]!.environmentId === null ? deletedWithProject(slug) : tombstoneOf(slug, day));
       return [
-        ...[...rows.values()].map((row) => environmentChange(row, { ...row.columns, slug: tombstoneOf(row.columns.slug, day) })),
+        ...[...rows.values()].map((row) => environmentChange(row, { ...row.columns, slug: tombstone(row.columns.slug) })),
         ...live.map((key) => secretChange(key.columns.id, key, null)),
       ];
     });
@@ -903,9 +905,9 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         let versions = await eraseVersions(tx, doomed);
         if (environment === null) {
           await update(tx, projects, { id: project.id }, { slug: tombstone });
-          // With 0.15's log, each of its environments too, as one deleted alone: 0.15's environment is deleted by its own
-          // slug. 0.14 takes the project's for theirs, and finds them by it (`coffre audit market~deleted-…/dev`).
-          if (erasure.changes !== null) await tombstoneEnvironments(tx, project.id, scopeNow.environments, day);
+          // With 0.15's log, each of its environments too, `dev~deleted`: 0.15's environment is deleted by its own slug.
+          // 0.14 takes the project's for theirs. Either way `coffre audit market~deleted-…/dev` finds dev (`resolvePath`).
+          if (erasure.changes !== null) await tombstoneEnvironments(tx, scopeNow.environments.map((each) => each.id));
         } else await update(tx, environments, { id: environment.id }, { slug: tombstone });
         // Its personal configs with it: none outlives the environment it is a config of.
         const configs = environment === null ? [] : (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null);

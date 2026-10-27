@@ -197,21 +197,43 @@ test('an environment\'s deletion: it and its personal configs deleted, each live
   await inputsLogged();
 });
 
-test('a project\'s deletion makes a tombstone of each environment\'s slug, and logs each one deleted, and each live key', async () => {
+test('a project\'s deletion makes each environment `<slug>~deleted`, logs each one deleted, and each live key; its old path still names it', async () => {
   await root.projects.create('market');
   await root.environments.create('market/dev');
   await root.environments.create('market/prod');
   await root.secrets.set('market/dev', { A: 'one' });
   await root.secrets.set('market/prod', { A: 'two' });
+  await root.access.set(CI, { 'market/prod': 'viewer' });
+  const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  // An environment deleted alone first, and its slug taken again: the project's deletion takes the new one.
+  const old = await environmentId('dev');
+  await root.environments.update('market/dev', { archived: true });
+  await root.environments.delete('market/dev');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'three' });
   const [dev, prod] = [await environmentId('dev'), await environmentId('prod')];
   const keys = [await keyIn(dev, 'A'), await keyIn(prod, 'A')];
   await root.projects.update('market', { archived: true });
-  await root.projects.delete('market');
-  const rows = await db.owner.select({ id: environments.id, slug: environments.slug }).from(environments).where(inArray(environments.id, [dev, prod]));
-  assert.deepEqual(rows.map((row) => row.slug.split('~')[1]?.startsWith('deleted-')), [true, true], 'each slug a tombstone');
+  const { deletion } = await root.projects.delete('market');
+  assert.deepEqual(deletion.environments, ['dev', 'prod'], 'named as they were');
+  const rows = await db.owner.select({ id: environments.id, slug: environments.slug }).from(environments).where(inArray(environments.id, [old, dev, prod]));
+  const slugOf = (id: string) => rows.find((row) => row.id === id)!.slug;
+  assert.deepEqual([slugOf(dev), slugOf(prod)], ['dev~deleted', 'prod~deleted']);
+  assert.match(slugOf(old), /^dev~deleted-\d{4}-\d{2}-\d{2}$/, 'the one deleted alone keeps its dated tombstone');
   for (const id of [dev, prod]) assert.equal((await opsOf('environment', id)).at(-1), 'environment.delete');
   for (const id of keys) assert.equal((await opsOf('secret', id)).at(-1), 'secret.delete');
+  const outcome = await use(token.id, keys[1]!);
+  assert.ok(!['ok', 'stale', 'tampered'].includes(codeOf(outcome)), JSON.stringify(outcome));
   await inputsLogged();
+  // The log reads each by the path the deletion named it by, and by its tombstone; the one deleted alone, by its own.
+  const environmentOf = async (path: string) => {
+    const { entries } = await root.audit.list({ path, limit: 500 });
+    assert.ok(entries.length > 0, path);
+    return new Set(entries.map((entry) => entry.environment));
+  };
+  for (const [slug, id] of [['dev', dev], ['dev~deleted', dev], ['prod', prod], ['prod~deleted', prod], [slugOf(old), old]] as const) {
+    assert.deepEqual(await environmentOf(`${deletion.tombstone}/${slug}`), new Set([slugOf(id)]), slug);
+  }
 });
 
 test('a key written into a personal config while it is deleted: the deletion reads its keys again, and deletes each one it erases', async (t) => {
