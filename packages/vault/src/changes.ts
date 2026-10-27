@@ -190,7 +190,8 @@ export class Changes {
  * - **Before:** the row's columns as the app read them, and their seal,
  *   which must be the vault's over them (else `tampered`). That it is the
  *   object's newest change's, and still the row's, is `app_change`'s to
- *   check under the fence (ChangeChecksSeal, ChangeCAS), as `change_input`
+ *   check under its locks (the fence; an issue, the issue lock: 0026)
+ *   (ChangeChecksSeal, ChangeCAS), as `change_input`
  *   does for the vault's own. A row with no seal is 0.14's, before the
  *   cutover: its call logs nothing, and only checks that the log has no
  *   change of its object either (as `Changes` leaves such a row alone). No

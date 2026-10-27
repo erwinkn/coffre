@@ -11,7 +11,7 @@ import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProf
 import { createDatabase, type Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, consumedTokens, credentials, projects, serviceBindings } from './db/tables.ts';
+import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -22,7 +22,8 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
@@ -204,6 +205,18 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.notEqual(binding!.lastUsedAt, null);
   // An ES256 issuer is the same.
   assert.equal((await trade(token(ec))).status, 200);
+});
+
+test("a run's token.exchange changes no decision input but the credential it issues, and logs its issue alone: the trigger lets it by unfenced (0026, ExchangeOnlyIssues)", async () => {
+  const before = await decisionInputs(db.owner);
+  const changes = await db.owner.select({ number: logChanges.number }).from(logChanges);
+  const { status, body } = await trade(token(rsa));
+  assert.equal(status, 200, JSON.stringify(body));
+  const [entry] = await appEntries('token.exchange');
+  const issued = entry!.metadata.credentialId as string;
+  assert.deepEqual(await decisionInputs(db.owner, [issued]), before);
+  const logged = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).slice(changes.length).map(({ payload }) => JSON.parse(payload) as { op: string; ref: { id: string } });
+  assert.deepEqual(logged.map(({ op, ref }) => [op, ref.id]), (await keeps015(deps.vault)) ? [['credential.issue', issued]] : []);
 });
 
 test("a run's credential reaches what both its binding's scope and the account hold: a grant the account gets later reaches no binding made before", async () => {

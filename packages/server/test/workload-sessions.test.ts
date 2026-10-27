@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, holdSomething, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, secrets, serviceBindings } from './db/tables.ts';
 import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -281,6 +281,13 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
   assert.equal(asked.headers.get('dpop-nonce'), await gate.nonce());
   // A token that names the key is never spent: the same key may present it again, to re-prove.
   assert.equal((await signIn({ oidc: jwt }, key)).status, 200);
+});
+
+test("a workload's sign-in changes no decision input but the session it issues: the trigger lets its token.exchange by unfenced (0026, ExchangeOnlyIssues)", async () => {
+  await bindGithub();
+  const before = await decisionInputs(db.owner);
+  const made = await githubSession();
+  assert.deepEqual(await decisionInputs(db.owner, [(await sessionRow(made)).id]), before);
 });
 
 test("a key-naming token is useless to any other key: its audience names the key it was asked for", async () => {

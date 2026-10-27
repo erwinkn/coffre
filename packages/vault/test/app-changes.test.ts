@@ -7,12 +7,13 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { deriveLogKey } from '@coffre/core/audit';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { TOMBSTONE } from '@coffre/core/schemas';
 import type { CredentialColumns, ObjectChange, PreparedChange } from '@coffre/core/vault';
 import { tablesOf, type Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
-import { appChanges, isStaleChange } from '@coffre/db/log';
+import { appChanges, appendEntries, isStaleChange } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 import pg from 'pg';
 
@@ -276,14 +277,17 @@ test('a deleted environment\'s object holds its slug before the tombstone: the c
 test('a change of the app\'s waits for every use in flight, and the uses after it for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
   const w = await world();
   const row = token();
-  const calls = await prepare(w, row);
+  await write(row, await prepare(w, row), false);
+  // A revoke: an input every use of the credential reads, under the fence exclusive.
+  const revoked = { ...row, revokedAt: new Date() };
+  const calls = await prepare(w, revoked, row);
   const use = new pg.Client({ connectionString: OWNER_URL });
   await use.connect();
   try {
     await use.query('BEGIN');
     await use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
     let committed = false;
-    const writing = write(row, calls, false).then((numbers) => ((committed = true), numbers));
+    const writing = write(revoked, calls, true).then((numbers) => ((committed = true), numbers));
     await waitFor(async () => (await fenceWaiters()) > 0, 'the change waits for the use');
     assert.equal(committed, false);
     await use.query('COMMIT');
@@ -291,6 +295,128 @@ test('a change of the app\'s waits for every use in flight, and the uses after i
   } finally {
     await use.end();
   }
+});
+
+test('an issue never waits for a use, nor a use for an issue; the barrier waits for the issue on the issue lock, not on the fence (IssueOwnLock, BarrierWaitsIssues, BarrierIssueFirst; T123, R58)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+  const w = await world();
+  const [use, issuing, barrier] = [0, 1, 2].map(() => new pg.Client({ connectionString: OWNER_URL }));
+  await Promise.all([use, issuing, barrier].map((client) => client.connect()));
+  try {
+    // A use in flight: the issue does not wait for it.
+    await use.query('BEGIN');
+    await use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+    const first = token();
+    const writing = write(first, await prepare(w, first), false);
+    const done = await Promise.race([writing, new Promise((resolve) => setTimeout(() => resolve('waiting'), 2000))]);
+    assert.notEqual(done, 'waiting', 'the issue waits for no use');
+    await use.query('COMMIT');
+    assert.ok((await writing)[0]! > 0n);
+
+    // An issue in flight, its change numbered, not yet committed.
+    const row = token();
+    const [c] = await prepare(w, row);
+    await issuing.query('BEGIN');
+    await issuing.query(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at, scope)
+      VALUES ($1, $2, $3, $4, 'x', 0, $5, $6, $7, $8)`, [row.id, row.kind, randomBytes(32), randomBytes(32), row.principal, ROOT, row.expiresAt, row.scope]);
+    const { rows: [issued] } = await issuing.query<{ number: string }>('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9) AS number', [
+      c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
+    ]);
+    // It holds the issue lock, shared, and not the fence.
+    assert.deepEqual(await advisoryHeld(issuing), ['1 ShareLock']);
+    // A use meanwhile takes the fence at once.
+    await use.query(`SET lock_timeout = '200ms'`);
+    await use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+
+    // The barrier waits for the issue, on the issue lock, holding nothing a use waits for.
+    let closed = false;
+    const closing = barrier.query<{ upto: string }>('SELECT upto::text FROM close_one()').then((result) => ((closed = true), result.rows[0]!.upto));
+    await waitFor(async () => (await waitersOn(1)) > 0, 'the barrier waits for the issue');
+    assert.equal(closed, false);
+    await use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+    assert.equal(await waitersOn(0), 0, 'nothing waits for the fence');
+
+    // The issue commits: the barrier closes over it.
+    await issuing.query('COMMIT');
+    assert.ok(BigInt(await closing) >= BigInt(issued!.number), 'the barrier closes every number handed out before it');
+    await holdsReplay(w.keys, row.id);
+  } finally {
+    await Promise.all([use, issuing, barrier].map((client) => client.end()));
+  }
+});
+
+test('an issue of a row its transaction did not write takes the fence, as any change does: a use may name it', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+  const w = await world();
+  const row = token();
+  const calls = await prepare(w, row);
+  // The row, committed before the transaction that issues it: a 0.14 row, say, seen by any use.
+  const { credentials } = tablesOf(db.owner);
+  await db.owner.insert(credentials).values({ ...row, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
+  const use = new pg.Client({ connectionString: OWNER_URL });
+  await use.connect();
+  try {
+    await use.query('BEGIN');
+    await use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+    const writing = db.owner.transaction((tx: Transaction) => appChanges(tx, calls));
+    await waitFor(async () => (await fenceWaiters()) > 0, 'the issue waits for the use');
+    await use.query('COMMIT');
+    assert.ok((await writing)[0] !== null);
+  } finally {
+    await use.end();
+  }
+});
+
+test('an issue of a row a savepoint inserted takes the fence: its xmin is the savepoint\'s, not the transaction\'s', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+  const w = await world();
+  const row = token();
+  const [c] = await prepare(w, row);
+  const issuing = new pg.Client({ connectionString: OWNER_URL });
+  await issuing.connect();
+  try {
+    await issuing.query('BEGIN');
+    await issuing.query('SAVEPOINT s');
+    await issuing.query(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at, scope)
+      VALUES ($1, $2, $3, $4, 'x', 0, $5, $6, $7, $8)`, [row.id, row.kind, randomBytes(32), randomBytes(32), row.principal, ROOT, row.expiresAt, row.scope]);
+    await issuing.query('RELEASE SAVEPOINT s');
+    await issuing.query('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
+      c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
+    ]);
+    assert.deepEqual(await advisoryHeld(issuing), ['0 ExclusiveLock', '1 ShareLock']);
+    await issuing.query('COMMIT');
+  } finally {
+    await issuing.end();
+  }
+});
+
+test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its transaction wrote', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+  await world();
+  const row = token();
+  const { credentials } = tablesOf(db.owner);
+  // A row of 0.14's, unsealed, committed: the app revokes it, in a transaction that writes it, then calls app_change.
+  await db.owner.insert(credentials).values({ ...row, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
+  const app = new pg.Client({ connectionString: OWNER_URL });
+  await app.connect();
+  try {
+    await app.query('BEGIN');
+    await app.query('UPDATE credentials SET revoked_at = now() WHERE id = $1', [row.id]);
+    const { rows: [called] } = await app.query<{ number: string }>('SELECT app_change($1, $2, NULL, $3, $4, NULL, NULL, NULL, NULL) AS number', ['credential', row.id, Date.now(), ROOT]);
+    assert.equal(called!.number, '0', 'it logs nothing');
+    assert.deepEqual(await advisoryHeld(app), ['0 ExclusiveLock', '1 ShareLock']);
+    await app.query('ROLLBACK');
+  } finally {
+    await app.end();
+  }
+});
+
+test('0.14\'s trigger: an entry that changes access takes the issue lock, then the fence; a token.exchange, neither (IssueBeforeFence, ExchangeOnlyIssues)', postgresOnly('SQLite has no trigger'), async () => {
+  const key = deriveLogKey('app', randomBytes(32));
+  const held = (action: string) => db.owner.transaction(async (tx: Transaction) => {
+    await appendEntries(tx, key, [{ actor: ROOT, action, decision: 'allow' }]);
+    return (await rows<{ lock: string }>(tx, sql`SELECT objid || ' ' || mode AS lock FROM pg_locks
+      WHERE locktype = 'advisory' AND classid = 1668244070 AND pid = pg_backend_pid() ORDER BY objid`)).map(({ lock }) => lock);
+  });
+  assert.deepEqual(await held('token.revoke'), ['0 ExclusiveLock', '1 ShareLock']);
+  assert.deepEqual(await held('token.exchange'), []);
+  assert.deepEqual(await held('sign_in'), []);
 });
 
 test('an app\'s change beside a 0.14 decision on its principal: head, row, fence, and neither waits on the other in a circle (AppHeadFirst)', postgresOnly('SQLite has one writer'), async () => {
@@ -329,6 +455,19 @@ test('an app\'s change beside a 0.14 decision on its principal: head, row, fence
 async function fenceWaiters(): Promise<number> {
   const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND objid = 0 AND NOT granted`);
   return Number(row!.n);
+}
+
+/** Sessions waiting for the fence's key (0) or the issue lock's (1). */
+async function waitersOn(objid: 0 | 1): Promise<number> {
+  const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND objid = ${objid} AND NOT granted`);
+  return Number(row!.n);
+}
+
+/** The fence's locks and the issue lock's a client holds, as "<objid> <mode>". */
+async function advisoryHeld(client: pg.Client): Promise<string[]> {
+  const { rows: held } = await client.query<{ lock: string }>(`SELECT objid || ' ' || mode AS lock FROM pg_locks
+    WHERE locktype = 'advisory' AND classid = 1668244070 AND pid = pg_backend_pid() AND granted ORDER BY objid`);
+  return held.map(({ lock }) => lock);
 }
 
 /** Sessions waiting for any lock. */

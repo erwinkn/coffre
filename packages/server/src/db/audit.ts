@@ -1,4 +1,5 @@
 import { deriveLogKey, GENESIS_HASH, verifyEntries, type ChainVerification, type LogKey, type StoredEntry } from '@coffre/core/audit';
+import type { PreparedChange } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { appendEntries, MOVES_FROM, type Appended } from '@coffre/db/log';
 import { and, eq, inArray, min } from 'drizzle-orm';
@@ -37,7 +38,13 @@ export type AuditEntry = {
  * entries, is @coffre/db's: the vault appends to the same log the same way,
  * under its own key.
  */
-export async function appendAudit(tx: Transaction, chainKey: Buffer, entries: readonly AuditEntry[]): Promise<Appended> {
+export async function appendAudit(
+  tx: Transaction,
+  chainKey: Buffer,
+  entries: readonly AuditEntry[],
+  /** 0.15's changes of the write, made in the append's own statement (`appendEntries`): their numbers come back as `changes`. */
+  changes: readonly PreparedChange[] = [],
+): Promise<Appended & { changes: (bigint | null)[] }> {
   return appendEntries(
     tx,
     appLogKey(chainKey),
@@ -55,6 +62,9 @@ export async function appendAudit(tx: Transaction, chainKey: Buffer, entries: re
       subjectPrincipal: entry.subject ?? null,
       metadata: JSON.stringify(entry.metadata ?? {}),
     })),
+    undefined,
+    undefined,
+    changes,
   );
 }
 

@@ -72,7 +72,9 @@ held() {
 }
 
 # OldWritesFence (formal/Migration015.tla): 0.14's writes take the 0.15 fence,
-# its reads never: with the fence held, a revoke's entry waits, a read's does not.
+# its reads and sign-ins never (a token.exchange issues a credential nobody
+# holds yet: 0026, ExchangeOnlyIssues): with the fence held, a revoke's entry
+# waits, a read's does not.
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
 held 1668244070
@@ -82,14 +84,26 @@ entry() {
     VALUES (900, '$1', 'fixture', 0, 'system:fixture', '$2', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'));
     ROLLBACK;"
 }
-for read in 'vault secret.read' 'app credential.use' 'app sign_in' 'app secret.version'; do
+for read in 'vault secret.read' 'app credential.use' 'app sign_in' 'app token.exchange' 'app secret.version'; do
     entry ${read} | owner_psql >/dev/null || { echo "0.14's ${read#* } waited on the 0.15 fence" >&2; exit 1; }
 done
-for write in 'vault access.revoke' 'app token.revoke' 'vault secret.write' 'app token.exchange' 'app sign_out'; do
+for write in 'vault access.revoke' 'app token.revoke' 'vault secret.write' 'app sign_out'; do
     if entry ${write} | owner_psql >/dev/null 2>"$scratch/fenced" || ! grep -q 'lock timeout' "$scratch/fenced"; then
         cat "$scratch/fenced" >&2; echo "0.14's ${write#* } did not wait on the 0.15 fence" >&2; exit 1
     fi
 done
+let_go
+
+# IssueBeforeFence (0026): the trigger takes the issue lock before the fence.
+# With the issue lock held exclusive, as the barrier holds it, a revoke's entry
+# waits there; a token.exchange's takes neither lock.
+owner_psql -c 'SELECT pg_advisory_lock(1668244070, 1), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
+holders+=($!)
+held 1668244070
+entry app token.exchange | owner_psql >/dev/null || { echo "0.14's token.exchange waited on the issue lock" >&2; exit 1; }
+if entry app token.revoke | owner_psql >/dev/null 2>"$scratch/fenced" || ! grep -q 'lock timeout' "$scratch/fenced"; then
+    cat "$scratch/fenced" >&2; echo "0.14's token.revoke did not wait on the issue lock" >&2; exit 1
+fi
 let_go
 
 # RowFirst and ChangeHeadFirst (formal/Migration015.tla), the order row, head,
