@@ -159,7 +159,7 @@ function postgresStore(db: Database, range: number): LogStore {
         FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}
       ORDER BY n`);
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
-  // ranges, forgets the ones it drops here (T119); and the days it made, which it forgets as it drops them.
+  // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
   const made = new Set<number>();
   const madeDays = new Set<string>();
   return {
@@ -276,7 +276,7 @@ function postgresStore(db: Database, range: number): LogStore {
       return row!.state;
     },
     async dropTiles(below) {
-      // A step a call; each leaf range detached is forgotten, so that a write would make it again (T119): none does,
+      // A step a call; each leaf range detached is forgotten, so that a write would make it again (T119's item 2): none does,
       // a write's tiles being at the edge, at or above every cut.
       let deleted = 0;
       for (let step = 0; step < 10_000; step += 1) {

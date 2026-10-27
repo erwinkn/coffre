@@ -353,6 +353,38 @@ test('review r2: a day that waits on the same lock for a day is an alarm', { ski
   assert.match(alerts[0]!, new RegExp(`retention has waited on ${D10} since .*a reader holds the table past the lock timeout`));
 });
 
+test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits with no alarm, however long', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a day with no use' }, async () => {
+  const { cp, store } = await open();
+  // Every day before today gone: only today's and the days made ahead are left.
+  for (const day of (await store.days()).filter((d) => d < dayOf(Date.now()))) await run(db.owner, sql.raw(`DROP TABLE log_uses_${day.replaceAll('-', '')}`));
+  await log.use();
+  assert.ok((await cp.tick()).signed);
+  // Three days on, today's and tomorrow's days (made ahead) are due: nothing signed past their end yet.
+  let t = Date.now() + 3 * DAY_MS;
+  const alerts: string[] = [];
+  const keep = upkeep(cp, store, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
+  await keep();
+  assert.match((await retain(cp, store, { keepDays: 1, macKey, now: () => t })).waiting ?? '', /is not past the day's end yet/);
+  for (let i = 0; i < 3; i += 1) {
+    t += DAY_MS;
+    await keep();
+  }
+  assert.deepEqual(alerts, []);
+});
+
+test('T119, item 2: the store forgets each leaf range it drops, and makes it again if a write needs it', { skip: ENGINE === 'postgres' ? false : 'Postgres only: ranges' }, async () => {
+  const { cp, store } = await open();
+  await midnight(cp);
+  await later(cp);
+  await retain(cp, store, { keepDays: 1, macKey });
+  assert.equal(await exists('log_tiles_uses_0'), false);
+  // A write into the range dropped (none does: a write's tiles are at the edge, above every cut) makes it again first.
+  const top = cp.pair.pair.upto + 1_000_000n;
+  await store.write({ upto: top, notes: cp.pair.notes }, { changes: [], uses: [{ level: 0, index: 0, hashes: randomBytes(32) }] });
+  assert.equal(await exists('log_tiles_uses_0'), true);
+  await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${top}`);
+});
+
 test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its window no longer counts', async () => {
   const { cp, store } = await open();
   // The policy's window, as the change path logs it: 15 minutes.

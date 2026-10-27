@@ -169,13 +169,16 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   return { change, detached: state === 'detached' };
 }
 
+/** How a run that waits on a lock says so: the one wait that, standing a day, is an alarm (`upkeep`). */
+export const LOCK_WAIT = 'a reader holds the table past the lock timeout';
+
 /** What `work` answers, or, when the database gave up waiting for a lock (55P03, lock_timeout), why: no alarm. */
 async function waitingOnLock<T>(work: () => Promise<T>): Promise<T | { waiting: string }> {
   try {
     return await work();
   } catch (error) {
     const e = error as { code?: unknown; cause?: { code?: unknown } };
-    if (e.code === '55P03' || e.cause?.code === '55P03') return { waiting: 'a reader holds the table past the lock timeout: the next run tries again' };
+    if (e.code === '55P03' || e.cause?.code === '55P03') return { waiting: `${LOCK_WAIT}: the next run tries again` };
     throw error;
   }
 }

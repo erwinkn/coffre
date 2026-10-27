@@ -3,7 +3,7 @@ import { pairSigners } from '@coffre/core/merkle';
 import { Checkpointer, logOrigin, type Alarm, type CheckpointStore, type Memory, type Witness } from './checkpointer.ts';
 import { authentic, logMacKey } from './log-entry.ts';
 import type { LogStore } from './log-store.ts';
-import { DAY_MS, dayOf, retain } from './retention.ts';
+import { DAY_MS, dayOf, LOCK_WAIT, retain } from './retention.ts';
 
 /**
  * The checkpointer as a host runs it, on Node (`runCheckpointer`) or in its
@@ -56,7 +56,7 @@ export const RETAIN_EVERY_MS = 3_600_000;
 export const PRUNE_EVERY_MS = 60_000;
 const PRUNED = 10_000;
 
-/** How long one day may wait on the same thing (a reader holding the uses, say) before that is an alarm. */
+/** How long retention may wait on one lock (a reader holding the uses, say) before that is an alarm. */
 export const WAITING_ALARM_MS = DAY_MS;
 
 /** The days of uses a host makes ahead at `t`: yesterday's (a new database), today's, and `DAYS_AHEAD` more. */
@@ -66,8 +66,9 @@ export const daysAround = (t: number) => Array.from({ length: DAYS_AHEAD + 2 }, 
  * What a host runs after each tick (plan PR 7): the next days' partitions
  * made once a day, retention once an hour when `keepDays` is set, the bulk
  * cap's old rows pruned once a minute. A failure is an alarm, said once while
- * it stands; retention waiting for the log to move on is none, until one day
- * has waited longer than `WAITING_ALARM_MS`.
+ * it stands; retention waiting is none, but for a lock: one that has kept a
+ * day waiting longer than `WAITING_ALARM_MS`. A quiet log, whose pairs do not
+ * pass a day's end until something is logged, waits with no alarm.
  */
 export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: number | null; seed: Uint8Array; now?: () => number; alert: (message: string) => void }): () => Promise<void> {
   const now = options.now ?? Date.now;
@@ -92,7 +93,7 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       if (options.keepDays !== null && t - retained >= RETAIN_EVERY_MS) {
         retained = t;
         const run = await retain(cp, store, { keepDays: options.keepDays, macKey, now });
-        const day = /^(\d{4}-\d{2}-\d{2}): /.exec(run.waiting ?? '')?.[1] ?? (run.waiting === null ? null : 'tiles');
+        const day = run.waiting?.includes(LOCK_WAIT) ? (/^(\d{4}-\d{2}-\d{2}): /.exec(run.waiting)?.[1] ?? 'tiles') : null;
         if (day === null) waiting = null;
         else if (waiting?.day !== day) waiting = { day, since: t };
         else if (t - waiting.since >= WAITING_ALARM_MS) throw new Error(`retention has waited on ${day} since ${new Date(waiting.since).toISOString()}: ${run.waiting}`);

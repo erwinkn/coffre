@@ -16,7 +16,7 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import type { Alarm, Checkpointer, InclusionProof, Memory, SealThrough, Sealed, Tick, Witness } from './checkpointer.ts';
-import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
+import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 import { dayOf } from './retention.ts';
 
@@ -83,8 +83,10 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #pool: HyperdrivePool | null = null;
     /** The log's upkeep after each tick (log-checkpointer.ts), with the checkpointer it was opened with. */
     #upkeep: (() => Promise<void>) | null = null;
-    /** The day the next days of uses were last made for without the checkpointer (`#makeDays`). */
+    /** The day the next days of uses were last made for without the checkpointer (`#makeDays`), when it last tried, and its failure. */
     #daysFor: string | null = null;
+    #daysTried = -Infinity;
+    #daysFailed: string | null = null;
     /** The last ticks, newest last, with their wall time in the object: `status`. */
     readonly #ticks: (Tick & { wallMs: number; at: number })[] = [];
 
@@ -121,7 +123,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             seed: s.seed,
             alert: (message) => {
               console.warn(`coffre audit: ${message}`);
-              void this.#record({ at: Date.now(), message }).catch(() => {});
+              void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
             },
           });
         } catch (error) {
@@ -171,16 +173,26 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
      * a use needs its day's partition whatever the audit's state, and making one needs no signer.
      */
     async #makeDays(): Promise<void> {
-      const today = dayOf(Date.now());
-      if (this.#daysFor === today) return;
+      const now = Date.now();
+      const today = dayOf(now);
+      // Once a day when it works; when it fails, an hour later (DAYS_AHEAD days of slack), alarmed once while it stands
+      // apart from the checkpointer's own failures, so that neither hides the other.
+      if (this.#daysFor === today || now - this.#daysTried < RETAIN_EVERY_MS) return;
+      this.#daysTried = now;
       let pool: HyperdrivePool | null = null;
       try {
         const s = await settings(this.#env);
         pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: 1000 });
-        await logStore(createDatabase(pool)).makeDays(daysAround(Date.now()));
+        await logStore(createDatabase(pool)).makeDays(daysAround(now));
         this.#daysFor = today;
+        this.#daysFailed = null;
       } catch (error) {
-        await this.#failure(`the next days of uses were not made: ${reasonOf(error)}`);
+        const message = `the next days of uses were not made: ${reasonOf(error)}`;
+        if (message !== this.#daysFailed) {
+          console.warn(`coffre audit: ${message}`);
+          await this.#record({ at: now, message }).catch((e: Error) => console.warn(`coffre audit: the alarm could not be kept: ${e.message}`));
+        }
+        this.#daysFailed = message;
       } finally {
         await pool?.end().catch(() => {});
       }

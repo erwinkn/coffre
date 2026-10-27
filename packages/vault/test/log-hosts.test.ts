@@ -278,7 +278,7 @@ test('Fable review: a witness whose held pair no longer opens refuses, rather th
   assert.match(((await damaged.json()) as { reason: string }).reason, /name a new witness/);
 });
 
-test('T119: a reset over a seal in flight: the seal fails rather than sign beside the next checkpointer, and the next seal opens one', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+test('T119, item 3: a reset over a seal in flight: the seal fails rather than sign beside the next checkpointer, and the next seal opens one', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
   const state = objectState();
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, seed, closeIdleMs: 50 }));
   const object = new Checkpointer_(state, {});
@@ -307,4 +307,15 @@ test('T119: a reset over a seal in flight: the seal fails rather than sign besid
   assert.equal(state.data.get('pair'), encodePair(sealed.notes), 'one signer: its memory is the pair that sealed the change');
   const alarms = await checkpointerAlarms(namespace);
   assert.equal(alarms.filter((a) => /a checkpoint failed/.test(a.message)).length, 1, JSON.stringify(alarms));
+});
+
+test('review r3: with the database unreachable, the object keeps one alarm for each failure while it stands, however many ticks', async () => {
+  const state = objectState();
+  const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: 'postgresql://nobody:nothing@127.0.0.1:1/none' }, seed, closeIdleMs: 50 }));
+  const object = new Checkpointer_(state, {});
+  for (let i = 0; i < 4; i += 1) await object.alarm();
+  const alarms = await checkpointerAlarms(namespaceOf(object));
+  assert.equal(alarms.filter((a) => /cannot open/.test(a.message)).length, 1, JSON.stringify(alarms));
+  assert.equal(alarms.filter((a) => /the next days of uses were not made/.test(a.message)).length, 1, JSON.stringify(alarms));
+  assert.equal(alarms.length, 2, JSON.stringify(alarms));
 });
