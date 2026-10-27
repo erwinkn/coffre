@@ -1743,6 +1743,7 @@ export type Api = {
       unsealed: number;
       done: boolean;
       next: string | null;
+      audited: number | null;
     };
   };
 };

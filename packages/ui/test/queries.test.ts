@@ -207,9 +207,9 @@ test('the audit page loads its entries and its verification together, and a chec
   assert.equal((verified.chain as { trees: unknown }).trees, null, "0.14's log alone: nothing more to show");
 
   // 0.15's log kept too: its verdict is the badge's, a problem it finds a broken log.
-  const trees = { kept: true, ok: true, problems: [], from: '40', checkpoint: { upto: '52', at: 1_793_000_000_000 }, checkpoints: 1, sealed: 12, unsealed: 0, done: true, next: null };
+  const trees = { kept: true, ok: true, problems: [], from: '40', checkpoint: { upto: '52', at: 1_793_000_000_000 }, checkpoints: 1, sealed: 12, unsealed: 0, done: true, next: null, audited: 1_792_999_900_000 };
   const sealed = await load(intact, trees);
-  assert.deepEqual((sealed.chain as { trees: unknown }).trees, { checkpoint: trees.checkpoint, done: true });
+  assert.deepEqual((sealed.chain as { trees: unknown }).trees, { checkpoint: trees.checkpoint, done: true, audited: trees.audited });
   const problems = ['the principal token:ci: its rows carry another change\'s seal than the newest: put back, or written around the vault', 'one more'];
   const put = await load(intact, { ...trees, ok: false, problems });
   assert.deepEqual(put.chain, { integrity: 'broken', through: 9, failedAtSeq: null, author: 'vault', reason: `the sealed log: ${problems[0]} (and 1 more)` });

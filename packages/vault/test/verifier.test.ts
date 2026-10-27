@@ -312,16 +312,22 @@ test('a forged use is named at its entry, and so are the indexes that keep reque
   // Not the vault's, so not replayed: the bulk row it moved is one the log does not.
   assert.equal(checked.problems[0], `${outcome.number}: its MAC does not hold`);
   assert.match(checked.problems[1]!, new RegExp(`^the bulk cap of ${ADA}: its row for .* says \\d+, the log none$`));
-  // A copy of an entry passes the walk's own check across two stretches; the database refuses it, while its index stands.
+  // A copy of an entry passes the walk's own check across two stretches; the database refuses it, while its index stands:
+  // gone, or one of its name over other columns (review r2).
   const [drop, add] = ENGINE === 'postgres'
     ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
     : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
+  const gone = 'the indexes that keep each request to one entry are gone: a copy of an entry would pass';
   await run(db.owner, drop);
   try {
-    assert.ok((await w.verify()).problems.includes('the indexes that keep each request to one entry are gone: a copy of an entry would pass'));
+    assert.ok((await w.verify()).problems.includes(gone));
+    await run(db.owner, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (number)`);
+    assert.ok((await w.verify()).problems.includes(gone), 'a decoy over the number');
+    await run(db.owner, sql`DROP INDEX log_changes_request_id_key`);
   } finally {
     await run(db.owner, add);
   }
+  assert.ok(!(await w.verify()).problems.includes(gone));
 });
 
 test('review r1: grants come back from the rows in any order, and a member revoked and granted again still verifies', async () => {
@@ -334,27 +340,36 @@ test('review r1: grants come back from the rows in any order, and a member revok
   clean(await w.verify());
 });
 
-test('review r1: a page\'s check holds only the rows its entries touched; the checkpoint job holds them all, and every check after says what it found', async () => {
+test('review r2: a page\'s check says what the checkpoint job\'s audit of every row found, and when; on a quiet log too, until it is put right', async () => {
   const w = await instance();
   await w.vault.checkpoint();
-  // A writer changes a credential nobody uses since: the page's check, from the replay kept, reads no row of it.
+  const kept = await w.verify();
+  clean(kept);
+  assert.notEqual(kept.from, null, 'from the replay the job kept');
+  assert.ok(kept.audited !== null);
+  // A writer changes a credential, and nothing is sealed after: no new pair to keep a replay at.
   const { credentials } = tablesOf(db.owner);
   const [{ expiresAt }] = await db.owner.select({ expiresAt: credentials.expiresAt }).from(credentials).where(eq(credentials.id, w.credential));
   await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, w.credential));
-  assert.ok((await w.grant(BO, 'viewer')).ok);
-  const page = await w.verify();
-  clean(page);
-  assert.notEqual(page.from, null, 'from the replay kept');
-  // The job's walk holds every row, and keeps what it found with its replay.
+  // A page's check reads no row: it says the last audit's verdict, and when that was.
+  assert.equal((await w.verify()).audited, kept.audited);
+  // The job's audit reads them all, and keeps what it found in place of the replay it kept at the same pair.
   await w.vault.checkpoint();
   const named = `the credential ${w.credential}: its rows are not the object the log makes`;
-  assert.deepEqual((await w.verify()).problems, [named]);
+  const after = await w.verify();
+  assert.deepEqual(after.problems, [named]);
+  assert.ok(after.audited! > kept.audited!);
   assert.deepEqual((await w.verify()).problems, [named], 'every check after');
-  // Put back as it was, the next full audit clears it.
+  // Put back as it was, the job's next audit clears it, on the same quiet log.
   await db.owner.update(credentials).set({ expiresAt }).where(eq(credentials.id, w.credential));
-  assert.ok((await w.grant(BO, 'developer')).ok);
   await w.vault.checkpoint();
   clean(await w.verify());
+});
+
+test('review r2: a roles row that reads as no object is named, not thrown on', async () => {
+  const w = await instance();
+  await run(db.owner, sql`UPDATE log_config SET value = '"not an object"' WHERE name = 'roles'`);
+  assert.deepEqual((await w.verify('start')).problems, ['the roles instance: its rows do not read as an object']);
 });
 
 test('review r1: a database rolled back whole to an earlier pair, its kept replays with it, is named against the signer\'s memory', async () => {

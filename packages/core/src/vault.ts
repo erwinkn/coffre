@@ -265,9 +265,16 @@ export type TreeVerification =
       checkpoints: number;
       sealed: number;
       unsealed: number;
-      /** Whether it reached the present, its rows held to the replay; else where the next stretch goes on. */
+      /** Whether it reached the present; else where the next stretch goes on. */
       done: boolean;
       next: string | null;
+      /**
+       * When every input row and bulk row was last held to the replay (ms):
+       * by this walk, or, for a check from a kept replay, by the checkpoint
+       * job's last; what it found is among `problems`. Null short of the
+       * present.
+       */
+      audited: number | null;
     };
 
 /**

@@ -411,8 +411,8 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
         remaining: result.remaining ?? 0,
         checkpoint: result.checkpoint,
         pending: result.pending ?? 0,
-        /** 0.15's log, where it is kept: the newest pair its check reached, and whether it reached the present. */
-        trees: trees.kept ? { checkpoint: trees.checkpoint, done: trees.done } : null,
+        /** 0.15's log, where it is kept: the newest pair its check reached, whether it reached the present, and when its rows were last audited. */
+        trees: trees.kept ? { checkpoint: trees.checkpoint, done: trees.done, audited: trees.audited } : null,
       }
     : {
         integrity: 'broken' as const,
