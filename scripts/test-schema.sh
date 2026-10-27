@@ -49,20 +49,22 @@ docker compose exec -T postgres \
     < packages/db/test/log-owner.sql
 
 # The fence across sessions. Each holder sleeps far longer than its checks
-# take, and goes when the script does, however it ends.
+# take, and goes when the script does, however it ends. Advisory locks are
+# the database's: each check counts and ends this database's alone.
 owner_psql() { docker compose exec -T postgres psql -X -q -v ON_ERROR_STOP=1 -U coffre_owner -d "$database" "$@"; }
 vault_psql() { docker compose exec -T -e PGPASSWORD=local-vault-only postgres psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d "$database" "$@"; }
 scratch="$(mktemp -d)"
 holders=()
 let_go() {
-    owner_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    owner_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
     for holder in "${holders[@]}"; do wait "$holder" 2>/dev/null || true; done
     holders=()
 }
 trap 'let_go; rm -rf "$scratch"' EXIT
 held() {
     for attempt in $(seq 100); do
-        [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = $1 AND granted")" == 1 ]] && return 0
+        # This database's: another run may share the server.
+        [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.classid = $1 AND l.granted")" == 1 ]] && return 0
         sleep 0.1
     done
     echo "the lock $1 was never held" >&2

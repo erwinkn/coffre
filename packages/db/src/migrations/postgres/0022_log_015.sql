@@ -134,11 +134,16 @@ BEGIN
         END IF;
         RETURN name;
     END IF;
-    EXECUTE format('CREATE TABLE public.%I (LIKE public.log_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
-    EXECUTE format('CREATE UNIQUE INDEX ON public.%I (at, request_id)', name);
-    -- pg_dump reads each partition as a table of its own.
-    EXECUTE format('GRANT SELECT ON public.%I TO coffre_backup', name);
-    EXECUTE format('ALTER TABLE public.log_uses ATTACH PARTITION public.%I FOR VALUES FROM (%s) TO (%s)', name, lo, lo + 86400000);
+    BEGIN
+        EXECUTE format('CREATE TABLE public.%I (LIKE public.log_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
+        EXECUTE format('CREATE UNIQUE INDEX ON public.%I (at, request_id)', name);
+        -- pg_dump reads each partition as a table of its own.
+        EXECUTE format('GRANT SELECT ON public.%I TO coffre_backup', name);
+        EXECUTE format('ALTER TABLE public.log_uses ATTACH PARTITION public.%I FOR VALUES FROM (%s) TO (%s)', name, lo, lo + 86400000);
+    EXCEPTION WHEN duplicate_table OR unique_violation THEN
+        -- Another call made it meanwhile, and committed: it is checked as any day found.
+        RETURN public.make_day(p_day);
+    END;
     RETURN name;
 END
 $$;
@@ -160,10 +165,14 @@ BEGIN
         END IF;
         RETURN name;
     END IF;
-    EXECUTE format('CREATE TABLE public.%I (LIKE public.log_tiles_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
-    EXECUTE format('ALTER TABLE public.%I ADD PRIMARY KEY (tree, level, leaf)', name);
-    EXECUTE format('GRANT SELECT ON public.%I TO coffre_backup', name);
-    EXECUTE format('ALTER TABLE public.log_tiles_uses ATTACH PARTITION public.%I FOR VALUES FROM (%s) TO (%s)', name, p_from, p_to);
+    BEGIN
+        EXECUTE format('CREATE TABLE public.%I (LIKE public.log_tiles_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
+        EXECUTE format('ALTER TABLE public.%I ADD PRIMARY KEY (tree, level, leaf)', name);
+        EXECUTE format('GRANT SELECT ON public.%I TO coffre_backup', name);
+        EXECUTE format('ALTER TABLE public.log_tiles_uses ATTACH PARTITION public.%I FOR VALUES FROM (%s) TO (%s)', name, p_from, p_to);
+    EXCEPTION WHEN duplicate_table OR unique_violation THEN
+        RETURN public.make_tiles(p_from, p_to);
+    END;
     RETURN name;
 END
 $$;
@@ -253,7 +262,7 @@ BEGIN
                     greatest(lc.number, lm.number, ls.number, le.number, i.policy_number) AS inputs,
                     lc.seal AS c_last, lm.seal AS m_last, ls.seal AS s_last, le.seal AS e_last,
                     p_cover IS NOT NULL AND i.bulk_last > p_at - i.cap_refresh
-                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover)
+                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover AND u.credential = p_credential AND u.secret = p_secret)
                         AND p_cover > coalesce(greatest(lc.number, lm.number, ls.number, le.number, i.policy_number), 0) AS is_covered,
                     coalesce(i.bulk_last > p_at - i.cap_window - i.cap_refresh, false) AS is_in,
                     coalesce(i.bulk_last <= p_at - i.cap_refresh, true) AS stale,
@@ -319,7 +328,7 @@ BEGIN
                     cap.count AS cap_count, cap.window_ms AS cap_window, pol.seal AS policy_seal,
                     -- The isolate checked its cover against the seals' numbers when it read them.
                     p_cover IS NOT NULL AND b.last > p_at - cap.refresh
-                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover) AS is_covered,
+                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover AND u.credential = p_credential AND u.secret = p_secret) AS is_covered,
                     coalesce(b.last > p_at - cap.window_ms - cap.refresh, false) AS is_in,
                     coalesce(b.last <= p_at - cap.refresh, true) AS stale,
                     CASE WHEN locked AND c.principal IS NOT NULL AND NOT coalesce(b.last > p_at - cap.window_ms - cap.refresh, false) THEN (
@@ -484,7 +493,7 @@ CREATE FUNCTION prune_bulk(p_limit integer) RETURNS integer
     SELECT count(*)::integer FROM pruned;
 $$;
 --> statement-breakpoint
--- OldWritesFence (plan, PR 9: "old uses in flight"): until 0.16 removes 0.14's path, 0.14 still writes decision inputs, with an entry in audit_log, in the transaction that writes them. Each such entry takes the 0.15 fence exclusive, as a 0.15 change does, so that no 0.15 use is in flight across it: one that read before it commits first, and one after reads what it wrote (refused stale until the vault adopts it). It runs after 0.14's append took the log's head, so 0.14's order is head then fence, the order a 0.15 change that fences 0.14 too takes them (the reverse deadlocks). Every allowed entry fences but those that change no input, the list W211's spec (Migration015.tla, OldWritesFence) names: reads and uses, sign-ins (a credential nobody holds yet; a sign-out revokes one, and fences), and the log's own bookkeeping and alarms. So 0.14's uses never wait on it, and an action this list does not name fences rather than slips past. A refused entry changes nothing. Nothing takes the fence before 0.15 runs: until then it costs an uncontended lock per change.
+-- OldWritesFence (plan, PR 9: "old uses in flight"): until 0.16 removes 0.14's path, 0.14 still writes decision inputs, nearly always with an entry in audit_log in the transaction that writes them. Each such entry takes the 0.15 fence exclusive, as a 0.15 change does, so that no 0.15 use is in flight across it: one that read before it commits first, and one after reads what it wrote (refused stale until the vault adopts it). It runs after 0.14's append took the log's head, so 0.14's order is head then fence, the order a 0.15 change that fences 0.14 too takes them (the reverse deadlocks). Every allowed entry fences but those that change no input, the list W211's spec (Migration015.tla, OldWritesFence) names: reads and uses, sign-ins (a credential nobody holds yet; a sign-out revokes one, and fences), and the log's own bookkeeping and alarms. So 0.14's uses never wait on it, and an action this list does not name fences rather than slips past. A refused entry changes nothing. Nothing takes the fence before 0.15 runs: until then it costs an uncontended lock per change. The fence orders only what has an entry: 0.14's entry-less writes (a session's renewal, renewSession, moving a credential's expiry; last-use stamps) are ordered by the seals instead, a renewed row matching no change until the vault adopts it, and a stamp no part of any object (W216).
 CREATE FUNCTION log_fence_old_write() RETURNS trigger
     LANGUAGE plpgsql AS $$
 BEGIN
@@ -541,6 +550,16 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'coffre_vault_hot has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off';
     END IF;
+    SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
+    -- What is to change, only by a login that may: a superuser, or one with CREATEROLE and the role's ADMIN.
+    IF (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole))
+        OR NOT coalesce(held @> ARRAY['lock_timeout=1s', 'statement_timeout=2s', 'plan_cache_mode=force_generic_plan'], false))
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_roles WHERE rolname = current_user
+              AND (rolsuper OR (rolcreaterole AND pg_has_role(current_user, 'coffre_vault_hot', 'MEMBER WITH ADMIN OPTION')))
+       ) THEN
+        RAISE EXCEPTION '% may not change coffre_vault_hot, which another role made: have a login with CREATEROLE and its ADMIN run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan first', current_user;
+    END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
         ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
     END IF;
@@ -555,8 +574,7 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'coffre_vault_hot is a member of a role other than coffre_vault: revoke its memberships';
     END IF;
-    -- Only what is missing: altering another's role takes CREATEROLE and its ADMIN.
-    SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
+    -- Only what is missing.
     IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
     IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
     IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
