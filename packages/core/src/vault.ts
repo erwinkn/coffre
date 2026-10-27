@@ -228,7 +228,47 @@ export interface Vault {
    * log on.
    */
   waitSealed?(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>>;
+  /**
+   * Check 0.15's log (docs/design/0.15-plan.md, PR 8): both trees from a
+   * signed pair, every entry by its MAC and request, the log replayed on
+   * from the replay the vault kept there (the newest, unless `from` names
+   * another pair, or `start`, the first), and, once a walk reaches the
+   * present, every input row and bulk row held to the replay. No more than
+   * one walk a call: `next` says where the next stretch goes on. With 0.14's
+   * log alone, `kept` false; a vault older than 0.15 has none.
+   */
+  verifyTrees?(input: TreeVerificationInput): Promise<TreeVerification>;
 }
+
+export type TreeVerificationInput = {
+  /** The pair to go on from, by the number it seals up to, `start` for the first, or the newest replay kept when absent. */
+  from?: string;
+};
+
+/**
+ * 0.15's log as a walk found it. `problems` names what does not hold, each
+ * at its entry where it has one: a checkpoint whose heads the entries do
+ * not give, an entry whose MAC fails, a replay fault, a row not the
+ * replay's. Numbers are decimal text: the log's are 64-bit.
+ */
+export type TreeVerification =
+  | { kept: false }
+  | {
+      kept: true;
+      ok: boolean;
+      problems: string[];
+      /** The pair the walk went on from, by its `upto`; null for the first. */
+      from: string | null;
+      /** The newest pair it walked, and when it was signed (ms); null before the first. */
+      checkpoint: { upto: string; at: number } | null;
+      /** Pairs walked, entries sealed under them, and entries above the newest. */
+      checkpoints: number;
+      sealed: number;
+      unsealed: number;
+      /** Whether it reached the present, its rows held to the replay; else where the next stretch goes on. */
+      done: boolean;
+      next: string | null;
+    };
 
 /**
  * The columns of a row the app writes that a decision of 0.15's reads, as

@@ -298,3 +298,26 @@ test('coffre verify keys, on a terminal, asks for each key without showing it', 
 function cleanEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('COFFRE_')));
 }
+
+test('coffre verify log walks 0.15\'s log after 0.14\'s where the instance keeps it, a stretch a request, and fails on what it finds', async (t) => {
+  const chain = { ok: true, entries: 12, through: 11, from: 0, remaining: 0, next: null, checkpoint: null };
+  const stretch = { kept: true, ok: true, problems: [], from: null, checkpoint: { upto: '5', at: 0 }, checkpoints: 2, sealed: 5, unsealed: 0, done: false, next: '5' };
+  const last = { ...stretch, from: '5', checkpoint: { upto: '9', at: 1_793_000_000_000 }, sealed: 4, unsealed: 1, done: true, next: null };
+  const broken = { ...last, ok: false, problems: ['the principal token:ci: its rows carry another change\'s seal than the newest: put back, or written around the vault'] };
+  for (const [trees, code, said] of [
+    [undefined, 0, /^audit log OK: verified from the first entry through entry 11, 12 entries; members and grants replayed\nno checkpoint signed yet\n$/],
+    [[stretch, last], 0, /\n0\.15 log OK: verified from the first entry, its trees, every entry and the replay; every row is the log's\nlast checkpoint: up to entry 9, signed 2026-10-26T/],
+    [[stretch, broken], 2, /^0\.15 log BROKEN:\n {2}the principal token:ci: its rows carry another change's seal/],
+  ] as const) {
+    const answers = trees === undefined ? [] : [...trees];
+    const instance = await fakeInstance(t, (method, path) =>
+      method !== 'GET' ? undefined : path === '/api/audit/verification' ? chain : path === '/api/audit/trees' ? answers.shift() : undefined,
+    );
+    const { home } = signedInHome(t, instance.origin);
+    const run = await coffre(['verify', 'log'], home);
+    assert.equal(run.code, code, run.stderr);
+    assert.match(code === 0 ? run.stdout : run.stderr, said);
+    const asked = instance.seen.filter((r) => r.url.startsWith('/api/audit/trees')).map((r) => new URL(r.url, 'http://x').searchParams.get('from'));
+    assert.deepEqual(asked, trees === undefined ? ['start'] : ['start', '5']);
+  }
+});

@@ -178,7 +178,7 @@ test('the audit log is read on every visit, and its verification once with the p
 
 test('the audit page loads its entries and its verification together, and a check that fails does not fail the load', async () => {
   const calls: string[] = [];
-  const load = async (verify: () => Promise<unknown>) => {
+  const load = async (verify: () => Promise<unknown>, trees: unknown = { kept: false }) => {
     const queryClient = createQueryClient();
     const coffre = {
       audit: {
@@ -190,15 +190,29 @@ test('the audit page loads its entries and its verification together, and a chec
           calls.push('GET /audit/verification');
           return verify();
         },
+        verifyTrees: async () => {
+          calls.push('GET /audit/trees');
+          return trees;
+        },
       },
     } as unknown as CoffreClient;
     const result = await loadAudit(queryClient, coffre, {});
     return { result, chain: queryClient.getQueryData<ChainResult>([...keys.audit, 'chain']) };
   };
 
-  const verified = await load(async () => ({ ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null }));
-  assert.deepEqual(calls.sort(), ['GET /audit', 'GET /audit/verification']);
+  const intact = async () => ({ ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null });
+  const verified = await load(intact);
+  assert.deepEqual(calls.sort(), ['GET /audit', 'GET /audit/trees', 'GET /audit/verification']);
   assert.equal(verified.chain?.integrity, 'intact');
+  assert.equal((verified.chain as { trees: unknown }).trees, null, "0.14's log alone: nothing more to show");
+
+  // 0.15's log kept too: its verdict is the badge's, a problem it finds a broken log.
+  const trees = { kept: true, ok: true, problems: [], from: '40', checkpoint: { upto: '52', at: 1_793_000_000_000 }, checkpoints: 1, sealed: 12, unsealed: 0, done: true, next: null };
+  const sealed = await load(intact, trees);
+  assert.deepEqual((sealed.chain as { trees: unknown }).trees, { checkpoint: trees.checkpoint, done: true });
+  const problems = ['the principal token:ci: its rows carry another change\'s seal than the newest: put back, or written around the vault', 'one more'];
+  const put = await load(intact, { ...trees, ok: false, problems });
+  assert.deepEqual(put.chain, { integrity: 'broken', through: 9, failedAtSeq: null, author: 'vault', reason: `0.15's log: ${problems[0]} (and 1 more)` });
 
   // A vault that cannot be reached, and a refusal: each the badge's verdict, the entries still there.
   const down = await load(async () => {
@@ -221,6 +235,7 @@ test('the audit page verifies once an arrival: not again on mount, nor for a fil
         verified++;
         return { ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null };
       },
+      verifyTrees: async () => ({ kept: false }),
     },
   } as unknown as CoffreClient;
 

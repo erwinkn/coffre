@@ -609,6 +609,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'DELETE /apps/:id': { commands: ['apps revoke'] },
   'GET /audit': { commands: ['audit'] },
   'GET /audit/verification': { commands: ['verify log'] },
+  'GET /audit/trees': { commands: ['verify log'] },
   'GET /audit/keys': { commands: ['verify keys'] },
   'POST /audit/loss': { commands: ['audit accept-loss'] },
 };

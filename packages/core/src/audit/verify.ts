@@ -16,9 +16,12 @@ import { consistencyProof, EMPTY_ROOT, verifyConsistency } from './tree.ts';
  * lost entries or checkpoints.
  *
  * It needs the trees' public keys alone. What an entry's columns mean (its
- * MAC, its request ID) is the caller's to check, through `check`. The cost is
- * the entries since the start: a caller that keeps the `head` it verified
- * walks only what came after (R25).
+ * MAC, its request ID) is the caller's to check, through `check`, which sees
+ * every entry walked, in number order. The cost is the entries since the
+ * start: a caller that keeps the `head` it verified walks only what came
+ * after (R25). With `limit`, a walk stops at the first stored pair at or
+ * past that many entries, before the entries above the newest: a stretch,
+ * which another walk goes on from its `head` (`done` false).
  */
 export type LogEntry = { tree: TreeName; number: bigint; at: number; columns: readonly LeafValue[] };
 
@@ -44,18 +47,25 @@ export type Verdict = {
   unsealed: number;
   /** The newest pair walked, when the walk found nothing wrong: the `from` of the next one. */
   head: PairNotes | null;
+  /** Whether the walk reached the log's end, the entries above the newest pair included; false for a stretch cut at `limit`. */
+  done: boolean;
 };
 
 type Stop = { pair: Pair; notes: PairNotes; row: boolean };
 
+export type VerifyOptions = {
+  verifiers: PairVerifiers;
+  from?: PairNotes;
+  anchors?: readonly PairNotes[];
+  check?: (entry: LogEntry) => string | null;
+  limit?: number;
+};
+
 const PAGE = 100;
 
-export async function verifyLog(
-  reader: LogReader,
-  opts: { verifiers: PairVerifiers; from?: PairNotes; anchors?: readonly PairNotes[]; check?: (entry: LogEntry) => string | null },
-): Promise<Verdict> {
+export async function verifyLog(reader: LogReader, opts: VerifyOptions): Promise<Verdict> {
   const problems: string[] = [];
-  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0 };
+  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, done: true };
   const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
   // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
   try {
@@ -68,9 +78,9 @@ export async function verifyLog(
 
 async function walk(
   reader: LogReader,
-  opts: { verifiers: PairVerifiers; from?: PairNotes; anchors?: readonly PairNotes[]; check?: (entry: LogEntry) => string | null },
+  opts: VerifyOptions,
   problems: string[],
-  verdict: { checkpoints: number; sealed: number; unsealed: number },
+  verdict: { checkpoints: number; sealed: number; unsealed: number; done: boolean },
   done: (head: PairNotes | null) => Verdict,
 ): Promise<Verdict> {
   const open = async (row: StoredPair): Promise<Pair | null> => {
@@ -201,6 +211,11 @@ async function walk(
         if (stop.row) {
           verdict.checkpoints += 1;
           last = stop;
+          // A stretch ends at a stored pair, the next one's start; what it read past it, the next reads again.
+          if (opts.limit !== undefined && verdict.sealed >= opts.limit) {
+            verdict.done = false;
+            return done(last.notes);
+          }
         }
       }
     }

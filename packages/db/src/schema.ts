@@ -1143,6 +1143,25 @@ export const logTiles = pgTable(
   ],
 );
 
+/**
+ * The verifier's replay of 0.15's log (plan PR 8, `packages/vault/src/verifier.ts`),
+ * kept at a signed pair, `upto`, so that a check goes on from the newest one
+ * and reads only the entries since (R25): the objects, their newest seals
+ * and the bulk rows as the log makes them there, as JSON, under the vault's
+ * MAC over the pair's notes and the state. Only the vault writes it; a row
+ * it did not write fails its MAC, and one deleted costs a longer walk.
+ */
+export const logReplays = pgTable(
+  'log_replays',
+  {
+    upto: bigint({ mode: 'bigint' }).primaryKey(),
+    at: bigint({ mode: 'number' }).notNull(),
+    state: text().notNull(),
+    mac: bytea().notNull(),
+  },
+  (table) => [check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`)],
+);
+
 // For Drizzle's relational queries; see relations.ts.
 export const {
   environmentsRelations,

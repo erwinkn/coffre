@@ -185,6 +185,29 @@ test('review r3: entries and locate read one window\'s bounds, at any index, an 
   assert.deepEqual([(await store.locate(windows[1]!.at(-1)!))!.index], [0]);
 });
 
+test('T119: locate finds a use among its window\'s leaves, by its time in one probe when known; a use changed since its tick is refused', async () => {
+  const { cp, store } = await open();
+  // A window across a leaf tile's edge: 300 uses, the asked one in the second tile.
+  for (let i = 0; i < 100; i += 1) await use();
+  assert.ok((await cp.tick()).signed);
+  const at = Date.now();
+  const numbers: bigint[] = [];
+  for (let i = 0; i < 300; i += 1) numbers.push(await use(i === 250 ? at : undefined));
+  assert.ok((await cp.tick()).signed);
+  const asked = numbers[250]!;
+  for (const time of [undefined, at]) {
+    const found = (await store.locate(asked, time))!;
+    assert.deepEqual([found.entry.tree, found.index], ['uses', 350]);
+    const p = (await cp.prove(asked, time))!;
+    assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root));
+  }
+  // At another time, it is not there.
+  assert.equal(await store.locate(asked, at - 1), null);
+  // A writer changes it after its tick: its leaf is in none of the window's tiles.
+  await run(db.owner, sql`UPDATE log_uses SET purpose = 2 WHERE number = ${asked}`);
+  await assert.rejects(store.locate(asked), /use \d+ is in none of its window's leaves: the database changed it since its tick/);
+});
+
 test('Fable review: a tile read is planned over the ranges it reads, not every range', { skip: ENGINE === 'postgres' ? false : 'Postgres only: ranges' }, async () => {
   // Forty ranges, as many days of a busy instance's retention would make.
   for (let r = 0; r < 40; r += 1) await run(db.owner, sql`SELECT make_tiles(${r * RANGE}::bigint, ${(r + 1) * RANGE}::bigint)`);

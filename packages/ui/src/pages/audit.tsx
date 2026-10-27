@@ -45,7 +45,7 @@ export function AuditPage() {
   const [whole, setWhole] = useState<ChainResult | null>(null);
   const chain = shownChain(verification.data, whole);
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
-  const [walked, setWalked] = useState<{ through: number | null } | null>(null);
+  const [walked, setWalked] = useState<{ through: number | null; trees?: string } | null>(null);
   const [walkFailed, setWalkFailed] = useState<string | null>(null);
   const walkWhole = async () => {
     setWalked({ through: null });
@@ -53,7 +53,10 @@ export function AuditPage() {
     setWhole(null);
     let verdict: ChainResult;
     try {
-      verdict = chainResult(await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through })), true);
+      const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
+      // 0.15's log after 0.14's, where the instance keeps it: a stretch a request too.
+      const trees = chain.ok ? await client.audit.verifyTreesWhole((stretch) => setWalked({ through: chain.through, trees: stretch.kept ? (stretch.next ?? undefined) : undefined })) : undefined;
+      verdict = chainResult(chain, true, trees);
     } catch (error) {
       verdict = chainUnknown(error);
     }
@@ -414,7 +417,7 @@ function ChainStatus({
   onWalk,
 }: {
   chain: ChainResult;
-  walked: { through: number | null } | null;
+  walked: { through: number | null; trees?: string } | null;
   walkFailed: string | null;
   /** The check on load is being asked again. */
   retrying: boolean;
@@ -425,7 +428,11 @@ function ChainStatus({
     return (
       <span className="chain-note" role="status">
         <Spinner size={14} />
-        {walked.through === null ? 'Verifying from the first entry…' : `Verified through ${walked.through.toLocaleString('en')}…`}
+        {walked.trees !== undefined
+          ? `Replayed through ${Number(walked.trees).toLocaleString('en')}…`
+          : walked.through === null
+            ? 'Verifying from the first entry…'
+            : `Verified through ${walked.through.toLocaleString('en')}…`}
       </span>
     );
   }
@@ -478,6 +485,13 @@ function ChainStatus({
     : signed === null
       ? 'Audit log verified by the app and vault keys, not signed yet.'
       : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
+  // 0.15's log, where it is kept: its two trees, every entry and the replay, and every row held to the replay.
+  const trees = chain.trees;
+  const sealed = trees?.checkpoint == null ? null : `entry ${Number(trees.checkpoint.upto).toLocaleString('en')}, sealed at ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
+  const replayed = trees === null
+    ? ''
+    : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row is the one the log makes.`;
+  const behind = trees !== null && !trees.done;
   return (
     <div className="chain">
       {chain.pending > 0 && (
@@ -508,14 +522,24 @@ function ChainStatus({
           </button>
         </Toggletip>
       )}
-      {!chain.whole && chain.remaining === 0 && (
+      {behind && (
+        <Toggletip
+          align="end"
+          label={`The sealed log is verified${sealed === null ? '' : ` through ${sealed}`}. Its replay is catching up with it, a stretch every five minutes, and a check goes no further than one stretch.`}
+        >
+          <button type="button" className="chain-note" role="status">
+            Newer sealed entries to verify
+          </button>
+        </Toggletip>
+      )}
+      {!chain.whole && chain.remaining === 0 && !behind && (
         <button type="button" className="btn btn-sm" onClick={onWalk}>
           Verify whole log
         </button>
       )}
       {/* No seal over a log verified only in part: what is left could be anything. */}
-      {chain.remaining === 0 && (
-        <Toggletip align="end" label={verified}>
+      {chain.remaining === 0 && !behind && (
+        <Toggletip align="end" label={`${verified}${replayed}`}>
           <button type="button" className="chain-seal">
             <ShieldCheck size={14} />
             Verified

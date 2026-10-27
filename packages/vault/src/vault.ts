@@ -101,6 +101,8 @@ import {
   type Wrapped,
   type Vault,
   type Via,
+  type TreeVerification,
+  type TreeVerificationInput,
   type VerifyLogInput,
   type WrapInput,
   type WrappedKey,
@@ -126,6 +128,7 @@ import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
+import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
 export type VaultOptions = {
   /**
@@ -209,6 +212,8 @@ export type PreparedVault = {
    * then everyone the deployment names made an Owner (`#declare`).
    */
   converted: boolean;
+  /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
+  verifier: VerifierKeys | null;
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -220,6 +225,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough) : null,
     limited: false,
+    verifier: null,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
     verified: START,
     reported: new Set(),
@@ -2827,6 +2833,7 @@ class VaultService implements Vault {
    */
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
     await this.#settled();
+    if (this.#prepared.log015 !== null) await this.#replayOn();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
     // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
     const { wrongKek, logKeys } = this.#prepared;
@@ -3062,6 +3069,38 @@ class VaultService implements Vault {
     if (typeof input?.number !== 'string' || !/^[1-9][0-9]{0,18}$/.test(input.number)) throw new Error('waitSealed takes an entry\'s number, in decimal');
     const sealed = await log015.sealThrough(BigInt(input.number));
     return { ok: true, witnessed: sealed.witnessed ?? null };
+  }
+
+  /**
+   * 0.15's log checked (verifier.ts) from the newest replay kept, `from`
+   * another, or the first entry: no more than one walk (`walks.verify`).
+   * With 0.14's log alone, there is none to check.
+   */
+  async verifyTrees(input: TreeVerificationInput = {}): Promise<TreeVerification> {
+    await this.#settled();
+    if (this.#prepared.log015 === null) return { kept: false };
+    const from = input?.from;
+    if (from !== undefined && (typeof from !== 'string' || !/^(start|0|[1-9][0-9]{0,18})$/.test(from))) throw new Error("verifyTrees goes on from `start` or a pair's number, in decimal");
+    return verifyTrees(this.#db, await this.#verifierKeys(), { ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify });
+  }
+
+  /**
+   * A walk of 0.15's log on from the newest replay kept, keeping where it
+   * ends: the checkpoint job's, so that a page's check reads a beat's
+   * worth. What it finds, the page's check finds again; this never fails
+   * the checkpoint of 0.14's log it runs before.
+   */
+  async #replayOn(): Promise<void> {
+    try {
+      const walked = await verifyTrees(this.#db, await this.#verifierKeys(), { limit: this.#prepared.options.walks.checkpoint, keep: true });
+      if (!walked.ok) console.warn(`coffre audit: 0.15's log does not verify: ${walked.problems.slice(0, 3).join('; ')}`);
+    } catch (error) {
+      console.warn(`coffre audit: 0.15's log was not checked: ${(error as Error).message}`);
+    }
+  }
+
+  async #verifierKeys(): Promise<VerifierKeys> {
+    return (this.#prepared.verifier ??= await verifierKeys(this.#config.signingKeys));
   }
 
   #log015(): NonNullable<PreparedVault['log015']> {

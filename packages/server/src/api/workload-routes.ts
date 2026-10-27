@@ -116,6 +116,7 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'DELETE /apps/:id': false,
   'GET /audit': true,
   'GET /audit/verification': true,
+  'GET /audit/trees': true,
   'GET /audit/keys': true,
   // Accepting lost entries of the log is a person's, an Owner's: never a service's.
   'POST /audit/loss': false,

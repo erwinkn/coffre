@@ -85,6 +85,7 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'DELETE /apps/:id': null,
   'GET /audit': 'read',
   'GET /audit/verification': 'read',
+  'GET /audit/trees': 'read',
   'GET /audit/keys': null,
   'POST /audit/loss': null,
 };

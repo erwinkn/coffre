@@ -9,7 +9,7 @@ import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { objectKey, type Input, type Kind, type Ref } from './inputs.ts';
-import { configObject, environmentObject, memberStanding, principalObject } from './objects.ts';
+import { configObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -872,6 +872,113 @@ export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buf
     .orderBy(desc(logChanges.number))
     .limit(1);
   return row === undefined ? null : { seal: row.seal ?? null };
+}
+
+/**
+ * An object as its rows hold it, for the verifier's row audit (verifier.ts):
+ * its object, null where its rows hold none (a key archived), and the seal
+ * on them. A binding is held by its seal alone: no object of the log is
+ * made from one yet.
+ */
+export type Held = { ref: Ref; row: Input | null; seal: Buffer | null; sealOnly?: true };
+
+/**
+ * Every object the rows hold, by key, each read as the use's statement and
+ * the change path read it (`objects.ts`): members with their grants, lapsed
+ * ones too; credentials, their end the earlier of expiry and hard end;
+ * keys, archived ones with no object, a reference with its newest
+ * reference's source; environments; the roles and the policy. Every row:
+ * the audit is the explicit, whole-instance read R25 allows, never a
+ * request's.
+ */
+export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
+  const { vaultMembers, credentials, serviceBindings, secrets, secretVersions, secretReferences, environments, logConfig } = tablesOf(db);
+  const source = sql<string | null>`(SELECT ${secretReferences.sourceSecretId} FROM ${secretReferences} WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  const [members, held, tokens, bindings, keys, places, config] = await Promise.all([
+    db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal }).from(vaultMembers),
+    readGrants(db),
+    db.select({ id: credentials.id, principal: credentials.principal, kind: credentials.kind, scope: credentials.scope, revokedAt: credentials.revokedAt, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter, seal: credentials.seal }).from(credentials),
+    db.select({ id: serviceBindings.id, seal: serviceBindings.seal }).from(serviceBindings).where(isNotNull(serviceBindings.seal)),
+    db.select({
+      id: secrets.id, projectId: secrets.projectId, environmentId: secrets.environmentId, archivedAt: secrets.archivedAt, seal: secrets.seal, versionId: secrets.currentVersionId,
+      sensitive: secretVersions.sensitive, plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`, kekProvider: secretVersions.kekProvider,
+      kekId: secretVersions.kekId, kekVersion: secretVersions.kekVersion, wrappedDek: secretVersions.wrappedDek, source,
+    }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)),
+    db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, owner: environments.owner, parentId: environments.parentId, protected: environments.protected, archivedAt: environments.archivedAt, seal: environments.seal }).from(environments),
+    db.select({ name: logConfig.name, value: logConfig.value, seal: logConfig.seal }).from(logConfig),
+  ]);
+  const found = new Map<string, Held>();
+  const hold = (ref: Ref, row: Input | null, seal: Buffer | null | undefined, sealOnly?: true) => found.set(objectKey(ref), { ref, row, seal: seal ?? null, ...(sealOnly ? { sealOnly } : {}) });
+  const grantsOf = new Map<string, GrantRow[]>();
+  for (const grant of held) grantsOf.set(grant.principal, [...(grantsOf.get(grant.principal) ?? []), grant]);
+  for (const m of members) hold({ kind: 'principal', id: m.principal }, principalObject({ principal: m.principal, status: m.status, ...memberStanding(m) }, grantsOf.get(m.principal) ?? []), m.seal);
+  for (const c of tokens) {
+    // Its end in whole ms, as the app sends it (`credentialColumns`): the earlier of expiry and hard end.
+    const expiresAt = Math.min(c.expiresAt.getTime(), c.notAfter?.getTime() ?? Infinity);
+    hold({ kind: 'credential', id: c.id }, credentialObject({ id: c.id, principal: c.principal, kind: c.kind, scope: c.scope, revoked: c.revokedAt !== null, expiresAt }), c.seal);
+  }
+  for (const b of bindings) if (!found.has(objectKey({ kind: 'credential', id: b.id }))) hold({ kind: 'credential', id: b.id }, null, b.seal, true);
+  for (const k of keys) {
+    const version = k.versionId === null || k.wrappedDek === null ? null : {
+      id: k.versionId, sensitive: k.sensitive === true, plain: Boolean(k.plain), kekProvider: k.kekProvider!, kekId: k.kekId!, kekVersion: k.kekVersion!,
+      wrappedDek: Buffer.from(k.wrappedDek).toString('base64'),
+    };
+    const object = k.archivedAt !== null ? null : secretObject({ id: k.id, projectId: k.projectId, environmentId: k.environmentId, source: k.versionId === null ? k.source : null, version });
+    hold({ kind: 'secret', id: k.id }, object, k.seal);
+  }
+  for (const e of places) {
+    const { id, projectId, slug, owner, parentId } = e;
+    hold({ kind: 'environment', id }, environmentObject({ id, projectId, slug, owner, parentId, protected: e.protected, archived: e.archivedAt !== null }), e.seal);
+  }
+  for (const c of config) if (c.name === 'roles' || c.name === 'policy') hold({ kind: c.name, id: 'instance' }, configObject(c.value), c.seal);
+  return found;
+}
+
+/** The bulk cap's rows, every principal's: `last` by key. */
+export async function bulkRows(db: Queryable): Promise<Map<string, Map<string, number>>> {
+  const { logBulk } = tablesOf(db);
+  const rows = await db.select({ principal: logBulk.principal, secret: logBulk.secret, last: logBulk.last }).from(logBulk);
+  const by = new Map<string, Map<string, number>>();
+  for (const { principal, secret, last } of rows) {
+    const held = by.get(principal) ?? new Map<string, number>();
+    held.set(secret, Number(last));
+    by.set(principal, held);
+  }
+  return by;
+}
+
+/** A replay the verifier kept at a pair (`log_replays`). */
+export type KeptReplay = { upto: bigint; at: number; state: string; mac: Buffer };
+
+/** The replay kept at `upto`, or the newest one kept, if any. */
+export async function keptReplay(db: Queryable, upto?: bigint): Promise<KeptReplay | null> {
+  const { logReplays } = tablesOf(db);
+  const query = db.select({ upto: logReplays.upto, at: logReplays.at, state: logReplays.state, mac: logReplays.mac }).from(logReplays);
+  const [row] = await (upto === undefined ? query.orderBy(desc(logReplays.upto)).limit(1) : query.where(eq(logReplays.upto, upto)));
+  return row === undefined ? null : { upto: BigInt(row.upto), at: Number(row.at), state: row.state, mac: Buffer.from(row.mac) };
+}
+
+/**
+ * Keep a replay, once per pair, and forget those older than it kept for
+ * longer than `keptMs`: a walk's next stretch goes on from the one before
+ * within seconds.
+ */
+export async function keepReplay(db: Queryable, replay: KeptReplay, keptMs: number): Promise<void> {
+  const { logReplays } = tablesOf(db);
+  await db.insert(logReplays).values(replay).onConflictDoNothing();
+  await db.delete(logReplays).where(and(lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs)));
+}
+
+/**
+ * Whether the indexes that keep request ids unique stand (Postgres): a
+ * second entry under one request is a replay the database refuses, so a
+ * walk need hold only its own stretch to it (`RequestIdChecked`).
+ */
+export async function requestsUnique(db: Queryable): Promise<boolean> {
+  if (engineOf(db) !== 'postgres') return true;
+  const [row] = await rowsOf<{ n: string | number }>(db, sql`SELECT count(*) AS n FROM pg_index i
+    WHERE i.indexrelid IN (to_regclass('public.log_uses_request_idx'), to_regclass('public.log_changes_request_id_key')) AND i.indisunique AND i.indisvalid`);
+  return Number(row?.n) === 2;
 }
 
 /**

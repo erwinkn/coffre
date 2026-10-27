@@ -28,6 +28,7 @@ import type {
   UnwrapInput,
   UseInput,
   Vault,
+  TreeVerificationInput,
   VerifyLogInput,
   WrapInput,
 } from '@coffre/core/vault';
@@ -133,6 +134,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
   async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
   async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
+  async verifyTrees(input: TreeVerificationInput) { return this.#call((vault) => vault.verifyTrees(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

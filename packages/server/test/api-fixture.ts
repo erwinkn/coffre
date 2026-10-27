@@ -166,6 +166,7 @@ export function testVault(
     verifyLog: call('verifyLog'),
     prepare: call('prepare'),
     waitSealed: call('waitSealed'),
+    verifyTrees: call('verifyTrees'),
     // 0.15's use path, which the app does not call yet (plan PR 10): for tests that hold rows to their seals through it.
     use: call('use'),
     kek,

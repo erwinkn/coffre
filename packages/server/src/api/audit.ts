@@ -1,5 +1,5 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
-import { describeAccessFault, type LogVerification } from '@coffre/core/vault';
+import { describeAccessFault, type LogVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry } from '@coffre/db/log';
 
@@ -522,6 +522,24 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
     checkpoint: checkpoint === null ? null : { seq: checkpoint.seq, signedAt: checkpoint.signedAt },
     ...(verified.pending === undefined ? {} : { pending: verified.pending }),
   };
+}
+
+/**
+ * 0.15's log checked by the vault (`verifyTrees`, docs/design/0.15-plan.md
+ * PR 8): both trees from a signed pair, every entry by its MAC and request,
+ * the log replayed on from the replay the vault last kept, which the
+ * checkpoint job keeps moving, so a check reads a beat's worth; once a walk
+ * reaches the present, every input row and bulk row held to the replay.
+ * With `from`, a stretch of the walk from the first entry (`start`), then
+ * each `next`. With 0.14's log alone, `kept` false. For whoever reads the
+ * whole log (`readsWholeLog`), as `verifyAudit`.
+ */
+export async function verifyAuditTrees(ctx: ApiContext, query: { from?: string } = {}): Promise<TreeVerification> {
+  if (!readsWholeLog(ctx.caller)) {
+    throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
+  }
+  if (ctx.vault.verifyTrees === undefined) return { kept: false };
+  return ctx.vault.verifyTrees(query.from === undefined ? {} : { from: query.from });
 }
 
 /**

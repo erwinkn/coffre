@@ -1,4 +1,4 @@
-import { parseCheckpoint, splitNote, tileLeaves, type LogEntry, type PairNotes, type StoredPair, type TileKey, type TreeName } from '@coffre/core/merkle';
+import { entryLeaf, parseCheckpoint, splitNote, tileLeaves, type LogEntry, type PairNotes, type StoredPair, type Tile, type TileKey, type TreeName } from '@coffre/core/merkle';
 import type { Database } from '@coffre/db';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
@@ -127,6 +127,46 @@ async function one<T>(db: Database, query: SQL): Promise<T> {
   return (typeof v === 'string' ? JSON.parse(v) : v) as T;
 }
 
+/** What `locate` reads in one statement: the entry, a change's place among its window's changes, and the uses tree's size at each end of the window. */
+type Located = { entry: RawEntry | null; before: string | null; from: string | null; to: string | null };
+
+/**
+ * The use numbered as asked, in its window: at its time, when the caller
+ * knows it (one probe of the uses' index), else anywhere in the `at` the
+ * window's uses may hold, from the prior floor to the sealing barrier's slack.
+ */
+function useAt(at: number | undefined): SQL {
+  return at === undefined ? sql`u.at >= p.at_floor AND u.at <= s.at_floor + ${AT_SLACK_MS}` : sql`u.at = ${at}`;
+}
+
+/**
+ * The entry `locate` found, and its index in its tree. A change's is the
+ * changes before it in its window, counted by number, their key. A use's
+ * is where its leaf sits among the window's leaves, read from the uses
+ * tree's leaf tiles (a tick's worth, two or three tiles at 1,000 uses a
+ * second): counting the uses before it by `at` read every use the window's
+ * slack holds, about 63,000 index entries at that rate (T119: 9.6 ms and
+ * 1,397 buffers a proof, measured at 1M uses). A use whose leaf is not
+ * there was changed since its tick.
+ */
+async function located(found: Located | null | undefined, tiles: (keys: TileKey[]) => Promise<Tile[]>): Promise<{ entry: LogEntry; index: number } | null> {
+  if (found === null || found === undefined || found.entry === null) return null;
+  const entry = toEntry(found.entry);
+  if (entry.tree === 'changes') return found.before === null ? null : { entry, index: Number(found.before) };
+  if (found.from === null || found.to === null) return null;
+  const [from, to] = [Number(found.from), Number(found.to)];
+  const leaf = entryLeaf('uses', entry.number, entry.columns);
+  const wanted: TileKey[] = [];
+  for (let index = Math.floor(from / 256); index * 256 < to; index += 1) wanted.push({ level: 0, index });
+  for (const tile of await tiles(wanted)) {
+    for (let i = Math.max(from, tile.index * 256); i < Math.min(to, tile.index * 256 + tile.hashes.length / 32); i += 1) {
+      const offset = (i - tile.index * 256) * 32;
+      if (tile.hashes.subarray(offset, offset + 32).equals(leaf)) return { entry, index: i };
+    }
+  }
+  throw new Error(`use ${entry.number} is in none of its window's leaves: the database changed it since its tick`);
+}
+
 function postgresStore(db: Database, range: number): CheckpointStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
@@ -149,6 +189,12 @@ function postgresStore(db: Database, range: number): CheckpointStore {
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
   // ranges, forgets the ones it drops here.
   const made = new Set<number>();
+  const tiles: CheckpointStore['tiles'] = async (tree, keys) => {
+    if (keys.length === 0) return [];
+    const rows = await rowsOf<{ level: number; leaf: string; hashes: Buffer }>(db, sql`
+      SELECT t.level, t.leaf::text, t.hashes FROM log_tiles t WHERE t.tree = ${tree} AND (${tileKeys(keys)})`);
+    return rows.map((r) => ({ level: r.level, index: indexOf(r.level, Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
+  };
   return {
     async close(after, from) {
       // The barrier, and the newest pair with it: only the checkpointer writes that row, so a snapshot from before the
@@ -181,12 +227,7 @@ function postgresStore(db: Database, range: number): CheckpointStore {
       const [floor, ceiling] = bounds(after, upto);
       return (await rows(after, upto, floor, ceiling)).map(fromRow);
     },
-    async tiles(tree, keys) {
-      if (keys.length === 0) return [];
-      const rows = await rowsOf<{ level: number; leaf: string; hashes: Buffer }>(db, sql`
-        SELECT t.level, t.leaf::text, t.hashes FROM log_tiles t WHERE t.tree = ${tree} AND (${tileKeys(keys)})`);
-      return rows.map((r) => ({ level: r.level, index: indexOf(r.level, Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
-    },
+    tiles,
     async write(row, tiles) {
       // Each range a uses leaf tile falls in, and the one after it, made before the write needs them.
       for (const t of tiles.uses) {
@@ -207,26 +248,19 @@ function postgresStore(db: Database, range: number): CheckpointStore {
           ${sql.param(all.map(([tree]) => tree))}::text[], ${sql.param(all.map(([, t]) => t.level))}::smallint[],
           ${sql.param(all.map(([, t]) => String(leafOf(t))))}::bigint[], ${sql.param(all.map(([, t]) => t.hashes))}::bytea[])`);
     },
-    async locate(number) {
-      // The pair that seals it and the one before: the window is (prior.upto, sealing.upto], its uses at or above the
-      // prior floor and, committed before the sealing barrier, within the slack of its floor. The index counts that
-      // window alone.
-      const found = await one<{ entry: RawEntry | null; before: string | null } | null>(db, sql`
-        WITH sealing AS (SELECT upto, at_floor FROM log_checkpoints WHERE upto >= ${number} ORDER BY upto LIMIT 1),
+    async locate(number, at) {
+      const found = await one<Located | null>(db, sql`
+        WITH sealing AS (SELECT upto, at_floor, uses_size FROM log_checkpoints WHERE upto >= ${number} ORDER BY upto LIMIT 1),
              prior AS (SELECT upto, at_floor, changes_size, uses_size FROM log_checkpoints WHERE upto < ${number} ORDER BY upto DESC LIMIT 1)
         SELECT json_build_object(
           'entry', coalesce(
             (SELECT ${CHANGE} FROM log_changes c WHERE c.number = ${number}),
-            (SELECT ${USE} FROM log_uses u, prior p, sealing s WHERE u.at >= p.at_floor AND u.at <= s.at_floor + ${AT_SLACK_MS} AND u.number = ${number} LIMIT 1)),
-          'before', CASE
-            WHEN EXISTS (SELECT 1 FROM log_changes WHERE number = ${number})
-              THEN (SELECT p.changes_size + (SELECT count(*) FROM log_changes x WHERE x.number > p.upto AND x.number < ${number}) FROM prior p)::text
-            ELSE (SELECT p.uses_size + (SELECT count(*) FROM log_uses x, sealing s WHERE x.at >= p.at_floor AND x.at <= s.at_floor + ${AT_SLACK_MS}
-                    AND x.number > p.upto AND x.number < ${number}) FROM prior p)::text
-          END) AS v
+            (SELECT ${USE} FROM log_uses u, prior p, sealing s WHERE ${useAt(at)} AND u.number = ${number} LIMIT 1)),
+          'before', (SELECT p.changes_size + (SELECT count(*) FROM log_changes x WHERE x.number > p.upto AND x.number < ${number}) FROM prior p)::text,
+          'from', (SELECT uses_size FROM prior)::text,
+          'to', (SELECT uses_size FROM sealing)::text) AS v
         WHERE EXISTS (SELECT 1 FROM sealing)`);
-      if (found === null || found === undefined || found.entry === null || found.before === null) return null;
-      return { entry: toEntry(found.entry), index: Number(found.before) };
+      return located(found, (keys) => tiles('uses', keys));
     },
   };
 }
@@ -244,6 +278,14 @@ function sqliteStore(db: Database): CheckpointStore {
       ORDER BY 1
     ) e)`;
   const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
+  const tiles: CheckpointStore['tiles'] = async (tree, keys) => {
+    if (keys.length === 0) return [];
+    const wanted = JSON.stringify(keys.map((k) => [k.level, leafOf(k)]));
+    const rows = await rowsOf<{ level: number; leaf: number; hashes: Uint8Array }>(db, sql`
+      SELECT t.level, t.leaf, t.hashes FROM log_tiles t
+       WHERE t.tree = ${tree} AND (t.level, t.leaf) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(${wanted}))`);
+    return rows.map((r) => ({ level: Number(r.level), index: indexOf(Number(r.level), Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
+  };
   return {
     async close(after, from) {
       // One writer: every number committed is final. The barrier only moves the floor, as close_one does.
@@ -280,14 +322,7 @@ function sqliteStore(db: Database): CheckpointStore {
       const [floor, ceiling] = bounds(after, upto);
       return (await one<RawEntry[]>(db, sql`SELECT ${window(after, upto, floor, ceiling)} AS v`)).map(toEntry);
     },
-    async tiles(tree, keys) {
-      if (keys.length === 0) return [];
-      const wanted = JSON.stringify(keys.map((k) => [k.level, leafOf(k)]));
-      const rows = await rowsOf<{ level: number; leaf: number; hashes: Uint8Array }>(db, sql`
-        SELECT t.level, t.leaf, t.hashes FROM log_tiles t
-         WHERE t.tree = ${tree} AND (t.level, t.leaf) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(${wanted}))`);
-      return rows.map((r) => ({ level: Number(r.level), index: indexOf(Number(r.level), Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
-    },
+    tiles,
     async write(row, tiles) {
       const h = heads(row.notes);
       await db.transaction(async (tx) => {
@@ -304,23 +339,19 @@ function sqliteStore(db: Database): CheckpointStore {
           VALUES (${row.upto}, ${h.at}, ${h.floor}, ${h.changes.size}, ${h.changes.root}, ${row.notes.changes}, ${h.uses.size}, ${h.uses.root}, ${row.notes.uses})`);
       });
     },
-    async locate(number) {
-      const found = await one<{ entry: RawEntry | null; before: string | null } | null>(db, sql`
-        WITH sealing AS (SELECT upto, at_floor FROM log_checkpoints WHERE upto >= ${number} ORDER BY upto LIMIT 1),
+    async locate(number, at) {
+      const found = await one<Located | null>(db, sql`
+        WITH sealing AS (SELECT upto, at_floor, uses_size FROM log_checkpoints WHERE upto >= ${number} ORDER BY upto LIMIT 1),
              prior AS (SELECT upto, at_floor, changes_size, uses_size FROM log_checkpoints WHERE upto < ${number} ORDER BY upto DESC LIMIT 1)
         SELECT json_object(
           'entry', json(coalesce(
             (SELECT ${CHANGE} FROM log_changes c WHERE c.number = ${number}),
-            (SELECT ${USE} FROM log_uses u, prior p, sealing s WHERE u.at >= p.at_floor AND u.at <= s.at_floor + ${AT_SLACK_MS} AND u.number = ${number} LIMIT 1))),
-          'before', CAST(CASE
-            WHEN EXISTS (SELECT 1 FROM log_changes WHERE number = ${number})
-              THEN (SELECT p.changes_size + (SELECT count(*) FROM log_changes x WHERE x.number > p.upto AND x.number < ${number}) FROM prior p)
-            ELSE (SELECT p.uses_size + (SELECT count(*) FROM log_uses x, sealing s WHERE x.at >= p.at_floor AND x.at <= s.at_floor + ${AT_SLACK_MS}
-                    AND x.number > p.upto AND x.number < ${number}) FROM prior p)
-          END AS TEXT)) AS v
+            (SELECT ${USE} FROM log_uses u, prior p, sealing s WHERE ${useAt(at)} AND u.number = ${number} LIMIT 1))),
+          'before', CAST((SELECT p.changes_size + (SELECT count(*) FROM log_changes x WHERE x.number > p.upto AND x.number < ${number}) FROM prior p) AS TEXT),
+          'from', CAST((SELECT uses_size FROM prior) AS TEXT),
+          'to', CAST((SELECT uses_size FROM sealing) AS TEXT)) AS v
         WHERE EXISTS (SELECT 1 FROM sealing)`);
-      if (found === null || found === undefined || found.entry === null || found.before === null) return null;
-      return { entry: toEntry(found.entry), index: Number(found.before) };
+      return located(found, (keys) => tiles('uses', keys));
     },
   };
 }

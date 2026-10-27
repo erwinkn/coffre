@@ -6,7 +6,7 @@ import { POLICY_REVISION } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { acceptAuditLoss, auditKeys, listAudit, verifyAudit } from './audit.ts';
+import { acceptAuditLoss, auditKeys, listAudit, verifyAudit, verifyAuditTrees } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -740,6 +740,11 @@ export const routes = {
   ...route('GET /audit/verification', {
     input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,16}:[0-9a-f]{64}$/)]).optional() }),
     run: (ctx, { input }) => verifyAudit(ctx, input),
+  }),
+  // 0.15's log: from the replay the vault last kept; or, with `from`, a stretch of the walk from the first entry (`start`), and on from each `next`.
+  ...route('GET /audit/trees', {
+    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^(0|[1-9][0-9]{0,18})$/)]).optional() }),
+    run: (ctx, { input }) => verifyAuditTrees(ctx, input),
   }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.
   ...route('GET /audit/keys', { run: (ctx) => auditKeys(ctx) }),

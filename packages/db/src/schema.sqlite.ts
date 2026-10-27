@@ -969,6 +969,17 @@ export const logCheckpoints = sqliteTable(
   ],
 );
 
+export const logReplays = sqliteTable(
+  'log_replays',
+  {
+    upto: int64('upto').primaryKey(),
+    at: integer({ mode: 'number' }).notNull(),
+    state: text().notNull(),
+    mac: bytes('mac').notNull(),
+  },
+  (table) => [check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`)],
+);
+
 export const logTiles = sqliteTable(
   'log_tiles',
   {

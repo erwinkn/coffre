@@ -372,18 +372,34 @@ export const queries = {
  */
 async function verifyChain(client: CoffreClient) {
   try {
-    return chainResult(await client.audit.verify(), false);
+    const [chain, trees] = await Promise.all([client.audit.verify(), client.audit.verifyTrees()]);
+    return chainResult(chain, false, trees);
   } catch (error) {
     return chainUnknown(error);
   }
 }
 
+/** 0.15's log as its check found it (`audit.verifyTrees`): `kept` false where the instance keeps 0.14's alone. */
+export type TreesResult = Awaited<ReturnType<CoffreClient['audit']['verifyTrees']>>;
+
 /**
  * A verdict as the page shows it: `whole` when it comes from the walk
  * from the first entry, which someone asked for, not from the newest
- * checkpoint's.
+ * checkpoint's. Where the instance keeps 0.15's log too, its check
+ * (`trees`) is part of it: what it finds breaks the log as 0.14's would, and
+ * a check that has not reached the present leaves it partly checked.
  */
-export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean) {
+export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: TreesResult = { kept: false }) {
+  if (result.ok && trees.kept && !trees.ok) {
+    const more = trees.problems.length - 1;
+    return {
+      integrity: 'broken' as const,
+      through: result.through,
+      failedAtSeq: null,
+      author: 'vault' as const,
+      reason: `0.15's log: ${trees.problems[0] ?? 'it does not verify'}${more > 0 ? ` (and ${more} more)` : ''}`,
+    };
+  }
   return result.ok
     ? {
         integrity: 'intact' as const,
@@ -395,6 +411,8 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
         remaining: result.remaining ?? 0,
         checkpoint: result.checkpoint,
         pending: result.pending ?? 0,
+        /** 0.15's log, where it is kept: the newest pair its check reached, and whether it reached the present. */
+        trees: trees.kept ? { checkpoint: trees.checkpoint, done: trees.done } : null,
       }
     : {
         integrity: 'broken' as const,

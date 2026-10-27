@@ -88,8 +88,12 @@ export type CheckpointStore = LogReader & {
    * state holds one head without the other.
    */
   write(row: StoredPair, tiles: Record<TreeName, Tile[]>): Promise<void>;
-  /** Entry `number` and its leaf index in its tree, if it is in the log. */
-  locate(number: bigint): Promise<{ entry: LogEntry; index: number } | null>;
+  /**
+   * Entry `number` and its leaf index in its tree, if it is in the log; a
+   * use found at `at` when the caller knows its time, which spares a scan
+   * of its window's time.
+   */
+  locate(number: bigint, at?: number): Promise<{ entry: LogEntry; index: number } | null>;
 };
 
 /**
@@ -543,14 +547,14 @@ export class Checkpointer {
     return { pair: head.pair, notes: head.notes, witnessed, failures, cosigned, proof };
   }
 
-  /** Entry `number`'s inclusion proof against the newest pair, checked before it is handed out; null if not sealed. */
-  prove(number: bigint): Promise<InclusionProof | null> {
-    return this.proveAt(number, this.head);
+  /** Entry `number`'s inclusion proof against the newest pair, checked before it is handed out; null if not sealed. A use's `at`, if known, finds it in one probe. */
+  prove(number: bigint, at?: number): Promise<InclusionProof | null> {
+    return this.proveAt(number, this.head, at);
   }
 
-  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }): Promise<InclusionProof | null> {
+  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, at?: number): Promise<InclusionProof | null> {
     if (number > pair.upto) return null;
-    const found = await this.store.locate(number);
+    const found = await this.store.locate(number, at);
     if (found === null) return null;
     const { entry, index } = found;
     if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {

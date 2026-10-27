@@ -90,6 +90,7 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   // The log of the places it reaches; the whole log, and verifying it, are the instance's.
   'GET /audit': true,
   'GET /audit/verification': false,
+  'GET /audit/trees': false,
   'GET /audit/keys': false,
   'POST /audit/loss': false,
 };

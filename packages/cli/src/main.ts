@@ -2052,11 +2052,32 @@ async function verifyLog(): Promise<void> {
       process.exit(3);
     }
     process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
-    return;
+    return verifyTrees(shown);
   }
   const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;
   const through = result.through === null ? 'nothing verified' : `verified through entry ${result.through}`;
   process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
+  process.exit(2);
+}
+
+/**
+ * 0.15's log, after 0.14's: both trees, every entry, the replay and every
+ * row, walked from the first entry a stretch a request. Nothing to say where
+ * the instance keeps 0.14's log alone.
+ */
+async function verifyTrees(shown: boolean): Promise<void> {
+  // A server older than 0.15 has no such route: its 404 comes back to the client, which says so (`kept` false).
+  const result = await client(target(), undefined, [404]).audit.verifyTreesWhole((stretch) => {
+    if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rverified 0.15's log through entry ${stretch.next}…`);
+  });
+  if (shown) process.stderr.write('\r\x1b[K');
+  if (!result.kept) return;
+  if (result.ok) {
+    const signed = result.checkpoint === null ? 'no checkpoint signed yet' : `last checkpoint: up to entry ${result.checkpoint.upto}, signed ${new Date(result.checkpoint.at).toISOString()}`;
+    process.stdout.write(`0.15 log OK: verified from the first entry, its trees, every entry and the replay; every row is the log's\n${signed}\n`);
+    return;
+  }
+  process.stderr.write(`0.15 log BROKEN:\n${result.problems.map((problem) => `  ${problem}\n`).join('')}`);
   process.exit(2);
 }
 
