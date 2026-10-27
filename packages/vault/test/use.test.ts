@@ -111,26 +111,30 @@ test("the checkpointer seals real uses: each entry's MAC is the log's, over the 
   const w = await world();
   const id = await w.key();
   const fork = await environment(w, 'fork');
-  // Two uses, each from an isolate of its own (a repeat would ride the first's cover): one with no place, one through a fork.
+  // Three uses, each from an isolate of its own (a repeat would ride the first's cover): one with no place, one through a
+  // fork, and a copy keeping values sensitive (its purpose past 256) under the largest request id, past 2^53.
   const plain = heard(await (await isolate()).use(ask(w, id)));
   const through = heard(await (await isolate()).use(ask(w, id, { place: fork })));
-  assert.ok(plain.ok && through.ok, JSON.stringify([plain, through]));
+  const kept = heard(await (await isolate()).use(ask(w, id, { purpose: 'copy', keepsSensitive: true, requestId: (2n ** 63n - 1n).toString() })));
+  assert.ok(plain.ok && through.ok && kept.ok, JSON.stringify([plain, through, kept]));
+  const [row] = await rows<{ purpose: number; request_id: string }>(db.owner, sql`SELECT purpose, CAST(request_id AS TEXT) AS request_id FROM log_uses WHERE number = ${kept.number}`);
+  assert.deepEqual([Number(row!.purpose), row!.request_id], [purposeCode({ purpose: 'copy', keepsSensitive: true }), (2n ** 63n - 1n).toString()]);
   // The checkpointer as a host opens it: its MAC key from the vault's signing seed, as the use path's.
   const alarms: string[] = [];
   const store = logStore(db.vault);
   const cp = await openLogCheckpointer({ store, seed: SIGNING_KEY, memory: variableMemory(), record: (alarm) => void alarms.push(alarm.message) });
   const tick = await cp.tick();
   assert.ok(tick.signed, tick.failures.join('; '));
-  for (const number of [plain.number, through.number]) {
+  for (const number of [plain.number, through.number, kept.number]) {
     const p = (await cp.prove(BigInt(number)))!;
     assert.equal(p.tree, 'uses');
     assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root), number);
   }
-  assert.equal(cp.pair.pair.uses.size, 2);
+  assert.equal(cp.pair.pair.uses.size, 3);
   const signers = await pairSigners(await logOrigin(SIGNING_KEY), SIGNING_KEY);
   const verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
   const v = await verifyLog(store, { verifiers, check: (e) => (authentic(MAC)(e) ? null : 'its MAC does not hold') });
-  assert.ok(v.ok && v.sealed === Number(cp.pair.pair.changes.size) + 2, v.problems.join('\n'));
+  assert.ok(v.ok && v.sealed === Number(cp.pair.pair.changes.size) + 3, v.problems.join('\n'));
   // A third use, its purpose changed by a writer before its tick: the MAC covers it, and the tick refuses.
   const third = heard(await (await isolate()).use(ask(w, id, { purpose: 'reveal' })));
   assert.ok(third.ok, JSON.stringify(third));
