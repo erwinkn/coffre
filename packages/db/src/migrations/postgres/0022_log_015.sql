@@ -550,19 +550,6 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'coffre_vault_hot has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off';
     END IF;
-    SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
-    -- What is to change, only by a login that may: a superuser, or one with CREATEROLE and the role's ADMIN.
-    IF (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole))
-        OR NOT coalesce(held @> ARRAY['lock_timeout=1s', 'statement_timeout=2s', 'plan_cache_mode=force_generic_plan'], false))
-       AND NOT EXISTS (
-           SELECT 1 FROM pg_roles WHERE rolname = current_user
-              AND (rolsuper OR (rolcreaterole AND pg_has_role(current_user, 'coffre_vault_hot', 'MEMBER WITH ADMIN OPTION')))
-       ) THEN
-        RAISE EXCEPTION '% may not change coffre_vault_hot, which another role made: have a login with CREATEROLE and its ADMIN run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan first', current_user;
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
-        ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
-    END IF;
     IF EXISTS (
         SELECT 1 FROM pg_shdepend
          WHERE refclassid = 'pg_authid'::regclass AND refobjid = 'coffre_vault_hot'::regrole AND deptype = 'o'
@@ -574,15 +561,29 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'coffre_vault_hot is a member of a role other than coffre_vault: revoke its memberships';
     END IF;
-    -- Only what is missing.
-    IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
-    IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
-    IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_auth_members
-         WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option AND NOT set_option AND NOT admin_option
+    -- Memberships are kept per grantor: one that may set the group, or grant it, stays in force beside the one made here.
+    IF EXISTS (
+        SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND (set_option OR admin_option)
     ) THEN
-        GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
+        RAISE EXCEPTION 'coffre_vault_hot may set or grant coffre_vault: have its grantor run REVOKE coffre_vault FROM coffre_vault_hot, then migrate again';
     END IF;
+    -- Only what differs, each tried, and a refusal said with what to run: changing a role another made takes, on
+    -- Postgres 16, CREATEROLE and its ADMIN, and granting the group its ADMIN (as setup's changeRole says it).
+    SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
+            ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
+        END IF;
+        IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
+        IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
+        IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
+        ) THEN
+            GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
+        END IF;
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+    END;
 END
 $$;
