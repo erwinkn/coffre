@@ -1,8 +1,8 @@
 \set ON_ERROR_STOP on
 
 -- 0.15's log, as the owner, after log-guarantees.sql: what only someone who
--- writes the tables behind the vault can try, each named for the invariant of
--- W211's spec (formal/) it holds.
+-- writes the tables behind the vault can try, each named for the protection of
+-- the spec (formal/HotPathOne.tla, formal/Seal.tla) it holds.
 DO $$
 DECLARE
     r use_view;
@@ -99,7 +99,7 @@ BEGIN
     IF barrier.floor_found <> lowered OR barrier.at_floor <= lowered THEN
         RAISE EXCEPTION 'FAIL: the barrier hid a lowered floor: found %, lowered %', barrier.floor_found, lowered;
     END IF;
-    RAISE NOTICE 'PASS: the barrier answers the floor it found';
+    RAISE NOTICE 'PASS: BarrierChecksFloor, the barrier answers the floor it found';
 END
 $$;
 

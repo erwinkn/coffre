@@ -1,6 +1,7 @@
 \set ON_ERROR_STOP on
 
--- 0.15's log (0022_log_015.sql), as the vault's login: it reads every new
+-- 0.15's log (0022_log_015.sql), as the vault's login, each check named for the
+-- protection of the spec (formal/HotPathOne.tla, formal/Seal.tla) it holds: it reads every new
 -- table and writes none of them but through the functions, which keep the
 -- fence, the seals' CAS, the deadline, covers, the seal cache and the bulk
 -- cap. Run as coffre_vault_runtime, after schema-fixture.sql and

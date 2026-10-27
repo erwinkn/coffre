@@ -71,8 +71,8 @@ held() {
     exit 1
 }
 
-# OldWritesFence: 0.14's writes take the 0.15 fence, its reads never: with the
-# fence held, a revoke's entry waits, a read's does not (W211's list).
+# OldWritesFence (formal/Migration015.tla): 0.14's writes take the 0.15 fence,
+# its reads never: with the fence held, a revoke's entry waits, a read's does not.
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
 held 1668244070
@@ -92,7 +92,8 @@ for write in 'vault access.revoke' 'app token.revoke' 'vault secret.write' 'app 
 done
 let_go
 
-# ChangeHeadFirst, and the order row, head, fence: with 0.14's vault holding a
+# RowFirst and ChangeHeadFirst (formal/Migration015.tla), the order row, head,
+# fence: with 0.14's vault holding a
 # member's queue and row, then taking the head and the fence (its revoke's
 # entry), a change to that member waits for it and passes, rather than
 # holding the fence and deadlocking on the row.
