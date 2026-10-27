@@ -368,7 +368,7 @@ spec:
   serviceAccountName: api
   initContainers:
     - name: coffre
-      image: registry.acme.example/coffre-cli:0.12   # any image with the coffre CLI
+      image: ghcr.io/erwinkn/coffre-cli:0.14.5@sha256:…   # coffre's image, by its digest (below)
       restartPolicy: Always            # a native sidecar: an app restart keeps the session
       args: [serve, --url, https://secrets.acme.example, --service, api-prod, --proof, 'kubernetes:/var/run/secrets/coffre/token', --listen, '127.0.0.1:7300']
       volumeMounts: [{ name: coffre-token, mountPath: /var/run/secrets/coffre, readOnly: true }]
@@ -588,6 +588,97 @@ session ends with the pod.
 `coffre --url <url> --service <name> run [--proof <proof>] [<project>/<env>…] -- <command>`
 does the same for one command's life, on a port of its own, and the child
 can use `credential(name)` from `@coffre/client/credential`.
+
+### The image
+
+Each release publishes the CLI as an image, `ghcr.io/erwinkn/coffre-cli`,
+for `linux/amd64` and `linux/arm64`, so a sidecar needs no image of its
+own. Its entrypoint is `coffre`: the arguments are the command, and
+`command: [coffre, serve, …]` works too.
+
+```sh
+docker run --rm ghcr.io/erwinkn/coffre-cli:0.14.5 --version
+```
+
+It is tagged with the version (`0.14.5`), its line (`0.14`, the newest
+patch of it) and `latest` (the newest release). A tag can move; pin the
+digest in anything that runs, as the Kubernetes example does.
+`docker buildx imagetools inspect ghcr.io/erwinkn/coffre-cli:0.14.5`
+prints it. Its signed provenance names the workflow run and the commit
+that built it. Check that its signer is coffre's release workflow, since
+any workflow in the repository could sign: on a release tag, as each
+release builds its image, or on `main`, where an image is published again
+for a version npm already has (a release from before the image, or a
+failed image job). `main`, as its branch protection stands, takes changes only through pull
+requests that pass Validate (admins aside), where a tag may name any commit, so `main` is no weaker a
+signer than a tag:
+
+```sh
+gh attestation verify oci://ghcr.io/erwinkn/coffre-cli@sha256:… --repo erwinkn/coffre \
+  --cert-identity-regex '^https://github\.com/erwinkn/coffre/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9][0-9.]*(-[0-9A-Za-z.-]+)?)$'
+```
+
+The image's label `org.opencontainers.image.revision` names the CLI's
+commit, its release tag's, and the attestation the commit that built the
+image: the same for a release, `main`'s for an image published again. Each
+image also carries its SBOM
+(`docker buildx imagetools inspect … --format '{{json .SBOM}}'`).
+
+Inside is npm's own tarball of that version, checked against its
+integrity, on distroless Node 24 (Debian 13): no shell and no package
+manager. It runs as uid 65532 (`nonroot`), which cannot change the CLI's
+files. `coffre serve` keeps nothing on disk, so it runs with a read-only
+root and no capabilities:
+
+```yaml
+securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+```
+
+A command that saves a session, as `coffre login`, writes
+`/home/nonroot/.coffre`, which needs a writable root or a volume there.
+`coffre update` cannot update an image: run a new one. The kubelet's
+`tcpSocket` probe dials the pod's address, not its loopback, so a probe of
+a sidecar on `127.0.0.1` runs a command, and `node` is on the image's path:
+
+```yaml
+startupProbe:
+  exec: { command: [node, -e, "require('net').connect(7300, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"] }
+  periodSeconds: 2
+  failureThreshold: 30   # a minute to sign in
+```
+
+Give the first sign-in time: a probe that gives up restarts the sidecar,
+whose projected token its first attempt spent, so it waits for the
+kubelet's next one, eight minutes with 600 seconds, and the app's
+containers wait with it.
+
+**Docker and Compose.** In a pod, the app and the sidecar share
+`127.0.0.1`, where `coffre serve` listens unless told otherwise. Containers
+on a Docker network each have their own, so there the sidecar listens on
+`0.0.0.0` and the app names it by its service:
+
+```yaml
+# compose.yaml, on a Compute Engine VM (any proof works the same)
+services:
+  coffre:
+    image: ghcr.io/erwinkn/coffre-cli:0.14.5@sha256:…
+    command: [serve, --url, https://secrets.acme.example, --service, web, --proof, gcp, --listen, '0.0.0.0:7300']
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+  api:
+    image: registry.acme.example/api:1.4.2
+    environment: { OPENAI_BASE_URL: 'http://coffre:7300/use/openai' }
+    depends_on: [coffre]
+```
+
+`0.0.0.0` opens the session to every container on that network, as a pod
+opens it to every container in the pod: keep the network to the app and
+its sidecar (Compose's default network holds only its project's services),
+and never publish the port (`ports:`, `-p`). A published port is open on
+the host's interfaces, ahead of a host firewall such as ufw, to anyone who
+reaches the host. Stopping the container sends `SIGTERM`, and the sidecar
+logs out before it exits.
 
 ## Upstreams that accept only coffre
 

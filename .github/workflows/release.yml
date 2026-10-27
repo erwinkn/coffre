@@ -1,11 +1,21 @@
 name: Release
 
 # Push a tag naming the packages' version (`pnpm bump 0.2.0`, merged, then
-# `git tag v0.2.0 && git push origin v0.2.0`) to publish it to npm. The bump
-# also heads the release notes' Unreleased section with the version.
+# `git tag v0.2.0 && git push origin v0.2.0`) to publish it to npm, then the
+# CLI's image to ghcr.io/erwinkn/coffre-cli. The bump also heads the release
+# notes' Unreleased section with the version.
 on:
   push:
     tags: ['v*']
+  # The image alone, for a version npm already has: a release from before
+  # the image, or one whose image job failed. Only from main, whose
+  # Dockerfile builds it:
+  #   gh workflow run release.yml --ref main -f version=0.14.5
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version npm has, as 0.14.5
+        required: true
 
 permissions:
   contents: read
@@ -13,6 +23,7 @@ permissions:
 jobs:
   publish:
     name: Publish to npm
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # npm's trusted publisher for each package names this workflow file and
@@ -46,3 +57,140 @@ jobs:
         run: |
           npm --version
           ./scripts/publish.sh "$GITHUB_REF_NAME"
+
+  image:
+    name: Publish the CLI image
+    needs: publish
+    # On a tag, once npm has the release; by hand, without publishing.
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.publish.result == 'skipped')) }}
+    # One at a time, so that each decides its tags from npm with the others'
+    # pushed: an older release's image never moves `latest` back. GitHub
+    # keeps one run waiting; a third cancels it, and a dispatch redoes it.
+    concurrency:
+      group: coffre-cli-image
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Push the image with this job's GITHUB_TOKEN.
+      packages: write
+      # Sign the build's provenance with Sigstore, and record it with GitHub.
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/erwinkn/coffre-cli
+
+    steps:
+      - name: Check out the workflow's revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.22.1
+
+      - name: Name the version and the commit it was released from
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+        # A branch's own release.yml could drop this check, and any workflow
+        # in the repository can push and attest with its token: what makes an
+        # image official is its attestation's signer, this file on main or on
+        # a v* tag, which docs/workloads.md has verifiers require. This keeps
+        # a mistaken dispatch from a branch from publishing. The revision is
+        # the CLI's, its release tag's commit, as OCI defines it; the
+        # attestation names the commit that built the image, main's for a
+        # dispatch.
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::publish an image from main, not $GITHUB_REF: gh workflow run release.yml --ref main -f version=<version>"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then version="${GITHUB_REF_NAME#v}"; else version="$REQUESTED"; fi
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$version is no version"
+            exit 1
+          fi
+          if ! revision="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$version" --jq .sha)"; then
+            echo "::error::no tag v$version: an image is of a tagged release"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      # The image holds the very bytes npm serves, which never change for a
+      # version: not a tarball packed again here, which would differ.
+      - name: Take npm's tarball and check its integrity
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          # A version just published may take a moment to be served.
+          integrity=""
+          for _ in $(seq 30); do
+            integrity="$(npm view "@coffre/cli@$VERSION" dist.integrity 2>/dev/null)" && [[ -n "$integrity" ]] && break
+            sleep 10
+          done
+          [[ -n "$integrity" ]] || { echo "::error::npm has no @coffre/cli@$VERSION"; exit 1; }
+          mkdir "$RUNNER_TEMP/context"
+          tarball="$RUNNER_TEMP/context/coffre-cli-$VERSION.tgz"
+          # Its tarball, too, may be served a moment after its document.
+          for _ in $(seq 30); do
+            npm pack "@coffre/cli@$VERSION" --pack-destination "$RUNNER_TEMP/context" && break
+            sleep 10
+          done
+          [[ -f "$tarball" ]] || { echo "::error::npm serves no tarball of @coffre/cli@$VERSION"; exit 1; }
+          actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+          [[ "$actual" == "$integrity" ]] || { echo "::error::the tarball is $actual, npm's integrity $integrity"; exit 1; }
+          mv "$tarball" "$RUNNER_TEMP/context/coffre-cli.tgz"
+          # npm's list of versions may lag the version's own document.
+          for _ in $(seq 30); do
+            node scripts/image-tags.mjs "$VERSION" > "$RUNNER_TEMP/tags" && break
+            sleep 10
+          done
+          [[ -s "$RUNNER_TEMP/tags" ]] || { echo "::error::no tags for $VERSION after 5 minutes: image-tags.mjs's last error is above"; exit 1; }
+          cat "$RUNNER_TEMP/tags"
+
+      # Both platforms in one index, which needs BuildKit in a container: its
+      # image, and the SBOM's scanner, pinned like the actions.
+      - name: Build and push the image for amd64 and arm64
+        id: build
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          REVISION: ${{ steps.release.outputs.revision }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker buildx create --name coffre-image --driver docker-container \
+            --driver-opt image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c --use
+          printf %s "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          tags=()
+          while read -r tag; do tags+=(--tag "$IMAGE:$tag"); done < "$RUNNER_TEMP/tags"
+          source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          docker buildx build --platform linux/amd64,linux/arm64 --file packages/cli/Dockerfile \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            --annotation "index:org.opencontainers.image.description=The coffre command line; coffre serve is a workload's sidecar." \
+            --annotation "index:org.opencontainers.image.source=$source" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
+            --annotation "index:org.opencontainers.image.version=$VERSION" \
+            --annotation "index:org.opencontainers.image.revision=$REVISION" \
+            --attest type=provenance,mode=max \
+            --attest type=sbom,generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315 \
+            --metadata-file "$RUNNER_TEMP/metadata.json" \
+            "${tags[@]}" --push "$RUNNER_TEMP/context"
+          digest="$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in the build's metadata"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "$IMAGE:$VERSION@$digest, tagged $(paste -sd ' ' "$RUNNER_TEMP/tags")" >> "$GITHUB_STEP_SUMMARY"
+
+      # Its signer is this workflow at this run's ref, which verifiers pin
+      # (docs/workloads.md, "The image").
+      - name: Attest the image's provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # A storage record is an organization's: this is an account's package.
+          create-storage-record: false

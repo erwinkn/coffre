@@ -214,6 +214,13 @@ unsupported diff select full validation.
   client, which declares Node >= 20, with each Node `COFFRE_CLIENT_NODES`
   lists (`scripts/client-smoke.cjs`; the current one when unset; CI names 20,
   22 and 24). It needs network for third-party packages.
+- `pnpm test:image` builds the CLI's image (`packages/cli/Dockerfile`) from
+  this revision's packed CLI for linux/amd64 and linux/arm64, then runs the
+  native one: `--version`, its non-root user, and `coffre serve` on a
+  read-only root against the fake coffre on the host's network
+  (`packages/cli/scripts/image-smoke.ts`). It needs Docker on Linux and
+  removes its images. The release builds the same Dockerfile from npm's
+  tarball and pushes it to `ghcr.io/erwinkn/coffre-cli`.
 - `pnpm bench:workers` / `pnpm bench:node` (after `pnpm build`) boot an example as
   conformance does, on ports 3182 to +2, and print the CPU each hot path costs, cold (a
   new isolate or process) and warm, read from Linux's per-thread counters: on Workers,

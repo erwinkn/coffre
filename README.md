@@ -113,6 +113,7 @@ pnpm conformance:workers   # examples/workers, held to docs/conformance.md (afte
 pnpm conformance:node      # examples/node, its two processes, on SQLite
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
                        # --kind workers or --kind node selects one deployment
+pnpm test:image        # the CLI's image for amd64 and arm64, and coffre serve run in it (needs Docker)
 pnpm check:pins        # every dependency pinned exactly
 pnpm check:contrast    # every colour pair in the UI meets WCAG AA
 pnpm check:docs        # every path and script the docs name exists
@@ -603,7 +604,12 @@ empty `## Unreleased`. Validate proves that diff version-only and skips the
 full suite. Merged, then a pushed tag, `v0.4.2`: the release workflow
 publishes all eight packages with npm's trusted publishing (the workflow's
 OIDC token, no stored token) and provenance, so each version on npm names
-the commit and run that built it.
+the commit and run that built it. It then publishes the CLI's image,
+`ghcr.io/erwinkn/coffre-cli`, from npm's tarball, with signed provenance
+([workloads.md](docs/workloads.md#the-image)); `gh workflow run release.yml
+--ref main -f version=<version>` publishes the image alone, for a version
+npm already has. The first push made the package private, as GitHub
+makes every new one: its settings turn it public, once, for good.
 
 ## Not in scope
 
