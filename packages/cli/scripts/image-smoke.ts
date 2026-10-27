@@ -9,9 +9,10 @@
 //
 //   node --conditions=coffre:source packages/cli/scripts/image-smoke.ts <image> <version>
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
+import { promisify } from 'node:util';
 
 import { fakeCoffre } from '../test/workload-fake.ts';
 
@@ -53,10 +54,13 @@ try {
   assert.equal(sent?.path, '/use/openai/models');
   assert.equal(sent.headers.authorization, undefined);
 
-  docker('stop', name);
+  // Not execFileSync: the fake shares this process, and must answer the logout while docker waits.
+  await promisify(execFile)('docker', ['stop', name]);
   const [code] = await exited;
   assert.equal(code, 0, said);
-  assert.equal(coffre.log.at(-1), 'POST /api/auth/logout 200');
+  // A logout coffre did not confirm says so; one that it did says nothing.
+  assert.equal(said.trim().split('\n').length, 1, said);
+  assert.equal(coffre.log.at(-1), 'POST /api/auth/logout 200', said);
   console.log(`${image}: coffre serve forwarded a request signed, and logged out when stopped`);
 } finally {
   if (serve.exitCode === null) execFileSync('docker', ['rm', '-f', name], { stdio: 'ignore' });

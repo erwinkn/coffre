@@ -608,7 +608,8 @@ the commit and run that built it. It then publishes the CLI's image,
 `ghcr.io/erwinkn/coffre-cli`, from npm's tarball, with signed provenance
 ([workloads.md](docs/workloads.md#the-image)); `gh workflow run release.yml
 --ref main -f version=<version>` publishes the image alone, for a version
-npm already has.
+npm already has. The first push made the package private, as GitHub
+makes every new one: its settings turn it public, once, for good.
 
 ## Not in scope
 

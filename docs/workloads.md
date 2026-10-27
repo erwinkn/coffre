@@ -644,7 +644,13 @@ a sidecar on `127.0.0.1` runs a command, and `node` is on the image's path:
 startupProbe:
   exec: { command: [node, -e, "require('net').connect(7300, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"] }
   periodSeconds: 2
+  failureThreshold: 30   # a minute to sign in
 ```
+
+Give the first sign-in time: a probe that gives up restarts the sidecar,
+whose projected token its first attempt spent, so it waits for the
+kubelet's next one, eight minutes with 600 seconds, and the app's
+containers wait with it.
 
 **Docker and Compose.** In a pod, the app and the sidecar share
 `127.0.0.1`, where `coffre serve` listens unless told otherwise. Containers

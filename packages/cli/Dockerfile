@@ -35,6 +35,9 @@ LABEL org.opencontainers.image.title="coffre CLI" \
       org.opencontainers.image.description="The coffre command line; coffre serve is a workload's sidecar." \
       org.opencontainers.image.source="https://github.com/erwinkn/coffre" \
       org.opencontainers.image.licenses="MIT"
-# nonroot, by number, as Kubernetes' runAsNonRoot needs.
+# nonroot, by number, as Kubernetes' runAsNonRoot needs. The base works
+# in its home, which only 65532 may open: from /, a cluster that runs the
+# image as a user of its own can still look for a coffre.json there.
 USER 65532:65532
+WORKDIR /
 ENTRYPOINT ["coffre"]

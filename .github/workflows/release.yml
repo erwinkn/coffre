@@ -134,8 +134,13 @@ jobs:
           done
           [[ -n "$integrity" ]] || { echo "::error::npm has no @coffre/cli@$VERSION"; exit 1; }
           mkdir "$RUNNER_TEMP/context"
-          npm pack "@coffre/cli@$VERSION" --pack-destination "$RUNNER_TEMP/context"
           tarball="$RUNNER_TEMP/context/coffre-cli-$VERSION.tgz"
+          # Its tarball, too, may be served a moment after its document.
+          for _ in $(seq 30); do
+            npm pack "@coffre/cli@$VERSION" --pack-destination "$RUNNER_TEMP/context" && break
+            sleep 10
+          done
+          [[ -f "$tarball" ]] || { echo "::error::npm serves no tarball of @coffre/cli@$VERSION"; exit 1; }
           actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
           [[ "$actual" == "$integrity" ]] || { echo "::error::the tarball is $actual, npm's integrity $integrity"; exit 1; }
           mv "$tarball" "$RUNNER_TEMP/context/coffre-cli.tgz"
