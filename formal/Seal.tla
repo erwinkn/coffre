@@ -105,12 +105,14 @@
 (* honest entry of a window is never stamped before the barrier that       *)
 (* closed the window below it: the deadline and its floor, HotPathOneClock,*)
 (* abstracted here to "at the commit"). Uses go by day of `at`: a day is a *)
-(* partition, dropped whole, the uses stamped before a cut pair's barrier, *)
-(* whatever their numbers; those stamped at its instant, numbered below    *)
-(* it, are the next day's stragglers. One retention run:                   *)
-(*   choose   a cut: a pair the signer signed, both rows in the database,  *)
-(*            on its history, at or below its head; only a signer that     *)
-(*            keeps its memory retains (its pair bounds freshness);        *)
+(* partition, dropped whole: the uses stamped before its end, whatever    *)
+(* their numbers; those stamped after, numbered below its cut, are the     *)
+(* next day's stragglers. Each note also carries `prev`, the time of the   *)
+(* pair the signer signed before it. One retention run:                    *)
+(*   choose   a day's end, and its cut: the first row of the database past *)
+(*            it, a pair the signer signed, on its history, at or below    *)
+(*            its head; only a signer that keeps its memory retains (its   *)
+(*            pair bounds freshness);                                      *)
 (*   entry    the retention change, naming the cut, appended (RetAppend);  *)
 (*   drop     the day's uses partition dropped, and the uses tree's tiles  *)
 (*            below the cut, one tile per level kept (an abstraction: the  *)
@@ -135,6 +137,10 @@
 (*   FreshBeforeDrop   the day goes only once the pair that sealed the     *)
 (*                     retention change is Fresh past the cut: every copy  *)
 (*                     of a dropped use is then too old for the signer;    *)
+(*   CutFirst          the cut is the first pair past the day's end by its *)
+(*                     own signed `prev`, not the first row the database   *)
+(*                     still holds: a writer who deletes rows would push   *)
+(*                     the cut later, and every use between unwalked;      *)
 (*   CutSealed         the verifier honours a retention change only once   *)
 (*                     sealed in the changes tree, never one the database  *)
 (*                     merely holds;                                       *)
@@ -157,7 +163,7 @@ CONSTANTS
     RetAppend,    \* the retention change, one of Changes when Retention is on
     MaxTime,      \* clock steps in a behaviour (each at a barrier)
     Fresh,        \* FRESH_MS, in clock steps
-    FreshChecked, DropAfterSeal, FreshBeforeDrop, CutSealed, CutUsesOnly, KeepCutTiles
+    FreshChecked, DropAfterSeal, FreshBeforeDrop, CutFirst, CutSealed, CutUsesOnly, KeepCutTiles
 
 ASSUME Changes \subseteq Appends
 ASSUME Retention => RetAppend \in Changes
@@ -165,11 +171,12 @@ ASSUME Retention => RetAppend \in Changes
 Kinds == {"c", "u"}                          \* the changes tree and the uses tree, and an entry's kind
 Other(t) == IF t = "c" THEN "u" ELSE "c"
 KindOf(x) == IF x \in Changes THEN "c" ELSE "u"
-\* A note: its upto, its leaves, and the time of the barrier it was sealed at (both notes of a pair carry it).
-GenesisNote == [upto |-> 0, leaves |-> {}, at |-> 0]
+\* A note: its upto, its leaves, the time of the barrier it was sealed at, and that of the pair signed before it (both
+\* notes of a pair carry them).
+GenesisNote == [upto |-> 0, leaves |-> {}, at |-> 0, prev |-> 0]
 Genesis == [t \in Kinds |-> GenesisNote]      \* a pair: a note per tree
 \* A pair's row (or note, as a witness or reader holds it) for one tree.
-Row(h, t) == [t |-> t, upto |-> h[t].upto, leaves |-> h[t].leaves, at |-> h[t].at]
+Row(h, t) == [t |-> t, upto |-> h[t].upto, leaves |-> h[t].leaves, at |-> h[t].at, prev |-> h[t].prev]
 GenesisRows == {Row(Genesis, t) : t \in Kinds}
 Forged == "forged"                           \* the request ID of an entry the attacker made up
 
@@ -179,7 +186,7 @@ VARIABLES
     a,         \* each append: pc and number
     db,        \* the committed entries: [n, rid, kind, ok, at, cut], ok = its MAC holds; numbers may repeat; cut, the
                \* upto a retention change names (0 for any other entry)
-    cps,       \* the database's checkpoint rows, [t, upto, leaves, at] (a set: one per tree and upto, the primary key)
+    cps,       \* the database's checkpoint rows, [t, upto, leaves, at, prev] (a set: one per tree and upto, the primary key)
     cp,        \* the signer: pc, the upto and time it read, its pair in memory, the pair it is sealing, the steps left
     memory,    \* SignerMemory: the newest pair the signer remembers, outside the database
     queued,    \* the pair waiting to be published to the witness: [on, head]
@@ -198,7 +205,8 @@ VARIABLES
     late,      \* ghost: an honest entry committed at a number a signed pair already covered
     settling,  \* ghost: the attacker acted, and the signer has not ticked, written, published or restarted since
     now,       \* the clock
-    rt,        \* the retention run: pc ("idle", "entry", "done") and the cut pair it chose
+    rt,        \* the retention run: pc ("idle", "entry", "done"), the day's end, the cut pair it chose, and (a ghost) the
+               \* upto of the first pair the signer signed past the day's end
     tilesGone, \* the tiles at the cut were dropped with the rest below it
     dropped,   \* ghost: the entries retention dropped
     resealed   \* ghost: a pair was signed over an entry with the request ID of one retention dropped
@@ -217,7 +225,7 @@ NewestAny == CHOOSE r \in cps : \A s \in cps : s.upto <= r.upto                 
 \* The entries of kind t the database holds above `from` and up to `upto`.
 Window(t, from, upto) == {e \in db : e.kind = t /\ from < e.n /\ e.n <= upto}
 \* The pair h sealed up to `upto`, at the barrier's time `at`: each tree takes the entries of its kind above its note.
-Sealed(h, upto, at) == [t \in Kinds |-> [upto |-> upto, leaves |-> h[t].leaves \cup Window(t, h[t].upto, upto), at |-> at]]
+Sealed(h, upto, at) == [t \in Kinds |-> [upto |-> upto, leaves |-> h[t].leaves \cup Window(t, h[t].upto, upto), at |-> at, prev |-> h[t].at]]
 
 Init ==
     /\ seq = 0
@@ -233,7 +241,7 @@ Init ==
     /\ refused = FALSE /\ macAlarm = FALSE /\ witnessRefused = FALSE /\ rowAlarm = FALSE /\ staleAlarm = FALSE
     /\ signed = {Genesis} /\ shown = GenesisRows
     /\ committed = {} /\ answered = {} /\ forgerySealed = FALSE /\ late = FALSE /\ settling = FALSE
-    /\ now = 0 /\ rt = [pc |-> "idle", cut |-> Genesis] /\ tilesGone = FALSE /\ dropped = {} /\ resealed = FALSE
+    /\ now = 0 /\ rt = [pc |-> "idle", end |-> 0, cut |-> Genesis, first |-> 0] /\ tilesGone = FALSE /\ dropped = {} /\ resealed = FALSE
 
 Outside == <<memory, queued, witness, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
 Ghosts == <<signed, shown, committed, answered, forgerySealed, late, settling>>
@@ -412,12 +420,12 @@ OpenTree(t) ==
          IF SignerMemory /\ m # GenesisNote THEN Refuse
          ELSE [ok |-> TRUE, note |-> GenesisNote, rows |-> {Row(Genesis, t)}]
     ELSE LET r == NewestOf(t)
-             d == [upto |-> r.upto, leaves |-> r.leaves, at |-> r.at]
+             d == [upto |-> r.upto, leaves |-> r.leaves, at |-> r.at, prev |-> r.prev]
          IN IF ~SignerMemory
             THEN [ok |-> TRUE, note |-> d, rows |-> {}]
             ELSE IF m.upto > d.upto
             THEN IF d.leaves \cup Window(t, d.upto, m.upto) = m.leaves
-                 THEN [ok |-> TRUE, note |-> m, rows |-> {[t |-> t, upto |-> m.upto, leaves |-> m.leaves, at |-> m.at]}]
+                 THEN [ok |-> TRUE, note |-> m, rows |-> {[t |-> t, upto |-> m.upto, leaves |-> m.leaves, at |-> m.at, prev |-> m.prev]}]
                  ELSE Refuse
             ELSE IF m = d \/ (m.upto < d.upto /\ Prefix(m, d))
             THEN [ok |-> TRUE, note |-> d, rows |-> {}]
@@ -483,30 +491,36 @@ Resurrect == \E d \in dropped, n \in 1..seq : Attack(db \cup {[d EXCEPT !.n = n]
 -----------------------------------------------------------------------------
 (* Retention: one run (plan PR 7). *)
 
-\* The cut: a pair the signer signed whose two rows the database holds, on the signer's history in both trees (a
-\* consistency proof to its head), at or below it. Only a running signer that keeps its memory retains: the freshness
-\* bound is the pair it holds, which without its memory a restart takes from the database's rows.
+\* The upto of the first pair the signer signed at or past `end` (a ghost: the cut an honest run takes).
+FirstPast(end) == LET past == {h \in signed : h.c.at >= end} IN (CHOOSE h \in past : \A g \in past : h.c.upto <= g.c.upto).c.upto
+
+\* A day's end, and its cut: the first row of the database past it (`cutAt`), a pair the signer signed whose two rows
+\* the database holds, on the signer's history in both trees (a consistency proof to its head), at or below it; with
+\* CutFirst, also the first past it by its own signed `prev`. Only a running signer that keeps its memory retains: the
+\* freshness bound is the pair it holds, which without its memory a restart takes from the database's rows.
 RetainChoose ==
     /\ Retention /\ rt.pc = "idle" /\ SignerMemory
     /\ cp.pc \notin {"down", "refused"}
-    /\ \E h \in signed :
+    /\ \E end \in 1..MaxTime, h \in signed :
         /\ Row(h, "c") \in cps /\ Row(h, "u") \in cps
+        /\ h.u.at >= end /\ \A r \in cps : r.at >= end => r.upto >= h.u.upto
+        /\ CutFirst => h.u.prev < end
         /\ 0 < h.u.upto
         /\ Prefix(h.c, cp.head.c) /\ Prefix(h.u, cp.head.u)
-        /\ rt' = [pc |-> "entry", cut |-> h]
+        /\ rt' = [pc |-> "entry", end |-> end, cut |-> h, first |-> FirstPast(end)]
     /\ UNCHANGED <<seq, shared, a, db, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside /\ UNCHANGED Ghosts
     /\ UNCHANGED <<now, tilesGone, dropped, resealed>>
 
 \* Once the retention change is sealed in the signer's pair (DropAfterSeal; without, once committed), and (FreshBeforeDrop)
-\* that pair is Fresh past the cut: the day's partition goes, every use stamped before the cut's barrier whatever its
-\* number (or, without CutUsesOnly, every entry, as one tree of both kinds would), and the uses tree's tiles below the
-\* cut, those holding it kept or not.
+\* that pair is Fresh past the cut: the day's partition goes, every use stamped before its end whatever its number (or,
+\* without CutUsesOnly, every entry, as one tree of both kinds would), and the uses tree's tiles below the cut, those
+\* holding it kept or not.
 RetainDrop ==
     /\ rt.pc = "entry"
     /\ cp.pc \notin {"down", "refused"}
     /\ IF DropAfterSeal THEN Holds(cp.head.c, RetAppend) ELSE a[RetAppend].pc \in {"committed", "answered"}
     /\ FreshBeforeDrop => cp.head.c.at >= rt.cut.c.at + Fresh
-    /\ LET day == {e \in db : e.at < rt.cut.c.at /\ (CutUsesOnly => e.kind = "u")} IN
+    /\ LET day == {e \in db : e.at < rt.end /\ (CutUsesOnly => e.kind = "u")} IN
        /\ db' = db \ day
        /\ dropped' = dropped \cup day
     /\ tilesGone' = ~KeepCutTiles
@@ -564,8 +578,9 @@ Alarm ==
 Complete ==
     ~late
 
-\* The cut the honest retention change names, once committed (0: none): the uses at or below it are retention's to drop.
-RetainedUpto == IF \E e \in committed : e.rid = RetAppend THEN (CHOOSE e \in committed : e.rid = RetAppend).cut ELSE 0
+\* Once the retention change is committed, the first pair past its day's end (0: none): the uses at or below it are
+\* retention's to drop, the day's and its stragglers. Whatever cut the change names, never a later one.
+RetainedUpto == IF \E e \in committed : e.rid = RetAppend THEN rt.first ELSE 0
 \* What is kept for good, or until a later cut: every change, and every use above the cut.
 Kept(e) == ~(e.kind = "u" /\ e.n <= RetainedUpto)
 

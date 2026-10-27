@@ -205,9 +205,11 @@ async function walk(
   let cutMet = ahead === null;
   const walkEntries = (entries: readonly LogEntry[]) => {
     for (const e of entries) {
-      if (e.tree === 'changes' && retained !== null && e.number >= retained.entry.number && opts.cut!(e) !== null) {
-        if (e.number > retained.entry.number) problems.push(`${e.number}: a retention change newer than the newest the database names (${retained.entry.number})`);
-        else if (!sameEntry(e, retained.entry)) problems.push(`${e.number}: not the retention change the database names at its number`);
+      // The retention change the walk starts the uses tree from, met on the way. A newer one is not looked for: it can be
+      // appended, or sealed, while the walk runs, and an older cut only makes the walk cover more uses. (A day dropped
+      // below a newer cut while the walk still reads those uses shows as uses gone: walk again.)
+      if (e.tree === 'changes' && retained !== null && e.number === retained.entry.number) {
+        if (!sameEntry(e, retained.entry)) problems.push(`${e.number}: not the retention change the database names at its number`);
         else retainedMet = true;
       }
       if (e.number <= previous) problems.push(`${e.number}: numbered at or below the entry before (${previous}): two entries with one number, or out of order`);

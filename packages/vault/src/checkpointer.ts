@@ -473,8 +473,9 @@ export class Checkpointer {
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
-    // The pair carries the floor this barrier left; the signer reads from it once the pair is written.
-    const next = await signPair(this.signers, upto, at, heads, floor.set);
+    // The pair carries the floor this barrier left, which the signer reads from once the pair is written, and the floor
+    // of the pair before it: so the pair's own note says whether it is the first past a time (retention's cut).
+    const next = await signPair(this.signers, upto, at, heads, floor.set, pair.floor);
     this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.

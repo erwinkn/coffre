@@ -75,7 +75,7 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- The uses tree's tiles below a cut (W212): every tile whose leaves all lie below p_below, the cut's uses size, at most log_cut()'s, at every level; the tile that holds the cut, at each level, stays, and so does every proof of a leaf at or above it and every consistency proof from a size at or above it. The leaf tiles go a range at a time (make_tiles's partitions, those wholly below), detached then dropped, a step a call as drop_day's, the tiles above in one DELETE. Only the checkpointer and proofs read tiles. Answers what it did: 'detached <range>', 'dropped <range>', or 'done <rows deleted>'.
+-- The uses tree's tiles below a cut (W212): every tile whose leaves all lie below p_below, the cut's uses size, at most log_cut()'s, at every level; the tile that holds the cut, at each level, stays, and so does every proof of a leaf at or above it and every consistency proof from a size at or above it. The leaf tiles go a range at a time (make_tiles's partitions, those wholly below), detached then dropped, a step a call, the tiles above in one DELETE. Unlike a day's, a range is dropped right after its DETACH: no use's plan reads log_tiles, only the checkpointer's own statements and proofs, so no replan stalls a use. Answers what it did: 'detached <range>', 'dropped <range>', or 'done <rows deleted>'.
 CREATE FUNCTION drop_tiles(p_below bigint) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '1s' AS $$
 DECLARE

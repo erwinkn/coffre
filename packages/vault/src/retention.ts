@@ -14,8 +14,10 @@ import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPay
  *    use of the day took its number at or below it (a use's `at` is held to
  *    the floor), so all of them lie below the cut; a few of the next day's
  *    do too (stragglers), and stay until their own day goes. The cut must be
- *    a pair the signer signed, on its history (a consistency proof to its
- *    head in both trees), at or below its head.
+ *    a pair the signer signed, the first past the day's end by its own note
+ *    (its `prev`, the floor of the pair signed before it, below the end:
+ *    CutFirst), on its history (a consistency proof to its head in both
+ *    trees), at or below its head.
  * 2. The retention change naming it, unless the newest sealed one already
  *    cuts at or past it (a quiet day, or a retry): appended, and sealed in
  *    the signer's pair (DropAfterSeal; else the verifier, walking the uses
@@ -114,21 +116,28 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   const end = Date.parse(`${day}T00:00:00Z`) + DAY_MS;
   const head = cp.pair.pair;
   if (head.floor < end) return `the signer's newest pair (up to ${head.upto}) is not past the day's end yet`;
-  // 1. The cut: a pair of this log, on the signer's history, at or below its head.
+  // 1. The cut: a pair of this log at or below the signer's, the first it signed past the day's end by its own note (its
+  // floor at or past the end, the floor before it below: CutFirst). The rows say which pair that is, and a writer who
+  // deletes some, or edits their floors, would make a later one pass for it, and every use between go unwalked.
   const row = await store.cutAt(end);
   const cut = row === null ? null : await openPair(row.notes, cp.verifiers);
-  if (row === null || cut === null || cut.upto !== row.upto || cut.floor < end || cut.upto > head.upto) {
-    throw new Error(`retention of ${day}: no pair of this log at or below the signer's (up to ${head.upto}) is past the day's end: checkpoints were deleted or replaced`);
+  if (row === null || cut === null || cut.upto !== row.upto || cut.floor < end || cut.prev >= end || cut.upto > head.upto) {
+    throw new Error(`retention of ${day}: the database holds no pair of this log, at or below the signer's (up to ${head.upto}), that is the first past the day's end: checkpoints were deleted or replaced`);
   }
-  for (const tree of TREES) {
-    if (cut[tree].size === head[tree].size && cut.upto === head.upto) continue;
-    const proof = cut[tree].size > head[tree].size ? null : await proveConsistency(store, tree, cut[tree].size, head[tree].size).catch(() => null);
-    if (proof === null || !verifyConsistency(cut[tree].size, head[tree].size, cut[tree].root, head[tree].root, proof)) {
-      throw new Error(`retention of ${day}: the cut's ${tree} head (up to ${cut.upto}) is not on the signer's history`);
+  // On the signer's history, by a consistency proof to its head; unless the newest sealed cut is at or past it (a day a
+  // change already cut, or one waiting to be dropped): that cut was proved when it was sealed, and the tiles below it,
+  // which a proof from this one would read, may be gone.
+  const sealed = await sealedCut(cp, store);
+  if (sealed === null || sealed.upto < cut.upto) {
+    for (const tree of TREES) {
+      if (cut[tree].size === head[tree].size && cut.upto === head.upto) continue;
+      const proof = cut[tree].size > head[tree].size ? null : await proveConsistency(store, tree, cut[tree].size, head[tree].size).catch(() => null);
+      if (proof === null || !verifyConsistency(cut[tree].size, head[tree].size, cut[tree].root, head[tree].root, proof)) {
+        throw new Error(`retention of ${day}: the cut's ${tree} head (up to ${cut.upto}) is not on the signer's history`);
+      }
     }
   }
   // 2. The retention change, unless the newest sealed one cuts at or past this day's.
-  const sealed = await sealedCut(cp, store);
   let change: bigint | null = null;
   let freshAt = head.at;
   if (sealed === null || sealed.upto < cut.upto) {

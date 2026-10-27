@@ -1261,10 +1261,12 @@ one `upto` by each tick, as one pair.
 **Retention (plan PR 7, W229; `SealRetention`, `SealRetentionCrash`).** A
 day of uses is dropped below a cut that a sealed retention change names; the
 changes tree is never cut. The model adds a clock that each barrier moves on a
-step or not, an `at` on every entry and note, one retention run (choose a cut
-on the signer's history, append the change, drop the day's partition and the
-uses tree's tiles below the cut), and two attacker moves: a retention change
-made up, and a dropped use put back. The verifier walks the changes tree from
+step or not, an `at` on every entry and note and, on each note, the time of
+the pair signed before it (`prev`, the code's floor of that pair), one
+retention run (choose a day's end and its cut, the first row past it on the
+signer's history; append the change; drop the day's partition and the uses
+tree's tiles below the cut), and two attacker moves: a retention change made
+up, and a dropped use put back. The verifier walks the changes tree from
 genesis and the uses tree from the newest honoured cut.
 
 | protection | turned off, TLC finds |
@@ -1272,12 +1274,14 @@ genesis and the uses tree from the newest honoured cut.
 | the signer seals nothing stamped `Fresh` before its pair (FreshChecked: `FRESH_MS`) | `DroppedNeverResealed`: a dropped use put back is sealed again |
 | the day goes only once the retention change is sealed (DropAfterSeal) | `NoFalseAlarm`: the verifier, walking the uses from genesis, finds them gone |
 | ... and once the pair that sealed it is `Fresh` past the cut (FreshBeforeDrop) | `DroppedNeverResealed` |
+| the cut is the first pair past the day's end by its own signed `prev`, not the first row the database still holds (CutFirst) | `KeptNotLost`: a writer deletes the first pair's rows, the cut lands later, and a kept use between is deleted unseen (review r2) |
 | the verifier honours only a sealed retention change (CutSealed) | `KeptNotLost`: a change made up names a later cut, and a sealed use below it is deleted unseen |
 | a cut drops uses alone (CutUsesOnly) | `ChangesUntouched`, `NoFalseAlarm` |
 | the tiles holding the cut are kept, one per level (KeepCutTiles) | `NoFalseAlarm`: the uses tree has no start |
 
 `KeptNotLost` is `SealedDeletionDetected` less what retention drops: every
-change, and every use above the cut. `NoUndetectedReplay` holds for replays
+change, and every use above the first pair the signer signed past the day's
+end, whatever cut the change names. `NoUndetectedReplay` holds for replays
 whose entries are both kept. The protections of `Seal.cfg` stay on, and
 `SealRetentionCrash` checks the same across a signer crash, with one
 attacker step.
@@ -1385,8 +1389,8 @@ shortest one.
 
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
-tests do; skipped, seconds. With 0.15's models the suite is 265 TLC runs in
-eleven shards; the eight new ones are 0.15's. On a shared host with 4 workers,
+tests do; skipped, seconds. With 0.15's models the suite is 266 TLC runs in
+ten shards; the seven new ones are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
 shards 10.9 (5.8 and 5.5 here).
@@ -1399,8 +1403,7 @@ shards 10.9 (5.8 and 5.5 here).
 | hotpath-skew | 5.4 min | 29 min | 11.0 min (measured) |
 | seal | 4.9 min | 23 min | about 10 min (estimated) |
 | seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
-| seal-retention | 5.5 min | not measured | about 11 min (estimated) |
-| seal-retention-crash | 2.6 min | not measured | about 5 min (estimated) |
+| seal-retention | 3.9 min | not measured | about 8 min (estimated) |
 
 Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
@@ -1427,24 +1430,24 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is eleven jobs in parallel.** `scripts/formal.sh --shard
+- **A run is ten jobs in parallel.** `scripts/formal.sh --shard
   <name>` runs the scenarios of one
   (`shard_of`), each with its runs without a protection, balanced by what
   they took:
   - Tampering's 7 to 11 minutes (17.5 million states) alone;
   - Overtaking, Walking, Sharing, Rows and Mixed together;
-  - 0.15's models in eight:
+  - 0.15's models in seven:
     - `hotpath`;
     - `hotpath-policy` (the policy, liveness and stale-bulk scenarios);
     - `hotpath-bulk` (the bulk cap's main scenario);
     - `hotpath-skew` (its slack and clock-skew scenarios);
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin and SealCore);
-    - `seal-retention` and `seal-retention-crash` (a retention scenario each);
+    - `seal-retention` (SealRetention and SealRetentionCrash);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints
-  what a run would run, without TLC; a test holds the eleven to a partition
+  what a run would run, without TLC; a test holds the ten to a partition
   of it. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
   default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g

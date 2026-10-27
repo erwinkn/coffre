@@ -274,6 +274,85 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   assert.equal(r.waiting, null);
 });
 
+/**
+ * The store with the first barriers' floors given, as days past would have left them: the signer signs them as it
+ * signs any floor, and reads each window from them. After the last, the database's own floor again.
+ */
+function pastFloors(store: LogStore, floors: number[]): LogStore {
+  let last: number | null = null;
+  return Object.assign(Object.create(store) as LogStore, {
+    close: async (after: bigint, from: number) => {
+      const real = await store.close(after, from);
+      const set = floors.shift();
+      const floor = set !== undefined ? { found: last ?? real.floor.found, set } : { found: last ?? real.floor.found, set: real.floor.set };
+      last = set ?? null;
+      return { ...real, floor };
+    },
+  });
+}
+
+test('review r2: two days due at once, each cut its own: a catch-up drops both, though the tiles below the newer cut went first', async () => {
+  const alerts: string[] = [];
+  const store = pastFloors(logStore(db.vault, { tileRange: RANGE }), [MIDNIGHT - 3_600_000, MIDNIGHT + 10_000, MIDNIGHT + DAY_MS - 3_600_000]);
+  const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH });
+  // D10 sealed below a floor before its end; D9 in two pairs, the first of them past D10's end; then today, past D9's.
+  for (let i = 0; i < 300; i += 1) await log.use(MIDNIGHT - 3_000_000 + i * 1000);
+  assert.ok((await cp.tick()).signed);
+  for (let i = 0; i < 300; i += 1) await log.use(MIDNIGHT + 3_600_000 + i * 1000);
+  assert.ok((await cp.tick()).signed);
+  for (let i = 0; i < 300; i += 1) await log.use(MIDNIGHT + 7_200_000 + i * 1000);
+  assert.ok((await cp.tick()).signed);
+  for (let i = 0; i < 20; i += 1) await log.use();
+  await log.change();
+  assert.ok((await cp.tick()).signed);
+  const [d10, d9] = [(await store.cutAt(MIDNIGHT))!, (await store.cutAt(MIDNIGHT + DAY_MS))!];
+  assert.ok(d10.upto < d9.upto, 'two cuts');
+  await later(cp);
+  // One run: both days cut and detached, and the tiles below D9's cut dropped, D10's among them.
+  const first = await retain(cp, store, { keepDays: 1, macKey });
+  assert.equal(first.waiting, null);
+  assert.deepEqual(first.dropped.map((d) => d.day), [D10, D9]);
+  assert.ok(first.dropped.every((d) => d.change !== null), 'a change each');
+  assert.ok(first.tiles > 0);
+  // The next: D10, below the newer cut, is not proved again from tiles that are gone; both go.
+  const next = await retain(cp, store, { keepDays: 1, macKey });
+  assert.equal(next.waiting, null);
+  for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
+  const v = await verify(store);
+  assert.ok(v.ok, v.problems.join('\n'));
+  assert.deepEqual(alerts, []);
+});
+
+test('review r2: rows deleted to push the cut later are refused: the cut is the first pair past the day by its own note', async () => {
+  const { cp, store } = await open();
+  await midnight(cp);
+  await later(cp);
+  // The first pair past D10's end and D9's, deleted: the first row past it is now a later pair, whose note says another
+  // came before it past the end.
+  const first = (await store.cutAt(MIDNIGHT))!;
+  await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${first.upto}`);
+  await assert.rejects(retain(cp, store, { keepDays: 1, macKey }), /no pair of this log, at or below the signer's \(up to \d+\), that is the first past the day's end/);
+  assert.equal((await store.retention()), null, 'no retention change');
+});
+
+test('review r2: a day that waits on the same lock for a day is an alarm', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+  const { cp, store } = await open();
+  await midnight(cp);
+  await later(cp);
+  const held: LogStore = Object.assign(Object.create(store) as LogStore, { dropDay: async () => Promise.reject(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })) });
+  const alerts: string[] = [];
+  let t = Date.now();
+  const keep = upkeep(cp, held, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
+  await keep();
+  t += DAY_MS - 3_600_000;
+  await keep();
+  assert.deepEqual(alerts, [], 'waiting under a day: no alarm');
+  t += 3_600_000;
+  await keep();
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0]!, new RegExp(`retention has waited on ${D10} since .*a reader holds the table past the lock timeout`));
+});
+
 test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its window no longer counts', async () => {
   const { cp, store } = await open();
   // The policy's window, as the change path logs it: 15 minutes.

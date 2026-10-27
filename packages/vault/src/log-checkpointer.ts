@@ -56,11 +56,18 @@ export const RETAIN_EVERY_MS = 3_600_000;
 export const PRUNE_EVERY_MS = 60_000;
 const PRUNED = 10_000;
 
+/** How long one day may wait on the same thing (a reader holding the uses, say) before that is an alarm. */
+export const WAITING_ALARM_MS = DAY_MS;
+
+/** The days of uses a host makes ahead at `t`: yesterday's (a new database), today's, and `DAYS_AHEAD` more. */
+export const daysAround = (t: number) => Array.from({ length: DAYS_AHEAD + 2 }, (_, i) => dayOf(t + (i - 1) * DAY_MS));
+
 /**
  * What a host runs after each tick (plan PR 7): the next days' partitions
  * made once a day, retention once an hour when `keepDays` is set, the bulk
  * cap's old rows pruned once a minute. A failure is an alarm, said once while
- * it stands; retention waiting for the log to move on is none.
+ * it stands; retention waiting for the log to move on is none, until one day
+ * has waited longer than `WAITING_ALARM_MS`.
  */
 export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: number | null; seed: Uint8Array; now?: () => number; alert: (message: string) => void }): () => Promise<void> {
   const now = options.now ?? Date.now;
@@ -69,11 +76,13 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
   let retained = -Infinity;
   let pruned = -Infinity;
   let failed: string | null = null;
+  // The day retention waits on, and since when.
+  let waiting: { day: string; since: number } | null = null;
   return async () => {
     const t = now();
     try {
       if (madeFor !== dayOf(t)) {
-        await store.makeDays(Array.from({ length: DAYS_AHEAD + 2 }, (_, i) => dayOf(t + (i - 1) * DAY_MS)));
+        await store.makeDays(daysAround(t));
         madeFor = dayOf(t);
       }
       if (t - pruned >= PRUNE_EVERY_MS) {
@@ -82,7 +91,11 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       }
       if (options.keepDays !== null && t - retained >= RETAIN_EVERY_MS) {
         retained = t;
-        await retain(cp, store, { keepDays: options.keepDays, macKey, now });
+        const run = await retain(cp, store, { keepDays: options.keepDays, macKey, now });
+        const day = /^(\d{4}-\d{2}-\d{2}): /.exec(run.waiting ?? '')?.[1] ?? (run.waiting === null ? null : 'tiles');
+        if (day === null) waiting = null;
+        else if (waiting?.day !== day) waiting = { day, since: t };
+        else if (t - waiting.since >= WAITING_ALARM_MS) throw new Error(`retention has waited on ${day} since ${new Date(waiting.since).toISOString()}: ${run.waiting}`);
       }
       failed = null;
     } catch (error) {

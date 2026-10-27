@@ -206,7 +206,7 @@ test("tile paths are Go's", () => {
 test('a signed checkpoint opens with its key and no other, and nothing but a checkpoint parses', async () => {
   const signer = await noteSigner('coffre.example/audit/uses', Buffer.alloc(32, 7));
   const other = await noteSigner('coffre.example/audit/uses', Buffer.alloc(32, 8));
-  const body = checkpointBody({ origin: 'coffre.example/audit/uses', size: 3, root: Buffer.alloc(32, 1), upto: 42n, at: 1, floor: 0 });
+  const body = checkpointBody({ origin: 'coffre.example/audit/uses', size: 3, root: Buffer.alloc(32, 1), upto: 42n, at: 1, floor: 0, prev: 0 });
   const note = await signNote(body, [signer]);
   const verifier = await noteVerifier(signer.verifierKey);
   assert.equal(await openNote(note, verifier), body);
@@ -222,6 +222,8 @@ test('a signed checkpoint opens with its key and no other, and nothing but a che
     body.replace('\n3\n', '\n-3\n'),
     body.replace('floor 0', 'floor -1'),
     body.replace('floor 0\n', ''),
+    body.replace('prev 0\n', ''),
+    body.replace('prev 0', 'prev 00'),
     `${body}extra\n`,
     body.slice(0, -1),
     body.replace(/^.*\n/, 'has space\n'),

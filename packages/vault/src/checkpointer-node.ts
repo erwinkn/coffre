@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import type { Database } from '@coffre/db';
 
 import type { Alarm, Checkpointer, Memory, SealThrough, Witness } from './checkpointer.ts';
-import { openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
+import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 
 /**
@@ -70,6 +70,8 @@ export async function runCheckpointer(options: {
   const alarmsPath = `${options.memory}.alarms`;
   let appending: Promise<void> = Promise.resolve();
   const store = logStore(options.database, { tileRange: options.tileRange });
+  // The next days of uses first: a use needs its day's partition even if the checkpointer then refuses to open.
+  await store.makeDays(daysAround(Date.now()));
   const checkpointer = await openLogCheckpointer({
     store,
     seed: options.seed,
