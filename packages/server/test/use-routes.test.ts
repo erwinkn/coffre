@@ -269,12 +269,17 @@ test(`0.15: a whole environment of more keys than a request has uses in flight (
   assert.equal((await usesLogged()).length, Object.keys(many).length);
 });
 
-test('0.15: past its uses in flight, the isolate refuses a read at once, 503 with Retry-After, and logs nothing', async () => {
+test('0.15: past its uses in flight, the isolate refuses a read at once, by the API and the proxy, 503 with the vault\'s Retry-After, and logs nothing', async () => {
   await instance('0.15', 0);
   const { token } = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const refused = await send(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/dev/API_KEY' }) }));
   assert.equal(refused.status, 503, await refused.clone().text());
   assert.equal(refused.headers.get('retry-after'), '1', "the vault's own: an isolate's calls in flight free up in a moment");
+  // The same through the credential proxy, coffre's own refusal, the vault's Retry-After with it.
+  const { handle } = await handleFor(DEV);
+  const used = await send(new Request(`${ORIGIN}/use/market/dev/api/thing`, { headers: { 'x-api-key': handle } }));
+  assert.equal(used.status, 503, await used.clone().text());
+  assert.deepEqual([used.headers.get('coffre-proxy'), used.headers.get('retry-after')], ['refused', '1']);
   assert.deepEqual(await usesLogged(), []);
 });
 

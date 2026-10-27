@@ -370,7 +370,7 @@ Each CI run holds an ID token, good for one credential.
   4. the credential checked again with no lock (`credentialStill`), as
      after 0.14's unwrap;
   5. the value answered.
-
+- **Ending one:**
   - revoking it (`revokeCredential`);
   - untrusting its binding or replacing the issuer's keys (`unbind`,
     `replaceKeys`, `#revoke`);

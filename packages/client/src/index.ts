@@ -92,13 +92,16 @@ export class CoffreError extends Error {
   readonly code: string;
   /** The vault's own code when it refused: `no_grant`, `removed`, `bulk_limit`, ... */
   readonly reason: string | undefined;
+  /** For a 503 that says, when to ask again, in seconds (`Retry-After`): a busy 0.15 use's, in process. */
+  readonly retryAfter: string | undefined;
 
-  constructor(status: number, code: string, message: string, reason?: string) {
+  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string) {
     super(message);
     this.name = 'CoffreError';
     this.status = status;
     this.code = code;
     this.reason = reason;
+    this.retryAfter = retryAfter;
   }
 }
 

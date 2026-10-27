@@ -401,7 +401,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
         try {
           return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
-          if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
+          if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
         }
       },
@@ -409,7 +409,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
         try {
           return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
-          if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
+          if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
         }
       },
@@ -808,7 +808,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
     opened = await valuesFor(coffre, proxy, caller, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
-    return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
+    return nonced(failure(error.status, error.message, error.reason ?? error.code, error.retryAfter), caller);
   }
   const db = dialled(proxy, path, name, tunnel, opened.values[tunnel.key]!);
   if (db instanceof Response) return nonced(db, caller);
@@ -1342,7 +1342,7 @@ async function answering(caller: WorkloadUse, work: () => Promise<Response>): Pr
     return nonced(await work(), caller);
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
-    return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
+    return nonced(failure(error.status, error.message, error.reason ?? error.code, error.retryAfter), caller);
   }
 }
 
@@ -2159,13 +2159,13 @@ function answer(body: unknown): Response {
 }
 
 /** coffre's own refusal, told apart from the upstream's by its header. */
-function failure(status: number, message: string, reason?: string): Response {
+function failure(status: number, message: string, reason?: string, retryAfter?: string): Response {
   return new Response(JSON.stringify({ error: 'credential_proxy', message, ...(reason === undefined ? {} : { reason }) }), {
     status,
     headers: {
       'content-type': 'application/json', 'cache-control': 'no-store', 'coffre-proxy': 'refused',
       // coffre could not answer for a moment (`errorResponse`): the app's client hears when to ask again.
-      ...(status === 503 && reason === 'unavailable' ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
+      ...(status === 503 && reason === 'unavailable' ? { 'retry-after': retryAfter ?? UNAVAILABLE_RETRY_AFTER } : {}),
     },
   });
 }

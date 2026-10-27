@@ -159,8 +159,9 @@ export const USES_AT_ONCE = 4;
 /**
  * 0.15's read (docs/design/0.15-plan.md, PR 5b): one use per value, each
  * `use_credential` call logged as its request and decided on the rows as
- * the call reads them (R53). What it opens is the vault's: the version it
- * read and its envelope, which the app's earlier read may be older than.
+ * the call reads them (R53). What goes back is the version the app read,
+ * opened from the use's envelope: a use that read another answers 409, so
+ * that the rest of the answer (its version, its natures) is of the same.
  * All or nothing: the first refusal refuses the request, and no value of
  * it goes back. A use the vault could not decide (late, over its isolate's
  * calls in flight) answers 503 with `Retry-After` (R44).
