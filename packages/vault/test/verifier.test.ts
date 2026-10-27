@@ -117,16 +117,7 @@ async function instance(walks: VaultOptions['walks'] = {}) {
   /** A use of `secretId` on Ada's session, now. */
   const use = async (secretId = secret): Promise<UseOutcome> => {
     const at = Date.now();
-    const outcome = await vault.use({ credential, secretId, place: null, purpose: 'run', requestId: newRequestId(), at, deadline: at + 3000 });
-    // T128: the use path MACs its entry under a key of its own, the checkpointer and the verifier under the log's.
-    // Until W227 gives both one key, the test MACs each use as the checkpointer checks it.
-    if ('number' in outcome && outcome.number !== null) {
-      const [row] = await rows<{ at: string | number; request_id: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
-        sql`SELECT at, request_id, credential, secret, purpose, place FROM log_uses WHERE number = ${BigInt(outcome.number)}`);
-      const mac = entryMac(logMacKey(seed), { tree: 'uses', row: { at: Number(row!.at), requestId: BigInt(row!.request_id), credential: row!.credential, secret: row!.secret, purpose: Number(row!.purpose), place: row!.place } });
-      await run(db.owner, sql`UPDATE log_uses SET mac = ${mac} WHERE number = ${BigInt(outcome.number)}`);
-    }
-    return outcome;
+    return vault.use({ credential, secretId, place: null, purpose: 'run', requestId: newRequestId(), at, deadline: at + 3000 });
   };
   const verify = async (from?: string): Promise<Checked> => {
     const checked = await vault.verifyTrees!(from === undefined ? {} : { from });
