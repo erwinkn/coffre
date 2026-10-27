@@ -1296,16 +1296,19 @@ shortest one.
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
 tests do; skipped, seconds. With 0.15's models the suite is 233 TLC runs in
-seven shards; the four new ones are 0.15's. W211 timed them on a shared host with 4
-workers. A 4-core runner takes about a quarter of the CPU time, as
-Tampering's 31 CPU minutes ran in its 7 to 11:
+nine shards; the six new ones are 0.15's. On a shared host with 4 workers,
+each new one takes about 5 minutes. CI's runners took about twice as long:
+in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
+shards 10.9 (5.8 and 5.5 here).
 
-| shard | wall time, 4 workers here | CPU time | estimated on a runner |
+| shard | wall time here, 4 workers | CPU time | on CI |
 |---|---|---|---|
-| hotpath | 9.8 min | 47 min | about 12 to 17 min |
-| hotpath-bulk | 5.8 min | 31 min | about 8 to 11 min |
-| hotpath-skew | 5.4 min | 29 min | about 7 to 10 min |
-| seal | 10.4 min | 50 min | about 13 to 18 min |
+| hotpath | 4.7 min | 23 min | about 10 min (estimated) |
+| hotpath-policy | 5.3 min | 24 min | about 11 min (estimated) |
+| hotpath-bulk | 5.8 min | 31 min | 10.9 min (measured) |
+| hotpath-skew | 5.4 min | 29 min | 11.0 min (measured) |
+| seal | 4.9 min | 23 min | about 10 min (estimated) |
+| seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
 
 Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
@@ -1332,15 +1335,19 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is seven jobs in parallel.** `scripts/formal.sh --shard
-  tampering|large|rest|hotpath|hotpath-bulk|hotpath-skew|seal` runs the scenarios of one
+- **A run is nine jobs in parallel.** `scripts/formal.sh --shard
+  <name>` runs the scenarios of one
   (`shard_of`), each with its runs without a protection, balanced by what
   they took:
   - Tampering's 7 to 11 minutes (17.5 million states) alone;
   - Overtaking, Walking, Sharing, Rows and Mixed together;
-  - 0.15's models in four: `hotpath`, `hotpath-bulk` (the bulk cap's main
-    scenario), `hotpath-skew` (its slack and clock-skew scenarios), and
-    `seal` (Seal and Migration015);
+  - 0.15's models in six:
+    - `hotpath`;
+    - `hotpath-policy` (the policy, liveness and stale-bulk scenarios);
+    - `hotpath-bulk` (the bulk cap's main scenario);
+    - `hotpath-skew` (its slack and clock-skew scenarios);
+    - `seal` (Seal and Migration015);
+    - `seal-plugin` (SealPlugin and SealCore);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints

@@ -18,8 +18,9 @@
 #   scripts/formal.sh Deletion        one, and its runs without a protection
 #   scripts/formal.sh Deletion Locks  several
 #   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
-#                                     large, rest, hotpath, hotpath-bulk,
-#                                     hotpath-skew or seal
+#                                     large, rest, hotpath, hotpath-policy,
+#                                     hotpath-bulk, hotpath-skew, seal or
+#                                     seal-plugin
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
 #   scripts/formal.sh --heap 4g       TLC's JVM heap (default 1g)
 #   scripts/formal.sh --list          what would run, not running TLC
@@ -231,20 +232,23 @@ EXPECTED=(
 # CI's shards, balanced by what each scenario took on a runner (seconds,
 # `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
 # `rest`, every other scenario, about 260. 0.15's models (HotPathOne, Seal,
-# Migration015) have four of their own, by user CPU on a shared host (CI's
-# 4 cores take about a quarter of it, Tampering's 31 minutes of CPU running
-# in its 7 to 11): hotpath (34 minutes of CPU), hotpath-bulk (the bulk cap's
-# main scenario), hotpath-skew (its slack and clock-skew scenarios; the two
-# together took 62) and seal (Seal and Migration015, 50). A scenario in no case below is in `rest`.
-SHARDS="tampering large rest hotpath hotpath-bulk hotpath-skew seal"
+# Migration015) have six of their own, each about 5 minutes of TLC with 4
+# workers on a shared host, which CI's runners took about twice as long to
+# run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
+# scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
+# slack and clock-skew scenarios), seal (Seal and Migration015) and
+# seal-plugin (SealPlugin and SealCore). A scenario in no case below is in `rest`.
+SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin"
 shard_of() {
   case "$1" in
     Tampering) echo tampering ;;
     Overtaking|Walking|Sharing|Rows|Mixed) echo large ;;
     HotPathOneBulkSkew|HotPathOneBulkSlack) echo hotpath-skew ;;
     HotPathOneBulk) echo hotpath-bulk ;;
+    HotPathOneLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
-    Seal*|Migration015*) echo seal ;;
+    SealPlugin|SealCore) echo seal-plugin ;;
+    Seal|Migration015*) echo seal ;;
     *) echo rest ;;
   esac
 }
