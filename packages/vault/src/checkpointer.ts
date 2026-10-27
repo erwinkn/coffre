@@ -290,7 +290,7 @@ export class Checkpointer {
     const row = await store.newest();
     if (row === null) {
       if (mine !== null && (mine.pair.upto !== 0n || TREES.some((tree) => mine.pair[tree].size > 0))) {
-        throw new Error(`the database holds no checkpoint; the signer signed up to ${mine.pair.upto} (${sizes(mine.pair)})`);
+        throw new Error(`the database holds no checkpoint; the signer signed up to ${mine.pair.upto} (${said(mine.pair)})`);
       }
       // A new log: both trees empty at number 0, sealing nothing, so the first tick seals every entry there is. A
       // genesis already remembered (a crash before its write) is written as it was, never signed again.
@@ -317,7 +317,7 @@ export class Checkpointer {
         const tiles = appendWindow(edges, entries);
         const lost = TREES.filter((tree) => edges[tree].size !== mine.pair[tree].size || !edges[tree].root().equals(mine.pair[tree].root));
         if (lost.length > 0) {
-          throw new Error(`the database lost entries the signer sealed: up to ${mine.pair.upto} it holds ${sizes(edges)}, the signer signed ${sizes(mine.pair)}`);
+          throw new Error(`the database lost entries the signer sealed: up to ${mine.pair.upto} it holds ${said(edges)}, the signer signed ${said(mine.pair)}`);
         }
         await store.write({ upto: mine.pair.upto, notes: mine.notes }, tiles);
         head = mine;
@@ -682,6 +682,8 @@ const holds = (row: StoredPair | null, head: { pair: Pair; notes: PairNotes }) =
   row !== null && row.upto === head.pair.upto && row.notes.changes === head.notes.changes && row.notes.uses === head.notes.uses;
 
 const sizes = (heads: Record<TreeName, { size: number }>) => ({ changes: heads.changes.size, uses: heads.uses.size });
+/** Both trees' sizes as a message says them: `changes 4, uses 120`. */
+const said = (heads: Record<TreeName, { size: number }>) => `changes ${heads.changes.size}, uses ${heads.uses.size}`;
 
 /** Appends a window's entries, in number order, each to its tree: the tiles to write. */
 function appendWindow(edges: Record<TreeName, Edge>, entries: readonly LogEntry[]): Record<TreeName, Tile[]> {

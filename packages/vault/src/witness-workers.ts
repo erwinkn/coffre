@@ -12,7 +12,7 @@
 //   nothing: the verifier holds the rows to it later. Under a bucket lock
 //   rule a Worker or a database writer cannot overwrite or delete what it
 //   holds; an admin of the Cloudflare account can lift the rule (R54).
-import { encodePair, noteSigner, openPair, pairVerifiers, witnessPair, type PairNotes, type TreeName, type WitnessAnswer, type WitnessState } from '@coffre/core/merkle';
+import { decodePair, encodePair, noteSigner, openPair, pairVerifiers, witnessPair, type PairNotes, type TreeName, type WitnessAnswer, type WitnessState } from '@coffre/core/merkle';
 
 import type { Witness } from './checkpointer.ts';
 import type { ObjectNamespace, ObjectState } from './checkpointer-workers.ts';
@@ -50,16 +50,25 @@ export function witnessObject<Env>(settings: (env: Env) => WitnessSettings | Pro
       }
     }
 
+    /** Every failure answered from inside the gate, never thrown out of it, which would reset the object. */
     async #answer(p: Publication | null): Promise<Response> {
+      try {
+        return await this.#answerOr(p);
+      } catch (error) {
+        return Response.json({ ok: false, reason: `the witness failed: ${(error as Error).message}` }, { status: 500 });
+      }
+    }
+
+    async #answerOr(p: Publication | null): Promise<Response> {
       const s = await settings(this.#env);
       const log = await pairVerifiers(s.log);
       const self = await noteSigner(s.name, Buffer.from(s.key, 'base64'));
       const stored = await this.#state.storage.get<string>('pair');
-      const notes = stored === undefined ? null : JSON.parse(stored) as PairNotes;
+      const notes = stored === undefined ? null : decodePair(stored);
       const pair = notes === null ? null : await openPair(notes, log);
       // A pair held that no longer opens (the log's keys changed in its settings, a record damaged) is never forgotten
       // into a fresh witness: that would cosign whatever comes next. A new witness is a new name.
-      if (notes !== null && pair === null) return Response.json({ ok: false, reason: 'the pair this witness holds does not open under the log\'s keys: name a new witness' }, { status: 500 });
+      if (stored !== undefined && pair === null) return Response.json({ ok: false, reason: 'the pair this witness holds does not open under the log\'s keys: name a new witness' }, { status: 500 });
       const held: WitnessState = pair === null ? null : { pair, notes: notes! };
       const sizes = { changes: held?.pair.changes.size ?? 0, uses: held?.pair.uses.size ?? 0 };
       if (p === null) return Response.json({ held: sizes });
@@ -85,8 +94,15 @@ export function durableWitness(namespace: ObjectNamespace, options: { name?: str
       const object = namespace.get(namespace.idFromName(name));
       for (let tries = 0; tries < 2; tries += 1) {
         if (held === null) {
+          // The sizes it holds, or why it answers none: a witness that refuses (one whose pair no longer opens says to
+          // name a new one) is a failed try with its reason, and nothing is cached.
           const response = await object.fetch(new Request('https://witness/', { method: 'GET', signal }));
-          held = ((await response.json()) as { held: Record<TreeName, number> }).held;
+          const body = (await response.json().catch(() => ({}))) as { held?: Record<TreeName, number>; reason?: string };
+          const sizes = body.held;
+          if (!response.ok || sizes === undefined || !Number.isSafeInteger(sizes.changes) || !Number.isSafeInteger(sizes.uses)) {
+            return { ok: false, reason: body.reason ?? `the witness answered ${response.status}` };
+          }
+          held = sizes;
         }
         const from = held;
         const p = await proofs(from);

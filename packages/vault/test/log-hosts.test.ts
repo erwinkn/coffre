@@ -265,4 +265,15 @@ test('Fable review: a witness whose held pair no longer opens refuses, rather th
   const answer = await send(new (make(other))(state, {}), (await signPair(other.signers, 9n, 2, heads)).notes);
   assert.equal(answer.status, 500);
   assert.match(((await answer.json()) as { reason: string }).reason, /name a new witness/);
+  // Through its client, as the checkpointer publishes: a failed try with that reason, again on the next, never a crash.
+  const client = durableWitness(namespaceOf(new (make(other))(state, {})));
+  for (let i = 0; i < 2; i += 1) {
+    const refused = await client.publish((await signPair(other.signers, 9n, 2, heads)).notes, async () => ({ changes: [], uses: [] }), new AbortController().signal);
+    assert.ok(!refused.ok && /name a new witness/.test(refused.reason), JSON.stringify(refused));
+  }
+  // A record damaged past parsing: refused from inside the gate, the object up.
+  state.data.set('pair', 'not json');
+  const damaged = await send(new (make(k))(state, {}), first.notes);
+  assert.equal(damaged.status, 500);
+  assert.match(((await damaged.json()) as { reason: string }).reason, /name a new witness/);
 });
