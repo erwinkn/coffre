@@ -37,6 +37,14 @@ const D9 = dayOf(Date.now() - 9 * DAY_MS);
 const MIDNIGHT = Date.parse(`${D9}T00:00:00Z`);
 /** A small freshness bound, so that a test waits it out: the signer's and retention's alike. */
 const FRESH = 150;
+/**
+ * The signer's clock: the test's start, moved on by `later` alone, which waits as long first, so that every entry,
+ * stamped by the real one, is at or past it. Whether a pair is two freshness bounds past a cut is then the test's to
+ * say, never a race against a loaded machine's real clock (on CI, the walk and the writes between the cut and the
+ * first run took the two bounds' 300 ms, and the day went early).
+ */
+let clock = 0;
+const now = () => clock;
 const RANGE = 512;
 
 before(async () => {
@@ -49,6 +57,7 @@ before(async () => {
 });
 after(() => db?.close());
 beforeEach(async () => {
+  clock = Date.now();
   await log.empty();
   await log.days();
   if (ENGINE === 'postgres') {
@@ -63,7 +72,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function open() {
   const alerts: string[] = [];
   const store = logStore(db.vault, { tileRange: RANGE });
-  const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH });
+  const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   return { cp, store, alerts };
 }
 
@@ -91,9 +100,10 @@ async function midnight(cp: Checkpointer) {
   return { d10, d9, today, changes };
 }
 
-/** A new pair, its time now: the log moving on, as weeks of it would before a day is due. */
+/** A new pair, its time two bounds and more on: the log moving on, as weeks of it would before a day is due. */
 async function later(cp: Checkpointer) {
   await sleep(2 * FRESH + 50);
+  clock += 2 * FRESH + 50;
   await log.change();
   assert.ok((await cp.tick()).signed);
 }
@@ -109,7 +119,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.ok(before.ok, before.problems.join('\n'));
 
   // The change is written and sealed, but its pair is not two freshness bounds past the cut yet: nothing is dropped.
-  const early = await retain(cp, store, { keepDays: 9, macKey });
+  const early = await retain(cp, store, { keepDays: 9, macKey, now });
   assert.deepEqual(early.dropped, []);
   assert.match(early.waiting?.reason ?? '', /not two freshness bounds past it/);
   const [first] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
