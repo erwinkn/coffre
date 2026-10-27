@@ -765,7 +765,8 @@ export async function setSecrets(
     }
 
     // With 0.15's log, each key's change, from its object as read to what this write leaves it: the rows it was
-    // prepared from are the transaction's, held below (`PrepareAgain`), and their seals by `app_change`.
+    // prepared from are the transaction's, held below (`PrepareAgain`), and their seals by `app_change`. Refused, the
+    // write stores none of the references the vault just made: they are abandoned, as when its transaction fails.
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       const objects = await secretObjects(ctx.db, { ids: heads.map((row) => row.id) });
       const at = (id: string) => ({ id, ...environment });
@@ -788,6 +789,9 @@ export async function setSecrets(
         if (row !== undefined && row.archivedAt === null) after.set(row.id, null);
       }
       return [...after].map(([id, columns]) => secretChange(id, objects.get(id), columns));
+    }).catch(async (error: unknown) => {
+      await abandon(ctx, operationId, references, made.seqs);
+      throw error;
     });
 
     return audited(ctx, async (tx, log) => {

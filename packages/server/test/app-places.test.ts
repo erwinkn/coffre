@@ -11,10 +11,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { CoffreClient } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
 import type { UseOutcome, Vault } from '@coffre/core/vault';
-import { asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
-import { environments, logChanges, logFence, projects, secrets } from './db/tables.ts';
+import { auditLog, environments, logChanges, logFence, projects, secretReferences, secrets } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { clientFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
@@ -320,6 +320,23 @@ async function headWaiters(): Promise<number> {
   const [row] = (await db.owner.execute(sql`SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)).rows as { n: string }[];
   return Number(row?.n ?? 0);
 }
+
+test('a write refused by `prepare` (a key\'s row not the vault\'s) stores nothing, and abandons the references the vault made for it', async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { SOURCE: 'from-prod' });
+  await root.secrets.set('market/dev', { B: 'two' });
+  const b = await keyIn(await environmentId('dev'), 'B');
+  // A writer edits B's row and keeps its seal, which no longer covers it.
+  await db.owner.update(secrets).set({ seal: randomBytes(16) }).where(eq(secrets.id, b));
+  await assert.rejects(root.secrets.set('market/dev', { B: 'three', C: { ref: 'market/prod/SOURCE' } }), (error: { status?: number }) => error.status === 403);
+  const made = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.action, 'reference.create'), eq(auditLog.decision, 'allow')));
+  assert.equal(made.length, 1, 'the vault made the reference before the write was refused');
+  const ended = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(and(eq(auditLog.action, 'reference.end'), eq(auditLog.relatedSeq, made[0]!.seq)));
+  assert.deepEqual(ended.map((row) => (JSON.parse(row.metadata) as { reason?: string }).reason), ['abandoned']);
+  assert.deepEqual(await db.owner.select().from(secretReferences), [], 'nothing stored');
+});
 
 test('with 0.14\'s log, a deletion leaves its erased keys unarchived and a project\'s environments\' slugs as they were, and logs nothing of 0.15\'s', async () => {
   await instance(testVault([ROOT], {}, undefined, {}, {}));
