@@ -1289,7 +1289,8 @@ attacker step.
 `EXPECTED`, with every protection on: below a cut only changes are kept.
 - `BelowCutKept`: a straggler (a use of the next day numbered below the cut,
   stamped at its barrier's instant or after) can be deleted unseen once the
-  cut is announced, until its own day goes. The plan accepts this: about half
+  cut is announced, until its own day goes. Once the tiles below the cut are
+  gone, it is not provable either. The plan accepts this: about half
   a tick of uses at each midnight (W209 measured 275 at 1,000/s).
 - `ReplayAcrossCutSeen`: the same straggler copied above the cut, before the
   drop, and its original deleted. The copy reads as a use made once, at

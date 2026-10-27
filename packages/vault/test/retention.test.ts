@@ -111,7 +111,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   // The change is written and sealed, but its pair is not two freshness bounds past the cut yet: nothing is dropped.
   const early = await retain(cp, store, { keepDays: 9, macKey });
   assert.deepEqual(early.dropped, []);
-  assert.match(early.waiting ?? '', /not two freshness bounds past it/);
+  assert.match(early.waiting?.reason ?? '', /not two freshness bounds past it/);
   const [first] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
   assert.equal(Number(first!.n), 1);
 
@@ -244,8 +244,9 @@ test('a crash between the retention change and the drop: the next run finishes, 
   assert.ok((await verify(store)).ok);
   await later(cp);
   const r = await retain(cp, crashing, { keepDays: 1, macKey });
-  assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), [[D10, null], [D9, null]]);
-  await retain(cp, crashing, { keepDays: 1, macKey });
+  // A day a run on Postgres (one DETACH a run); SQLite deletes both at once.
+  assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), ENGINE === 'postgres' ? [[D10, null]] : [[D10, null], [D9, null]]);
+  for (let i = 0; i < 3; i += 1) await retain(cp, crashing, { keepDays: 1, macKey });
   for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
   const [count] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
   assert.equal(Number(count!.n), 1);
@@ -262,16 +263,19 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   await reader.unsafe('SELECT count(*) FROM log_uses');
   try {
     const held = await retain(cp, store, { keepDays: 1, macKey });
-    assert.match(held.waiting ?? '', new RegExp(`^${D10}: a reader holds the table past the lock timeout`));
+    assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
+    assert.match(held.waiting?.reason ?? '', /^a reader holds the table past the lock timeout/);
     assert.deepEqual(held.detached, []);
     assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
   } finally {
     await reader.unsafe('ROLLBACK');
     await reader.end();
   }
+  // One day detached a run: D10 now, D9 the next.
   const r = await retain(cp, store, { keepDays: 1, macKey });
-  assert.deepEqual(r.detached, [D10, D9]);
+  assert.deepEqual(r.detached, [D10]);
   assert.equal(r.waiting, null);
+  assert.deepEqual((await retain(cp, store, { keepDays: 1, macKey })).detached, [D9]);
 });
 
 /**
@@ -308,15 +312,15 @@ test('review r2: two days due at once, each cut its own: a catch-up drops both, 
   const [d10, d9] = [(await store.cutAt(MIDNIGHT))!, (await store.cutAt(MIDNIGHT + DAY_MS))!];
   assert.ok(d10.upto < d9.upto, 'two cuts');
   await later(cp);
-  // One run: both days cut and detached, and the tiles below D9's cut dropped, D10's among them.
-  const first = await retain(cp, store, { keepDays: 1, macKey });
-  assert.equal(first.waiting, null);
-  assert.deepEqual(first.dropped.map((d) => d.day), [D10, D9]);
-  assert.ok(first.dropped.every((d) => d.change !== null), 'a change each');
-  assert.ok(first.tiles > 0);
-  // The next: D10, below the newer cut, is not proved again from tiles that are gone; both go.
-  const next = await retain(cp, store, { keepDays: 1, macKey });
-  assert.equal(next.waiting, null);
+  // A day a run, each cut its own, each with its change; the tiles below each newest cut go as it is sealed and fresh. A
+  // day left below a newer cut (a crash, an older version's run) is not proved again from tiles that may be gone.
+  const runs = [];
+  for (let i = 0; i < 4; i += 1) runs.push(await retain(cp, store, { keepDays: 1, macKey }));
+  assert.ok(runs.every((r) => r.waiting === null), JSON.stringify(runs.map((r) => r.waiting)));
+  assert.deepEqual(runs.map((r) => r.detached), ENGINE === 'postgres' ? [[D10], [D9], [], []] : [[], [], [], []]);
+  const changed = runs.flatMap((r) => r.dropped).filter((d) => d.change !== null).map((d) => d.day);
+  assert.deepEqual(changed, [D10, D9], 'a change each');
+  assert.ok(runs.some((r) => r.tiles > 0));
   for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
   const v = await verify(store);
   assert.ok(v.ok, v.problems.join('\n'));
@@ -364,7 +368,7 @@ test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits wi
   const alerts: string[] = [];
   const keep = upkeep(cp, store, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
   await keep();
-  assert.match((await retain(cp, store, { keepDays: 1, macKey, now: () => t })).waiting ?? '', /is not past the day's end yet/);
+  assert.match((await retain(cp, store, { keepDays: 1, macKey, now: () => t })).waiting?.reason ?? '', /is not past the day's end yet/);
   for (let i = 0; i < 3; i += 1) {
     t += DAY_MS;
     await keep();
@@ -413,12 +417,17 @@ test('the database drops nothing a sealed retention change does not cut, and nev
   await refused(sql`SELECT drop_day(${dayOf(Date.now() - DAY_MS)}::date)`, /are not past/);
   await refused(sql`SELECT drop_tiles(1)`, /no sealed retention change cuts the uses tree/);
   const payload = JSON.stringify({ op: 'retention', day: D10, cut: { upto: '1', at: 0, uses: 1, root: '00'.repeat(32) } });
-  await refused(sql`SELECT log_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is no checkpoint past its end/);
+  await refused(sql`SELECT log_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
   // The checkpoint past the end, named with another uses head: refused too.
   const cut = (await store.cutAt(MIDNIGHT))!;
   const pair = (await openPair(cut.notes, verifiers))!;
   const wrong = JSON.stringify({ op: 'retention', day: D10, cut: { upto: String(cut.upto), at: pair.at, uses: pair.uses.size, root: '00'.repeat(32) } });
-  await refused(sql`SELECT log_retention('retention:y', 0, ${wrong}, ${randomBytes(16)})`, /is no checkpoint past its end/);
+  await refused(sql`SELECT log_retention('retention:y', 0, ${wrong}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
+  // A later checkpoint past the end, named with its own head: not the first, refused too.
+  const newest = (await store.newest())!;
+  const later = (await openPair(newest.notes, verifiers))!;
+  const past = JSON.stringify({ op: 'retention', day: D10, cut: { upto: String(newest.upto), at: later.at, uses: later.uses.size, root: later.uses.root.toString('hex') } });
+  await refused(sql`SELECT log_retention('retention:z', 0, ${past}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
   // The vault's login writes no log table itself.
   await refused(sql`DELETE FROM log_uses`, /permission denied/);
 });

@@ -3,7 +3,7 @@ import { pairSigners } from '@coffre/core/merkle';
 import { Checkpointer, logOrigin, type Alarm, type CheckpointStore, type Memory, type Witness } from './checkpointer.ts';
 import { authentic, logMacKey } from './log-entry.ts';
 import type { LogStore } from './log-store.ts';
-import { DAY_MS, dayOf, LOCK_WAIT, retain } from './retention.ts';
+import { DAY_MS, dayOf, retain } from './retention.ts';
 
 /**
  * The checkpointer as a host runs it, on Node (`runCheckpointer`) or in its
@@ -93,10 +93,10 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       if (options.keepDays !== null && t - retained >= RETAIN_EVERY_MS) {
         retained = t;
         const run = await retain(cp, store, { keepDays: options.keepDays, macKey, now });
-        const day = run.waiting?.includes(LOCK_WAIT) ? (/^(\d{4}-\d{2}-\d{2}): /.exec(run.waiting)?.[1] ?? 'tiles') : null;
+        const day = run.waiting?.lock ? (run.waiting.day ?? 'the tiles') : null;
         if (day === null) waiting = null;
         else if (waiting?.day !== day) waiting = { day, since: t };
-        else if (t - waiting.since >= WAITING_ALARM_MS) throw new Error(`retention has waited on ${day} since ${new Date(waiting.since).toISOString()}: ${run.waiting}`);
+        else if (t - waiting.since >= WAITING_ALARM_MS) throw new Error(`retention has waited on ${day} since ${new Date(waiting.since).toISOString()}: ${run.waiting!.reason}`);
       }
       failed = null;
     } catch (error) {

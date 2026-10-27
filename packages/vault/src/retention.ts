@@ -68,8 +68,11 @@ export type RetentionRun = {
   dropped: { day: string; change: bigint | null }[];
   /** Of those, the days detached and not dropped yet: the next run drops them. */
   detached: string[];
-  /** Why the run stopped before a due day, when it waits for something (the log to move on): no alarm. */
-  waiting: string | null;
+  /**
+   * Why the run stopped before a due day (`day`) or the tiles (no day), when it waits for something: the log to move on,
+   * or (`lock`) a reader holding the uses past the lock timeout. No alarm; a lock standing a day is one (`upkeep`).
+   */
+  waiting: { day: string | null; lock: boolean; reason: string } | null;
   /** Tiles deleted or leaf ranges dropped below the newest cut. */
   tiles: number;
 };
@@ -94,28 +97,35 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
   const last = dayOf(now() - (options.keepDays + 1) * DAY_MS);
   for (const day of (await store.days()).filter((d) => d <= last)) {
     const done = await retainDay(cp, store, day, options.macKey, now);
-    if (typeof done === 'string') {
-      run.waiting = `${day}: ${done}`;
+    if ('reason' in done) {
+      run.waiting = { day, ...done };
       break;
     }
     run.dropped.push({ day, change: done.change });
-    if (done.detached) run.detached.push(day);
+    // One DETACH a run: each invalidates every backend's plan of log_uses, and a second landing while they replan stalls
+    // uses (measured for a DROP: 0.15-plan.md, "As built: PR 7"). A backlog of days goes a day an hour.
+    if (done.detached) {
+      run.detached.push(day);
+      break;
+    }
   }
   // The tiles below the newest cut, once its sealing is two freshness bounds past it, as a day goes (FreshBeforeDrop).
   const newest = await sealedCut(cp, store);
   if (newest !== null && cp.pair.pair.at >= newest.at + 2 * cp.freshMs) {
     const tiles = await waitingOnLock(() => store.dropTiles(newest.uses.size));
     if (typeof tiles === 'number') run.tiles = tiles;
-    else run.waiting ??= `the tiles below ${newest.upto}: ${tiles.waiting}`;
+    else run.waiting ??= { day: null, lock: true, reason: `the tiles below ${newest.upto}: ${tiles.reason}` };
   }
   return run;
 }
 
 /** One day: dropped, with the change written for it if any; or why it waits. */
-async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: Buffer, now: () => number): Promise<{ change: bigint | null; detached: boolean } | string> {
+type Wait = { lock: boolean; reason: string };
+
+async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: Buffer, now: () => number): Promise<{ change: bigint | null; detached: boolean } | Wait> {
   const end = Date.parse(`${day}T00:00:00Z`) + DAY_MS;
   const head = cp.pair.pair;
-  if (head.floor < end) return `the signer's newest pair (up to ${head.upto}) is not past the day's end yet`;
+  if (head.floor < end) return { lock: false, reason: `the signer's newest pair (up to ${head.upto}) is not past the day's end yet` };
   // 1. The cut: a pair of this log at or below the signer's, the first it signed past the day's end by its own note (its
   // floor at or past the end, the floor before it below: CutFirst). The rows say which pair that is, and a writer who
   // deletes some, or edits their floors, would make a later one pass for it, and every use between go unwalked.
@@ -159,26 +169,23 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   }
   // 3. Freshness, against the signer's own pair, never a row.
   const bound = Math.max(cut.at, end) + 2 * cp.freshMs;
-  if (freshAt < bound) return `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet`;
+  if (freshAt < bound) return { lock: false, reason: `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet` };
   // 4. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above). A reader
   // holding log_uses longer than `drop_day`'s lock_timeout (a backup, say) makes it give up: the next run tries again.
   let state = await waitingOnLock(() => store.dropDay(day));
   if (state === 'dropped') state = await waitingOnLock(() => store.dropDay(day));
-  if (typeof state === 'object') return state.waiting;
+  if (typeof state === 'object') return state;
   if (state === 'dropped') throw new Error(`retention of ${day}: its uses were not dropped`);
   return { change, detached: state === 'detached' };
 }
 
-/** How a run that waits on a lock says so: the one wait that, standing a day, is an alarm (`upkeep`). */
-export const LOCK_WAIT = 'a reader holds the table past the lock timeout';
-
 /** What `work` answers, or, when the database gave up waiting for a lock (55P03, lock_timeout), why: no alarm. */
-async function waitingOnLock<T>(work: () => Promise<T>): Promise<T | { waiting: string }> {
+async function waitingOnLock<T>(work: () => Promise<T>): Promise<T | Wait> {
   try {
     return await work();
   } catch (error) {
     const e = error as { code?: unknown; cause?: { code?: unknown } };
-    if (e.code === '55P03' || e.cause?.code === '55P03') return { waiting: `${LOCK_WAIT}: the next run tries again` };
+    if (e.code === '55P03' || e.cause?.code === '55P03') return { lock: true, reason: 'a reader holds the table past the lock timeout: the next run tries again' };
     throw error;
   }
 }

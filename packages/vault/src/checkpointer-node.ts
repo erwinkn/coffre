@@ -105,14 +105,17 @@ export async function runCheckpointer(options: {
   let ticking: Promise<unknown> = Promise.resolve();
   // A tick that throws (a failed write may be a tamper signal: a tile changed under the signer) is an alarm, kept once.
   let failed: string | null = null;
+  // The upkeep after a tick that held; after one refused, only the next days (retention would fail on it, alarmed again).
   const loop = () => {
-    ticking = checkpointer.tick().then(() => void (failed = null), (error: Error) => {
+    ticking = checkpointer.tick().then(() => ((failed = null), keep()), async (error: Error) => {
       const message = `a checkpoint failed: ${reasonOf(error)}`;
-      if (message === failed) return;
-      failed = message;
-      console.warn(`coffre audit: ${message}`);
-      return record({ at: Date.now(), message });
-    }).then(keep).finally(() => {
+      if (message !== failed) {
+        failed = message;
+        console.warn(`coffre audit: ${message}`);
+        await record({ at: Date.now(), message });
+      }
+      await store.makeDays(daysAround(Date.now())).catch(() => {});
+    }).finally(() => {
       if (!stopped) timer = setTimeout(loop, interval);
     });
   };

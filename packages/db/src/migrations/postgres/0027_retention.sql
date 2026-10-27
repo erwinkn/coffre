@@ -13,14 +13,16 @@ BEGIN
        OR (op #>> '{cut,at}') IS NULL OR (op #>> '{cut,root}') IS NULL THEN
         RAISE EXCEPTION 'not a retention change: %', p_payload USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    -- Its cut is a checkpoint, its time and uses head the change's, at or past the end of its day by its floor of at: every use of the day took its number at or below it.
+    -- Its cut is the first checkpoint at or past the end of its day by its floor of at (every use of the day took its number at or below it), its time and uses head the change's.
     IF (op #>> '{cut,root}') !~ '^[0-9a-f]{64}$' OR NOT EXISTS (
-        SELECT 1 FROM public.log_checkpoints k
+        SELECT 1 FROM (
+            SELECT k.upto, k.at, k.uses_size, k.uses_root FROM public.log_checkpoints k
+             WHERE k.at_floor >= ((op ->> 'day')::date + 1 - date '1970-01-01')::bigint * 86400000 ORDER BY k.at_floor, k.upto LIMIT 1
+        ) k
          WHERE k.upto = (op #>> '{cut,upto}')::bigint AND k.at = (op #>> '{cut,at}')::bigint
            AND k.uses_size = (op #>> '{cut,uses}')::bigint AND k.uses_root = decode(op #>> '{cut,root}', 'hex')
-           AND k.at_floor >= ((op ->> 'day')::date + 1 - date '1970-01-01')::bigint * 86400000
     ) THEN
-        RAISE EXCEPTION 'the cut of % is no checkpoint past its end', op ->> 'day' USING ERRCODE = 'invalid_parameter_value';
+        RAISE EXCEPTION 'the cut of % is not the first checkpoint past its end', op ->> 'day' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     SELECT c.number INTO n FROM public.log_changes c WHERE c.request_id = p_request;
