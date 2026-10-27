@@ -1296,7 +1296,8 @@ Tampering's 31 CPU minutes ran in its 7 to 11:
 | shard | wall time, 4 workers here | CPU time | estimated on a runner |
 |---|---|---|---|
 | hotpath | 7.5 min | 34 min | about 9 to 12 min |
-| hotpath-bulk and hotpath-skew | 11.4 min, before the split | 62 min, together | about 8 to 11 min each |
+| hotpath-bulk | 5.8 min | 31 min | about 8 to 11 min |
+| hotpath-skew | 5.5 min | 31 min | about 8 to 11 min |
 | seal | 10.4 min | 50 min | about 13 to 18 min | Two things
 cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
