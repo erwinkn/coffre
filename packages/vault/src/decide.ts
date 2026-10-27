@@ -417,14 +417,14 @@ export function readerOf(principal: PrincipalInput | null, credential: Credentia
     return { status, live: none, all: none };
   }
   const guarded = [...environments].filter((environment) => environment.protected && !environment.deleted);
+  // By project, in a Map: a project id a plain object already holds (`constructor`) is a project like another.
+  const byProject = new Map<string, { environmentId: string; slug: string | null }[]>();
+  for (const environment of guarded) byProject.set(environment.projectId, [...(byProject.get(environment.projectId) ?? []), { environmentId: environment.id, slug: environment.slug }]);
   const policy: Policy = {
     roles: { ...ROLES, ...roles.roles },
     instanceRoles: { ...INSTANCE_ROLES, ...roles.instanceRoles },
     protected: guarded.map((environment) => environment.id),
-    protectedIn: guarded.reduce<Record<string, { environmentId: string; slug: string | null }[]>>(
-      (byProject, environment) => ({ ...byProject, [environment.projectId]: [...(byProject[environment.projectId] ?? []), { environmentId: environment.id, slug: environment.slug }] }),
-      {},
-    ),
+    protectedIn: Object.fromEntries(byProject),
   };
   const person = credential.principal.startsWith('user:');
   const standing = person ? { role: principal.role, scope: principal.scope } : { role: 'member' as const, scope: EVERYWHERE };

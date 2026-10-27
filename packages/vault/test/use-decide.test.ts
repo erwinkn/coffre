@@ -8,7 +8,7 @@ import { bulkStep, refreshMs, USE_DEADLINE_MS } from '../src/bulk.ts';
 import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
 import { limitOp, applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
 import { purposeCode, purposeOf, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
-import type { UseCode } from '../src/decide.ts';
+import { readerOf, type UseCode } from '../src/decide.ts';
 import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World, WRAPPED } from './world.ts';
 
 // The 0.15 decision on sealed inputs, and its replay (docs/design/sealed-inputs.md). Every
@@ -402,4 +402,12 @@ test('genesis is held to what the ops that make an object hold it to', () => {
   assert.equal(applyOp(null, { kind: 'credential', id: 'c' }, { op: 'genesis', value: ci }), undefined);
   assert.deepEqual(applyOp(null, { kind: 'credential', id: 'c' }, { op: 'genesis', value: { ...ci, caller: 'bearer' } }), { ...ci, caller: 'bearer' });
   assert.equal(applyOp(null, { kind: 'principal', id: BO }, { op: 'genesis', value: { kind: 'principal', principal: ADA, status: 'active', role: 'member', scope: EVERYWHERE, grants: [] } }), undefined);
+});
+
+test("a project id a plain object already holds is a project like another to the reader's policy", () => {
+  const environment = { kind: 'environment' as const, id: 'e', projectId: 'constructor', slug: 'dev', owner: null, parentId: null, protected: true, deleted: false, archived: false };
+  const credentialRow = { kind: 'credential' as const, id: 'c', principal: ADA, caller: 'person' as const, scope: null, expiresAt: null, revoked: false };
+  const member = { kind: 'principal' as const, principal: ADA, status: 'active' as const, role: 'owner' as const, scope: EVERYWHERE, grants: [] };
+  const reader = readerOf(member, credentialRow, noEdits(), [environment], 0);
+  assert.deepEqual(reader.live.policy?.protectedIn.constructor, [{ environmentId: 'e', slug: 'dev' }]);
 });

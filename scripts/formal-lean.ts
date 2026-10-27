@@ -403,7 +403,7 @@ function principalRow(principal: string): PrincipalInput {
 function environmentRow(id: string): EnvironmentInput {
   const personal = id.endsWith('@ada');
   return {
-    kind: 'environment', id, projectId: chance(0.95) ? projectOf(id) : pick(PROJECTS), slug: slugOf(id) ?? 'none',
+    kind: 'environment', id, projectId: chance(0.95) ? projectOf(id) : pick([...PROJECTS, ...INHERITED]), slug: slugOf(id) ?? 'none',
     owner: personal ? (chance(0.8) ? 'user:ada' : null) : chance(0.05) ? pick(PEOPLE) : null,
     parentId: personal || id.endsWith('fork') ? (chance(0.9) ? `${projectOf(id)}/dev` : pick(ENVIRONMENTS)) : null,
     protected: chance(0.3), deleted: chance(0.06), archived: chance(0.08),
