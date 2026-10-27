@@ -955,37 +955,60 @@ export async function bulkRows(db: Queryable): Promise<Map<string, Map<string, n
   return by;
 }
 
-/** A replay the verifier kept at a pair (`log_replays`). */
-export type KeptReplay = { upto: bigint; at: number; state: string; mac: Buffer };
+/**
+ * A row the verifier kept at a pair (`log_replays`): the replay there and
+ * its hash, null for a walk that found the log broken; what a walk that
+ * reached the present found (`verdict`), null for a stretch short of it.
+ */
+export type KeptReplay = { upto: bigint; at: number; state: string | null; stateHash: Buffer | null; verdict: string | null; mac: Buffer };
 
-/** The replay kept at `upto`, or the newest one kept, if any. */
-export async function keptReplay(db: Queryable, upto?: bigint): Promise<KeptReplay | null> {
+/** The pairs kept rows are at, newest first: those with a replay to go on from, or with a verdict. */
+export async function keptUptos(db: Queryable, holding: 'state' | 'verdict'): Promise<bigint[]> {
   const { logReplays } = tablesOf(db);
-  const query = db.select({ upto: logReplays.upto, at: logReplays.at, state: logReplays.state, mac: logReplays.mac }).from(logReplays);
-  const [row] = await (upto === undefined ? query.orderBy(desc(logReplays.upto)).limit(1) : query.where(eq(logReplays.upto, upto)));
-  return row === undefined ? null : { upto: BigInt(row.upto), at: Number(row.at), state: row.state, mac: Buffer.from(row.mac) };
+  const column = holding === 'state' ? logReplays.stateHash : logReplays.verdict;
+  return (await db.select({ upto: logReplays.upto }).from(logReplays).where(isNotNull(column)).orderBy(desc(logReplays.upto))).map((row) => BigInt(row.upto));
 }
 
-/** The pairs replays are kept at, newest first. */
-export async function keptUptos(db: Queryable): Promise<bigint[]> {
+/** The row kept at `upto`; its replay itself only when `withState`, the page's check never reading it. */
+export async function keptReplay(db: Queryable, upto: bigint, withState: boolean): Promise<KeptReplay | null> {
   const { logReplays } = tablesOf(db);
-  return (await db.select({ upto: logReplays.upto }).from(logReplays).orderBy(desc(logReplays.upto))).map((row) => BigInt(row.upto));
+  const [row] = await db.select({
+    upto: logReplays.upto, at: logReplays.at, stateHash: logReplays.stateHash, verdict: logReplays.verdict, mac: logReplays.mac,
+    state: withState ? logReplays.state : sql<null>`NULL`,
+  }).from(logReplays).where(eq(logReplays.upto, upto));
+  if (row === undefined) return null;
+  return { upto: BigInt(row.upto), at: Number(row.at), state: row.state ?? null, stateHash: row.stateHash == null ? null : Buffer.from(row.stateHash), verdict: row.verdict ?? null, mac: Buffer.from(row.mac) };
 }
 
 /**
- * Keep a replay at its pair, in place of one kept there before (a fresh
- * audit of the rows on a quiet log), and forget those older than it kept
- * for longer than `keptMs`: a walk's next stretch goes on from the one
- * before within seconds; and forget those at `forged`, which the walk found
- * were not the vault's. The vault's login deletes and inserts, never
- * updates: a kept replay is never edited in place.
+ * Keep a row at its pair:
+ * - **With a verdict** (a walk that reached the present), it replaces the
+ *   one kept there before, a fresh audit on a quiet log. Only such walks
+ *   write verdicts (the checkpoint job's, a whole walk's last stretch), so
+ *   it is never an older one.
+ * - **A stretch's,** with no verdict, never replaces anything.
+ *
+ * Then it forgets:
+ * - those at `forged`, which the walk found were not the vault's;
+ * - those older than it and kept for longer than `keptMs` (a walk's next
+ *   stretch goes on from the one before within seconds), but never the
+ *   newest verdict or the newest replay.
+ *
+ * Within bounded lock waits: a row a writer holds locked fails the keep
+ * rather than hanging the job. The vault's login deletes and inserts, never
+ * updates: a kept row is never edited in place.
  */
 export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number, forged: readonly bigint[] = []): Promise<void> {
   const { logReplays } = tablesOf(db);
   await db.transaction(async (tx) => {
-    await tx.delete(logReplays).where(inArray(logReplays.upto, [replay.upto, ...forged]));
+    await boundLockWaits(tx, 5000, true);
+    await tx.delete(logReplays).where(inArray(logReplays.upto, replay.verdict === null ? [...forged] : [replay.upto, ...forged]));
     await tx.insert(logReplays).values(replay).onConflictDoNothing();
-    await tx.delete(logReplays).where(and(lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs)));
+    const newest = (column: SQLWrapper) => sql`coalesce((SELECT max(k.upto) FROM log_replays k WHERE ${column} IS NOT NULL), -1)`;
+    await tx.delete(logReplays).where(and(
+      lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs),
+      sql`${logReplays.upto} <> ${newest(sql.raw('k.verdict'))}`, sql`${logReplays.upto} <> ${newest(sql.raw('k.state_hash'))}`,
+    ));
   });
 }
 

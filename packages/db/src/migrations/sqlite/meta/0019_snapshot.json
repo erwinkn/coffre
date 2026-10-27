@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "66c286ca-6c25-4f6d-aca4-41226e602ccc",
+  "id": "caf3f054-7f35-4e4f-ad83-8e1698ea18cd",
   "prevId": "14afe218-058f-4b29-85c1-c0685ec425ef",
   "tables": {
     "audit_chain_head": {
@@ -1810,7 +1810,21 @@
           "name": "state",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "state_hash": {
+          "name": "state_hash",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "verdict": {
+          "name": "verdict",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "mac": {
@@ -1829,6 +1843,10 @@
         "log_replays_mac_check": {
           "name": "log_replays_mac_check",
           "value": "octet_length(\"log_replays\".\"mac\") = 32"
+        },
+        "log_replays_state_check": {
+          "name": "log_replays_state_check",
+          "value": "(\"log_replays\".\"state\" IS NULL) = (\"log_replays\".\"state_hash\" IS NULL) AND (\"log_replays\".\"state_hash\" IS NULL OR octet_length(\"log_replays\".\"state_hash\") = 32)"
         }
       }
     },

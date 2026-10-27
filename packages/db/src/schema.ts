@@ -1145,21 +1145,30 @@ export const logTiles = pgTable(
 
 /**
  * The verifier's replay of 0.15's log (plan PR 8, `packages/vault/src/verifier.ts`),
- * kept at a signed pair, `upto`, so that a check goes on from the newest one
- * and reads only the entries since (R25): the objects, their newest seals
- * and the bulk rows as the log makes them there, as JSON, under the vault's
- * MAC over the pair's notes and the state. Only the vault writes it; a row
- * it did not write fails its MAC, and one deleted costs a longer walk.
+ * kept at a signed pair, `upto`: the objects, their newest seals and the bulk
+ * rows as the log makes them there, as JSON (`state`, and its SHA-256), so
+ * that the next walk goes on from it; and, once a walk reached the present,
+ * what it found there (`verdict`), which a page's check says without
+ * reading the state (R25). Under the vault's MAC over the pair's notes, the
+ * state's hash and the verdict. Only the vault writes it; a row it did not
+ * write fails its MAC, and one deleted costs a longer walk.
  */
 export const logReplays = pgTable(
   'log_replays',
   {
     upto: bigint({ mode: 'bigint' }).primaryKey(),
     at: bigint({ mode: 'number' }).notNull(),
-    state: text().notNull(),
+    // Null for a walk that found the log broken: its verdict is kept, its replay never gone on from.
+    state: text(),
+    stateHash: bytea('state_hash'),
+    // Null for a stretch short of the present.
+    verdict: text(),
     mac: bytea().notNull(),
   },
-  (table) => [check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`)],
+  (table) => [
+    check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`),
+    check('log_replays_state_check', sql`(${table.state} IS NULL) = (${table.stateHash} IS NULL) AND (${table.stateHash} IS NULL OR octet_length(${table.stateHash}) = 32)`),
+  ],
 );
 
 // For Drizzle's relational queries; see relations.ts.

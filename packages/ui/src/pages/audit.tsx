@@ -528,7 +528,7 @@ function ChainStatus({
       {behind && (
         <Toggletip
           align="end"
-          label={`The sealed log is verified${sealed === null ? '' : ` through ${sealed}`}. Its replay is catching up with it, a stretch every five minutes, and a check goes no further than one stretch.`}
+          label={`The sealed log is verified${sealed === null ? '' : ` through ${sealed}`}. A check goes no further than one stretch past the newest verdict, which the checkpoint job is catching up with.`}
         >
           <button type="button" className="chain-note" role="status">
             Newer sealed entries to verify

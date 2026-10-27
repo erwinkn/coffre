@@ -1,5 +1,5 @@
 {
-  "id": "1309347d-1134-4253-a64b-2aa8b80b06ff",
+  "id": "522f4d76-1518-456a-af49-8e0e661314dc",
   "prevId": "bb769243-ea6e-413f-8d50-3641ae6374b4",
   "version": "7",
   "dialect": "postgresql",
@@ -2086,7 +2086,19 @@
           "name": "state",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
+        },
+        "state_hash": {
+          "name": "state_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "verdict": {
+          "name": "verdict",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "mac": {
           "name": "mac",
@@ -2104,6 +2116,10 @@
         "log_replays_mac_check": {
           "name": "log_replays_mac_check",
           "value": "octet_length(\"log_replays\".\"mac\") = 32"
+        },
+        "log_replays_state_check": {
+          "name": "log_replays_state_check",
+          "value": "(\"log_replays\".\"state\" IS NULL) = (\"log_replays\".\"state_hash\" IS NULL) AND (\"log_replays\".\"state_hash\" IS NULL OR octet_length(\"log_replays\".\"state_hash\") = 32)"
         }
       },
       "isRLSEnabled": false

@@ -53,7 +53,7 @@ DO $$
 DECLARE
     attempt text;
 BEGIN
-    INSERT INTO log_replays VALUES (9223372036854775806, 0, '{}', decode(repeat('00', 32), 'hex'));
+    INSERT INTO log_replays (upto, at, verdict, mac) VALUES (9223372036854775806, 0, '{}', decode(repeat('00', 32), 'hex'));
     DELETE FROM log_replays WHERE upto = 9223372036854775806;
     PERFORM count(*) FROM (SELECT id, principal, kind, scope, revoked_at, expires_at, not_after, seal FROM credentials) c;
     PERFORM count(*) FROM (SELECT id, seal FROM service_bindings) b;

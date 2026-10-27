@@ -3105,17 +3105,18 @@ class VaultService implements Vault {
   /**
    * One walk of 0.15's log, held to the pairs held outside. The signer
    * remembers a pair before the database has it (RememberFirst), so a walk
-   * that lands in between finds the database one pair behind: that, and
-   * only that, is walked again a tick later (review r4). A rollback is
+   * that lands in between finds the database behind (`Verdict.behind`):
+   * that walk is walked again a tick later (review r4). A rollback is
    * still behind then.
    */
   async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Extract<TreeVerification, { kept: true }>> {
     const anchors = await this.#prepared.log015!.heldOutside();
     const keys = await this.#verifierKeys();
-    const walked = await verifyTrees(this.#db, keys, { ...options, anchors });
-    if (walked.ok || !walked.problems.some((problem) => BEHIND_ANCHOR.test(problem))) return walked;
+    const walk = () => verifyTrees(this.#db, keys, { ...options, anchors, clockOffset: this.#prepared.options.clockOffset() }).then(({ behind: _, ...verdict }) => ({ verdict, behind: _ }));
+    const first = await walk();
+    if (!first.behind) return first.verdict;
     await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
-    return verifyTrees(this.#db, keys, { ...options, anchors });
+    return (await walk()).verdict;
   }
 
   /**
@@ -3130,9 +3131,9 @@ class VaultService implements Vault {
   async #replayOn(): Promise<void> {
     try {
       const began = Date.now();
-      let walked = await this.#walkTrees({ limit: this.#prepared.options.walks.checkpoint, keep: true });
+      let walked = await this.#walkTrees({ limit: this.#prepared.options.walks.checkpoint, replay: true });
       while (walked.ok && !walked.done && walked.next !== null && Date.now() - began < REPLAY_ON_MS) {
-        walked = await this.#walkTrees({ from: walked.next, limit: this.#prepared.options.walks.checkpoint, keep: true });
+        walked = await this.#walkTrees({ from: walked.next, limit: this.#prepared.options.walks.checkpoint, replay: true });
       }
       if (!walked.ok) console.warn(`coffre audit: 0.15's log does not verify: ${walked.problems.slice(0, 3).join('; ')}`);
       else if (!walked.done) console.warn(`coffre audit: 0.15's log is walked through ${walked.next}, short of the present: the next runs go on`);
@@ -3407,8 +3408,6 @@ const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
 /** How long the checkpoint job walks 0.15's log a run, a stretch of `walks.checkpoint` at a time (`#replayOn`). */
 const REPLAY_ON_MS = 10_000;
 
-/** core's `verifyLog`, finding the database behind a pair held outside. */
-const BEHIND_ANCHOR = /^the database ends up to \d+; a pair held outside seals up to \d+: /;
 
 /** The digest of the members and grants a checkpoint keeps whole, beside the digest it says they have. */
 function keptDigest({ members, grants, newest }: AccessTally): string {

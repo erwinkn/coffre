@@ -49,6 +49,13 @@ export type Verdict = {
   head: PairNotes | null;
   /** Whether the walk reached the log's end, the entries above the newest pair included; false for a stretch cut at `limit`. */
   done: boolean;
+  /**
+   * Whether the database ends before a pair held outside: deleted entries or
+   * checkpoints, or the signer's own write a moment away (it remembers a pair
+   * before the database holds it), which a caller may tell apart by asking
+   * again a tick later.
+   */
+  behind: boolean;
 };
 
 type Stop = { pair: Pair; notes: PairNotes; row: boolean };
@@ -65,7 +72,7 @@ const PAGE = 100;
 
 export async function verifyLog(reader: LogReader, opts: VerifyOptions): Promise<Verdict> {
   const problems: string[] = [];
-  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, done: true };
+  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, done: true, behind: false };
   const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
   // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
   try {
@@ -80,7 +87,7 @@ async function walk(
   reader: LogReader,
   opts: VerifyOptions,
   problems: string[],
-  verdict: { checkpoints: number; sealed: number; unsealed: number; done: boolean },
+  verdict: { checkpoints: number; sealed: number; unsealed: number; done: boolean; behind: boolean },
   done: (head: PairNotes | null) => Verdict,
 ): Promise<Verdict> {
   const open = async (row: StoredPair): Promise<Pair | null> => {
@@ -180,6 +187,7 @@ async function walk(
       if (row !== undefined) {
         if (!sameNotes(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: ${samePair(row.pair, anchor.pair) ? 'the same heads signed at another time or floor' : 'a second history'}`);
       } else if (final && anchor.pair.upto > newest) {
+        verdict.behind = true;
         problems.push(`the database ends up to ${newest}; a pair held outside seals up to ${anchor.pair.upto}: entries or checkpoints were deleted`);
       } else {
         stops.push(anchor);

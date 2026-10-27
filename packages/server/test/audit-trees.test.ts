@@ -70,7 +70,9 @@ test("GET /audit/trees: 0.15's log verified, then a row changed around the app n
   // The database's writer renames `prod` out from under its seal: a slug-scoped role decides on it.
   const { environments } = tablesOf(db.owner);
   await db.owner.update(environments).set({ slug: 'staging' }).where(eq(environments.slug, 'prod'));
-  const broken = await root.audit.verifyTrees();
+  // A page's check says the last replay's verdict; the walk from the first entry, as the checkpoint job's, replays and
+  // holds every row.
+  const broken = await root.audit.verifyTreesWhole();
   assert.ok(broken.kept && !broken.ok);
   // Named by its path, as 0.14's faults are, not by its id.
   assert.ok(broken.problems.includes('the environment market/staging: its rows are not the object the log makes'), broken.problems.join('\n'));

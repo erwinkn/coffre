@@ -75,7 +75,8 @@ async function instance(walks: VaultOptions['walks'] = {}) {
     if (control.hold) return {} as Awaited<ReturnType<SealThrough>>;
     return cp.sealThrough(number, deadline);
   };
-  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside, walks }, async () => {}, hot));
+  const clock = { offset: 0 };
+  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside, walks, clockOffset: () => clock.offset }, async () => {}, hot));
   const keys: ChangeKeys = { seals: [sealKey(seed)], mac: logMacKey(seed) };
   const where = await places(db.owner);
   const genesis = async (ref: Ref, input: Input) => {
@@ -130,7 +131,12 @@ async function instance(walks: VaultOptions['walks'] = {}) {
   };
   const grant = (principal: string, role: string | null, environmentId = where.dev) =>
     vault.setAccess({ actor: ROOT, principal, ...(role === null ? {} : { admit: true }), changes: [{ projectId: where.project, environmentId, role, expiresAt: null }] });
-  return { vault, cp, control, config, seed, keys, ...where, credential, secret, key, use, verify, grant, genesis };
+  /** The checkpoint job's run, then a page's check: what the job's replay and audit found. */
+  const audited = async () => {
+    await vault.checkpoint();
+    return verify();
+  };
+  return { vault, cp, control, clock, config, seed, keys, ...where, credential, secret, key, use, verify, audited, grant, genesis };
 }
 
 /** A walk that found nothing, and reached the present. */
@@ -157,15 +163,14 @@ test('a log the vault wrote verifies: both trees, every entry, the replay, every
   assert.deepEqual(await old.verifyTrees!({}), { kept: false });
 });
 
-test('R25: a check goes on from the replay the last walk kept, reading only the entries since; the checkpoint job keeps it moving', async () => {
+test('R25: a page\'s check goes on from the newest verdict, reading the entries since, and no replay; the checkpoint job keeps it moving', async () => {
   const w = await instance();
   for (let i = 0; i < 4; i += 1) await w.use();
-  // Too few entries to be worth keeping: the next check reads them again.
-  assert.equal((await w.verify()).from, null);
-  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_replays`)).length, 0);
-  // The checkpoint job's walk keeps what it replayed, however little.
-  await w.vault.checkpoint();
-  const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays`);
+  // No verdict yet: the first check replays from the first entry, as the job does, and keeps one.
+  const first = await w.verify();
+  clean(first);
+  assert.equal(first.from, null);
+  const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays WHERE verdict IS NOT NULL`);
   assert.ok(kept !== undefined, 'kept');
   await w.use();
   await w.cp.tick();
@@ -173,6 +178,33 @@ test('R25: a check goes on from the replay the last walk kept, reading only the 
   clean(checked);
   assert.equal(checked.from, String(kept.upto));
   assert.equal(checked.sealed, 1, 'only the use since');
+  assert.equal(checked.audited, first.audited, "the verdict it went on from: the page replays nothing, and reads no row");
+});
+
+test('review r5: a page\'s check never reads the replay kept, whatever its size: one edited under its hash is the job\'s to pass over', async () => {
+  const w = await instance();
+  clean(await w.audited());
+  await run(db.owner, sql`UPDATE log_replays SET state = replace(state, '"developer"', '"viewer"')`);
+  // The page reads the verdict and the hash it is MAC'd with, never the replay: nothing to say.
+  clean(await w.verify());
+  // The job reads the replay to go on from it: not the one its hash says, passed over, and the job replays from the first entry.
+  await w.vault.checkpoint();
+  const [kept] = await rows<{ n: string | number }>(db.owner, sql`SELECT count(*) AS n FROM log_replays WHERE state LIKE '%"viewer"%'`);
+  assert.equal(Number(kept!.n), 0, 'forgotten by the replay the job kept');
+  clean(await w.verify());
+});
+
+test('review r5: a verdict older than three runs of the job is out of date: the seal is withheld', async () => {
+  const w = await instance();
+  clean(await w.audited());
+  w.clock.offset = 16 * 60_000;
+  const stale = await w.verify();
+  assert.equal(stale.problems.length, 1);
+  assert.match(stale.problems[0]!, /^the replay and every row were last verified at .*, more than 15 minutes ago: the checkpoint job has not reached the present since$/);
+  // The job's next run brings a fresh one.
+  await w.vault.checkpoint();
+  w.clock.offset = 0;
+  clean(await w.verify());
 });
 
 test('a walk from the first entry goes a stretch at a time, each ending at a pair, and the last reaches the present', async () => {
@@ -197,7 +229,7 @@ test('a walk from the first entry goes a stretch at a time, each ending at a pai
   for (const [i, s] of stretches.slice(1).entries()) assert.equal(s.from, stretches[i]!.next);
   // A stretch named by a pair whose replay nobody kept is refused, not walked from nothing.
   const lost = await w.verify('1');
-  assert.ok(!lost.ok && /no replay is kept at 1/.test(lost.problems.join()));
+  assert.ok(!lost.ok && /no replay the vault kept is at 1/.test(lost.problems.join()));
 });
 
 test('a row put back from before a revoke is named: its seal is an older change\'s', async () => {
@@ -214,7 +246,8 @@ test('a row put back from before a revoke is named: its seal is an older change\
     principal: g.principal as string, projectId: g.project_id as string | null, environmentId: g.environment_id as string | null, environmentSlug: g.environment_slug as string | null,
     role: g.role as string, expiresAt: g.expires_at === null ? null : Number(g.expires_at), grantedAt: Number(g.granted_at), grantedBy: g.granted_by as string,
   })));
-  const checked = await w.verify();
+  // The job's audit finds it; every use of it is refused `stale` meanwhile.
+  const checked = await w.audited();
   assert.ok(!checked.ok);
   assert.deepEqual(checked.problems, [`the principal ${BO}: its rows carry another change's seal than the newest: put back, or written around the vault`]);
 });
@@ -290,28 +323,24 @@ test('numbers swapped inside the window: two changes of one object, replayed out
   assert.ok(checked.problems.some((p) => p.startsWith(`${b!.number}: its seal is not the vault's over principal ${BO}`)), checked.problems.join('\n'));
 });
 
-test('a kept replay the vault did not write is named and passed over, never gone on from, and the job\'s next replay forgets it', async () => {
+test('a kept verdict the vault did not write is named and passed over, never said, and the next one kept forgets it', async () => {
   const w = await instance();
-  await w.vault.checkpoint();
-  const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays`);
-  // A writer edits the replay, hoping the check goes on from it, and plants one at a pair to come, hoping to stop every
-  // check after (review r3).
-  await run(db.owner, sql`UPDATE log_replays SET state = replace(state, '"developer"', '"viewer"')`);
-  await run(db.owner, sql`INSERT INTO log_replays (upto, at, state, mac) VALUES (900000000, 0, '{}', ${randomBytes(32)})`);
+  clean(await w.audited());
+  const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays WHERE verdict IS NOT NULL`);
+  // A writer edits the verdict, and plants one at a pair to come, hoping to stop every check after (review r3).
+  await run(db.owner, sql`UPDATE log_replays SET verdict = '{"at":0,"problems":[]}'`);
+  await run(db.owner, sql`INSERT INTO log_replays (upto, at, verdict, mac) VALUES (900000000, 0, '{"at":0,"problems":[]}', ${randomBytes(32)})`);
   const named = (upto: string | number) => `the replay kept at ${upto} is not the vault's over the checkpoint there: passed over`;
   const checked = await w.verify();
   assert.deepEqual(checked.problems, [named(900000000), named(kept!.upto)]);
-  assert.equal(checked.from, null, 'from the first entry, the only start left');
-  assert.ok(checked.done);
-  // Asked for by its pair, it is refused; the walk from the first entry does not read it.
-  assert.match((await w.verify(String(kept!.upto))).problems.join(), /is not the vault's over the checkpoint there: walk again/);
-  clean(await w.verify('start'));
-  // The job keeps a replay of its own, and forgets the two: the checks after go on from it, as before.
-  await w.vault.checkpoint();
+  // With no verdict of the vault's left, the check replayed from the first entry, and kept one: the checks after go on from it.
+  assert.equal(checked.from, null);
   const after = await w.verify();
   clean(after);
   assert.notEqual(after.from, null);
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_replays WHERE upto = 900000000`)).length, 0);
+  // Asked for as a stretch's start, a pair with no replay of the vault's is refused.
+  assert.match((await w.verify('900000000')).problems.join(), /no replay the vault kept is at 900000000/);
 });
 
 test('a forged use is named at its entry, and so are the indexes that keep requests unique, gone', async () => {

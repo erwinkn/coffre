@@ -974,10 +974,15 @@ export const logReplays = sqliteTable(
   {
     upto: int64('upto').primaryKey(),
     at: integer({ mode: 'number' }).notNull(),
-    state: text().notNull(),
+    state: text(),
+    stateHash: bytes('state_hash'),
+    verdict: text(),
     mac: bytes('mac').notNull(),
   },
-  (table) => [check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`)],
+  (table) => [
+    check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`),
+    check('log_replays_state_check', sql`(${table.state} IS NULL) = (${table.stateHash} IS NULL) AND (${table.stateHash} IS NULL OR octet_length(${table.stateHash}) = 32)`),
+  ],
 );
 
 export const logTiles = sqliteTable(
