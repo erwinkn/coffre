@@ -72,7 +72,8 @@ test("GET /audit/trees: 0.15's log verified, then a row changed around the app n
   await db.owner.update(environments).set({ slug: 'staging' }).where(eq(environments.slug, 'prod'));
   const broken = await root.audit.verifyTrees();
   assert.ok(broken.kept && !broken.ok);
-  assert.ok(broken.problems.some((p) => /^the environment [0-9a-f-]{36}: its rows are not the object the log makes$/.test(p)), broken.problems.join('\n'));
+  // Named by its path, as 0.14's faults are, not by its id.
+  assert.ok(broken.problems.includes('the environment market/staging: its rows are not the object the log makes'), broken.problems.join('\n'));
 
   // Someone who reads part of the log cannot check it whole.
   await root.members.add('user:ada@acme.example', {});

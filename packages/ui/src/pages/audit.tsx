@@ -487,7 +487,8 @@ function ChainStatus({
       : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
   // 0.15's log, where it is kept: its two trees, every entry and the replay, and every row held to the replay.
   const trees = chain.trees;
-  const sealed = trees?.checkpoint == null ? null : `entry ${Number(trees.checkpoint.upto).toLocaleString('en')}, sealed at ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
+  // Its own numbers are not the entries' above: it is named by when its newest checkpoint was signed.
+  const sealed = trees?.checkpoint == null ? null : `its checkpoint of ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
   const replayed = trees === null
     ? ''
     : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row is the one the log makes.`;

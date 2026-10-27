@@ -397,7 +397,7 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
       through: result.through,
       failedAtSeq: null,
       author: 'vault' as const,
-      reason: `0.15's log: ${trees.problems[0] ?? 'it does not verify'}${more > 0 ? ` (and ${more} more)` : ''}`,
+      reason: `the sealed log: ${trees.problems[0] ?? 'it does not verify'}${more > 0 ? ` (and ${more} more)` : ''}`,
     };
   }
   return result.ok

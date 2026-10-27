@@ -539,7 +539,28 @@ export async function verifyAuditTrees(ctx: ApiContext, query: { from?: string }
     throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
   }
   if (ctx.vault.verifyTrees === undefined) return { kept: false };
-  return ctx.vault.verifyTrees(query.from === undefined ? {} : { from: query.from });
+  const verified = await ctx.vault.verifyTrees(query.from === undefined ? {} : { from: query.from });
+  return verified.kept && verified.problems.length > 0 ? { ...verified, problems: await namedObjects(ctx, verified.problems) } : verified;
+}
+
+/**
+ * The vault's problems with their objects worded by name, as `named` does
+ * 0.14's faults: an environment as `market/prod`, a member as they are
+ * shown. Keys and credentials keep their ids, which is how the API names
+ * them too.
+ */
+async function namedObjects(ctx: ApiContext, problems: readonly string[]): Promise<string[]> {
+  const known = problems.some((problem) => problem.includes('the environment ')) ? await places(ctx.db, { tombstones: true }) : [];
+  const environment = (id: string) => {
+    for (const project of known) {
+      const found = project.environments.find((place) => place.id === id);
+      if (found !== undefined) return `${project.slug}/${found.slug}`;
+    }
+    return id;
+  };
+  return problems.map((problem) => problem
+    .replace(/the environment ([0-9a-f-]{36})/g, (_, id: string) => `the environment ${environment(id)}`)
+    .replace(/the principal (\S+): /g, (_, principal: string) => `the member ${principalName(principal)}: `));
 }
 
 /**
