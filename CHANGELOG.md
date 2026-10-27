@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **0.15's change path, behind its switch: nothing calls it yet.**
+  `0023_change_path` replaces `change_input`, which nothing called, with
+  one that takes every change the vault makes to members, grants, roles,
+  the bulk cap and an environment's protection or slug. The vault logs
+  them only with 0.15's log switched on, which no deployment can do yet
+  ([0.15-plan.md](docs/design/0.15-plan.md), PR 4a). This release behaves
+  as 0.14.5.
+
 - **0.15's log, expanded: one migration, nothing calls it yet.**
   `0022_log_015` on Postgres (`0018_log_015` on SQLite) adds the tables,
   seals, functions and login 0.15's hot path will run on

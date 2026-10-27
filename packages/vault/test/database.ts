@@ -161,7 +161,7 @@ export async function run(db: Queryable, query: SQL): Promise<void> {
 
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
-  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig } = tablesOf(owner);
+  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, credentials } = tablesOf(owner);
   await owner.delete(secretReferences);
   // SQLite checks a RESTRICT foreign key row by row, so entries that point
   // at others let go of them first.
@@ -176,6 +176,8 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.delete(logChanges);
   await owner.delete(logConfig);
   await owner.delete(vaultGrants);
+  // A session a test made, for a use to name.
+  await owner.delete(credentials);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);
   await owner.update(secrets).set({ currentVersionId: null });

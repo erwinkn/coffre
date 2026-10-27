@@ -115,20 +115,25 @@ export class Changes {
 
   /**
    * Log every staged change, in the decision's transaction, once its writes
-   * have run, at `at`: the numbers of their entries, which the decision
+   * have run, at `at`, `written` holding the members' objects as the
+   * decision read them back after its writes, if it did: the numbers of their entries, which the decision
    * waits to see sealed before it answers (R51). Throws `NotLogged` for a
    * row a writer put back (ChangeChecksSeal), and `Moved` for one whose
    * seal moved since it was read (ChangeCAS), which the decision then reads
    * again.
    */
-  async commit(tx: Transaction, at: number): Promise<bigint[]> {
+  async commit(tx: Transaction, at: number, written: ReadonlyMap<string, Input> = new Map()): Promise<bigint[]> {
     if ([...this.#staged.values()].some((staged) => staged.read === undefined)) throw new Error('changes committed before they were prepared: prepare reads each object before the writes run');
     const calls: ChangeCall[] = [];
     for (const { ref, steps, read } of this.#staged.values()) {
       if (!read!.logged) continue;
       const { seal: base, now, afters } = read!;
       // The member's own rows, which the decision wrote: they must be what the ops leave, or something wrote around it.
-      if (ref.kind === 'principal' && !sameObject(this.#keys.seals[0]!, ref, (await readObject(tx, ref)).row, now)) throw new NotLogged(ref, 'tampered');
+      // As the decision read them back to seal them (`written`), or read again here.
+      if (ref.kind === 'principal') {
+        const held = written.get(objectKey(ref)) ?? (await readObject(tx, ref)).row;
+        if (!sameObject(this.#keys.seals[0]!, ref, held, now)) throw new NotLogged(ref, 'tampered');
+      }
       let from = base;
       steps.forEach(({ op, actor }, i) => {
         // No op of these deletes an object: each leaves one to seal.
@@ -183,4 +188,18 @@ export function loggedChange(row: { number: bigint; at: number; object: string; 
   const ref = named ?? (op.op === 'genesis' ? refOf(op.value) : undefined);
   if (ref === undefined || objectKey(ref) !== row.object) return null;
   return { kind: 'change', number: row.number, at: row.at, ref: { kind: ref.kind, id: ref.id }, op: op as Op, seal: row.seal };
+}
+
+/**
+ * The cutover's change for one object (plan PR 9): its row sealed as it
+ * is, the object it holds the payload's `value`. An environment's carries
+ * the object as `value` too, which writes its protection, which 0.14 kept
+ * in its policy; the roles' and the policy's rows are made from the
+ * payload. From no seal: an object the log has never held.
+ */
+export function genesisCall(keys: ChangeKeys, ref: Ref, input: Input, at: number, actor: string): ChangeCall {
+  const op: Op = { op: 'genesis', value: input };
+  const seal = sealOf(keys.seals[0]!, ref, input);
+  const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op), seal };
+  return { ref, ...row, value: ref.kind === 'environment' ? canonical(input) : null, sealFrom: null, mac: entryMac(keys.mac, { tree: 'changes', row }) };
 }

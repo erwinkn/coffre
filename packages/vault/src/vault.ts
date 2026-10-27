@@ -110,7 +110,7 @@ import { Changes, Moved, NotLogged, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
-import { limitChange, POLICY_REF, ROLES_REF, sealKey, type Op, type Ref } from './inputs.ts';
+import { limitChange, objectKey, POLICY_REF, ROLES_REF, sealKey, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { logMacKey } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -678,9 +678,14 @@ class VaultService implements Vault {
         const sealing = new Set([...d.touched, ...accessSeq.keys()]);
         // Under a share lock, a write to the row would wait for every other read holding it, and they for it.
         if (shared && sealing.size > 0) throw new Error('a read changes no member, and seals no row');
-        for (const principal of sealing) await this.#seal(d, principal, accessSeq.get(principal));
-        // Last, so that the fence, which 0.15's changes take exclusive, is held from them to the commit alone.
-        const numbers = d.changes === null ? [] : await d.changes.commit(tx, at);
+        const written = new Map<string, Input>();
+        for (const principal of sealing) {
+          const object = await this.#seal(d, principal, accessSeq.get(principal));
+          if (object !== null) written.set(objectKey(memberRef(principal)), object);
+        }
+        // Last: the fence, which they take exclusive (0.14's append took it already, OldWritesFence), is held from
+        // here to the commit, so as few round trips as can be.
+        const numbers = d.changes === null ? [] : await d.changes.commit(tx, at, written);
         return { result, numbers };
       });
       this.#reported(reports);
@@ -713,11 +718,12 @@ class VaultService implements Vault {
    * naming `accessSeq`, their newest access entry, when it wrote one. The
    * table must hold exactly that: a grant written around the vault while it
    * decided (its row lock does not stop one) is refused, with the decision,
-   * rather than sealed in.
+   * rather than sealed in. It answers the member's object as the rows now
+   * hold it, for 0.15's log.
    */
-  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<void> {
+  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<PrincipalInput | null> {
     const row = await store.member(d.tx, principal);
-    if (row === undefined) return;
+    if (row === undefined) return null;
     const decided = d.grants.get(principal);
     if (decided === undefined) throw new Error(`sealing ${principal} without the grants this decision verified`);
     if (!sameGrants(await store.grants(d.tx, principal), decided)) {
@@ -726,6 +732,8 @@ class VaultService implements Vault {
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
     await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
+    // The member's object as the rows hold it now: what 0.15's change of it must have left (`changes.ts`).
+    return store.principalObject(row, decided);
   }
 
   /**
