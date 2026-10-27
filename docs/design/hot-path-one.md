@@ -21,6 +21,9 @@ instance-wide revision. This one asks: can a use be **one** round trip, with
   [`scripts/formal.sh`](../../scripts/formal.sh).
 - **The plan:** [`0.15-plan.md`](0.15-plan.md), the pull requests from spec to
   shipped code (W211).
+- **On main:** [the schema](#the-schema-on-main-w215-372) (W215) and
+  [the use path](#the-use-path-on-main-w219-plan-pr-5a) (W219), each with
+  its decisions and numbers.
 
 Every number below is labelled **measured** (with where) or **reasoned**.
 W211 (round 2, 2026-10-27) folded Erwin's decisions into the prototype; its
@@ -219,6 +222,208 @@ takes. On Cloudflare, 27% of W211's calls took the probing path, so about
 0.47 ms a use, weighted. The probing form is over the plan's ~0.6 ms a
 use: PR 5's bench holds it to the budget, with its cuts (W211's open
 decision 5) if it misses.
+
+## The use path on main (W219, plan PR 5a)
+
+Plan PR 5 is in two parts. **5a** (this) is the vault's side: migration
+`0024_use_015` replaces `use_credential`, and the vault makes one call per use
+(`packages/vault/src/use.ts`). Nothing calls it yet, and 0.14 stays the default.
+**5b** wires the server's `/use`, reveals and sign/verify routes to it, behind
+the switch. It comes after PR 4 (both halves), because a use can only be
+allowed on objects that the change path has sealed.
+
+### What a use does
+
+1. **Admission.** The isolate counts its calls in flight. Past the limit, the
+   use is refused at once with `overloaded` (503 `Retry-After: 1`), and no
+   connection is taken.
+   - The limit is `uses.inFlight`. By default it is the hot pool's
+     `connections`: the pg pool's `max` on Node, a setting on Workers.
+   - T112 measures the right number on Workers.
+2. **The call.**
+   - The isolate MACs the request (`useMac`: 16 bytes under a key of its own,
+     `coffre.vault.uses.v1`).
+   - It makes one call of `use_credential` as `coffre_vault_hot`, which has
+     timeouts of its own (lock 1 s, statement 2 s) and generic plans. On Workers
+     this goes through a Hyperdrive config of its own, `hotDatabase`.
+   - The call races the deadline. If the deadline wins, the use answers `late`
+     and the call's row is dropped whenever it arrives (WorkerHonoursDeadline).
+   - Postgres holds the deadline too, with `clock_timestamp()`: `late`, or a
+     rollback with 57014 (DeadlineChecked).
+3. **The decision.**
+   - The row is decoded into PR 3's `UseView` through one shared mapping,
+     `objects.ts`, which PR 4 seals with.
+   - Then `checkSeals`, UsesSeeOldWrites, and `decideChecked`.
+4. **The key.** It is opened only after the call has returned, so after the
+   commit (ReleaseAfterCommit). Its key operation is bound by the same
+   deadline. A value opened after the deadline never leaves.
+
+### What the statement reads, in two shapes
+
+`readUse`'s inputs are the credential, its principal (with grants), the
+roles, the policy, the key, a reference's source, and up to four
+environments: the place read through, the key's own, the source's, and a
+personal config's parent. On top of those, the 0.14 probe:
+`audit_log_subject_idx`, newest first, which the principal's newest change must
+account for.
+
+| shape | when | reads |
+|---|---|---|
+| **plain** | the key has a version of its own and no place is named: most uses | credential, principal, roles, policy, key and its version, its environment, and that environment's parent if it is a personal config |
+| **whole** | a place is named, or the key has no version of its own (a reference) | everything above, plus the place, the source (its newest `secret_references` row) and its version, the source's environment, and that environment's parent |
+
+- **How the shapes change.** The plain statement answers `whole` for a key
+  with no version and writes nothing. The function then runs the whole
+  statement.
+- **Why this is safe.** Both statements run under the same shared fence, and
+  nothing that changes an input commits while it is held. The same holds for
+  0022's `reprobe` and `lock` retries.
+- **Seal cache:** each shape has a probing form and a cached form. That makes
+  four statements, generated from one template, and the migration holds all
+  four.
+
+### The answer: JSON, not a typed row (reversible)
+
+Erwin approved a typed row (W208 measured a JSON answer at ~0.15 ms of 0.26).
+Measured here, `to_json(r)` of the same row is cheaper on both sides:
+
+- **Postgres.** The typed row is 95 columns. node-postgres sends Describe on
+  every execution, so each call costs a RowDescription of 95 fields, 95
+  DataRow fields, and the Function Scan's tuplestore. The JSON is one datum
+  built in C. W208's cost came from `json_build_object` over nested objects,
+  not this.
+- **The Worker.** Decoding one answer takes 11.0 µs for `rowOf` (plain
+  `JSON.parse`, bigints as text, bytes from `\x` hex) against 14.5 µs for
+  node-postgres's typed fields. A reviver on every value would cost 43.6 µs.
+  `rowOf` re-parses with each number's source text only when a bigint is past
+  2^53, and fails closed on a runtime without source text. Both engines test
+  numbers past 2^53.
+- **Bytes as hex, always.** `to_json` writes a bytea as the session's
+  `bytea_output` says. The function sets it to `hex` for itself, so a
+  database set to `escape` cannot turn every seal into other bytes.
+
+### Measurements
+
+**Rig.** Postgres 16.14 in Docker held to 2 vCPU and 2 GB, with
+pg_stat_statements (`track = all`).
+- **Data:** 1,000 service members, each with a credential and grants on a
+  project's dev and prod. 100 projects, each with dev, prod and a personal
+  config of dev. 3,000 keys with values, and 500 references (prod holding
+  personal-config values, read through dev). The genesis changes number about
+  5,800.
+- **Load:** `use_credential` called by `packages/vault/scripts/bench-use.ts` at
+  a fixed 500 uses/s for 10 s, pool 16, as the hot login. 1,000 (credential,
+  key) pairs, every key's bulk row fresh: the steady state.
+- **What is counted:**
+  - CPU: the container's cgroup `usage_usec` over the uses served;
+  - buffers and server time: pg_stat_statements, the call with its nested
+    statements;
+  - client CPU: the bench process's own.
+- **Repetitions:** three interleaved runs per row; the table shows medians.
+  The spread is about 5%. Single runs on this shared host wandered by 0.2 ms,
+  so only interleaved runs are compared.
+- **This host is slower than W215's container.** 0022's function costs 1.17 /
+  0.95 ms of CPU here, where W215 measured 0.64 / 0.41 ms of server time. So
+  every row is read against 0022 on the same rig.
+
+| variant | CPU per use, probing / cached | buffers, probing / cached | server time, probing / cached |
+|---|---|---|---|
+| 0022's `use_credential` (5 inputs), the baseline | 1.17 / 0.95 ms | 44 / 32 | 0.84 / 0.62 ms |
+| 0024 first written: every input, one shape, typed row | 1.94 / 1.32 ms | 58 / 40 | 1.53 / 0.92 ms |
+| ... answering `to_json(r)` | 1.70 / 1.10 ms | 58 / 40 | 1.49 / 0.90 ms |
+| ... in two shapes, typed row | 1.51–1.56 / 1.07–1.08 ms | 56 / 38 | 1.12–1.16 / 0.70 ms |
+| **two shapes and JSON (shipped)** | **1.33 / 0.89 ms** | **56 / 38** | **1.12 / 0.68 ms** |
+| shipped, without the 0.14 probe (its price) | 1.30 / 0.89 ms | 52 / 35 | 1.08 / 0.68 ms |
+| one shape, without the grants' arrays (their price) | 1.72 / 1.11 ms (against 1.83 / 1.14) | 52 / 33 | 1.46 / 0.83 ms |
+| shipped, plus an index on `(number) INCLUDE (mac)` for the newest change | 1.34 / 0.94 ms | 56.6 / 38.4 | unchanged: the planner keeps the pkey |
+| typed row, named statement | 1.40 / 0.91 ms | 56 / 38 | 1.15 / 0.71 ms |
+| shipped, named statement | 1.31 / 0.86 ms | 56 / 38 | 1.14 / 0.68 ms |
+| shipped on postgres.js (`prepare`, no `fetch_types`), pool 16 | 1.50 / 1.08 ms | 56 / 38 | 1.32 / 0.88 ms |
+
+- **Weighted at Cloudflare's 27% probing:**
+  - shipped: 0.27 × 1.33 + 0.73 × 0.89 = **1.01 ms**;
+  - 0022 on the same rig: 1.01 ms.
+
+  0024 reads twice 0022's inputs, the 0.14 probe included, for the same CPU.
+  The plan's ~0.6 ms budget is W211's rig's number for 0022's statement, so
+  in its terms the shipped use is within it.
+- **Reference uses, on their own (whole shape, every input):** 1.83 ms CPU, 87
+  buffers, 1.61 ms server time.
+- **The 0.14 probe (UsesSeeOldWrites):** about 0.04 ms probing and nothing
+  measurable from the cache; 4 buffers.
+- **Buffers miss the plan's "under 30".** They are 38 cached, 56 probing and
+  87 for a reference. Each is a page touched, all hits, none read from disk.
+  - Each probe of an index of realistic depth costs 3 pages, and a use
+    probes 6 to 10 of them, so the count follows the inputs, not the log.
+  - The prototype's 14 and 29 were four inputs on tables of a few rows.
+  - The numbers that matter are CPU and flatness; see the cuts tried below
+    and R48 just after.
+- **R48, flat as the log grows.** At about 100k entries: 1.43 / 0.99 ms; 57 /
+  39 buffers; references 1.84 ms and 86 buffers. At 1.09M: 1.36 / 0.93 ms; 58
+  / 40 buffers; references 1.83 ms and 87 buffers. `use-cost.test.ts` holds it
+  in CI, from 10k to 1M:
+  - one statement per use;
+  - buffers +0 probing and +4 cached, one level more on each of the four
+    indexes that grow with the log.
+
+**The cuts.** The plan listed four, and Erwin approved two more (07:46Z).
+
+| cut | result | kept |
+|---|---|---|
+| the answer as a typed row (approved) | 0.22 ms more of Postgres CPU per use than JSON, and 3.5 µs more on the Worker (above) | no: JSON, reversible |
+| fewer plan nodes: two shapes | −0.41 ms probing, −0.23 ms cached; most uses never run a reference's joins | yes |
+| the fence and bulk rows read once | already so in 0022's shape: each is one join of the statement, and the `lock` retry runs only when a key's row moves, at most once a minute | nothing to cut |
+| roles and policy together | their rows come in one read of `log_config`'s one page. The probe of each newest change stays: merging the two objects changes PR 3's model, its Lean proof and PR 4's `change_input`, for one probe (about 3 buffers, under 0.04 ms) | rows: yes; objects: no |
+| the newest change index-only (`INCLUDE (mac)`) | no change: the planner keeps the primary key | no |
+| named statements (#357 halved Postgres CPU) | −0.04 / −0.03 ms for JSON, −0.16 / −0.17 ms for the typed row. The outer statement is one trivial call, and plpgsql already caches its inner statements' plans per session; #357 named many statements per request | no: 3% does not pay for a name per SQL text; reversible |
+| postgres.js | at pool 1 it ties pg: 1.26 / 0.83 ms against 1.28 / 0.88 (named pg 1.25 / 0.83). At pool 16 it costs +0.15 / +0.19 ms, because it takes the oldest idle connection and cycled all 16 backends against pg's 4–6 (counted per run); Hyperdrive picks its own. Client CPU: equal (0.18–0.20 ms). Bundle with Drizzle: 119 / 37 KB against pg's 163 / 47 KB (minified / gzip). Cold start in workerd: unresolved (below) | Erwin's R56: 0.15 swaps to postgres.js everywhere, for its smaller bundle and lighter load, with the hot paths' numbers held before it merges. 5a reaches Postgres only through Drizzle's `execute`, so it needs no change for it |
+
+**Cold start, by driver.** A minimal Worker per driver with its Drizzle adapter
+made one connection and one query through wrangler's local Hyperdrive, with
+workerd restarted each time (25 runs, per-thread CPU from schedstat).
+- **First request,** with the driver imported lazily so that its evaluation
+  falls inside the request: pg 7.2 ms, postgres.js 7.2 ms, an empty Worker
+  8.4 ms (spread 2.7–9.5 ms). Wrangler's own proxy dominates, so this resolves
+  no difference.
+- **Startup CPU per variant** cannot be read this way: threads that exit
+  leave no count.
+- **To settle it:** run workerd directly, in a cgroup of its own, or read a
+  deployed Worker's cold-start CPU from analytics.
+- **Not run:** the same through Hyperdrive on Cloudflare. Its best case is
+  bounded by the local −0.04 ms, and it is reversible if Erwin wants it.
+
+**In the tests** (`use-cost.test.ts`, the suite's tables of a few rows):
+- **Buffers:** probing 44 at 10k and 44 at 1M; cached 24 and 28.
+- **Statements:** one per use, probing and cached alike.
+
+### What 5a leaves to later PRs, and why
+
+- **A credential's `caller` is in its row.** It is the person's for `user:`,
+  a workload's for `kind = 'workload'`, and a bearer's otherwise.
+  - 0.14 makes a service token a workload when the deployment's
+    `workloads.useOnly` is set (`auth.ts`). PR 4's change path decides how
+    the object carries that.
+  - A credential's member generation is no part of the object either. 0.14
+    ends a removed member's credentials by bumping it; in 0.15 the change
+    path must revoke them (`credential.revoke`).
+- **A reference is the holder's newest `secret_references` row** while the
+  holder has no version of its own (`objects.ts`). Ending one is a `reference.end`
+  entry in 0.14; PR 4's change path must leave the row saying so, or the
+  object stale.
+- **The principal's newest change names the 0.14 entry it accounts for** in its
+  payload, `old`. PR 4a's changes write it: the 0.14 access entry that the same
+  decision appended. The cutover's genesis and each adoption will write it too
+  (PR 9). A change that names none accounts for
+  none, so the use is `stale` while 0.14 holds any access entry about the
+  principal: it fails closed.
+- **The 0.14 probe reads only the principal.** Its entries are the vault's,
+  which a writer cannot forge. Credentials, keys and environments are the
+  app's in 0.14, entries the vault cannot authenticate. Their late 0.14
+  writes leave their rows stale until adopted (fail closed), and a row put
+  back over one is PR 9's to refuse.
+- **`coffre setup` does not give `coffre_vault_hot` a password yet.** The
+  host does, as for any login (docs/deploy.md). The suite's
+  `setup-test-database.sh` gives it one.
 
 ## In short (W208, round 1)
 

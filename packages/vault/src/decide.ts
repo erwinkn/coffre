@@ -2,7 +2,7 @@ import {
   allows, EVERYWHERE, INSTANCE_ROLES, NOTHING, ROLES, ownsProject, readsSensitive, useOnly, withinCredential,
   type HeldKey, type Holdings, type Permission, type Place, type Policy,
 } from '@coffre/core/access';
-import { handsBack, type Access, type Purpose, type RefusalCode } from '@coffre/core/vault';
+import { handsBack, type Access, type Purpose, type RefusalCode, type UseCode } from '@coffre/core/vault';
 
 import { overCap, type BulkRead } from './bulk.ts';
 import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
@@ -231,17 +231,7 @@ export type UseRequest = {
   at: number;
 };
 
-/** Why a use is refused: the rules' codes, and those of sealed inputs. */
-export type UseCode =
-  | RefusalCode
-  /** An input's row is not its object's newest change's: put back from before one, deleted, or written around the log. */
-  | 'stale'
-  /** The credential is not one, was revoked, or had ended at the request's time. */
-  | 'credential'
-  /** No such key. */
-  | 'missing'
-  /** The log holds no policy, so no cap: never served, as the vault writes one before its first use. */
-  | 'no_policy';
+export type { UseCode };
 
 /** One input as a use read it: its row (null: none), the seal on it, and the seal its object's newest change left (null: none, or gone). */
 export type Read<T extends Input> = { row: T | null; seal: Buffer | null; newest: Buffer | null };

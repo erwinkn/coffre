@@ -25,6 +25,7 @@ import type {
   SetSettingsInput,
   ChangePolicyInput,
   UnwrapInput,
+  UseInput,
   Vault,
   VerifyLogInput,
   WrapInput,
@@ -45,9 +46,18 @@ export * from './index.ts';
 /**
  * What the vault Worker's `vault(env => …)` returns. `witnesses` are 0.15's
  * (docs/design/audit-tree.md, R40: a deployment opts in), unused until its
- * log is switched on (plan PR 10).
+ * log is switched on (plan PR 10). `hotDatabase`: 0.15's hot path, behind
+ * its switch (docs/design/0.15-plan.md, PR 5), a Hyperdrive config of its
+ * own whose login is `coffre_vault_hot`; and `uses`, how many uses an
+ * isolate has in flight at most (by default `connections`, the share of
+ * that config's pool an isolate may hold: T112 measures it).
  */
-export type WorkersVaultConfig = VaultConfig & { database: PostgresDatabase; witnesses?: readonly Witness[] };
+export type WorkersVaultConfig = VaultConfig & {
+  database: PostgresDatabase;
+  witnesses?: readonly Witness[];
+  hotDatabase?: PostgresDatabase;
+  uses?: { inFlight?: number; connections?: number; coverMs?: number };
+};
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
 let configure: ((env: never) => WorkersVaultConfig) | null = null;
@@ -57,7 +67,7 @@ let configure: ((env: never) => WorkersVaultConfig) | null = null;
  * isolate keeps: the ready value itself, never the work of making it, which
  * would belong to the call that started it (vault.ts, `PreparedVault`).
  */
-const ready = new WeakMap<object, { database: PostgresDatabase; prepared: PreparedVault }>();
+const ready = new WeakMap<object, { database: PostgresDatabase; hotDatabase?: PostgresDatabase; prepared: PreparedVault }>();
 
 /**
  * What the app's `VAULT` service binding calls. Each call gets a database of
@@ -76,15 +86,28 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     }
   }
 
-  async #ready(): Promise<{ database: PostgresDatabase; prepared: PreparedVault }> {
+  /** 0.15's use: one connection of the hot path's config, for its one statement. */
+  async use(input: UseInput) {
+    const { prepared, hotDatabase } = await this.#ready();
+    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
+    const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
+    try {
+      const hot = createDatabase(pool);
+      return await openVault(hot, prepared, hot).use!(input);
+    } finally {
+      this.ctx.waitUntil(pool.end());
+    }
+  }
+
+  async #ready(): Promise<{ database: PostgresDatabase; hotDatabase?: PostgresDatabase; prepared: PreparedVault }> {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const prepared = await prepareVault(resolveVaultConfig(config));
+      const prepared = await prepareVault(resolveVaultConfig(config), config.uses === undefined ? {} : { uses: config.uses });
       // Calls that raced here each made one; the first kept serves them all from now on.
-      entry = ready.get(env) ?? { database: config.database, prepared };
+      entry = ready.get(env) ?? { database: config.database, ...(config.hotDatabase === undefined ? {} : { hotDatabase: config.hotDatabase }), prepared };
       ready.set(env, entry);
     }
     return entry;

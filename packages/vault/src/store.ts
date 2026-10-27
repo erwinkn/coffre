@@ -8,7 +8,8 @@ import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/g
 import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
-import { objectKey, type Input, type Kind, type PrincipalInput, type Ref } from './inputs.ts';
+import { objectKey, type Input, type Kind, type Ref } from './inputs.ts';
+import { configObject, environmentObject, memberStanding, principalObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -833,7 +834,7 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): 
         .from(vaultMembers)
         .where(eq(vaultMembers.principal, ref.id));
       if (row === undefined) return { row: null, seal: null };
-      return { row: principalObject({ principal: ref.id, status: row.status as Member['status'], ...storedRole(row) }, await readGrants(db, { principal: ref.id })), seal: row.seal ?? null };
+      return { row: principalObject({ principal: ref.id, status: row.status, ...memberStanding(row) }, await readGrants(db, { principal: ref.id })), seal: row.seal ?? null };
     }
     case 'environment': {
       const [row] = await db
@@ -849,40 +850,16 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): 
         .from(environments)
         .where(eq(environments.id, ref.id));
       if (row === undefined) return { row: null, seal: null };
-      return {
-        row: {
-          kind: 'environment',
-          id: ref.id,
-          projectId: row.projectId,
-          slug: row.slug,
-          owner: row.owner,
-          parentId: row.parentId,
-          protected: row.protected === true,
-          deleted: isTombstone(row.slug),
-          archived: row.archivedAt !== null,
-        },
-        seal: row.seal ?? null,
-      };
+      const { projectId, slug, owner, parentId, archivedAt } = row;
+      return { row: environmentObject({ id: ref.id, projectId, slug, owner, parentId, protected: row.protected, archived: archivedAt !== null }), seal: row.seal ?? null };
     }
     case 'roles': case 'policy': {
       const [row] = await db.select({ value: logConfig.value, seal: logConfig.seal }).from(logConfig).where(eq(logConfig.name, ref.kind));
       if (row === undefined) return { row: null, seal: null };
       // Whatever it holds: a value that is not the object fails its seal.
-      return { row: JSON.parse(row.value) as Input, seal: row.seal ?? null };
+      return { row: configObject(row.value), seal: row.seal ?? null };
     }
   }
-}
-
-/** A member's object, from their row and their grants, lapsed ones too. */
-export function principalObject(member: Pick<Member, 'principal' | 'status' | 'role' | 'scope'>, grants: readonly GrantRow[]): PrincipalInput {
-  return {
-    kind: 'principal',
-    principal: member.principal,
-    status: member.status,
-    role: member.role,
-    scope: member.scope,
-    grants: grants.map(({ projectId, environmentId, environmentSlug, role, expiresAt }) => ({ projectId, environmentId, environmentSlug, role, expiresAt })),
-  };
 }
 
 /** The object's newest change in the log: whether it has one, and the seal it left (HotPathOne's NewestIn). */

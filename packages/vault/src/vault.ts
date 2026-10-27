@@ -93,6 +93,8 @@ import {
   type UnwrapInput,
   USE_METADATA_LENGTH,
   type Unwrapped,
+  type UseInput,
+  type UseOutcome,
   type UseRecord,
   type Wrapped,
   type Vault,
@@ -115,11 +117,13 @@ import { limitChange, objectKey, POLICY_REF, ROLES_REF, sealKey, type Input, typ
 import { logMacKey } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
+import { principalObject } from './objects.ts';
 import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
+import { use, UseCache, useKey, useLimits, type UseLimits } from './use.ts';
 
 export type VaultOptions = {
   /**
@@ -146,6 +150,11 @@ export type VaultOptions = {
    * with `log: '0.15'`.
    */
   sealThrough?: SealThrough;
+  /**
+   * 0.15's uses, per isolate (use.ts): how many calls in flight at once, by
+   * default the hot path's pool, `connections`, and how long a cover holds.
+   */
+  uses?: Partial<UseLimits> & { connections?: number };
 };
 
 
@@ -167,7 +176,7 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'uses'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
@@ -198,6 +207,10 @@ export type PreparedVault = {
    * then everyone the deployment names made an Owner (`#declare`).
    */
   converted: boolean;
+  /** What MACs 0.15's uses (use.ts); its seals are `log015`'s. */
+  useKey: Buffer;
+  /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
+  uses: UseCache;
 };
 
 export async function prepareVault(config: ResolvedVaultConfig, options: VaultOptions = {}): Promise<PreparedVault> {
@@ -207,6 +220,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough) : null,
     limited: false,
+    uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
     verified: START,
     reported: new Set(),
     since: null,
@@ -228,12 +242,19 @@ async function keysOf(seeds: readonly Uint8Array[]) {
   const signers = await Promise.all(seeds.map((seed) => signer(seed)));
   const logKeys = seeds.map((seed) => vaultLogKey(seed));
   const rowKeys = seeds.map((seed) => rowKey(seed));
-  return { signer: signers[0], signers, logKey: logKeys[0], logKeys, rowKey: rowKeys[0], rowKeys };
+  return { signer: signers[0], signers, logKey: logKeys[0], logKeys, rowKey: rowKeys[0], rowKeys, useKey: useKey(seeds[0]) };
 }
 
-/** The vault over `db`. Cheap: on Workers, one per call, over that call's connections. */
-export function openVault(db: Database, prepared: PreparedVault): Vault {
-  return new VaultService(db, prepared);
+/** A pool's connections, unless its transport says (pg's default). */
+const DEFAULT_CONNECTIONS = 10;
+
+/**
+ * The vault over `db`, and, for 0.15's uses, over `hot`, the hot path's own
+ * login (`coffre_vault_hot`: its lock and statement timeouts, generic
+ * plans; schema 0022). Cheap: on Workers, one per call, over that call's connections.
+ */
+export function openVault(db: Database, prepared: PreparedVault, hot?: Database): Vault {
+  return new VaultService(db, prepared, hot);
 }
 
 /** Every key operation of one call, together: a removal waits at most this long for a read at KMS. */
@@ -577,11 +598,22 @@ class VaultService implements Vault {
   readonly #db: Database;
   readonly #prepared: PreparedVault;
   readonly #config: ResolvedVaultConfig;
+  readonly #hot: Database | undefined;
 
-  constructor(db: Database, prepared: PreparedVault) {
+  constructor(db: Database, prepared: PreparedVault, hot?: Database) {
     this.#db = db;
     this.#prepared = prepared;
     this.#config = prepared.config;
+    this.#hot = hot;
+  }
+
+  /** 0.15's use (use.ts), on the hot path's login. */
+  async use(input: UseInput): Promise<UseOutcome> {
+    // Behind the switch: a vault keeping 0.14's log alone has no 0.15 objects to decide on.
+    const { log015, useKey: key, uses: cache } = this.#prepared;
+    if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
+    if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
+    return use({ db: this.#hot, sealKeys: log015.seals, useKey: key, keks: this.#config.keks, cache }, input);
   }
 
   async #now(db: Queryable): Promise<number> {
@@ -737,7 +769,7 @@ class VaultService implements Vault {
     await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
     // The member's object as the rows hold it now, which 0.15's change of it must have left, and the access entry its
     // row names, which that change accounts for (`changes.ts`).
-    return { object: store.principalObject(row, decided), accessSeq: next.accessSeq };
+    return { object: principalObject(row, decided), accessSeq: next.accessSeq };
   }
 
   /**

@@ -39,17 +39,39 @@ export type NodeVaultConfig = VaultConfig & {
    * development. Or one already open, which the vault leaves open.
    */
   database: string | Database;
+  /**
+   * 0.15's hot path, behind its switch (docs/design/0.15-plan.md, PR 5):
+   * the same database as `coffre_vault_hot`, whose lock and statement
+   * timeouts bound a use, or one already open. Without it, the vault has
+   * no 0.15 uses.
+   */
+  hotDatabase?: string | Database;
 };
 
 /** The vault in this process. */
 export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
   const resolved = resolveVaultConfig(config);
-  if (typeof config.database !== 'string') return openLocalVault(config.database, resolved, options);
-  const { db, close } = await openDatabase(config.database);
-  return openLocalVault(db, resolved, options, close).catch(async (error: unknown) => {
+  const opened: (() => Promise<void>)[] = [];
+  const open = async (database: string | Database) => {
+    if (typeof database !== 'string') return database;
+    const { db, close } = await openDatabase(database);
+    opened.push(close);
+    return db;
+  };
+  const close = async () => {
+    await Promise.all(opened.map((done) => done()));
+  };
+  try {
+    const db = await open(config.database);
+    const hot = config.hotDatabase === undefined ? undefined : await open(config.hotDatabase);
+    // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
+    const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
+    const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
+    return await openLocalVault(db, resolved, { ...options, uses }, close, hot);
+  } catch (error) {
     await close();
     throw error;
-  });
+  }
 }
 
 const METHOD_NAMES = new Set<string>(METHODS);

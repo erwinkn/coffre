@@ -1,0 +1,134 @@
+import { isCredentialScope, type CallerKind, type CredentialScope, type InstanceRole, type Scope } from '@coffre/core/access';
+import { TOMBSTONE } from '@coffre/core/schemas';
+import { storedRole } from '@coffre/db/grants';
+
+import type { CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PrincipalInput, SecretInput } from './inputs.ts';
+
+/**
+ * The tables' rows as the objects of the 0.15 log (inputs.ts): what a seal
+ * covers, made from a row's columns alone. One mapping for every reader and
+ * writer of a row, the use path's statement (use.ts) and the change path
+ * (plan, PR 4) alike, so that what one seals the other checks. A row's other
+ * columns, bookkeeping the app updates outside any change (a credential's
+ * `last_used_at`), are no part of its object (docs/design/sealed-inputs.md).
+ *
+ * Each function takes the columns as plain values, whichever query read
+ * them: times in ms since the epoch, uuids as text. Each object is made
+ * from its own rows alone: an environment is deleted when its own slug is
+ * a tombstone, not its project's (a project's deletion writes its
+ * environments' changes, plan PR 4b).
+ */
+
+/** A credential's columns: `credentials` (a session, a token, a workload's session). */
+export type CredentialColumns = {
+  id: string;
+  principal: string;
+  kind: string;
+  /** Its scope as stored, JSON; null for a session's. */
+  scope: string | null;
+  revoked: boolean;
+  /** The earlier of its expiry and its hard end, if any, in whole ms: a stored time's sub-millisecond part dropped, never rounded. */
+  expiresAt: number | null;
+};
+
+/**
+ * A credential: a person's on a `user:` principal, a workload's session, or
+ * a bearer's token. A scope that does not parse as one reaches nothing.
+ */
+export function credentialObject(row: CredentialColumns): CredentialInput {
+  const caller: CallerKind = row.principal.startsWith('user:') ? 'person' : row.kind === 'workload' ? 'workload' : 'bearer';
+  return { kind: 'credential', id: row.id, principal: row.principal, caller, scope: scopeOf(row.scope), expiresAt: row.expiresAt, revoked: row.revoked };
+}
+
+function scopeOf(stored: string | null): CredentialScope | null {
+  if (stored === null) return null;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {}
+  return isCredentialScope(parsed) ? parsed : [];
+}
+
+/** A member's grant as its object holds it, from its row (`vault_grants`): an environment's with that environment's project. */
+type GrantColumns = Pick<InputGrant, 'projectId' | 'environmentId' | 'environmentSlug' | 'role' | 'expiresAt'>;
+
+/** A member's object, from their row (its role and scope as `storedRole` reads them) and their grants, lapsed ones too. */
+export function principalObject(member: { principal: string; status: string; role: InstanceRole; scope: Scope }, grants: readonly GrantColumns[]): PrincipalInput {
+  return {
+    kind: 'principal',
+    principal: member.principal,
+    status: member.status === 'active' ? 'active' : 'removed',
+    role: member.role,
+    scope: member.scope,
+    grants: grants.map(({ projectId, environmentId, environmentSlug, role, expiresAt }) => ({ projectId, environmentId, environmentSlug, role, expiresAt })),
+  };
+}
+
+/** A member's role and scope as stored (`owner`, `role`, `scope`), as their object holds them. */
+export function memberStanding(row: { owner: boolean; role: string | null; scope: string | null }): { role: InstanceRole; scope: Scope } {
+  return storedRole(row);
+}
+
+/** The version a key's value is: its ids, its nature and its wrapped data key. */
+export type VersionColumns = {
+  id: string;
+  sensitive: boolean;
+  /** Whether the value is plain: kept as text, with no data key the vault opens. */
+  plain: boolean;
+  kekProvider: string;
+  kekId: string;
+  kekVersion: string;
+  /** The wrapped data key, base64. */
+  wrappedDek: string;
+};
+
+/**
+ * A key's columns (`secrets`), unarchived: an archived key is no object.
+ * `source`: a reference's, the source its newest `secret_references` row
+ * names while it has no version of its own; null for a key with a value.
+ */
+export type SecretColumns = { id: string; projectId: string; environmentId: string; source: string | null };
+
+/**
+ * A key: its current version, nature and wrapped data key; or, for a
+ * reference, its source, whose value and nature are its own (R23): a
+ * reference holds no version, and is a secret by itself.
+ */
+export function secretObject(row: SecretColumns, version: VersionColumns | null): SecretInput {
+  const { id, projectId, environmentId, source } = row;
+  if (source !== null || version === null) return { kind: 'secret', id, projectId, environmentId, version: '', nature: 'secret', key: null, source };
+  const nature: Nature = version.sensitive ? 'sensitive' : version.plain ? 'plain' : 'secret';
+  const key = nature === 'plain' ? null : { kekProvider: version.kekProvider, kekId: version.kekId, kekVersion: version.kekVersion, bytes: version.wrappedDek };
+  return { kind: 'secret', id, projectId, environmentId, version: version.id, nature, key, source: null };
+}
+
+/** An environment's columns (`environments`). Its slug as stored: a deleted one's carries a tombstone, `dev~deleted-…`. */
+export type EnvironmentColumns = {
+  id: string;
+  projectId: string;
+  slug: string;
+  owner: string | null;
+  parentId: string | null;
+  /** Null until the cutover writes it (0022): not protected. */
+  protected: boolean | null;
+  archived: boolean;
+};
+
+/** An environment: its slug, as it was before any tombstone, and whether it was deleted. */
+export function environmentObject(row: EnvironmentColumns): EnvironmentInput {
+  const tomb = row.slug.indexOf(TOMBSTONE);
+  return {
+    kind: 'environment', id: row.id, projectId: row.projectId, slug: tomb < 0 ? row.slug : row.slug.slice(0, tomb),
+    owner: row.owner, parentId: row.parentId, protected: row.protected === true, deleted: tomb >= 0, archived: row.archived,
+  };
+}
+
+/**
+ * The roles and the policy: each one `log_config` row whose value is the
+ * object as the change that made it wrote it (0022's `change_input`:
+ * genesis's `value`), read whole. A value that is not that object fails
+ * its seal.
+ */
+export function configObject(value: string): Input {
+  return JSON.parse(value) as Input;
+}

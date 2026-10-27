@@ -24,6 +24,8 @@ const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 export const OWNER_URL = url('coffre_owner:local-dev-only');
 export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
+/** 0.15's hot path's login (schema 0022): the vault's, with its lock and statement timeouts and generic plans. */
+export const HOT_URL = url('coffre_vault_hot:local-hot-only');
 
 /** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
 type Spoken<I> = I extends Through ? Omit<I, 'caller'> & Partial<Through> : I;
@@ -77,7 +79,7 @@ export async function openLocalVault(...[db, config, options, close]: Parameters
   return speaking(await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed } : {}), ...options }, close));
 }
 
-export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; close(): Promise<void> };
+export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; hot(connections?: number): Promise<Database>; close(): Promise<void> };
 
 /**
  * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
@@ -101,6 +103,7 @@ export async function openTestDatabase(): Promise<TestDatabase> {
     owner: await open(OWNER_URL),
     vault: await open(VAULT_URL),
     connect: (connections) => open(VAULT_URL, connections),
+    hot: (connections) => open(HOT_URL, connections),
     close: async () => {
       await Promise.all(opened.map((close) => close()));
     },
