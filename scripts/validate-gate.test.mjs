@@ -111,7 +111,7 @@ test('the shards partition formal.sh and the workflow runs each of them', () => 
     const all = list().stdout.trim().split('\n');
     assert.ok(all.length > 100);
     const matrix = workflow.match(/shard: \[([a-z, -]+)\]/)[1].split(', ');
-    assert.deepEqual(matrix, ['tampering', 'large', 'rest', 'hotpath', 'hotpath-policy', 'hotpath-bulk', 'hotpath-skew', 'seal', 'seal-plugin']);
+    assert.deepEqual(matrix, ['tampering', 'large', 'rest', 'hotpath', 'hotpath-policy', 'hotpath-bulk', 'hotpath-skew', 'seal', 'seal-plugin', 'seal-retention']);
     const sharded = matrix.flatMap((shard) => list('--shard', shard).stdout.trim().split('\n'));
     assert.deepEqual([...sharded].sort(), [...all].sort());
     const tampering = list('--shard', 'tampering').stdout.trim().split('\n');

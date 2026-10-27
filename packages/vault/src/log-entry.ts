@@ -1,6 +1,8 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
-import { macData, type LeafValue, type LogEntry } from '@coffre/core/merkle';
+import { macData, type Cut, type LeafValue, type LogEntry } from '@coffre/core/merkle';
+
+import { logObject } from './inputs.ts';
 
 /**
  * 0.15's entries as the trees seal them (docs/design/audit-tree.md, "A
@@ -57,4 +59,36 @@ export function authentic(key: Buffer): (entry: LogEntry) => boolean {
     const expected = createHmac('sha256', key).update(macData(entry.tree, entry.columns.slice(0, -1))).digest().subarray(0, MAC_BYTES);
     return timingSafeEqual(expected, mac);
   };
+}
+
+/**
+ * A retention change (plan PR 7, migration 0027's `log_retention`): an entry
+ * of the changes tree, kept for good, that cuts the uses tree. Its object is
+ * the log's own, its actor the system's, and its payload names the day it
+ * drops and the cut: the pair at or past the day's end, by its upto, its time
+ * and its uses head, which the kept tiles at the cut give a verifier.
+ */
+export const RETENTION_OBJECT = logObject('log', 'retention');
+export const RETENTION_ACTOR = 'system:retention';
+
+export function retentionPayload(day: string, cut: Cut): string {
+  return JSON.stringify({ op: 'retention', day, cut: { upto: String(cut.upto), at: cut.at, uses: cut.uses.size, root: cut.uses.root.toString('hex') } });
+}
+
+/** The cut a retention change names, from its entry; null for any other entry, or one whose payload is not a retention's. */
+export function retentionCut(entry: LogEntry): Cut | null {
+  if (entry.tree !== 'changes' || entry.columns[2] !== RETENTION_OBJECT || typeof entry.columns[4] !== 'string') return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(entry.columns[4]);
+  } catch {
+    return null;
+  }
+  const c = (payload as { op?: unknown; cut?: { upto?: unknown; at?: unknown; uses?: unknown; root?: unknown } } | null);
+  const cut = c?.op === 'retention' ? c.cut : undefined;
+  if (typeof cut?.upto !== 'string' || !/^\d{1,19}$/.test(cut.upto) || !Number.isSafeInteger(cut.at) || !Number.isSafeInteger(cut.uses) || (cut.uses as number) < 0
+    || typeof cut.root !== 'string' || !/^[0-9a-f]{64}$/.test(cut.root)) {
+    return null;
+  }
+  return { upto: BigInt(cut.upto), at: cut.at as number, uses: { size: cut.uses as number, root: Buffer.from(cut.root, 'hex') } };
 }

@@ -966,6 +966,7 @@ export const logCheckpoints = sqliteTable(
   (table) => [
     check('log_checkpoints_changes_root_check', sql`octet_length(${table.changesRoot}) = 32`),
     check('log_checkpoints_uses_root_check', sql`octet_length(${table.usesRoot}) = 32`),
+    index('log_checkpoints_floor_idx').on(table.atFloor, table.upto),
   ],
 );
 

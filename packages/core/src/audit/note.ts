@@ -13,6 +13,7 @@ import { HASH_SIZE, type Hash } from './tree.ts';
  *   upto 2026102600000001048599   extension: every number at or below it is final
  *   at 1793048700000              extension: when it was signed, ms since the epoch
  *   floor 1793048697000           extension: the floor of `at` its barrier set
+ *   prev 1793048696500            extension: the floor of the pair signed before it
  *
  *   — coffre.example/audit/uses Az3g…   key ID (4 bytes) and Ed25519 signature, base64
  *
@@ -21,29 +22,34 @@ import { HASH_SIZE, type Hash } from './tree.ts';
  * `floor` is the lowest `at` a use may still be written with once its barrier
  * ran: the database's row of it is unsigned, so the signer holds it here and
  * the next barrier must find it no lower (HotPathOne.tla's BarrierChecksFloor).
+ * `prev` is the floor of the pair the signer signed just before, so that a pair
+ * is provably the first past a time from its own note: its floor at or past
+ * it, its `prev` below. Retention cuts a day there (Seal.tla's CutFirst); a
+ * writer who deletes rows cannot make a later pair pass for it.
  * Ed25519 through WebCrypto, which Node and Workers both have.
  */
-export type Checkpoint = { origin: string; size: number; root: Hash; upto: bigint; at: number; floor: number };
+export type Checkpoint = { origin: string; size: number; root: Hash; upto: bigint; at: number; floor: number; prev: number };
 
 /** The largest number a log entry may carry: Postgres's bigint. */
 export const MAX_NUMBER = 2n ** 63n - 1n;
 
 export function checkpointBody(c: Checkpoint): string {
-  return `${c.origin}\n${c.size}\n${c.root.toString('base64')}\nupto ${c.upto}\nat ${c.at}\nfloor ${c.floor}\n`;
+  return `${c.origin}\n${c.size}\n${c.root.toString('base64')}\nupto ${c.upto}\nat ${c.at}\nfloor ${c.floor}\nprev ${c.prev}\n`;
 }
 
 /** The checkpoint a note's text holds; throws on anything else, byte for byte, since the database is a writer's to shape. */
 export function parseCheckpoint(text: string): Checkpoint {
   const lines = text.split('\n');
-  const [origin, size, root, upto, at, floor, end] = lines;
+  const [origin, size, root, upto, at, floor, prev, end] = lines;
   const hash = Buffer.from(root ?? '', 'base64');
-  const ok = lines.length === 7 && end === '' && origin !== undefined && /^[^\s+]+$/.test(origin)
+  const ok = lines.length === 8 && end === '' && origin !== undefined && /^[^\s+]+$/.test(origin)
     && /^(0|[1-9]\d{0,15})$/.test(size ?? '') && hash.length === HASH_SIZE && hash.toString('base64') === root
-    && /^upto (0|[1-9]\d{0,18})$/.test(upto ?? '') && /^at (0|[1-9]\d{0,15})$/.test(at ?? '') && /^floor (0|[1-9]\d{0,15})$/.test(floor ?? '');
+    && /^upto (0|[1-9]\d{0,18})$/.test(upto ?? '') && /^at (0|[1-9]\d{0,15})$/.test(at ?? '') && /^floor (0|[1-9]\d{0,15})$/.test(floor ?? '')
+    && /^prev (0|[1-9]\d{0,15})$/.test(prev ?? '');
   // Sizes and times are exact numbers up to 2^53, as the tree's arithmetic; numbers are Postgres bigints.
-  const [n, t, f] = [Number(size), Number(at?.slice(3)), Number(floor?.slice(6))];
-  if (!ok || BigInt(upto!.slice(5)) > MAX_NUMBER || ![n, t, f].every(Number.isSafeInteger)) throw new Error('not a checkpoint');
-  return { origin: origin!, size: n, root: hash, upto: BigInt(upto!.slice(5)), at: t, floor: f };
+  const [n, t, f, b] = [Number(size), Number(at?.slice(3)), Number(floor?.slice(6)), Number(prev?.slice(5))];
+  if (!ok || BigInt(upto!.slice(5)) > MAX_NUMBER || ![n, t, f, b].every(Number.isSafeInteger)) throw new Error('not a checkpoint');
+  return { origin: origin!, size: n, root: hash, upto: BigInt(upto!.slice(5)), at: t, floor: f, prev: b };
 }
 
 const ED25519 = 1;

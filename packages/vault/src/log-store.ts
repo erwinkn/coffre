@@ -4,7 +4,9 @@ import { engineOf, rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { CheckpointStore } from './checkpointer.ts';
-import { changeEntry, useEntry } from './log-entry.ts';
+import { logObject } from './inputs.ts';
+import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
+import type { RetentionStore } from './retention.ts';
 
 /**
  * The checkpointer's database (checkpointer.ts, `CheckpointStore`): 0.15's
@@ -23,6 +25,10 @@ import { changeEntry, useEntry } from './log-entry.ts';
  *   made (`make_tiles`) before a tile lands in it, the next one with it.
  * - Every read of uses is bounded by `at`, from the floor of the window it
  *   reads: none scans the history (R48).
+ * - Retention (retention.ts, migration 0027): days made ahead, the
+ *   retention change, and a day's partition and the tiles below a cut
+ *   dropped, each through its function, which holds the vault's login to
+ *   what a sealed retention change cuts.
  *
  * On SQLite one transaction runs at a time: the fence is implicit, every
  * number committed is final, and the barrier only moves the floor. The
@@ -44,7 +50,10 @@ type Options = {
   tileRange?: number;
 };
 
-export function logStore(db: Database, options: Options = {}): CheckpointStore {
+/** The checkpointer's database, with retention's part. */
+export type LogStore = CheckpointStore & RetentionStore;
+
+export function logStore(db: Database, options: Options = {}): LogStore {
   const range = options.tileRange ?? TILE_RANGE;
   // A range holds whole leaf tiles: 256 leaves each.
   if (!Number.isSafeInteger(range) || range <= 0 || range % 256 !== 0) throw new Error(`tileRange must be a positive multiple of 256, not ${range}`);
@@ -118,6 +127,9 @@ type RawPair = { upto: string; changes: string; uses: string };
 const toPair = (r: RawPair | null | undefined): StoredPair | null => (r === null || r === undefined ? null : { upto: BigInt(r.upto), notes: { changes: r.changes, uses: r.uses } });
 
 const leafOf = (t: TileKey) => tileLeaves(t).first;
+/** A UTC day, YYYY-MM-DD, as ms since the epoch at its start. */
+const dayStart = (day: string) => Date.parse(`${day}T00:00:00Z`);
+const DAY_MS = 86_400_000;
 const indexOf = (level: number, leaf: number) => leaf / 2 ** (8 * (level + 1));
 
 /** One row, one JSON column `v`, as both dialects answer the reads below. */
@@ -127,7 +139,7 @@ async function one<T>(db: Database, query: SQL): Promise<T> {
   return (typeof v === 'string' ? JSON.parse(v) : v) as T;
 }
 
-function postgresStore(db: Database, range: number): CheckpointStore {
+function postgresStore(db: Database, range: number): LogStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
   const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
@@ -147,8 +159,9 @@ function postgresStore(db: Database, range: number): CheckpointStore {
         FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}
       ORDER BY n`);
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
-  // ranges, forgets the ones it drops here.
+  // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
   const made = new Set<number>();
+  const madeDays = new Set<string>();
   return {
     async close(after, from) {
       // The barrier, and the newest pair with it: only the checkpointer writes that row, so a snapshot from before the
@@ -228,10 +241,62 @@ function postgresStore(db: Database, range: number): CheckpointStore {
       if (found === null || found === undefined || found.entry === null || found.before === null) return null;
       return { entry: toEntry(found.entry), index: Number(found.before) };
     },
+    async retention() {
+      // The newest at or below the newest checkpoint (sealed, as far as the database says: log_cut's), by its object's
+      // index; then its place, as a proof reads it.
+      const [r] = await rowsOf<{ n: string | null }>(db, sql`SELECT (SELECT c.number FROM log_changes c
+          WHERE c.object = ${RETENTION_OBJECT}::uuid AND c.number <= (SELECT coalesce(max(k.upto), -1) FROM log_checkpoints k)
+          ORDER BY c.number DESC LIMIT 1)::text AS n`);
+      return r?.n == null ? null : this.locate(BigInt(r.n));
+    },
+    async days() {
+      // Every day of uses there is, attached or left detached by a drop that stopped between its two steps: the
+      // catalog, not the uses, so that a quiet day, with none, is found too.
+      const names = await rowsOf<{ name: string }>(db, sql`
+        SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND c.relname ~ '^log_uses_[0-9]{8}$'`);
+      return names.map((n) => `${n.name.slice(9, 13)}-${n.name.slice(13, 15)}-${n.name.slice(15, 17)}`).sort();
+    },
+    async makeDays(days) {
+      for (const day of days) {
+        if (madeDays.has(day)) continue;
+        await rowsOf(db, sql`SELECT make_day(${day}::date)`);
+        madeDays.add(day);
+      }
+    },
+    async cutAt(ms) {
+      return toPair(await one<RawPair | null>(db, sql`SELECT ${PAIR} AS v FROM log_checkpoints k WHERE k.at_floor >= ${ms} ORDER BY k.at_floor, k.upto LIMIT 1`));
+    },
+    async appendRetention(change) {
+      const [row] = await rowsOf<{ n: string }>(db, sql`SELECT log_retention(${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea)::text AS n`);
+      return BigInt(row!.n);
+    },
+    async dropDay(day) {
+      const [row] = await rowsOf<{ state: 'detached' | 'dropped' | 'gone' }>(db, sql`SELECT drop_day(${day}::date) AS state`);
+      if (row!.state !== 'detached') madeDays.delete(day);
+      return row!.state;
+    },
+    async dropTiles(below) {
+      // A step a call; each leaf range detached is forgotten, so that a write would make it again (T119's item 2): none does,
+      // a write's tiles being at the edge, at or above every cut.
+      let deleted = 0;
+      for (let step = 0; step < 10_000; step += 1) {
+        const [row] = await rowsOf<{ done: string }>(db, sql`SELECT drop_tiles(${below}::bigint) AS done`);
+        const [what, name] = row!.done.split(' ') as [string, string];
+        if (what === 'done') return deleted + Number(name);
+        // Forgotten whichever step this call took: a DETACH whose answer was lost shows next as the range dropped.
+        made.delete(Number(name.slice('log_tiles_uses_'.length)));
+        if (what === 'detached') deleted += 1;
+      }
+      throw new Error('the tiles below the cut were not all dropped in 10,000 steps');
+    },
+    async pruneBulk(limit) {
+      const [row] = await rowsOf<{ n: number }>(db, sql`SELECT prune_bulk(${limit}::int) AS n`);
+      return Number(row!.n);
+    },
   };
 }
 
-function sqliteStore(db: Database): CheckpointStore {
+function sqliteStore(db: Database): LogStore {
   const CHANGE = sql.raw(`json_object('tree', 'changes', 'number', CAST(c.number AS TEXT), 'at', CAST(c.at AS TEXT), 'requestId', c.request_id,
     'object', c.object, 'actor', c.actor, 'payload', c.payload, 'seal', CASE WHEN c.seal IS NULL THEN NULL ELSE hex(c.seal) END, 'mac', hex(c.mac))`);
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
@@ -321,6 +386,58 @@ function sqliteStore(db: Database): CheckpointStore {
         WHERE EXISTS (SELECT 1 FROM sealing)`);
       if (found === null || found === undefined || found.entry === null || found.before === null) return null;
       return { entry: toEntry(found.entry), index: Number(found.before) };
+    },
+    // Retention on SQLite (tests and local development): no partitions, so a day's uses and the tiles below a cut are
+    // deleted rows, in one statement each; no functions, so no checks but the vault's own.
+    async retention() {
+      const [r] = await rowsOf<{ n: string | null }>(db, sql`SELECT CAST((SELECT c.number FROM log_changes c
+          WHERE c.object = ${RETENTION_OBJECT} AND c.number <= (SELECT coalesce(max(k.upto), -1) FROM log_checkpoints k)
+          ORDER BY c.number DESC LIMIT 1) AS TEXT) AS n`);
+      return r?.n == null ? null : this.locate(BigInt(r.n));
+    },
+    async days() {
+      // Each day that holds a use: the first use at or past the end of the one before, by the uses' index, a probe a day.
+      const days: string[] = [];
+      for (let from = Number.MIN_SAFE_INTEGER; ;) {
+        const [r] = await rowsOf<{ at: number | null }>(db, sql`SELECT min(at) AS at FROM log_uses WHERE at >= ${from}`);
+        if (r?.at == null) return days;
+        const start = Math.floor(Number(r.at) / DAY_MS) * DAY_MS;
+        days.push(new Date(start).toISOString().slice(0, 10));
+        from = start + DAY_MS;
+      }
+    },
+    async makeDays() {},
+    async cutAt(ms) {
+      return toPair(await one<RawPair | null>(db, sql`SELECT ${PAIR} AS v FROM log_checkpoints k WHERE k.at_floor >= ${ms} ORDER BY k.at_floor, k.upto LIMIT 1`));
+    },
+    async appendRetention(change) {
+      return db.transaction(async (tx) => {
+        const [found] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(number AS TEXT) AS n FROM log_changes WHERE request_id = ${change.requestId}`);
+        if (found !== undefined) return BigInt(found.n);
+        const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
+        await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+          VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${RETENTION_OBJECT}, ${RETENTION_ACTOR}, ${change.payload}, NULL, ${change.mac})`);
+        return BigInt(next!.n);
+      });
+    },
+    async dropDay(day) {
+      await rowsOf(db, sql`DELETE FROM log_uses WHERE at >= ${dayStart(day)} AND at < ${dayStart(day) + DAY_MS}`);
+      return 'gone';
+    },
+    async dropTiles(below) {
+      // A tile goes once every leaf it stands for lies below the cut; level 7's one tile spans past any (2^64 leaves).
+      const deleted = await rowsOf(db, sql`DELETE FROM log_tiles WHERE tree = 'uses' AND level < 7 AND leaf + (1 << (8 * (level + 1))) <= ${below} RETURNING 1 AS n`);
+      return deleted.length;
+    },
+    async pruneBulk(limit) {
+      // prune_bulk's bound (migration 0022): the policy's window, its refresh, the deadline and an hour.
+      const pruned = await rowsOf(db, sql`DELETE FROM log_bulk WHERE rowid IN (
+          SELECT b.rowid FROM log_bulk b, (
+            SELECT CAST(json_extract(x.payload, '$.value.bulk.windowMs') AS INTEGER) AS w FROM log_changes x
+             WHERE x.object = ${logObject('policy', 'instance')} ORDER BY x.number DESC LIMIT 1) p
+           WHERE p.w IS NOT NULL AND b.last < ${NOW} - p.w - min(60000, p.w / 10) - 3000 - 3600000 LIMIT ${limit})
+        RETURNING 1 AS n`);
+      return pruned.length;
     },
   };
 }
