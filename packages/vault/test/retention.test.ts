@@ -11,8 +11,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
 import { leafHash, openPair, pairSigners, pairVerifiers, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
-import pg from 'pg';
 
 import { Checkpointer } from '../src/checkpointer.ts';
 import { logObject } from '../src/inputs.ts';
@@ -257,17 +257,16 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   await midnight(cp);
   await later(cp);
   // A backup's pg_dump, say: the whole table held ACCESS SHARE for the length of its transaction.
-  const reader = new pg.Client({ connectionString: VAULT_URL });
-  await reader.connect();
-  await reader.query('BEGIN');
-  await reader.query('SELECT count(*) FROM log_uses');
+  const reader = postgresSession(VAULT_URL);
+  await reader.unsafe('BEGIN');
+  await reader.unsafe('SELECT count(*) FROM log_uses');
   try {
     const held = await retain(cp, store, { keepDays: 1, macKey });
     assert.match(held.waiting ?? '', new RegExp(`^${D10}: a reader holds the table past the lock timeout`));
     assert.deepEqual(held.detached, []);
     assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
   } finally {
-    await reader.query('ROLLBACK');
+    await reader.unsafe('ROLLBACK');
     await reader.end();
   }
   const r = await retain(cp, store, { keepDays: 1, macKey });
@@ -334,8 +333,7 @@ test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s c
       SELECT ${top}::bigint + g * 100, ${now}, ${now - 3000}::bigint + g, 0, ${Buffer.alloc(32)}, 'x', 0, ${Buffer.alloc(32)}, 'x' FROM generate_series(1, ${total / 100}) g`);
     await run(db.owner, sql`VACUUM ANALYZE`);
   };
-  const vault = new pg.Client({ connectionString: VAULT_URL });
-  await vault.connect();
+  const vault = postgresClient(VAULT_URL, { max: 1 });
   const statements = {
     cut: `SELECT k.upto, k.changes_note, k.uses_note FROM log_checkpoints k WHERE k.at_floor >= ${MIDNIGHT} ORDER BY k.at_floor, k.upto LIMIT 1`,
     sealed: 'SELECT * FROM log_cut()',
@@ -345,8 +343,8 @@ test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s c
     const counted: Record<string, number> = {};
     for (const [name, text] of Object.entries(statements)) {
       for (let i = 0; i < 2; i += 1) {
-        const { rows: [plan] } = await vault.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${text}`);
-        const node = (plan as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+        const [plan] = await vault.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${text}`);
+        const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
         counted[name] = node['Shared Hit Blocks'] + node['Shared Read Blocks'];
       }
     }
