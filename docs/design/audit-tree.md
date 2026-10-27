@@ -398,6 +398,8 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 | the log's origin from the signing key; no deployment option | — | 6b |
 | witnesses are vault config, opted into, fed by the checkpointer | the plugin's capability where the pairs are signed (R40) | 6b |
 | a refusal that stands is alerted once; alarms kept where the plugin reads them | — | 6b |
+| a tile read names its tiles as constants | planning 8.7 → 0.4 ms at 150 ranges | 6b, Fable's review |
+| the object's memory synced before the database write | one storage round trip a tick | 6b, Fable's review |
 
 ## Where it runs (6b)
 
@@ -418,6 +420,11 @@ functions.
   3. `write_checkpoint(…)`: both trees' tiles and the pair, one call
      (PairWrittenTogether). A tile only grows, and a second pair at one
      place fails.
+- **A tile read names its tiles as constants** (`(level = 0 AND leaf =
+  256) OR …`), so Postgres prunes the leaf ranges as it plans. As an array,
+  every range was planned: 8.7 ms at 150 ranges, a month at 1,000 uses a
+  second, against 0.4 ms (Fable's review). It runs for every witness's
+  proof each tick and every change's proof.
 - **No read scans history (R48).** Each read of uses is bounded by `at`
   on both sides: from the floor of the pair it starts after, to the slack
   past the floor of the pair that seals where it ends (review r3). Only a
@@ -456,7 +463,9 @@ a new log; how a rotation carries the trees across is the cutover's
 
 **On Node** (`packages/vault/src/checkpointer-node.ts`):
 - `runCheckpointer({ database, seed, memory, witnesses })` ticks every
-  500 ms, a tick after the last ends.
+  500 ms, a tick after the last ends. A tick that throws is an alarm, kept
+  once; `stop()` closes the checkpointer, so a handle kept after it never
+  ticks beside a runner started over the same file.
 - The memory is a file, written whole, synced, renamed over the last, and
   the directory synced (`fileMemory`).
 - Alarms are appended to `<memory>.alarms`, one JSON line each.
@@ -497,11 +506,15 @@ optional capability, wired where the pairs are signed, in the vault.
   trees extend the one it holds. Its client sends each tree's proof from
   the sizes the object holds; on a 409 it learns those sizes and sends
   again. It passes the try's abort signal to the object's request.
+  A pair it holds that no longer opens (its settings now name other keys,
+  a record damaged) is refused, never forgotten into a fresh witness: a
+  new witness is a new name (Fable's review).
 - **`r2Archive(env.ARCHIVE)`** puts each pair it is sent under
   `audit/<upto>.json` without overwriting. The pump sends the newest pair,
   so one a slow put skipped over is not kept; the next, which extends it,
-  is. The same pair again is fine; another at a place
-  already archived is refused. Under a bucket lock, a Worker or a database
+  is. A put over an object already there, answered with null or, under a
+  bucket lock, with an error, is the same pair sent again, which is fine,
+  or another, which is refused. Under a bucket lock, a Worker or a database
   writer cannot overwrite or delete what it holds; an account admin can
   lift the lock (R54).
 
