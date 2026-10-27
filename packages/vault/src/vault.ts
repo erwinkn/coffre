@@ -41,6 +41,7 @@ import {
   type ServiceAccount,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
+import { MAX_NUMBER, type PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -156,6 +157,14 @@ export type VaultOptions = {
    */
   sealThrough?: SealThrough;
   /**
+   * Under 0.15's log, the pairs held where no database writer reaches: the
+   * signer's memory (`durableHeldOutside` on Workers, the Node runner's
+   * `heldOutside`), later a witness's. The verifier holds every walk to
+   * them; without, a database rolled back whole to an earlier pair verifies
+   * until the signer's next tick refuses it (verifier.ts).
+   */
+  heldOutside?: () => Promise<readonly PairNotes[]>;
+  /**
    * 0.15's uses, per isolate (use.ts): how many calls in flight at once, by
    * default the hot path's pool, `connections`, and how long a cover holds.
    */
@@ -181,13 +190,13 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'uses'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
    * Null under 0.14's alone.
    */
-  log015: (ChangeKeys & { sealThrough: SealThrough }) | null;
+  log015: (ChangeKeys & { sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]> }) | null;
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
   /** How far the chain is rehashed, by any call of this process: its head must still be there. */
@@ -223,7 +232,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
-    log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough) : null,
+    log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
     limited: false,
     verifier: null,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
@@ -238,9 +247,9 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
 }
 
 /** 0.15's change keys from the vault's signing keys, the first sealing and MACing, each checking a seal. */
-function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined): ChangeKeys & { sealThrough: SealThrough } {
+function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined, heldOutside = async (): Promise<readonly PairNotes[]> => []): NonNullable<PreparedVault['log015']> {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
-  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough };
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough, heldOutside };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -3086,8 +3095,11 @@ class VaultService implements Vault {
     await this.#settled();
     if (this.#prepared.log015 === null) return { kept: false };
     const from = input?.from;
-    if (from !== undefined && (typeof from !== 'string' || !/^(start|0|[1-9][0-9]{0,18})$/.test(from))) throw new Error("verifyTrees goes on from `start` or a pair's number, in decimal");
-    return verifyTrees(this.#db, await this.#verifierKeys(), { ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify });
+    if (from !== undefined && (typeof from !== 'string' || !/^(start|0|[1-9][0-9]{0,18})$/.test(from) || (from !== 'start' && BigInt(from) > MAX_NUMBER))) {
+      throw new Error("verifyTrees goes on from `start` or a pair's number, in decimal");
+    }
+    const anchors = await this.#prepared.log015.heldOutside();
+    return verifyTrees(this.#db, await this.#verifierKeys(), { ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify, anchors });
   }
 
   /**
@@ -3098,7 +3110,8 @@ class VaultService implements Vault {
    */
   async #replayOn(): Promise<void> {
     try {
-      const walked = await verifyTrees(this.#db, await this.#verifierKeys(), { limit: this.#prepared.options.walks.checkpoint, keep: true });
+      const anchors = await this.#prepared.log015!.heldOutside();
+      const walked = await verifyTrees(this.#db, await this.#verifierKeys(), { limit: this.#prepared.options.walks.checkpoint, keep: true, anchors });
       if (!walked.ok) console.warn(`coffre audit: 0.15's log does not verify: ${walked.problems.slice(0, 3).join('; ')}`);
     } catch (error) {
       console.warn(`coffre audit: 0.15's log was not checked: ${(error as Error).message}`);

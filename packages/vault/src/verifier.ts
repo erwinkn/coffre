@@ -1,6 +1,6 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
-import { openPair, pairSigners, pairVerifiers, verifyLog, type LogEntry, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
+import { MAX_NUMBER, openPair, pairSigners, pairVerifiers, verifyLog, type LogEntry, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
 import type { TreeVerification } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
@@ -9,7 +9,7 @@ import { refreshMs, USE_DEADLINE_MS } from './bulk.ts';
 import { loggedChange } from './changes.ts';
 import { FRESH_MS, logOrigin } from './checkpointer.ts';
 import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
-import { canonical, sealKey, type Input, type SealKeys } from './inputs.ts';
+import { alike, objectKey, refOf, sealKey, type Input, type Ref, type SealKeys } from './inputs.ts';
 import { authentic, logMacKey } from './log-entry.ts';
 import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
 import { logStore } from './log-store.ts';
@@ -72,6 +72,13 @@ export type VerifyOptions = {
   limit: number;
   /** Keep the replay where the walk ends, however few entries it read: the checkpoint job's walk. */
   keep?: boolean;
+  /**
+   * Pairs held outside the database: the signer's memory, a witness's
+   * (`VaultOptions.heldOutside`). The walk must reach each: a database
+   * rolled back whole to an earlier pair, rows and kept replays with it,
+   * otherwise passes until the signer's next tick refuses it.
+   */
+  anchors?: readonly PairNotes[];
 };
 
 /** A walk that read at least this many entries keeps its replay, so the next check reads fewer. */
@@ -79,6 +86,18 @@ export const KEEP_AFTER = 1000;
 
 /** How long a replay older than the newest is kept: a walk's next stretch asks for it within seconds. */
 export const REPLAYS_KEPT_MS = 3_600_000;
+
+/**
+ * Which rows a walk holds to the replay, when it reaches the present. A
+ * check from a kept replay, a page's, holds only the objects its entries
+ * changed or read, and their principals' bulk rows: R25's cost, the entries
+ * since. Every other walk holds every row, an O(objects) read: the
+ * checkpoint job's, every five minutes; one from the first entry; the last
+ * stretch of a whole walk; and a check with no replay kept yet. What the
+ * last full audit found is kept with the replay, and each check after says
+ * it again until a full audit finds the rows whole.
+ */
+type Audited = { at: number; problems: string[] };
 
 export async function verifyTrees(db: Database, keys: VerifierKeys, options: VerifyOptions): Promise<Extract<TreeVerification, { kept: true }>> {
   const problems: string[] = [];
@@ -89,7 +108,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   // The walk's start, read in its snapshot: a replay kept at a pair, checked by its MAC over the pair's notes.
   const walked = await db.transaction(async (tx) => {
     const store = logStore(tx as unknown as Database);
-    let start: { notes: PairNotes; upto: bigint; replayed: Replayed } | null = null;
+    let start: { notes: PairNotes; upto: bigint; replayed: Replayed; audited: Audited | null } | null = null;
     if (options.from !== 'start') {
       const upto = options.from === undefined ? undefined : parseUpto(options.from);
       if (upto === null) return { refused: `not a pair to go on from: ${options.from}` };
@@ -97,16 +116,20 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       if (kept === null && upto !== undefined) return { refused: `no replay is kept at ${upto}: walk again from the first entry` };
       if (kept !== null) {
         const pair = await store.pair(kept.upto);
-        const replayed = pair === null ? null : opened(keys, kept, pair.notes);
-        if (pair === null || replayed === null) return { refused: `the replay kept at ${kept.upto} is not the vault's over the checkpoint there: walk again from the first entry` };
-        start = { notes: pair.notes, upto: kept.upto, replayed };
+        const read = pair === null ? null : opened(keys, kept, pair.notes);
+        if (pair === null || read === null) return { refused: `the replay kept at ${kept.upto} is not the vault's over the checkpoint there: walk again from the first entry` };
+        start = { notes: pair.notes, upto: kept.upto, ...read };
       }
     }
     const replayed = start?.replayed ?? emptyReplay();
     const newest = await store.newest();
     // The replay as it stands at the newest pair, taken as the walk passes it: entries above it are not sealed yet.
-    let atNewest: string | null = null;
+    let atNewest: Saved | null = null;
     const requests = new Requests();
+    // What the entries changed or read, for a check that holds only those rows: each object by its key, and the bulk
+    // rows of each principal a use counted against.
+    const touched = new Map<string, Ref>();
+    const counted = new Set<string>();
     const check = (entry: LogEntry): string | null => {
       if (newest !== null && atNewest === null && entry.number > newest.upto) atNewest = saved(replayed);
       if (!authentic(keys.mac)(entry)) return 'its MAC does not hold';
@@ -115,27 +138,53 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       if (typeof one === 'string') return one;
       const faults = replayed.faults.length;
       replay(keys.seals, [one], undefined, replayed);
+      if (one.kind === 'change') touched.set(objectKey(one.ref), one.ref);
+      else {
+        for (const ref of [{ kind: 'credential', id: one.request.credential }, { kind: 'secret', id: one.request.secretId }] as const) touched.set(objectKey(ref), ref);
+        const credential = replayed.rows.get(objectKey({ kind: 'credential', id: one.request.credential }))?.row;
+        if (credential?.kind === 'credential') {
+          touched.set(objectKey({ kind: 'principal', id: credential.principal }), { kind: 'principal', id: credential.principal });
+          counted.add(credential.principal);
+        }
+      }
       return replayed.faults.length > faults ? replayed.faults.splice(faults).map((fault) => fault.replace(/^\d+: /, '')).join('; ') : null;
     };
-    const verdict = await verifyLog(store, { verifiers: keys.verifiers, ...(start === null ? {} : { from: start.notes }), check, limit: options.limit });
+    const verdict = await verifyLog(store, {
+      verifiers: keys.verifiers, ...(start === null ? {} : { from: start.notes }), ...(options.anchors === undefined ? {} : { anchors: options.anchors }), check, limit: options.limit,
+    });
     problems.push(...verdict.problems);
     if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
     const at = await now(tx);
-    if (verdict.done) problems.push(...audit(replayed, await heldObjects(tx), await bulkRows(tx), at));
+    // The rows: every one, or a page's check's, those its entries touched, beside what the last full audit found.
+    let audited = start?.audited ?? null;
+    const rows: string[] = [];
+    if (verdict.done && (start === null || options.from !== undefined || options.keep === true)) {
+      audited = { at, problems: audit(replayed, await heldObjects(tx), await bulkRows(tx), at) };
+      rows.push(...audited.problems);
+    } else if (verdict.done) {
+      const only = { keys: new Set(touched.keys()), principals: counted };
+      rows.push(...(audited?.problems ?? []), ...audit(replayed, await heldObjects(tx, [...touched.values()]), await bulkRows(tx, [...counted]), at, only));
+    }
     // The replay at the pair the walk ended at: the newest, passed before the entries above it, or where a stretch stopped.
-    return { verdict, start, at, state: verdict.done ? (atNewest ?? saved(replayed)) : saved(replayed) };
+    return { verdict, start, at, rows, audited, state: verdict.done ? (atNewest ?? saved(replayed)) : saved(replayed) };
   }, SNAPSHOT);
   if ('refused' in walked) {
     problems.push(walked.refused!);
     return result({ from: options.from === undefined || options.from === 'start' ? null : options.from });
   }
-  const { verdict, start, at, state } = walked;
+  const { verdict, start, at, rows, audited } = walked;
   const head = verdict.head === null ? null : await openPair(verdict.head, keys.verifiers);
   // What it replayed, kept at the pair it ended at, for the next stretch, or the next check once it read enough to be
-  // worth it; never when it found something wrong.
-  if (problems.length === 0 && head !== null && verdict.head !== null && head.upto > (start?.upto ?? -1n) && (options.keep === true || !verdict.done || verdict.sealed >= KEEP_AFTER)) {
-    await keepReplay(db, { upto: head.upto, at, state, mac: replayMac(keys.replays[0]!, head.upto, verdict.head, state) }, REPLAYS_KEPT_MS);
+  // worth it; never over a log that does not hold. Rows a full audit found wrong are kept with it, for every check after
+  // to say; a page's check that finds one keeps nothing, so the next reads its entries again.
+  const fullAudit = audited !== (start?.audited ?? null);
+  const keep = problems.length === 0 && (rows.length === 0 || fullAudit) && head !== null && verdict.head !== null && head.upto > (start?.upto ?? -1n)
+    && (options.keep === true || !verdict.done || verdict.sealed >= KEEP_AFTER);
+  if (keep) {
+    const state = JSON.stringify({ ...walked.state, audited });
+    await keepReplay(db, { upto: head!.upto, at, state, mac: replayMac(keys.replays[0]!, head!.upto, verdict.head!, state) }, REPLAYS_KEPT_MS);
   }
+  problems.push(...rows);
   return result({
     from: start === null ? null : start.upto.toString(),
     checkpoint: head === null ? null : { upto: head.upto.toString(), at: head.at },
@@ -148,7 +197,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
 }
 
 function parseUpto(from: string): bigint | null {
-  return /^\d{1,19}$/.test(from) ? BigInt(from) : null;
+  return /^\d{1,19}$/.test(from) && BigInt(from) <= MAX_NUMBER ? BigInt(from) : null;
 }
 
 // --- entries ------------------------------------------------------------------------------------------
@@ -205,6 +254,8 @@ type Saved = {
   limit: BulkLimit | null;
   bulk: [principal: string, rows: [secret: string, last: number][]][];
   last: string;
+  /** What the last full audit of the rows found, and when; null before the first. */
+  audited?: Audited | null;
 };
 
 /**
@@ -212,7 +263,7 @@ type Saved = {
  * out: older than the longest window, its refresh, the deadline and an
  * hour, before the newest use's time.
  */
-function saved(replayed: Replayed): string {
+function saved(replayed: Replayed): Saved {
   let newest = -Infinity;
   for (const held of replayed.bulk.values()) for (const last of held.values()) newest = Math.max(newest, last);
   const horizon = newest - MAX_BULK_WINDOW_MINUTES * 60_000 - 60_000 - USE_DEADLINE_MS - 3_600_000;
@@ -224,11 +275,11 @@ function saved(replayed: Replayed): string {
     bulk: [...replayed.bulk].map(([principal, held]) => [principal, [...held].filter(([, last]) => last > horizon)] as [string, [string, number][]]).filter(([, held]) => held.length > 0),
     last: replayed.last.toString(),
   };
-  return JSON.stringify(state);
+  return state;
 }
 
-/** A kept replay, if its MAC is the vault's over the pair's notes and itself. */
-function opened(keys: VerifierKeys, kept: KeptReplay, notes: PairNotes): Replayed | null {
+/** A kept replay, and what the last full audit found, if its MAC is the vault's over the pair's notes and itself. */
+function opened(keys: VerifierKeys, kept: KeptReplay, notes: PairNotes): { replayed: Replayed; audited: Audited | null } | null {
   if (!keys.replays.some((key) => timingSafeEqual(replayMac(key, kept.upto, notes, kept.state), kept.mac))) return null;
   const state = JSON.parse(kept.state) as Saved;
   if (state.v !== 1) return null;
@@ -241,7 +292,7 @@ function opened(keys: VerifierKeys, kept: KeptReplay, notes: PairNotes): Replaye
   replayed.limit = state.limit;
   for (const [principal, held] of state.bulk) replayed.bulk.set(principal, new Map(held));
   replayed.last = BigInt(state.last);
-  return replayed;
+  return { replayed, audited: state.audited ?? null };
 }
 
 function replayMac(key: Buffer, upto: bigint, notes: PairNotes, state: string): Buffer {
@@ -259,13 +310,21 @@ function replayMac(key: Buffer, upto: bigint, notes: PairNotes, state: string): 
  * rows, those that may still count: the database forgets older ones
  * (`prune_bulk`), the replay too.
  */
-function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>, bulk: Map<string, Map<string, number>>, now: number): string[] {
+function audit(
+  replayed: Replayed,
+  held: Awaited<ReturnType<typeof heldObjects>>,
+  bulk: Map<string, Map<string, number>>,
+  now: number,
+  only?: { keys: ReadonlySet<string>; principals: ReadonlySet<string> },
+): string[] {
   const problems: string[] = [];
   const name = (key: string) => {
-    const ref = held.get(key)?.ref;
+    const row = replayed.rows.get(key)?.row;
+    const ref = held.get(key)?.ref ?? (row === undefined ? undefined : refOf(row));
     return ref === undefined ? `object ${key}` : `the ${ref.kind} ${ref.id}`;
   };
   for (const [key, seal] of replayed.newest) {
+    if (only !== undefined && !only.keys.has(key)) continue;
     const rows = held.get(key);
     if (seal === null) {
       if (rows !== undefined && (rows.row !== null || rows.seal !== null)) problems.push(`${name(key)}: its rows hold what the log deleted`);
@@ -274,7 +333,7 @@ function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>
     const object = replayed.rows.get(key)!.row;
     if (rows === undefined || (rows.row === null && rows.sealOnly === undefined)) problems.push(`${name(key)}: the log holds it, its rows do not`);
     else if (rows.seal === null || !rows.seal.equals(seal)) problems.push(`${name(key)}: its rows carry ${rows.seal === null ? 'no seal' : "another change's seal than the newest"}: put back, or written around the vault`);
-    else if (rows.sealOnly === undefined && canonical(rows.row) !== canonical(object)) problems.push(`${name(key)}: its rows are not the object the log makes`);
+    else if (rows.sealOnly === undefined && !alike(rows.row!, object)) problems.push(`${name(key)}: its rows are not the object the log makes`);
   }
   for (const [key, rows] of held) {
     if (replayed.newest.has(key)) continue;
@@ -289,6 +348,7 @@ function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>
   // As prune_bulk bounds it, by the database's clock: older rows may be gone from either side.
   const horizon = now - limit.windowMs - refreshMs(limit) - USE_DEADLINE_MS - 3_600_000;
   for (const principal of new Set([...bulk.keys(), ...replayed.bulk.keys()])) {
+    if (only !== undefined && !only.principals.has(principal)) continue;
     const [stored, made] = [bulk.get(principal) ?? new Map<string, number>(), replayed.bulk.get(principal) ?? new Map<string, number>()];
     for (const secret of new Set([...stored.keys(), ...made.keys()])) {
       const [a, b] = [stored.get(secret), made.get(secret)];

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
+import { decodePair } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
@@ -64,14 +65,17 @@ async function instance(walks: VaultOptions['walks'] = {}) {
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
   };
   const seed = config.signingKeys[0]!;
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory: variableMemory() });
+  const memory = variableMemory();
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  // The signer's memory, where no database writer reaches: what each walk is held to.
+  const heldOutside = async () => (memory.record === null ? [] : [decodePair(memory.record)!]);
   const control = { hold: false, before: null as null | ((number: bigint) => Promise<void>) };
   const sealThrough: SealThrough = async (number, deadline) => {
     await control.before?.(number);
     if (control.hold) return {} as Awaited<ReturnType<SealThrough>>;
     return cp.sealThrough(number, deadline);
   };
-  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, walks }, async () => {}, hot));
+  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside, walks }, async () => {}, hot));
   const keys: ChangeKeys = { seals: [sealKey(seed)], mac: logMacKey(seed) };
   const where = await places(db.owner);
   const genesis = async (ref: Ref, input: Input) => {
@@ -308,12 +312,71 @@ test('a forged use is named at its entry, and so are the indexes that keep reque
   // Not the vault's, so not replayed: the bulk row it moved is one the log does not.
   assert.equal(checked.problems[0], `${outcome.number}: its MAC does not hold`);
   assert.match(checked.problems[1]!, new RegExp(`^the bulk cap of ${ADA}: its row for .* says \\d+, the log none$`));
-  if (ENGINE !== 'postgres') return;
   // A copy of an entry passes the walk's own check across two stretches; the database refuses it, while its index stands.
-  await run(db.owner, sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`);
+  const [drop, add] = ENGINE === 'postgres'
+    ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
+    : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
+  await run(db.owner, drop);
   try {
     assert.ok((await w.verify()).problems.includes('the indexes that keep each request to one entry are gone: a copy of an entry would pass'));
   } finally {
-    await run(db.owner, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`);
+    await run(db.owner, add);
   }
+});
+
+test('review r1: grants come back from the rows in any order, and a member revoked and granted again still verifies', async () => {
+  const w = await instance();
+  assert.ok((await w.grant(BO, 'viewer')).ok);
+  assert.ok((await w.grant(BO, 'viewer', w.prod)).ok);
+  assert.ok((await w.grant(BO, null)).ok);
+  // The grant lands in the slot the revoke freed, ahead of the one it kept: the replay has them the other way round.
+  assert.ok((await w.grant(BO, 'developer')).ok);
+  clean(await w.verify());
+});
+
+test('review r1: a page\'s check holds only the rows its entries touched; the checkpoint job holds them all, and every check after says what it found', async () => {
+  const w = await instance();
+  await w.vault.checkpoint();
+  // A writer changes a credential nobody uses since: the page's check, from the replay kept, reads no row of it.
+  const { credentials } = tablesOf(db.owner);
+  const [{ expiresAt }] = await db.owner.select({ expiresAt: credentials.expiresAt }).from(credentials).where(eq(credentials.id, w.credential));
+  await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, w.credential));
+  assert.ok((await w.grant(BO, 'viewer')).ok);
+  const page = await w.verify();
+  clean(page);
+  assert.notEqual(page.from, null, 'from the replay kept');
+  // The job's walk holds every row, and keeps what it found with its replay.
+  await w.vault.checkpoint();
+  const named = `the credential ${w.credential}: its rows are not the object the log makes`;
+  assert.deepEqual((await w.verify()).problems, [named]);
+  assert.deepEqual((await w.verify()).problems, [named], 'every check after');
+  // Put back as it was, the next full audit clears it.
+  await db.owner.update(credentials).set({ expiresAt }).where(eq(credentials.id, w.credential));
+  assert.ok((await w.grant(BO, 'developer')).ok);
+  await w.vault.checkpoint();
+  clean(await w.verify());
+});
+
+test('review r1: a database rolled back whole to an earlier pair, its kept replays with it, is named against the signer\'s memory', async () => {
+  const w = await instance();
+  await w.vault.checkpoint();
+  const [earlier] = await rows<{ upto: string | number }>(db.owner, sql`SELECT max(upto) AS upto FROM log_checkpoints`);
+  assert.ok((await w.grant(BO, 'viewer')).ok);
+  const signed = w.cp.pair.pair.upto;
+  // Every row the grant and its seal left, gone: its entries, the pairs above, Bo.
+  await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto > ${BigInt(earlier!.upto)}`);
+  await run(db.owner, sql`DELETE FROM log_changes WHERE number > ${BigInt(earlier!.upto)}`);
+  await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${BO}`);
+  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${BO}`);
+  const checked = await w.verify();
+  assert.ok(!checked.ok);
+  assert.ok(checked.problems.includes(`the database ends up to ${earlier!.upto}; a pair held outside seals up to ${signed}: entries or checkpoints were deleted`), checked.problems.join('\n'));
+});
+
+test('review r1: an object whose rows are gone is named from the replay; a pair past the log\'s numbers is refused', async () => {
+  const w = await instance();
+  const { credentials } = tablesOf(db.owner);
+  await db.owner.delete(credentials).where(eq(credentials.id, w.credential));
+  assert.deepEqual((await w.verify()).problems, [`the credential ${w.credential}: the log holds it, its rows do not`]);
+  await assert.rejects(w.vault.verifyTrees!({ from: '9223372036854775808' }), /goes on from `start` or a pair's number/);
 });

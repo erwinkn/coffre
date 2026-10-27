@@ -162,5 +162,5 @@ export function checkpointer() {
   });
 }
 
-export { checkpointerAlarms, checkpointerStatus, durableSealThrough, startCheckpointer } from './checkpointer-workers.ts';
+export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer } from './checkpointer-workers.ts';
 export { durableWitness, r2Archive, witnessObject as witness, type WitnessSettings } from './witness-workers.ts';

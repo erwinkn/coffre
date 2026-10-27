@@ -887,25 +887,32 @@ export type Held = { ref: Ref; row: Input | null; seal: Buffer | null; sealOnly?
  * the change path read it (`objects.ts`): members with their grants, lapsed
  * ones too; credentials, their end the earlier of expiry and hard end;
  * keys, archived ones with no object, a reference with its newest
- * reference's source; environments; the roles and the policy. Every row:
- * the audit is the explicit, whole-instance read R25 allows, never a
- * request's.
+ * reference's source; environments; the roles and the policy. Every row,
+ * the explicit whole-instance read R25 allows; or, given `only`, those
+ * objects' rows alone, what a page's check reads (verifier.ts).
  */
-export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
+export async function heldObjects(db: Queryable, only?: readonly Ref[]): Promise<Map<string, Held>> {
   const { vaultMembers, credentials, serviceBindings, secrets, secretVersions, secretReferences, environments, logConfig } = tablesOf(db);
   const source = sql<string | null>`(SELECT ${secretReferences.sourceSecretId} FROM ${secretReferences} WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  const ids = (kind: Kind) => [...new Set((only ?? []).filter((ref) => ref.kind === kind).map((ref) => ref.id))];
+  /** `read`, over every row, or over the ids `only` names of `kind`: none named, nothing read. */
+  const rowsOf = async <T>(kind: Kind, column: SQLWrapper, read: (where: SQL | undefined) => Promise<T[]>): Promise<T[]> => {
+    if (only === undefined) return read(undefined);
+    const named = ids(kind);
+    return named.length === 0 ? [] : read(inArray(column as never, named));
+  };
   const [members, held, tokens, bindings, keys, places, config] = await Promise.all([
-    db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal }).from(vaultMembers),
-    readGrants(db),
-    db.select({ id: credentials.id, principal: credentials.principal, kind: credentials.kind, scope: credentials.scope, revokedAt: credentials.revokedAt, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter, seal: credentials.seal }).from(credentials),
-    db.select({ id: serviceBindings.id, seal: serviceBindings.seal }).from(serviceBindings).where(isNotNull(serviceBindings.seal)),
-    db.select({
+    rowsOf('principal', vaultMembers.principal, (where) => db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal }).from(vaultMembers).where(where)),
+    only === undefined ? readGrants(db) : Promise.all(ids('principal').map((principal) => readGrants(db, { principal }))).then((each) => each.flat()),
+    rowsOf('credential', credentials.id, (where) => db.select({ id: credentials.id, principal: credentials.principal, kind: credentials.kind, scope: credentials.scope, revokedAt: credentials.revokedAt, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter, seal: credentials.seal }).from(credentials).where(where)),
+    rowsOf('credential', serviceBindings.id, (where) => db.select({ id: serviceBindings.id, seal: serviceBindings.seal }).from(serviceBindings).where(and(isNotNull(serviceBindings.seal), where))),
+    rowsOf('secret', secrets.id, (where) => db.select({
       id: secrets.id, projectId: secrets.projectId, environmentId: secrets.environmentId, archivedAt: secrets.archivedAt, seal: secrets.seal, versionId: secrets.currentVersionId,
       sensitive: secretVersions.sensitive, plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`, kekProvider: secretVersions.kekProvider,
       kekId: secretVersions.kekId, kekVersion: secretVersions.kekVersion, wrappedDek: secretVersions.wrappedDek, source,
-    }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)),
-    db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, owner: environments.owner, parentId: environments.parentId, protected: environments.protected, archivedAt: environments.archivedAt, seal: environments.seal }).from(environments),
-    db.select({ name: logConfig.name, value: logConfig.value, seal: logConfig.seal }).from(logConfig),
+    }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)).where(where)),
+    rowsOf('environment', environments.id, (where) => db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, owner: environments.owner, parentId: environments.parentId, protected: environments.protected, archivedAt: environments.archivedAt, seal: environments.seal }).from(environments).where(where)),
+    only !== undefined && !only.some((ref) => ref.kind === 'roles' || ref.kind === 'policy') ? [] : db.select({ name: logConfig.name, value: logConfig.value, seal: logConfig.seal }).from(logConfig),
   ]);
   const found = new Map<string, Held>();
   const hold = (ref: Ref, row: Input | null, seal: Buffer | null | undefined, sealOnly?: true) => found.set(objectKey(ref), { ref, row, seal: seal ?? null, ...(sealOnly ? { sealOnly } : {}) });
@@ -934,10 +941,12 @@ export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
   return found;
 }
 
-/** The bulk cap's rows, every principal's: `last` by key. */
-export async function bulkRows(db: Queryable): Promise<Map<string, Map<string, number>>> {
+/** The bulk cap's rows, every principal's, or `only` these principals': `last` by key. */
+export async function bulkRows(db: Queryable, only?: readonly string[]): Promise<Map<string, Map<string, number>>> {
   const { logBulk } = tablesOf(db);
-  const rows = await db.select({ principal: logBulk.principal, secret: logBulk.secret, last: logBulk.last }).from(logBulk);
+  if (only !== undefined && only.length === 0) return new Map();
+  const rows = await db.select({ principal: logBulk.principal, secret: logBulk.secret, last: logBulk.last }).from(logBulk)
+    .where(only === undefined ? undefined : inArray(logBulk.principal, [...only]));
   const by = new Map<string, Map<string, number>>();
   for (const { principal, secret, last } of rows) {
     const held = by.get(principal) ?? new Map<string, number>();
@@ -970,12 +979,16 @@ export async function keepReplay(db: Queryable, replay: KeptReplay, keptMs: numb
 }
 
 /**
- * Whether the indexes that keep request ids unique stand (Postgres): a
+ * Whether the indexes that keep request ids unique stand: a
  * second entry under one request is a replay the database refuses, so a
  * walk need hold only its own stretch to it (`RequestIdChecked`).
  */
 export async function requestsUnique(db: Queryable): Promise<boolean> {
-  if (engineOf(db) !== 'postgres') return true;
+  if (engineOf(db) === 'sqlite') {
+    const [row] = await rowsOf<{ n: string | number }>(db, sql`SELECT count(*) AS n FROM sqlite_master
+      WHERE type = 'index' AND name IN ('log_uses_request_idx', 'log_changes_request_id_key') AND sql LIKE 'CREATE UNIQUE INDEX%'`);
+    return Number(row?.n) === 2;
+  }
   const [row] = await rowsOf<{ n: string | number }>(db, sql`SELECT count(*) AS n FROM pg_index i
     WHERE i.indexrelid IN (to_regclass('public.log_uses_request_idx'), to_regclass('public.log_changes_request_id_key')) AND i.indisunique AND i.indisvalid`);
   return Number(row?.n) === 2;

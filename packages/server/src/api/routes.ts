@@ -743,7 +743,8 @@ export const routes = {
   }),
   // 0.15's log: from the replay the vault last kept; or, with `from`, a stretch of the walk from the first entry (`start`), and on from each `next`.
   ...route('GET /audit/trees', {
-    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^(0|[1-9][0-9]{0,18})$/)]).optional() }),
+    // A pair's number is 64-bit: one past 2^63 - 1 names none.
+    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^(0|[1-9][0-9]{0,18})$/).refine((n) => BigInt(n) <= 9223372036854775807n, 'not a number of the log')]).optional() }),
     run: (ctx, { input }) => verifyAuditTrees(ctx, input),
   }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.

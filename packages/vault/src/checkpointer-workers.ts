@@ -11,7 +11,7 @@
 // checkpointer()`, beside `vault(…)`), and starts it once; nothing does yet:
 // 0.15's log is switched on in plan PR 10. Asked with `fetch`, as the
 // anchor and the gates are.
-import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
+import { decodePair, parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
@@ -168,7 +168,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
 
     async fetch(request: Request): Promise<Response> {
       try {
-        const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' };
+        const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' } | { op: 'remembered' };
         if (call.op === 'start') {
           if ((await this.#open()) === null) return Response.json({ error: this.#failed }, { status: 503 });
           if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
@@ -187,6 +187,11 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
             ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
           });
+        }
+        if (call.op === 'remembered') {
+          // The pair the signer remembers, read from the object's storage, opened or not.
+          const record = await durableMemory(this.#state.storage).last();
+          return Response.json({ notes: record === null ? null : decodePair(record) });
         }
         if (call.op === 'alarms') {
           // A page at a time, each from the last key of the one before (which it lists again): a list is 1,000 keys at most.
@@ -231,6 +236,17 @@ export async function startCheckpointer(namespace: ObjectNamespace, name = 'chec
 /** The object's head and its last ticks, each with its barrier, write and wall time. */
 export function checkpointerStatus(namespace: ObjectNamespace, name = 'checkpointer'): Promise<{ open: boolean; upto: string | null; sizes: Record<'changes' | 'uses', number> | null; ticks: (Omit<Tick, 'upto'> & { upto: string; wallMs: number; at: number })[] }> {
   return ask(namespace, name, { op: 'status' });
+}
+
+/**
+ * The pair the signer remembers, where no database writer reaches: what the
+ * vault's verifier holds its walks to (`VaultOptions.heldOutside`).
+ */
+export function durableHeldOutside(namespace: ObjectNamespace, name = 'checkpointer'): () => Promise<PairNotes[]> {
+  return async () => {
+    const { notes } = await ask<{ notes: PairNotes | null }>(namespace, name, { op: 'remembered' });
+    return notes === null ? [] : [notes];
+  };
 }
 
 /** The alarms the object kept since `since` (ms). */

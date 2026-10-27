@@ -491,7 +491,7 @@ function ChainStatus({
   const sealed = trees?.checkpoint == null ? null : `its checkpoint of ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
   const replayed = trees === null
     ? ''
-    : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row is the one the log makes.`;
+    : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row is the one the log makes${chain.whole ? '' : ': those changed since checked now, all of them every five minutes'}.`;
   const behind = trees !== null && !trees.done;
   return (
     <div className="chain">
