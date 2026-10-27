@@ -135,7 +135,7 @@ test("the checkpointer seals real uses: each entry's MAC is the log's, over the 
   const verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
   const v = await verifyLog(store, { verifiers, check: (e) => (authentic(MAC)(e) ? null : 'its MAC does not hold') });
   assert.ok(v.ok && v.sealed === Number(cp.pair.pair.changes.size) + 3, v.problems.join('\n'));
-  // A third use, its purpose changed by a writer before its tick: the MAC covers it, and the tick refuses.
+  // One more use, its purpose changed by a writer before its tick: the MAC covers it, and the tick refuses.
   const third = heard(await (await isolate()).use(ask(w, id, { purpose: 'reveal' })));
   assert.ok(third.ok, JSON.stringify(third));
   await run(db.owner, sql`UPDATE log_uses SET purpose = ${purposeCode({ purpose: 'run', keepsSensitive: false })} WHERE number = ${third.number}`);
