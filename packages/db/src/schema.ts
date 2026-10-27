@@ -1119,9 +1119,10 @@ export const logCheckpoints = pgTable(
 
 /**
  * The two trees' tiles (C2SP tlog-tiles: height 8, up to 256 hashes of one
- * level). Partitioned by tree, and the uses tree's by `leaf`, the first
- * leaf a tile covers (`make_tiles`), so that retention drops a table rather
- * than deleting a day's rows (W212).
+ * level). Partitioned by tree; the uses tree's leaf tiles (level 0) by
+ * `leaf`, the first leaf a tile covers (`make_tiles`), so that retention
+ * drops a table rather than deleting a day's rows (W212); its levels above,
+ * which span far past their first leaf, in one table (W217).
  */
 export const logTiles = pgTable(
   'log_tiles',

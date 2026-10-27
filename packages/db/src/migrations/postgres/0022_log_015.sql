@@ -89,7 +89,12 @@ CREATE TABLE "log_tiles" (
 --> statement-breakpoint
 CREATE TABLE "log_tiles_changes" PARTITION OF "log_tiles" FOR VALUES IN ('changes');
 --> statement-breakpoint
-CREATE TABLE "log_tiles_uses" PARTITION OF "log_tiles" FOR VALUES IN ('uses') PARTITION BY RANGE ("leaf");
+-- The uses tree by level: its leaves' tiles (level 0) by leaf range, which retention drops whole (W212: 1.16 s against 13.8 s for a DELETE); the levels above, 1/256 of the bytes, in one table, where retention deletes the few tiles that end at or below the cut. A tile above level 0 starts low and spans far (2/0 covers 16.7M leaves), so a range of first leaves would drop one that still holds the cut (W217, #370's keptAbove).
+CREATE TABLE "log_tiles_uses" PARTITION OF "log_tiles" FOR VALUES IN ('uses') PARTITION BY LIST ("level");
+--> statement-breakpoint
+CREATE TABLE "log_tiles_uses_leaves" PARTITION OF "log_tiles_uses" FOR VALUES IN (0) PARTITION BY RANGE ("leaf");
+--> statement-breakpoint
+CREATE TABLE "log_tiles_uses_upper" PARTITION OF "log_tiles_uses" FOR VALUES IN (1, 2, 3, 4, 5, 6, 7);
 --> statement-breakpoint
 -- The seals, null until 0.15's cutover seals each row: one on each table an object of W216's lives in, a member's covering its grants, a secret's its current version and a reference's source. Adding a nullable column rewrites nothing; the checks are NOT VALID so that adding them scans nothing either (every row is null, and every new row is checked).
 ALTER TABLE "credentials" ADD COLUMN "seal" "bytea";--> statement-breakpoint
@@ -148,7 +153,7 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- A range of the uses tree's tiles, those whose first leaf is in [p_from, p_to), made apart and attached as make_day makes a day. What ranges, and when, is the checkpointer's.
+-- A range of the uses tree's leaf tiles (level 0), those whose first leaf is in [p_from, p_to), made apart and attached as make_day makes a day. What ranges, and when, is the checkpointer's.
 CREATE FUNCTION make_tiles(p_from bigint, p_to bigint) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -158,7 +163,7 @@ BEGIN
     IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN
         IF NOT EXISTS (
             SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-             WHERE i.inhparent = 'public.log_tiles_uses'::regclass AND c.oid = to_regclass('public.' || quote_ident(name))
+             WHERE i.inhparent = 'public.log_tiles_uses_leaves'::regclass AND c.oid = to_regclass('public.' || quote_ident(name))
                AND pg_get_expr(c.relpartbound, c.oid) = format('FOR VALUES FROM (%L) TO (%L)', p_from, p_to)
         ) THEN
             RAISE EXCEPTION '% exists, and does not hold the tiles of [%, %)', name, p_from, p_to;
@@ -166,10 +171,10 @@ BEGIN
         RETURN name;
     END IF;
     BEGIN
-        EXECUTE format('CREATE TABLE public.%I (LIKE public.log_tiles_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
+        EXECUTE format('CREATE TABLE public.%I (LIKE public.log_tiles_uses_leaves INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
         EXECUTE format('ALTER TABLE public.%I ADD PRIMARY KEY (tree, level, leaf)', name);
         EXECUTE format('GRANT SELECT ON public.%I TO coffre_backup', name);
-        EXECUTE format('ALTER TABLE public.log_tiles_uses ATTACH PARTITION public.%I FOR VALUES FROM (%s) TO (%s)', name, p_from, p_to);
+        EXECUTE format('ALTER TABLE public.log_tiles_uses_leaves ATTACH PARTITION public.%I FOR VALUES FROM (%s) TO (%s)', name, p_from, p_to);
     EXCEPTION WHEN duplicate_table OR unique_violation THEN
         RETURN public.make_tiles(p_from, p_to);
     END;
@@ -551,7 +556,7 @@ GRANT EXECUTE ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_creden
 -- The vault reads all of it; the backup reads every table, partitions included (pg_dump reads each), and the sequence. The app reads none: it never decides.
 GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles TO coffre_vault;
 --> statement-breakpoint
-GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles, log_tiles_changes, log_tiles_uses TO coffre_backup;
+GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles, log_tiles_changes, log_tiles_uses, log_tiles_uses_leaves, log_tiles_uses_upper TO coffre_backup;
 --> statement-breakpoint
 GRANT SELECT ON SEQUENCE log_number TO coffre_backup;
 --> statement-breakpoint
