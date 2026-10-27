@@ -19,12 +19,16 @@
 // With `--uses <rate>`, uses run beside, that many a second, each one `use_credential` call through a relay of its
 // own (uses.ts), and it reports their latency and refusals for each level, `0` jobs a level of uses alone (`--idle`
 // seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
+// With `--proxy <rate>` instead, the uses beside are the whole app's `/use`, the credential proxy on 100 people's
+// handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--cgroup <dir>`, the Postgres
+// container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over the uses sent).
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
-//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 [--use-pool 100] [--idle 5]] [--signin-only]
+//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
+//     [--signin-only] [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -49,6 +53,7 @@ import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testV
 import { answer, type Pages } from '../start-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
 import { farPostgres, percentile } from './far.ts';
+import type { ProxyLoad, ProxyPhase } from './proxy-uses.ts';
 import type { UseLoad, UsePhase } from './uses.ts';
 import { watched } from '../db/postgres-pool.ts';
 
@@ -60,8 +65,13 @@ const { values } = parseArgs({
     log: { type: 'string', default: '0.14' },
     uses: { type: 'string', default: '0' },
     idle: { type: 'string', default: '5' },
+    warm: { type: 'string', default: '3' },
     'use-pool': { type: 'string', default: '100' },
     'signin-only': { type: 'boolean', default: false },
+    proxy: { type: 'string', default: '0' },
+    threads: { type: 'string', default: '4' },
+    'proxy-cache': { type: 'string', default: '0' },
+    cgroup: { type: 'string' },
   },
 });
 const RTT = Number(values.rtt);
@@ -69,6 +79,9 @@ const ROUNDS = Number(values.rounds);
 const JOBS = values.jobs.split(',').map(Number);
 const USES = Number(values.uses);
 const SIGNIN_ONLY = values['signin-only'];
+const PROXY = Number(values.proxy);
+/** The Postgres container's CPU so far, in µs, when `--cgroup` names its cgroup. */
+const cpuUsec = () => (values.cgroup === undefined ? 0 : Number(/usage_usec (\d+)/.exec(readFileSync(join(values.cgroup, 'cpu.stat'), 'utf8'))![1]));
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -116,6 +129,7 @@ const checkpointerPool = postgresClient(TEST_VAULT_DATABASE_URL, { max: 4 });
 const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
 let checkpointer: RunningCheckpointer | null = null;
 let loader: Worker | null = null;
+let proxies: Worker[] = [];
 try {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
@@ -253,15 +267,61 @@ try {
     loader = new Worker(new URL('./uses.ts', import.meta.url), { workerData: load });
     await new Promise((resolve) => loader!.once('message', resolve));
   }
+  // `/use` beside, `--proxy` a second (proxy-uses.ts): 100 people, each a Developer of ci/dev with a handle of their own,
+  // so that no one principal's bulk row serializes them, as with `--uses`.
+  if (PROXY > 0) {
+    const handles: string[] = [];
+    for (let n = 0; n < 100; n += 1) {
+      const email = `person-${n}@acme.example`;
+      await root.members.add(`user:${email}`);
+      await root.access.set(`user:${email}`, { 'ci/dev': 'developer' });
+      const started = await setup.signin!.startDevice({ clientLabel: 'laptop', sourceIp: null });
+      await setup.signin!.decideDevice(await contextFor(deps, email), started.userCode, true);
+      const polled = await setup.signin!.pollDevice(started.deviceCode, { requestId: crypto.randomUUID(), sourceIp: null });
+      if (polled.status !== 'approved') throw new Error('not approved');
+      const made = await answer(new Request(`${ORIGIN}/api/handles`, { method: 'POST', headers: { authorization: `Bearer ${polled.credential.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: ['ci/dev'] }) }), setup, ui, null);
+      handles.push(((await made.json()) as { token: string }).token);
+    }
+    const load: ProxyLoad = {
+      log: values.log === '0.15' ? '0.15' : '0.14', urls: { app: TEST_RUNTIME_DATABASE_URL, vault: TEST_VAULT_DATABASE_URL, hot: TEST_HOT_DATABASE_URL }, rtt: RTT, rate: PROXY,
+      pools: { app: Number(values['use-pool']), vault: 8, hot: 16 }, handles, path: 'ci/dev', value: `${SEVEN[0]!.toLowerCase()}-value`, kek: kek.toString('base64'), owner: ROOT, chainKey: deps.chainKey.toString('base64'), origin: ORIGIN,
+      cacheSeconds: Number(values['proxy-cache']),
+    };
+    // The proxy injects `API_KEY`: ci/dev's first key under that name.
+    await root.secrets.set('ci/dev', { API_KEY: load.value });
+    // Several threads, each an app and a vault of its own, as Workers runs many isolates: one Node thread is the
+    // bottleneck well below 1,000 requests a second, as the thread CPU per request below says.
+    const threads = Number(values.threads);
+    proxies = await Promise.all(Array.from({ length: threads }, async (_, n) => {
+      const worker = new Worker(new URL('./proxy-uses.ts', import.meta.url), { workerData: { ...load, rate: PROXY / threads, handles: handles.filter((_, i) => i % threads === n) } });
+      await new Promise((resolve) => worker.once('message', resolve));
+      return worker;
+    }));
+  }
+  /** Postgres's CPU in each named phase, µs, over the uses it sent. */
+  const cpu = new Map<string, number>();
+  let cpuFrom: { phase: string; usec: number } | null = null;
   /** The uses from now on count toward `phase`, or none (null): the binding's renewal between rounds is no sign-in's. */
   const usesIn = async (phase: string | null) => {
+    if (proxies.length > 0) {
+      if (cpuFrom !== null) cpu.set(cpuFrom.phase, (cpu.get(cpuFrom.phase) ?? 0) + cpuUsec() - cpuFrom.usec);
+      cpuFrom = phase === null ? null : { phase, usec: cpuUsec() };
+      await Promise.all(proxies.map(async (worker) => {
+        worker.postMessage({ phase });
+        await new Promise((resolve) => worker.once('message', resolve));
+      }));
+      return;
+    }
     if (loader === null) return;
+    if (cpuFrom !== null) cpu.set(cpuFrom.phase, (cpu.get(cpuFrom.phase) ?? 0) + cpuUsec() - cpuFrom.usec);
+    cpuFrom = phase === null ? null : { phase, usec: cpuUsec() };
     loader.postMessage({ phase });
     await new Promise((resolve) => loader!.once('message', resolve));
   };
   // Every connection's plans made, and every key's bulk row written, before the first level.
+  // `--warm` seconds: long enough that each pooled connection has planned its statements, as Hyperdrive's have.
   await usesIn('warm');
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  await new Promise((resolve) => setTimeout(resolve, Number(values.warm) * 1000));
   await usesIn(null);
   for (const jobs of JOBS) {
     if (jobs === 0) {
@@ -293,20 +353,44 @@ try {
       for (const [what, waited] of [...waits].sort((a, b) => b[1] - a[1]).slice(0, 3)) console.log(`         ${(waited / runs.length).toFixed(0).padStart(5)} ms/run  ${what}`);
     }
   }
+  if (proxies.length > 0) {
+    const reports = await Promise.all(proxies.map((worker) => {
+      worker.postMessage({ report: true });
+      return new Promise<ProxyPhase[]>((resolve) => worker.on('message', (message: { phases?: ProxyPhase[] }) => message.phases && resolve(message.phases)));
+    }));
+    console.log(`/use, ${PROXY}/s beside over ${proxies.length} threads, the whole app on ${values.log}'s log (ms; refused: any answer but the upstream's 200, and errors):`);
+    for (const name of reports[0]!.map(({ phase }) => phase).filter((phase) => phase !== 'warm')) {
+      const each = reports.map((phases) => phases.find(({ phase }) => phase === name)!);
+      const sorted = each.flatMap(({ latencies }) => latencies).sort((a, b) => a - b);
+      const sent = each.reduce((sum, { sent: n }) => sum + n, 0);
+      const refused = new Map<string, number>();
+      for (const { refused: by } of each) for (const [why, n] of Object.entries(by)) refused.set(why, (refused.get(why) ?? 0) + n);
+      const app = each.reduce((sum, { cpuUs }) => sum + cpuUs, 0) / 1000 / Math.max(1, sent);
+      const used = cpu.get(name);
+      console.log(
+        `  ${name.padEnd(8)} ${String(sent).padStart(6)} uses  p50 ${percentile(sorted, 50).toFixed(1).padStart(6)}  p90 ${percentile(sorted, 90).toFixed(1).padStart(6)}  p99 ${percentile(sorted, 99).toFixed(1).padStart(6)}  ` +
+          `max ${sorted.at(-1)!.toFixed(1).padStart(7)}  app CPU ${app.toFixed(2)} ms/use` +
+          `${used === undefined || values.cgroup === undefined ? '' : `  Postgres CPU ${(used / 1000 / Math.max(1, sent)).toFixed(2)} ms/use`}  refused: ${[...refused].map(([why, n]) => `${why} ${n}`).join(', ') || 'none'}`,
+      );
+    }
+  }
   if (loader !== null) {
     loader.postMessage({ report: true });
     const { phases } = await new Promise<{ phases: UsePhase[] }>((resolve) => loader!.on('message', (message: { phases?: UsePhase[] }) => message.phases && resolve(message as { phases: UsePhase[] })));
     console.log(`uses, ${USES}/s beside, each one round trip (ms; refused: the database's own answers and errors):`);
     for (const use of phases.filter(({ phase }) => phase !== 'warm')) {
       const refused = Object.entries(use.refused).map(([why, n]) => `${why} ${n}`).join(', ') || 'none';
+      const used = cpu.get(use.phase);
       console.log(
         `  ${use.phase.padEnd(8)} ${String(use.sent).padStart(6)} uses  p50 ${use.p50.toFixed(1).padStart(6)}  p90 ${use.p90.toFixed(1).padStart(6)}  p99 ${use.p99.toFixed(1).padStart(6)}  ` +
-          `max ${use.max.toFixed(1).padStart(7)}  past 2 rtt ${(use.slow * 100).toFixed(1).padStart(5)}%  refused: ${refused}`,
+          `max ${use.max.toFixed(1).padStart(7)}  past 2 rtt ${(use.slow * 100).toFixed(1).padStart(5)}%` +
+          `${used === undefined || values.cgroup === undefined ? '' : `  Postgres CPU ${(used / 1000 / Math.max(1, use.sent)).toFixed(2)} ms/use`}  refused: ${refused}`,
       );
     }
   }
 } finally {
   await loader?.terminate();
+  await Promise.all(proxies.map((worker) => worker.terminate()));
   await Promise.all(idle.map(({ vault, pool }) => vault.close().then(() => pool.end())));
   await Promise.all([farApp.close(), farVault.close()]);
   await checkpointer?.stop();

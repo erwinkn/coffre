@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
-import type { Through, Vault } from '@coffre/core/vault';
+import type { Through, UseInput, UseOutcome, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
@@ -17,7 +17,8 @@ import type { ApiContext } from '../src/api/context.ts';
 import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import type { WorkloadService } from '../src/api/workloads.ts';
-import { emptyLog, openVaultDatabase } from './db/engine.ts';
+import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
+import { emptyLog, openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 import { drainBackgroundTasks, trackBackgroundTask } from './background-tasks.ts';
 
@@ -107,8 +108,53 @@ export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
 /** For a test whose setup writes an input's row around the app (a session's end moved in the database), which 0.15's log refuses as not the vault's: run under 0.14's only. */
 export const LOG_014_ONLY = LOG === '0.15' ? "0.15's log refuses a row written around the app: this test's setup is 0.14's" : false;
 
+/**
+ * Whether a test may edit roles and read values on a credential: not under 0.15's log, which holds no roles until the
+ * cutover makes their genesis (plan PR 9). A use decides on the built-in roles meanwhile (vault decide.ts, `noEdits`),
+ * where 0.14 decides on the edited ones.
+ */
+export const EDITS_ROLES = LOG === '0.14';
+
 /** For a test of 0.14's start over of a tampered member, which 0.15's log does not take (the vault's tests' START_OVER): run under 0.14's only. */
 export const START_OVER_014 = LOG === '0.15' ? "0.15's log changes no tampered member until a reseal makes its row the log's again (plan PR 9), never 0.14's start over" : false;
+
+/**
+ * The uses 0.15's log holds, oldest first: each read's record there, where 0.14's are its `secret.read` and
+ * `credential.use` entries. Slim (R53): the credential, the key, the purpose's code (`log-replay.ts`, PURPOSES: 4 a
+ * use) and the place; a repeat its isolate's cover rides writes none.
+ */
+export async function usesLogged(owner: Database): Promise<{ credential: string; secret: string; purpose: number; place: string | null }[]> {
+  const { logUses } = tablesOf(owner);
+  return owner.select({ credential: logUses.credential, secret: logUses.secret, purpose: logUses.purpose, place: logUses.place }).from(logUses).orderBy(logUses.number);
+}
+
+/**
+ * Each use the vault is asked for from now, and its answer, until `stop` puts its `use` back: how often a value was
+ * opened under 0.15's log, where `usesLogged` misses a repeat its cover rode.
+ */
+export function watchUses(vault: TestVault): { asked: UseInput[]; answered: UseOutcome[]; stop(): void } {
+  const use = vault.use!;
+  const asked: UseInput[] = [];
+  const answered: UseOutcome[] = [];
+  vault.use = async (input) => {
+    asked.push(input);
+    const outcome = await use(input);
+    answered.push(outcome);
+    return outcome;
+  };
+  return { asked, answered, stop: () => void (vault.use = use) };
+}
+
+/** The ids of the keys named `key`, in any environment: what a use names (`watchUses`). */
+export async function keyIds(owner: Database, key: string): Promise<string[]> {
+  const { secrets } = tablesOf(owner);
+  return (await owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, key))).map((row) => row.id);
+}
+
+/** 0.15's hot path's database, as a vault's `hotDatabase` takes it: its own login on Postgres, the same file on SQLite. */
+export function hotDatabaseUrl(): string {
+  return TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
+}
 
 /** A checkpointer that seals everything at once: what a change waits on, in a test with no tree. */
 export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => ({}) as Awaited<ReturnType<NonNullable<VaultOptions['sealThrough']>>>;
@@ -118,7 +164,7 @@ export function testVault(
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
-  log: Pick<VaultOptions, 'log' | 'sealThrough'> = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
+  log: Pick<VaultOptions, 'log' | 'sealThrough' | 'uses'> = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -130,6 +176,8 @@ export function testVault(
         database: await openVaultDatabase(),
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
         owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
+        // With 0.15's log, its uses too, over the hot path's login (the same file on SQLite): the app opens values through them.
+        ...(log.log === '0.15' ? { hotDatabase: hotDatabaseUrl() } : {}),
         ...config,
       },
       { clockOffset: () => offset, walks, ...log },
@@ -167,7 +215,7 @@ export function testVault(
     prepare: call('prepare'),
     waitSealed: call('waitSealed'),
     verifyTrees: call('verifyTrees'),
-    // 0.15's use path, which the app does not call yet (plan PR 10): for tests that hold rows to their seals through it.
+    // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),
     kek,
     signingKey,
@@ -300,6 +348,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
     vaultMembers,
     logChanges,
     logConfig,
+    logUses,
+    logBulk,
   } = tablesOf(owner);
   await owner.delete(mcpApprovals);
   await owner.delete(mcpConnections);
@@ -317,6 +367,9 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // 0.15's log, which the change path writes (COFFRE_TEST_LOG=0.15), gone with the rows it is of.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
+  // Its uses and their cap's rows: a test's reads count from none.
+  await owner.delete(logUses);
+  await owner.delete(logBulk);
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);

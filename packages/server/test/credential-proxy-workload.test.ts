@@ -33,7 +33,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
@@ -570,7 +570,8 @@ test('past a limit, 429 with Retry-After and nothing sent; one alert per workloa
   assert.match(alerts[0]!.text, /^api-prod is past its limit for metered per minute, from 203\.0\.113\.9/);
 });
 
-test("a narrowed session is held to its constraints on the URL sent, and one limited to paths signs nothing", async () => {
+// Its child is planted in the database, as `narrow` would make it, sealed by nothing.
+test("a narrowed session is held to its constraints on the URL sent, and one limited to paths signs nothing", { skip: LOG_014_ONLY }, async () => {
   await bind();
   const parent = await session();
   const root = await sessionRow(parent);
@@ -632,8 +633,13 @@ test("verify takes a workload, its proof binding the body and signature checked;
   const swapped = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: ask(body, signature), signed: { body: ask(body, 'sha256=00') } });
   assert.equal(swapped.body.reason, 'req');
   assert.ok(vaultCalls - opened <= 1, 'the vault asked once at most, then the cache');
-  const uses = (await entries('credential.use')).filter((entry) => entry.credential === 'webhook');
-  assert.deepEqual(uses.map((entry) => entry.hmac), [true]);
+  if (LOG === '0.14') {
+    const uses = (await entries('credential.use')).filter((entry) => entry.credential === 'webhook');
+    assert.deepEqual(uses.map((entry) => entry.hmac), [true]);
+  } else {
+    // 0.15's record: one use of the secret, its row slim (R53), naming no verifier.
+    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
+  }
   // A verifier signs nothing.
   const signed = await use(held, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'webhook', message: 'aGk' } }) });
   assert.equal(signed.status, 404);

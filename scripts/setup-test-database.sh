@@ -51,3 +51,12 @@ BEGIN
 END
 $$;
 SQL
+
+# 0.15's uses go in a partition of their day (0022), which a deployment's
+# checkpointer makes ahead (plan PR 7): today's and tomorrow's, made here, so
+# that every clone holds a run's days. None before: retention's tests hold
+# what is left of the past.
+docker compose exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U coffre_owner -d "$database" >/dev/null <<'SQL'
+SELECT make_day(current_date), make_day(current_date + 1);
+SQL

@@ -21,7 +21,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -336,7 +336,8 @@ async function legacyToken(principal: string): Promise<{ token: string; id: stri
   return { token, id: row.id };
 }
 
-test("two processes sealing 0.4's tokens at once seal each once, and each token reaches what its account held", async () => {
+// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
+test("two processes sealing 0.4's tokens at once seal each once, and each token reaches what its account held", { skip: LOG_014_ONLY }, async () => {
   const tokens = await Promise.all(Array.from({ length: 6 }, () => legacyToken(CI)));
   // Each its own process, as two isolates or two Node servers starting together.
   const counts = await Promise.all([sealScopes(deps.db, deps.chainKey, deps.vault), sealScopes(deps.db, deps.chainKey, deps.vault)]);
@@ -347,7 +348,8 @@ test("two processes sealing 0.4's tokens at once seal each once, and each token 
   for (const { token } of tokens) assert.equal(await reads(token, 'prod'), 403);
 });
 
-test('a vault that cannot answer seals nothing: the credential is uncheckable, never sealed empty or in part, and the next check seals it', async () => {
+// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
+test('a vault that cannot answer seals nothing: the credential is uncheckable, never sealed empty or in part, and the next check seals it', { skip: LOG_014_ONLY }, async () => {
   const { token, id } = await legacyToken(CI);
   const access = deps.vault.access.bind(deps.vault);
   let down = true;
@@ -402,7 +404,8 @@ test('on Workers, where each request builds its runtime, the isolate seals once:
   assert.notEqual(await scope(second.id), null);
 });
 
-test('a token 0.4 makes after this process sealed is sealed on its first use, with the answer its check already asked of the vault, and widened by nothing after', async () => {
+// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
+test('a token 0.4 makes after this process sealed is sealed on its first use, with the answer its check already asked of the vault, and widened by nothing after', { skip: LOG_014_ONLY }, async () => {
   const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
   assert.equal(await reads(issued.token, 'dev'), 'dev-key', 'the first check seals what there is');
   const straggler = await legacyToken(CI);
@@ -435,7 +438,8 @@ test("a token's dry run says what it would reach, checked as issuing it is, and 
   assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.create')).then((rows) => rows.filter((row) => row.decision === 'allow')), []);
 });
 
-test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", async () => {
+// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
+test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", { skip: LOG_014_ONLY }, async () => {
   // A token 0.4 issued: no scope, its MAC over 0.4's tuple.
   const token = generateToken('service');
   const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));

@@ -36,4 +36,8 @@ export const {
   mcpApprovals,
   logChanges,
   logFence,
+  logUses,
+  logBulk,
+  logCheckpoints,
+  logTiles,
 } = schema;

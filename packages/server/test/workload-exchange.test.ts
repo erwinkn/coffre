@@ -22,7 +22,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
@@ -936,14 +936,20 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   const caused = (await db.owner.select({ author: auditLog.author, action: auditLog.action, decision: auditLog.decision, metadata: auditLog.metadata })
     .from(auditLog).where(eq(auditLog.actor, MEMBER)).orderBy(asc(auditLog.seq)))
     .map((entry) => ({ ...entry, credentialId: (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId }));
-  assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`), ['app token.exchange allow', 'vault secret.read allow', 'app secret.read deny']);
+  // Under 0.15's log, the read is a use, and names the credential as its own column: the vault's read is no entry here.
+  assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`),
+    LOG === '0.15' ? ['app token.exchange allow', 'app secret.read deny'] : ['app token.exchange allow', 'vault secret.read allow', 'app secret.read deny']);
   assert.ok(caused.every((entry) => entry.credentialId === credentialId));
+  if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [credentialId]);
 
   // Whoever owns the database deletes the credential's row: the log still leads from the read to its run.
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
   const { entries } = await root.audit.list({ detail: '1' });
-  const shown = entries.find((entry) => entry.action === 'secret.read')!;
-  assert.deepEqual(shown.run, { exchangeSeq: entries.find((entry) => entry.action === 'token.exchange')!.seq, claims: exchange!.metadata.run });
+  // The audit page reads 0.15's uses from plan PR 8: until then, the read it shows with its run is 0.14's entry.
+  if (LOG === '0.14') {
+    const shown = entries.find((entry) => entry.action === 'secret.read')!;
+    assert.deepEqual(shown.run, { exchangeSeq: entries.find((entry) => entry.action === 'token.exchange')!.seq, claims: exchange!.metadata.run });
+  }
   assert.equal(entries.find((entry) => entry.action === 'token.exchange')!.run!.claims.run_id, '7001');
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);

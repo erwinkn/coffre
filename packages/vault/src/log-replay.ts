@@ -1,7 +1,11 @@
+import type { Queryable } from '@coffre/db';
+
 import { bulkStep, type BulkRows } from './bulk.ts';
+import { loggedChange } from './changes.ts';
 import type { BulkLimit } from './config.ts';
 import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
-import { applyOp, objectKey, POLICY_REF, ROLES_REF, sealed, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { applyOp, objectKey, POLICY_REF, ROLES_REF, sealed, sealKey, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { loggedRows } from './store.ts';
 
 /**
  * The 0.15 log replayed (plan, PR 3; the verifier of PR 8 walks it): its
@@ -143,4 +147,32 @@ function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   else replayed.rows.set(key, { row: after, seal: entry.seal });
   if (after?.kind === 'policy' && entry.ref.id === POLICY_REF.id) replayed.limit = after.bulk;
   replayed.newest.set(key, entry.seal);
+}
+
+/**
+ * The log as stored, read whole and replayed with the seal keys of
+ * `signingKeys` (the vault's): each use's decision by its entry number,
+ * and what does not hold, an entry that names no object or no purpose
+ * among `replay`'s faults. The verifier of plan PR 8 walks the log a
+ * stretch at a time; this reads all of it, for the suites that hold every
+ * live answer to it (R53).
+ */
+export async function replayStored(db: Queryable, signingKeys: readonly Uint8Array[]): Promise<{ decided: Map<string, UseCode | null>; faults: string[] }> {
+  const { changes, uses } = await loggedRows(db);
+  const faults: string[] = [];
+  const entries: Logged[] = [];
+  for (const row of changes) {
+    const change = loggedChange({ number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: row.seal === null ? null : Buffer.from(row.seal) });
+    if (change === null) faults.push(`${row.number}: names no object it is of`);
+    else entries.push(change);
+  }
+  for (const row of uses) {
+    const purpose = purposeOf(Number(row.purpose));
+    if (purpose === null) faults.push(`${row.number}: no purpose ${row.purpose}`);
+    else entries.push({ kind: 'use', number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purpose } });
+  }
+  entries.sort((a, b) => (a.number < b.number ? -1 : a.number > b.number ? 1 : 0));
+  const decided = new Map<string, UseCode | null>();
+  const replayed = replay(signingKeys.map(sealKey), entries, (use, code) => decided.set(use.number.toString(), code));
+  return { decided, faults: [...faults, ...replayed.faults] };
 }

@@ -358,6 +358,18 @@ Each CI run holds an ID token, good for one credential.
      long for the vault, by the app,
      under the head, the credential checked again under it;
   5. the value answered.
+- **Using a credential under 0.15's log** (`Uses015`; `keys.ts`,
+  `useValues`; docs/design/0.15-plan.md, PR 5b):
+  1. and 2. as above;
+  3. one `use_credential` call: it logs the request and decides on the
+     credential's row and the account's as they are, under the fence
+     shared, which each change to either takes exclusive. One step here,
+     with no account row, no head and no kept answer: `HotPathOne.tla`
+     proves that order (TotalOrder, NothingAllowedAfterAnswer). The proxy's
+     `credential.use` is no entry of its own: the use is the record;
+  4. the credential checked again with no lock (`credentialStill`), as
+     after 0.14's unwrap;
+  5. the value answered.
 - **Ending one:**
   - revoking it (`revokeCredential`);
   - untrusting its binding or replacing the issuer's keys (`unbind`,
@@ -376,6 +388,8 @@ Each CI run holds an ID token, good for one credential.
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
 | A read on a kept answer is decided only while that is still the vault's answer, under the account's row (`#keys`, `accessRevision`) | a `secret.read` logged on an answer kept from before a removal and an admission (`NoReadOnStaleAnswer`, which states the check itself: a wiring check, as this model carries no grants or policy, what the check is for); the fence still withholds the value, so `NoReleaseAfterEnd` holds without it | |
 | That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
+| Under 0.15's log, the app's check after the use, with no lock (`credentialStill`): 0.15's credential object carries no generation, and a removal ends the account's credentials by revoking each, in its sweep, after `member.remove` | a token used between a removal and its sweep, the account admitted again meanwhile: the use allows it, and the value goes to a credential the removal ended (`NoReleaseAfterEnd`, `Revoking015`) | this model, PR 5b, which keeps the check |
+| Under 0.15's log, untrusting or replacing a binding revokes what it issued, each revoke a change (`#revoke`) | the same, through a credential of an untrusted binding: the use decides on the credential's row (`NoReleaseAfterEnd`, `Revoking015`) | |
 
 The race this model found, as the script prints it with the export's fence off. A
 run's token is checked (step 5), its revocation commits (6), and the vault,
@@ -490,6 +504,7 @@ window of fifteen minutes. #292's review.
 | `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
 | `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 162 thousand |
 | `Proxying` | A reader uses its token through the credential proxy alone, its use logged by the vault or by the app, while an owner revokes the token or removes the account: each fence shown needed on the proxy's own path | 505 |
+| `Revoking015` | `Revoking` with 0.15's reads: each one use, deciding on the rows as they are and logging its request. It states no `NoReadOnStaleAnswer`: a kept answer is no input of a use, whose entry is the request whatever it decides | 82 thousand |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 

@@ -13,8 +13,9 @@ import type { AddressInfo } from 'node:net';
 import { ROLES, roleGrants } from '@coffre/core/access';
 import { createClient, type CoffreClient } from '@coffre/client';
 
-import { clientFor } from './api-fixture.ts';
-import { deps, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { replayStored } from '@coffre/vault/node';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { db, deps, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
@@ -106,7 +107,14 @@ test("a Contributor's run gets placeholders and the plain values, never a secret
   const answer = await route('/use/market/dev/api/thing', { headers: { 'x-api-key': handle.token } });
   assert.equal(answer.status, 200);
   assert.deepEqual(await answer.json(), { real: true });
-  // The vault's read was to use, which the Contributor's grant holds.
+  // The vault's read was to use, which the Contributor's grant holds: under 0.15's log, uses, each allowed as the
+  // replay of the log says.
+  if (LOG === '0.15') {
+    const used = await usesLogged(db.owner);
+    assert.ok(used.length > 0 && used.every((use) => use.purpose === 4), JSON.stringify(used));
+    assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
+    return;
+  }
   const used = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.actor === `user:${CONTRIBUTOR}`);
   assert.ok(used.length > 0 && used.every((entry) => entry.decision === 'allow' && entry.metadata.purpose === 'use'), JSON.stringify(used.map((entry) => [entry.decision, entry.metadata.purpose])));
 });

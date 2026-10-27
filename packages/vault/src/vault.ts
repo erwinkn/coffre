@@ -59,6 +59,7 @@ import {
 } from '@coffre/core/kek';
 import {
   checkpointMessage,
+  REFUSAL_MESSAGES,
   checkpointVerifier,
   describeAccessFault,
   POLICY_REVISION,
@@ -466,29 +467,6 @@ function refusal(code: RefusalCode, message: string): Refusal {
   return { code, message };
 }
 
-const MESSAGES: Record<RefusalCode, string> = {
-  removed: 'this member was removed',
-  not_a_member: 'not a member',
-  no_grant: 'no grant covers this',
-  expired: 'the grant that covered this has expired',
-  bulk_limit: 'too many secrets read in too short a time',
-  bad_claim: 'the key does not belong to this secret',
-  deleted: 'this project or environment was deleted',
-  ended: 'the reference read through was ended',
-  personal: "a personal config's values are its owner's alone",
-  sensitive: "a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it",
-  not_owner_issued: 'a service account reads a sensitive value only on a token or trust binding an Owner of its project issued',
-  use_only: "a workload uses this value through coffre and never holds it: list it in its binding's reads, where the value is held, if it must",
-  not_allowed: 'not allowed to change this',
-  last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
-  invalid: 'not something the rules allow',
-  policy_changed: "the instance's roles or protected environments changed while this was asked: try again",
-  access_changed: 'what this member holds changed since the read was decided: try again',
-  log_broken: 'the vault log does not hold from the last checkpoint',
-  wrong_kek: "this vault's key does not open the data it holds",
-  tampered: "this member's record failed the vault's integrity check",
-};
-
 /**
  * A decision in progress: its transaction, the member rows it locked, its
  * time, and what it will commit. Changes to members and grants wait until
@@ -781,7 +759,7 @@ class VaultService implements Vault {
     if (decided === undefined) throw new Error(`sealing ${principal} without the grants this decision verified`);
     if (!sameGrants(await store.grants(d.tx, principal), decided)) {
       this.#report(d.reports, principal, 'mac', row.mac.toString('hex'));
-      throw new Refused(refusal('tampered', MESSAGES.tampered), []);
+      throw new Refused(refusal('tampered', REFUSAL_MESSAGES.tampered), []);
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
     await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
@@ -951,8 +929,16 @@ class VaultService implements Vault {
    * whenever the log's policy says otherwise, as any change, under the head
    * and the fence. Uses read the cap from it (CapSealed), never from the
    * configuration. Once per process; until it lands, each call tries again.
+   * A cap the log already holds is read first, with no lock: every isolate
+   * that starts finds it there, and takes neither 0.14's head nor the fence
+   * for it, which every other start would queue behind (PR 5b's bench).
    */
   async #limit(): Promise<void> {
+    const { row: logged } = await store.readObject(this.#db, POLICY_REF as Ref & { kind: 'policy' });
+    if (limitChange(logged?.kind === 'policy' ? logged : null, this.#config.bulkLimit) === null) {
+      this.#prepared.limited = true;
+      return;
+    }
     const outcome = await this.#decideNow([], async (d) => {
       const { row } = await store.readObject(d.tx, POLICY_REF as Ref & { kind: 'policy' });
       const op = limitChange(row?.kind === 'policy' ? row : null, this.#config.bulkLimit);
@@ -1388,12 +1374,12 @@ class VaultService implements Vault {
     principal: string,
     code: 'bad_claim' | 'deleted' | 'invalid',
     entries: NewEntry[],
-    { message = MESSAGES[code], asked }: { message?: string; asked?: string } = {},
+    { message = REFUSAL_MESSAGES[code], asked }: { message?: string; asked?: string } = {},
   ): Promise<Outcome<never>> {
     return this.#decide([principal], async (d) => {
       if (asked !== undefined) {
         const standing = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads);
-        if (this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
+        if (this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', REFUSAL_MESSAGES.access_changed), []);
       }
       throw new Refused(refusal(code, message), entries);
     }, { reads: true });
@@ -1481,7 +1467,7 @@ class VaultService implements Vault {
       const standing = await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads);
       // A read decided on an earlier answer about its reader, only while that is still the answer: nothing read, nothing logged.
       const asked = call.input.accessRevision;
-      if (asked !== undefined && this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', MESSAGES.access_changed), []);
+      if (asked !== undefined && this.#revisionOf(standing, d) !== asked) throw new Refused(refusal('access_changed', REFUSAL_MESSAGES.access_changed), []);
       const reader = through(standing, call.input);
       // One read of the environments the decision is about, as the store has them, not as the app sent them:
       // each secret's and, for a read through a reference, its holder's. A grant on one slug in every project
@@ -1503,7 +1489,7 @@ class VaultService implements Vault {
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
       if (first !== null) {
         throw new Refused(
-          refusal(first, MESSAGES[first]),
+          refusal(first, REFUSAL_MESSAGES[first]),
           secrets.map((secret, i) => entry(secret, 'deny', codes[i] ?? first)),
         );
       }
@@ -1585,7 +1571,7 @@ class VaultService implements Vault {
           const codes = await vet(locked, d.reads);
           const first = codes.find((code) => code !== null);
           if (first === undefined || first === null) return;
-          throw new Refused(refusal(first, MESSAGES[first]), secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', codes[item] ?? first)));
+          throw new Refused(refusal(first, REFUSAL_MESSAGES[first]), secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', codes[item] ?? first)));
         });
       }
       const { outcomes, expired } = await settle(operations((secret) => context(secret, owners.get(secret.environmentId))), within(deadline, this.#prepared.options.keyBudgetMs));
@@ -1605,7 +1591,7 @@ class VaultService implements Vault {
         }
         if (expired) throw new Outage(new KekUnavailableError('key operation exceeded its deadline'), entries());
         if (done.length < outcomes.length) {
-          throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), entries());
+          throw new Refused(refusal('bad_claim', REFUSAL_MESSAGES.bad_claim), entries());
         }
         if (late) {
           // Again under the log's head, the append's, taken a statement early: a
@@ -1619,7 +1605,7 @@ class VaultService implements Vault {
           await decided(d);
           const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
           if (places.some((place) => d.reads.environments.get(place.environmentId)?.deleted ?? false)) {
-            throw new Refused(refusal('deleted', MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
+            throw new Refused(refusal('deleted', REFUSAL_MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
           }
         }
         const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
@@ -1710,7 +1696,7 @@ class VaultService implements Vault {
         return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) ?? 'secret');
       });
       const first = codes.find((code) => code !== null) ?? null;
-      if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));
+      if (first !== null) throw new Refused(refusal(first, REFUSAL_MESSAGES[first]), items.map((item, i) => entry(item, 'deny', codes[i] ?? first)));
       const entries = items.map((item) => entry(item, 'allow', null));
       d.log.push(...entries);
       const answer = { seqs: [] as number[] };
@@ -1764,7 +1750,7 @@ class VaultService implements Vault {
     });
     if (sealed.some((seal) => seal === null)) {
       return this.#decide([principal], async () => {
-        throw new Refused(refusal('bad_claim', MESSAGES.bad_claim), vias.map((via, i) => entry(via, sealed[i]!, 'deny', 'bad_claim')));
+        throw new Refused(refusal('bad_claim', REFUSAL_MESSAGES.bad_claim), vias.map((via, i) => entry(via, sealed[i]!, 'deny', 'bad_claim')));
       });
     }
     const seals = sealed as Sealed[];
@@ -1788,7 +1774,7 @@ class VaultService implements Vault {
       });
       if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));
       const first = codes.find((code) => code !== null) ?? null;
-      if (first !== null) throw new Refused(refusal(first, MESSAGES[first]), vias.map((via, i) => entry(via, seals[i]!, 'deny', codes[i] ?? first)));
+      if (first !== null) throw new Refused(refusal(first, REFUSAL_MESSAGES[first]), vias.map((via, i) => entry(via, seals[i]!, 'deny', codes[i] ?? first)));
       const entries = vias.map((via, i) => entry(via, seals[i]!, 'allow', null));
       d.log.push(...entries);
       const answer = { seqs: [] as number[] };
@@ -1898,7 +1884,7 @@ class VaultService implements Vault {
     const owner = { role: 'owner' as const, scope: EVERYWHERE };
     d.grants.set(principal, [...subject.stored]);
     d.touched.add(principal);
-    if (tampered) await this.#startOver(d, VAULT_ACTOR, principal, row, subject.fault!, correlation, (code, message) => new Refused(refusal(code, message ?? MESSAGES[code]), []));
+    if (tampered) await this.#startOver(d, VAULT_ACTOR, principal, row, subject.fault!, correlation, (code, message) => new Refused(refusal(code, message ?? REFUSAL_MESSAGES[code]), []));
     // Started over, their row is one 0.15's log does not hold, and changes nothing there: adoption or a reseal does
     // (plan PR 9). Otherwise, the change the writes below make.
     if (!tampered) {
@@ -2046,7 +2032,7 @@ class VaultService implements Vault {
     const action = changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
     // One place refused is shown where it is, to whoever reads that place's log; an invalid one may be no place at all.
     const [only] = changes.length === 1 ? changes : [];
-    const refused = (code: RefusalCode, message = MESSAGES[code]) => {
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) => {
       const where = only === undefined || code === 'invalid' ? { ids: {}, detail: {} } : located(only);
       return new Refused(refusal(code, message), [{
         ...accessEntry(actor, action, principal, 'deny', input, { changes: input.changes, ...where.detail }, code),
@@ -2145,7 +2131,7 @@ class VaultService implements Vault {
    * not run the instance sets one up as they would through `admit`.
    */
   async #admitWith(d: Decision, acting: Standing, principal: string, row: Member | undefined, input: SetAccessInput): Promise<Admitted> {
-    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) =>
       new Refused(refusal(code, message), [accessEntry(acting.principal, 'member.add', principal, 'deny', input, { changes: input.changes }, code)]);
     if (!SERVICE.test(principal)) throw refused('invalid', 'only a service account is admitted with its grants: a person, by an instance role');
     if (!runsInstance(acting.live)) await this.#setsUp(d, acting, true, refused);
@@ -2209,7 +2195,7 @@ class VaultService implements Vault {
   admit(input: AdmitInput): Promise<Outcome<Admitted>> {
     const { actor, principal } = input;
     const asked = input.role === undefined ? {} : { role: input.role, scope: input.scope ?? EVERYWHERE };
-    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) =>
       new Refused(refusal(code, message), [
         accessEntry(actor, 'member.add', principal, 'deny', input, asked, code),
       ]);
@@ -2316,7 +2302,7 @@ class VaultService implements Vault {
 
   remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>> {
     const { actor, principal } = input;
-    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) =>
       new Refused(refusal(code, message), [accessEntry(actor, 'member.remove', principal, 'deny', input, {}, code)]);
     return this.#decide([actor, principal], async (d) => {
       validateCorrelation(input);
@@ -2473,7 +2459,7 @@ class VaultService implements Vault {
       ...at,
       metadata: JSON.stringify({ ...detail, ...traced(input) }),
     });
-    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) =>
       new Refused(refusal(code, message), [entry('deny', { change: describeChange(change) }, code)]);
     return this.#decide([actor], async (d) => {
       validateCorrelation(input);
@@ -2597,7 +2583,7 @@ class VaultService implements Vault {
       requestId: input.requestId ?? null,
       metadata: JSON.stringify({ ...detail, ...traced(input) }),
     });
-    const refused = (code: RefusalCode, message = MESSAGES[code]) =>
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) =>
       new Refused(refusal(code, message), [entry('deny', { serviceAccounts: input.settings?.serviceAccounts ?? null }, code)]);
     return this.#decide([actor], async (d) => {
       validateCorrelation(input);
@@ -2883,7 +2869,7 @@ class VaultService implements Vault {
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
       const latest = await store.latestVaultEntry(d.tx, [CHECKPOINT]);
-      const refused = (code: RefusalCode, detail: Record<string, unknown>, message = MESSAGES[code]) =>
+      const refused = (code: RefusalCode, detail: Record<string, unknown>, message = REFUSAL_MESSAGES[code]) =>
         new Refused(refusal(code, message), [
           { actor: SCHEDULER, action: CHECKPOINT, decision: 'deny', code, metadata: JSON.stringify(detail) },
         ]);
@@ -3039,7 +3025,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15' }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3050,6 +3036,8 @@ class VaultService implements Vault {
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
       ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const }),
+      // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
+      ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const }),
     };
   }
 

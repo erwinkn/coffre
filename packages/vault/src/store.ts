@@ -822,6 +822,20 @@ function heldAs(secretVersions: ReturnType<typeof tablesOf>['secretVersions'], c
  */
 export type HeldObject = { row: Input | null; seal: Buffer | null };
 
+/**
+ * 0.15's log as stored, whole: its changes and its uses, each with the
+ * columns its replay reads (`replayStored`), bytes as the driver gives them.
+ */
+export async function loggedRows(db: Queryable): Promise<{
+  changes: { number: string | number; at: string | number; object: string; payload: string; seal: Uint8Array | null }[];
+  uses: { number: string | number; at: string | number; credential: string; secret: string; purpose: number | string; place: string | null }[];
+}> {
+  return {
+    changes: await rowsOf(db, sql`SELECT number, at, object, payload, seal FROM log_changes`),
+    uses: await rowsOf(db, sql`SELECT number, at, credential, secret, purpose, place FROM log_uses`),
+  };
+}
+
 /** The kinds whose objects the change path reads so far: the vault's own, an environment's, the roles' and the policy's. */
 export type ReadKind = Exclude<Kind, 'credential' | 'secret'>;
 

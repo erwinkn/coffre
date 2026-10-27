@@ -140,7 +140,12 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async policy() { return this.#call((vault) => vault.policy()); }
   async changePolicy(input: ChangePolicyInput) { return this.#call((vault) => vault.changePolicy(input)); }
   async checkpoint() { return this.#call((vault) => vault.checkpoint()); }
-  async about() { return this.#call((vault) => vault.about()); }
+  /** What the vault says of itself; its uses over the hot path's own config (`use`), which `#call`'s vault has not. */
+  async about() {
+    const { hotDatabase } = await this.#ready();
+    const about = await this.#call((vault) => vault.about());
+    return about.log === '0.15' && hotDatabase !== undefined ? { ...about, uses: true as const } : about;
+  }
   async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
   async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
