@@ -599,27 +599,36 @@ test('BarrierChecksFloor: a floor of at a writer lowered is refused at the next 
   store.floor = signed - 60_000;
   store.append('uses', 'late', '{}', signed - 30_000);
   const t = await cp.tick();
-  assert.ok(!t.signed && /floor of at is .* below/.test(t.failures.join()), t.failures.join());
+  assert.ok(!t.signed && /floor of at is .* lowered by a writer/.test(t.failures.join()), t.failures.join());
   assert.ok(alerts.some((a) => /lowered by a writer/.test(a)));
 });
 
-test('review r9, BarrierChecksFloor: a raised floor is alerted and adopted only with the pair that signs it; quiet ticks raise no alarm', async () => {
-  const { store, open, alerts } = await setup();
-  const cp = await open();
-  await traffic(store, cp, 2);
-  for (let i = 0; i < 3; i += 1) assert.ok(!(await cp.tick()).signed, 'quiet');
-  await traffic(store, cp, 1);
-  assert.deepEqual(alerts, [], 'quiet ticks move the floor through the signer\'s own barriers');
-  const signed = cp.pair.pair.floor;
-  store.floor += 3_600_000;
-  store.log.push({ ...store.log.at(-1)!, number: store.next++, columns: [1n, 'f', '{}', Buffer.alloc(16)] });
-  assert.ok(!(await cp.tick()).signed);
-  assert.ok(alerts.some((a) => /raised by a writer/.test(a)), alerts.join('\n'));
-  store.log.pop();
-  store.append('uses', 'u');
-  assert.ok((await cp.tick()).signed);
-  assert.equal(store.froms.at(-1), signed, 'the window is still read from the floor the newest pair signed');
-  assert.equal(cp.pair.pair.floor, store.floor, 'the new pair carries the floor its barrier left');
+test('review r9–r10, BarrierChecksFloor: a floor lowered or raised is refused at every tick until reopened; quiet ticks raise no alarm', async () => {
+  for (const delta of [-60_000, 3_600_000]) {
+    const { store, open, alerts } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 2);
+    for (let i = 0; i < 3; i += 1) assert.ok(!(await cp.tick()).signed, 'quiet');
+    await traffic(store, cp, 1);
+    assert.deepEqual(alerts, [], 'quiet ticks find the floor where the signer\'s own barrier left it');
+    const signed = cp.pair.pair.floor;
+    const left = store.floor;
+    store.floor += delta;
+    store.append('uses', 'late', '{}', delta < 0 ? signed - 30_000 : Date.now());
+    for (let i = 0; i < 3; i += 1) {
+      const t = await cp.tick();
+      assert.ok(!t.signed && /floor of at is .* by a writer/.test(t.failures.join()), `tick ${i}: ${t.failures.join()}`);
+      // Even a row landed back exactly where the signer's barrier left it (a barrier in the same millisecond) stays refused.
+      store.floor = left;
+    }
+    assert.equal(cp.pair.pair.floor, signed, 'nothing adopted');
+    assert.ok(store.froms.every((f) => f <= signed), 'windows read from the signed floor');
+    // Reopened, once an operator has looked: the floor found is no lower than the newest pair's, so it seals on.
+    if (delta > 0) {
+      const reopened = await open();
+      assert.ok((await reopened.tick()).signed);
+    }
+  }
 });
 
 test('review r9: a floor that runs back is refused by open(), witnesses and the verifier', async () => {
@@ -646,6 +655,21 @@ test('review r9: a floor that runs back is refused by open(), witnesses and the 
     uses: await proveConsistency(store, 'uses', held.uses.size, newest.uses.size),
   }), new AbortController().signal);
   assert.ok(!answer.ok && /floor of at/.test(answer.reason), JSON.stringify(answer));
+});
+
+test('review r10: pairs held outside below the start are held to time and floor among themselves', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  const notes: PairNotes[] = [];
+  for (let i = 0; i < 6; i += 1) {
+    await traffic(store, cp, 1);
+    notes.push(cp.pair.notes);
+  }
+  const p5 = (await openPair(notes[4]!, k.verifiers))!;
+  const forged = await signPair(k.signers, p5.upto, p5.at, { changes: p5.changes, uses: p5.uses }, 1);
+  store.rows.delete(p5.upto);
+  const v = await verify(store, k, { from: notes[5]!, anchors: [notes[2]!, forged.notes] });
+  assert.ok(!v.ok && v.problems.some((p) => /time runs back/.test(p)), v.problems.join('\n'));
 });
 
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.

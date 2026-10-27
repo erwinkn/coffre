@@ -143,13 +143,17 @@ unsigned, so a writer could lower it and let in a late use below it, which a
 window read from the floor would miss (`HotPathOne.tla`'s
 BarrierChecksFloor). So each pair signs the floor its barrier left, and the
 signer reads windows from the newest pair's floor, moving it only when a
-pair carrying a new one is written. Every barrier must find the floor where
-this process's last barrier left it. Found lower, the tick is refused and
-alerted. Found higher, it is alerted: a raised floor only refuses uses below
-it, so refusing the tick would gain nothing. After a restart the first
-barrier may find it higher honestly, since barriers whose pairs went
-unsigned (quiet ticks, a crash) raised it. Open, witnesses and the verifier
-refuse a floor that comes down between pairs, as they do for `at`.
+pair carrying a new one is written. Every barrier must find the floor
+exactly where this process's last barrier left it. Found lower, a late use
+may have got in below it; found higher, the writer's value would be signed,
+and so kept. Either way the tick is refused and alerted, and so is every
+tick after it until the checkpointer is reopened (review r10), even if a
+later barrier lands the row back on the expected value. After a restart the
+first barrier may find it higher honestly, since barriers whose pairs went
+unsigned (quiet ticks, a crash) raised it, but never lower than the newest
+pair's. Open, witnesses and the verifier refuse a floor that comes down
+between pairs, as they do for `at`, the verifier among pairs held outside
+too.
 
 **The pair's `at` never comes down, and never runs far ahead.** Retention's
 freshness step (plan PR 7) rests on the first half. A replay of a dropped
@@ -363,7 +367,7 @@ the code holds it and the tests that break it.
 | protection (`Seal.tla`) | in the code | tests (`packages/vault/test/audit-tree.test.ts`) |
 |---|---|---|
 | NumberUnderLock, CloseLocks | `CheckpointStore.close`: the barrier (`close_one`) | 6b, over migration 0022 |
-| BarrierChecksFloor (`HotPathOne.tla`) | `tick`: the floor `close_one` found must be no lower than the one the signer's last barrier set; each pair signs its floor | "BarrierChecksFloor: …" |
+| BarrierChecksFloor (`HotPathOne.tla`) | `tick`: the floor `close_one` found must be exactly where this process's last barrier left it (after a restart, no lower than the newest pair's), else every tick refuses until reopened; each pair signs its floor, and windows are read from the newest pair's | "BarrierChecksFloor: …", "review r9–r10, BarrierChecksFloor: …" |
 | RememberFirst | `tick`: `memory.remember` before `store.write` | (e) |
 | SignerMemory | `open()`: memory equal, a prefix in both trees, or re-derived; else refused | (b), (c), (g), (j), "a memory restored…" |
 | RowChecked, PairChecked | `tick`: the newest pair, each tree's own newest note, byte for byte | (m), "PairChecked: …", "review r1: a row replaced…" |

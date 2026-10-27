@@ -100,6 +100,15 @@ async function walk(
   // Tiles that do not give their signed head are a problem to report, and the walk goes on where it can.
   const reload = (pair: Pair) => loadEdges(reader, pair).catch((error: Error) => (problems.push(error.message), null));
 
+  // Pairs held outside below the start, in order, then the start: their times and floors never come down.
+  const below = (await Promise.all((opts.anchors ?? []).map((notes) => openPair(notes, opts.verifiers))))
+    .filter((a): a is Pair => a !== null && a.upto <= start.pair.upto)
+    .sort((a, b) => (a.upto < b.upto ? -1 : 1));
+  for (const [i, a] of below.entries()) {
+    const next = below[i + 1] ?? start.pair;
+    if (next.at < a.at || next.floor < a.floor) problems.push(`the pair held outside up to ${a.upto}: its time or floor is past the next pair's (up to ${next.upto}): time runs back`);
+  }
+
   // Pairs held outside. Those at or below the start are not walked (verified before), but each must still be the row
   // at its place, if there is one, and, whether or not there is, a prefix of the start, by a consistency proof from the
   // tiles, in both trees.
@@ -114,8 +123,6 @@ async function walk(
       const row = await reader.pair(anchor.upto);
       const pair = row === null ? null : await open(row);
       if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time or floor' : 'a second history'}`);
-      // Below the start, time and floor are no later than the start's.
-      if (anchor.at > start.pair.at || anchor.floor > start.pair.floor) problems.push(`the pair held outside up to ${anchor.upto}: its time or floor is past the start's: time runs back`);
       // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside.
       for (const tree of TREES) {
         const [from, to] = [anchor[tree], start.pair[tree]];

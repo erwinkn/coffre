@@ -213,7 +213,7 @@ func check(path string) {
 	}
 	verifiers := note.VerifierList(vs...)
 
-	// Every pair: each note opens under its own tree's key and origin, and both share upto and at.
+	// Every pair: each note opens under its own tree's key and origin, and both share upto, at and floor.
 	heads := map[string][]head{}
 	for i, p := range f.Pairs {
 		c, u := open(p["changes"], verifiers), open(p["uses"], verifiers)

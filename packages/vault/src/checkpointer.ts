@@ -217,6 +217,8 @@ export class Checkpointer {
    * barriers whose pairs went unsigned raised it to).
    */
   private barrier: number | null = null;
+  /** Set once a barrier finds the floor elsewhere: every tick refuses until the checkpointer is reopened. */
+  private floorAlarm: string | null = null;
 
   private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
@@ -350,17 +352,19 @@ export class Checkpointer {
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
     // The floor is an unsigned row (HotPathOne.tla's BarrierChecksFloor): a writer who lowered it would let a use in
-    // below it, which a window read from the floor the signer holds misses. Found below the newest pair's floor, or
-    // below what this process's last barrier set: an alarm, and nothing signed. Found above what its last barrier set
-    // is a writer too, alerted; refusing it would gain nothing, since a raised floor only refuses uses below it. After
-    // a restart the first barrier may find it higher honestly: barriers whose pairs went unsigned raised it.
+    // below it, which a window read from the floor the signer holds misses; one who raised it would get its value
+    // signed, and so kept. Each barrier must find it exactly where this process's last one left it, else the tick is
+    // refused, and every tick after it, until the checkpointer is reopened (sticky, as the model's alarm: a later
+    // barrier can land the row back on the expected value, but not undo what the floor let in meanwhile). After a
+    // restart the first barrier may find it above the newest pair's honestly (barriers whose pairs went unsigned
+    // raised it), never below.
     const expected = this.barrier ?? this.floor;
-    if (floor.found === null || floor.found < expected) {
-      failures.push(`the floor of at is ${floor.found ?? 'gone'}, below the ${expected} the signer's barrier set: lowered by a writer`);
-    } else if (this.barrier !== null && floor.found > this.barrier) {
-      this.options.alert(`the floor of at is ${floor.found}, above the ${this.barrier} the signer's last barrier set: raised by a writer`);
+    if (floor.found === null || floor.found < expected || (this.barrier !== null && floor.found !== this.barrier)) {
+      this.floorAlarm ??= `the floor of at is ${floor.found ?? 'gone'}, not the ${expected} the signer's barrier set: ${floor.found !== null && floor.found > expected ? 'raised' : 'lowered'} by a writer; reopen the checkpointer once it is put right`;
+    } else {
+      this.barrier = floor.set;
     }
-    this.barrier = floor.set;
+    if (this.floorAlarm !== null) failures.push(this.floorAlarm);
     // A running signer seals from the pair it holds and never takes the database's word for it; but the database's
     // newest row must still be that pair, note for note. Rows deleted or replaced since show here, within a tick;
     // nothing is signed over them.
