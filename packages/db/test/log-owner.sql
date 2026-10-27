@@ -1,9 +1,8 @@
 \set ON_ERROR_STOP on
 
 -- 0.15's log, as the owner, after log-guarantees.sql: what only someone who
--- writes the tables behind the vault can try. The cap is the policy's newest
--- change's, never its row's (CapSealed): a row put back moves nothing, and a
--- policy that names no cap logs no use.
+-- writes the tables behind the vault can try, each named for the invariant of
+-- W211's spec (formal/) it holds.
 DO $$
 DECLARE
     r use_view;
@@ -21,7 +20,7 @@ BEGIN
         RAISE EXCEPTION 'FAIL: a policy that names no cap logged a use: %', r.state;
     END IF;
     DELETE FROM log_changes WHERE request_id = 'policy-without-cap';
-    RAISE NOTICE 'PASS: the cap is the policy''s newest change''s, and a policy without one logs nothing';
+    RAISE NOTICE 'PASS: CapSealed, the cap is the policy''s newest change''s, and a policy without one logs nothing';
 END
 $$;
 
@@ -46,5 +45,44 @@ BEGIN
     END;
     DROP TABLE log_uses_19700102;
     RAISE NOTICE 'PASS: make_day and make_tiles check what they find by its bound';
+END
+$$;
+
+-- ChangeChecksSeal: a row put back from before a change, validly sealed once,
+-- is refused stale by the next change, which seals nothing and logs nothing.
+DO $$
+DECLARE
+    t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    before bytea := (SELECT seal FROM vault_members WHERE principal = 'token:deploy');
+BEGIN
+    IF change_input('principal', 'token:deploy', 'reseal-a', t, 'system:test', '{"op":"genesis"}', before, decode(repeat('6e', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NULL THEN
+        RAISE EXCEPTION 'FAIL: a change from the row''s own seal did nothing';
+    END IF;
+    UPDATE vault_members SET seal = before WHERE principal = 'token:deploy';
+    BEGIN
+        PERFORM change_input('principal', 'token:deploy', 'reseal-b', t, 'system:test', '{"op":"genesis"}', before, decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
+        RAISE EXCEPTION 'FAIL: a change sealed a row put back from before the newest change';
+    EXCEPTION WHEN data_corrupted THEN NULL;
+    END;
+    IF EXISTS (SELECT 1 FROM log_changes WHERE request_id = 'reseal-b') OR (SELECT seal FROM vault_members WHERE principal = 'token:deploy') <> before THEN
+        RAISE EXCEPTION 'FAIL: a refused change left a trace';
+    END IF;
+    UPDATE vault_members SET seal = decode(repeat('6e', 16), 'hex') WHERE principal = 'token:deploy';
+    RAISE NOTICE 'PASS: ChangeChecksSeal, a change refuses a row that is not its newest change''s';
+END
+$$;
+
+-- The barrier answers the floor it found, so that the checkpointer sees one lowered behind its back.
+DO $$
+DECLARE
+    barrier record;
+    lowered bigint;
+BEGIN
+    UPDATE log_fence SET at_floor = at_floor - 600000 RETURNING at_floor INTO lowered;
+    SELECT * INTO barrier FROM close_one();
+    IF barrier.floor_found <> lowered OR barrier.at_floor <= lowered THEN
+        RAISE EXCEPTION 'FAIL: the barrier hid a lowered floor: found %, lowered %', barrier.floor_found, lowered;
+    END IF;
+    RAISE NOTICE 'PASS: the barrier answers the floor it found';
 END
 $$;

@@ -71,8 +71,8 @@ held() {
     exit 1
 }
 
-# 0.14's writes take the 0.15 fence, its reads never: with the fence held, a
-# revoke's entry waits, a read's does not (W211's list, Migration015.tla).
+# OldWritesFence: 0.14's writes take the 0.15 fence, its reads never: with the
+# fence held, a revoke's entry waits, a read's does not (W211's list).
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
 held 1668244070
@@ -92,7 +92,7 @@ for write in 'vault access.revoke' 'app token.revoke' 'vault secret.write' 'app 
 done
 let_go
 
-# A 0.15 change takes its locks in 0.14's order: with 0.14's vault holding a
+# ChangeHeadFirst, and the order row, head, fence: with 0.14's vault holding a
 # member's queue and row, then taking the head and the fence (its revoke's
 # entry), a change to that member waits for it and passes, rather than
 # holding the fence and deadlocking on the row.
@@ -110,9 +110,32 @@ held 1668245101
 vault_psql -At >"$scratch/change.log" 2>&1 <<'SQL' || { cat "$scratch/change.log" >&2; echo 'a 0.15 change did not pass a 0.14 write in flight' >&2; exit 1; }
 SET lock_timeout = '10s';
 SELECT change_input('principal', 'token:deploy', 'reseal-under-0.14', 1, 'system:test', '{"op":"genesis"}',
-    decode(repeat('5e', 16), 'hex'), decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
+    (SELECT seal FROM vault_members WHERE principal = 'token:deploy'), decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
 SQL
 wait "$old" || { cat "$scratch/old.log" >&2; echo "0.14's write failed beside a 0.15 change" >&2; exit 1; }
+[[ "$(cat "$scratch/change.log")" == t ]] || { cat "$scratch/change.log" >&2; exit 1; }
+
+# And a 0.14 decision that only reads the member (its queue shared, its row
+# FOR SHARE, then the head and a read's entry) beside a 0.15 change to that
+# member's credential: the change waits behind it, then passes.
+owner_psql >"$scratch/old.log" 2>&1 <<'SQL' &
+BEGIN;
+SELECT pg_advisory_xact_lock_shared(1668245101, hashtext(principal)) FROM vault_members WHERE principal = 'token:deploy' FOR SHARE;
+SELECT pg_sleep(2) /* coffre-test-holder */;
+SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE;
+INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+VALUES (902, 'vault', 'fixture', 0, 'system:fixture', 'secret.read', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'));
+ROLLBACK;
+SQL
+old=$!
+held 1668245101
+vault_psql -At >"$scratch/change.log" 2>&1 <<'SQL' || { cat "$scratch/change.log" >&2; echo "a 0.15 credential change did not pass a 0.14 decision in flight" >&2; exit 1; }
+SET lock_timeout = '10s';
+SELECT change_input('credential', '33333333-3333-3333-3333-333333333333', 'reseal-credential-under-0.14', 1, 'system:test', '{"op":"genesis"}',
+    (SELECT seal FROM log_changes WHERE object = log_object('credential', '33333333-3333-3333-3333-333333333333') ORDER BY number DESC LIMIT 1),
+    decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
+SQL
+wait "$old" || { cat "$scratch/old.log" >&2; echo "0.14's decision failed beside a 0.15 change" >&2; exit 1; }
 [[ "$(cat "$scratch/change.log")" == t ]] || { cat "$scratch/change.log" >&2; exit 1; }
 
 # A use that waits for its principal's lock past its deadline writes nothing.

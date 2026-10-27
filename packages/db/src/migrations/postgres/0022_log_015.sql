@@ -396,7 +396,7 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- A change (hot-path-one.md, "A change"): the fence exclusive, so that no use overlaps it; a retry finds its entry and answers its number (a request id names one change: another under it is refused); the object's row moves only from the seal the vault read (of two changes to one object, the second finds another seal and does nothing: null); then its entry, numbered now. It answers the number, which a change waits to see sealed (R51).
+-- A change (hot-path-one.md, "A change"): the fence exclusive, so that no use overlaps it; a retry finds its entry and answers its number (a request id names one change: another under it is refused); a row that is not its object's newest change's is refused, as a use refuses it (ChangeChecksSeal: else a row put back from before a change, validly sealed once, would be sealed again under the next change, and serve what the log says was taken away); the object's row moves only from the seal the vault read (ChangeCAS: of two changes to one object, the second finds another seal and does nothing: null); then its entry, numbered now. It answers the number, which a change waits to see sealed (R51).
 --
 -- This schema knows one op, `genesis`: the object's row sealed as it is, or, for the policy and the roles, made from the payload's `value`. That is the cutover's (plan, PR 9); the ops that change what a row says come with the 0.15 change path (PR 4), each applied as its payload says.
 CREATE FUNCTION change_input(
@@ -408,13 +408,24 @@ DECLARE
     target uuid := public.log_object(p_kind, p_id);
     n bigint;
     done integer;
+    member text;
+    held bytea;
+    newest bytea;
 BEGIN
-    -- Its locks in the order 0.14's writers take theirs, so that none waits on the other in a circle until 0.16: a
-    -- member's queue (MEMBER_QUEUE, 0x636f666d) and row first (0.14's vault locks them before the head, lockMembers), then 0.14's head (its app
-    -- takes it before its rows), then the fence (0.14's appends take it after the head, audit_log_fence). The head
-    -- held, no 0.14 write lands between this change and its entry (ChangeHeadFirst).
-    IF p_kind = 'principal' THEN
-        PERFORM pg_advisory_xact_lock(1668245101, hashtext(m.principal)) FROM public.vault_members m WHERE m.principal = p_id FOR NO KEY UPDATE;
+    -- Its locks in the order 0.14's writers take theirs, so that none waits on the other in a circle until 0.16 (row,
+    -- head, fence): the member's queue (MEMBER_QUEUE, 0x636f666d) and row first, a principal's own or a credential's
+    -- (0.14's vault locks them before the head, lockMembers; a change that fences 0.14 too moves the member's
+    -- access_seq, plan PR 9), then 0.14's head (its app takes it before its rows), then the fence (0.14's appends
+    -- take it after the head, audit_log_fence). The head held, no 0.14 write lands between this change and its entry
+    -- (ChangeHeadFirst).
+    member := CASE p_kind
+        WHEN 'principal' THEN p_id
+        WHEN 'credential' THEN coalesce(
+            (SELECT c.principal FROM public.credentials c WHERE c.id = p_id::uuid),
+            (SELECT b.principal FROM public.service_bindings b WHERE b.id = p_id::uuid))
+    END;
+    IF member IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(1668245101, hashtext(m.principal)) FROM public.vault_members m WHERE m.principal = member FOR NO KEY UPDATE;
     END IF;
     PERFORM 1 FROM public.audit_chain_head WHERE only_row FOR UPDATE;
     PERFORM pg_advisory_xact_lock(1668244070, 0);
@@ -430,6 +441,22 @@ BEGIN
     END IF;
     IF op ->> 'op' IS DISTINCT FROM 'genesis' THEN
         RAISE EXCEPTION 'this schema knows no change %', op ->> 'op' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- ChangeChecksSeal: the row's seal is its object's newest change's, or the object has neither yet (one probe, as
+    -- a use makes). A row deleted outright, or a seal no change wrote, is stale too.
+    held := CASE p_kind
+        WHEN 'principal' THEN (SELECT m.seal FROM public.vault_members m WHERE m.principal = p_id)
+        WHEN 'credential' THEN coalesce(
+            (SELECT c.seal FROM public.credentials c WHERE c.id = p_id::uuid),
+            (SELECT b.seal FROM public.service_bindings b WHERE b.id = p_id::uuid))
+        WHEN 'environment' THEN (SELECT e.seal FROM public.environments e WHERE e.id = p_id::uuid)
+        WHEN 'secret' THEN (SELECT x.seal FROM public.secrets x WHERE x.id = p_id::uuid)
+        WHEN 'policy' THEN (SELECT g.seal FROM public.log_config g WHERE g.name = 'policy')
+        WHEN 'roles' THEN (SELECT g.seal FROM public.log_config g WHERE g.name = 'roles')
+    END;
+    newest := (SELECT c.seal FROM public.log_changes c WHERE c.object = target ORDER BY c.number DESC LIMIT 1);
+    IF held IS DISTINCT FROM newest THEN
+        RAISE EXCEPTION 'the % object''s row is not its newest change''s: stale', p_kind USING ERRCODE = 'data_corrupted';
     END IF;
     CASE p_kind
         WHEN 'principal' THEN
@@ -463,13 +490,16 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- The checkpointer's barrier: under the fence exclusive, no use or change is in flight, so every number handed out so far is final (committed, or a gap for good). It answers the last one, which the next checkpoint closes up to: no lag, and no number check in the uses. It raises the floor of `at` to its clock less deadline_max(), never lowers it; the uses after it are held to it.
-CREATE FUNCTION close_one() RETURNS TABLE (upto bigint, at_floor bigint)
+-- The checkpointer's barrier: under the fence exclusive, no use or change is in flight, so every number handed out so far is final (committed, or a gap for good). It answers the last one, which the next checkpoint closes up to: no lag, and no number check in the uses. It raises the floor of `at` to its clock less deadline_max(), never lowers it; the uses after it are held to it. It also answers the floor it found: the one the last barrier set, which the checkpointer holds against the floor of its last signed checkpoint and alarms on any other (W211's spec: a writer who lowers the floor puts uses where no checkpoint reads).
+CREATE FUNCTION close_one() RETURNS TABLE (upto bigint, at_floor bigint, floor_found bigint)
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    found_floor bigint;
 BEGIN
     PERFORM pg_advisory_xact_lock(1668244070, 0);
+    SELECT f.at_floor INTO found_floor FROM public.log_fence f WHERE f.only_row;
     UPDATE public.log_fence f SET at_floor = greatest(f.at_floor, (extract(epoch FROM clock_timestamp()) * 1000)::bigint - public.deadline_max()) WHERE f.only_row;
-    RETURN QUERY SELECT pg_sequence_last_value('public.log_number'), f.at_floor FROM public.log_fence f WHERE f.only_row;
+    RETURN QUERY SELECT pg_sequence_last_value('public.log_number'), f.at_floor, found_floor FROM public.log_fence f WHERE f.only_row;
 END
 $$;
 --> statement-breakpoint

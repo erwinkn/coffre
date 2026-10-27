@@ -170,7 +170,7 @@ BEGIN
        OR (SELECT object FROM log_changes WHERE request_id = 'genesis-member') <> log_object('principal', 'token:deploy') THEN
         RAISE EXCEPTION 'FAIL: genesis left the row or its object other than it said';
     END IF;
-    RAISE NOTICE 'PASS: change_input seals each object once, from the seal it read, and a retry finds its entry';
+    RAISE NOTICE 'PASS: ChangeCAS, change_input seals each object once, from the seal it read, and a retry finds its entry';
 END
 $$;
 
@@ -238,7 +238,7 @@ BEGIN
        OR EXISTS (SELECT 1 FROM log_bulk WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
         RAISE EXCEPTION 'FAIL: the cap let a second key in: %', r;
     END IF;
-    RAISE NOTICE 'PASS: a use logs its request once, reads every input sealed, and keeps covers, the cache and the cap';
+    RAISE NOTICE 'PASS: a use logs its request once, reads every input sealed, and keeps covers (CoverExists), the cache (CacheSameChange) and the cap';
 END
 $$;
 
@@ -249,12 +249,15 @@ DECLARE
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
     barrier record;
     pruned integer;
+    before bigint;
 BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a deadline past deadline_max was taken'; END IF;
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 21, t - 2000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t - 1);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a use past its deadline was taken'; END IF;
+    before := (SELECT at_floor FROM log_fence);
     SELECT * INTO barrier FROM close_one();
+    IF barrier.floor_found <> before THEN RAISE EXCEPTION 'FAIL: the barrier misreported the floor it found'; END IF;
     IF barrier.upto <> (SELECT max(n) FROM (SELECT max(number) AS n FROM log_uses UNION ALL SELECT max(number) FROM log_changes) x)
        OR barrier.at_floor < t - 3000 OR barrier.at_floor <> (SELECT at_floor FROM log_fence) THEN
         RAISE EXCEPTION 'FAIL: the barrier closed at % with floor %', barrier.upto, barrier.at_floor;
@@ -268,6 +271,6 @@ BEGIN
     IF pruned <> 1 OR EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:gone') THEN RAISE EXCEPTION 'FAIL: prune_bulk kept a key no window counts'; END IF;
     pruned := prune_bulk(100);
     IF pruned <> 0 OR NOT EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:deploy') THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
-    RAISE NOTICE 'PASS: late uses write nothing, the barrier raises the floor, and pruning keeps what a window counts';
+    RAISE NOTICE 'PASS: late uses write nothing (DeadlineChecked, FloorChecked), the barrier raises the floor, and pruning keeps what a window counts';
 END
 $$;
