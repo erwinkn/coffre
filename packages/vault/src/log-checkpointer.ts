@@ -39,3 +39,9 @@ export async function openLogCheckpointer(options: HostOptions): Promise<Checkpo
 
 /** How often the checkpointer seals (R51, R54): a change waits at most about this long for a tick, and seals sooner if it asks. */
 export const TICK_MS = 500;
+
+/** An error as an alarm says it: the database's own reason, when a query wrapped it, rather than the query's text. */
+export function reasonOf(error: unknown): string {
+  const e = error as Error & { cause?: unknown };
+  return e?.cause instanceof Error ? e.cause.message : (e?.message ?? String(error));
+}

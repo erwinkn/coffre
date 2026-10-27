@@ -57,6 +57,9 @@ export function witnessObject<Env>(settings: (env: Env) => WitnessSettings | Pro
       const stored = await this.#state.storage.get<string>('pair');
       const notes = stored === undefined ? null : JSON.parse(stored) as PairNotes;
       const pair = notes === null ? null : await openPair(notes, log);
+      // A pair held that no longer opens (the log's keys changed in its settings, a record damaged) is never forgotten
+      // into a fresh witness: that would cosign whatever comes next. A new witness is a new name.
+      if (notes !== null && pair === null) return Response.json({ ok: false, reason: 'the pair this witness holds does not open under the log\'s keys: name a new witness' }, { status: 500 });
       const held: WitnessState = pair === null ? null : { pair, notes: notes! };
       const sizes = { changes: held?.pair.changes.size ?? 0, uses: held?.pair.uses.size ?? 0 };
       if (p === null) return Response.json({ held: sizes });
@@ -126,7 +129,10 @@ export function r2Archive(bucket: ArchiveBucket, options: { prefix?: string } = 
       if (!/^\d{1,19}$/.test(upto)) return { ok: false, reason: 'not a checkpoint pair' };
       const key = `${prefix}${upto.padStart(20, '0')}.json`;
       const record = encodePair(notes);
-      if ((await bucket.put(key, record, { onlyIf: { etagDoesNotMatch: '*' } })) !== null) return { ok: true };
+      // An object already there is answered by R2 with null, or, under a bucket lock, perhaps with an error: either way,
+      // it is the pair sent again or another one, which the read below tells apart.
+      const put = await bucket.put(key, record, { onlyIf: { etagDoesNotMatch: '*' } }).catch(() => null);
+      if (put !== null) return { ok: true };
       const kept = await (await bucket.get(key))?.text();
       return kept === record ? { ok: true } : { ok: false, reason: `the archive holds another pair up to ${upto}` };
     },

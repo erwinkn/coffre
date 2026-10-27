@@ -464,15 +464,23 @@ a new log; how a rotation carries the trees across is the cutover's
 **On Workers** (`packages/vault/src/checkpointer-workers.ts`): one Durable
 Object, `export const CoffreCheckpointer = checkpointer()` beside `vault(…)`,
 configured by the same `vault(env => …)`.
-- **Its memory is its storage.** The output gate holds every message the
-  object sends, the database write included, until the pair it remembered
-  is durable (RememberFirst).
+- **Its memory is its storage**, synced before `remember` returns
+  (RememberFirst). The output gate holds a Response and a new connection
+  until a write is durable, but not a query on a connection already open,
+  as the database write is. So `sync()` makes RememberFirst hold without
+  leaning on the gate (Fable's review).
 - **It ticks on its alarm** every 500 ms, holding one Hyperdrive connection
   that closes when idle. A failed tick drops the connection and the
   checkpointer, and the next alarm opens both again under `open()`'s rules.
   The old checkpointer is closed first, its tick in flight ended, with
   nothing else delivered meanwhile. A change still waiting on it can tick
   it no more, so two never sign at once (review r3).
+- **A refused open and a tick that throws are alarms**, kept once while
+  they stand (Fable's review). A refused open is the gravest of states:
+  entries the signer sealed lost, another pair at its place, time run
+  back. A write that fails may be a tamper signal: a tile changed under
+  the signer. A refused open is never thrown inside the gate, which would
+  reset the object; the object stays up and says why.
 - **Asked with `fetch`**, as the anchor and the gates are:
   - `startCheckpointer(env.CHECKPOINTER)` starts it;
   - `durableSealThrough(env.CHECKPOINTER)` is the change path's seam;

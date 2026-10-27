@@ -14,7 +14,7 @@ import { sql } from 'drizzle-orm';
 import { Checkpointer } from '../src/checkpointer.ts';
 import { authentic, logMacKey } from '../src/log-entry.ts';
 import { logWriter } from './log-entries.ts';
-import { logStore } from '../src/log-store.ts';
+import { logStore, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 
@@ -183,4 +183,13 @@ test('review r3: entries and locate read one window\'s bounds, at any index, an 
   assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root));
   // The change of the second window, by its key: the first in its tree.
   assert.deepEqual([(await store.locate(windows[1]!.at(-1)!))!.index], [0]);
+});
+
+test('Fable review: a tile read is planned over the ranges it reads, not every range', { skip: ENGINE === 'postgres' ? false : 'Postgres only: ranges' }, async () => {
+  // Forty ranges, as many days of a busy instance's retention would make.
+  for (let r = 0; r < 40; r += 1) await run(db.owner, sql`SELECT make_tiles(${r * RANGE}::bigint, ${(r + 1) * RANGE}::bigint)`);
+  const keys = [{ level: 0, index: 3 }, { level: 1, index: 0 }];
+  const plan = await rows<{ 'QUERY PLAN': string }>(db.vault, sql`EXPLAIN SELECT t.level, t.leaf, t.hashes FROM log_tiles t WHERE t.tree = 'uses' AND (${tileKeys(keys)})`);
+  const ranges = new Set(plan.flatMap((r) => r['QUERY PLAN'].match(/log_tiles_uses_\d+(?= )/g) ?? []));
+  assert.ok(ranges.size <= 2, `${ranges.size} of 40 ranges planned:\n${plan.map((r) => r['QUERY PLAN']).join('\n')}`);
 });

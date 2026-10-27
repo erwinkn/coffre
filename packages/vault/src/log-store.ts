@@ -88,6 +88,19 @@ function bounds(after: bigint, upto: bigint): [SQL, SQL] {
   ];
 }
 
+/**
+ * The tiles asked, as constants in the statement, `(level = 0 AND leaf = 256) OR …`: Postgres then prunes the leaf
+ * ranges as it plans. Passed as an array, every range was planned, 8.7 ms at 150 ranges, a month at 1,000 uses a
+ * second, against 0.4 ms (Fable's review). Each is a whole number the code computed, checked before it is written.
+ */
+export function tileKeys(keys: readonly TileKey[]): SQL {
+  return sql.raw(keys.map((k) => {
+    const leaf = leafOf(k);
+    if (!Number.isSafeInteger(k.level) || !Number.isSafeInteger(leaf) || k.level < 0 || leaf < 0) throw new Error(`not a tile: ${k.level}/${k.index}`);
+    return `(t.level = ${k.level} AND t.leaf = ${leaf})`;
+  }).join(' OR '));
+}
+
 type WindowRow = {
   tree: TreeName; n: string; at: string; request_id: string; mac: Buffer;
   object: string | null; actor: string | null; payload: string | null; seal: Buffer | null;
@@ -171,8 +184,7 @@ function postgresStore(db: Database, range: number): CheckpointStore {
     async tiles(tree, keys) {
       if (keys.length === 0) return [];
       const rows = await rowsOf<{ level: number; leaf: string; hashes: Buffer }>(db, sql`
-        SELECT t.level, t.leaf::text, t.hashes FROM log_tiles t
-         WHERE t.tree = ${tree} AND (t.level, t.leaf) IN (SELECT * FROM unnest(${sql.param(keys.map((k) => k.level))}::smallint[], ${sql.param(keys.map((k) => String(leafOf(k))))}::bigint[]))`);
+        SELECT t.level, t.leaf::text, t.hashes FROM log_tiles t WHERE t.tree = ${tree} AND (${tileKeys(keys)})`);
       return rows.map((r) => ({ level: r.level, index: indexOf(r.level, Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
     },
     async write(row, tiles) {

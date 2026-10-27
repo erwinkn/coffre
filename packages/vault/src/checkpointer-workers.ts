@@ -16,7 +16,7 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import type { Alarm, Checkpointer, InclusionProof, Memory, SealThrough, Sealed, Tick, Witness } from './checkpointer.ts';
-import { openLogCheckpointer, TICK_MS } from './log-checkpointer.ts';
+import { openLogCheckpointer, reasonOf, TICK_MS } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 
 /** The part of a Durable Object's state the checkpointer uses. */
@@ -24,6 +24,7 @@ export type ObjectState = {
   storage: {
     get<T>(key: string): Promise<T | undefined>;
     put<T>(key: string, value: T): Promise<void>;
+    sync(): Promise<void>;
     delete(keys: string[]): Promise<number>;
     list<T>(options: { prefix: string; start?: string; end?: string; limit?: number }): Promise<Map<string, T>>;
     getAlarm(): Promise<number | null>;
@@ -48,11 +49,20 @@ export type CheckpointerSettings = {
   closeIdleMs?: number;
 };
 
-/** The signer's memory in the object's storage: one key, the pair's record. */
+/**
+ * The signer's memory in the object's storage: one key, the pair's record,
+ * durable before `remember` returns. The output gate holds a Response and a
+ * new connection until the write is, but not a query on a connection
+ * already open, as the database write is: `sync()` makes RememberFirst hold
+ * without leaning on it (Fable's review).
+ */
 export function durableMemory(storage: ObjectState['storage']): Memory {
   return {
     last: async () => (await storage.get<string>('pair')) ?? null,
-    remember: (record) => storage.put('pair', record),
+    async remember(record) {
+      await storage.put('pair', record);
+      await storage.sync();
+    },
   };
 }
 
@@ -77,13 +87,19 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     }
 
     /** The checkpointer, opened once, every other request held meanwhile, so that two never open it side by side. */
-    async #open(): Promise<Checkpointer> {
+    /**
+     * Null when it cannot be opened: `open()` refuses the gravest states the log has (entries the signer sealed lost,
+     * another pair at its place, time run back), and each is an alarm, kept once while it stands. Never thrown from
+     * inside the gate, which would reset the object.
+     */
+    async #open(): Promise<Checkpointer | null> {
       if (this.#checkpointer !== null) return this.#checkpointer;
       return this.#state.blockConcurrencyWhile(async () => {
         if (this.#checkpointer !== null) return this.#checkpointer;
-        const s = await settings(this.#env);
-        const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
+        let pool: HyperdrivePool | null = null;
         try {
+          const s = await settings(this.#env);
+          pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
           this.#checkpointer = await openLogCheckpointer({
             store: logStore(createDatabase(pool)),
             seed: s.seed,
@@ -92,15 +108,25 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             record: (alarm) => this.#record(alarm),
           });
         } catch (error) {
-          await pool.end().catch(() => {});
-          throw error;
+          await pool?.end().catch(() => {});
+          await this.#failure(`the checkpointer cannot open: ${reasonOf(error)}`);
+          return null;
         }
         this.#pool = pool;
         return this.#checkpointer;
       });
     }
 
-    /** After a failure the database or the memory may stand elsewhere: the next request opens again, under `open()`'s rules. */
+    /** The failure that stands, alarmed once: a refused open, a tick that threw. */
+    #failed: string | null = null;
+
+    async #failure(message: string): Promise<void> {
+      if (message === this.#failed) return;
+      this.#failed = message;
+      console.warn(`coffre audit: ${message}`);
+      await this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
+    }
+
     /**
      * Nothing else delivered meanwhile, and the old checkpointer closed, its tick in flight ended, before the next
      * request may open another: a change still waiting on the old one can tick it no more, so two never sign at once.
@@ -124,12 +150,16 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
 
     async alarm(): Promise<void> {
       try {
+        const checkpointer = await this.#open();
+        if (checkpointer === null) return;
         const t0 = performance.now();
-        const t = await (await this.#open()).tick();
+        const t = await checkpointer.tick();
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
+        this.#failed = null;
       } catch (error) {
-        console.warn(`coffre audit: a checkpoint failed: ${(error as Error).message}`);
+        // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
+        await this.#failure(`a checkpoint failed: ${reasonOf(error)}`);
         await this.#reset();
       } finally {
         await this.#state.storage.setAlarm(Date.now() + TICK_MS);
@@ -140,11 +170,15 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
       try {
         const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' };
         if (call.op === 'start') {
-          await this.#open();
+          if ((await this.#open()) === null) return Response.json({ error: this.#failed }, { status: 503 });
           if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
           return Response.json({ ok: true });
         }
-        if (call.op === 'seal') return Response.json(sealedToJson(await (await this.#open()).sealThrough(BigInt(call.number), call.deadline)));
+        if (call.op === 'seal') {
+          const checkpointer = await this.#open();
+          if (checkpointer === null) return Response.json({ error: this.#failed }, { status: 503 });
+          return Response.json(sealedToJson(await checkpointer.sealThrough(BigInt(call.number), call.deadline)));
+        }
         if (call.op === 'status') {
           // The object's own view: after an eviction, nothing until its next tick opens it again (`open: false`).
           const head = this.#checkpointer?.pair.pair;

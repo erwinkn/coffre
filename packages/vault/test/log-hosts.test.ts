@@ -50,14 +50,16 @@ const until = async (done: () => boolean, ms = 5000) => {
 };
 
 /** A Durable Object's state, as the runtime gives one: storage that reads its own writes, an alarm, and the gate. */
-function objectState(): ObjectState & { alarm: number | null; data: Map<string, unknown> } {
+function objectState(): ObjectState & { alarm: number | null; data: Map<string, unknown>; syncs: number } {
   const data = new Map<string, unknown>();
   const state = {
     alarm: null as number | null,
     data,
+    syncs: 0,
     storage: {
       get: async <T>(key: string) => data.get(key) as T | undefined,
       put: async <T>(key: string, value: T) => void data.set(key, value),
+      sync: async () => void (state.syncs += 1),
       delete: async (keys: string[]) => keys.filter((k) => data.delete(k)).length,
       list: async <T>(o: { prefix: string; start?: string; end?: string; limit?: number }) =>
         new Map([...data].filter(([k]) => k.startsWith(o.prefix) && (o.start === undefined || k >= o.start) && (o.end === undefined || k < o.end))
@@ -188,9 +190,10 @@ test('the witness\'s client hands the abort to the object\'s request', async () 
 
 test('the R2 archive keeps every pair once, takes the same pair again, and refuses another at its place', async () => {
   const objects = new Map<string, string>();
+  // Under a bucket lock, a put over an object already there fails, rather than answering null.
   const bucket = {
     put: async (key: string, value: string, o?: { onlyIf?: { etagDoesNotMatch?: string } }) => {
-      if (o?.onlyIf?.etagDoesNotMatch === '*' && objects.has(key)) return null;
+      if (o?.onlyIf?.etagDoesNotMatch === '*' && objects.has(key)) throw new Error('This object is locked');
       objects.set(key, value);
       return {};
     },
@@ -219,4 +222,47 @@ test('the change path\'s seam has a stand-in for its tests: the numbers asked, e
   assert.equal((await double(1n)).witnessed, false);
   await assert.rejects(double(2n), /not in the signed changes tree/);
   assert.deepEqual(double.asked, [1n, 2n]);
+});
+
+test('Fable review: the object remembers durably, keeps a refused open and a failed tick as alarms, once each', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+  const state = objectState();
+  const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, seed, closeIdleMs: 50 }));
+  const first = new Checkpointer_(state, {});
+  await startCheckpointer(namespaceOf(first));
+  await log.use();
+  const synced = state.syncs;
+  await first.alarm();
+  assert.ok(state.syncs > synced, 'the pair synced before the database had it');
+  // A tile changed under the signer: the next write fails, an alarm, kept once however many ticks fail.
+  for (let i = 0; i < 300; i += 1) await log.use();
+  await first.alarm();
+  await run(db.owner, sql`UPDATE log_tiles SET hashes = ${randomBytes(64)} WHERE tree = 'uses' AND level = 0`);
+  await log.use();
+  for (let i = 0; i < 3; i += 1) await first.alarm();
+  let alarms = await checkpointerAlarms(namespaceOf(first));
+  assert.equal(alarms.filter((a) => /a checkpoint failed: .*shrink or change/s.test(a.message)).length, 1, JSON.stringify(alarms));
+  // Evicted, then the database's rows gone: the next open is refused, kept as an alarm, and the object stays up.
+  await log.empty();
+  const second = new Checkpointer_(state, {});
+  for (let i = 0; i < 2; i += 1) await second.alarm();
+  alarms = await checkpointerAlarms(namespaceOf(second));
+  assert.equal(alarms.filter((a) => /cannot open: .*holds no checkpoint/.test(a.message)).length, 1, JSON.stringify(alarms));
+  assert.ok(state.alarm !== null, 'its alarm still set');
+  await assert.rejects(durableSealThrough(namespaceOf(second))(1n), /cannot open/);
+});
+
+test('Fable review: a witness whose held pair no longer opens refuses, rather than starting over', async () => {
+  const k = await keys(7);
+  const other = await keys(8);
+  const state = objectState();
+  const make = (log: typeof k) => witnessObject(() => ({ name: 'witness.test', key: Buffer.alloc(32, 9).toString('base64'), log: { changes: log.signers.changes.verifierKey, uses: log.signers.uses.verifierKey } }));
+  const heads = { changes: { size: 1, root: Buffer.alloc(32, 1) }, uses: { size: 1, root: Buffer.alloc(32, 2) } };
+  const first = await signPair(k.signers, 5n, 1, heads);
+  const send = (object: { fetch(r: Request): Promise<Response> }, notes: PairNotes, from = { changes: 0, uses: 0 }) =>
+    object.fetch(new Request('https://witness/', { method: 'POST', body: JSON.stringify({ notes, from, proofs: { changes: [], uses: [] } }) }));
+  assert.equal((await send(new (make(k))(state, {}), first.notes)).status, 200);
+  // The deployment's settings now name other keys: the pair held does not open under them.
+  const answer = await send(new (make(other))(state, {}), (await signPair(other.signers, 9n, 2, heads)).notes);
+  assert.equal(answer.status, 500);
+  assert.match(((await answer.json()) as { reason: string }).reason, /name a new witness/);
 });
