@@ -41,9 +41,11 @@
     alone and waited; and a transaction queued behind as many statements
     as a connection pipelines was left without its connection, inside a
     transaction no one would end: a transaction now waits for a connection
-    of its own. What a transaction's work asks once it has ended, or once
-    its connection closed, is refused, not sent where it would run outside
-    it;
+    of its own. A transaction's end is decided once its work has settled:
+    what its work asks from then on, or once its connection closed, is
+    refused, not sent behind the COMMIT or ROLLBACK where it would run
+    outside it, and it ends once what it asked has answered, rolling back
+    if any of it failed;
   - a client whose connection was cut under a query, or as it opened,
     closes: upstream waited for the query for ever; and the next query on
     that connection answers its own rows, where upstream gave it the dead
@@ -57,9 +59,7 @@
     `reserve()` or transaction that opened it again;
   - a statement the client cannot write (too many parameters) fails alone,
     where upstream failed the one before it and hung, its transaction with
-    it; and a transaction one of whose statements failed unwaited fails,
-    where upstream reported its COMMIT, which Postgres answered with
-    ROLLBACK, as a success;
+    it;
   - an opening that cannot be finished (TLS with a key it cannot read, a
     sign-in's hash or a server's SCRAM message, a sign-in the client has
     not, such as GSSAPI, a `socket` factory that throws) fails the query

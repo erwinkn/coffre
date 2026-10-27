@@ -158,6 +158,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     try {
       build(q);
       message = toBuffer(q);
+      // What is sent, once it can be: its BEGIN first, if it carries one, and its values as asked.
+      if (typeof options.debug === 'function') {
+        if (q.begin !== null) options.debug(id, q.begin, [], []);
+        options.debug(id, q.text, q.args, q.statement!.types);
+      }
     } catch (e) {
       // Coffre: a statement the client cannot write fails alone, and nothing of it is sent. On an idle connection it is
       // answered all the same, a lone Sync's ReadyForQuery, which goes on as any answer does; behind one answering, it
@@ -206,11 +211,6 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     // Coffre: an unnamed statement's plain values go with it, in one round trip (typedByServer, below).
     q.describeFirst = parameters.length > 0 && typedByServer(parameters, types);
     q.statement = { string: q.text, types, columns: null };
-
-    if (typeof options.debug === 'function') {
-      if (q.begin !== null) options.debug(id, q.begin, [], []);
-      options.debug(id, q.text, parameters, types);
-    }
   }
 
   function write(x: Buffer): boolean {
@@ -348,10 +348,12 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     const e = err && typeof err === 'object' ? err : new Error(String(err));
     if (!('query' in e) && !('parameters' in e)) {
       const debug = Boolean(options.debug);
+      // Postgres refusing the BEGIN a statement carried refused the BEGIN: named as such.
+      const begin = q.begin !== null && !q.began && e instanceof Errors.PostgresError;
       Object.defineProperties(e, {
         stack: { value: ('stack' in e ? String(e.stack) : '') + q.origin.replace(/.*\n/, '\n'), enumerable: debug },
-        query: { value: q.text, enumerable: debug },
-        parameters: { value: q.parameters, enumerable: debug },
+        query: { value: begin ? q.begin : q.text, enumerable: debug },
+        parameters: { value: begin ? [] : q.parameters, enumerable: debug },
         args: { value: q.args, enumerable: debug },
         types: { value: q.statement?.types, enumerable: debug },
       });

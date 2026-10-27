@@ -63,13 +63,17 @@ Nine, each marked `Coffre:` in the code:
   it. A transaction that asks nothing sends nothing. It holds its
   connection from the start, as `reserve()` does, and gives it back once
   it has ended: upstream gave it back once Postgres said the connection
-  was idle, which it also says after a BEGIN that failed. What its work
-  left running asks once it has ended (`TRANSACTION_ENDED`), or once its
-  connection closed (the close's error), is not sent either: it would run
-  on the pool's connection, outside it, or open a transaction there no one
-  ends; nor is a ROLLBACK for a connection gone. A statement that failed
-  unwaited fails the transaction, whose COMMIT Postgres answers with
-  ROLLBACK rather than an error, which upstream took for success. A held
+  was idle, which it also says after a BEGIN that failed. Its end is
+  decided once its work has settled (`settle`): what the work left running
+  asks from then on is refused, unsent (`TRANSACTION_ENDED`), as is what it
+  asks once its connection closed (the close's error); the transaction
+  then waits for every statement it asked to answer, and ends with a
+  ROLLBACK if any failed, waited for or not, else a COMMIT. Upstream sent
+  the COMMIT or ROLLBACK at once: a statement asked during it ran after it,
+  outside the transaction, in autocommit, kept even when the transaction
+  rolled back; and a statement that failed unwaited left a COMMIT, which
+  Postgres answers with ROLLBACK, not an error, and upstream took for
+  success. No ROLLBACK goes to a connection gone. A held
   connection asked to end meanwhile, its `max_lifetime` say, closes once
   given back (`release`, in `connection.ts`). Through Hyperdrive, the
   first statement reaches the pooler with its BEGIN, in one batch: the

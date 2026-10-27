@@ -568,3 +568,62 @@ test('one connection: the pool\'s statements around a transaction stay out of it
     await client.end();
   }
 });
+
+test('what a transaction\'s work asks once its end is decided is not sent: not behind its COMMIT, not behind its ROLLBACK', { skip }, async () => {
+  const { client, sent } = sending('coffre-tx-decided');
+  try {
+    await client.unsafe('drop table if exists decided');
+    await client.unsafe('create table decided (n int)');
+    const refused: string[] = [];
+    const later = (tx: TransactionSql, n: number) => tx.unsafe('select pg_sleep(0.05)').then(() => tx.unsafe('insert into decided values ($1)', [n])).catch((e: { code?: string }) => void refused.push(String(e.code)));
+    // The work resolves, a statement of its still answering, and another asked after it: behind the COMMIT, upstream.
+    await client.begin((tx) => void later(tx, 1));
+    // The work fails, the same left running: behind the ROLLBACK, upstream, kept.
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into decided values ($1)', [100]);
+      void later(tx, 2);
+      throw new Error('roll back');
+    }), { message: 'roll back' });
+    // Drizzle's shape: one branch of a Promise.all fails, the other goes on.
+    const drizzled = postgresClient(DATABASE, { max: 1 });
+    const db = createDatabase(drizzled);
+    await assert.rejects(db.transaction(async (tx) => {
+      await Promise.all([
+        (async () => {
+          await tx.execute(sql`select 1`);
+          throw new Error('branch');
+        })(),
+        (async () => {
+          await tx.execute(sql`select pg_sleep(0.05)`);
+          await tx.execute(sql`insert into decided values (3)`).catch(() => {});
+        })(),
+      ]);
+    }), { message: 'branch' }).finally(() => drizzled.end());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.deepEqual(refused, ['TRANSACTION_ENDED', 'TRANSACTION_ENDED']);
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from decided')], [{ n: 0 }]);
+    // Nothing went after a COMMIT or a ROLLBACK.
+    for (const end of ['commit', 'rollback']) {
+      const at = sent.indexOf(end);
+      if (at >= 0) assert.ok(!sent[at + 1]?.startsWith('insert'), `${end} then ${sent[at + 1]}`);
+    }
+  } finally {
+    await client.unsafe('drop table if exists decided').catch(() => {});
+    await client.end();
+  }
+});
+
+test('a statement the client cannot write, left unwaited behind the first, rolls the transaction back', { skip }, async () => {
+  const { client } = sending('coffre-tx-unwritable');
+  try {
+    await client.unsafe('create temporary table unwritable (n int)');
+    await assert.rejects(client.begin((tx) => {
+      tx.unsafe('insert into unwritable values ($1)', [1]).execute();
+      tx.unsafe('select $1', Array(65534).fill(1)).execute();
+      return 'ok';
+    }), { code: 'MAX_PARAMETERS_EXCEEDED' });
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from unwritable')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});

@@ -217,6 +217,10 @@ export default function postgres(given: Options): Sql {
     let savepoints = 0;
     /** The transaction's first statement, which carries its BEGIN (`toBuffer`, connection.ts), once asked. */
     let first: Query | null = null;
+    /** Every statement of the transaction's asked: it ends once each has answered. */
+    const asked = new Set<Query>();
+    /** Its end is decided, COMMIT or ROLLBACK: what its work asks now is refused, unsent. */
+    let decided = false;
     /**
      * Why nothing more of the transaction is sent, which would run outside it: its BEGIN failed, its connection closed,
      * or it has ended, and its connection is the pool's again (what its work left running may still ask).
@@ -274,40 +278,60 @@ export default function postgres(given: Options): Sql {
           const x = fn(sql);
           Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(resolve as (value: unknown) => void, reject);
         });
-
+        if (!name) await settle();
         if (uncaughtError) throw uncaughtError;
       } catch (e) {
+        if (!name) await settle();
         // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed; nor one whose
         // connection closed, which Postgres rolled back.
-        if (!name) await first?.catch(() => {});
-        if (!stopped && (name || first?.began)) await own(name ? 'rollback to ' + quote(name) : 'rollback');
+        if (!stopped && (name || first?.began)) await (name ? own('rollback to ' + quote(name)) : last('rollback'));
         throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
       }
 
-      if (!name && first !== null) {
-        // Coffre: a statement that failed unwaited fails the transaction, whose COMMIT Postgres answers with ROLLBACK,
-        // not an error; and a COMMIT refused as its BEGIN failed fails with the BEGIN's error. Upstream resolved.
-        await own('commit').catch((e: unknown) => {
-          throw uncaughtError ?? e;
-        });
-        if (uncaughtError) throw uncaughtError;
-      }
+      if (!name && first !== null) await last('commit');
 
       return result;
 
       /** A statement of the transaction's: one that fails and is not waited for fails the transaction all the same. */
       function inTransaction(q: Query): void {
-        q.catch((e: unknown) => uncaughtError || (uncaughtError = e));
-        if (stopped) return q.reject(stopped);
-        if (first === null) {
-          first = q;
-          q.begin = 'begin ' + mode.replace(/[^a-z ]/gi, '');
+        // Coffre: refused once the end is decided, and not counted against a transaction that may commit.
+        if (decided) {
+          q.catch(() => {});
+          return q.reject(stopped ?? Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent'));
         }
-        // Nothing follows the BEGIN until Postgres has answered it, whatever execute says: a statement that failed to
-        // be written, its BEGIN with it, has the next wait all the same, to be refused.
-        if (c.queue === full) queries.push(q);
-        else if (!c.execute(q) || q === first) move(c, full);
+        q.catch((e: unknown) => uncaughtError || (uncaughtError = e));
+        asked.add(q);
+        send(q);
       }
+    }
+
+    /**
+     * Coffre: the end decided, nothing more of the work's is sent, and the transaction ends once what it asked has
+     * answered, with a ROLLBACK if any of it failed. Upstream sent the COMMIT at once: what the work asked after it ran
+     * outside the transaction, in autocommit, and a statement that failed unwaited left a COMMIT that Postgres
+     * answered with ROLLBACK, which upstream took for success.
+     */
+    async function settle(): Promise<void> {
+      decided = true;
+      await Promise.allSettled(asked);
+    }
+
+    /** The transaction's COMMIT or ROLLBACK, past the door that settle closed. */
+    function last(text: string): Query {
+      return new Query(text, [], send, { simple: true }, Boolean(options.debug));
+    }
+
+    /** `q` on the transaction's connection: sent, or queued until the connection can take more. */
+    function send(q: Query): void {
+      if (stopped) return q.reject(stopped);
+      if (first === null) {
+        first = q;
+        q.begin = 'begin ' + mode.replace(/[^a-z ]/gi, '');
+      }
+      // Nothing follows the BEGIN until Postgres has answered it, whatever execute says: a statement that failed to
+      // be written, its BEGIN with it, has the next wait all the same, to be refused.
+      if (c.queue === full) queries.push(q);
+      else if (!c.execute(q) || q === first) move(c, full);
     }
   }
 
