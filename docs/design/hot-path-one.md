@@ -133,7 +133,9 @@ deletion verified):
 
 `HotPathOne.tla` grows inputs, seals, a database writer and the seal cache.
 `HotPathOneClock.tla` (merged into `HotPathOne.tla` on main) is new: time, the deadline, the floor of `at`, and the
-bulk cap. TLC (W211's run after review r1, `formal-r1.txt`):
+bulk cap. TLC (W211's run after review r1, `formal-r1.txt`; experiment
+results, historical: the promoted, merged model's counts are in
+[`docs/formal.md`](../formal.md)):
 
 | scenario | distinct states |
 |---|---|

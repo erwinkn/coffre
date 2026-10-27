@@ -92,9 +92,11 @@
 (*                                                                         *)
 (* The bulk cap (R52): at most BulkCount distinct keys per principal in    *)
 (* any BulkWindow (W), both parameters; Keys = {} leaves it out. With a    *)
-(* `policy` input (W216), the count is the deployment's, sealed and        *)
-(* changed like any input: TRUE stands for BulkCount, FALSE for            *)
-(* BulkCountAlt, and a change flips it; it allows every use itself. One row*)
+(* `policy` input (W216), the count and the window are the deployment's,  *)
+(* sealed and changed like any input: TRUE stands for (BulkCount,          *)
+(* BulkWindow), FALSE for (BulkCountAlt, BulkWindowAlt), and a change      *)
+(* flips it; it allows every use itself. Each request is decided on the    *)
+(* policy in force at its number, live and in the replay. One row          *)
 (* per key the principal asked for, `last`: the time the key last entered *)
 (* the set or was moved on. A key is in the set at time t while            *)
 (* last > t - W - delta. A key that is not in the set enters it if fewer   *)
@@ -217,7 +219,7 @@ CONSTANTS
     MaxClockBacks,   \* times it steps back by one in a behaviour
     MaxSkew,         \* how far a Worker's clock is from Postgres's
     D,               \* a use's deadline after its `at`
-    BulkCount, BulkCountAlt, BulkWindow, Refresh,
+    BulkCount, BulkCountAlt, BulkWindow, BulkWindowAlt, Refresh,
     UseLocks, StatementSnapshot, UseNumberUnderLock, ChangeLocks, ChangeNumberUnderLock,
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
@@ -299,34 +301,36 @@ NoCache == [on |-> FALSE, seals |-> AllTrue, change |-> NoChange]
 KeysOr == IF Keys = {} THEN {None} ELSE Keys
 
 (* The bulk cap. *)
-\* The cap's count a policy value stands for; the count in force as of the log L.
-Count(v) == IF v THEN BulkCount ELSE BulkCountAlt
-CountIn(L) == IF "policy" \in Inputs THEN Count(NewestIn(L, "policy")) ELSE BulkCount
+\* The cap a policy value stands for, (count, window); the one in force as of the log L.
+PolicyOf(v) == IF v THEN [n |-> BulkCount, w |-> BulkWindow] ELSE [n |-> BulkCountAlt, w |-> BulkWindowAlt]
+PolicyIn(L) == IF "policy" \in Inputs THEN PolicyOf(NewestIn(L, "policy")) ELSE PolicyOf(TRUE)
+CountIn(L) == PolicyIn(L).n
+WindowIn(L) == PolicyIn(L).w
 Margin == IF Slack THEN Refresh ELSE 0
 CountMargin == Margin + (IF DeadlineSlack THEN D ELSE 0)
 
-\* The cap's set at time t, on rows L; the other keys that count against a new one.
-InSet(L, k, t) == L[k] > t - BulkWindow - Margin
-Counts(L, k, t) == L[k] > t - BulkWindow - CountMargin
+\* The cap's set at time t under window w, on rows L; the other keys that count against a new one.
+InSet(L, k, t, w) == L[k] > t - w - Margin
+Counts(L, k, t, w) == L[k] > t - w - CountMargin
 Fresh(L, k, t) == L[k] > t - Refresh
 
-\* The cap's rule for a request for k at t, on rows L: admitted or not, and the `last` it writes
-\* (NoTime: none). The live statement B and the replay apply the same rule.
-Rule(L, k, t, n) ==
+\* The cap's rule for a request for k at t under the policy p, on rows L: admitted or not, and the
+\* `last` it writes (NoTime: none). The live statement B and the replay apply the same rule.
+Rule(L, k, t, p) ==
     IF k = None THEN [admitted |-> TRUE, write |-> NoTime]
-    ELSE IF InSet(L, k, t)
+    ELSE IF InSet(L, k, t, p.w)
     THEN [admitted |-> TRUE, write |-> IF RefreshOnUse /\ ~Fresh(L, k, t) THEN t ELSE NoTime]
-    ELSE IF Cardinality({k2 \in Keys \ {k} : Counts(L, k2, t)}) >= n
+    ELSE IF Cardinality({k2 \in Keys \ {k} : Counts(L, k2, t, p.w)}) >= p.n
          THEN [admitted |-> FALSE, write |-> NoTime]
          ELSE [admitted |-> TRUE, write |-> t]
 
 \* The replay of the cap: the use entries of the log G in number order, the rule applied to each on
-\* the rows the ones before it left, with the count the changes numbered before it left.
+\* the rows the ones before it left, under the policy the changes numbered before it left.
 RECURSIVE ReplayFrom(_, _, _, _)
 ReplayFrom(es, L, decided, G) ==
     IF es = {} THEN [rows |-> L, decided |-> decided]
     ELSE LET e == CHOOSE e \in es : \A d \in es : e.seq <= d.seq
-             r == Rule(L, e.key, e.at, CountIn({d \in G : d.seq < e.seq}))
+             r == Rule(L, e.key, e.at, PolicyIn({d \in G : d.seq < e.seq}))
          IN ReplayFrom(es \ {e}, IF r.write = NoTime THEN L ELSE [L EXCEPT ![e.key] = Max(@, r.write)],
                        decided \cup {<<e.seq, r.admitted>>}, G)
 BulkReplay(G) == ReplayFrom({e \in UsesIn(G) : e.key /= None}, [k \in Keys |-> NoTime], {}, G)
@@ -443,13 +447,14 @@ UseLock(x) ==
     /\ UNCHANGED <<log, nextSeq, holder, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
 
-\* Statement A: the key's bulk row, as committed. A key that must enter the set or be moved on asks
-\* for the principal's lock.
+\* Statement A: the key's bulk row, as committed, and the policy's window (which no change can move
+\* while the use holds the lock shared). A key that must enter the set or be moved on asks for the
+\* principal's lock.
 UseRead(x) ==
     /\ u[x].pc = "locked"
     /\ LET k == u[x].key
            t == u[x].at
-       IN u' = [u EXCEPT ![x].pc = IF PrincipalLocks /\ (~InSet(bulk, k, t) \/ ~Fresh(bulk, k, t)) THEN "waiting" ELSE "read"]
+       IN u' = [u EXCEPT ![x].pc = IF PrincipalLocks /\ (~InSet(bulk, k, t, WindowIn(log)) \/ ~Fresh(bulk, k, t)) THEN "waiting" ELSE "read"]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
 
@@ -483,23 +488,23 @@ CoverThere(k) ==
     /\ CoverExists => \E e \in UsesIn(log) : e.seq = cover[k].seq /\ e.id = cover[k].id
 CoverNoChange(k) ==
     CoverChecksChanges => \A d \in ChangesIn(log) : (CoverChecksAllInputs \/ d.input = "member") => d.seq < cover[k].seq
-CoverInSet(k, t) == k /= None => InSet(bulk, k, t) /\ (CoverFresh => Fresh(bulk, k, t))
+CoverInSet(k, t, w) == k /= None => InSet(bulk, k, t, w) /\ (CoverFresh => Fresh(bulk, k, t))
 
-\* The counts a caller may pass from its own config (without CapFromPolicy): any the policy has had.
-CallerCounts ==
+\* The caps a caller may pass from its own config (without CapFromPolicy): any the policy has had.
+CallerPolicies ==
     IF "policy" \in Inputs /\ ~CapFromPolicy
-    THEN {Count(v) : v \in {TRUE} \cup {e.value : e \in {d \in ChangesIn(log) : d.input = "policy"}}}
-    ELSE {BulkCount}
+    THEN {PolicyOf(v) : v \in {TRUE} \cup {e.value : e \in {d \in ChangesIn(log) : d.input = "policy"}}}
+    ELSE {PolicyOf(TRUE)}
 
 \* Statement B, its snapshot taken now (or, as a bare CTE, at the call's start): everything the
-\* decision reads, the cap's rule (its count from the policy's newest change), and the entry's
+\* decision reads, the cap's rule (its count and window from the policy's newest change), the entry's
 \* number, from the sequence unless passed in; or, a repeat on its cover, nothing written. Without
 \* LockToCommit the fence lock goes here, before the commit. Without ReleaseAfterCommit the value
 \* leaves on what was read.
 UseRun(x) ==
     /\ u[x].pc = "read"
     /\ DeadlineChecked => pnow <= u[x].deadline
-    /\ \E passed \in IF SealCache /\ cache[u[x].key].on THEN BOOLEAN ELSE {FALSE}, callerCount \in CallerCounts :
+    /\ \E passed \in IF SealCache /\ cache[u[x].key].on THEN BOOLEAN ELSE {FALSE}, callerPolicy \in CallerPolicies :
        LET k == u[x].key
            t == u[x].at
            seen == IF StatementSnapshot THEN Committed ELSE u[x].snap
@@ -508,12 +513,12 @@ UseRun(x) ==
            newestChange == IF StatementSnapshot THEN NewestChange ELSE u[x].snapNewestChange
            skip == passed /\ (CacheChecked => CacheHolds(k, newestChange))
            newest == IF skip THEN cache[k].seals ELSE probes
-           covered == /\ Covers /\ CoverThere(k) /\ CoverInSet(k, t)
+           p == IF "policy" \notin Inputs THEN PolicyOf(TRUE)
+                ELSE IF ~CapFromPolicy THEN callerPolicy
+                ELSE PolicyOf(IF CapSealed THEN newest["policy"] ELSE read["policy"])
+           covered == /\ Covers /\ CoverThere(k) /\ CoverInSet(k, t, p.w)
                       /\ IF skip THEN cover[k].seq > cache[k].change.seq ELSE CoverNoChange(k)
-           n == IF "policy" \notin Inputs THEN BulkCount
-                ELSE IF ~CapFromPolicy THEN callerCount
-                ELSE Count(IF CapSealed THEN newest["policy"] ELSE read["policy"])
-           r == Rule(bulk, k, t, n)
+           r == Rule(bulk, k, t, p)
            admitted == covered \/ r.admitted
            base == Code(read, newest)
            code == IF base = "allow" /\ ~admitted THEN "bulk" ELSE base
@@ -856,11 +861,14 @@ ReleaseByDeadline ==
     \A r \in released : r.t <= r.deadline
 
 \* In any window of BulkWindow, by the requests' `at`, the values released to the principal are of
-\* BulkCount distinct keys at most (the larger count, if the policy changes it).
+\* BulkCount distinct keys at most. With a policy that changes the cap, what holds across a change is
+\* the weaker bound: in any window as long as the smaller of the two, the larger of the two counts.
+\* (Each request is decided exactly on the policy in force at its number: BulkReplayAgrees.)
 Times == (0 - MaxSkew)..(MaxTime + MaxSkew)
+CapWindow == IF "policy" \in Inputs /\ BulkWindowAlt < BulkWindow THEN BulkWindowAlt ELSE BulkWindow
+CapCount == IF "policy" \in Inputs THEN Max(BulkCount, BulkCountAlt) ELSE BulkCount
 BulkCapHolds ==
-    \A t \in Times : Cardinality({r.key : r \in {q \in released : q.key /= None /\ t - BulkWindow < q.at /\ q.at <= t}})
-                     <= Max(BulkCount, IF "policy" \in Inputs THEN BulkCountAlt ELSE BulkCount)
+    \A t \in Times : Cardinality({r.key : r \in {q \in released : q.key /= None /\ t - CapWindow < q.at /\ q.at <= t}}) <= CapCount
 
 \* The replay of the cap decides each entry as live did, and leaves the bulk rows live left.
 BulkReplayAgrees ==

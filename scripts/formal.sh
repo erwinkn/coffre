@@ -168,6 +168,8 @@ REMOVALS=(
   "HotPathOneBulkSlack Slack BulkCapHolds"
   "HotPathOnePolicy CapFromPolicy BulkReplayAgrees"
   "HotPathOnePolicy CapSealed BulkReplayAgrees"
+  "HotPathOnePolicyWindow CapFromPolicy BulkReplayAgrees"
+  "HotPathOnePolicyWindow CapSealed BulkReplayAgrees"
   # Liveness, under weak fairness (HotPathOneLive's PROPERTIES).
   "HotPathOneLive WorkerHonoursDeadline UseAnswered"
   "HotPathOneLive ChangeRereads ChangeAnswered"
@@ -212,6 +214,8 @@ REMOVALS=(
   "Migration015Drops AdoptAfterSeal NewChangesStand"
   # The marker PR 5 did not take (the plan's PR 5): it holds only while the writer leaves it alone.
   "Migration015Marker OldWriteMarksRow AllowedOnlyWhenGranted"
+  # … and a writer who clears it (MaxClears=1) breaks it with every protection on: why PR 5 keeps the probe.
+  "Migration015Marker MaxClears=1 AllowedOnlyWhenGranted"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -354,14 +358,17 @@ for removal in "${REMOVALS[@]}"; do
     fi
   done
   [ -z "$missing" ] || { echo "FAIL  $scenario has no $missing"; failed=1; continue; }
+  # How the run reads: "without A and B", or "with Name=Value" for a constant set.
+  what="without ${protection//+/ and }"
+  [[ "$protection" == *=* ]] && what="with ${protection//+/ and }"
   only_check "$invariant"
   started=$SECONDS
   tlc without.cfg
   if grep -q "$broken" "$work/out.txt"; then
-    echo "ok    $scenario without ${protection//+/ and } breaks $invariant ($((SECONDS - started))s):"
+    echo "ok    $scenario $what breaks $invariant ($((SECONDS - started))s):"
     node "$root/scripts/formal-trace.mjs" <"$work/out.txt" | tail -n +2 | sed 's/^/        /'
   else
-    echo "FAIL  $scenario without ${protection//+/ and } should break $invariant"
+    echo "FAIL  $scenario $what should break $invariant"
     cat "$work/out.txt"
     failed=1
   fi

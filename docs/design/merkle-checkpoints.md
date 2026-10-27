@@ -376,14 +376,22 @@ sees. So the two heads form a **pair**, under these rules:
 3. **One statement writes both.** It writes both trees' tiles and both
    checkpoint rows, as `shapes/bench.ts` does. No database state holds one
    without the other.
-4. **`open()` takes the pair as one value.**
-   - The database's newest rows must be a pair at one `upto`. Two rows at
-     different `upto`s are refused.
-   - #365's rules apply to the pair: equal, a prefix of it, or re-derived.
-     A re-derivation rebuilds both trees from the same window of entries,
-     and must give both remembered heads, or it refuses.
-5. **Each tick checks both rows.** The database's newest pair must be the
-   pair the signer holds (RowChecked).
+4. **`open()` checks each tree against the one remembered pair.** (As
+   modelled in `formal/Seal.tla` by W211, plan PR 1, which replaced the
+   first draft's rule: the database's newest rows must be a pair at one
+   `upto`, else refuse.)
+   - Each tree's newest row is held to its note in the remembered pair, by
+     #365's rules: equal, a prefix of it, or re-derived. A re-derivation
+     must give the remembered note, or it refuses.
+   - `open()` refuses only when one of these per-tree checks fails. So it
+     repairs a half-written pair, writing the missing tree's row from
+     memory, rather than refusing it.
+   - TLC shows the one memory record (rule 2) is what keeps the two trees
+     together. Refusing rows at different `upto`s is not needed, and would
+     make any half-written pair fatal.
+5. **Each tick checks each tree's newest row** against the signer's pair
+   (RowChecked, PairChecked). A single "newest row" query across both trees
+   is unsafe: deleting one tree's newest row would pass it (TLC).
 6. **Witnesses get the pair.**
    - The pump sends both notes in one publication: one request to a witness
      of our own, or each note to the standard witness of its origin.
@@ -391,18 +399,32 @@ sees. So the two heads form a **pair**, under these rules:
      witnessed on both logs. With no witness, it answers once that pair is
      sealed.
 7. **The verifier walks both trees from one start `upto` and merges them by
-   number.** Numbers and request IDs must be unique across both trees. Each
-   leaf's `kind` must match its tree: the kind is in the MAC and the leaf, so
-   an entry moved between trees fails. Pairs must share their `upto`.
+   number.** Numbers and request IDs must be unique across both trees.
+   - **Each tree's newest row must have its partner** (PairVerified, which
+     covers for PairChecked). This holds only together with rule 3: without
+     one statement for both rows, it raises false alarms.
+   - **The kind is under the entry's MAC** (KindInMac, TLC). Without it, a
+     change moved into the uses partition before it is sealed gets sealed
+     into the uses tree, and is later pruned with the uses.
+   - **The leaf check adds nothing on its own.** Rule 7's "a leaf's kind
+     must match its tree" guards nothing against this attacker. A sealed
+     entry that is moved no longer matches its leaf, and
+     SealedDeletionDetected catches that.
 
-**Why the model needs no change for today's invariants, under rules 2 to
-5.** Every action `formal/Seal.tla` takes on the head acts on the pair as one
-value: signing, remembering, writing, comparing at `open()` and at each tick.
-The pair is a function of the sealed sequence the model already tracks: its
-two projections by kind, at one `upto`. So each model state maps to exactly
-one state of the split. Each invariant stated over heads (Complete,
-SealedDeletionDetected, SplitViewDetected, AnsweredChangeKept, NoFalseAlarm)
-holds for pairs if it holds for heads.
+**The pair, as TLC checks it (W211, plan PR 1).** W212 first argued that the
+model needed no change: every action on the head acts on the pair as one
+value. `formal/Seal.tla` now models the pair explicitly instead:
+- entries carry their kind, and a head is two notes at one `upto`;
+- a crash can fall between remembering or writing the two notes;
+- the attacker can delete one tree's row, or move an entry's kind.
+
+The four pair protections are each shown necessary:
+- PairWrittenTogether: without it, `PairConsistent` and `NoFalseAlarm` break;
+- PairRemembered: without it, `PairConsistent` breaks;
+- PairChecked + PairVerified: without both, `SealedDeletionDetected` breaks;
+- KindInMac: without it, `KindKept` breaks.
+
+W209's invariants hold over the pair, restated per tree.
 
 Two things this argument does not cover:
 - **Standard witnesses see one log each.** A fork of one tree is a fork of
@@ -411,9 +433,8 @@ Two things this argument does not cover:
 - **A reader that pairs notes itself.** Notes from different ticks carry
   different `upto`s, and rule 7 rejects them.
 
-Putting the pair into `Seal.tla` explicitly, with a crash between the two
-notes, is the first step of the port (R45). It is an argument here, not a
-TLC run.
+The pair is in `Seal.tla` explicitly, with a crash between the two notes,
+since plan PR 1.
 
 ### Retention with `split`, step by step (review r1)
 
@@ -1182,7 +1203,10 @@ Protections, each a constant:
   protection.
 - **WaitForSeal:** R51.
 
-`scripts/formal.sh --workers 4 --shard seal`, about 2 minutes:
+W209's run of the single-head model, about 2 minutes (historical: the pair
+model, promoted by plan PR 1, has larger counts, in
+[`docs/formal.md`](../formal.md); its `seal` shard runs in about 10
+minutes):
 
 | scenario | distinct states | time |
 |---|---|---|

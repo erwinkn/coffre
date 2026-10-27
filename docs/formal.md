@@ -1165,7 +1165,7 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | a change's CAS on its object's seal (ChangeCAS) | `EachChangeFlips` |
 | the deadline checked in Postgres; the Worker's answer at it | `NoLateWork`, `ReleaseByDeadline` |
 | new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
-| the cap's count from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed) | `BulkReplayAgrees` |
+| the cap's count and window from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed); HotPathOnePolicyWindow flips the window alone | `BulkReplayAgrees` |
 
 **HotPathOneStaleBulk** checks the two halves together: a use refused
 `stale` still moves the cap's row exactly as the replay does, and a repeat
@@ -1194,6 +1194,12 @@ bounded):
   three uses.
 - A writer that forges no seal.
 - The tree reduced to sets of numbers (Seal.tla checks the tree).
+- **Request ids:** each use is a distinct request. A retry that repeats its
+  request id, the unique `(at, request id)` index, and "a retry never
+  decides again" are not in the model. PRs 4 and 5 test them on Postgres.
+- **Time in covers:** a cover is ended only by a change, a missing entry or
+  a stale bulk row. Its window and the credential's expiry are not in the
+  model, and are tested on Postgres.
 
 ### Seal.tla
 
@@ -1287,19 +1293,21 @@ shortest one.
 
 ### In CI
 
-Run in order, the 125 TLC runs took 22 minutes, twice the tests. As three shards
-they take about 11 (Tampering's), as long as the tests do; skipped, seconds.
-0.15's models added four shards. W211 timed them on a shared host with 4
+Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
+the tests. As three shards they took about 11 (Tampering's), as long as the
+tests do; skipped, seconds. With 0.15's models the suite is 233 TLC runs in
+seven shards; the four new ones are 0.15's. W211 timed them on a shared host with 4
 workers. A 4-core runner takes about a quarter of the CPU time, as
 Tampering's 31 CPU minutes ran in its 7 to 11:
 
 | shard | wall time, 4 workers here | CPU time | estimated on a runner |
 |---|---|---|---|
-| hotpath | 7.5 min | 34 min | about 9 to 12 min |
+| hotpath | 9.8 min | 47 min | about 12 to 17 min |
 | hotpath-bulk | 5.8 min | 31 min | about 8 to 11 min |
-| hotpath-skew | 5.5 min | 31 min | about 8 to 11 min |
-| seal | 10.4 min | 50 min | about 13 to 18 min | Two things
-cut that, and `Formal model` is still the one job `Validate` asks about, on
+| hotpath-skew | 5.4 min | 29 min | about 7 to 10 min |
+| seal | 10.4 min | 50 min | about 13 to 18 min |
+
+Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
 
 - **A green run of the same inputs is not run again.** TLC's answer depends
