@@ -419,8 +419,9 @@ functions.
      (PairWrittenTogether). A tile only grows, and a second pair at one
      place fails.
 - **No read scans history (R48).** Each read of uses is bounded by `at`
-  from the floor of the windows it reads. The verifier's `entries` read
-  from the floor of the pair it starts after.
+  on both sides: from the floor of the pair it starts after, to the slack
+  past the floor of the pair that seals where it ends (review r3). Only a
+  read past the newest pair, the head, is open-ended.
 - **`locate` finds an old use** through the uses' one index. It reads
   between its window's floor and the sealing barrier's floor plus
   `deadline_max()` and 60 s (63 s in all), then counts the window's uses
@@ -469,6 +470,9 @@ configured by the same `vault(env => …)`.
 - **It ticks on its alarm** every 500 ms, holding one Hyperdrive connection
   that closes when idle. A failed tick drops the connection and the
   checkpointer, and the next alarm opens both again under `open()`'s rules.
+  The old checkpointer is closed first, its tick in flight ended, with
+  nothing else delivered meanwhile. A change still waiting on it can tick
+  it no more, so two never sign at once (review r3).
 - **Asked with `fetch`**, as the anchor and the gates are:
   - `startCheckpointer(env.CHECKPOINTER)` starts it;
   - `durableSealThrough(env.CHECKPOINTER)` is the change path's seam;
@@ -485,8 +489,10 @@ optional capability, wired where the pairs are signed, in the vault.
   trees extend the one it holds. Its client sends each tree's proof from
   the sizes the object holds; on a 409 it learns those sizes and sends
   again. It passes the try's abort signal to the object's request.
-- **`r2Archive(env.ARCHIVE)`** puts each pair under `audit/<upto>.json`
-  without overwriting. The same pair again is fine; another at a place
+- **`r2Archive(env.ARCHIVE)`** puts each pair it is sent under
+  `audit/<upto>.json` without overwriting. The pump sends the newest pair,
+  so one a slow put skipped over is not kept; the next, which extends it,
+  is. The same pair again is fine; another at a place
   already archived is refused. Under a bucket lock, a Worker or a database
   writer cannot overwrite or delete what it holds; an account admin can
   lift the lock (R54).

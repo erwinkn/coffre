@@ -721,6 +721,33 @@ test('6b review r1: a pending pair the database stands at neither side of is ale
   assert.equal(alerts.filter((a) => /reopen the checkpointer/.test(a)).length, 1, alerts.join('\n'));
 });
 
+test('6b review r3: a closed checkpointer ends its tick in flight, then refuses every tick and every change', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  store.append('uses', 'x');
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let writing = false;
+  const write = store.write.bind(store);
+  store.write = async (row, tiles) => {
+    writing = true;
+    await held;
+    return write(row, tiles);
+  };
+  const ticking = cp.tick();
+  while (!writing) await new Promise((resolve) => setTimeout(resolve, 1));
+  let closed = false;
+  const closing = cp.close().then(() => (closed = true));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(closed, false, 'close waits for the tick in flight');
+  release();
+  assert.ok((await ticking).signed);
+  await closing;
+  await assert.rejects(cp.tick(), /was closed/);
+  await assert.rejects(cp.sealThrough(store.append('changes', 'c')), /was closed/);
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {

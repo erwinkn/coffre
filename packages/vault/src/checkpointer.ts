@@ -359,6 +359,19 @@ export class Checkpointer {
    * publish it. Ticks run one at a time, the regular ones and those a change
    * asks for.
    */
+  /**
+   * Stops this checkpointer for good, once the tick in flight, if any, has
+   * ended: every tick after, and every change that would tick, is refused.
+   * A host that opens another over the same memory closes this one first,
+   * so that two signers never act at once.
+   */
+  close(): Promise<void> {
+    this.closed = true;
+    return this.running.then(() => {}, () => {});
+  }
+
+  private closed = false;
+
   tick(): Promise<Tick> {
     const run = this.running.then(() => this.tickNow());
     this.running = run.catch(() => {});
@@ -366,6 +379,7 @@ export class Checkpointer {
   }
 
   private async tickNow(): Promise<Tick> {
+    if (this.closed) throw new Error('this checkpointer was closed: another took over its memory');
     let finished = false;
     if (this.pending !== null) {
       await this.finish(this.pending);

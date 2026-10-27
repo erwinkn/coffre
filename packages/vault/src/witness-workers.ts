@@ -7,7 +7,8 @@
 //   extend it (`witnessPair`), so the log cannot show two histories and get
 //   both witnessed. Its own key cosigns; deployments that want a witness
 //   outside their Cloudflare account point a C2SP witness at each tree.
-// - `r2Archive(env.ARCHIVE)`: every pair kept in an R2 bucket. It checks
+// - `r2Archive(env.ARCHIVE)`: the pairs it is sent kept in an R2 bucket (the pump sends the newest one, so a pair a
+//   slow put skipped over is not kept; the next one, which extends it, is). It checks
 //   nothing: the verifier holds the rows to it later. Under a bucket lock
 //   rule a Worker or a database writer cannot overwrite or delete what it
 //   holds; an admin of the Cloudflare account can lift the rule (R54).
@@ -41,8 +42,12 @@ export function witnessObject<Env>(settings: (env: Env) => WitnessSettings | Pro
     async fetch(request: Request): Promise<Response> {
       // Read, check and write as one, nothing else delivered meanwhile: a Durable Object's handlers interleave at every
       // await but storage's, so two forks sent at once would each be checked against the pair held, and both cosigned.
-      const body = request.method === 'GET' ? null : ((await request.json()) as Publication);
-      return this.#state.blockConcurrencyWhile(() => this.#answer(body));
+      try {
+        const body = request.method === 'GET' ? null : ((await request.json()) as Publication);
+        return await this.#state.blockConcurrencyWhile(() => this.#answer(body));
+      } catch (error) {
+        return Response.json({ ok: false, reason: `the witness failed: ${(error as Error).message}` }, { status: 500 });
+      }
     }
 
     async #answer(p: Publication | null): Promise<Response> {
@@ -108,7 +113,7 @@ export type ArchiveBucket = {
 };
 
 /**
- * Every pair, kept in an R2 bucket under `<prefix><upto, 20 digits>.json`.
+ * Each pair it is sent, kept in an R2 bucket under `<prefix><upto, 20 digits>.json`.
  * A place already archived with the same pair is fine (a pair sent again);
  * one archived with another is refused, and said.
  */

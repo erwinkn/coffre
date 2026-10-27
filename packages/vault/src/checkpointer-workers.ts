@@ -101,11 +101,18 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     }
 
     /** After a failure the database or the memory may stand elsewhere: the next request opens again, under `open()`'s rules. */
+    /**
+     * Nothing else delivered meanwhile, and the old checkpointer closed, its tick in flight ended, before the next
+     * request may open another: a change still waiting on the old one can tick it no more, so two never sign at once.
+     */
     async #reset(): Promise<void> {
-      this.#checkpointer = null;
-      const pool = this.#pool;
-      this.#pool = null;
-      await pool?.end().catch(() => {});
+      await this.#state.blockConcurrencyWhile(async () => {
+        const [old, pool] = [this.#checkpointer, this.#pool];
+        this.#checkpointer = null;
+        this.#pool = null;
+        await old?.close();
+        await pool?.end().catch(() => {});
+      });
     }
 
     async #record(alarm: Alarm): Promise<void> {
@@ -148,7 +155,6 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           });
         }
         if (call.op === 'alarms') {
-          // A page at a time: a list is a thousand keys at most.
           // A page at a time, each from the last key of the one before (which it lists again): a list is 1,000 keys at most.
           const alarms: Alarm[] = [];
           let start = alarmKey(call.since ?? 0);

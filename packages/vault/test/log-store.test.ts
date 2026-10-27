@@ -157,3 +157,30 @@ test('reads are bounded by their windows: locate finds a use in an old window by
   const c = (await store.locate(BigInt(raw!.number)))!;
   assert.equal(c.entry.tree, 'changes');
 });
+
+test('review r3: entries and locate read one window\'s bounds, at any index, an empty window between', async () => {
+  const { cp, store } = await open();
+  const windows: bigint[][] = [];
+  for (let t = 0; t < 4; t += 1) {
+    const numbers: bigint[] = [];
+    if (t !== 2) for (let i = 0; i < 5; i += 1) numbers.push(await use());
+    if (t === 1) numbers.push(await change());
+    windows.push(numbers);
+    // A tick of nothing new signs nothing: an empty window is a pair at the same place, so the third window comes from
+    // a skipped number alone.
+    if (t === 2) await log.change().then(async (n) => (numbers.push(n), undefined));
+    assert.ok((await cp.tick()).signed);
+  }
+  const pairs = await store.pairs(-1n, 10);
+  // The middle windows' entries, exactly, read by the verifier's `entries`.
+  const middle = await store.entries(pairs[1]!.upto, pairs[3]!.upto);
+  assert.deepEqual(middle.map((e) => e.number), [...windows[1]!, ...windows[2]!]);
+  // A use in the last window, not its first: its index counts every use before it in the tree.
+  const last = windows[3]!;
+  const found = (await store.locate(last[3]!))!;
+  assert.deepEqual([found.entry.tree, found.index], ['uses', 5 + 5 + 3]);
+  const p = (await cp.prove(last[3]!))!;
+  assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root));
+  // The change of the second window, by its key: the first in its tree.
+  assert.deepEqual([(await store.locate(windows[1]!.at(-1)!))!.index], [0]);
+});

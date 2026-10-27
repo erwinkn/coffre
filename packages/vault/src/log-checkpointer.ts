@@ -32,7 +32,7 @@ export async function openLogCheckpointer(options: HostOptions): Promise<Checkpo
     now,
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
-      void Promise.resolve(options.record?.({ at: now(), message })).catch(() => {});
+      void Promise.resolve(options.record?.({ at: now(), message })).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
     },
   });
 }
