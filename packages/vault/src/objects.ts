@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { isCredentialScope, type CallerKind, type CredentialScope, type InstanceRole, type Scope } from '@coffre/core/access';
 import { TOMBSTONE } from '@coffre/core/schemas';
 import type { CredentialColumns, EnvironmentColumns, SecretColumns, VersionColumns } from '@coffre/core/vault';
@@ -15,9 +17,13 @@ import type { CredentialInput, EnvironmentInput, Input, InputGrant, Nature, Prin
  *
  * Each function takes the columns as plain values, whichever query read
  * them: times in ms since the epoch, uuids as text. Each object is made
- * from its own rows alone: an environment is deleted when its own slug is
- * a tombstone, not its project's (a project's deletion writes its
- * environments' changes, plan PR 4b).
+ * from its own rows: an environment is deleted when its own slug is a
+ * tombstone, not its project's (a project's deletion writes its
+ * environments' changes, plan PR 4b). The one column of another row an
+ * object holds is an environment's project's archival, which 0.14 decides
+ * on, kept apart from its own; a project's archive changes each of its
+ * environments. A key's source is its newest reference row's while that
+ * row has not ended.
  */
 
 /** A credential's columns: `credentials` (a session, a token, a workload's session), as the app sends them too (`prepare`). */
@@ -69,27 +75,41 @@ export function memberStanding(row: { owner: boolean; role: string | null; scope
 export type { SecretColumns, VersionColumns };
 
 /**
- * A key: its current version, nature and wrapped data key; or, for a
- * reference, its source, whose value and nature are its own (R23): a
- * reference holds no version, and is a secret by itself.
+ * A key: its current version, nature and wrapped data key, or a plain
+ * one's digest; or, for a reference, its source, whose value and nature
+ * are its own (R23): a reference holds no version, and is a secret by
+ * itself. A reference that has ended holds neither (`ended`).
  */
 export function secretObject(row: SecretColumns): SecretInput {
   const { id, projectId, environmentId, source, version } = row;
-  if (source !== null || version === null) return { kind: 'secret', id, projectId, environmentId, version: '', nature: 'secret', key: null, source };
-  const nature: Nature = version.sensitive ? 'sensitive' : version.plain ? 'plain' : 'secret';
+  if (source !== null || version === null) {
+    return { kind: 'secret', id, projectId, environmentId, version: '', nature: 'secret', key: null, digest: null, source, reference: source === null ? null : row.reference };
+  }
+  const nature: Nature = version.sensitive ? 'sensitive' : version.plaintext !== null ? 'plain' : 'secret';
   const key = nature === 'plain' ? null : { kekProvider: version.kekProvider, kekId: version.kekId, kekVersion: version.kekVersion, bytes: version.wrappedDek };
-  return { kind: 'secret', id, projectId, environmentId, version: version.id, nature, key, source: null };
+  const digest = nature === 'plain' ? plainDigest(version.plaintext!) : null;
+  return { kind: 'secret', id, projectId, environmentId, version: version.id, nature, key, digest, source: null, reference: null };
+}
+
+/** A plain value's digest, as its object holds it: SHA-256 of its UTF-8 text, base64. */
+export function plainDigest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('base64');
 }
 
 /** An environment's columns (`environments`), as the app sends them too (@coffre/core/vault). */
 export type { EnvironmentColumns };
 
-/** An environment: its slug, as it was before any tombstone, and whether it was deleted. */
+/**
+ * An environment: its slug, as it was before any tombstone, whether it was
+ * deleted, and its own archival and its project's, apart. A deleted one
+ * holds no project's archival: it reads nothing, and its project archived
+ * or restored after changes nothing of it.
+ */
 export function environmentObject(row: EnvironmentColumns): EnvironmentInput {
   const tomb = row.slug.indexOf(TOMBSTONE);
   return {
     kind: 'environment', id: row.id, projectId: row.projectId, slug: tomb < 0 ? row.slug : row.slug.slice(0, tomb),
-    owner: row.owner, parentId: row.parentId, protected: row.protected === true, deleted: tomb >= 0, archived: row.archived,
+    owner: row.owner, parentId: row.parentId, protected: row.protected === true, deleted: tomb >= 0, archived: row.archived, projectArchived: tomb < 0 && row.projectArchived,
   };
 }
 

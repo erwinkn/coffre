@@ -13,11 +13,13 @@ import { defineSignin, github } from '@coffre/core/identity';
 import type { UseOutcome, Vault } from '@coffre/core/vault';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
+import { patchProject } from '../src/api/projects.ts';
 import { SigninService } from '../src/api/signin.ts';
+import { resolvePath } from '../src/db/queries.ts';
 import { auditLog, environments, logChanges, logFence, projects, secretReferences, secrets } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
-import { clientFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const CI = 'token:ci';
@@ -160,6 +162,80 @@ test('each way the API writes an environment or a key is a change of 0.15\'s log
   await inputsLogged();
 });
 
+test("a reference broken through the API: its row's end and its holder's change in the vault's decision, and a token's use through it refused `ended`; a value written over it, then a reference again, read as the rows say (T125)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { SOURCE: 'from-prod' });
+  await root.secrets.set('market/dev', { C: { ref: 'market/prod/SOURCE' } });
+  await root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const c = await keyIn(await environmentId('dev'), 'C');
+  assert.equal(codeOf(await use(token.id, c)), 'ok');
+  await root.references.break('market/dev/C');
+  assert.equal(codeOf(await use(token.id, c)), 'ended');
+  assert.deepEqual(await opsOf('secret', c), ['secret.write', 'secret.write']);
+  const ends = async () => (await db.owner.select({ endedAt: secretReferences.endedAt }).from(secretReferences).where(eq(secretReferences.secretId, c)).orderBy(asc(secretReferences.createdSeq)))
+    .map((row) => row.endedAt !== null);
+  assert.deepEqual(await ends(), [true]);
+  // A value of its own over the ended reference, then a reference again (the old one ended `replaced` by the vault first).
+  await root.secrets.set('market/dev', { C: 'its own' });
+  assert.equal(codeOf(await use(token.id, c)), 'ok');
+  await root.secrets.set('market/dev', { C: { ref: 'market/prod/SOURCE' } });
+  assert.equal(codeOf(await use(token.id, c)), 'ok');
+  await root.secrets.set('market/dev', { C: 'its own again' });
+  assert.equal(codeOf(await use(token.id, c)), 'ok');
+  assert.deepEqual(await ends(), [true, true]);
+  await inputsLogged();
+});
+
+test("a project archived and restored through the API: each of its live environments' change (`project.archive`), a personal config's and one archived on its own included, and a token's use through a fork of it refused as 0.14 refuses it (T126)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'one' });
+  await root.environments.create('market/feature', { from: 'dev', inherit: true });
+  await root.environments.create('market/old');
+  await root.environments.update('market/old', { archived: true });
+  await root.secrets.set('market/dev@me', { MINE: 'mine' });
+  await root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const [dev, feature, old] = [await environmentId('dev'), await environmentId('feature'), await environmentId('old')];
+  const [config] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.owner, `user:${ROOT}`));
+  assert.ok(config !== undefined);
+  const a = await keyIn(dev, 'A');
+  assert.equal(codeOf(await use(token.id, a, feature)), 'ok');
+  await root.projects.update('market', { archived: true });
+  assert.equal(codeOf(await use(token.id, a, feature)), 'bad_claim');
+  for (const id of [dev, feature, old, config.id]) assert.equal((await opsOf('environment', id)).at(-1), 'project.archive', id);
+  await inputsLogged();
+  await root.projects.update('market', { archived: false });
+  assert.equal(codeOf(await use(token.id, a, feature)), 'ok');
+  for (const id of [dev, feature, old, config.id]) assert.deepEqual((await opsOf('environment', id)).slice(-2), ['project.archive', 'project.archive'], id);
+  // Archived on its own, it stays so once its project is restored: the two apart.
+  assert.equal((await opsOf('environment', old)).filter((op) => op === 'environment.archive').length, 1);
+  assert.equal(codeOf(await use(token.id, a, old)), 'bad_claim');
+  await inputsLogged();
+});
+
+test("a project archived through the API, then deleted while one of its keys reads another project's: the reference ends with its holder's change, and the deletion's own changes follow (T125, T126)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.projects.create('web');
+  await root.environments.create('web/prod');
+  await root.secrets.set('web/prod', { OTHER: 'web-other' });
+  await root.secrets.set('market/dev', { OTHER: { ref: 'web/prod/OTHER' } });
+  const dev = await environmentId('dev');
+  const held = await keyIn(dev, 'OTHER');
+  await root.projects.update('market', { archived: true });
+  const { deletion } = await root.projects.delete('market');
+  assert.equal(deletion.references.length, 1);
+  assert.deepEqual((await opsOf('secret', held)).slice(-2), ['secret.write', 'secret.delete']);
+  assert.deepEqual((await opsOf('environment', dev)).slice(-2), ['project.archive', 'environment.delete']);
+  const [row] = await db.owner.select({ endedAt: secretReferences.endedAt }).from(secretReferences).where(eq(secretReferences.secretId, held));
+  assert.ok(row?.endedAt != null);
+  await inputsLogged();
+});
+
 test('a protected environment\'s fork is made protected: its row and its object say so from its first change', async () => {
   await root.projects.create('market');
   await root.environments.create('market/prod');
@@ -256,6 +332,121 @@ test('a key written into a personal config while it is deleted: the deletion rea
   assert.ok(raced);
   const late = await keyIn(config!.id, 'LATE');
   assert.deepEqual(await opsOf('secret', late), ['secret.write', 'secret.delete']);
+  await inputsLogged();
+});
+
+test('a project archived by another request while this one archives it: the second writes and logs nothing of it', async (t) => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const dev = await environmentId('dev');
+  const prepare = deps.vault.prepare!;
+  let raced = false;
+  t.mock.method(deps.vault as Required<Vault>, 'prepare', async (input: Parameters<typeof prepare>[0]) => {
+    const prepared = await prepare(input);
+    if (!raced && input.changes.some((change) => change.kind === 'environment' && change.id === dev && change.after.projectArchived)) {
+      raced = true;
+      await root.projects.update('market', { archived: true });
+    }
+    return prepared;
+  });
+  await root.projects.update('market', { archived: true });
+  assert.ok(raced);
+  const archives = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'project.archive'));
+  assert.equal(archives.length, 1);
+  assert.deepEqual((await opsOf('environment', dev)).filter((op) => op === 'project.archive'), ['project.archive']);
+  await inputsLogged();
+});
+
+test("an archive that prepared nothing (another request had archived the project) while a third restores it before its transaction: it prepares again, and no environment's seal is left behind (review r6)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'one' });
+  await root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const a = await keyIn(await environmentId('dev'), 'A');
+  const ctx = await contextFor(deps, ROOT);
+  const place = await resolvePath(ctx.db, { project: 'market' });
+  assert.ok(place !== null);
+  // A has the project live; B archives it before A reads its environments, so A prepares nothing.
+  await root.projects.update('market', { archived: true });
+  let raced = false;
+  ctx.db = new Proxy(ctx.db, {
+    get(target, name) {
+      const value = Reflect.get(target, name) as unknown;
+      if (name === 'transaction' && typeof value === 'function') {
+        return async (...args: unknown[]) => {
+          // C restores it before A takes the head.
+          if (!raced) {
+            raced = true;
+            await root.projects.update('market', { archived: false });
+          }
+          return (value as (...xs: unknown[]) => unknown).apply(target, args);
+        };
+      }
+      return typeof value === 'function' ? (value as (...xs: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  await patchProject(ctx, place, { archived: true });
+  assert.ok(raced);
+  assert.equal(codeOf(await use(token.id, a)), 'ok');
+  await root.projects.update('market', { archived: false });
+  assert.equal(codeOf(await use(token.id, a)), 'ok');
+  await inputsLogged();
+});
+
+test("a project a writer marked archived in the database: an archive asked then is refused as tampered, never taken as done, and nothing is logged (review r8)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const dev = await environmentId('dev');
+  const before = await opsOf('environment', dev);
+  await db.owner.update(projects).set({ archivedAt: new Date() }).where(eq(projects.slug, 'market'));
+  await assert.rejects(root.projects.update('market', { archived: true }));
+  await db.owner.update(projects).set({ archivedAt: null }).where(eq(projects.slug, 'market'));
+  assert.deepEqual(await opsOf('environment', dev), before);
+  assert.equal((await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'project.archive'))).length, 0);
+});
+
+test("an archive or a restore asked of the project as another request left it, the other undoing it before: each writes what it asks, its environments sealed to match (review r9)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const dev = await environmentId('dev');
+  const ctx = await contextFor(deps, ROOT);
+  // A finds the project archived and asks to archive it; B restores it before A prepares.
+  await root.projects.update('market', { archived: true });
+  const archived = await resolvePath(ctx.db, { project: 'market' });
+  assert.ok(archived !== null);
+  await root.projects.update('market', { archived: false });
+  await patchProject(ctx, archived, { archived: true });
+  assert.ok((await resolvePath(ctx.db, { project: 'market' }))!.project.archivedAt !== null, 'archived, as asked');
+  assert.equal((await opsOf('environment', dev)).at(-1), 'project.archive');
+  await inputsLogged();
+  // And the other way: A finds it live, and asks to restore it; B archives it before A prepares.
+  await root.projects.update('market', { archived: false });
+  const live = await resolvePath(ctx.db, { project: 'market' });
+  await root.projects.update('market', { archived: true });
+  await patchProject(ctx, live!, { archived: false });
+  assert.equal((await resolvePath(ctx.db, { project: 'market' }))!.project.archivedAt, null, 'restored, as asked');
+  await inputsLogged();
+});
+
+test("an environment made while its project is archived: the archive reads the project's environments again, and logs `project.archive` on each one (T126)", async (t) => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const dev = await environmentId('dev');
+  const prepare = deps.vault.prepare!;
+  let raced = false;
+  t.mock.method(deps.vault as Required<Vault>, 'prepare', async (input: Parameters<typeof prepare>[0]) => {
+    const prepared = await prepare(input);
+    // Between the archive's read of the project's environments and its transaction, one is made.
+    if (!raced && input.changes.some((change) => change.kind === 'environment' && change.id === dev && change.after.projectArchived)) {
+      raced = true;
+      await root.environments.create('market/late');
+    }
+    return prepared;
+  });
+  await root.projects.update('market', { archived: true });
+  assert.ok(raced);
+  assert.deepEqual(await opsOf('environment', await environmentId('late')), ['environment.create', 'project.archive']);
   await inputsLogged();
 });
 

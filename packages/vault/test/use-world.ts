@@ -60,10 +60,10 @@ export const LOG_015: VaultOptions = {
   },
 };
 
-/** A vault of its own, a fresh isolate: its own seal cache, covers and admission count. */
+/** A vault of its own, a fresh isolate: its own seal cache, covers and admission count; and the vault, for its decisions. */
 export async function isolate(options: VaultOptions = {}) {
   const vault = openVault(db.vault, await prepareVault(CONFIG, { ...LOG_015, ...options }), hot);
-  return { use: (input: UseInput) => vault.use!(input) };
+  return { use: (input: UseInput) => vault.use!(input), vault };
 }
 
 // --- the change path, as the owner plays it ---------------------------------------------------------
@@ -124,7 +124,7 @@ export async function world(options: { count?: number; windowMs?: number; role?:
   const objects = {
     principal: { kind: 'principal', principal, status: 'active', role: 'member', scope: { projects: 'all', environments: 'all' }, grants: [grant] } as Input,
     credential: { kind: 'credential', id: credentialId, principal, caller, scope: null, expiresAt, revoked: false } as Input,
-    environment: { kind: 'environment', id: dev, projectId: project, slug: 'dev', owner: null, parentId: null, protected: false, deleted: false, archived: false } as Input,
+    environment: { kind: 'environment', id: dev, projectId: project, slug: 'dev', owner: null, parentId: null, protected: false, deleted: false, archived: false, projectArchived: false } as Input,
   };
   // The instance's one policy and one roles object: the first world's.
   if ((await rows(db.owner, sql`SELECT 1 FROM log_config`)).length === 0) {
@@ -151,7 +151,7 @@ export async function world(options: { count?: number; windowMs?: number; role?:
     await run(db.owner, sql`UPDATE secrets SET current_version_id = ${version}, current_version = 1 WHERE id = ${id}`);
     const object: Input = {
       kind: 'secret', id, projectId: project, environmentId: dev, version, nature: sensitive ? 'sensitive' : 'secret',
-      key: { kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, bytes: Buffer.from(wrapped.bytes).toString('base64') }, source: null,
+      key: { kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, bytes: Buffer.from(wrapped.bytes).toString('base64') }, digest: null, source: null, reference: null,
     };
     await genesis({ kind: 'secret', id }, object);
     keys.push({ id, value, object });

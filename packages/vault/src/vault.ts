@@ -114,9 +114,9 @@ import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuth
 import { Changes, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { SealThrough } from './checkpointer.ts';
-import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
+import { keyRefusals, live, placeIn, PRINCIPAL, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
-import { limitChange, objectKey, POLICY_REF, ROLES_REF, sealKey, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
+import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { logMacKey } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -1701,7 +1701,9 @@ class VaultService implements Vault {
     validateCorrelation(input);
     if (reason !== 'replaced' && reason !== 'broken' && reason !== 'abandoned') throw new Error('a reference ends replaced, broken or abandoned');
     const vias = input.items.map((item) => validateVia(item)!);
-    if (vias.some((via) => via === null) || new Set(vias.map((via) => via.seq)).size !== vias.length) throw new Error('each reference to end, once');
+    if (vias.some((via) => via === null) || new Set(vias.map((via) => via.seq)).size !== vias.length || new Set(vias.map((via) => via!.reference)).size !== vias.length) {
+      throw new Error('each reference to end, once');
+    }
     if (vias.length === 0) return { ok: true, seqs: [] };
     const sealed = await this.#referencesAt(vias);
     // A holder's row is committed after its reference is sealed, if the write went through: an end names it only then.
@@ -1738,8 +1740,11 @@ class VaultService implements Vault {
       });
     }
     const seals = sealed as Sealed[];
+    // Ended already: by an authentic end only. A forged one (a row with the vault's name and no valid MAC) refuses a
+    // read, the safe side there (`endedReferences`); here it would stop a genuine break, and with 0.15's log leave the
+    // holder serving, its end written nowhere (review r9).
     const ended = async (db: Queryable) => {
-      const done = await store.endedReferences(db, seals.map((seal) => seal.seq));
+      const done = new Set((await store.referenceEnds(db, seals.map((seal) => seal.seq))).filter((end) => this.#authentic(end)).map((end) => end.relatedSeq!));
       return seals.map((seal) => (done.has(seal.seq) ? ('ended' as const) : null));
     };
     return this.#decide([principal], async (d) => {
@@ -1747,18 +1752,75 @@ class VaultService implements Vault {
       const actor = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads), input);
       // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
       const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
-      const codes: (RefusalCode | null)[] = seals.map((seal) => {
-        const holder = refuses(actor, 'secret.write', placeIn(seal.holder, environments), false);
-        // Abandoning is its maker's alone, for a write of theirs that stored nothing: the vault
-        // never reads the app's rows, so whose seal it is decides, and no one else's end says it.
+      // Who may end each: write where it is held; for a break, managing the source's project's access too; abandoning,
+      // its maker alone, for a write of theirs that stored nothing (the vault never reads the app's rows, so whose
+      // seal it is decides, and no one else's end says it).
+      const mayEnd = (reader: Reader, places: ReadonlyMap<string, { projectId: string; slug: string }>) => seals.map((seal): RefusalCode | null => {
+        const holder = refuses(reader, 'secret.write', placeIn(seal.holder, places), false);
         if (reason === 'abandoned' && seal.createdBy !== principal) return 'not_allowed';
-        // Replacing or abandoning is the holder's side: write where it is held.
         if (holder === null || reason !== 'broken') return holder;
-        return refuses(actor, 'grant.manage', { projectId: seal.source.projectId }, false) === null ? null : holder;
+        return refuses(reader, 'grant.manage', { projectId: seal.source.projectId }, false) === null ? null : holder;
       });
+      const codes: (RefusalCode | null)[] = mayEnd(actor, environments);
+      // With 0.15's log, also as 0.15 decides it, on sealed objects alone (R53): the actor's principal object, the
+      // roles object and each holder environment's object, each as its log has it and checked against its seal
+      // (`readerOf`, as a use's reader). 0.14's reader reads rows no seal covers (an environment's slug, a project's
+      // tombstone, the protection they make): a writer who swapped one could let a member end what they may not
+      // (reviews r10 and r11). An end needs both to allow it, so an unsealed row can only refuse one. An object the log
+      // does not bear out refuses the end. Per reference: one whose holder environment, or the actor, 0.14's log alone
+      // holds (before the cutover) is 0.14's reader's alone, and no other reference of the call with it (review r12).
+      const allowed14 = !codes.some((code) => code !== null);
+      if (d.changes !== null && allowed14) {
+        const member = await d.changes.held(d.tx, { kind: 'principal', id: principal });
+        const roles = await d.changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' });
+        const places = new Map<string, EnvironmentInput>();
+        for (const id of new Set(seals.map((seal) => seal.holder.environmentId))) {
+          const held = await d.changes.held(d.tx, { kind: 'environment', id });
+          if (held.log === 'live' && held.object.kind === 'environment') places.set(id, held.object);
+        }
+        if (member.log !== 'unlogged') {
+          const credential: CredentialInput = { kind: 'credential', id: principal, principal, caller: input.caller, scope: input.credentialScope ?? null, expiresAt: null, revoked: false };
+          const reader = readerOf(member.log === 'live' && member.object.kind === 'principal' ? member.object : null, credential,
+            roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits(), places.values(), d.at);
+          mayEnd(reader, places).forEach((code, i) => {
+            if (places.has(seals[i]!.holder.environmentId)) codes[i] = code;
+          });
+        }
+      }
       if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, REFUSAL_MESSAGES[first]), vias.map((via, i) => entry(via, seals[i]!, 'deny', codes[i] ?? first)));
+      // With 0.15's log, each reference ended ends in its row, beside 0.14's entry, in this transaction (0029;
+      // formal/SealedObjects.tla, EndInRow and EndWithEntry). Decided only on what the vault authenticates (R53): that
+      // it has not ended is 0.14's log's (`ended` above), and what its holder reads is the holder's object, as its log
+      // has it and checked against its seal (`heldByLog`: ReferenceInObject, LivenessFromLog), never its rows, which
+      // a writer may rename, plant or mark archived. A holder whose rows the log does not bear out refuses the end
+      // (`tampered`, `stale`).
+      // - A holder whose object reads its source through this reference changes: `secret.write`, no source, whose
+      //   newest row, this one, `change_input` ends.
+      // - Any other ends this row alone, by its id (`end_reference`): an abandoned reference's stored none, and its
+      //   end touches no other. A holder with no object (archived, or 0.14's alone before the cutover) has only rows,
+      //   which decide nothing here: an unarchive seals what they hold (a task of its own), and the cutover holds
+      //   each reference row to 0.14's `reference.create` and `reference.end` (plan PR 9).
+      if (d.changes !== null) {
+        const changes = d.changes;
+        const rows: string[] = [];
+        const staged = new Set<string>();
+        for (const [i, { holder }] of seals.entries()) {
+          const reference = vias[i]!.reference;
+          const ref = { kind: 'secret' as const, id: holder.secretId };
+          const held = await changes.held(d.tx, ref);
+          if (held.log === 'live' && held.object.kind === 'secret' && held.object.reference === reference) {
+            if (staged.has(holder.secretId)) continue;
+            staged.add(holder.secretId);
+            const ended = { op: 'secret.write', projectId: holder.projectId, environmentId: holder.environmentId, version: '', nature: 'secret', key: null, digest: null, source: null, reference: null } as const;
+            changes.stage(ref, ended, principal);
+            continue;
+          }
+          rows.push(reference);
+        }
+        if (rows.length > 0) d.writes.push((at) => store.endReferenceRows(d.tx, rows, at));
+      }
       const entries = vias.map((via, i) => entry(via, seals[i]!, 'allow', null));
       d.log.push(...entries);
       const answer = { seqs: [] as number[] };

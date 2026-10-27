@@ -141,6 +141,13 @@
       "when": 1793120000000,
       "tag": "0019_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1793130000000,
+      "tag": "0020_ended_references",
+      "breakpoints": true
     }
   ]
 }

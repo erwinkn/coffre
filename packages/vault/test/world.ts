@@ -80,10 +80,10 @@ export function market(limit = { count: 3, windowMs: 60_000 }): World {
   w.change({ kind: 'credential', id: credential(2) }, { op: 'credential.issue', principal: BO, caller: 'person', scope: null, expiresAt: 1_000_000 });
   w.change({ kind: 'credential', id: credential(3) }, { op: 'credential.issue', principal: CI, caller: 'bearer', scope: null, expiresAt: null });
   for (const [n, environmentId, nature] of [[1, DEV, 'secret'], [2, DEV, 'sensitive'], [3, PROD, 'secret'], [4, DEV, 'secret'], [5, DEV, 'secret'], [6, MINE, 'secret']] as const) {
-    w.change({ kind: 'secret', id: key(n) }, { op: 'secret.write', projectId: MARKET, environmentId, version: `v${n}`, nature, key: WRAPPED, source: null });
+    w.change({ kind: 'secret', id: key(n) }, { op: 'secret.write', projectId: MARKET, environmentId, version: `v${n}`, nature, key: WRAPPED, digest: null, source: null, reference: null });
   }
   // A reference in the fork to dev's first key.
-  w.change({ kind: 'secret', id: key(9) }, { op: 'secret.write', projectId: MARKET, environmentId: FORK, version: 'r9', nature: 'secret', key: null, source: key(1) });
+  w.change({ kind: 'secret', id: key(9) }, { op: 'secret.write', projectId: MARKET, environmentId: FORK, version: 'r9', nature: 'secret', key: null, digest: null, source: key(1), reference: key(1) });
   return w;
 }
 

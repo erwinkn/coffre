@@ -88,6 +88,40 @@ BEGIN
 END
 $$;
 
+-- A reference's end that changes no object (0029's end_reference): the vault's alone, never a standing one's, nor with no
+-- time, and a row ended once (log-fixture.sql's two references, one standing, one whose holder is archived).
+DO $$
+BEGIN
+    IF NOT has_function_privilege('coffre_vault', 'end_reference(uuid, bigint)', 'EXECUTE')
+       OR has_function_privilege('coffre_app', 'end_reference(uuid, bigint)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'end_reference(uuid, bigint)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'FAIL: end_reference is not the vault''s alone';
+    END IF;
+    BEGIN
+        PERFORM end_reference('88888888-8888-8888-8888-888888888881', 0);
+        RAISE EXCEPTION 'FAIL: end_reference ended a standing reference';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM end_reference('88888888-8888-8888-8888-888888888882', NULL);
+        RAISE EXCEPTION 'FAIL: end_reference took no time';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM end_reference('88888888-8888-8888-8888-888888888882', -1);
+        RAISE EXCEPTION 'FAIL: end_reference took a time before the epoch';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    IF end_reference(gen_random_uuid(), 0) THEN
+        RAISE EXCEPTION 'FAIL: end_reference ended a reference that is not';
+    END IF;
+    IF NOT end_reference('88888888-8888-8888-8888-888888888882', 0) OR end_reference('88888888-8888-8888-8888-888888888882', 0) THEN
+        RAISE EXCEPTION 'FAIL: end_reference did not end an archived holder''s reference once';
+    END IF;
+    RAISE NOTICE 'PASS: end_reference is the vault''s, ends no standing reference, takes a time, and ends a row once';
+END
+$$;
+
 -- The hot path's login: the vault's group, its own settings, unable to log in until it is given a password.
 DO $$
 BEGIN
@@ -403,7 +437,7 @@ DECLARE
 BEGIN
 BEGIN
     SELECT jsonb_build_object('kind', 'environment', 'id', e.id::text, 'projectId', e.project_id::text, 'slug', 'renamed', 'owner', e.owner,
-                              'parentId', e.parent_id, 'protected', true, 'deleted', false, 'archived', true)
+                              'parentId', e.parent_id, 'protected', true, 'deleted', false, 'archived', true, 'projectArchived', false)
       INTO env FROM environments e WHERE e.id = '22222222-2222-2222-2222-222222222222';
     -- Each call its own statement: a check in the call's statement would read from before what the call wrote.
     n := change_input('environment', '22222222-2222-2222-2222-222222222222', 'environment-renamed', t, 'user:admin@acme.example',

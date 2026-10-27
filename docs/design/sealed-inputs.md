@@ -232,7 +232,9 @@ the same.
   content current.
 - **For PR 5:** a use opens a wrapped key. A plain value, which 0.14's
   vault never decides either, is refused at the door (`bad_claim`): the
-  app hands it back without a use.
+  app hands it back without a use. Its text is under its seal all the
+  same: its object holds the text's digest (0029), so an edited text is
+  `tampered`, not `bad_claim`.
 - **For PR 4 and PR 5, from the spec (W211):** a change writes only over
   a row whose seal is its object's newest change's (`ChangeChecksSeal`,
   else `stale`), and only from the seal it read (`ChangeCAS`); one refused

@@ -381,47 +381,73 @@ export async function patchProject(
   const renamed = Object.keys(renames).length > 0;
   const before = patch.folder === undefined ? null : (await projectFolderOf(ctx.db)).get(project.id) ?? null;
   const moving = patch.folder !== undefined && patch.folder !== before;
-  return audited(ctx, async (tx, log) => {
-    await stillThere(tx, place);
-    if (archivedAt != null) await refuseIfRead(ctx, tx, project.slug, { projectId: project.id }, 'project.archive', { projectId: project.id });
-    if (renamed || archivedAt !== undefined) {
-      try {
-        await update(tx, projects, { id: project.id }, { ...renames, archivedAt });
-      } catch (error) {
-        if (!isUniqueViolation(error)) throw error;
-        throw new Refusal(
-          slugTaken('project', renames.slug!),
-          denied(ctx, 'project.update', 'slug_taken', { projectId: project.id, metadata: { slug: renames.slug } }),
-        );
+  // With 0.15's log, an archive or a restore changes each of its live environments' objects (`project.archive`: 0.14
+  // takes an environment of an archived project as archived), prepared from the environments read now, which the
+  // transaction must find under the head, or prepares again: one made meanwhile would keep its project live in the log.
+  const live = async (db: Queryable) => [...(await environmentObjects(db, { projectId: project.id })).values()].filter((row) => !isTombstone(row.columns.slug));
+  return retrying(async () => {
+    let read: { environments: string[]; archived: boolean } = { environments: [], archived: false };
+    // Prepared from what the request asks, not from the project's row as the router read it: a row a writer marked
+    // archived would otherwise make the archive a no-op that checks nothing.
+    const asked = patch.archived;
+    const changes = asked === undefined ? null : await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      const rows = await live(ctx.db);
+      // The project as these rows were read, in the same statement (each carries its project's archival): the
+      // transaction must find it so under the head, or what this prepared (nothing, when another request had archived
+      // it) is no longer what it would commit beside. A project with no live environment prepares nothing either way.
+      read = { environments: rows.map((row) => row.columns.id), archived: rows.some((row) => row.columns.projectArchived) };
+      // Every one, even one already as asked (an archive another request made meanwhile): it changes nothing, but
+      // `prepare` holds its rows to its seal, so that an archival flag a writer set is refused, never taken as done.
+      return rows.map((row) => environmentChange(row, { ...row.columns, projectArchived: asked }));
+    });
+    return audited(ctx, async (tx, log) => {
+      const now = await stillThere(tx, place);
+      // Archived or restored meanwhile by another request, as this one asks: nothing to write or log of it (its renames
+      // and its move still go).
+      // From what the request asks, as the changes were prepared, against the project as found under the head.
+      const archiving = asked !== undefined && (now.project.archivedAt !== null) !== asked ? (asked ? archivedAt ?? new Date() : null) : undefined;
+      if (changes !== null && (!sameIds((await live(tx)).map((row) => row.columns.id), read.environments)
+        || (read.environments.length > 0 && (now.project.archivedAt !== null) !== read.archived))) throw new ObjectMoved();
+      if (archiving != null) await refuseIfRead(ctx, tx, project.slug, { projectId: project.id }, 'project.archive', { projectId: project.id });
+      if (renamed || archiving !== undefined) {
+        try {
+          await update(tx, projects, { id: project.id }, { ...renames, archivedAt: archiving });
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+          throw new Refusal(
+            slugTaken('project', renames.slug!),
+            denied(ctx, 'project.update', 'slug_taken', { projectId: project.id, metadata: { slug: renames.slug } }),
+          );
+        }
       }
-    }
-    if (renamed) {
-      log.push(allowed(ctx, 'project.update', {
-        projectId: project.id,
-        metadata: { from: project.slug, ...renames },
-      }));
-    }
-    if (archivedAt !== undefined) {
-      log.push(allowed(ctx, archivedAt === null ? 'project.restore' : 'project.archive', {
-        projectId: project.id,
-        metadata: { slug: renames.slug ?? project.slug },
-      }));
-    }
-    if (moving) {
-      await fileProject(tx, project.id, patch.folder!);
-      log.push(allowed(ctx, 'project.move', {
-        projectId: project.id,
-        metadata: { slug: renames.slug ?? project.slug, from: before, to: patch.folder },
-      }));
-    }
-    return {
-      project: {
-        slug: renames.slug ?? project.slug,
-        name: renames.name ?? project.name,
-        archivedAt: iso(archivedAt === undefined ? project.archivedAt : archivedAt),
-        folder: patch.folder === undefined ? before : patch.folder,
-      },
-    };
+      if (renamed) {
+        log.push(allowed(ctx, 'project.update', {
+          projectId: project.id,
+          metadata: { from: project.slug, ...renames },
+        }));
+      }
+      if (archiving !== undefined) {
+        log.push(allowed(ctx, archiving === null ? 'project.restore' : 'project.archive', {
+          projectId: project.id,
+          metadata: { slug: renames.slug ?? project.slug },
+        }));
+      }
+      if (moving) {
+        await fileProject(tx, project.id, patch.folder!);
+        log.push(allowed(ctx, 'project.move', {
+          projectId: project.id,
+          metadata: { slug: renames.slug ?? project.slug, from: before, to: patch.folder },
+        }));
+      }
+      return {
+        project: {
+          slug: renames.slug ?? now.project.slug,
+          name: renames.name ?? now.project.name,
+          archivedAt: iso(archiving === undefined ? now.project.archivedAt : archiving),
+          folder: patch.folder === undefined ? before : patch.folder,
+        },
+      };
+    }, changes);
   });
 }
 
@@ -708,7 +734,8 @@ class Erasure {
       const day = new Date();
       const tombstone = (slug: string) => (places[0]!.environmentId === null ? deletedWithProject(slug) : tombstoneOf(slug, day));
       return [
-        ...[...rows.values()].map((row) => environmentChange(row, { ...row.columns, slug: tombstone(row.columns.slug) })),
+        // Deleted, an environment holds no project's archival (`environment.delete`): said here, not left to the vault.
+        ...[...rows.values()].map((row) => environmentChange(row, { ...row.columns, slug: tombstone(row.columns.slug), projectArchived: false })),
         ...live.map((key) => secretChange(key.columns.id, key, null)),
       ];
     });

@@ -516,7 +516,7 @@ test('a session\'s first call plans its four statements before it takes the fenc
       [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
     assert.equal(answer!.use.state, null);
     const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0028');
+    assert.equal(setting!.planned, '0029');
   } finally {
     await fence.end();
     await fresh.end();
@@ -542,7 +542,7 @@ test('covers: a repeat rides its entry, and writes none, until any input changes
   // A change to the key (its value moved): the next repeat is an entry of its own.
   const key = w.keys[0]!.object as Extract<Input, { kind: 'secret' }>;
   const moved = { ...key, nature: 'secret' as const };
-  await change({ kind: 'secret', id }, { op: 'secret.write', projectId: key.projectId, environmentId: key.environmentId, version: key.version, nature: 'secret', key: key.key, source: null }, moved,
+  await change({ kind: 'secret', id }, { op: 'secret.write', projectId: key.projectId, environmentId: key.environmentId, version: key.version, nature: 'secret', key: key.key, digest: null, source: null, reference: null }, moved,
     seal('secrets', 'id', id));
   const after = heard(await use(ask(w, id)));
   assert.ok(after.ok && !after.covered, 'a cover from before a change covers nothing');
@@ -620,7 +620,7 @@ test('before the policy is logged, a use does nothing', async () => {
 async function environment(w: { project: string }, slug: string, extra: { owner?: string; parentId?: string } = {}): Promise<string> {
   const id = randomUUID();
   await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: extra.owner ?? null, parentId: extra.parentId ?? null });
-  const object: Input = { kind: 'environment', id, projectId: w.project, slug, owner: extra.owner ?? null, parentId: extra.parentId ?? null, protected: false, deleted: false, archived: false };
+  const object: Input = { kind: 'environment', id, projectId: w.project, slug, owner: extra.owner ?? null, parentId: extra.parentId ?? null, protected: false, deleted: false, archived: false, projectArchived: false };
   await change({ kind: 'environment', id }, { op: 'genesis', value: object }, object, seal('environments', 'id', id));
   return id;
 }
@@ -657,13 +657,14 @@ test('a reference reads its source\'s value, decided at its holder: the whole sh
   const prod = await environment(w, 'prod');
   await grant(w, prod);
   const holder = randomUUID();
+  const row = randomUUID();
   const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }]));
   await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId: prod, key: `HELD_${holder.slice(0, 4)}` });
   await db.owner.insert(tablesOf(db.owner).secretReferences).values({
-    id: randomUUID(), projectId: w.project, environmentId: prod, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
+    id: row, projectId: w.project, environmentId: prod, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: appended.seqStart, createdBy: ROOT,
   });
-  const object: Input = { kind: 'secret', id: holder, projectId: w.project, environmentId: prod, version: '', nature: 'secret', key: null, source };
+  const object: Input = { kind: 'secret', id: holder, projectId: w.project, environmentId: prod, version: '', nature: 'secret', key: null, digest: null, source, reference: row };
   await change({ kind: 'secret', id: holder }, { op: 'genesis', value: object }, object, seal('secrets', 'id', holder));
   const { use } = await isolate();
   for (const purpose of ['run', 'reveal'] as const) {
@@ -677,7 +678,7 @@ test('a reference reads its source\'s value, decided at its holder: the whole sh
   // The source's row put back from before a change: the reference's use is stale too.
   const sourceObject = w.keys[0]!.object as Extract<Input, { kind: 'secret' }>;
   const sealBefore = (await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM secrets WHERE id = ${source}`))[0]!.seal;
-  await change({ kind: 'secret', id: source }, { op: 'secret.write', projectId: sourceObject.projectId, environmentId: sourceObject.environmentId, version: sourceObject.version, nature: 'sensitive', key: sourceObject.key, source: null },
+  await change({ kind: 'secret', id: source }, { op: 'secret.write', projectId: sourceObject.projectId, environmentId: sourceObject.environmentId, version: sourceObject.version, nature: 'sensitive', key: sourceObject.key, digest: null, source: null, reference: null },
     { ...sourceObject, nature: 'sensitive' }, seal('secrets', 'id', source));
   await run(db.owner, sql`UPDATE secrets SET seal = ${sealBefore} WHERE id = ${source}`);
   assert.equal(code(heard(await use(ask(w, holder, { purpose: 'compare' })))), 'stale');
@@ -703,7 +704,7 @@ test("a personal config's key: its owner reads it while they read its parent, wh
   });
   await run(db.owner, sql`UPDATE secrets SET current_version_id = ${version}, current_version = 1 WHERE id = ${id}`);
   const object: Input = { kind: 'secret', id, projectId: w.project, environmentId: mine, version, nature: 'secret',
-    key: { kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, bytes: Buffer.from(wrapped.bytes).toString('base64') }, source: null };
+    key: { kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, bytes: Buffer.from(wrapped.bytes).toString('base64') }, digest: null, source: null, reference: null };
   await change({ kind: 'secret', id }, { op: 'genesis', value: object }, object, seal('secrets', 'id', id));
   const { use } = await isolate();
   const outcome = heard(await use(ask(w, id)));

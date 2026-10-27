@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **0.15's use reads three more things right, behind its switch: nothing
+  calls it yet.** `0029_use_objects` adds `secret_references.ended_at`
+  and replaces `use_credential`, `change_input` and `app_change`, which
+  only 0.15's log calls. With 0.15's log on: a reference's end is written
+  in its row, beside 0.14's `reference.end`, and a use through it is
+  refused `ended`; an environment's object holds its project's archival,
+  so a use through a fork of an archived project is refused as 0.14
+  refuses it; and a plain value's object holds its text's digest, so a
+  text edited in the database is refused as tampered. The vault's login
+  may now read `secret_references`. With the switch off, as every
+  deployment has it, one thing changes: a project archived (or restored)
+  by two requests at once is archived once, with one entry, where the
+  second used to write its row and its entry again
+  ([0.15-plan.md](docs/design/0.15-plan.md), "use_credential correctness").
+
 - **One Postgres driver: postgres.js, coffre's own copy.** node-postgres
   (`pg`) is gone from every package. `@coffre/db` ships postgres.js 3.4.9
   as TypeScript, one tree for Node and Workers, with what coffre uses of

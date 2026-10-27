@@ -65,7 +65,7 @@ test('a change that does nothing is never applied: creates of what exists, chang
   assert.equal(w.change({ kind: 'principal', id: ADA }, { op: 'member.add', role: 'owner', scope: EVERYWHERE }), false);
   assert.equal(w.change({ kind: 'principal', id: BO }, { op: 'access.revoke', place: { projectId: 'other', environmentId: null, environmentSlug: null } }), false);
   // A key does not move: a write of it elsewhere does nothing.
-  assert.equal(w.change({ kind: 'secret', id: key(1) }, { op: 'secret.write', projectId: 'other', environmentId: PROD, version: 'x', nature: 'secret', key: null, source: null }), false);
+  assert.equal(w.change({ kind: 'secret', id: key(1) }, { op: 'secret.write', projectId: 'other', environmentId: PROD, version: 'x', nature: 'secret', key: null, digest: null, source: null, reference: null }), false);
   holdsReplay(w);
 });
 
@@ -118,7 +118,7 @@ test('a row put back from before a change is stale, a row edited is tampered, an
     ['a key put back from before a new version', (w: World) => {
       const k = objectKey({ kind: 'secret', id: key(1) });
       const old = w.rows.get(k)!;
-      w.change({ kind: 'secret', id: key(1) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, version: 'v1b', nature: 'secret', key: { kekProvider: 'local', kekId: 'k1', kekVersion: '1', bytes: 'BBBB' }, source: null });
+      w.change({ kind: 'secret', id: key(1) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, version: 'v1b', nature: 'secret', key: { kekProvider: 'local', kekId: 'k1', kekVersion: '1', bytes: 'BBBB' }, digest: null, source: null, reference: null });
       w.rows.set(k, old);
       return 'stale';
     }],
@@ -379,7 +379,7 @@ test('a rename reaches the log: a Developer scoped to staging loses the environm
   const STAGING = '00000000-0000-4000-8000-0000000000d5';
   const SCOPED = 'user:cy@acme.example';
   w.change({ kind: 'environment', id: STAGING }, { op: 'environment.create', projectId: '00000000-0000-4000-8000-000000000001', slug: 'staging', owner: null, parentId: null, protected: false });
-  w.change({ kind: 'secret', id: key(20) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: STAGING, version: 'v', nature: 'secret', key: WRAPPED, source: null });
+  w.change({ kind: 'secret', id: key(20) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: STAGING, version: 'v', nature: 'secret', key: WRAPPED, digest: null, source: null, reference: null });
   w.change({ kind: 'principal', id: SCOPED }, { op: 'member.add', role: 'developer', scope: { projects: 'all', environments: { only: ['staging'] } } });
   w.change({ kind: 'credential', id: credential(5) }, { op: 'credential.issue', principal: SCOPED, caller: 'person', scope: null, expiresAt: null });
   assert.deepEqual(liveAndReplayed(w, [ask(5, 20)]), [null]);
@@ -391,8 +391,8 @@ test('a rename reaches the log: a Developer scoped to staging loses the environm
 
 test('a plain value, or any with no wrapped key, is no use: the app hands it back, as 0.14\'s vault never decides one', () => {
   const w = market({ count: 100, windowMs: 60_000 });
-  w.change({ kind: 'secret', id: key(21) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, version: 'p', nature: 'plain', key: null, source: null });
-  w.change({ kind: 'secret', id: key(22) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: FORK, version: 'r', nature: 'secret', key: null, source: key(21) });
+  w.change({ kind: 'secret', id: key(21) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, version: 'p', nature: 'plain', key: null, digest: null, source: null, reference: null });
+  w.change({ kind: 'secret', id: key(22) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: FORK, version: 'r', nature: 'secret', key: null, digest: null, source: key(21), reference: key(21) });
   assert.deepEqual(liveAndReplayed(w, [ask(1, 21), ask(1, 22)]), ['bad_claim', 'bad_claim']);
 });
 
@@ -405,7 +405,7 @@ test('genesis is held to what the ops that make an object hold it to', () => {
 });
 
 test("a project id a plain object already holds is a project like another to the reader's policy", () => {
-  const environment = { kind: 'environment' as const, id: 'e', projectId: 'constructor', slug: 'dev', owner: null, parentId: null, protected: true, deleted: false, archived: false };
+  const environment = { kind: 'environment' as const, id: 'e', projectId: 'constructor', slug: 'dev', owner: null, parentId: null, protected: true, deleted: false, archived: false, projectArchived: false };
   const credentialRow = { kind: 'credential' as const, id: 'c', principal: ADA, caller: 'person' as const, scope: null, expiresAt: null, revoked: false };
   const member = { kind: 'principal' as const, principal: ADA, status: 'active' as const, role: 'owner' as const, scope: EVERYWHERE, grants: [] };
   const reader = readerOf(member, credentialRow, noEdits(), [environment], 0);
