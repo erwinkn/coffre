@@ -6,7 +6,7 @@
 // fsynced), so the memory's own cost shows apart.
 //
 //   node --conditions=coffre:source packages/vault/scripts/audit-tree-bench.ts [ticks] [dir]
-import { open, readFile, rename } from 'node:fs/promises';
+import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { Checkpointer, type Memory } from '../src/checkpointer.ts';
@@ -33,7 +33,8 @@ function fileMemory(path: string): Memory {
 
 const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(q * xs.length))]!;
 
-for (const [name, memory] of [['variable', variableMemory()], ['file, fsynced', fileMemory(join(dir, `audit-memory-${process.pid}`))]] as const) {
+const memoryFile = join(dir, `audit-memory-${process.pid}`);
+for (const [name, memory] of [['variable', variableMemory()], ['file, fsynced', fileMemory(memoryFile)]] as const) {
   const k = await keys(3);
   const store = new MemoryStore(k.macKey);
   const cpu: number[] = [];
@@ -57,3 +58,5 @@ for (const [name, memory] of [['variable', variableMemory()], ['file, fsynced', 
   const [c, w, r] = [cpu.slice(skip), wall.slice(skip), remember.slice(skip)];
   console.log(`${name}: a tick of 500, CPU p50 ${quantile(c, 0.5).toFixed(2)} / p99 ${quantile(c, 0.99).toFixed(2)} ms; wall p50 ${quantile(w, 0.5).toFixed(2)} / p99 ${quantile(w, 0.99).toFixed(2)} ms; memory write p50 ${quantile(r, 0.5).toFixed(3)} / p99 ${quantile(r, 0.99).toFixed(3)} ms; ${(memory as { record?: string }).record?.length ?? (await memory.last())?.length} B remembered`);
 }
+await rm(memoryFile, { force: true });
+await rm(`${memoryFile}.part`, { force: true });

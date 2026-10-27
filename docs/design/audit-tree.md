@@ -231,7 +231,8 @@ shares no code with ours. Run on 2026-10-27:
 - **Cuts.** Uses-tree cuts at 40,000, 65,536, 65,537 and 70,002 keep only
   the tiles `keptAbove` keeps, from 121 down to 3 of 277. Go's
   `TileHashReader`, which checks each tile it loads against the signed head,
-  still proves, with our bytes, about 40 sampled leaves above each cut and
+  still proves, with our bytes, up to 42 sampled leaves above each cut (one
+  at 70,002, where only one is left) and
   consistency from each sampled size: the cut, the cut plus one, and every
   tick's head at or above it. Leaf 0 is no longer provable. (Every leaf and
   every size above a cut is the TypeScript test's, on the 1,500-leaf tree.)
@@ -266,7 +267,7 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 | the uses tree on disk, per use | 57 B (41 B compacted, W212) | 9.6 B |
 | the uses tree's WAL, a tick of 495 uses | 31.3 KB | 5.0 KB |
 | the log's WAL a tick (rows at 244 B a use, plus the tree) | 152 KB | 126 KB |
-| a proof's leaf level (8 KB tiles) | one tile: 0.17 ms p50, 0.43 ms p99 | 256 uses read back: 0.57 ms p50, 0.82 ms p99 (by the window's `at` range; a number index would add 22.5 B and 149 B of WAL a use) |
+| a proof's leaf level (8 KB tiles) | one tile: 0.21 ms p50, 0.35 ms p99 | 256 uses read back: 0.59 ms p50, 0.89 ms p99 (by the window's `at` range; a number index would add 22.5 B and 149 B of WAL a use) |
 
 **The call: keep them.**
 
@@ -277,7 +278,7 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
     go through the store's `tiles()`, so the rebuild has one home there.
     But it runs on every tick's consistency proofs for witnesses, on
     `open()`, on the tile API that Go and C2SP clients read, and on the
-    verifier's start. Each costs 0.57 ms instead of 0.17. The use table
+    verifier's start. Each costs 0.59 ms instead of 0.21. The use table
     has no index on number (W211), so each rebuild reads a window by `at`,
     which ties the store's tree reads to the hot path's barrier.
   - **Retention would get a new step.** The tile holding each cut would

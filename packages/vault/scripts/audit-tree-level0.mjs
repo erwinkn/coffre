@@ -90,5 +90,5 @@ await time('leaf level from one tile', 'SELECT hashes FROM tiles WHERE level = 0
 await time('leaf level from 256 uses, by number (with the number index)', 'SELECT * FROM uses WHERE number >= $1 ORDER BY number LIMIT 256', () => [pick() * 256]);
 await q('DROP INDEX uses_number');
 // Without it: the window's `at` range (a checkpoint row would give it), then the numbers kept.
-await time('leaf level from 256 uses, by the window\'s at range (no number index)', 'SELECT * FROM uses WHERE at BETWEEN $1 AND $2 ORDER BY number', () => { const s = t0 + pick() * 256; return [s, s + 300]; });
+await time('leaf level from 256 uses, by the window\'s at range (no number index)', 'SELECT * FROM uses WHERE at BETWEEN $1 AND $2 ORDER BY number', () => { const s = t0 + pick() * 256; return [s, s + 255]; });
 await db.end();

@@ -156,7 +156,6 @@ type Pump = {
   busy: boolean;
   next: { notes: PairNotes; pair: Pair } | null;
   acked: bigint;
-  held: Record<TreeName, number> | null;
   cosigned: PairNotes | null;
   failure: string | null;
   waiters: { upto: bigint; done: () => void }[];
@@ -456,7 +455,7 @@ export class Checkpointer {
   private pump(w: Witness): Pump {
     let p = this.pumps.get(w);
     if (p === undefined) {
-      p = { busy: false, next: null, acked: -1n, held: null, cosigned: null, failure: null, waiters: [] };
+      p = { busy: false, next: null, acked: -1n, cosigned: null, failure: null, waiters: [] };
       this.pumps.set(w, p);
     }
     return p;
@@ -499,7 +498,6 @@ export class Checkpointer {
       const a = await attempt(() => w.publish(notes, proofs), WITNESS_DEADLINE_MS);
       if (a.ok && pair.upto > p.acked) {
         p.acked = pair.upto;
-        p.held = sizes(pair);
         p.cosigned = a.cosigned;
       }
       p.failure = a.ok ? null : a.reason;
