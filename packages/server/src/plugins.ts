@@ -498,7 +498,7 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
       if (!(error instanceof ApiError)) throw error;
       // Nothing goes back on a kept answer the vault has not vouched for this request, a refusal included (`fetchApi`).
       await recalled?.confirm();
-      throw new CoffreError(error.status, error.code, error.message, error.reason);
+      throw new CoffreError(error.status, error.code, error.message, error.reason, error.retryAfter);
     }
   };
   return {

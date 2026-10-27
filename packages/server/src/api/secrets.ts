@@ -1307,7 +1307,7 @@ export async function dryRunSecrets(
       }
       comparing.push({ key, value: written, secretVersionId: current.id, secret: secretRef(place, environment, secret, current.version), envelope: current.envelope });
     }
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: 'compare' }, comparing);
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose: 'compare', credentialRow: ctx.credentialId }, comparing);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     comparing.forEach(({ key, value }, i) => {
       keys[key] = opened.values[i] === value ? 'unchanged' : 'changed';
@@ -1887,7 +1887,7 @@ export async function reveal(
     // Which credential the values go into, and where: the vault's entry names the keys, this one what they were for. The
     // vault appends it beside its reads, under the head it holds for them; an older vault, or no vault call, leaves it to us.
     const used = use === undefined ? null : allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } });
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose }, rows, ctx.caller.recalled, used === null ? undefined : useRecord(used));
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, credentialRow: ctx.credentialId }, rows, ctx.caller.recalled, used === null ? undefined : useRecord(used));
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);

@@ -14,7 +14,7 @@ import * as gs from '@hegeldev/hegel/generators';
 import { credential } from '@coffre/client/credential';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor } from './api-fixture.ts';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
@@ -180,19 +180,26 @@ test("a webhook body is 64 KiB at most, or its hmac()'s maxBytes; one past it is
 test("verifies and HMAC signatures are logged once a minute per handle and name, as a credential's requests are, the vault asked once", async () => {
   const { env } = await run();
   const reads = (await entries('secret.read')).length;
-  const unwrap = deps.vault.unwrap.bind(deps.vault);
-  let unwrapped = 0;
-  deps.vault.unwrap = (async (...args: Parameters<typeof unwrap>) => {
-    unwrapped++;
-    return unwrap(...args);
-  }) as typeof unwrap;
+  // How the vault opens a value: 0.14's unwrap, or 0.15's use, one a key.
+  const method = LOG === '0.15' ? 'use' : 'unwrap';
+  const opens = (deps.vault[method] as (...args: unknown[]) => Promise<unknown>).bind(deps.vault);
+  let opened = 0;
+  (deps.vault as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+    opened++;
+    return opens(...args);
+  };
   try {
     const header = `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`;
     for (let i = 0; i < 5; i++) assert.equal(await used(env, 'yousign').verify(YOUSIGN_BODY, header), true);
     for (let i = 0; i < 3; i++) await used(env, 'iframe-token').sign(`m${i}`);
-    assert.equal(unwrapped, 2, 'one opening for each name, then the cache');
+    assert.equal(opened, 2, 'one opening for each name, then the cache');
   } finally {
-    deps.vault.unwrap = unwrap;
+    (deps.vault as unknown as Record<string, unknown>)[method] = opens;
+  }
+  if (LOG === '0.15') {
+    // 0.15's record: a use of each key, its row slim (R53), naming neither the name nor that it signs.
+    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 2);
+    return;
   }
   const uses = (await entries('credential.use')).filter((entry) => entry.metadata.hmac === true);
   assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.purpose]).sort(), [['iframe-token', 'use'], ['yousign', 'use']]);

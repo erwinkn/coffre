@@ -73,6 +73,14 @@ CONSTANTS
     \* starts over, asking, otherwise (fetch-api.ts, AccessChanged).
     KeptAnswerChecked
 
+(***************************************************************************)
+(* Which read the app makes: 0.14's unwrap, or 0.15's use (docs/design/     *)
+(* 0.15-plan.md, PR 5b; server api/keys.ts, useValues). Not a protection:  *)
+(* the deployment's log decides it.                                        *)
+(***************************************************************************)
+CONSTANTS
+    Uses015
+
 None == "none"
 \* Credentials are named as entries are, by the operation that made them,
 \* or "tok", the token the account starts with.
@@ -300,12 +308,13 @@ UseVerify(p) ==
 \* the credential.
 UseAccess(p) ==
     /\ pc[p] = "use.access"
-    /\ \/ IF status = "active" /\ gen = Cred(l[p].cred).gen
-            THEN Read(p, "use.lock", [l[p] EXCEPT !.recalled = FALSE])
+    /\ LET next == IF Uses015 THEN "use.use" ELSE "use.lock" IN
+       \/ IF status = "active" /\ gen = Cred(l[p].cred).gen
+            THEN Read(p, next, [l[p] EXCEPT !.recalled = FALSE])
             ELSE Refuse(p)
        \/ /\ ~l[p].asks
           /\ Cred(l[p].cred).gen <= gen
-          /\ Read(p, "use.lock", [l[p] EXCEPT !.recalled = TRUE, !.kept = Cred(l[p].cred).gen])
+          /\ Read(p, next, [l[p] EXCEPT !.recalled = TRUE, !.kept = Cred(l[p].cred).gen])
 
 UseLock(p) == pc[p] = "use.lock" /\ ShareRow(p, "use.head")
 
@@ -337,6 +346,27 @@ UseDecide(p) ==
                  /\ Release(p)
                  /\ Goto(p, IF op[p].proxy /\ ~byVault THEN "use.apphead" ELSE "use.fence")
                  /\ UNCHANGED <<rows, op, left, history>>
+
+\* 0.15's read (Uses015): one `use_credential` call, which logs the request
+\* (`use`) and decides on the credential's row and the account's as they
+\* are, under the fence shared, which every change to either takes
+\* exclusive: one step here, ordered against each change by the log alone
+\* (HotPathOne.tla, TotalOrder). It holds neither the account's row nor the
+\* head, never decides on a kept answer, and the proxy's `credential.use` is
+\* no entry of its own: the use is the record. Its credential object has
+\* no generation (packages/vault/src/objects.ts): a removal ends the
+\* account's credentials by revoking each, in its sweep, after its
+\* `member.remove`. Allowed, the app checks the credential with no lock,
+\* as after 0.14's unwrap: a use between the removal and its sweep, the
+\* account admitted again meanwhile, is allowed on a credential the
+\* removal ended, and only that check withholds the value (TLC, Revoking015
+\* without CredentialFenceUnlocked).
+UseOne(p) ==
+    /\ pc[p] = "use.use"
+    /\ log' = Append(log, [Entry("use", p) EXCEPT !.cred = l[p].cred])
+    /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
+    /\ Goto(p, IF ~Cred(l[p].cred).revoked /\ status = "active" THEN "use.fence" ELSE "idle")
+    /\ UNCHANGED <<rows, locks, op, left, history>>
 
 \* Through the proxy, its use not logged by the vault: the app's own
 \* transaction, under the head, appends `credential.use`, after the fence.
@@ -494,7 +524,7 @@ Init ==
 Step(p) ==
     \/ Begin(p)
     \/ ExCandidates(p) \/ ExSpent(p) \/ ExAccess(p) \/ ExHead(p) \/ ExCommit(p)
-    \/ UseVerify(p) \/ UseAccess(p) \/ UseLock(p) \/ UseHead(p) \/ UseDecide(p)
+    \/ UseVerify(p) \/ UseAccess(p) \/ UseLock(p) \/ UseHead(p) \/ UseDecide(p) \/ UseOne(p)
     \/ UseAppHead(p) \/ UseCommit(p) \/ UseFence(p) \/ UseAnswer(p)
     \/ RevokeHead(p) \/ RevokeCommit(p)
     \/ UnbindHead(p) \/ UnbindCommit(p)
@@ -546,7 +576,8 @@ Ends(e, r) ==
     \/ e.kind = "member.remove" /\ e.gen > r.gen
 
 \* No value reaches a caller through a credential whose release, the
-\* vault's `secret.read`, follows the entry that ended it in the log.
+\* vault's `secret.read` or 0.15's `use`, follows the entry that ended it in
+\* the log.
 NoReleaseAfterEnd ==
     \A u \in revealed : \A i \in 1..(u.at - 1) : ~Ends(log[i], Cred(u.cred))
 

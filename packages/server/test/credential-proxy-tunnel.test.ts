@@ -16,11 +16,11 @@ import { Duplex } from 'node:stream';
 import { WebSocket } from 'ws';
 
 
-import { clientFor } from './api-fixture.ts';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { trackBackgroundTask } from './background-tasks.ts';
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { checkPlugins, pluginSocket, type CoffrePlugin } from '../src/plugins.ts';
 import { credentialProxy, postgres, type Network } from '../src/plugins/credential-proxy.ts';
@@ -40,6 +40,12 @@ let listenerPort: number;
 let handle: string;
 /** Each connection the listener carried. */
 const carried: Socket[] = [];
+
+/** How the vault opens a value, which a case holds up: 0.14's unwrap, or 0.15's use. */
+const OPENS = LOG === '0.15' ? 'use' : 'unwrap';
+type Opens = (...args: unknown[]) => Promise<unknown>;
+const opens = (): Opens => deps.vault[OPENS] as Opens;
+const openWith = (open: Opens) => void ((deps.vault as unknown as Record<string, unknown>)[OPENS] = open);
 
 before(async () => {
   // coffre over HTTP, its upgrades to its plugins' sockets.
@@ -167,6 +173,8 @@ test('queries through the tunnel run as the real login, and the session is logge
     await client.end();
   }
   // The session's own: the checks its group made while it was open, a fifth of a second apart here, are logged as theirs.
+  // Under 0.15, one use of the key, its checks riding its cover; its row slim (R53), naming no tunnel.
+  if (LOG === '0.15') return assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
   const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true);
   assert.equal(uses.length, 1);
   assert.equal(uses[0]!.metadata.tunnel, true);
@@ -473,15 +481,15 @@ test("a group of sessions is checked once an interval, however many it holds, an
 test('a check the vault never answers is a no, by its deadline: the sessions do not outlive a stalled vault', postgresOnly, async () => {
   const client = appClientOf();
   await client.unsafe('SELECT 1');
-  const unwrap = deps.vault.unwrap;
+  const open = opens();
   // Stalled until the case ends, then refused: a check still waiting is the case's, which the next case waits for.
   const stalls: (() => void)[] = [];
-  deps.vault.unwrap = () => new Promise((_, reject) => stalls.push(() => reject(new Error('the case ended'))));
+  openWith(() => new Promise((_, reject) => stalls.push(() => reject(new Error('the case ended')))));
   const stalled = Date.now();
   try {
     assert.ok((await client.ended) - stalled < 600, 'within an interval and a deadline');
   } finally {
-    deps.vault.unwrap = unwrap;
+    openWith(open);
     for (const stop of stalls) stop();
   }
 });
@@ -505,26 +513,28 @@ test("a new group let in on a cached URL decides at once: a grant lost meanwhile
 test("a check answered once its group's last session has gone arms nothing: a newer group is let in on the URL the cache holds", postgresOnly, async () => {
   // Checked every 2 seconds, a check given as long: a group's bytes stop 4 seconds past its last good check.
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 2 })]);
-  const opened = async () => (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true).length;
+  // 0.14's openings of the URL, its checks apart. 0.15's uses do not tell them apart (its row slim, R53): there, only
+  // that the cases below hold.
+  const opened = async () => (LOG === '0.14' ? (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true).length : 0);
   const first = appClientOf();
   await first.unsafe('SELECT 1');
   // The group's first check, held in the vault until its one session has gone, then answered yes.
-  const unwrap = deps.vault.unwrap;
+  const open = opens();
   let entered!: () => void;
   const checking = new Promise<void>((resolve) => (entered = resolve));
   let release!: () => void;
   const released = new Promise<void>((resolve) => (release = resolve));
-  deps.vault.unwrap = async (...asked: Parameters<typeof unwrap>) => {
+  openWith(async (...asked) => {
     entered();
     await released;
-    return unwrap.apply(deps.vault, asked);
-  };
+    return open.apply(deps.vault, asked);
+  });
   try {
     await checking;
     await first.end();
     assert.equal(await sessionsEnded(), true);
   } finally {
-    deps.vault.unwrap = unwrap;
+    openWith(open);
     release();
   }
   // Past when the gone group's watchdog would have closed it, had the yes armed one, and dropped the URL from the cache.

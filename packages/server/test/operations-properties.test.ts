@@ -8,7 +8,7 @@ import { defineSignin, github } from '@coffre/core/identity';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, LOG, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -71,6 +71,8 @@ async function scenario(operations: readonly Operation[]) {
   await resetDatabase(database.owner);
   // Fake deployment keys are fixed so randomness cannot change any verdict.
   const vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 17) });
+  // Under 0.15's log, a read on a credential is a use, which `reads` counts by its answers.
+  const uses = LOG === '0.15' ? watchUses(vault) : null;
   const deps: FixtureDeps = { db: database.runtime, vault, chainKey: Buffer.alloc(32, 23), anchor: testAnchor() };
   const signinConfig = defineSignin({ publicUrl: 'https://coffre.test', providers: [github({ clientId: 'property', clientSecret: 'property' })] });
   const signin = new SigninService({ ...deps, signin: signinConfig });
@@ -248,26 +250,30 @@ async function scenario(operations: readonly Operation[]) {
   }
   async function read(member: Member, slug: Slug) {
     const previous = await reads();
+    const before = usesAllowed();
     const environment = environmentAt(slug);
     const result = await allowed(() => client(member).secrets.reveal(`market/${slug}/VALUE`), may(member, environment) && credentials.some((credential) => credential.member === member && credential.live));
     const current = await reads();
-    assert.equal(current.length - previous.length, result ? 1 : 0, 'exactly one allowed audit entry per value read, and none for a refused read');
+    const used = usesAllowed() - before;
+    assert.equal(current.length - previous.length + used, result ? 1 : 0, 'exactly one allowed audit entry (or use) per value read, and none for a refused read');
     if (result) {
       assert.equal(result.values.VALUE, environment!.value, 'the current value remains readable by those granted');
-      assert.equal(current.at(-1)!.author, 'vault');
+      if (used === 0) assert.equal(current.at(-1)!.author, 'vault');
     }
   }
   async function readBilling(member: Member | 'root', key: 'VALUE') {
     const previous = await reads();
+    const before = usesAllowed();
     const live = member === 'root' || credentials.some((credential) => credential.member === member && credential.live);
     // The root reads whatever has a value, or a live reference to a live source; a member needs a grant there too.
     const expected = key === 'VALUE' && (member === 'root' ? mayBilling('root') : mayBilling(member) && live);
     const result = await allowed(() => (member === 'root' ? root : client(member)).secrets.reveal(`billing/prod/${key}`), expected);
     const current = await reads();
-    assert.equal(current.length - previous.length, result ? 1 : 0, 'exactly one allowed audit entry per value read, and none for a refused read');
+    const used = usesAllowed() - before;
+    assert.equal(current.length - previous.length + used, result ? 1 : 0, 'exactly one allowed audit entry (or use) per value read, and none for a refused read');
     if (!result) return;
     assert.equal(result.values[key], billingValue(), 'billing reads its value, or its live source\'s current one');
-    if (model.billing.reference !== null) {
+    if (model.billing.reference !== null && used === 0) {
       // Through a reference, a read of the source, in the source's project and, by `also`, in the holder's.
       const entry = current.at(-1)!;
       assert.equal(entry.projectId, model.project!.id, 'a read through a reference is logged as a read of its source');
@@ -284,7 +290,7 @@ async function scenario(operations: readonly Operation[]) {
    * app may log an empty read, which names no secret).
    */
   async function readForged(member: Member | 'root') {
-    const released = async () => (await reads()).filter((entry) => entry.author === 'vault');
+    const released = async () => (await reads()).filter((entry) => entry.author === 'vault').length + usesAllowed();
     const previous = await released();
     const values = await (member === 'root' ? root : client(member)).secrets.reveal('billing/prod/FORGED')
       .then((result) => result.values, (error: unknown) => {
@@ -292,11 +298,17 @@ async function scenario(operations: readonly Operation[]) {
         return {};
       });
     assert.deepEqual(values, {}, 'an unsealed reference row releases nothing');
-    assert.equal((await released()).length, previous.length, 'and the vault opens no key for it');
+    assert.equal(await released(), previous, 'and the vault opens no key for it');
   }
   async function reads() {
     return database.owner.select().from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
   }
+  /**
+   * Under 0.15's log, the uses the vault answered with a value: each read on a credential, counted as answered, since
+   * a repeat rides its cover and writes no row of its own. A use's row is slim (R53): what 0.14's entry says of a
+   * read beyond that it was, its project, is 0.14's alone.
+   */
+  const usesAllowed = () => uses?.answered.filter((outcome) => outcome.ok).length ?? 0;
   async function invariants() {
     for (const credential of credentials) {
       if (credential.live && model.active[credential.member]) await signin.verify(credential.token);

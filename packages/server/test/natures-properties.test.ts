@@ -70,7 +70,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, EDITS_ROLES, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { environments as storedEnvironments, projects as storedProjects } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -546,11 +546,12 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
     const row = await realEnv(project.id, { slug: environment.slug });
     envs.push({ key: environment.id, id: row.id, projectId: project.id, project: project.slug, slug: environment.slug, parent: parent?.key ?? null, owner: null });
   }
-  for (const [name, wanted] of Object.entries(policy.roles)) {
+  // Under 0.15's log, before its cutover, no role is edited (`EDITS_ROLES`): its uses decide on the built-in ones.
+  for (const [name, wanted] of EDITS_ROLES ? Object.entries(policy.roles) : []) {
     if (name === 'owner' || (ROLES[name] !== undefined && sameColumns(wanted, ROLES[name]))) continue;
     if (await attempt(() => root.roles.set(name, definition(name, wanted))) !== null) roles[name] = wanted;
   }
-  for (const name of ['auditor', 'developer', 'admin'] as const) {
+  for (const name of EDITS_ROLES ? (['auditor', 'developer', 'admin'] as const) : []) {
     const wanted = policy.instanceRoles[name];
     if (sameColumns(wanted, INSTANCE_ROLES[name])) continue;
     if (await attempt(() => root.roles.set(name, definition(name, wanted), { instance: true })) !== null) instanceRoles[name] = wanted;
@@ -837,7 +838,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
       case 'role-edit': {
         const instance = op.flag;
         const name = instance ? (['auditor', 'developer', 'admin'] as const)[op.index % 3]! : op.role;
-        if (name === 'owner') return null;
+        if (name === 'owner' || !EDITS_ROLES) return null;
         if (await attempt(() => root.roles.set(name, definition(name, op.columns), { instance })) === null) return null;
         (instance ? instanceRoles : roles)[name] = op.columns;
         return 'access';

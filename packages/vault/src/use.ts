@@ -1,5 +1,3 @@
-import { randomBytes } from 'node:crypto';
-
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { UseBusy, UseInput, UseOutcome, UsedValue } from '@coffre/core/vault';
@@ -42,10 +40,8 @@ import { callUse as callSqlite } from './use.sqlite.ts';
 
 export type { UseInput, UseOutcome, UsedValue };
 
-/** A use's request id: 63 random bits, unique within its millisecond (hot-path-one.md, "Row size"). */
-export function newRequestId(): string {
-  return (randomBytes(8).readBigUInt64BE() >> 1n).toString();
-}
+/** A use's request id (`newUseRequestId`, core's: the app makes them too). */
+export { newUseRequestId as newRequestId } from '@coffre/core/vault';
 
 /** What the vault holds per isolate for its uses (`UseCache`): only settled values. */
 export type CachedSeals = {

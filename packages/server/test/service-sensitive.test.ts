@@ -23,7 +23,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, credentials, environments, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -386,7 +386,8 @@ test('the vault decides it too, whatever the app asks: a service reads a sensiti
   assert.deepEqual(denied, Array(3).fill({ actor: CI, code: 'not_owner_issued' }));
 });
 
-test('tokens and bindings issued before 0.11 are sealed once by who issued them: an Owner of the project keeps reading its sensitive values, anyone else does not', async () => {
+// Its tokens of 0.10 are planted in the database: rows no change of 0.15's log sealed, refused by a use until the cutover (plan PR 9).
+test('tokens and bindings issued before 0.11 are sealed once by who issued them: an Owner of the project keeps reading its sensitive values, anyone else does not', { skip: LOG_014_ONLY }, async () => {
   const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
   const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
   // As 0.10 stored a scope: each place's role and what it held, nothing said of sensitive values.
