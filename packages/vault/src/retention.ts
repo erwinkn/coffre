@@ -99,8 +99,13 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
     run.dropped.push({ day, change: done.change });
     if (done.detached) run.detached.push(day);
   }
+  // The tiles below the newest cut, once its sealing is two freshness bounds past it, as a day goes (FreshBeforeDrop).
   const newest = await sealedCut(cp, store);
-  if (newest !== null) run.tiles = await store.dropTiles(newest.uses.size);
+  if (newest !== null && cp.pair.pair.at >= newest.at + 2 * cp.freshMs) {
+    const tiles = await waitingOnLock(() => store.dropTiles(newest.uses.size));
+    if (typeof tiles === 'number') run.tiles = tiles;
+    else run.waiting ??= `the tiles below ${newest.upto}: ${tiles.waiting}`;
+  }
   return run;
 }
 
@@ -146,11 +151,24 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   // 3. Freshness, against the signer's own pair, never a row.
   const bound = Math.max(cut.at, end) + 2 * cp.freshMs;
   if (freshAt < bound) return `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet`;
-  // 4. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above).
-  const state = await store.dropDay(day);
-  if (state === 'detached') return { change, detached: true };
-  if (state === 'dropped' && (await store.dropDay(day)) !== 'gone') throw new Error(`retention of ${day}: its uses were not dropped`);
-  return { change, detached: false };
+  // 4. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above). A reader
+  // holding log_uses longer than `drop_day`'s lock_timeout (a backup, say) makes it give up: the next run tries again.
+  let state = await waitingOnLock(() => store.dropDay(day));
+  if (state === 'dropped') state = await waitingOnLock(() => store.dropDay(day));
+  if (typeof state === 'object') return state.waiting;
+  if (state === 'dropped') throw new Error(`retention of ${day}: its uses were not dropped`);
+  return { change, detached: state === 'detached' };
+}
+
+/** What `work` answers, or, when the database gave up waiting for a lock (55P03, lock_timeout), why: no alarm. */
+async function waitingOnLock<T>(work: () => Promise<T>): Promise<T | { waiting: string }> {
+  try {
+    return await work();
+  } catch (error) {
+    const e = error as { code?: unknown; cause?: { code?: unknown } };
+    if (e.code === '55P03' || e.cause?.code === '55P03') return { waiting: 'a reader holds the table past the lock timeout: the next run tries again' };
+    throw error;
+  }
 }
 
 /** The newest retention change's cut, proved in the signer's pair; null if there is none. */

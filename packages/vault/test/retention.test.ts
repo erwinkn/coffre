@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
-import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import { leafHash, openPair, pairSigners, pairVerifiers, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
 import { sql } from 'drizzle-orm';
 import pg from 'pg';
 
@@ -252,6 +252,29 @@ test('a crash between the retention change and the drop: the next run finishes, 
   assert.ok((await verify(store)).ok);
 });
 
+test('a reader holding the uses past drop_day\'s lock timeout makes the run wait, no alarm; the next run detaches', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+  const { cp, store } = await open();
+  await midnight(cp);
+  await later(cp);
+  // A backup's pg_dump, say: the whole table held ACCESS SHARE for the length of its transaction.
+  const reader = new pg.Client({ connectionString: VAULT_URL });
+  await reader.connect();
+  await reader.query('BEGIN');
+  await reader.query('SELECT count(*) FROM log_uses');
+  try {
+    const held = await retain(cp, store, { keepDays: 1, macKey });
+    assert.match(held.waiting ?? '', new RegExp(`^${D10}: a reader holds the table past the lock timeout`));
+    assert.deepEqual(held.detached, []);
+    assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
+  } finally {
+    await reader.query('ROLLBACK');
+    await reader.end();
+  }
+  const r = await retain(cp, store, { keepDays: 1, macKey });
+  assert.deepEqual(r.detached, [D10, D9]);
+  assert.equal(r.waiting, null);
+});
+
 test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its window no longer counts', async () => {
   const { cp, store } = await open();
   // The policy's window, as the change path logs it: 15 minutes.
@@ -272,7 +295,7 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
 });
 
 test('the database drops nothing a sealed retention change does not cut, and never yesterday\'s uses', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its functions' }, async () => {
-  const { cp } = await open();
+  const { cp, store } = await open();
   await midnight(cp);
   const vault = db.vault;
   const refused = async (query: ReturnType<typeof sql>, said: RegExp) => assert.rejects(run(vault, query), (e: Error) => said.test(`${e.message} ${(e.cause as Error | undefined)?.message}`));
@@ -281,6 +304,11 @@ test('the database drops nothing a sealed retention change does not cut, and nev
   await refused(sql`SELECT drop_tiles(1)`, /no sealed retention change cuts the uses tree/);
   const payload = JSON.stringify({ op: 'retention', day: D10, cut: { upto: '1', at: 0, uses: 1, root: '00'.repeat(32) } });
   await refused(sql`SELECT log_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is no checkpoint past its end/);
+  // The checkpoint past the end, named with another uses head: refused too.
+  const cut = (await store.cutAt(MIDNIGHT))!;
+  const pair = (await openPair(cut.notes, verifiers))!;
+  const wrong = JSON.stringify({ op: 'retention', day: D10, cut: { upto: String(cut.upto), at: pair.at, uses: pair.uses.size, root: '00'.repeat(32) } });
+  await refused(sql`SELECT log_retention('retention:y', 0, ${wrong}, ${randomBytes(16)})`, /is no checkpoint past its end/);
   // The vault's login writes no log table itself.
   await refused(sql`DELETE FROM log_uses`, /permission denied/);
 });

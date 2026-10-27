@@ -9,13 +9,15 @@ DECLARE
     op jsonb := p_payload::jsonb;
     n bigint;
 BEGIN
-    IF op ->> 'op' IS DISTINCT FROM 'retention' OR (op ->> 'day') IS NULL OR (op #>> '{cut,upto}') IS NULL OR (op #>> '{cut,uses}') IS NULL THEN
+    IF op ->> 'op' IS DISTINCT FROM 'retention' OR (op ->> 'day') IS NULL OR (op #>> '{cut,upto}') IS NULL OR (op #>> '{cut,uses}') IS NULL
+       OR (op #>> '{cut,at}') IS NULL OR (op #>> '{cut,root}') IS NULL THEN
         RAISE EXCEPTION 'not a retention change: %', p_payload USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    -- Its cut is a checkpoint, of that many uses, at or past the end of its day by its floor of at: every use of the day took its number at or below it.
-    IF NOT EXISTS (
+    -- Its cut is a checkpoint, its time and uses head the change's, at or past the end of its day by its floor of at: every use of the day took its number at or below it.
+    IF (op #>> '{cut,root}') !~ '^[0-9a-f]{64}$' OR NOT EXISTS (
         SELECT 1 FROM public.log_checkpoints k
-         WHERE k.upto = (op #>> '{cut,upto}')::bigint AND k.uses_size = (op #>> '{cut,uses}')::bigint
+         WHERE k.upto = (op #>> '{cut,upto}')::bigint AND k.at = (op #>> '{cut,at}')::bigint
+           AND k.uses_size = (op #>> '{cut,uses}')::bigint AND k.uses_root = decode(op #>> '{cut,root}', 'hex')
            AND k.at_floor >= ((op ->> 'day')::date + 1 - date '1970-01-01')::bigint * 86400000
     ) THEN
         RAISE EXCEPTION 'the cut of % is no checkpoint past its end', op ->> 'day' USING ERRCODE = 'invalid_parameter_value';

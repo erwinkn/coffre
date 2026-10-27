@@ -1296,6 +1296,13 @@ attacker step.
 TLC found the second while the retention model was being written: the first
 draft held `NoUndetectedReplay` for any replay with one entry kept.
 
+The model drops the day and its tiles in one step. The code splits it: a
+day is detached in one run and dropped by the next, and the tiles go once
+the cut's sealing is fresh. A crash, or a lock timeout, between those steps
+leaves a day detached or tiles half gone below a sealed cut, which the
+verifier never reads; `retention.test.ts` covers the split and a crash
+between the change and the drop.
+
 The code reads each window from the floor of `at` (HotPathOne's
 `BarrierChecksFloor`), so a dropped use put back is not even read; `FRESH_MS`
 is the second line. In the model the time an entry carries is its commit's;
