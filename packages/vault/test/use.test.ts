@@ -517,3 +517,25 @@ test('whole numbers past 2^53 come back exact, entry numbers included', async ()
   const again = await use(ask(w, id, { purpose: 'reveal' }));
   assert.ok(again.ok && BigInt(again.number) > BigInt(outcome.number), JSON.stringify(again));
 });
+
+test('CacheSameChange: a newest change of the same number but another MAC (a log restored) sends the cache back to the probes', async () => {
+  const w = await world();
+  const id = await w.key();
+  // The log's newest change, which the cache is read at: another object's, which a restore takes away.
+  await environment(w, 'spare');
+  const { use } = await isolate();
+  assert.ok(heard(await use(ask(w, id))).ok);
+  // The log as a restore leaves it: under the newest change's number, another change, the credential's revoke, its row as that change wrote it.
+  const credentialRef: Ref = { kind: 'credential', id: w.credentialId };
+  const revoked = { ...(w.objects.credential as Extract<Input, { kind: 'credential' }>), revoked: true };
+  const revokedSeal = sealOf(SEAL, credentialRef, revoked);
+  await db.owner.transaction(async (tx) => {
+    const [newest] = await rows<{ number: string | number }>(tx, sql`SELECT max(number) AS number FROM log_changes`);
+    await run(tx, sql`DELETE FROM log_changes WHERE number = ${newest!.number}`);
+    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      VALUES (${newest!.number}, ${Date.now()}, ${randomUUID()}, ${objectKey(credentialRef)}, ${ROOT}, ${JSON.stringify({ op: 'credential.revoke' })}, ${revokedSeal}, ${randomBytes(16)})`);
+    await run(tx, sql`UPDATE credentials SET revoked_at = ${ENGINE === 'postgres' ? sql`now()` : sql`${Date.now()}`}, seal = ${revokedSeal} WHERE id = ${w.credentialId}`);
+  });
+  // Trusting the cache by number alone would hold the row to the credential's old seal (`stale`); read again, it is revoked.
+  assert.equal(code(await use(ask(w, id, { purpose: 'reveal' }))), 'credential');
+});
