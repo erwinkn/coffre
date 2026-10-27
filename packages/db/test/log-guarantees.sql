@@ -78,6 +78,25 @@ BEGIN
 END
 $$;
 
+-- An object's key is W216's objectKey, byte for byte (its vectors, packages/vault/test/object-keys.json on PR 3's branch).
+DO $$
+BEGIN
+    IF (SELECT array_agg(log_object(kind, id) = key::uuid) FROM (VALUES
+        ('principal', 'user:ada@acme.example', 'e357e51a-07d4-a671-34f3-d3b47e0522c3'),
+        ('principal', 'token:ci', 'aea468b6-61e8-9582-0262-8b22f69e6812'),
+        ('principal', 'user:zoë@exämple.fr', '759bfca0-9425-57c2-1902-154fe7c8d0a7'),
+        ('credential', '00000000-0000-4000-8002-000000000001', '3462b400-6f10-7337-5d8a-43257d15ffbc'),
+        ('secret', '00000000-0000-4000-8001-000000000001', '05aed852-dcc4-ea15-1a9d-e75712c15c40'),
+        ('environment', '00000000-0000-4000-8000-0000000000d1', '1e5f5d8d-b9e7-631a-f27f-778d634a545e'),
+        ('roles', 'instance', 'f7efff01-4561-2159-b22c-87275ad9837d'),
+        ('policy', 'instance', '8b635b60-7b8e-30c1-1e14-118bf7ef71dd')
+    ) AS vector (kind, id, key)) <> ARRAY[true, true, true, true, true, true, true, true] THEN
+        RAISE EXCEPTION 'FAIL: log_object disagrees with the vault''s objectKey';
+    END IF;
+    RAISE NOTICE 'PASS: log_object is the vault''s objectKey';
+END
+$$;
+
 -- Days of uses, made ahead, once each.
 DO $$
 DECLARE
@@ -117,37 +136,38 @@ DECLARE
     tag bytea := decode(repeat('ee', 16), 'hex');
     sealed bytea := decode(repeat('5e', 16), 'hex');
 BEGIN
-    first := change_input('policy', '', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, sealed, tag);
-    IF first IS NULL OR change_input('policy', '', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, sealed, tag) <> first THEN
+    first := change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, sealed, tag);
+    IF first IS NULL OR change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, sealed, tag) <> first THEN
         RAISE EXCEPTION 'FAIL: a retried change did not find its entry';
     END IF;
     BEGIN
-        PERFORM change_input('policy', '', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":9,"windowMs":86400000}}}', NULL, sealed, tag);
+        PERFORM change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":9,"windowMs":86400000}}}', NULL, sealed, tag);
         RAISE EXCEPTION 'FAIL: a request id named two changes';
     EXCEPTION WHEN unique_violation THEN NULL;
     END;
-    PERFORM change_input('member', 'token:deploy', 'genesis-member', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
+    PERFORM change_input('principal', 'token:deploy', 'genesis-member', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('credential', '33333333-3333-3333-3333-333333333333', 'genesis-credential', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
+    PERFORM change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('secret', '44444444-4444-4444-4444-444444444441', 'genesis-secret-1', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('secret', '44444444-4444-4444-4444-444444444442', 'genesis-secret-2', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('environment', '22222222-2222-2222-2222-222222222222', 'genesis-environment', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    PERFORM change_input('project', '11111111-1111-1111-1111-111111111111', 'genesis-project', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     IF (SELECT count(*) FROM log_changes) <> 7 OR (SELECT count(DISTINCT object) FROM log_changes) <> 7 THEN
         RAISE EXCEPTION 'FAIL: genesis logged % changes', (SELECT count(*) FROM log_changes);
     END IF;
     -- The row's seal is no longer the one read: nothing is done, and nothing logged.
-    IF change_input('member', 'token:deploy', 'genesis-member-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
-       OR change_input('member', 'token:nobody', 'genesis-nobody', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
+    IF change_input('principal', 'token:deploy', 'genesis-member-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
+       OR change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
+       OR change_input('principal', 'token:nobody', 'genesis-nobody', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
        OR (SELECT count(*) FROM log_changes) <> 7 THEN
         RAISE EXCEPTION 'FAIL: a change moved a seal it had not read';
     END IF;
     BEGIN
-        PERFORM change_input('member', 'token:deploy', 'grant', t, 'system:x', '{"op":"access.grant"}', sealed, sealed, tag);
+        PERFORM change_input('principal', 'token:deploy', 'grant', t, 'system:x', '{"op":"access.grant"}', sealed, sealed, tag);
         RAISE EXCEPTION 'FAIL: change_input applied an op this schema does not know';
     EXCEPTION WHEN invalid_parameter_value THEN NULL;
     END;
     IF (SELECT seal FROM vault_members WHERE principal = 'token:deploy') IS DISTINCT FROM sealed
-       OR (SELECT object FROM log_changes WHERE request_id = 'genesis-member') <> log_object('member', 'token:deploy') THEN
+       OR (SELECT object FROM log_changes WHERE request_id = 'genesis-member') <> log_object('principal', 'token:deploy') THEN
         RAISE EXCEPTION 'FAIL: genesis left the row or its object other than it said';
     END IF;
     RAISE NOTICE 'PASS: change_input seals each object once, from the seal it read, and a retry finds its entry';
@@ -164,7 +184,7 @@ BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000);
     IF r.state IS NOT NULL OR r.number IS NULL OR r.principal <> 'token:deploy' OR r.newest <> (SELECT max(number) FROM log_changes)
        OR r.inputs <> r.newest OR r.c_seal IS DISTINCT FROM r.c_last OR r.m_seal IS DISTINCT FROM r.m_last OR r.s_seal IS DISTINCT FROM r.s_last
-       OR r.e_seal IS DISTINCT FROM r.e_last OR r.p_seal IS DISTINCT FROM r.p_last OR r.policy_seal IS DISTINCT FROM r.policy_last
+       OR r.e_seal IS DISTINCT FROM r.e_last OR r.policy_seal IS DISTINCT FROM r.policy_last
        OR r.cap_count <> 1 OR r.cap_window <> 86400000 OR r.s_version <> '55555555-5555-5555-5555-555555555551' OR r.v_wrapped_dek <> decode('d0', 'hex')
        OR json_array_length(r.grants) <> 1 OR r.c_revoked OR r.c_kind <> 'service' OR r.in_set OR r.others <> 0 THEN
         RAISE EXCEPTION 'FAIL: the use read %', r;

@@ -91,20 +91,20 @@ CREATE TABLE "log_tiles_changes" PARTITION OF "log_tiles" FOR VALUES IN ('change
 --> statement-breakpoint
 CREATE TABLE "log_tiles_uses" PARTITION OF "log_tiles" FOR VALUES IN ('uses') PARTITION BY RANGE ("leaf");
 --> statement-breakpoint
--- The seals, null until 0.15's cutover seals each row. Adding a nullable column rewrites nothing; the checks are NOT VALID so that adding them scans nothing either (every row is null, and every new row is checked).
+-- The seals, null until 0.15's cutover seals each row: one on each table an object of W216's lives in, a member's covering its grants, a secret's its current version and a reference's source. Adding a nullable column rewrites nothing; the checks are NOT VALID so that adding them scans nothing either (every row is null, and every new row is checked).
 ALTER TABLE "credentials" ADD COLUMN "seal" "bytea";--> statement-breakpoint
 ALTER TABLE "environments" ADD COLUMN "seal" "bytea";--> statement-breakpoint
-ALTER TABLE "projects" ADD COLUMN "seal" "bytea";--> statement-breakpoint
+-- Whether the environment is protected: 0.14 keeps it in the policy's entries, 0.15 on the environment's object (W216). Null until the cutover writes it.
+ALTER TABLE "environments" ADD COLUMN "protected" boolean;--> statement-breakpoint
 ALTER TABLE "secrets" ADD COLUMN "seal" "bytea";--> statement-breakpoint
 ALTER TABLE "service_bindings" ADD COLUMN "seal" "bytea";--> statement-breakpoint
 ALTER TABLE "vault_members" ADD COLUMN "seal" "bytea";--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_seal_check" CHECK ("credentials"."seal" IS NULL OR octet_length("credentials"."seal") = 16) NOT VALID;--> statement-breakpoint
 ALTER TABLE "environments" ADD CONSTRAINT "environments_seal_check" CHECK ("environments"."seal" IS NULL OR octet_length("environments"."seal") = 16) NOT VALID;--> statement-breakpoint
-ALTER TABLE "projects" ADD CONSTRAINT "projects_seal_check" CHECK ("projects"."seal" IS NULL OR octet_length("projects"."seal") = 16) NOT VALID;--> statement-breakpoint
 ALTER TABLE "secrets" ADD CONSTRAINT "secrets_seal_check" CHECK ("secrets"."seal" IS NULL OR octet_length("secrets"."seal") = 16) NOT VALID;--> statement-breakpoint
 ALTER TABLE "service_bindings" ADD CONSTRAINT "service_bindings_seal_check" CHECK ("service_bindings"."seal" IS NULL OR octet_length("service_bindings"."seal") = 16) NOT VALID;--> statement-breakpoint
 ALTER TABLE "vault_members" ADD CONSTRAINT "vault_members_seal_check" CHECK ("vault_members"."seal" IS NULL OR octet_length("vault_members"."seal") = 16) NOT VALID;--> statement-breakpoint
--- An object's key in the log: the first 16 bytes of SHA-256('coffre.object.v1' 0x00 kind 0x00 id), read as a uuid, which the vault computes the same way. Kinds: member (its principal), credential, binding, project, environment, secret (each its id), policy and roles (id ''). Plain SQL, so that each probe inlines it, and STABLE as convert_to is: declared IMMUTABLE, it would not be inlined, and a statement would call it as a function of its own, 32 µs a call against 3.7 (measured).
+-- An object's key in the log: the first 16 bytes of SHA-256('coffre.object.v1' 0x00 kind 0x00 id), read as a uuid, which the vault computes the same way. Kinds (W216's objectKey, in @coffre/vault): principal (a member, by its principal), credential (a token or a binding, by its id), secret, environment (each by its id), roles and policy (id 'instance'). Plain SQL, so that each probe inlines it, and STABLE as convert_to is: declared IMMUTABLE, it would not be inlined, and a statement would call it as a function of its own, 32 µs a call against 3.7 (measured).
 CREATE FUNCTION log_object(p_kind text, p_id text) RETURNS uuid
     LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT pg_catalog.encode(pg_catalog.substr(pg_catalog.sha256(
@@ -156,8 +156,7 @@ CREATE TYPE use_view AS (
     m_status text, m_role text, m_scope text, m_generation integer, grants json, m_seal bytea, m_last bytea,
     s_environment uuid, s_archived boolean, s_version uuid, s_seal bytea, s_last bytea,
     v_envelope integer, v_ciphertext bytea, v_iv bytea, v_auth_tag bytea, v_wrapped_dek bytea, v_kek_provider text, v_kek_id text, v_kek_version text, v_sensitive boolean,
-    e_project uuid, e_parent uuid, e_owner text, e_archived boolean, e_deleted boolean, e_seal bytea, e_last bytea,
-    p_archived boolean, p_deleted boolean, p_seal bytea, p_last bytea,
+    e_project uuid, e_parent uuid, e_owner text, e_archived boolean, e_deleted boolean, e_protected boolean, e_seal bytea, e_last bytea,
     cap_count integer, cap_window bigint, policy_seal bytea, policy_last bytea,
     in_set boolean, others integer
 );
@@ -172,7 +171,7 @@ CREATE TYPE use_view AS (
 --
 -- The seal cache (p_known, p_known_mac): if the log's newest change is still exactly the one the isolate read its seals at, by number and MAC, no input changed since, and the statement probes nothing. Otherwise it writes nothing, answers 'reprobe' inside the function, and the probing statement runs. Two statements, not one with its probes skipped: a probe's plan nodes cost most of it even when it does not run (measured).
 --
--- Six inputs, each one object: the credential, its member (with the member's grants, under the member's seal), the secret (with its current version, under the secret's seal), its environment and project, and the policy (the cap). Roles, the environment asked at (`place`) and a reference's source are read by the 0.15 vault's statement when it is built (plan, PR 5).
+-- Five inputs, each one object (W216's): the credential, its principal (the member, with its grants, under the member's seal), the secret (with its current version, under the secret's seal), its environment (whose `deleted` says its project's too), and the policy (the cap). Roles, the environment asked at (`place`) and a reference's source are read by the 0.15 vault's statement when it is built (plan, PR 5).
 CREATE FUNCTION use_credential(
     p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_purpose smallint, p_place uuid, p_mac bytea, p_deadline bigint,
     p_cover bigint DEFAULT NULL, p_cover_at bigint DEFAULT NULL, p_cover_request bigint DEFAULT NULL, p_known bigint DEFAULT NULL, p_known_mac bytea DEFAULT NULL
@@ -202,14 +201,12 @@ BEGIN
                     s.environment_id AS s_environment, s.archived_at IS NOT NULL AS s_archived, s.current_version_id AS s_version, s.seal AS s_seal,
                     sv.envelope_version, sv.ciphertext, sv.iv, sv.auth_tag, sv.wrapped_dek, sv.kek_provider, sv.kek_id, sv.kek_version, sv.sensitive,
                     e.project_id AS e_project, e.parent_id AS e_parent, e.owner AS e_owner, e.archived_at IS NOT NULL AS e_archived, strpos(e.slug, '~') > 0 AS e_deleted,
-                    e.seal AS e_seal,
-                    pr.archived_at IS NOT NULL AS p_archived, strpos(pr.slug, '~') > 0 AS p_deleted, pr.seal AS p_seal,
+                    e.protected AS e_protected, e.seal AS e_seal,
                     pol.seal AS policy_seal,
                     public.log_object('credential', p_credential::text) AS k_credential,
-                    public.log_object('member', c.principal) AS k_member,
+                    public.log_object('principal', c.principal) AS k_member,
                     public.log_object('secret', p_secret::text) AS k_secret,
-                    public.log_object('environment', s.environment_id::text) AS k_environment,
-                    public.log_object('project', e.project_id::text) AS k_project
+                    public.log_object('environment', s.environment_id::text) AS k_environment
                   FROM (SELECT 1) one
                   LEFT JOIN n ON true
                   LEFT JOIN public.log_fence f ON f.only_row
@@ -223,7 +220,6 @@ BEGIN
                   LEFT JOIN public.secrets s ON s.id = p_secret
                   LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id
                   LEFT JOIN public.environments e ON e.id = s.environment_id
-                  LEFT JOIN public.projects pr ON pr.id = e.project_id
                   LEFT JOIN public.log_bulk b ON b.principal = c.principal AND b.secret = p_secret
             ),
             v AS MATERIALIZED (
@@ -231,11 +227,11 @@ BEGIN
                     CASE WHEN i.at_floor IS NULL OR p_at < i.at_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
                          WHEN i.policy IS NULL THEN 'unconfigured'
                          WHEN i.p IS NOT NULL AND NOT locked AND coalesce(i.bulk_last <= p_at - i.cap_refresh, true) THEN 'lock' END AS state,
-                    greatest(lc.number, lm.number, ls.number, le.number, lp.number, lpol.number) AS inputs,
-                    lc.seal AS c_last, lm.seal AS m_last, ls.seal AS s_last, le.seal AS e_last, lp.seal AS p_last, lpol.seal AS policy_last,
+                    greatest(lc.number, lm.number, ls.number, le.number, lpol.number) AS inputs,
+                    lc.seal AS c_last, lm.seal AS m_last, ls.seal AS s_last, le.seal AS e_last, lpol.seal AS policy_last,
                     p_cover IS NOT NULL AND i.bulk_last > p_at - i.cap_refresh
                         AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover)
-                        AND p_cover > coalesce(greatest(lc.number, lm.number, ls.number, le.number, lp.number, lpol.number), 0) AS is_covered,
+                        AND p_cover > coalesce(greatest(lc.number, lm.number, ls.number, le.number, lpol.number), 0) AS is_covered,
                     coalesce(i.bulk_last > p_at - i.cap_window - i.cap_refresh, false) AS is_in,
                     coalesce(i.bulk_last <= p_at - i.cap_refresh, true) AS stale,
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
@@ -253,8 +249,7 @@ BEGIN
                   LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_member ORDER BY x.number DESC LIMIT 1) lm ON true
                   LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_secret ORDER BY x.number DESC LIMIT 1) ls ON true
                   LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_environment ORDER BY x.number DESC LIMIT 1) le ON true
-                  LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_project ORDER BY x.number DESC LIMIT 1) lp ON true
-                  LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = public.log_object('policy', '') ORDER BY x.number DESC LIMIT 1) lpol ON true
+                  LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1) lpol ON true
             ),
             w AS (
                 INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place)
@@ -275,8 +270,7 @@ BEGIN
                 v.m_seal, v.m_last,
                 v.s_environment, v.s_archived, v.s_version, v.s_seal, v.s_last,
                 v.envelope_version, v.ciphertext, v.iv, v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version, v.sensitive,
-                v.e_project, v.e_parent, v.e_owner, v.e_archived, v.e_deleted, v.e_seal, v.e_last,
-                v.p_archived, v.p_deleted, v.p_seal, v.p_last,
+                v.e_project, v.e_parent, v.e_owner, v.e_archived, v.e_deleted, v.e_protected, v.e_seal, v.e_last,
                 v.cap_count, v.cap_window, v.policy_seal, v.policy_last,
                 v.is_in, v.n_others
               INTO r FROM v;
@@ -299,8 +293,7 @@ BEGIN
                     s.environment_id AS s_environment, s.archived_at IS NOT NULL AS s_archived, s.current_version_id AS s_version, s.seal AS s_seal,
                     sv.envelope_version, sv.ciphertext, sv.iv, sv.auth_tag, sv.wrapped_dek, sv.kek_provider, sv.kek_id, sv.kek_version, sv.sensitive,
                     e.project_id AS e_project, e.parent_id AS e_parent, e.owner AS e_owner, e.archived_at IS NOT NULL AS e_archived, strpos(e.slug, '~') > 0 AS e_deleted,
-                    e.seal AS e_seal,
-                    pr.archived_at IS NOT NULL AS p_archived, strpos(pr.slug, '~') > 0 AS p_deleted, pr.seal AS p_seal,
+                    e.protected AS e_protected, e.seal AS e_seal,
                     cap.count AS cap_count, cap.window_ms AS cap_window, pol.seal AS policy_seal,
                     -- The isolate checked its cover against the seals' numbers when it read them.
                     p_cover IS NOT NULL AND b.last > p_at - cap.refresh
@@ -328,7 +321,6 @@ BEGIN
                   LEFT JOIN public.secrets s ON s.id = p_secret
                   LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id
                   LEFT JOIN public.environments e ON e.id = s.environment_id
-                  LEFT JOIN public.projects pr ON pr.id = e.project_id
                   LEFT JOIN public.log_bulk b ON b.principal = c.principal AND b.secret = p_secret
             ),
             w AS (
@@ -350,8 +342,7 @@ BEGIN
                 v.m_seal, NULL::bytea,
                 v.s_environment, v.s_archived, v.s_version, v.s_seal, NULL::bytea,
                 v.envelope_version, v.ciphertext, v.iv, v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version, v.sensitive,
-                v.e_project, v.e_parent, v.e_owner, v.e_archived, v.e_deleted, v.e_seal, NULL::bytea,
-                v.p_archived, v.p_deleted, v.p_seal, NULL::bytea,
+                v.e_project, v.e_parent, v.e_owner, v.e_archived, v.e_deleted, v.e_protected, v.e_seal, NULL::bytea,
                 v.cap_count, v.cap_window, v.policy_seal, NULL::bytea,
                 v.is_in, v.n_others
               INTO r FROM v;
@@ -398,20 +389,21 @@ BEGIN
         RAISE EXCEPTION 'this schema knows no change %', op ->> 'op' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     CASE p_kind
-        WHEN 'member' THEN
+        WHEN 'principal' THEN
             UPDATE public.vault_members SET seal = p_seal WHERE principal = p_id AND seal IS NOT DISTINCT FROM p_seal_from;
         WHEN 'credential' THEN
+            -- A token's row, or a trust binding's: one kind of object, ids that never meet.
             UPDATE public.credentials SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-        WHEN 'binding' THEN
-            UPDATE public.service_bindings SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-        WHEN 'project' THEN
-            UPDATE public.projects SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
+            GET DIAGNOSTICS done = ROW_COUNT;
+            IF done = 0 THEN
+                UPDATE public.service_bindings SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
+            END IF;
         WHEN 'environment' THEN
             UPDATE public.environments SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
         WHEN 'secret' THEN
             UPDATE public.secrets SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
         WHEN 'policy', 'roles' THEN
-            IF p_id <> '' OR p_seal_from IS NOT NULL OR op -> 'value' IS NULL THEN
+            IF p_id <> 'instance' OR p_seal_from IS NOT NULL OR op -> 'value' IS NULL THEN
                 RAISE EXCEPTION 'the % object is one, made once from its value', p_kind USING ERRCODE = 'invalid_parameter_value';
             END IF;
             INSERT INTO public.vault_config (name, value, seal) VALUES (p_kind, (op -> 'value')::text, p_seal) ON CONFLICT (name) DO NOTHING;

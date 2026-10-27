@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- What log-guarantees.sql decides on, as the owner, after schema-fixture.sql:
--- a service account with a token, and two secrets in the fixture's
+-- a service account with a token and a trust binding, and two secrets in the fixture's
 -- environment. Nothing is sealed yet; the vault seals it there.
 DELETE FROM log_bulk;
 DELETE FROM log_changes;
@@ -9,6 +9,7 @@ TRUNCATE log_uses;
 DELETE FROM vault_config;
 UPDATE log_fence SET at_floor = (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 3000;
 DELETE FROM credentials;
+DELETE FROM service_bindings;
 UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;
 DELETE FROM secrets;
@@ -24,6 +25,10 @@ VALUES ('token:deploy', '11111111-1111-1111-1111-111111111111', 'viewer', 1, 'us
 INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at)
 VALUES ('33333333-3333-3333-3333-333333333333', 'service', decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
         'coffre_svc_…abcd', 1, 'token:deploy', 'user:admin@acme.example', now() + interval '1 day');
+
+INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, created_by)
+VALUES ('66666666-6666-6666-6666-666666666666', decode(repeat('04', 32), 'hex'), 'token:deploy', 1, 'github',
+        'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'user:admin@acme.example');
 
 INSERT INTO secrets (id, project_id, environment_id, key)
 VALUES ('44444444-4444-4444-4444-444444444441', '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'API_KEY'),

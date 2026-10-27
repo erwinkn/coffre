@@ -18,8 +18,8 @@
   - **Every 0.14 entry that changes access takes a new lock**, which
     nothing else takes before 0.15: an advisory lock, uncontended, in the
     append's own transaction. Reads and uses take none.
-  - It adds a nullable column to six tables and a check that scans
-    nothing (`NOT VALID`), so it runs in a moment.
+  - It adds nullable columns to five tables, and checks that scan nothing
+    (`NOT VALID`), so it runs in a moment.
 
 - **The CLI is an image.** Each release now publishes
   `ghcr.io/erwinkn/coffre-cli` for amd64 and arm64, tagged `<version>`,

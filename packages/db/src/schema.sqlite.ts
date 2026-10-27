@@ -67,11 +67,8 @@ export const projects = sqliteTable(
     createdAt: createdAt(),
     archivedAt: time('archived_at'),
     folder: text(),
-    // 0.15's seal (schema.ts).
-    seal: bytes('seal'),
   },
   (table) => [
-    check('projects_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', isPlaceSlug(table.slug)),
     folderCheck('projects_folder_check', table.folder),
@@ -89,6 +86,7 @@ export const environments = sqliteTable(
     archivedAt: time('archived_at'),
     parentId: text('parent_id'),
     owner: text(),
+    protected: flag('protected'),
     // 0.15's seal (schema.ts).
     seal: bytes('seal'),
   },

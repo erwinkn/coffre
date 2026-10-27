@@ -21,13 +21,13 @@ import { TEST_ENGINE } from './engine.ts';
 /**
  * 0.15's expand migration (0022_log_015 on Postgres, 0018_log_015 on
  * SQLite) on a database 0.14.5 made and used: every row it held is kept,
- * each sealed table gains a null seal and nothing else, and 0.14.5's code
+ * each sealed table gains a null seal (an environment its protection too) and nothing else, and 0.14.5's code
  * still reads it and appends to its log, the chain unbroken, as it serves
  * between `coffre migrate` and the deploy.
  */
 
 const TAGS: Record<Engine, string> = { postgres: '0022_log_015', sqlite: '0018_log_015' };
-const SEALED = ['credentials', 'environments', 'projects', 'secrets', 'service_bindings', 'vault_members'];
+const SEALED = ['credentials', 'environments', 'secrets', 'service_bindings', 'vault_members'];
 const hex = (byte: number, length = 32) => Buffer.alloc(length, byte).toString('hex');
 
 /** The engine's migrations up to the one before 0.15's: 0.14.5's schema. */
@@ -165,7 +165,7 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
   const kept = await (async () => {
     const opened = await database.open();
     try {
-      return Object.fromEntries(await Promise.all([...SEALED, 'vault_grants', 'secret_versions', 'audit_log'].map(async (table) => [table, await read(opened.owner, table)] as const)));
+      return Object.fromEntries(await Promise.all([...SEALED, 'projects', 'vault_grants', 'secret_versions', 'audit_log'].map(async (table) => [table, await read(opened.owner, table)] as const)));
     } finally {
       await opened.close();
     }
@@ -179,8 +179,9 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
     for (const [table, before] of Object.entries(kept)) {
       const after = await read(opened.owner, table);
       if (SEALED.includes(table)) {
-        assert.deepEqual(after.map(({ seal, ...row }) => row), before, `${table} keeps its rows`);
-        assert.ok(after.every((row) => row.seal === null), `${table}'s rows are not sealed yet`);
+        // What 0.15 adds to its rows: the seal, and an environment's protection.
+        assert.deepEqual(after.map(({ seal, protected: _, ...row }) => row), before, `${table} keeps its rows`);
+        assert.ok(after.every((row) => row.seal === null && (row.protected ?? null) === null), `${table}'s rows are not sealed yet`);
       } else {
         assert.deepEqual(after, before, `${table} is as it was`);
       }

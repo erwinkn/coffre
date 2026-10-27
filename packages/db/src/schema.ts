@@ -51,12 +51,8 @@ export const projects = pgTable(
     createdAt: createdAt(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
     folder: text(),
-    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
-    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
-    seal: bytea(),
   },
   (table) => [
-    check('projects_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     folderCheck('projects_folder_check', table.folder),
@@ -79,6 +75,9 @@ export const environments = pgTable(
     // A personal config's owner, `user:<email>`: a fork whose values only they
     // read, the vault binding each to them. Set when it is made and never after.
     owner: text(),
+    // Whether it is protected, on 0.15's environment object (0.14 keeps it in
+    // the policy's entries). Null until 0.15's cutover writes it.
+    protected: boolean(),
     // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
     // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
     seal: bytea(),

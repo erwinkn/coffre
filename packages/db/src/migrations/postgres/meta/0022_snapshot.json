@@ -1,5 +1,5 @@
 {
-  "id": "f2ac69c7-3526-4644-a404-638caf58b516",
+  "id": "c0e0e64e-36d7-4913-b367-3acd61c0f689",
   "prevId": "7dccaedc-bfdd-4d11-8dbc-b8f6d77b1df4",
   "version": "7",
   "dialect": "postgresql",
@@ -1465,6 +1465,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "protected": {
+          "name": "protected",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "seal": {
           "name": "seal",
           "type": "bytea",
@@ -2632,12 +2638,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "seal": {
-          "name": "seal",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -2654,10 +2654,6 @@
       },
       "policies": {},
       "checkConstraints": {
-        "projects_seal_check": {
-          "name": "projects_seal_check",
-          "value": "\"projects\".\"seal\" IS NULL OR octet_length(\"projects\".\"seal\") = 16"
-        },
         "projects_slug_check": {
           "name": "projects_slug_check",
           "value": "\"projects\".\"slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}(~[a-z0-9-]{1,40})?$'"

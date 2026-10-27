@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "28f78723-8e7e-4a31-9d06-606574829a1f",
+  "id": "14afe218-058f-4b29-85c1-c0685ec425ef",
   "prevId": "fbfa94ac-5304-475b-b32c-163cc66f498e",
   "tables": {
     "audit_chain_head": {
@@ -1236,6 +1236,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "protected": {
+          "name": "protected",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "seal": {
           "name": "seal",
           "type": "blob",
@@ -2346,13 +2353,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "seal": {
-          "name": "seal",
-          "type": "blob",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {
@@ -2368,10 +2368,6 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
-        "projects_seal_check": {
-          "name": "projects_seal_check",
-          "value": "\"projects\".\"seal\" IS NULL OR octet_length(\"projects\".\"seal\") = 16"
-        },
         "projects_slug_check": {
           "name": "projects_slug_check",
           "value": "(length(\"projects\".\"slug\") BETWEEN 1 AND 63 AND \"projects\".\"slug\" GLOB '[a-z0-9]*' AND \"projects\".\"slug\" NOT GLOB '*[^a-z0-9-]*') OR (instr(\"projects\".\"slug\", '~') BETWEEN 2 AND 64 AND substr(\"projects\".\"slug\", 1, instr(\"projects\".\"slug\", '~') - 1) GLOB '[a-z0-9]*' AND substr(\"projects\".\"slug\", 1, instr(\"projects\".\"slug\", '~') - 1) NOT GLOB '*[^a-z0-9-]*' AND length(substr(\"projects\".\"slug\", instr(\"projects\".\"slug\", '~') + 1)) BETWEEN 1 AND 40 AND substr(\"projects\".\"slug\", instr(\"projects\".\"slug\", '~') + 1) NOT GLOB '*[^a-z0-9-]*')"

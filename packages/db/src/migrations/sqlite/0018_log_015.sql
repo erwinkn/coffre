@@ -76,8 +76,8 @@ CREATE TABLE `vault_config` (
 );
 --> statement-breakpoint
 ALTER TABLE `credentials` ADD COLUMN `seal` blob CONSTRAINT "credentials_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint
+ALTER TABLE `environments` ADD COLUMN `protected` integer;--> statement-breakpoint
 ALTER TABLE `environments` ADD COLUMN `seal` blob CONSTRAINT "environments_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint
-ALTER TABLE `projects` ADD COLUMN `seal` blob CONSTRAINT "projects_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint
 ALTER TABLE `secrets` ADD COLUMN `seal` blob CONSTRAINT "secrets_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint
 ALTER TABLE `service_bindings` ADD COLUMN `seal` blob CONSTRAINT "service_bindings_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint
 ALTER TABLE `vault_members` ADD COLUMN `seal` blob CONSTRAINT "vault_members_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint

@@ -10,6 +10,7 @@ UPDATE audit_chain_head
    SET next_seq = 0,
        head_hash = decode(repeat('00', 32), 'hex');
 DELETE FROM credentials;
+DELETE FROM service_bindings;
 DELETE FROM vault_grants;
 DELETE FROM vault_members;
 DELETE FROM dismissed_keys;
