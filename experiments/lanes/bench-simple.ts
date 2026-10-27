@@ -12,12 +12,15 @@
 // was still allowed (must be 0). --hold-snapshot keeps a REPEATABLE READ
 // transaction open for the whole run, as a backup's pg_dump does.
 //
-// --variant one (W208) runs src/one.ts on seed-one.ts's database: one call
-// per use. --cap bounds the uses in flight (an isolate's admission control:
-// above it a use is refused 503 at once, without a statement); --deadline-ms
-// answers 503 a use not done by then, and `one`'s call does nothing if it
-// starts later than that (the pool or Hyperdrive held it). --outcomes writes
-// each use's answer, for verify-one.ts's replay.
+// --variant one (W208, W211) runs src/one.ts on seed-one.ts's database: one
+// call per use. --cap bounds the uses in flight (an isolate's admission
+// control: above it a use is refused 503 at once, without a statement);
+// --deadline-ms (3,000 at most, and by default) answers 503 a use not done
+// by then, and `one`'s call does nothing if it starts later than that (the
+// pool or Hyperdrive held it). --secrets: each principal's uses go round
+// that many keys, under the bulk cap --bulk-count / --bulk-window-ms (which
+// must be the seed's: the replay holds the log's). --outcomes writes each
+// use's answer, for verify-one.ts's replay.
 //
 //   node experiments/lanes/bench-simple.ts --url postgresql://… --variant seq --rate 1000 [--seconds 20] [--principals 100] [--pool 40]
 //     [--cgroup /sys/fs/cgroup/…/cpu.stat] [--revoke-at 10] [--checkpoint-ms 1000] [--label x]
@@ -68,14 +71,25 @@ const { values } = parseArgs({
     // `one`, fewer rows: covers held for this many ms, and the share of uses that go without (as distinct reads would).
     'cover-ms': { type: 'string' },
     distinct: { type: 'string', default: '0' },
+    // `one`: the keys each principal's uses go round, and the bulk cap (the seed's).
+    secrets: { type: 'string', default: '1' },
+    // `one`: no seal cache (every use probes each input's newest change).
+    'no-seal-cache': { type: 'boolean', default: false },
+    'bulk-count': { type: 'string', default: '1000' },
+    'bulk-window-ms': { type: 'string', default: '900000' },
+    'bulk-refresh-ms': { type: 'string' },
   },
 });
 if (values.url === undefined) throw new Error('--url names the database (through the relay)');
 const VARIANT = values.variant as Variant | 'one';
 const ONE = VARIANT === 'one';
-const CAP = Number(values.cap);
-const DEADLINE = values['deadline-ms'] === undefined ? undefined : Number(values['deadline-ms']);
+const ADMIT = Number(values.cap);
+// `one`'s deadline is mandatory (R53): 3 s unless set lower.
+const DEADLINE = values['deadline-ms'] !== undefined ? Number(values['deadline-ms']) : ONE ? one.DEADLINE_MAX : undefined;
+const SECRETS = Number(values.secrets);
+const CAP = one.limits(Number(values['bulk-count']), Number(values['bulk-window-ms']), values['bulk-refresh-ms'] === undefined ? undefined : Number(values['bulk-refresh-ms']));
 const RUN = randomUUID().slice(0, 8);
+const seals = values['no-seal-cache'] ? undefined : one.sealCache();
 const covers: one.Covers | undefined = values['cover-ms'] === undefined ? undefined : { window: Number(values['cover-ms']), held: new Map() };
 const DISTINCT = Number(values.distinct);
 const RATE = Number(values.rate);
@@ -166,8 +180,10 @@ const sampler = setInterval(() => waiting.push(pool.waitingCount), 50);
 let inFlight = 0;
 let inFlightMax = 0;
 const LATE = Symbol('late');
-const revokeOp: one.Op = kind === 'credential' ? { op: 'credential.revoke', credential: 'cred-svc-0' } : { op: 'access.revoke', environment: ENVIRONMENT };
-const restoreOp: one.Op = kind === 'credential' ? { op: 'credential.restore', credential: 'cred-svc-0' } : { op: 'access.grant', environment: ENVIRONMENT, role: 'viewer' };
+const revokeObject = kind === 'credential' ? `credential:${one.credentialId(0)}` : 'member:svc-0';
+const revokeOp: one.Op = kind === 'credential' ? { op: 'credential.revoke' } : { op: 'access.revoke', environment: ENVIRONMENT };
+const restoreOp: one.Op = kind === 'credential' ? { op: 'credential.restore' } : { op: 'access.grant', environment: ENVIRONMENT, role: 'viewer' };
+const startedAt = Date.now();
 const cpuBefore = cpu();
 const start = performance.now();
 let n = 0;
@@ -179,7 +195,7 @@ while (next < SECONDS * 1000) {
     revoking = true;
     const began = performance.now();
     const revoked = ONE
-      ? one.change(control, keys, 'svc-0', revokeOp).then((done) => ({ seq: done.number }))
+      ? one.change(control, keys, revokeObject, revokeOp).then((done) => ({ seq: done.number }))
       : change(control, keys, mode ?? 'head', 'svc-0', false, ENVIRONMENT, kind);
     pending.push(revoked.then((done) => {
       revocation = { ms: performance.now() - began, at: performance.now() - start, seq: done.seq };
@@ -191,17 +207,21 @@ while (next < SECONDS * 1000) {
     pending.push(maintain(at).catch((error: Error) => { maintenance = `FAILED: ${error.message}`; }));
   }
   const principal = `svc-${n % PRINCIPALS}`;
+  const credential = one.credentialId(n % PRINCIPALS);
+  const secret = one.secretId(Math.floor(n / PRINCIPALS) % SECRETS);
   const sent = performance.now() - start;
   n += 1;
-  const requestId = `${RUN}-${n}`;
-  if (CAP > 0 && inFlight >= CAP) {
+  const requestId = ONE ? one.newRequestId() : `${RUN}-${n}`;
+  if (ADMIT > 0 && inFlight >= ADMIT) {
     // Admission control: refused at once, no statement sent.
     runs.push({ sent, ms: performance.now() - start - sent, status: 503, code: 'overloaded', statements: 0, tries: 0, principal, requestId });
   } else {
     inFlight += 1;
     inFlightMax = Math.max(inFlightMax, inFlight);
-    const input = { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId };
-    const call = (ONE ? one.use(pool, keys, input, DEADLINE === undefined ? undefined : Date.now() + DEADLINE, Math.random() < DISTINCT ? undefined : covers) : use(pool, keys, VARIANT as Variant, input)) as Promise<
+    const at = Date.now();
+    const call = (ONE
+      ? one.use(pool, keys, { credential, secretId: secret, requestId, at }, at + DEADLINE!, CAP, Math.random() < DISTINCT ? undefined : covers, seals)
+      : use(pool, keys, VARIANT as Variant, { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId })) as Promise<
       { ok: true; statements: number; tries?: number; number?: string; covered?: true } | { ok: false; code: string; retryAfter?: number; statements: number; tries?: number; number?: string }
     >;
     // The slot is held until the call is done, answered or not: it bounds the work in flight, not the answers.
@@ -259,7 +279,7 @@ console.log([
 ].join('  '));
 
 if (values.outcomes !== undefined) writeFileSync(values.outcomes, runs.map((r) => JSON.stringify({ requestId: r.requestId, status: r.status, code: r.code, number: r.number ?? null, covered: r.covered ?? false })).join('\n') + '\n');
-console.log(`  rig: load generator ${((self.user + self.system) / 1000 / elapsed / 10).toFixed(0)}% of a core, relay ${(relayMs / elapsed / 10).toFixed(0)}% of a core; uses waiting for a connection mean ${(waiting.reduce((a, b) => a + b, 0) / Math.max(1, waiting.length)).toFixed(0)}, max ${Math.max(0, ...waiting)}${CAP > 0 ? `; in flight max ${inFlightMax} (cap ${CAP})` : ''}`);
+console.log(`  rig: load generator ${((self.user + self.system) / 1000 / elapsed / 10).toFixed(0)}% of a core, relay ${(relayMs / elapsed / 10).toFixed(0)}% of a core; uses waiting for a connection mean ${(waiting.reduce((a, b) => a + b, 0) / Math.max(1, waiting.length)).toFixed(0)}, max ${Math.max(0, ...waiting)}${ADMIT > 0 ? `; in flight max ${inFlightMax} (cap ${ADMIT})` : ''}`);
 
 if (checkpoints.length > 0) {
   const db = checkpoints.map((c) => c.dbMs).sort((a, b) => a - b);
@@ -287,16 +307,17 @@ if (revocation !== null) {
   // no use by svc-0 allowed at a revision before the revocation's may have been written after the revocation was.
   const inFlight = runs.filter((x) => x.principal === 'svc-0' && x.sent < r.at && x.sent + x.ms > r.at - r.ms).length;
   if (ONE) {
-    // `one`: no use numbered before the revocation was written after it, and none numbered after it was allowed.
+    // `one`: no use numbered before the revocation committed after it (commit timestamps: the slim row has no
+    // written_at), and none numbered after it was allowed.
     const { rows: [audit] } = await admin.query(
-      `SELECT count(*) FILTER (WHERE u.number < c.number AND u.written_at > c.written_at)::int AS late,
+      `SELECT count(*) FILTER (WHERE u.number < c.number AND pg_xact_commit_timestamp(u.xmin) > pg_xact_commit_timestamp(c.xmin))::int AS late,
               count(*) FILTER (WHERE u.number < c.number)::int AS before
-       FROM entries u, entries c WHERE c.number = $1 AND u.principal = 'svc-0' AND u.kind = 'use' AND u.request_id LIKE $2`,
-      [r.seq, `${RUN}-%`],
+       FROM uses u, changes c WHERE c.number = $1 AND u.credential = $2 AND u.at >= $3`,
+      [r.seq, one.credentialId(0), String(startedAt)],
     );
     const allowedAfter = runs.filter((x) => x.principal === 'svc-0' && x.status === 200 && x.number !== undefined && BigInt(x.number) > BigInt(r.seq)).length;
     console.log(`  revocation, in the log: svc-0 uses in flight while it ran: ${inFlight}; entries numbered before it ${audit.before}, of which written after it ${audit.late} (must be 0); numbered after it and allowed ${allowedAfter} (must be 0)`);
-    await one.change(control, keys, 'svc-0', restoreOp);
+    await one.change(control, keys, revokeObject, restoreOp);
   } else {
     const { rows: [audit] } = await admin.query(
       `SELECT count(*) FILTER (WHERE u.revision < c.revision AND u.written_at > c.written_at)::int AS late,
@@ -312,10 +333,10 @@ if (revocation !== null) {
 
 // Each statement's mean server time and buffers, the busiest first.
 const { rows: stats } = await admin.query(`
-  SELECT calls, round(mean_exec_time::numeric, 3) AS mean_ms, round((shared_blks_hit + shared_blks_read)::numeric / calls, 1) AS buffers,
+  SELECT calls, plans, round(mean_exec_time::numeric, 3) AS mean_ms, round((shared_blks_hit + shared_blks_read)::numeric / calls, 1) AS buffers,
     round(wal_records::numeric / calls, 1) AS wal, left(regexp_replace(query, '\\s+', ' ', 'g'), 70) AS query
   FROM pg_stat_statements WHERE calls >= 10 AND query NOT LIKE '%pg_stat_statements%' ORDER BY total_exec_time DESC LIMIT 6`);
-for (const s of stats) console.log(`  ${String(s.calls).padStart(8)} × ${String(s.mean_ms).padStart(7)} ms  ${String(s.buffers).padStart(5)} buf  ${String(s.wal).padStart(4)} wal  ${s.query}`);
+for (const s of stats) console.log(`  ${String(s.calls).padStart(8)} × ${String(s.mean_ms).padStart(7)} ms  ${String(s.buffers).padStart(5)} buf  ${String(s.wal).padStart(4)} wal  ${String(s.plans).padStart(4)} plans  ${s.query}`);
 
 if (snapshotHolder !== null) await snapshotHolder.end();
 await admin.end();

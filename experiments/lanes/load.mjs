@@ -10,10 +10,15 @@
 // answer that still succeeded: each one a use ordered after a revocation,
 // which must be refused. The grant is given back after the run.
 //
+// W211: --secrets <n> sends k=<j>, each principal's uses going round n keys;
+// request ids are random 63-bit numbers (`one`'s). --tick-path <path>
+// --tick-ms <ms> POSTs there every tick-ms, one at a time, through the run (the
+// checkpointer, on the changes' Hyperdrive config, which it keeps warm).
+//
 //   node experiments/lanes/load.mjs --base https://… --path /use/v2 [--rate 100] [--seconds 30] [--principals 50]
 import http from 'node:http';
 import https from 'node:https';
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
@@ -35,6 +40,9 @@ const { values } = parseArgs({
     // W208: each use's answer, as JSON lines keyed by its request id (sent as r=), for verify-one.ts.
     outcomes: { type: 'string' },
     label: { type: 'string', default: '' },
+    secrets: { type: 'string', default: '1' },
+    'tick-path': { type: 'string' },
+    'tick-ms': { type: 'string', default: '1000' },
   },
 });
 const BASE = new URL(values.base);
@@ -87,7 +95,20 @@ let n = 0;
 let next = 0;
 const revokeAt = values['revoke-at'] === undefined ? null : Number(values['revoke-at']) * 1000;
 const sep = values.path.includes('?') ? '&' : '?';
-const RUN = randomUUID().slice(0, 8);
+const SECRETS = Number(values.secrets);
+// A request id: random, 63 bits (one.ts's newRequestId).
+const requestIdOf = () => (randomBytes(8).readBigUInt64BE() >> 1n).toString();
+// The checkpointer: one tick at a time, every --tick-ms, until the run's last request is sent.
+const ticks = [];
+let ticking = values['tick-path'] !== undefined;
+const ticker = (async () => {
+  while (ticking) {
+    await sleep(Number(values['tick-ms']));
+    if (!ticking) break;
+    const r = await call('POST', values['tick-path']);
+    ticks.push(r);
+  }
+})();
 const withP = (path) => `${path}${path.includes('?') ? '&' : '?'}p=svc-0`;
 while (next < SECONDS * 1000) {
   const wait = start + next - performance.now();
@@ -101,11 +122,14 @@ while (next < SECONDS * 1000) {
   const principal = `svc-${OFFSET + (n % PRINCIPALS)}`;
   const sent = performance.now() - start;
   n += 1;
-  const requestId = `${RUN}-${n}`;
-  pending.push(call('GET', `${values.path}${sep}p=${principal}${values.query}&r=${requestId}`).then((r) => runs.push({ ...r, sent, principal, requestId })));
+  const requestId = requestIdOf();
+  const key = Math.floor((n - 1) / PRINCIPALS) % SECRETS;
+  pending.push(call('GET', `${values.path}${sep}p=${principal}${values.query}&k=${key}&r=${requestId}`).then((r) => runs.push({ ...r, sent, principal, requestId })));
   next += -Math.log(1 - Math.random()) * (1000 / RATE);
 }
+ticking = false;
 await Promise.all(pending);
+await ticker;
 const elapsed = (performance.now() - start) / 1000;
 
 const ok = runs.filter((r) => r.status === 200);
@@ -140,6 +164,11 @@ const steps = ['s1', 's2', 's3'].map((name) => [name, ok.map((r) => r.timing[nam
 const mean = (v) => v.reduce((a, b) => a + b, 0) / v.length;
 if (steps.length > 0) console.log(`  statements at the worker: ${steps.map(([name, v]) => `${name} mean ${mean(v).toFixed(1)}, p50/p90/p99 ${percentile(v, 50)}/${percentile(v, 90)}/${percentile(v, 99)} ms`).join(', ')}`);
 
+if (ticks.length > 0) {
+  const ms = ticks.map((t) => t.ms).sort((a, b) => a - b);
+  const bad = ticks.filter((t) => t.status !== 200);
+  console.log(`  ticks: ${ticks.length}, p50/max ${percentile(ms, 50).toFixed(0)}/${ms.at(-1).toFixed(0)} ms${bad.length === 0 ? ', all signed' : `, ${bad.length} FAILED: ${bad.slice(0, 2).map((t) => t.body).join('; ')}`}`);
+}
 if (revocation !== null) {
   const r = await revocation;
   const after = runs.filter((x) => x.principal === 'svc-0' && revokedAt !== null && x.sent > revokedAt);

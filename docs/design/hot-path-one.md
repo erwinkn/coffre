@@ -1,4 +1,4 @@
-# One call per use (0.15, W208)
+# One call per use (0.15, W208 and W211)
 
 An experiment, not a decision. Written by W208 on 2026-10-26, on a draft PR
 marked DO NOT MERGE. It follows W201's
@@ -16,12 +16,154 @@ instance-wide revision. This one asks: can a use be **one** round trip, with
   MACs, and a replay of every decision),
   [`fence-one.ts`](../../experiments/lanes/fence-one.ts) (why it must be a
   function), [`size-one.ts`](../../experiments/lanes/size-one.ts) (bytes per use).
-- **Model:** [`formal/HotPathOne.tla`](../../formal/HotPathOne.tla), checked by
+- **Model:** [`formal/HotPathOne.tla`](../../formal/HotPathOne.tla) and
+  [`formal/HotPathOneClock.tla`](../../formal/HotPathOneClock.tla), checked by
   [`scripts/formal-hotpath.sh`](../../scripts/formal-hotpath.sh).
+- **The plan:** [`0.15-plan.md`](0.15-plan.md), the pull requests from spec to
+  shipped code (W211).
 
 Every number below is labelled **measured** (with where) or **reasoned**.
+W211 (round 2, 2026-10-27) folded Erwin's decisions into the prototype; its
+section comes first, and the sections after it are W208's, edited where round
+2 changed them.
 
-## In short
+## Round 2 (W211): Erwin's decisions, folded in
+
+Erwin's decisions on W208's six (R50, R53, R54), each now in the prototype:
+
+1. **No revision:** as W208 built it.
+2. **Requests, not outcomes; every input sealed.** The member and its grants,
+   the credential, the secret with its wrapped key, and the environment each
+   carry a seal. A use is refused `stale` unless each row is its object's
+   newest change. A row deleted outright is `stale` too. Every change goes
+   through one function, `change_input`.
+3. **Per-isolate covers.** They now see a change to any of the four inputs,
+   and they ride on the bulk cap, which is built: count and window are
+   parameters, tested at count 10 over a day.
+4. **Overload:** left for T112, as decided.
+5. **The slim row with a 16-byte MAC:** wired through (uses table, MAC,
+   replay, verifier).
+6. **A deadline of at most 3 s, held in Postgres:** refused at the lock;
+   checked again by the statement that decides, after any wait for the
+   principal's lock; and rolled back at the end of the call if passed.
+
+What round 2 found on the way, each measured, and each now in the design:
+
+- **Sealing costs about half of the use's server time.** That is four probes,
+  and the plan nodes around them. A **per-isolate seal cache** buys most of it
+  back: the call skips the probes while the log's newest change is the one
+  the cache was read at. Statement buffers go 29 → 14, and Postgres CPU per
+  use 0.72 → 0.58 ms.
+- **The cache must name that change exactly, by number and MAC.** "No change
+  numbered above" trusted seals from an older log after a reseed: on
+  Cloudflare, 23,255 uses were refused `stale` that the replay allowed (fail
+  closed). The live-against-replay check caught it; a restore from backup
+  would do the same. TLC shows the weaker check breaks `ReplaySound`.
+- **Planning.** Postgres's auto plan mode made five custom plans per
+  connection after every autovacuum of `fence` or `bulk`: 411 plans of the
+  statement in 15 s at 1,000/s, 26 ms each under load. Generic plans on the
+  vault's login fix it (44 plans).
+- **The bulk cap needs a deadline margin** (TLC). Uses are decided in number
+  order, not by `at`, so other keys are counted over `window + refresh +
+  deadline`.
+
+### Before and after
+
+Local: W208's container shape (Postgres 16.14, 2 vCPU, 2 GB, a 2 ms relay,
+pool 40). W208's code (b8df3660) ran on the same container the same night as
+the baseline (`matrix.log`, `matrix2.log`, in thread storage `w211-raw/`).
+
+| measured | W208's `one` | W211 |
+|---|---|---|
+| 1,000/s for 120 s: p50 / p99 | 2.6 / 4.9 ms | 2.8 / 11.4 ms |
+| Postgres CPU per use | 0.36 ms | **0.58 ms** (0.72 without the seal cache) |
+| the call: server time, buffers, WAL records | 0.27 ms, 13.6, 2.0 | 0.56 ms, 14.2, 2.0 |
+| ceiling (under 1% refused, 20 s steps) | 4,000/s, clean | **2,500/s**; 3,000/s offered: 2,972 served, 2.2% refused |
+| 8,000/s offered, cap 48 and deadline | 4,598/s at p50 3.8 ms | 2,985/s at p50 4.1 ms, the rest refused at once |
+| covers, 80% repeats: entries per use | 0.215 (W208's run) | 0.220 |
+| revocation at 2,000/s: own pool / the uses' pool | (3,800/s: 25.5 / 6.4 ms) | 29.0 / 7.7 ms, 0 allowed after |
+| 1M entries of history: buffers, p50 | (14.6, 2.6 ms) | 15.2, 2.8 ms |
+| bytes per use at 1M rows; WAL per use | 341 B; 442 B | **141 B; 248 B** |
+| live equal to the replay | every use | every use: about 566,000 local and 451,000 on Cloudflare (the final code), 0 disagree |
+
+- **The price of round 2 is Postgres CPU:** about 0.2 ms more per use. That
+  is the four inputs' seals (with the cache, mostly the newest-change probe
+  and the larger plan), the bulk cap's row, and the floor read with them.
+- **On Equisafe's 2 vCPU, the ceiling falls from about 4,000 to about 2,500
+  uses a second.** That is still 2.5× R44's 1,000/s. Open decisions 2 lists
+  the cuts left for the implementation.
+- **p99** includes each run's start: every new connection plans its
+  statement once (about 5 ms unloaded). W208's simpler statement planned in
+  a fraction of that.
+- **Cache hits are diluted across many isolates.** On Cloudflare, 27% of the
+  calls took the probing path.
+
+**Cloudflare** (personal account, Worker in WAW, Hyperdrive pool 100, the
+same rig as W208, 00:31–00:40 UTC; every resource deleted after and the
+deletion verified):
+
+| measured | W208 | W211 |
+|---|---|---|
+| 1,000/s for 120 s: Worker p50 / p99 | 37 / 828 ms (path 31 ms) | 60 / 249 ms (path ~60 ms) |
+| Worker CPU p50 / p99 (analytics) | 1.87 / 4.65 ms | **1.82 / 4.72 ms** |
+| Postgres CPU | 46% of a core | 70% of a core (the checkpointer included) |
+| covers: entries per use | 0.63 | 0.51 |
+| revocation, the changes' own config: idle | 892 ms | 179 ms, 142 ms |
+| … kept warm by the checkpointer (a tick a second on that config) | | **107 ms, 106 ms** |
+| … on the uses' config | 91 ms | 145 ms |
+
+- **W208's cold 892 ms did not come back.** Each "idle" run here followed one
+  whose last grant had used the changes' config about 45 s earlier, so it was
+  not cold.
+- **Warm, a revocation is its two statements' round trips.** Running the
+  checkpointer on the changes' config keeps it warm at no extra cost: 0.15's
+  checkpointer runs on that config anyway (plan, PR 6).
+- **Replay:** live equal to the replay in all 7 runs, about 451,000 uses.
+
+### The model (W211)
+
+`HotPathOne.tla` grows inputs, seals, a database writer and the seal cache.
+`HotPathOneClock.tla` is new: time, the deadline, the floor of `at`, and the
+bulk cap. TLC (W211's run, `w211-formal.txt`):
+
+| scenario | distinct states |
+|---|---|
+| HotPathOne (two inputs, no writer) | 4,638,719 |
+| HotPathOneCovers (member and secret) | 6,798,323 |
+| HotPathOneSeals (four inputs, one rollback, the cache) | 1,445,421 |
+| HotPathOneRestore (a log restored, then a rollback) | 6,409,651 |
+| HotPathOneClock (deadline, floor, Postgres's clock stepping back) | 670,105 |
+| HotPathOneBulk (count 1, two keys, covers) | 11,521,159 |
+| HotPathOneBulkSlack (a refresh longer than the deadline) | 6,041,726 |
+
+Each new protection, removed, breaks its invariant:
+
+| protection removed | breaks |
+|---|---|
+| each input's seal (SealMember, SealCredential, SealSecret, SealEnvironment) | `ReplaySound`: allowed live, refused by the replay |
+| the seals checked before what the rows say (StaleFirst) | `TamperVisible`: a refusal the replay does not give, not marked `stale` |
+| the cache used only while nothing changed (CacheChecked) | `ReplaySound`, `RepeatsAreTheirCover` |
+| … and only if the newest change is the same one (CacheSameChange) | `ReplaySound`, after a restore |
+| covers that see every input (CoverChecksAllInputs) | `RepeatsAreTheirCover` |
+| the floor of `at` | `CheckpointsHold` |
+| the deadline checked in Postgres | `NoLateWork` |
+| the Worker's answer at its deadline | `ReleaseByDeadline` |
+| new and stale keys under the principal's lock | `BulkCapHolds`, `BulkReplayAgrees` |
+| refresh on use; covers only while the row is fresh | `BulkCapHolds` |
+| the refresh's slack; the deadline's slack | `BulkCapHolds` |
+
+W208's 18 removals and W201's 16 still fail as before: 53 of 53 in all.
+
+**What the model leaves out:**
+- one principal, one isolate, and two or three uses;
+- liveness;
+- clocks in `HotPathOne` (and changes in `HotPathOneClock`);
+- writer forgeries (the writer only puts back older, validly sealed rows);
+- a restore together with a crash.
+
+The PR 1 of the plan merges them.
+
+## In short (W208, round 1)
 
 - **A use is one call.** The Worker MACs the request, then calls
   `use_credential` once. That plpgsql function takes an advisory lock
@@ -235,7 +377,7 @@ recorded. Measured, every local run: all agree, deny reasons included
 (`forbidden` after the revoke, `expired` after svc-1's credential expired
 mid-run). The 5-minute run: 300,274 uses, 300,274 agree.
 
-### The member's seal: what it protects, without a revision
+### Seals: what they protect, without a revision
 
 W201 sealed a member row "at revision + 1": the vault's MAC over the member,
 its grants and the revision of its newest access change, checked against the
@@ -258,10 +400,39 @@ rollback, and passes. To undo the revoke unseen, the attacker must also
 delete its entry before it is sealed, which W209's rule (a change answers
 only once sealed and witnessed) closes.
 
-The lookup is one index probe on the changes partition, which only changes
-grow (measured: flat to 10M uses). The prototype seals only the member and its
-grants; credentials, secrets and environments need the same treatment
-(reasoned).
+The lookup is one index probe on the changes, which only changes grow
+(measured: flat to 10M uses).
+
+**W211: every input.** W208 sealed only the member and its grants. Round 2
+seals all four inputs a decision reads: the member with its grants, the
+credential, the secret with its wrapped key, the environment. Each is one
+object of the log (`member:<principal>`, `credential:<id>`, …), and each
+change names its object and records the seal it leaves.
+
+How a use checks them:
+- `change_input` makes every change: a CAS on the object's seal, the payload
+  applied as logged. `decide` refuses `tampered` (not a valid seal) or
+  `stale` (not the newest change's) for each input in turn.
+- Measured (fence-one): put back the member row and grant from before a
+  revoke, a credential from before its revoke, a secret from before its key
+  was rotated, or an environment from before its deletion. Each use is
+  refused `stale`, and the verifier names each row ("not the log's").
+- Without the seal check, all four would be allowed live. The replay refuses
+  three of them, so a check of live against replay catches those. It does
+  not catch the secret: a use that releases the old key is allowed in the
+  replay too, and only the row audit shows it. Rows, not only decisions, must
+  match the log.
+
+**The seal cache.** The four probes cost about half of the call's server
+time. So each isolate keeps the seals it last read, as of the log's newest
+change at the time (its number and MAC). A use passes that change back, and
+the call skips the probes if it is still the newest. Postgres checks this in
+the use's own snapshot, under the fence shared, so no change can come in
+between. The change is named exactly, by number and MAC, not as "nothing
+numbered above". Cloudflare showed why: isolates outlived a reseed of the
+database, and a cache that trusted "no higher number" refused 23,255 good
+uses `stale`. It failed closed, and the replay caught it. A restore from
+backup would do the same.
 
 ### Replays
 
@@ -397,12 +568,12 @@ What a cover keeps:
   impossible, so a use after a confirmed revoke is a fresh entry, refused,
   and provably so. TLC holds `RepeatsAreTheirCover` (96.5M states) and breaks
   it without the change check or without the shared lock.
-- **Scope, as built:** "a change to the member" means what `change_member`
-  writes: the member, its grants, its credentials. A secret rotated, moved or
-  deleted, or an environment deleted, writes no change entry for the member,
-  so a cover would not see it. Before covers ship, every other decision input
-  must be a change the cover check can see (its own number, compared the same
-  way).
+- **Scope (W211):** a cover holds only if no change to any of the use's
+  four inputs (member, credential, secret, environment) was numbered after
+  it, and only while the key's bulk row is fresh, so a repeat never moves or
+  skips the cap. Measured (fence-one): a change to each input, or a stale
+  bulk row, makes the next repeat an entry of its own. W208's covers saw only
+  the member's changes.
 - **Expiry:** a cover ends at the credential's expiry, so the first use after
   it is a fresh, logged refusal.
 
@@ -430,14 +601,46 @@ many as there are distinct keys an isolate saw that day, and costs nothing in
 Postgres. A cover never outlives a change or an expiry, so a long window
 loses nothing to revocation.
 
-**The bulk cap** (1,000 distinct keys per principal per 15 min, configurable
-as `bulkLimit: { count, windowMinutes }`): the prototype does not implement
-it. Covers do not change what it must count: every distinct key still writes
-at least one entry per isolate per window. But counting from the log would
-scan history (R48), so the cap still needs its own table (`vault_releases`,
-latest read per principal and key). Its size grows with distinct keys read in
-`windowMinutes`, up to a day, and with a count of 10 it refuses the 11th
-distinct key the same way (reasoned; not measured here).
+### The bulk cap (W211)
+
+The cap allows `count` distinct keys per principal per rolling `window`
+(R28, R52: both the deployment's, default 1,000 per 15 minutes, window at
+most a day). It is built into the use's one statement:
+
+- **What it keeps.** One row per (principal, key), holding `last`, the time of
+  that key's last logged use.
+- **What counts.** A key is counted at time t if `last > t − window −
+  refresh`.
+- **A use of a counted key** passes the cap.
+- **A use of an uncounted key** passes only if fewer than `count` other keys
+  are counted, and then it enters (`last := at`).
+- **Refresh.** A use whose key's row is older than `refresh` (a minute, or a
+  tenth of the window) moves it on. So a hot key writes its row at most once
+  a minute, not once per use.
+- **The slack.** `last` lags the key's newest use by at most `refresh`, so
+  the bound adds `refresh`. Over any rolling `window`, at most `count` keys
+  are released. A key is counted up to a minute too long, never too short.
+- **The other keys** are counted over `window + refresh + deadline`. Uses are
+  decided in number order, not in the order of their `at`, so a key that
+  entered at a later `at` can already be in when an earlier use is decided.
+  TLC found two keys released in one window without this margin.
+- **Ordering.** A use that may write a row (the key new, or its row stale)
+  takes its principal's own lock first, and reads again. So writes come in
+  number order, and the replay decides each use the same. Other uses take no
+  lock.
+- **Requests, not releases.** Every request counts, allowed or refused for
+  any reason but the cap. 0.14 counted releases (Open decisions, 1).
+
+Covers ride on it: a repeat is covered only while its key's row is fresh.
+
+Measured:
+- **Count 10 over a day** (fence-one): ten keys pass and the eleventh is
+  refused `bulk`. Repeats of the ten pass, on covers. Six new keys at once
+  with room for two admit exactly two. The replay agrees with every answer,
+  and the `bulk` rows are the replay's.
+- **A 1.5 s window:** a key refused, then admitted once the window passed.
+- **Locally,** 20 keys per principal at 1,000/s: 14,890 `bulk` refusals, each
+  equal to its replay.
 
 ### Row size
 
@@ -451,6 +654,8 @@ over 20,000 more, one per transaction, commit records included
 | slim: number, time, request id (random bigint), credential (uuid), secret (uuid), MAC (32 B) | 126 B | 32 B | **158 B** | 260 B | 13.6 GB/day |
 | slim, MAC truncated to 16 B | 109 B | 32 B | **141 B** | 244 B | 12.2 GB/day |
 | slim, 80% repeats on covers | | | **~34 B** | ~56 B | 2.9 GB/day |
+| **W211, wired:** schema-one.sql's own `uses`, 16 B MAC; WAL through `use_credential`, bulk writes included | 109 B | 32 B | **141 B** | **248 B** | 12.2 GB/day |
+| W211, wired, every use on a cover (99.5% of 20,000) | | | | 4 B | |
 
 The slim row drops:
 
@@ -465,9 +670,10 @@ A 64-bit random request id need only be unique within its millisecond: at
 per millisecond. A collision would answer one use 503 `replayed`, and its
 retry, with a new id, would pass. Of a
 row's 158 B, about 24 B is the tuple header and 32 B the MAC; the rest is
-three bigints and two uuids. The prototype keeps its readable columns; the
-slim row is measured, not wired through (reasoned: the decision, the replay
-and the verifier need nothing it drops).
+three bigints and two uuids. W211 wired it through: the decision, the
+replay and the verifier need nothing it drops (measured: every replay below
+agrees). Changes keep a fuller row (object, actor, payload, seal); they are
+few and kept for good.
 
 ## Measurements
 
@@ -704,46 +910,78 @@ Against W201's `seq`, for someone with database write access but no key:
   - A swap across a revoke moves a use to the other side of it. That is
     inside the ~1-tick window R51 accepts for uses.
   - Once sealed, nothing moves: W209's leaves hash the whole entry.
-- **Rollback of decision inputs:** refused by the seal check (above) for the
-  member and its grants only. Rolling back a credential's `revoked`, a
-  secret's wrapped key or an environment's `deleted` changes the live
-  decision with nothing to see it: the outcome is not stored, so no replay
-  disagrees. **Open until every decision input is sealed to its newest
-  change.**
+- **Rollback of decision inputs (W211):** refused for all four (member and
+  grants, credential, secret, environment), and named by the verifier's row
+  audit (Seals, above).
+  - **What remains:** a change entry copied under a new number. Its MAC is
+    valid, since the MAC excludes the number, so it makes an old seal the
+    newest again. That needs dropping the unique index on `request_id`, and
+    the signer refuses to seal the copy: it is older than the signer's head
+    allows (W209). It is inside the same ~1-tick window as the swap.
 - **Unchanged from W201:** everything a database writer could already do,
   such as change a grant directly. That is authorisation state, and the
   replay catches it afterwards only if the row is sealed to the log.
 
-## Decisions for Erwin
+## Decisions
 
-1. **Drop the revision (R50 says "revision fence").** `one` needs none, by
-   the argument and the model above: uses and changes never overlap, so the
-   number orders them. The cost: every use takes one advisory lock shared, and
-   every change waits for the uses in flight. Recommended.
-2. **The log stores requests, not outcomes.** "Was this allowed?" is
-   answered by a replay, which is deterministic and checked here against every
-   live decision. The catch: a database writer who rolls back a decision
-   input (a grant, a credential) makes live and replay disagree unseen,
-   unless that input is sealed to its newest change. So every decision input
-   needs a seal like the member's.
-3. **Covers.** Fewer rows for less detail: the log keeps the first read in a
-   window, not each one. Per isolate, as built: 0.215 entries per use locally,
-   0.63 on Workers (~150 isolates). A shared, MAC'd cover table would recover
-   the local figure, at one more statement per cover.
-4. **A shared admission bound on Workers.** Per-isolate caps did not refuse
-   fast at 2.5× the pool's ceiling. The options: a counter in a Durable Object
-   (one more hop per use), or a small per-isolate cap derived from the pool and
-   a measured isolate count. The deadline already keeps goodput at the ceiling.
-5. **The slim row** (158 B, or 141 with a 16-byte MAC): worth wiring through.
-   A 16-byte MAC keeps 128 bits against forgery, which is what HMAC
-   truncation guidance allows.
-6. **A use must carry a deadline ≤ 3 s.** It bounds overload work; a request
-   with a longer one, or with a time below the barrier's floor, gets no entry
-   and a 503 `late`.
+Each design decision, as taken: what was chosen, against what, the numbers
+behind it, and what it costs. Erwin's decisions of 2026-10-26 (R50, R53) are
+marked as his; the rest are the experiment's, W208's then W211's, and stay
+open to him.
+
+| # | decision | alternatives | numbers | tradeoff |
+|---|---|---|---|---|
+| 1 | **No revision** (Erwin, R50): uses take the fence shared, changes exclusive, the number alone orders them | W201's instance-wide revision; shards (#350) | local ceiling 1.3–1.6× `seq`'s (W208); Cloudflare at pool 40: ~1,040/s against ~500/s | every change waits for the uses in flight (a fraction of a ms); one lock is shared by every use |
+| 2 | **One call per use: a plpgsql function** whose statement takes its snapshot after the lock | a bare CTE (one statement); two statements (`seq`) | the bare CTE allows a revoked use (fence-one, measured); 1 round trip against 2 | the use's statement lives in SQL, not in the vault's TypeScript |
+| 3 | **The log records requests, not outcomes** (Erwin, R53) | store the outcome | 3.2M (W208) and about 1.0M (W211) live decisions all equal to the replay | "was it allowed?" needs a replay; every decision input must be sealed (4) |
+| 4 | **Every decision input sealed to its newest change** (Erwin, R53): member and grants, credential, secret, environment; `stale` when a row is not its newest change's | seal the member only (W208); seal nothing; audit rows each tick instead (detects, does not prevent) | rollback of each input refused (fence-one); 4 probes cost about half the call's server time (0.41 → 0.21 ms without them, unloaded) | the main cost of round 2, mostly bought back by the seal cache (5) |
+| 5 | **A per-isolate seal cache**, valid while the log's newest change is the one it was read at (number and MAC) | probe every use; trust "no higher number" | Postgres CPU per use 0.73 → 0.55 ms; buffers 29 → 16; the "no higher number" version refused 23,255 good uses on Cloudflare after a reseed (fail closed, caught by the replay) | one more probe per use (the newest change); any change anywhere sends every isolate back to the probes once |
+| 6 | **The statement in two forms**, one without the seal probes for the cached case | one form with its probes skipped by a condition | the condition skipped the probes but not their plan nodes: 0.34 → 0.29 ms cached | the function holds the statement twice |
+| 7 | **Generic plans for the vault's login** (`plan_cache_mode`) | Postgres's auto mode | auto made 411 plans of the statement in 15 s at 1,000/s, 26 ms each under load; generic: 44 | a plan that is not tuned per call (the statement is all index probes, so nothing is lost) |
+| 8 | **Per-isolate covers** (Erwin, R53), invalidated by a change to any of the four inputs, and only while the key's bulk row is fresh | a shared, MAC'd cover table; a counter row per tick (rejected: R44) | 0.22 entries per use locally at 80% repeats; 0.51 on Workers | the log keeps the first read in a window, not each one |
+| 9 | **The bulk cap counts requests**, a key from its last logged use, refreshed at most every `refresh`, counted over `window + refresh` (others over `+ deadline` too); new and refreshed keys serialise on the principal's lock | count releases (0.14's meaning: needs a second statement after the decision); count from the log (scans history, R48); refresh on every use (a hot row per key) | count 10 over a day: the 11th key refused, 6 at once with room for 2 admit 2, replay agrees; locally 14,890 `bulk` refusals all replayed equal | a key stays counted up to `refresh` (a minute) longer than its window; a token probing keys it cannot read uses up its budget; refusals by the cap take the lock |
+| 10 | **The slim row with a 16-byte MAC** (Erwin, R53) | 32-byte MAC; the prototype's text row | 140.8 B per use at 1M rows (341 before); 248 B of WAL per use (442) | 128 bits against forgery, as HMAC truncation guidance allows |
+| 11 | **A hard deadline ≤ 3 s, held in Postgres too** (Erwin, R53, R54): refused at the lock, and rolled back at the end of the call if passed | the Worker's race alone | a use held 500 ms past its 300 ms deadline by its principal's lock wrote nothing (fence-one) | a use that waits too long fails instead of finishing late |
+| 12 | **`at` days** (Erwin, R54) | days by number (W209) | retention: DETACH 3 ms, DROP 26–52 ms at 10M (W208) | a replay must land in its day: (at, request id) is the replay's key |
+| 13 | **Admission: a per-isolate cap from the pool size**, with the login's lock 1 s / statement 2 s timeouts (Erwin, R53) | a shared counter in a Durable Object | per-isolate caps did not refuse fast across ~150 isolates (W208) | measured in T112, not here |
+| 14 | **Two Merkle trees by retention class** (W212, #368, settled by numbers per R54; Erwin reviews): changes (kept for good) and uses (dropped by day), each RFC 9162 with its own origin; one tick signs both heads with the same `upto`, as one pair (one record, one write, one witness) | one tree for both (#365); a tree per day, per tick, an MMR | +7–8% tree WAL (~2 KB a tick, under 0.5% of the log's WAL), +0.2–0.6 ms signer CPU; no 10.4 min/day retention rebuild, no digest of kept changes, changes provable for good | two heads that must move together (modelled first, plan PR 1) |
+| 15 | **The changes' Hyperdrive config kept warm by the checkpointer** | an idle config of its own; the uses' config | revocation 106–107 ms warm against 142–179 ms idle (W211, Cloudflare); W208 saw 892 ms cold | none: the checkpointer runs on that config anyway |
+
+## Open decisions
+
+1. **The bulk cap's meaning** (9): requests, as built, or releases (0.14's),
+   which costs a second statement on the first use of each key. Recommended:
+   requests.
+2. **Sealing's cost.** About 0.19 ms of Postgres CPU per use more than W208's
+   `one` with the cache (0.55 against 0.36 ms, same container, same day), so a
+   2 vCPU Postgres serves about 2,700 uses a second instead of 4,000. Still 2.7×
+   R44's 1,000/s. Further cuts for the implementation: uuid object keys (about
+   20% of each probe), fewer joins in the cached form (the fence and the bulk
+   row read once), and grouping the rarely changing inputs (roles, policy)
+   under one object as 0.15 adds them.
+3. **A refusal storm by the cap takes the principal's lock.** A key not in the
+   set, with the cap already full on an unlocked read, could be refused
+   without the lock (writes only add keys, so a full set stays full for the
+   numbers after). Not built, so that the code stays the model; worth
+   modelling and adding if a principal's bulk refusals matter.
+4. **The day split** (R54 settles `at` days; W209's #365 had both).
 
 ## Reproducing
 
-All throwaway and deleted after: the container `w208-pg` (its own compose
+W211: the container `w211-pg` (compose project `w211`, port 30211, W208's
+flags plus `track_commit_timestamp`), the relay on 30212, the Worker
+`coffre-w211-lanes` and the same Cloudflare set as W208's, all deleted after.
+Its scripts (`run.sh`, `run208.sh` for W208's code as the baseline,
+`matrix.sh`, `matrix2.sh`, `cf-run.sh`, `cf-matrix.sh`) and every output are
+in thread storage, `w211-raw/`. New in round 2:
+
+```
+node experiments/lanes/seed-one.ts --url $DB --principals 100 [--secrets 20 --bulk-count 10 --bulk-window-ms 86400000]
+node experiments/lanes/bench-simple.ts … --variant one [--secrets 20 --bulk-count 10 --bulk-window-ms 86400000] [--no-seal-cache]
+node experiments/lanes/load.mjs … --path /simple/one/use [--secrets 20] [--tick-path /simple/one/tick --tick-ms 1000]
+```
+
+W208: all throwaway and deleted after: the container `w208-pg` (its own compose
 project, port 30208), the Worker `coffre-w208-lanes`, its loader, KV
 namespace, two Hyperdrive configs, the tunnel, its DNS record, the Access app
 and two service tokens.

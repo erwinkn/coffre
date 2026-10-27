@@ -35,11 +35,17 @@ type Env = LaneEnv & ShardEnv & { HD_CONTROL?: Hyperdrive };
  *   simple W201's Postgres-only path (simple.ts): GET /simple/<head|seq|cas>/use,
  *          one read and one append; POST /simple/<head|seq>/revoke and /grant.
  *          named=1 names (prepares) the hot path's statements.
- *   one    W208's one-call path (one.ts): GET /simple/one/use, one call;
- *          POST /simple/one/revoke and /grant. cap=<n> refuses a use at once
- *          (503) while the isolate has n in flight; deadline=<ms> answers 503
- *          a use not done by then, and its call does nothing if it gets its
- *          lock later. cover=<ms>: repeats ride on this isolate's covers.
+ *   one    W208's one-call path (one.ts), W211's: GET /simple/one/use?p=svc-<i>&k=<j>&r=<request id>,
+ *          one call, for svc-<i>'s credential and secret <j>; POST
+ *          /simple/one/revoke and /grant. cap=<n> refuses a use at once (503)
+ *          while the isolate has n in flight; deadline=<ms> (3,000 by default
+ *          and at most) answers 503 a use not done by then, and its call does
+ *          nothing if it gets its lock later. cover=<ms>: repeats ride on this
+ *          isolate's covers. bulk=<count>:<window ms> the bulk cap (the seed's).
+ *          seals=0: no seal cache (each use probes each input's newest change).
+ *          POST /simple/one/tick: one checkpoint, on the changes' Hyperdrive
+ *          config (HD_CONTROL), as 0.15's checkpointer would: it keeps that
+ *          config's connection warm for the changes.
  *
  * POST /revoke?p=&mode=lanes|chain takes a principal's grant away, and
  * POST /grant gives it back, each a control decision.
@@ -302,6 +308,8 @@ const inFlight = new Map<number, number>();
 let oneInFlight = 0;
 /** `one`: this isolate's covers, for cover=<ms>. */
 const oneCovers: one.Covers = { window: 0, held: new Map() };
+/** `one`: this isolate's seal cache (seals=0 turns it off). */
+const oneSeals = one.sealCache();
 const LATE = Symbol('late');
 const ISOLATE_IN_FLIGHT = 64;
 
@@ -486,13 +494,16 @@ export default {
           const cap = Number(url.searchParams.get('cap') ?? '0');
           // Admission control, per isolate: refused at once, no connection opened.
           if (cap > 0 && oneInFlight >= cap) return answer(503, { ok: false, code: 'overloaded' }, meter, { 'retry-after': '1' });
-          const wait = url.searchParams.has('deadline') ? Number(url.searchParams.get('deadline')) : undefined;
-          const deadline = wait === undefined ? undefined : Date.now() + wait;
+          // The deadline is mandatory (R53): the request's time plus 3 s at most, held by the call in Postgres too.
+          const at = Date.now();
+          const wait = Math.min(one.DEADLINE_MAX, Number(url.searchParams.get('deadline') ?? one.DEADLINE_MAX));
+          const [count, windowMs] = (url.searchParams.get('bulk') ?? '1000:900000').split(':').map(Number);
           oneInFlight += 1;
           const covers = url.searchParams.has('cover') ? Object.assign(oneCovers, { window: Number(url.searchParams.get('cover')) }) : undefined;
-          const call = (async () => one.use(await open(), keysOf(env), { principal, credential: `cred-${principal}`, environmentId: ENVIRONMENT, secretId: SECRET, requestId }, deadline, covers))();
+          const input = { credential: one.credentialId(Number(principal.slice(4))), secretId: one.secretId(Number(url.searchParams.get('k') ?? '0')), requestId: /^\d+$/.test(requestId) ? requestId : one.newRequestId(), at };
+          const call = (async () => one.use(await open(), keysOf(env), input, at + wait, one.limits(count, windowMs), covers, url.searchParams.get('seals') === '0' ? undefined : oneSeals))();
           const done = call.finally(() => { oneInFlight -= 1; });
-          const result = wait === undefined ? await done : await Promise.race([done, sleep(wait).then((): typeof LATE => LATE)]);
+          const result = await Promise.race([done, sleep(wait).then((): typeof LATE => LATE)]);
           if (result === LATE) {
             lingering.push(done.catch(() => {}));
             return answer(503, { ok: false, code: 'deadline' }, meter, { 'retry-after': '1' });
@@ -504,9 +515,16 @@ export default {
         if (action === 'revoke' || action === 'grant') {
           // Changes on a Hyperdrive config of their own (HD_CONTROL, when bound and not shared=1).
           const control = await open(env.HD_CONTROL === undefined || url.searchParams.get('shared') === '1' ? env.HD : env.HD_CONTROL);
-          const op: one.Op = action === 'revoke' ? { op: 'access.revoke', environment: ENVIRONMENT } : { op: 'access.grant', environment: ENVIRONMENT, role: 'viewer' };
-          const done = await one.change(control, keysOf(env), principal, op);
+          const op: one.Op = action === 'revoke' ? { op: 'access.revoke', environment: one.ENVIRONMENT } : { op: 'access.grant', environment: one.ENVIRONMENT, role: 'viewer' };
+          const done = await one.change(control, keysOf(env), `member:${principal}`, op);
           return answer(200, { ok: true, seq: done.number, tries: done.tries, at: Date.now() }, meter);
+        }
+        if (action === 'tick') {
+          // One checkpoint on the changes' config: where it ended is read back each time (an isolate keeps nothing).
+          const control = await open(env.HD_CONTROL ?? env.HD);
+          const state = await one.loadCheckpointState(control);
+          const done = await one.checkpoint(control, keysOf(env), state);
+          return answer(done.failures.length === 0 ? 200 : 500, { ok: done.failures.length === 0, entries: done.entries, dbMs: done.dbMs, failures: done.failures.slice(0, 3) }, meter);
         }
       }
       if (route === 'simple') {

@@ -2,7 +2,9 @@
 # Model-checks 0.15's simple hot path, formal/HotPath.tla, with TLC (W201): a
 # use as one read and one append statement, the revision fence, changes, and
 # ("seq") the checkpoints that close the numbers they sign; and its one-call
-# variant, formal/HotPathOne.tla (W208): no revision, one call per use. As
+# variant, formal/HotPathOne.tla (W208, W211): no revision, one call per use,
+# every decision input sealed to its newest change; and formal/HotPathOneClock.tla
+# (W211): its deadline, the floor of `at`, and the bulk cap with covers. As
 # scripts/formal-shards.sh: every scenario must hold, then each runs again with
 # one of the design's protections turned off, and must fail on the invariant
 # it keeps.
@@ -54,7 +56,25 @@ REMOVALS=(
   "HotPathOne SyncCommit NothingAllowedAfterAnswer"
   "HotPathOne CheckpointLocks CheckpointsHold"
   "HotPathOneCovers CoverChecksChanges RepeatsAreTheirCover"
+  "HotPathOneCovers CoverChecksAllInputs RepeatsAreTheirCover"
   "HotPathOneCovers UseLocks RepeatsAreTheirCover"
+  "HotPathOneSeals SealMember ReplaySound"
+  "HotPathOneSeals SealCredential ReplaySound"
+  "HotPathOneSeals SealSecret ReplaySound"
+  "HotPathOneSeals SealEnvironment ReplaySound"
+  "HotPathOneSeals StaleFirst TamperVisible"
+  "HotPathOneSeals CacheChecked ReplaySound"
+  "HotPathOneCovers CacheChecked RepeatsAreTheirCover"
+  "HotPathOneRestore CacheSameChange ReplaySound"
+  "HotPathOneClock FloorChecked CheckpointsHold"
+  "HotPathOneClock DeadlineChecked NoLateWork"
+  "HotPathOneClock WorkerHonoursDeadline ReleaseByDeadline"
+  "HotPathOneBulk PrincipalLocks BulkCapHolds"
+  "HotPathOneBulk PrincipalLocks BulkReplayAgrees"
+  "HotPathOneBulk RefreshOnUse BulkCapHolds"
+  "HotPathOneBulk CoverFresh BulkCapHolds"
+  "HotPathOneBulkSlack Slack BulkCapHolds"
+  "HotPathOneBulk DeadlineSlack BulkCapHolds"
 )
 
 LONG=()

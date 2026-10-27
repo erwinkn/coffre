@@ -1,7 +1,7 @@
-// The prototype's Worker (W194, W201, then W208), deployed only to a personal account for a load
+// The prototype's Worker (W194, W201, W208, then W211), deployed only to a personal account for a load
 // test, and deleted after. Synthetic data and keys; SEED is not a secret.
 {
-  "name": "coffre-w208-lanes",
+  "name": "coffre-w211-lanes",
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
@@ -11,10 +11,10 @@
   "durable_objects": { "bindings": [{ "name": "LANE", "class_name": "Lane" }, { "name": "SHARD", "class_name": "Shard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lane"] }, { "tag": "v2", "new_sqlite_classes": ["Shard"] }],
   // `wrangler hyperdrive create coffre-w201-pg --caching-disabled --origin-connection-limit 40`; locally, the connection string below.
-  // W201, W208: HD for uses (40, then 100 origin connections); HD_CONTROL, 5 connections, for changes, so that a revocation never
+  // W201, W208, W211: HD for uses (40, then 100 origin connections); HD_CONTROL, 5 connections, for changes, so that a revocation never
   // queues behind uses for a connection.
   "hyperdrive": [
-    { "binding": "HD", "id": "00fa3ae16a194d5589fa08a3b94494f6", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" },
-    { "binding": "HD_CONTROL", "id": "b252ab2914f14600b670c108cfbe37d4", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" }
+    { "binding": "HD", "id": "eb7fe4af3268480d8ad95e042de53c0a", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" },
+    { "binding": "HD_CONTROL", "id": "f6b08aaa028b40b3857b71f4e359d743", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" }
   ]
 }

@@ -11,12 +11,20 @@
 //             it), no principal (the credential's, which never changes), no environment (the
 //             secret's), no written_at (the benches').
 //   slim16    slim with the MAC truncated to 16 bytes.
+//   wired     (W211) schema-one.sql's own `uses`, as seed-one.ts makes it: a day's partition filled
+//             with 1M rows, then WAL per use over --wal real calls of `use_credential`, one per
+//             transaction, as the hot path makes them (the bulk cap's rare writes included), and
+//             again with covers (each credential's repeats of its last allowed use).
 //
 //   node experiments/lanes/size-one.ts --url postgresql://… (a server where a scratch database may be made) [--rows 1000000]
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
 import pg from 'pg';
+
+import { keysFrom } from './src/model.ts';
+import { credentialId, limits, newRequestId, secretId, use, type Covers } from './src/one.ts';
 
 const { values } = parseArgs({ options: { url: { type: 'string' }, rows: { type: 'string', default: '1000000' }, wal: { type: 'string', default: '20000' } } });
 if (values.url === undefined) throw new Error('--url names a database on the server to use');
@@ -78,6 +86,35 @@ try {
     console.log(`${name.padEnd(8)} heap ${per(z.heap)} (tuple ${Number(z.tuple).toFixed(0)}), index ${per(z.idx)}, total ${per(String(Number(z.heap) + Number(z.idx)))} B; WAL ${(Number(after.bytes) / WAL).toFixed(0)} B per use`);
   }
   await db.end();
+
+  // The wired schema: seed-one.ts's database, its own `uses`.
+  execFileSync(process.execPath, [new URL('./seed-one.ts', import.meta.url).pathname, '--url', scratch.toString(), '--principals', '100'], { stdio: 'ignore' });
+  const wired = new pg.Client({ connectionString: scratch.toString() });
+  await wired.connect();
+  const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+  await wired.query(`INSERT INTO uses SELECT 1000000 + i, $1::bigint + i * 50, (random() * 9e18)::bigint, $2::uuid, $3::uuid, substring(sha256(i::text::bytea) FROM 1 FOR 16)
+    FROM generate_series(1, $4::bigint) i`, [String(Math.floor(Date.now() / 86_400_000) * 86_400_000), credentialId(0), secretId(0), String(Math.min(ROWS, 1_700_000))]);
+  await wired.query(`VACUUM ANALYZE uses_${day}`);
+  const { rows: [w] } = await wired.query(`SELECT pg_relation_size('uses_${day}') AS heap, pg_indexes_size('uses_${day}') AS idx,
+    (SELECT count(*) FROM uses_${day}) AS n, (SELECT avg(pg_column_size(t.*)) FROM uses_${day} t) AS tuple`);
+  const n = Number(w.n);
+  const keys = keysFrom('w194-synthetic');
+  const cap = limits();
+  const walOf = async (covers?: Covers) => {
+    const { rows: [before] } = await wired.query('SELECT pg_current_wal_insert_lsn() AS lsn');
+    let covered = 0;
+    for (let i = 0; i < WAL; i += 1) {
+      const at = Date.now();
+      const a = await use(wired, keys, { credential: credentialId(i % 100), secretId: secretId(0), requestId: newRequestId(), at }, at + 3000, cap, covers);
+      if (a.ok && a.covered) covered += 1;
+    }
+    const { rows: [after] } = await wired.query('SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), $1) AS bytes', [before.lsn]);
+    return { per: (Number(after.bytes) / WAL).toFixed(0), covered };
+  };
+  const plain = await walOf();
+  const covers = await walOf({ window: 60_000, held: new Map() });
+  console.log(`wired    heap ${(Number(w.heap) / n).toFixed(1)} (tuple ${Number(w.tuple).toFixed(0)}), index ${(Number(w.idx) / n).toFixed(1)}, total ${((Number(w.heap) + Number(w.idx)) / n).toFixed(1)} B over ${n} rows; WAL ${plain.per} B per use through use_credential; with covers ${covers.per} B per use (${covers.covered} of ${WAL} on a cover)`);
+  await wired.end();
 } finally {
   await admin.query('DROP DATABASE IF EXISTS w208_size WITH (FORCE)');
   await admin.end();
