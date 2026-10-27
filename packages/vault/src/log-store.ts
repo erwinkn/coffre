@@ -115,6 +115,8 @@ function postgresStore(db: Database, range: number): CheckpointStore {
       SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL, NULL, NULL, NULL, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
         FROM log_uses u WHERE u.at >= ${floor} AND u.number > ${after} AND u.number <= ${upto}
       ORDER BY n`);
+  // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
+  // ranges, forgets the ones it drops here.
   const made = new Set<number>();
   return {
     async close(after, from) {

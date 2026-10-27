@@ -1,4 +1,4 @@
-import { appendFile, open, readFile, rename } from 'node:fs/promises';
+import { appendFile, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import type { Database } from '@coffre/db';
@@ -64,12 +64,24 @@ export async function runCheckpointer(options: {
   tileRange?: number;
 }): Promise<RunningCheckpointer> {
   const alarmsPath = `${options.memory}.alarms`;
+  let appending: Promise<void> = Promise.resolve();
   const checkpointer = await openLogCheckpointer({
     store: logStore(options.database, { tileRange: options.tileRange }),
     seed: options.seed,
     memory: fileMemory(options.memory),
     witnesses: options.witnesses,
-    record: (alarm) => appendFile(alarmsPath, `${JSON.stringify(alarm)}\n`),
+    record: (alarm) => {
+      // In order, one after the other; a file grown past a megabyte keeps its last 30 days.
+      appending = appending.then(async () => {
+        await appendFile(alarmsPath, `${JSON.stringify(alarm)}\n`);
+        if ((await stat(alarmsPath)).size > 1_000_000) {
+          const kept = (await readAlarms(alarmsPath)).filter((a) => a.at >= alarm.at - 30 * 86_400_000);
+          await writeFile(`${alarmsPath}.part`, kept.map((a) => `${JSON.stringify(a)}\n`).join(''));
+          await rename(`${alarmsPath}.part`, alarmsPath);
+        }
+      }).catch((error: Error) => console.warn(`coffre audit: an alarm could not be kept: ${error.message}`));
+      return appending;
+    },
   });
   const interval = options.intervalMs ?? TICK_MS;
   let stopped = false;
@@ -85,8 +97,8 @@ export async function runCheckpointer(options: {
     checkpointer,
     sealThrough: (number, deadline) => checkpointer.sealThrough(number, deadline),
     async alarms(since = 0) {
-      const text = await readFile(alarmsPath, 'utf8').catch(() => '');
-      return text.split('\n').filter((line) => line.length > 0).map((line) => JSON.parse(line) as Alarm).filter((a) => a.at >= since);
+      await appending;
+      return (await readAlarms(alarmsPath)).filter((a) => a.at >= since);
     },
     async stop() {
       stopped = true;
@@ -94,4 +106,16 @@ export async function runCheckpointer(options: {
       await ticking;
     },
   };
+}
+
+/** The alarms in the file, a line each; a line a crash left torn is skipped. */
+async function readAlarms(path: string): Promise<Alarm[]> {
+  const text = await readFile(path, 'utf8').catch(() => '');
+  return text.split('\n').flatMap((line) => {
+    try {
+      return line.length > 0 ? [JSON.parse(line) as Alarm] : [];
+    } catch {
+      return [];
+    }
+  });
 }

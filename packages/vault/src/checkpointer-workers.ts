@@ -130,8 +130,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     }
 
     async fetch(request: Request): Promise<Response> {
-      const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' };
       try {
+        const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' };
         if (call.op === 'start') {
           await this.#open();
           if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
@@ -148,9 +148,18 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           });
         }
         if (call.op === 'alarms') {
-          const since = call.since ?? 0;
-          const found = await this.#state.storage.list<string>({ prefix: 'alarm:', start: alarmKey(since) });
-          return Response.json([...found].map(([key, message]) => ({ at: Number(key.split(':')[1]), message })));
+          // A page at a time: a list is a thousand keys at most.
+          // A page at a time, each from the last key of the one before (which it lists again): a list is 1,000 keys at most.
+          const alarms: Alarm[] = [];
+          let start = alarmKey(call.since ?? 0);
+          let last: string | null = null;
+          for (;;) {
+            const page = await this.#state.storage.list<string>({ prefix: 'alarm:', start, limit: 1000 });
+            for (const [key, message] of page) if (key !== last) alarms.push({ at: Number(key.split(':')[1]), message });
+            if (page.size < 1000) break;
+            last = start = [...page.keys()].at(-1)!;
+          }
+          return Response.json(alarms);
         }
         return new Response('unknown op', { status: 400 });
       } catch (error) {

@@ -89,7 +89,7 @@ export function durableWitness(namespace: ObjectNamespace, options: { name?: str
           held = answer.held;
           continue;
         }
-        if (!answer.ok) return { ok: false, reason: answer.reason };
+        if (!answer.ok) return { ok: false, reason: answer.reason ?? `the witness answered ${response.status}` };
         held = sizesOf(notes);
         return { ok: true, cosigned: answer.cosigned };
       }
