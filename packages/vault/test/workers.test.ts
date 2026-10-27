@@ -18,7 +18,7 @@ import type { WrappedKey } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { isUnavailable } from '@coffre/db/dialect';
 import { and, eq, inArray } from 'drizzle-orm';
-import pg from 'pg';
+import { postgresSession } from '@coffre/db/connect';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { emptyDatabase, ENGINE, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
@@ -40,16 +40,54 @@ beforeEach(async () => {
  * Postgres as Hyperdrive serves it from far away: each chunk either way
  * delayed by `ms`. Locally a query answers in well under a millisecond,
  * which hides calls waiting on each other's I/O. `opened` counts the
- * connections made to it.
+ * connections made to it; `statements` the statements sent on them (each
+ * Sync, or simple Query); `flushes` the Flush messages, which a client sends
+ * to have a statement described before it sends its values; and `trips` the
+ * round trips past the login: each time a client speaks again once answered,
+ * but to say goodbye (Terminate), which waits for no answer.
  */
-async function slowPostgres(ms: number): Promise<{ url: string; readonly opened: number; close(): Promise<void> }> {
+async function slowPostgres(ms: number): Promise<{ url: string; readonly opened: number; readonly statements: number; readonly flushes: number; readonly trips: number; close(): Promise<void> }> {
   const target = new URL(VAULT_URL);
   let opened = 0;
+  let statements = 0;
+  let flushes = 0;
+  let trips = 0;
   const server: Server = createServer((client) => {
     opened += 1;
     const upstream = connect(Number(target.port), target.hostname);
     const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) =>
       from.on('data', (chunk) => setTimeout(() => to.write(chunk), ms));
+    // The client's messages, read as they come: the first, untyped, starts the connection; then a type and a length each.
+    let pending = Buffer.alloc(0);
+    let started = false;
+    let answered = true;
+    client.on('data', (chunk: Buffer) => {
+      // A round trip begins: the login's (its startup, its password messages) is not a statement's.
+      if (answered && started && chunk[0] !== 0x70 && chunk[0] !== 0x58) trips += 1;
+      answered = false;
+      pending = Buffer.concat([pending, chunk]);
+      for (;;) {
+        if (!started) {
+          if (pending.length < 8) break;
+          const length = pending.readInt32BE(0);
+          if (pending.length < length) break;
+          // An SSLRequest is answered before the startup message comes.
+          if (pending.readInt32BE(4) !== 80877103) started = true;
+          pending = pending.subarray(length);
+          continue;
+        }
+        if (pending.length < 5) break;
+        const length = pending.readInt32BE(1);
+        if (pending.length < 1 + length) break;
+        const type = String.fromCharCode(pending[0]!);
+        if (type === 'S' || type === 'Q') statements += 1;
+        if (type === 'H') flushes += 1;
+        pending = pending.subarray(1 + length);
+      }
+    });
+    upstream.on('data', () => {
+      answered = true;
+    });
     relay(client, upstream);
     relay(upstream, client);
     const end = () => {
@@ -67,6 +105,15 @@ async function slowPostgres(ms: number): Promise<{ url: string; readonly opened:
     url: url.href,
     get opened() {
       return opened;
+    },
+    get statements() {
+      return statements;
+    },
+    get flushes() {
+      return flushes;
+    },
+    get trips() {
+      return trips;
     },
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
@@ -195,6 +242,45 @@ test('each call opens one connection at most: on Cloudflare, a call that opened 
   }
 });
 
+test('in workerd, a call\'s statements cost a round trip each at most: none waits to learn its parameters\' types first', { skip, timeout: 120_000 }, async (t) => {
+  const placed = await places(db.owner);
+  const secret = await placed.secret(placed.dev);
+  const database = await slowPostgres(2);
+  const vault = await freshVault(database.url);
+  try {
+    // The isolate's first calls settle its keys and make root the Owner: then the calls as they come, warm.
+    assert.ok((await vault.call('access', ROOT)).ok);
+    const wrapped = (await vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })) as { ok: boolean; result: { wrapped: WrappedKey[] } };
+    assert.ok(wrapped.ok);
+    const items = await storedVersions(db.owner, [{ secret, wrapped: wrapped.result.wrapped[0]! }]);
+    const calls: [string, () => Promise<{ ok: boolean; error?: string }>][] = [
+      ['access', () => vault.call('access', ROOT)],
+      ['unwrap, a reveal', () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'reveal', items })],
+      ['unwrap, a use', () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'use', items })],
+      ['wrap, a change', () => vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })],
+      ['verifyLog', () => vault.call('verifyLog', {})],
+    ];
+    const seen: Record<string, { statements: number; trips: number }> = {};
+    for (const [name, call] of calls) {
+      const before = { statements: database.statements, trips: database.trips };
+      const result = await call();
+      assert.ok(result.ok, `${name} failed: ${result.error}`);
+      seen[name] = { statements: database.statements - before.statements, trips: database.trips - before.trips };
+    }
+    t.diagnostic(`statements and round trips per call: ${JSON.stringify(seen)}`);
+    // A statement described first is a Parse, a Describe and a Flush, then a wait for its types: none here.
+    assert.equal(database.flushes, 0, 'a statement waited to be described before its values were sent');
+    for (const [name, { statements, trips }] of Object.entries(seen)) {
+      assert.ok(statements > 0, `${name} sent no statement`);
+      // Fewer when statements of a transaction go together.
+      assert.ok(trips <= statements, `${name}: ${statements} statements in ${trips} round trips`);
+    }
+  } finally {
+    await vault.stop();
+    await database.close();
+  }
+});
+
 test('in workerd too, a query on the database inside its own transaction is refused at once, not left to hang', { skip, timeout: 120_000 }, async () => {
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
@@ -237,8 +323,7 @@ test('through the entrypoint, a read past the head\'s places in line fails at on
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const vault = await freshVault(VAULT_URL);
-  const holder = new pg.Client({ connectionString: OWNER_URL });
-  await holder.connect();
+  const holder = postgresSession(OWNER_URL);
   try {
     assert.ok((await vault.call('access', ROOT)).ok);
     const wrapped = (await vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })) as { ok: boolean; result: { wrapped: WrappedKey[] } };
@@ -247,9 +332,9 @@ test('through the entrypoint, a read past the head\'s places in line fails at on
     const read = () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'reveal', items });
     // Once, so that what a process does once is done; then the head held, and every place in line taken.
     assert.equal(((await read()).result as { ok: boolean }).ok, true);
-    await holder.query('BEGIN');
-    await holder.query('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
-    await holder.query('SELECT pg_advisory_xact_lock($1, place) FROM generate_series(1, $2::int) AS place', [0x636f6668, READ_HEAD_WAITERS]);
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.unsafe('SELECT pg_advisory_xact_lock($1, place) FROM generate_series(1, $2::int) AS place', [0x636f6668, READ_HEAD_WAITERS]);
     const started = Date.now();
     const refused = await read();
     assert.ok(Date.now() - started < 2_000, `refused after ${Date.now() - started} ms`);
@@ -257,7 +342,7 @@ test('through the entrypoint, a read past the head\'s places in line fails at on
     assert.equal(refused.code, '55P03', 'the code crossed the binding');
     assert.ok(isUnavailable({ code: refused.code }), 'which the app answers as unavailable');
   } finally {
-    await holder.query('ROLLBACK').catch(() => undefined);
+    await holder.unsafe('ROLLBACK').catch(() => undefined);
     await holder.end();
     await vault.stop();
   }

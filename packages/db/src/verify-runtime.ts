@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import pg from 'pg';
-
-import { postgresConnection } from './postgres.ts';
+import { postgresClient } from './postgres.ts';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -10,19 +8,15 @@ function requiredEnvironment(name: string): string {
 }
 
 const expectedRole = requiredEnvironment('COFFRE_RUNTIME_ROLE');
-const pool = new pg.Pool({
-  application_name: 'coffre-runtime-verification',
-  ...postgresConnection(requiredEnvironment('DATABASE_URL')),
-  max: 1,
-});
+const client = postgresClient(requiredEnvironment('DATABASE_URL'), { application_name: 'coffre-runtime-verification', max: 1 });
 
 try {
-  const identity = await pool.query<{
+  const identity = await client.unsafe<{
     current_user: string;
     memberships: string[];
     safe_membership: boolean;
     unsafe_attributes: boolean;
-  }>(
+  }[]>(
     `SELECT current_user,
             (
               role.rolsuper OR role.rolcreatedb OR role.rolcreaterole
@@ -47,14 +41,14 @@ try {
        FROM pg_roles role
       WHERE role.rolname = current_user`,
   );
-  assert.deepEqual(identity.rows, [{
+  assert.deepEqual([...identity], [{
     current_user: expectedRole,
     memberships: ['coffre_app'],
     safe_membership: true,
     unsafe_attributes: false,
   }]);
 
-  const ownership = await pool.query<{ object_count: number }>(
+  const ownership = await client.unsafe<{ object_count: number }[]>(
     `SELECT count(*)::int AS object_count
        FROM pg_shdepend dependency
        JOIN pg_roles role ON role.oid = dependency.refobjid
@@ -62,9 +56,9 @@ try {
         AND dependency.deptype = 'o'
         AND role.rolname = current_user`,
   );
-  assert.equal(ownership.rows[0]?.object_count, 0, 'runtime role owns database objects');
+  assert.equal(ownership[0]?.object_count, 0, 'runtime role owns database objects');
 
-  const privileges = await pool.query<{
+  const privileges = await client.unsafe<{
     audit_delete: boolean;
     audit_truncate: boolean;
     audit_update: boolean;
@@ -74,7 +68,7 @@ try {
     head_hash_update: boolean;
     migrations_select: boolean;
     schema_create: boolean;
-  }>(
+  }[]>(
     `SELECT has_database_privilege(current_user, current_database(), 'CREATE') AS database_create,
             has_database_privilege(current_user, current_database(), 'TEMPORARY') AS database_temporary,
             has_schema_privilege(current_user, 'public', 'CREATE') AS schema_create,
@@ -91,7 +85,7 @@ try {
               current_user, 'drizzle.__drizzle_migrations', 'SELECT'
             ) AS migrations_select`,
   );
-  assert.deepEqual(privileges.rows, [{
+  assert.deepEqual([...privileges], [{
     audit_delete: false,
     audit_truncate: false,
     audit_update: false,
@@ -103,20 +97,15 @@ try {
     schema_create: false,
   }]);
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    // What every append does to the log's head, rolled back.
-    const head = await client.query(
-      `UPDATE audit_chain_head SET next_seq = next_seq, head_hash = head_hash WHERE only_row`,
-    );
-    assert.equal(head.rowCount, 1, 'runtime head update did not affect the singleton');
-  } finally {
-    await client.query('ROLLBACK');
-    client.release();
-  }
+  // What every append does to the log's head, rolled back.
+  const rolledBack = new Error('rolled back');
+  await assert.rejects(client.begin(async (tx) => {
+    const head = await tx.unsafe(`UPDATE audit_chain_head SET next_seq = next_seq, head_hash = head_hash WHERE only_row`);
+    assert.equal(head.count, 1, 'runtime head update did not affect the singleton');
+    throw rolledBack;
+  }), (error) => error === rolledBack);
 
   console.log(`runtime database role ${expectedRole} passed privilege verification`);
 } finally {
-  await pool.end();
+  await client.end();
 }

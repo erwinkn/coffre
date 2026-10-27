@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { pairSigners } from '@coffre/core/merkle';
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 import { unstable_dev } from 'wrangler';
 
 import { logOrigin } from '../src/checkpointer.ts';
@@ -25,11 +25,11 @@ const rate = Number(rateArg ?? 1000);
 const seconds = Number(secondsArg ?? 60);
 
 const seed = randomBytes(32);
-const owner = new pg.Pool({ connectionString: ownerUrl, max: 2 });
-for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.query(`DELETE FROM ${table}`);
-await owner.query(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
+const owner = postgresClient(ownerUrl, { max: 2 });
+for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.unsafe(`DELETE FROM ${table}`);
+await owner.unsafe(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-await owner.query('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
+await owner.unsafe('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
 
 const signers = await pairSigners(await logOrigin(seed), seed);
 const dir = mkdtempSync(join(tmpdir(), 'coffre-checkpoint-bench-workers-'));

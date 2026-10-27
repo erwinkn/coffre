@@ -89,7 +89,7 @@ async function versionCount(): Promise<number> {
 
 test('the API runs on the restricted runtime login', postgresOnly('the restricted runtime role exists only on Postgres'), async () => {
   const identity = await db.runtime.execute<{ current_user: string }>(sql`SELECT current_user`);
-  assert.equal(identity.rows[0].current_user, 'coffre_runtime');
+  assert.equal(identity[0]!.current_user, 'coffre_runtime');
   assert.deepEqual((await root.secrets.set('market/dev', { RUNTIME_PROOF: 'works' })).keys, {
     RUNTIME_PROOF: { version: 1, sensitivity: 'secret' },
   });

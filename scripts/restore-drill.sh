@@ -89,10 +89,10 @@ log 'building the app'
 app_config="$(node packages/conformance/src/draining.ts examples/workers/app/dist/server)"
 
 log "a seeded instance over $source_db"
-node scripts/ensure-database.mjs "$source_db"
+node --conditions=coffre:source scripts/ensure-database.mjs "$source_db"
 DATABASE_URL="$(owner_url "$source_db")" pnpm --dir packages/db run db:migrate --backup-login coffre_backup_login >/dev/null
 start_coffre "$source_db" "$COFFRE_VAULT_KEY"
-DATABASE_URL="$(owner_url "$source_db")" node dev/seed.mjs >/dev/null
+DATABASE_URL="$(owner_url "$source_db")" node --conditions=coffre:source dev/seed.mjs >/dev/null
 node scripts/restore-drill.mjs prepare >"$scratch/state.json"
 stop_coffre
 
@@ -106,11 +106,11 @@ printf '%s' "$backup_url" | cli backup "$scratch/backup.dump"
 
 log "restoring into $restored_db with coffre restore, checked with the keys"
 # The logins and their passwords, which a dump of one database leaves out.
-node scripts/ensure-database.mjs "$restored_db"
+node --conditions=coffre:source scripts/ensure-database.mjs "$restored_db"
 printf '%s\n%s\n%s\n' "$(owner_url "$restored_db")" "$COFFRE_VAULT_KEY" "$COFFRE_APP_KEY" | cli restore "$scratch/backup.dump" --keys
 
 log 'checking the backup again, with the wrong vault key'
-node scripts/ensure-database.mjs "$scratch_db"
+node --conditions=coffre:source scripts/ensure-database.mjs "$scratch_db"
 if printf '%s\n%s\n%s\n' "$(owner_url "$scratch_db")" "$(openssl rand -base64 32)" "$COFFRE_APP_KEY" | cli verify backup "$scratch/backup.dump" --keys >"$scratch/wrong-key.log" 2>&1; then
     cat "$scratch/wrong-key.log" >&2
     echo 'coffre verify backup passed with the wrong vault key' >&2

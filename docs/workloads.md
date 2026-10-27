@@ -195,13 +195,15 @@ should not pass through coffre, such as gigabyte S3 objects.
 ### Postgres
 
 ```ts
-import pg from 'pg';
+import postgres from 'postgres';
 import { connect } from '@coffre/client/workload/postgres';
 
-const pool = new pg.Pool({ stream: () => connect(coffre, 'db') });
+const sql = postgres({ socket: () => connect(coffre, 'db') });
 ```
 
-`connect` gives node-postgres a stream over the tunnel's WebSocket, signed
+node-postgres takes the same stream: `new pg.Pool({ stream: () => connect(coffre, 'db') })`.
+
+`connect` gives the driver a stream over the tunnel's WebSocket, signed
 by the session. There is no listener, no password and no database URL in
 the app: coffre logs in to the database. It uses the runtime's own
 `WebSocket` (Node 22 and later, Bun, Deno). Node 20 has none, so pass the

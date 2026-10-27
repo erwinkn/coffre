@@ -12,14 +12,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
+
 
 import { clientFor } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 import { deps, DEV, entries, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
-import { tunnelListener } from './tunnel-listener.ts';
+import { appClient, tunnelListener } from './tunnel-listener.ts';
 
 const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database, over Hyperdrive' : false;
 const NAME = 'coffre-tunnel-coffre-workers-test';
@@ -68,6 +68,7 @@ async function boot(): Promise<void> {
   });
 }
 
+
 after(async () => {
   await worker?.stop();
   if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -77,11 +78,8 @@ test("a run's session in coffre's object: admitted and logged as on Node, rechec
   await boot();
   const listener = await tunnelListener(`ws://${worker.address}:${worker.port}/use/market/dev/db`, handle);
   try {
-    const client = new pg.Client({ connectionString: `postgres://app:${handle}@127.0.0.1:${listener.port}/app` });
-    client.on('error', () => undefined);
-    const ended = new Promise((resolve) => client.once('end', resolve));
-    await client.connect();
-    assert.deepEqual((await client.query('SELECT current_user AS who')).rows, [{ who: 'coffre_runtime' }]);
+    const client = appClient(listener.port, handle);
+    assert.deepEqual([...await client.unsafe('SELECT current_user AS who')], [{ who: 'coffre_runtime' }]);
     // One use at admission, as on Node; then the object's check, a use too, each second.
     const admitted = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db');
     assert.equal(admitted.length, 1);
@@ -91,7 +89,7 @@ test("a run's session in coffre's object: admitted and logged as on Node, rechec
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.ok((await entries('credential.use')).some((entry) => entry.metadata.recheck === true), 'the object rechecked the handle');
-    assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
+    assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
 
     // Revoked from Node, as `coffre tokens revoke` does: the object's next check ends the session.
     const session = await sessionFor(DEV);
@@ -99,12 +97,13 @@ test("a run's session in coffre's object: admitted and logged as on Node, rechec
     const id = listed.tokens.find((token) => token.hint.endsWith(handle.slice(-4)))!.id;
     await route(`/api/members/user:${DEV}/tokens/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${session}` } });
     const revoked = Date.now();
-    await ended;
+    await client.ended;
     assert.ok(Date.now() - revoked < 5000, `the session outlived its handle by ${Date.now() - revoked} ms`);
     // And a new connection is refused at admission.
-    const refused = new pg.Client({ connectionString: `postgres://app:${handle}@127.0.0.1:${listener.port}/app` });
-    refused.on('error', () => undefined);
-    await assert.rejects(refused.connect());
+    const refused = appClient(listener.port, handle);
+    await assert.rejects(refused.unsafe('SELECT 1'));
+    await refused.end();
+    await client.end();
   } finally {
     listener.close();
   }

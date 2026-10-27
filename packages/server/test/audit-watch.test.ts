@@ -14,6 +14,7 @@ import { acceptLoss, auditReadiness, HEARTBEAT_STALE_AFTER_SECONDS, walkAuditBac
 import { openTestDatabase, resetDatabase, testAnchor, testVault } from './api-fixture.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { withLogUnlocked } from './db/engine.ts';
+import { answering } from './db/postgres-pool.ts';
 
 const db = await openTestDatabase();
 // A log nobody has signed in to: the vault's entries are its checkpoints, and the one that makes the Owner its deployment names.
@@ -582,9 +583,8 @@ test('readiness accepts a recent anchor and rejects a stale one', async () => {
 });
 
 test('readiness rejects a database without the expected Drizzle schema prefix', async () => {
-  // The migrations count, in Drizzle's array row mode: none applied.
-  const query = async () => ({ rows: [[0]], fields: [] });
-  const empty = createDatabase({ query, connect: async () => ({ query, release: () => {} }) } as never);
+  // No ledger of migrations at all.
+  const empty = createDatabase(answering(() => [{ present: false }]));
   assert.equal((await auditReadiness(empty, vault, chainKey, anchor)).ok, false);
 });
 

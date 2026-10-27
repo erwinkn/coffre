@@ -1,19 +1,17 @@
 import { resolve } from 'node:path';
 
 import type { Client, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
-import pg from 'pg';
-
 import { createDatabase, type Database } from './database.ts';
 import type { Engine } from './dialect.ts';
 import { asPostgresDatabase } from './portable.ts';
-import { postgresConnection } from './postgres.ts';
+import { postgresClient } from './postgres.ts';
 
-export { postgresConnection } from './postgres.ts';
+export { postgresClient, postgresOptions, postgresSession, quoteIdentifier, quoteLiteral, SessionLost, type ClientOptions, type PostgresClient } from './postgres.ts';
 
 /**
  * Open a database from its URL, on a Node server:
  *
- *   postgres://… or postgresql://…   node-postgres
+ *   postgres://… or postgresql://…   postgres.js, a pool of up to 10 connections
  *   file:… or libsql:…                @libsql/client (SQLite)
  *
  * The SQLite driver loads only when asked for. The Worker does not
@@ -23,8 +21,9 @@ export { postgresConnection } from './postgres.ts';
 export async function openDatabase(url: string): Promise<OpenDatabase> {
   switch (engineOfUrl(url)) {
     case 'postgres': {
-      const pool = new pg.Pool(postgresConnection(url));
-      return { engine: 'postgres', db: createDatabase(pool), close: () => pool.end() };
+      // As node-postgres's pool was: 10 connections, each closed after 10 s idle.
+      const client = postgresClient(url, { max: 10, idle_timeout: 10 });
+      return { engine: 'postgres', db: createDatabase(client), close: () => client.end() };
     }
     case 'sqlite': {
       const [{ createClient }, { drizzle }, schema] = await Promise.all([

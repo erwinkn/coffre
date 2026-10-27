@@ -62,7 +62,7 @@ rm -rf "$work/tarballs" "$work/cli" "$work/client" "$work/coffre-workers" "$work
 # The Workers deployment runs on the local Postgres, in a database the
 # conformance run makes and drops; the logins it runs as must exist.
 "$root/scripts/ensure-postgres.sh"
-node "$root/scripts/ensure-database.mjs" coffre
+node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
 postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}

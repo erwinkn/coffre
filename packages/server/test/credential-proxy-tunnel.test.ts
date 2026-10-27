@@ -1,5 +1,5 @@
 // Postgres through the credential proxy's tunnel (docs/design/credential-proxy.md,
-// "Postgres through a tunnel"): the app's driver, `pg`, connects to a local
+// "Postgres through a tunnel"): the app's driver, postgres.js, connects to a local
 // listener with the handle as its password; the listener carries each
 // connection over a WebSocket to coffre, which logs in to the real database
 // with the real password (SCRAM, as this suite's Postgres asks) and pipes
@@ -13,8 +13,8 @@ import { connect as tcp, createServer as createTcp, type AddressInfo, type Serve
 import { once } from 'node:events';
 import { Duplex } from 'node:stream';
 
-import pg from 'pg';
 import { WebSocket } from 'ws';
+
 
 import { clientFor } from './api-fixture.ts';
 import { trackBackgroundTask } from './background-tasks.ts';
@@ -27,6 +27,7 @@ import { credentialProxy, postgres, type Network } from '../src/plugins/credenti
 import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import type { WorkersSocket } from '../src/workers-socket.ts';
+import { appClient, type AppClient } from './tunnel-listener.ts';
 
 const postgresOnly = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false };
 // The suite's database, as the app's would name it: no TLS to a database on loopback.
@@ -132,8 +133,20 @@ function answered(socket: Socket): Promise<Buffer> {
 }
 
 /** The app's client, on the listener, the handle its password: what `coffre run` puts in DATABASE_URL. */
-function appClient(password = handle): pg.Client {
-  return new pg.Client({ connectionString: `postgres://app:${password}@127.0.0.1:${listenerPort}/app` });
+const appClientOf = (password = handle): AppClient => appClient(listenerPort, password);
+
+/** Whether the tunnel ends `client`'s connection within `ms`. */
+const endsWithin = (client: AppClient, ms: number): Promise<boolean> =>
+  Promise.race([client.ended.then(() => true), new Promise<boolean>((resolve) => setTimeout(resolve, ms, false))]);
+
+/** A CancelRequest, as psql sends one, with the key a session was given. */
+function cancelRequest({ pid, secret }: { pid: number; secret: number }): Buffer {
+  const packet = Buffer.alloc(16);
+  packet.writeInt32BE(16, 0);
+  packet.writeInt32BE(80877102, 4);
+  packet.writeUInt32BE(pid >>> 0, 8);
+  packet.writeUInt32BE(secret >>> 0, 12);
+  return packet;
 }
 
 test('the plan names the tunnel, and gives the app no database URL of its own', postgresOnly, async () => {
@@ -145,13 +158,11 @@ test('the plan names the tunnel, and gives the app no database URL of its own', 
 });
 
 test('queries through the tunnel run as the real login, and the session is logged as one use', postgresOnly, async () => {
-  const client = appClient();
-  await client.connect();
+  const client = appClientOf();
   try {
-    const { rows } = await client.query('SELECT current_user AS who, 1 + 1 AS two');
-    assert.deepEqual(rows, [{ who: 'coffre_runtime', two: 2 }]);
+    assert.deepEqual([...await client.unsafe('SELECT current_user AS who, 1 + 1 AS two')], [{ who: 'coffre_runtime', two: 2 }]);
     // An extended-protocol query with parameters, as drivers send them.
-    assert.deepEqual((await client.query('SELECT $1::text || $2::text AS joined', ['a', 'b'])).rows, [{ joined: 'ab' }]);
+    assert.deepEqual([...await client.unsafe('SELECT $1::text || $2::text AS joined', ['a', 'b'])], [{ joined: 'ab' }]);
   } finally {
     await client.end();
   }
@@ -163,19 +174,20 @@ test('queries through the tunnel run as the real login, and the session is logge
 });
 
 test('a password that is not the handle is refused, before any login to the database', postgresOnly, async () => {
-  const client = appClient('not-the-handle');
-  await assert.rejects(client.connect(), (error: { code?: string }) => error.code === '28P01');
+  const client = appClientOf('not-the-handle');
+  await assert.rejects(client.unsafe('SELECT 1'), (error: { code?: string }) => error.code === '28P01');
+  await client.end();
 });
 
 test('LISTEN and NOTIFY across two tunnelled connections', postgresOnly, async () => {
-  const listening = appClient();
-  const notifying = appClient();
-  await listening.connect();
-  await notifying.connect();
+  const listening = appClientOf();
+  const notifying = appClientOf();
   try {
-    await listening.query('LISTEN coffre_tunnel');
-    const heard = new Promise<string>((resolve) => listening.on('notification', (message) => resolve(message.payload!)));
-    await notifying.query("SELECT pg_notify('coffre_tunnel', 'through the tunnel')");
+    let hear!: (payload: string) => void;
+    const heard = new Promise<string>((resolve) => (hear = resolve));
+    // postgres.js listens on a connection of its own, which it opens here, through the tunnel all the same.
+    await listening.listen('coffre_tunnel', hear);
+    await notifying.unsafe("SELECT pg_notify('coffre_tunnel', 'through the tunnel')");
     assert.equal(await heard, 'through the tunnel');
   } finally {
     await listening.end();
@@ -203,21 +215,16 @@ test('COPY both ways, on the wire as psql sends it', postgresOnly, async () => {
 });
 
 test("a cancel request, on a connection of its own, reaches the database with the key the app was given", postgresOnly, async () => {
-  const client = appClient();
-  await client.connect();
+  const client = appClientOf();
   try {
-    const sleeping = client.query('SELECT pg_sleep(30)');
+    // The key the tunnel gave the app, at its startup.
+    const { state } = await client.unsafe('SELECT 1');
+    const sleeping = client.unsafe('SELECT pg_sleep(30)').execute();
     await new Promise((resolve) => setTimeout(resolve, 200));
-    const { processID, secretKey } = client as unknown as { processID: number; secretKey: number };
     // As psql sends one: a CancelRequest, to the same listener.
     const cancel = tcp({ host: '127.0.0.1', port: listenerPort });
     await once(cancel, 'connect');
-    const packet = Buffer.alloc(16);
-    packet.writeInt32BE(16, 0);
-    packet.writeInt32BE(80877102, 4);
-    packet.writeInt32BE(processID, 8);
-    packet.writeInt32BE(secretKey, 12);
-    cancel.write(packet);
+    cancel.write(cancelRequest(state));
     const started = Date.now();
     await assert.rejects(sleeping, (error: { code?: string }) => error.code === '57014');
     assert.ok(Date.now() - started < 5000);
@@ -228,25 +235,19 @@ test("a cancel request, on a connection of its own, reaches the database with th
 });
 
 test("a cancel request with a key no live session of this handle was given reaches nothing", postgresOnly, async () => {
-  const client = appClient();
-  await client.connect();
+  const client = appClientOf();
   try {
-    const sleeping = client.query('SELECT pg_sleep(0.6) AS slept');
+    const { state } = await client.unsafe('SELECT 1');
+    const sleeping = client.unsafe('SELECT pg_sleep(0.6) AS slept').execute();
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const { processID, secretKey } = client as unknown as { processID: number; secretKey: number };
     // The database's own key is never the app's: guess one, or flip one bit of the one given.
-    for (const [pid, key] of [[processID, secretKey ^ 1], [12345, 67890]]) {
+    for (const key of [{ pid: state.pid, secret: state.secret ^ 1 }, { pid: 12345, secret: 67890 }]) {
       const cancel = tcp({ host: '127.0.0.1', port: listenerPort });
       await once(cancel, 'connect');
-      const packet = Buffer.alloc(16);
-      packet.writeInt32BE(16, 0);
-      packet.writeInt32BE(80877102, 4);
-      packet.writeInt32BE(pid!, 8);
-      packet.writeInt32BE(key!, 12);
-      cancel.write(packet);
+      cancel.write(cancelRequest(key));
       await once(cancel, 'close');
     }
-    assert.deepEqual((await sleeping).rows, [{ slept: '' }], 'the query ran to its end');
+    assert.deepEqual([...await sleeping], [{ slept: '' }], 'the query ran to its end');
   } finally {
     await client.end();
   }
@@ -352,26 +353,28 @@ test('a database that ends SCRAM without its signature is no database the URL na
   await once(fake, 'listening');
   try {
     await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@127.0.0.1:${(fake.address() as AddressInfo).port}/d?sslmode=disable` });
-    await assert.rejects(appClient().connect(), /without proving it knows the password/);
+    const client = appClientOf();
+    await assert.rejects(client.unsafe('SELECT 1'), /without proving it knows the password/);
+    await client.end();
   } finally {
     fake.close();
   }
 });
 
 test("a person whose grant ends loses their open sessions at the next check", postgresOnly, async () => {
-  const client = appClient();
-  client.on('error', () => undefined);
-  await client.connect();
-  assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
+  const client = appClientOf();
+  assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: null });
   // New connections meanwhile, which the cache would serve: none of them stands in for the vault's answer.
   for (let tries = 0; tries < 6; tries += 1) {
-    const another = appClient();
-    another.on('error', () => undefined);
-    await another.connect().then(() => another.end(), () => undefined);
+    const another = appClientOf();
+    await another.unsafe('SELECT 1').catch(() => undefined);
+    await another.end();
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  await assert.rejects(client.query('SELECT 1'));
+  assert.equal(await endsWithin(client, 0), true, 'the open session ended');
+  await assert.rejects(client.unsafe('SELECT 1'));
+  await client.end();
 });
 
 test('a connection the app drops while the database has not answered leaves no socket open to it', postgresOnly, async () => {
@@ -420,18 +423,14 @@ test('a startup asks for encryption once each, and no more', postgresOnly, async
 });
 
 test('sessions opened at different times end together, within one check of the revocation', postgresOnly, async () => {
-  const first = appClient();
-  first.on('error', () => undefined);
-  await first.connect();
+  const first = appClientOf();
+  await first.unsafe('SELECT 1');
   await new Promise((resolve) => setTimeout(resolve, 100));
-  const second = appClient();
-  second.on('error', () => undefined);
-  await second.connect();
-  const ended = (client: pg.Client) => new Promise<number>((resolve) => client.once('end', () => resolve(Date.now())));
-  const ends = [ended(first), ended(second)];
+  const second = appClientOf();
+  await second.unsafe('SELECT 1');
   const revoked = Date.now();
   await revoke();
-  const [a, b] = await Promise.all(ends);
+  const [a, b] = await Promise.all([first.ended, second.ended]);
   // One check is 200 ms here: both within two of it, the first that fails ending them both.
   assert.ok(Math.max(a, b) - revoked < 450, `${a - revoked} ms and ${b - revoked} ms`);
 });
@@ -453,10 +452,9 @@ test('a refused upgrade leaves no socket behind, though the peer keeps its side 
 });
 
 test("a group of sessions is checked once an interval, however many it holds, and a revocation just after a check ends them within one", postgresOnly, async () => {
-  const clients = Array.from({ length: 10 }, () => appClient());
-  for (const client of clients) client.on('error', () => undefined);
+  const clients = Array.from({ length: 10 }, () => appClientOf());
   // One after another: what is counted is the group's checks, not ten first reads at once racing for the log's head.
-  for (const client of clients) await client.connect();
+  for (const client of clients) await client.unsafe('SELECT 1');
   const rechecks = async () => (await entries('credential.use')).filter((entry) => entry.metadata.recheck === true).length;
   // Two and a half intervals, counted from now: two checks, or three, for all ten, never one each.
   const from = await rechecks();
@@ -465,26 +463,23 @@ test("a group of sessions is checked once an interval, however many it holds, an
   // Revoked right after a check: the next one, an interval on, ends all ten.
   const before = await rechecks();
   for (let waited = 0; (await rechecks()) === before && waited < 500; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
-  const ended = clients.map((client) => new Promise<number>((resolve) => client.once('end', () => resolve(Date.now()))));
   const revoked = Date.now();
   await revoke();
-  const times = await Promise.all(ended);
+  const times = await Promise.all(clients.map((client) => client.ended));
   // An interval is 200 ms here: within it and a margin for a slow machine, far short of ten intervals, one per session.
   assert.ok(Math.max(...times) - revoked < 600, `${Math.max(...times) - revoked} ms`);
 });
 
 test('a check the vault never answers is a no, by its deadline: the sessions do not outlive a stalled vault', postgresOnly, async () => {
-  const client = appClient();
-  client.on('error', () => undefined);
-  await client.connect();
-  const ended = new Promise<number>((resolve) => client.once('end', () => resolve(Date.now())));
+  const client = appClientOf();
+  await client.unsafe('SELECT 1');
   const unwrap = deps.vault.unwrap;
   // Stalled until the case ends, then refused: a check still waiting is the case's, which the next case waits for.
   const stalls: (() => void)[] = [];
   deps.vault.unwrap = () => new Promise((_, reject) => stalls.push(() => reject(new Error('the case ended'))));
   const stalled = Date.now();
   try {
-    assert.ok((await ended) - stalled < 600, 'within an interval and a deadline');
+    assert.ok((await client.ended) - stalled < 600, 'within an interval and a deadline');
   } finally {
     deps.vault.unwrap = unwrap;
     for (const stop of stalls) stop();
@@ -494,19 +489,16 @@ test('a check the vault never answers is a no, by its deadline: the sessions do 
 test("a new group let in on a cached URL decides at once: a grant lost meanwhile ends it, not an interval later", postgresOnly, async () => {
   // Checked every 5 seconds: an interval later is seconds on, which no load makes of at once.
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 5 })]);
-  const first = appClient();
-  await first.connect();
+  const first = appClientOf();
+  await first.unsafe('SELECT 1');
   await first.end();
   await new Promise((resolve) => setTimeout(resolve, 50));
   await clientFor(deps, ROOT).access.set(`user:${DEV}`, { market: null });
   // The URL is still in the cache: the connection is let in, and its group's own first check ends it.
-  const second = appClient();
-  second.on('error', () => undefined);
+  const second = appClientOf();
   const started = Date.now();
-  const outcome = await second.connect().then(
-    () => new Promise<number>((resolve) => second.once('end', () => resolve(Date.now()))),
-    () => Date.now(),
-  );
+  const outcome = await second.unsafe('SELECT 1').then(() => second.ended, () => Date.now());
+  await second.end();
   assert.ok(outcome - started < 2500, `${outcome - started} ms`);
 });
 
@@ -514,8 +506,8 @@ test("a check answered once its group's last session has gone arms nothing: a ne
   // Checked every 2 seconds, a check given as long: a group's bytes stop 4 seconds past its last good check.
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 2 })]);
   const opened = async () => (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true).length;
-  const first = appClient();
-  await first.connect();
+  const first = appClientOf();
+  await first.unsafe('SELECT 1');
   // The group's first check, held in the vault until its one session has gone, then answered yes.
   const unwrap = deps.vault.unwrap;
   let entered!: () => void;
@@ -538,8 +530,8 @@ test("a check answered once its group's last session has gone arms nothing: a ne
   // Past when the gone group's watchdog would have closed it, had the yes armed one, and dropped the URL from the cache.
   await new Promise((resolve) => setTimeout(resolve, 4500));
   const before = await opened();
-  const second = appClient();
-  await second.connect();
+  const second = appClientOf();
+  await second.unsafe('SELECT 1');
   await second.end();
   assert.equal(await opened(), before, 'let in on the URL the cache holds, opened no more');
 });
@@ -563,7 +555,9 @@ test('a database that asks for more SCRAM iterations than any needs is refused b
   try {
     await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@127.0.0.1:${(fake.address() as AddressInfo).port}/d?sslmode=disable` });
     const started = Date.now();
-    await assert.rejects(appClient().connect(), /SCRAM iterations/);
+    const client = appClientOf();
+    await assert.rejects(client.unsafe('SELECT 1'), /SCRAM iterations/);
+    await client.end();
     assert.ok(Date.now() - started < 2000);
   } finally {
     fake.close();
@@ -628,21 +622,26 @@ async function revoke(): Promise<void> {
 }
 
 test('a handle revoked mid-session ends the open session at the next check, and opens no other', postgresOnly, async () => {
-  const client = appClient();
-  client.on('error', () => undefined);
-  await client.connect();
-  assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
+  const client = appClientOf();
+  assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   await revoke();
-  await new Promise((resolve) => setTimeout(resolve, 600));
-  await assert.rejects(client.query('SELECT 1'));
-  await assert.rejects(appClient().connect(), 'nor is a new one opened');
+  assert.equal(await endsWithin(client, 600), true, 'the open session ended');
+  await assert.rejects(client.unsafe('SELECT 1'));
+  await client.end();
+  const another = appClientOf();
+  await assert.rejects(another.unsafe('SELECT 1'), 'nor is a new one opened');
+  await another.end();
 });
 
 test('a tunnel reaches only the hosts it names, and a private database only with insecureUpstreams', postgresOnly, async () => {
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['db.acme.example'] }) }, insecureUpstreams: true })]);
-  await assert.rejects(appClient().connect());
+  const unnamed = appClientOf();
+  await assert.rejects(unnamed.unsafe('SELECT 1'));
+  await unnamed.end();
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
-  await assert.rejects(appClient().connect());
+  const loopback = appClientOf();
+  await assert.rejects(loopback.unsafe('SELECT 1'));
+  await loopback.end();
   // Loopback written the ways Node still dials it, with TLS asked for: refused all the same.
   for (const host of ['127.1', '2130706433', '0x7f000001', '127.0.0.1.', 'localhost.', 'LOCALHOST', '[::ffff:7f00:1]', '[0:0:0:0:0:0:0:1]']) {
     await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: `postgres://u:p@${host}:5432/d` });
@@ -694,10 +693,9 @@ test('a tunnel through a network binding reaches the private host it names, plai
   await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable') });
   // Each connection opens the URL afresh, as the vault holds it now.
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) }, cacheSeconds: 0 })]);
-  const client = appClient();
-  await client.connect();
+  const client = appClientOf();
   try {
-    assert.deepEqual((await client.query('SELECT current_user AS who')).rows, [{ who: 'coffre_runtime' }]);
+    assert.deepEqual([...await client.unsafe('SELECT current_user AS who')], [{ who: 'coffre_runtime' }]);
   } finally {
     await client.end();
   }
@@ -761,20 +759,14 @@ test('a cancel request through a network binding reaches the database, though it
     DATABASE_URL: `postgres://coffre_runtime:local-runtime-only@10.9.8.7:5432${new URL(TEST_RUNTIME_DATABASE_URL).pathname}?sslmode=disable`,
   });
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) } })]);
-  const client = appClient();
-  await client.connect();
+  const client = appClientOf();
   try {
-    const sleeping = client.query('SELECT pg_sleep(30)');
+    const { state } = await client.unsafe('SELECT 1');
+    const sleeping = client.unsafe('SELECT pg_sleep(30)').execute();
     await new Promise((resolve) => setTimeout(resolve, 200));
-    const { processID, secretKey } = client as unknown as { processID: number; secretKey: number };
     const cancel = tcp({ host: '127.0.0.1', port: listenerPort });
     await once(cancel, 'connect');
-    const packet = Buffer.alloc(16);
-    packet.writeInt32BE(16, 0);
-    packet.writeInt32BE(80877102, 4);
-    packet.writeInt32BE(processID, 8);
-    packet.writeInt32BE(secretKey, 12);
-    cancel.write(packet);
+    cancel.write(cancelRequest(state));
     const started = Date.now();
     await assert.rejects(sleeping, (error: { code?: string }) => error.code === '57014');
     assert.ok(Date.now() - started < 5000);

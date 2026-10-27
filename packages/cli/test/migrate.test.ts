@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 
 import { AfterMigrations, managedObjects, migrateDatabase, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
@@ -311,11 +311,10 @@ test("outside a deployment's folder, migrate says where it runs, before asking f
 async function fresh(name: string): Promise<string> {
   await emptyCluster();
   const url = await database(name, 'superuser');
-  const client = new pg.Client({ connectionString: url });
-  await client.connect();
+  const client = postgresClient(url, { max: 1 });
   try {
-    await client.query('CREATE ROLE coffre_runtime LOGIN');
-    await client.query('CREATE ROLE coffre_vault_runtime LOGIN');
+    await client.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await client.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
   } finally {
     await client.end();
   }
@@ -323,11 +322,10 @@ async function fresh(name: string): Promise<string> {
 }
 
 async function applied(url: string): Promise<number> {
-  const client = new pg.Client({ connectionString: url });
-  await client.connect();
+  const client = postgresClient(url, { max: 1 });
   try {
-    const ledger = (await client.query("SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present")).rows[0].present as boolean;
-    return ledger ? Number((await client.query('SELECT count(*) AS n FROM drizzle.__drizzle_migrations')).rows[0].n) : 0;
+    const [{ present }] = await client.unsafe<[{ present: boolean }]>("SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present");
+    return present ? Number((await client.unsafe<[{ n: string }]>('SELECT count(*) AS n FROM drizzle.__drizzle_migrations'))[0].n) : 0;
   } finally {
     await client.end();
   }
@@ -335,12 +333,11 @@ async function applied(url: string): Promise<number> {
 
 /** What a coffre's own migrator records, written straight into the ledger. */
 async function record(url: string, hash: string, createdAt: number): Promise<void> {
-  const client = new pg.Client({ connectionString: url });
-  await client.connect();
+  const client = postgresClient(url, { max: 1 });
   try {
-    await client.query('CREATE SCHEMA IF NOT EXISTS drizzle');
-    await client.query('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
-    await client.query('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)', [hash, createdAt]);
+    await client.unsafe('CREATE SCHEMA IF NOT EXISTS drizzle');
+    await client.unsafe('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
+    await client.unsafe('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)', [hash, createdAt]);
   } finally {
     await client.end();
   }
@@ -368,9 +365,9 @@ test("in a deployment's folder, its pipeline migrates a new database before the 
   assert.equal(await applied(url), KNOWN.length);
 
   // The backup login, made after the migrations: a run with nothing to apply grants it its group when named.
-  await asSuperuser('postgres', (client) => client.query("CREATE ROLE coffre_backup_login LOGIN PASSWORD 'backup'"));
+  await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE coffre_backup_login LOGIN PASSWORD 'backup'"));
   const membership = () => asSuperuser('postgres', async (client) =>
-    (await client.query("SELECT admin_option, inherit_option, set_option FROM pg_auth_members WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole")).rows);
+    [...await client.unsafe("SELECT admin_option, inherit_option, set_option FROM pg_auth_members WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole")]);
   const again = await migrateIn(dir, url);
   assert.equal(again.code, 0, again.output);
   assert.match(again.output, new RegExp(`✓ \\S+ is up to date, at coffre \\S+'s schema: ${KNOWN.length === 1 ? '1 migration' : `${KNOWN.length} migrations`}, the last ${KNOWN.at(-1)}; reasserted the database's privileges\n`));
@@ -415,18 +412,17 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
   await emptyCluster();
   // Migrated by one login, as a managed host's first: CREATEROLE, not superuser.
   const owned = await database('setup_migrate_owners', 'owner');
-  const owner = new pg.Client({ connectionString: owned });
-  await owner.connect();
+  const owner = postgresClient(owned, { max: 1 });
   try {
-    await owner.query('CREATE ROLE coffre_runtime LOGIN');
-    await owner.query('CREATE ROLE coffre_vault_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
   } finally {
     await owner.end();
   }
   const dir = deploymentFolder(pinnedAt(cliVersion()));
   assert.equal((await migrateIn(dir, owned)).code, 0);
   // Then deployed with another, as PlanetScale gives a second: CREATEROLE too, a member of no role.
-  await asSuperuser('postgres', (client) => client.query("CREATE ROLE setup_deployer LOGIN CREATEROLE PASSWORD 'deployer-only-p4ss'"));
+  await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE setup_deployer LOGIN CREATEROLE PASSWORD 'deployer-only-p4ss'"));
   const deployer = new URL(owned);
   deployer.username = 'setup_deployer';
   deployer.password = 'deployer-only-p4ss';
@@ -439,7 +435,7 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
   assert.doesNotMatch(unread.output, /permission denied/);
 
   // PlanetScale's reads and writes every table, and owns none.
-  await asSuperuser('postgres', (client) => client.query('GRANT pg_read_all_data, pg_write_all_data TO setup_deployer'));
+  await asSuperuser('postgres', (client) => client.unsafe('GRANT pg_read_all_data, pg_write_all_data TO setup_deployer'));
   // Up to date, it applies nothing, and says the next migration needs another login.
   const current = await migrateIn(dir, deployer.href);
   assert.equal(current.code, 0, current.output);
@@ -452,7 +448,7 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
 
   // With a migration to apply, refused before it asks, not "permission denied for schema drizzle".
   const last = await asSuperuser('setup_migrate_owners', async (client) =>
-    (await client.query('DELETE FROM drizzle.__drizzle_migrations WHERE id = (SELECT max(id) FROM drizzle.__drizzle_migrations) RETURNING hash, created_at')).rows[0] as { hash: string; created_at: string },
+    (await client.unsafe<[{ hash: string; created_at: string }]>('DELETE FROM drizzle.__drizzle_migrations WHERE id = (SELECT max(id) FROM drizzle.__drizzle_migrations) RETURNING hash, created_at'))[0],
   );
   const pending = await migrateIn(dir, deployer.href);
   assert.equal(pending.code, 1);
@@ -465,7 +461,7 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
   await assert.rejects(migrateDatabase(deployer.href), (error) => error instanceof NotOwner && error.owners.map(({ name }) => name).join() === 'setup_owner' && error.login === 'setup_deployer');
 
   // A member of the owner migrates, and is told nothing more.
-  await asSuperuser('postgres', (client) => client.query('GRANT setup_owner TO setup_deployer'));
+  await asSuperuser('postgres', (client) => client.unsafe('GRANT setup_owner TO setup_deployer'));
   await migrateDatabase(deployer.href);
   const member = await migrateIn(dir, deployer.href);
   assert.equal(member.code, 0, member.output);
@@ -473,9 +469,9 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
 
   // A table of the database's own in public, which another role owns, is not coffre's to change.
   await asSuperuser('setup_migrate_owners', async (client) => {
-    await client.query('CREATE ROLE setup_reporting');
-    await client.query('CREATE TABLE public.unrelated_reporting_data (id int)');
-    await client.query('ALTER TABLE public.unrelated_reporting_data OWNER TO setup_reporting');
+    await client.unsafe('CREATE ROLE setup_reporting');
+    await client.unsafe('CREATE TABLE public.unrelated_reporting_data (id int)');
+    await client.unsafe('ALTER TABLE public.unrelated_reporting_data OWNER TO setup_reporting');
   });
   await migrateDatabase(owned);
   const unrelated = await migrateIn(dir, owned);
@@ -486,19 +482,18 @@ test("a login that neither owns coffre's tables nor is a member of their owner i
 test('a member of the owner that does not inherit its privileges is told so, and the GRANT it says lets it migrate', needsCluster, async () => {
   await emptyCluster();
   const owned = await database('setup_migrate_inherit', 'owner');
-  const owner = new pg.Client({ connectionString: owned });
-  await owner.connect();
+  const owner = postgresClient(owned, { max: 1 });
   try {
-    await owner.query('CREATE ROLE coffre_runtime LOGIN');
-    await owner.query('CREATE ROLE coffre_vault_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
   } finally {
     await owner.end();
   }
   await migrateDatabase(owned);
   // NOINHERIT: on Postgres 16 its memberships do not inherit unless granted so; a plain GRANT gives one that does not.
   await asSuperuser('postgres', async (client) => {
-    await client.query("CREATE ROLE setup_deployer LOGIN NOINHERIT PASSWORD 'deployer-only-p4ss'");
-    await client.query('GRANT setup_owner TO setup_deployer');
+    await client.unsafe("CREATE ROLE setup_deployer LOGIN NOINHERIT PASSWORD 'deployer-only-p4ss'");
+    await client.unsafe('GRANT setup_owner TO setup_deployer');
   });
   const deployer = new URL(owned);
   deployer.username = 'setup_deployer';
@@ -510,6 +505,6 @@ test('a member of the owner that does not inherit its privileges is told so, and
   assert.ok(refused instanceof NotOwner, String(refused));
   assert.match(refused.message, /this login, setup_deployer, is a member of it but does not inherit its privileges: .* run GRANT "setup_owner" TO "setup_deployer" WITH INHERIT TRUE$/);
   // What it says to run, run as it says.
-  await asSuperuser('postgres', (client) => client.query(refused.message.slice(refused.message.lastIndexOf('run ') + 4)));
+  await asSuperuser('postgres', (client) => client.unsafe(refused.message.slice(refused.message.lastIndexOf('run ') + 4)));
   await migrateDatabase(deployer.href);
 });

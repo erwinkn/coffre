@@ -3,15 +3,15 @@
 // Postgres 16 of your own, never the shared one: it drops and makes the
 // tables `uses` and `tiles` in the database the URL names.
 //
-//   node packages/vault/scripts/audit-tree-level0.mjs postgres://user:password@127.0.0.1:<port>/<database>
-import pg from 'pg';
+//   node --conditions=coffre:source packages/vault/scripts/audit-tree-level0.mjs postgres://user:password@127.0.0.1:<port>/<database>
 import { randomBytes, randomUUID } from 'node:crypto';
+import { postgresSession } from '@coffre/db/connect';
 if (process.argv[2] === undefined) throw new Error('usage: audit-tree-level0.mjs <postgres url>');
-const db = new pg.Client({ connectionString: process.argv[2] });
-await db.connect();
-const q = (t, v) => db.query(t, v);
-const lsn = async () => (await q('SELECT pg_current_wal_lsn() AS l')).rows[0].l;
-const walSince = async (from) => Number((await q('SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1) AS d', [from])).rows[0].d);
+// One session, as coffre opens one: its statements unnamed, its arrays sent as node-postgres sends them.
+const db = postgresSession(process.argv[2]);
+const q = (t, v) => db.unsafe(t, v);
+const lsn = async () => (await q('SELECT pg_current_wal_lsn() AS l'))[0].l;
+const walSince = async (from) => Number((await q('SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1) AS d', [from]))[0].d);
 await q('DROP TABLE IF EXISTS uses, tiles');
 await q(`CREATE TABLE uses (number bigint NOT NULL, at bigint NOT NULL, request_id bigint NOT NULL, credential uuid NOT NULL, secret uuid NOT NULL, mac bytea NOT NULL)`);
 await q('CREATE UNIQUE INDEX uses_request ON uses (at, request_id)');
@@ -20,7 +20,7 @@ const t0 = Date.now() * 1;
 // 1M uses at 1,000 a second, numbers with a gap now and then.
 await q(`INSERT INTO uses SELECT g + g / 97, $1::bigint + g, (random() * 9e18)::bigint, gen_random_uuid(), gen_random_uuid(), substr(sha256(g::text::bytea), 1, 16) FROM generate_series(1, $2) g`, [t0, N]);
 await q('VACUUM ANALYZE uses');
-const size = async (rel) => Number((await q('SELECT pg_relation_size($1) AS s', [rel])).rows[0].s);
+const size = async (rel) => Number((await q('SELECT pg_relation_size($1) AS s', [rel]))[0].s);
 const heap = await size('uses'), idx = await size('uses_request');
 console.log(`uses, 1M rows: heap ${(heap / N).toFixed(1)} B, (at, request_id) index ${(idx / N).toFixed(1)} B per use`);
 await q('CREATE INDEX uses_number ON uses (number)');
@@ -60,12 +60,13 @@ for (const level0 of [true, false]) {
       }
       leaves += 1;
     }
+    // The hashes as a bytea[]: postgres.js takes a plain array of buffers for one bytea.
     const rows = [...changed.values()].map(([l, index, full]) => [l, index, full ?? Buffer.concat(level[l])]).filter(([l, , b]) => b.length > 0 && (level0 || l > 0));
     if (rows.length > 0) await q(`INSERT INTO tiles SELECT * FROM unnest($1::smallint[], $2::bigint[], $3::bytea[]) ON CONFLICT (level, idx) DO UPDATE SET hashes = excluded.hashes`, [rows.map((r) => r[0]), rows.map((r) => r[1]), rows.map((r) => r[2])]);
     if (t % 300 === 299) await q('CHECKPOINT');
   }
   await q('VACUUM tiles');
-  const total = Number((await q("SELECT pg_total_relation_size('tiles') AS s")).rows[0].s);
+  const total = Number((await q("SELECT pg_total_relation_size('tiles') AS s"))[0].s);
   console.log(`uses tree ${level0 ? 'with' : 'without'} level-0 tiles: WAL ${((await walSince(from)) / ticks / 1024).toFixed(1)} KB a tick of 495 uses; ${(total / leaves).toFixed(1)} B per use on disk`);
 }
 // A proof's leaf level: one tile, or the 256 uses it stands for, found by number (index) or by `at` (no number index).

@@ -10,9 +10,9 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { EVERYWHERE, ROLES, type Permission } from '@coffre/core/access';
 import { tablesOf } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
+import { postgresSession } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
-import pg from 'pg';
 
 import { Changes, genesisCall, loggedChange, NotLogged, payloadOf, type ChangeKeys } from '../src/changes.ts';
 import type { Sealed } from '../src/checkpointer.ts';
@@ -454,33 +454,33 @@ test('a change waits for every use in flight, and every use asked meanwhile wait
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const from = (await store.readObject(db.owner, { kind: 'environment', id: w.prod })).seal;
   const protect = made(w.keys, { kind: 'environment', id: w.prod }, { op: 'environment.protect', protected: true }, { ...environment(w.project, w.prod, 'prod'), protected: true }, from);
-  const [use, changer] = [new pg.Client({ connectionString: OWNER_URL }), new pg.Client({ connectionString: VAULT_URL })];
-  await Promise.all([use.connect(), changer.connect()]);
-  const call = (c: store.ChangeCall) => changer.query(
+  // A session each, its transactions begun and ended by hand.
+  const [use, changer] = [postgresSession(OWNER_URL), postgresSession(VAULT_URL)];
+  const call = (c: store.ChangeCall) => changer.unsafe<[{ number: string | null }]>(
     'SELECT change_input($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) AS number',
     [c.ref.kind, c.ref.id, c.requestId, c.at, c.actor, c.payload, c.value, c.sealFrom, c.seal, c.mac],
   );
   try {
     // A use in flight holds the fence shared, as use_credential takes it: the change, with no 0.14 entry to fence it
     // too, waits for it in change_input.
-    await use.query('BEGIN');
-    await use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
-    await changer.query('BEGIN');
+    await use.unsafe('BEGIN');
+    await use.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+    await changer.unsafe('BEGIN');
     let ran = false;
     const changing = call(protect).then((result) => ((ran = true), result));
     await waitFor(async () => (await fenceWaiters()) > 0, 'the change waits for the use');
     assert.equal(ran, false);
-    await use.query('COMMIT');
-    assert.ok((await changing).rows[0].number !== null);
+    await use.unsafe('COMMIT');
+    assert.ok((await changing)[0].number !== null);
     // The change has run, not committed: a use asked now waits for the commit, and then reads what it wrote.
-    await use.query('BEGIN');
-    const using = use.query('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+    await use.unsafe('BEGIN');
+    const using = use.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 0)').execute();
     await waitFor(async () => (await fenceWaiters()) > 0, 'the use waits for the change');
-    await changer.query('COMMIT');
+    await changer.unsafe('COMMIT');
     await using;
-    const read = await use.query('SELECT protected FROM environments WHERE id = $1', [w.prod]);
-    assert.equal(read.rows[0].protected, true);
-    await use.query('COMMIT');
+    const [read] = await use.unsafe<[{ protected: boolean }]>('SELECT protected FROM environments WHERE id = $1', [w.prod]);
+    assert.equal(read.protected, true);
+    await use.unsafe('COMMIT');
   } finally {
     await Promise.all([use.end(), changer.end()]);
   }
@@ -489,19 +489,18 @@ test('a change waits for every use in flight, and every use asked meanwhile wait
 test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head, fence, and neither waits on the other in a circle (RowFirst, ChangeHeadFirst)', postgresOnly('SQLite has one writer'), async () => {
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
-  const old = new pg.Client({ connectionString: OWNER_URL });
-  await old.connect();
+  const old = postgresSession(OWNER_URL);
   try {
     // 0.14's vault: the member's queue and row, then, a moment later, the head, then an entry that changes access,
     // which takes the fence (OldWritesFence).
-    await old.query('BEGIN');
-    await old.query(`SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM vault_members WHERE principal = $1 FOR NO KEY UPDATE`, [ADA]);
+    await old.unsafe('BEGIN');
+    await old.unsafe(`SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM vault_members WHERE principal = $1 FOR NO KEY UPDATE`, [ADA]);
     const changed = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] });
     await waitFor(async () => (await waiting()) > 0, 'the change waits for the row');
-    await old.query('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
-    await old.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    await old.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await old.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
       SELECT next_seq, 'vault', 'fixture', 0, 'system:fixture', 'access.grant', 'allow', head_hash, decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex') FROM audit_chain_head`);
-    await old.query('ROLLBACK');
+    await old.unsafe('ROLLBACK');
     const outcome = await changed;
     assert.ok(outcome.ok, JSON.stringify(outcome));
     await holdsReplay(w.keys, [member(ADA)]);

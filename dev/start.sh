@@ -110,7 +110,7 @@ log 'starting Postgres'
 ./scripts/ensure-postgres.sh
 
 log "applying migrations to $database"
-node scripts/ensure-database.mjs "$database"
+node --conditions=coffre:source scripts/ensure-database.mjs "$database"
 DATABASE_URL="$owner_url" pnpm --dir packages/db run db:migrate >/dev/null
 
 # Service logs go to files rather than stdout so the seed output stays legible.
@@ -127,7 +127,7 @@ NODE_OPTIONS="--conditions=coffre:source ${NODE_OPTIONS:-}" ./dev/node_modules/.
 until curl -sf "$COFFRE_DEV_URL/livez" >/dev/null 2>&1; do sleep 1; done
 
 log 'seeding'
-DATABASE_URL="$owner_url" node dev/seed.mjs
+DATABASE_URL="$owner_url" node --conditions=coffre:source dev/seed.mjs
 
 cli="node --conditions=coffre:source packages/cli/src/main.ts"
 cat <<BANNER

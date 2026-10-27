@@ -18,10 +18,8 @@ const API = local.apiUrl;
 const IDP = local.idpUrl;
 const ADMIN = local.owner;
 
-const pg = (await import('pg')).default;
-const pool = new pg.Pool({
-    connectionString: local.databaseUrl,
-});
+const { postgresClient } = await import('@coffre/db/connect');
+const pool = postgresClient(local.databaseUrl, { max: 1 });
 
 // Behind a tunnel (dev/start.sh), the stack's own URLs are its public ones.
 const tunnel = { api: process.env.COFFRE_DEV_PUBLIC_URL, idp: process.env.COFFRE_DEV_IDP_PUBLIC_URL };
@@ -51,30 +49,30 @@ const member = ({ principalType, principalId }) =>
 // to the vault's members, so they go next; then the members and grants,
 // which go with the log that records them.
 console.log('==> resetting local data');
-await pool.query('DELETE FROM secret_references');
-await pool.query('ALTER TABLE audit_log DISABLE TRIGGER USER');
-await pool.query('DELETE FROM audit_log');
-await pool.query('ALTER TABLE audit_log ENABLE TRIGGER USER');
-await pool.query('DELETE FROM vault_releases');
-await pool.query('DELETE FROM mcp_approvals');
-await pool.query('DELETE FROM mcp_connections');
-await pool.query('DELETE FROM oauth_clients');
-await pool.query('DELETE FROM credentials');
-await pool.query('DELETE FROM enrollments');
-await pool.query('DELETE FROM device_authorizations');
-await pool.query('DELETE FROM identities');
-await pool.query('DELETE FROM service_bindings');
-await pool.query('DELETE FROM consumed_tokens');
-await pool.query('DELETE FROM capped_alerts');
-await pool.query('DELETE FROM vault_grants');
-await pool.query('DELETE FROM vault_members');
-await pool.query('DELETE FROM dismissed_keys');
-await pool.query('UPDATE secrets SET current_version_id = NULL');
-await pool.query('DELETE FROM secret_versions');
-await pool.query('DELETE FROM secrets');
-await pool.query('DELETE FROM environments');
-await pool.query('DELETE FROM projects');
-await pool.query(
+await pool.unsafe('DELETE FROM secret_references');
+await pool.unsafe('ALTER TABLE audit_log DISABLE TRIGGER USER');
+await pool.unsafe('DELETE FROM audit_log');
+await pool.unsafe('ALTER TABLE audit_log ENABLE TRIGGER USER');
+await pool.unsafe('DELETE FROM vault_releases');
+await pool.unsafe('DELETE FROM mcp_approvals');
+await pool.unsafe('DELETE FROM mcp_connections');
+await pool.unsafe('DELETE FROM oauth_clients');
+await pool.unsafe('DELETE FROM credentials');
+await pool.unsafe('DELETE FROM enrollments');
+await pool.unsafe('DELETE FROM device_authorizations');
+await pool.unsafe('DELETE FROM identities');
+await pool.unsafe('DELETE FROM service_bindings');
+await pool.unsafe('DELETE FROM consumed_tokens');
+await pool.unsafe('DELETE FROM capped_alerts');
+await pool.unsafe('DELETE FROM vault_grants');
+await pool.unsafe('DELETE FROM vault_members');
+await pool.unsafe('DELETE FROM dismissed_keys');
+await pool.unsafe('UPDATE secrets SET current_version_id = NULL');
+await pool.unsafe('DELETE FROM secret_versions');
+await pool.unsafe('DELETE FROM secrets');
+await pool.unsafe('DELETE FROM environments');
+await pool.unsafe('DELETE FROM projects');
+await pool.unsafe(
     "UPDATE audit_chain_head SET next_seq = 0, head_hash = decode(repeat('00', 32), 'hex')",
 );
 

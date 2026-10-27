@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 
 import { editWorker, readWorker } from '../src/deployment.ts';
 import { templateDir } from '../src/init.ts';
@@ -160,7 +160,7 @@ async function answer(terminal: Session, address = ''): Promise<void> {
 }
 
 /** Whether the backup login may log in, as the catalog has it. */
-const canLogIn = () => asSuperuser('postgres', async (client) => (await client.query("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'coffre_backup_login'")).rows);
+const canLogIn = () => asSuperuser('postgres', async (client) => [...await client.unsafe("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'coffre_backup_login'")]);
 
 /** Every secret this deployment has, none of which may reach the main screen, nor wrangler's arguments. */
 const secrets = new Set<string>();
@@ -389,7 +389,7 @@ test("a Hyperdrive config deleted during a run, its login's password kept: setup
   const files = ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
   cloudflare.state.vanishing.add('coffre');
   // As a deployment set up before setup made the backup login has it: none. This run makes it, and stops before it could show its password.
-  await asSuperuser('postgres', (client) => client.query('DROP ROLE coffre_backup_login'));
+  await asSuperuser('postgres', (client) => client.unsafe('DROP ROLE coffre_backup_login'));
   const { output, code } = await setup((terminal) => answer(terminal));
   const text = mainText(output);
   assert.match(text, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords\n\s+coffre_backup_login: made, unable to log in until you have saved the password the screen shows\n/);
@@ -464,7 +464,7 @@ test("a second deployment on the same account: it takes names of its own, and th
   const before = first();
   assert.deepEqual(await firstConnects(), [true, true]);
   // Its database on a server of its own, as two deployments' must be: a login is the server's.
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_workers_two'), OTHER_CLUSTER);
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_workers_two'), OTHER_CLUSTER);
   const second = another('second');
   const pages = openedAll('http://127.0.0.1:').length;
   const { output, code } = await setup(
@@ -528,7 +528,7 @@ test("a second deployment on the same account: it takes names of its own, and th
 test("a deployment on another's database server: setup stops before giving their shared login a new password", { skip }, async () => {
   const before = cloudflare.state.configs.get('acc-acme')!.length;
   const third = another('third');
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_workers_three'));
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_workers_three'));
   const { output, code } = await setup(
     // Until it refuses: before the first Owner, now; once, after them.
     (terminal) =>
@@ -552,12 +552,12 @@ test("--reset-passwords on a database too small for both Hyperdrive configs: set
   // The logins a running instance logs in with, its Hyperdrive configs holding these passwords.
   await emptyCluster(SMALL_CLUSTER);
   await asSuperuser('postgres', async (client) => {
-    await client.query('CREATE DATABASE setup_workers_small');
-    await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'running-app'");
-    await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'running-vault'");
+    await client.unsafe('CREATE DATABASE setup_workers_small');
+    await client.unsafe("CREATE ROLE coffre_runtime LOGIN PASSWORD 'running-app'");
+    await client.unsafe("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'running-vault'");
   }, SMALL_CLUSTER);
   const verifiers = () =>
-    asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows, SMALL_CLUSTER);
+    asSuperuser('postgres', async (client) => [...await client.unsafe("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")], SMALL_CLUSTER);
   const held = await verifiers();
   const configs = JSON.stringify(cloudflare.state.configs.get('acc-acme'));
   const requests = cloudflare.state.requests.length;
@@ -589,10 +589,9 @@ test("--reset-passwords on a database too small for both Hyperdrive configs: set
 });
 
 test('a Worker without its key over a database in use: setup stops before changing anything', { skip }, async () => {
-  const client = new pg.Client({ connectionString: url });
-  await client.connect();
+  const client = postgresClient(url, { max: 1 });
   try {
-    await client.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+    await client.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
       VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`);
   } finally {
     await client.end();

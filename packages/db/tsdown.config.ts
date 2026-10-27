@@ -2,7 +2,8 @@ import { defineConfig } from 'tsdown';
 
 // One entry per subpath in `exports`; what they share becomes chunks. The
 // migrations are copied beside them by the build script, where migrate.ts
-// looks for them.
+// looks for them. The driver, postgres.js, stays an import (`#postgres`),
+// which picks its Node or workerd build where the package runs.
 export default defineConfig({
   entry: {
     index: 'src/database.ts',
@@ -17,6 +18,7 @@ export default defineConfig({
     log: 'src/log.ts',
     grants: 'src/grants.ts',
   },
+  external: [/^#postgres/],
   platform: 'node',
   dts: true,
   fixedExtension: false,

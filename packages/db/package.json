@@ -14,7 +14,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "vendor"
   ],
   "exports": {
     ".": {
@@ -74,6 +75,13 @@
     },
     "./package.json": "./package.json"
   },
+  "imports": {
+    "#postgres": {
+      "types": "./vendor/postgres/types/index.d.ts",
+      "workerd": "./vendor/postgres/cf/src/index.js",
+      "default": "./vendor/postgres/src/index.js"
+    }
+  },
   "scripts": {
     "build": "tsdown && cp -r src/migrations dist/migrations",
     "typecheck": "tsc --noEmit",
@@ -86,13 +94,10 @@
   "dependencies": {
     "@coffre/core": "workspace:*",
     "@libsql/client": "0.18.0",
-    "drizzle-orm": "0.45.2",
-    "pg": "8.16.3",
-    "pg-connection-string": "2.14.0"
+    "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
-    "@types/pg": "8.20.0",
     "drizzle-kit": "0.31.10",
     "tsdown": "0.23.0",
     "typescript": "5.9.3"

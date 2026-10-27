@@ -21,8 +21,7 @@ import { deriveLogKey, GENESIS_HASH, verifyEntries, type Author, type LogKey, ty
 import { decrypt, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { derivedSigningKey, KekBadClaimError, LocalKekProvider } from '@coffre/core/kek';
 import { MOVES_FROM } from '@coffre/db/log';
-import { postgresConnection } from '@coffre/db/connect';
-import pg from 'pg';
+import { postgresClient, postgresSession, type PostgresClient } from '@coffre/db/connect';
 
 import { BackupError, counted, type Facts, type Manifest, MANIFEST_FORMAT, manifestPath, migrationName, pgTool, readFacts, sha256, size } from './backup.ts';
 import { databaseUrl, DatabaseUrlError, readDatabaseUrl, urlSecrets } from './database-url.ts';
@@ -185,18 +184,17 @@ async function readInputs(out: Output, withKeys: boolean, command: string): Prom
  * whoever restores, either way: the owner the deployment migrates as.
  */
 async function restoreInto(dump: string, url: URL, mode: Mode): Promise<void> {
-  const client = new pg.Client({ ...postgresConnection(url.href), application_name: 'coffre restore' });
-  await client.connect();
+  const client = postgresClient(url.href, { max: 1, application_name: 'coffre restore' });
   try {
-    const found = await client.query<{ name: string }>(`
+    const found = await client.unsafe<{ name: string }[]>(`
       SELECT format('%I.%I', n.nspname, c.relname) AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname IN ('public', 'drizzle') AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
       UNION ALL SELECT 'the schema drizzle' FROM pg_namespace WHERE nspname = 'drizzle'
       ORDER BY 1`);
-    if (found.rowCount! > 0) {
-      const names = found.rows.slice(0, 3).map((row) => row.name);
+    if (found.length > 0) {
+      const names = found.slice(0, 3).map((row) => row.name);
       throw new BackupError(
-        `${decodeURIComponent(url.pathname.slice(1))} is not empty: it holds ${listed(found.rowCount! > 3 ? [...names, `${found.rowCount! - 3} more`] : names, 'and')}. ` +
+        `${decodeURIComponent(url.pathname.slice(1))} is not empty: it holds ${listed(found.length > 3 ? [...names, `${found.length - 3} more`] : names, 'and')}. ` +
           'Restore into a new database: createdb, as the owner',
       );
     }
@@ -245,10 +243,10 @@ async function restoreInto(dump: string, url: URL, mode: Mode): Promise<void> {
  * too.
  */
 async function checkRestored(report: Checks, url: URL, manifest: Manifest, keys: Keys | null): Promise<void> {
-  const client = new pg.Client({ ...postgresConnection(url.href), application_name: 'coffre restore' });
-  await client.connect();
+  // One session, its snapshot read throughout: lost, every statement after fails rather than reading outside it.
+  const client = postgresSession(url.href, { application_name: 'coffre restore' });
   try {
-    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+    await client.unsafe('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY');
     const facts = await readFacts(client);
     await report.check('rows', {}, async () => rowsVerdict(manifest, facts));
     await report.check('migrations', {}, async () => {
@@ -260,7 +258,7 @@ async function checkRestored(report: Checks, url: URL, manifest: Manifest, keys:
     });
     await report.check('audit log', {}, async () => walkLog(client, manifest, facts, keys === null ? null : keysOf(keys)));
     if (keys !== null) await report.check('values', {}, async () => openValues(client, keys.vault));
-    await client.query('COMMIT');
+    await client.unsafe('COMMIT');
   } finally {
     await client.end().catch(() => {});
   }
@@ -333,7 +331,7 @@ type Tally = { authenticated: number; others: Map<string, number>; newest: strin
  * others are linked only, and counted; each author's newest key must be one
  * given, or the keys given are not its current ones.
  */
-async function walkLog(client: pg.ClientBase, manifest: Manifest, facts: Facts, keys: LogKeys | null): Promise<string> {
+async function walkLog(client: PostgresClient, manifest: Manifest, facts: Facts, keys: LogKeys | null): Promise<string> {
   if (manifest.log === null || facts.log === null) {
     if (manifest.log !== facts.log) throw new Failure(`the log's head is ${facts.log === null ? 'missing' : 'there'}, and the backup ${manifest.log === null ? 'had none' : 'had one'}`);
     throw new Skip('no log head, in the backup or here');
@@ -419,8 +417,8 @@ function keyOrder(entry: StoredEntry, author: Tally, current: ReadonlySet<string
 }
 
 /** Up to a batch of the log's entries, from entry `from` on, as the chain covers them. */
-async function entriesFrom(client: pg.ClientBase, from: bigint): Promise<StoredEntry[]> {
-  const { rows } = await client.query<Record<string, unknown>>(
+async function entriesFrom(client: PostgresClient, from: bigint): Promise<StoredEntry[]> {
+  const rows = await client.unsafe<Record<string, unknown>[]>(
     `SELECT e.seq::text AS seq, author, key_id, occurred_at::text, actor, action, decision, code, subject_principal, project_id, environment_id,
        secret_id, secret_version_id, operation_id, request_id, source_ip, related_seq::text, metadata, prev_hash, mac, hash
      FROM audit_log e WHERE e.seq >= $1 ORDER BY e.seq LIMIT ${BATCH}`,
@@ -481,7 +479,7 @@ type VersionRow = {
  * value must read as the text kept beside it. What opens is never shown or
  * kept.
  */
-async function openValues(client: pg.ClientBase, vaultKeys: string): Promise<string> {
+async function openValues(client: PostgresClient, vaultKeys: string): Promise<string> {
   const keks = decodedKeys(vaultKeys, 'vault key');
   if (keks.length === 0) throw new Skip('not opened: no vault key given');
   // The provider that opened each vault ID and version: the others are tried again on each version none has opened yet.
@@ -507,7 +505,7 @@ async function openValues(client: pg.ClientBase, vaultKeys: string): Promise<str
   };
   try {
     for (;;) {
-      const { rows } = await client.query<VersionRow>(
+      const rows = await client.unsafe<VersionRow[]>(
         `SELECT v.id, p.slug || '/' || e.slug || '/' || s.key AS path, v.version, s.project_id, s.environment_id, s.id AS secret_id, e.owner,
            v.sensitive, v.envelope_version, v.ciphertext, v.iv, v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version, v.plaintext
          FROM secret_versions v JOIN secrets s ON s.id = v.secret_id JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = s.project_id

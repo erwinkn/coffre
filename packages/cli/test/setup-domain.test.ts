@@ -276,12 +276,12 @@ async function refused(where: string, databaseUrl: string, address: string, down
 
 /** What the cluster keeps for each of coffre's logins' passwords. */
 const verifiers = (cluster = CLUSTER) =>
-  asSuperuser('postgres', async (client) => (await client.query("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")).rows, cluster);
+  asSuperuser('postgres', async (client) => [...await client.unsafe("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")], cluster);
 
 /** A database on the cluster that holds data: coffre's log has an entry, as far as setup can tell. */
 async function inUse(name: string): Promise<string> {
-  await asSuperuser('postgres', (client) => client.query(`CREATE DATABASE ${name}`));
-  await asSuperuser(name, (client) => client.query('CREATE TABLE audit_log (seq bigint); INSERT INTO audit_log VALUES (0)'));
+  await asSuperuser('postgres', (client) => client.unsafe(`CREATE DATABASE ${name}`));
+  await asSuperuser(name, (client) => client.unsafe('CREATE TABLE audit_log (seq bigint); INSERT INTO audit_log VALUES (0)'));
   return `${CLUSTER}/${name}`;
 }
 
@@ -296,8 +296,8 @@ test("DNS elsewhere, Workers without their keys over a database in use: setup re
 
 test("DNS elsewhere, an administrator who can't create roles: setup refuses before Cloudflare's questions, and asks Cloudflare nothing", { skip }, async () => {
   await asSuperuser('postgres', async (client) => {
-    await client.query('CREATE DATABASE setup_domain_weak');
-    await client.query("CREATE ROLE setup_owner LOGIN PASSWORD 'owner-only-p4ss'");
+    await client.unsafe('CREATE DATABASE setup_domain_weak');
+    await client.unsafe("CREATE ROLE setup_owner LOGIN PASSWORD 'owner-only-p4ss'");
   });
   const weak = new URL(`${CLUSTER}/setup_domain_weak`);
   weak.username = 'setup_owner';
@@ -310,14 +310,14 @@ test("DNS elsewhere, an administrator who can't create roles: setup refuses befo
     assert.ok(!text.includes('Set Cloudflare up too?'), text);
   } finally {
     await asSuperuser('postgres', async (client) => {
-      await client.query('DROP DATABASE setup_domain_weak WITH (FORCE)');
-      await client.query('DROP ROLE setup_owner');
+      await client.unsafe('DROP DATABASE setup_domain_weak WITH (FORCE)');
+      await client.unsafe('DROP ROLE setup_owner');
     });
   }
 });
 
 test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and neither login was changed, as it says", { skip }, async () => {
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_shared'));
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_domain_shared'));
   const held = await verifiers();
   const { text, code, writes } = await refused('shared', `${CLUSTER}/setup_domain_shared`, 'shared.example.org', 0, 'is also the login of');
   assert.deepEqual(writes, [], 'nothing written to Cloudflare');
@@ -333,9 +333,9 @@ const otherSkip = skip || (OTHER_CLUSTER === undefined && 'needs the other clust
 test('a database that comes to hold data while setup asks its questions: setup refuses before it makes a key for it', { skip: otherSkip }, async () => {
   // Set up before, without Cloudflare: its logins made, migrated, holding no data yet.
   await asSuperuser('postgres', async (client) => {
-    await client.query('CREATE DATABASE setup_domain_late_used');
-    await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'late-app'");
-    await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'late-vault'");
+    await client.unsafe('CREATE DATABASE setup_domain_late_used');
+    await client.unsafe("CREATE ROLE coffre_runtime LOGIN PASSWORD 'late-app'");
+    await client.unsafe("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'late-vault'");
   }, OTHER_CLUSTER);
   await migrateDatabase(`${OTHER_CLUSTER}/setup_domain_late_used`);
   const held = await verifiers(OTHER_CLUSTER);
@@ -343,7 +343,7 @@ test('a database that comes to hold data while setup asks its questions: setup r
     const { text, code, writes } = await refused('late-used', `${OTHER_CLUSTER}/setup_domain_late_used`, 'late-used.acme.test', 0, 'already holds data', () =>
       // Its first entry, written while setup waits.
       asSuperuser('setup_domain_late_used', (client) =>
-        client.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+        client.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
           VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`),
       OTHER_CLUSTER),
     );
@@ -367,13 +367,13 @@ test("another deployment's logins made on this server while setup asks its quest
     caching: { disabled: true },
     origin_connection_limit: 20,
   });
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_late_shared'), OTHER_CLUSTER);
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_domain_late_shared'), OTHER_CLUSTER);
   let held: unknown[] = [];
   try {
     const { text, code, writes } = await refused('late-shared', `${OTHER_CLUSTER}/setup_domain_late_shared`, 'late-shared.acme.test', 0, 'is also the login of', async () => {
       await asSuperuser('postgres', async (client) => {
-        await client.query("CREATE ROLE coffre_runtime LOGIN PASSWORD 'elsewhere-app'");
-        await client.query("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'elsewhere-vault'");
+        await client.unsafe("CREATE ROLE coffre_runtime LOGIN PASSWORD 'elsewhere-app'");
+        await client.unsafe("CREATE ROLE coffre_vault_runtime LOGIN PASSWORD 'elsewhere-vault'");
       }, OTHER_CLUSTER);
       held = await verifiers(OTHER_CLUSTER);
     });
@@ -437,7 +437,7 @@ test("no domain on the account: setup explains both ways; adding the domain, ref
 
 test("no domain on the account: the Worker's workers.dev address, for now; deployed there", { skip }, async () => {
   deployment('dev');
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_two'));
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_domain_two'));
   const second = `${CLUSTER}/setup_domain_two`;
   const choose = async (terminal: Session) => {
     await start(terminal, 'secrets.other.org', 1);
@@ -479,7 +479,7 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
  */
 async function tooSmall(where: string, answers: Record<string, string>) {
   await emptyCluster(SMALL_CLUSTER);
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_domain_small'), SMALL_CLUSTER);
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_domain_small'), SMALL_CLUSTER);
   deployment(where);
   const before = cloudflare.state.requests.length;
   try {

@@ -1440,8 +1440,8 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
  */
 export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
   if (dialect.engineOf(db) === 'postgres') {
-    const { rows } = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`);
-    return rows[0]!.pruned;
+    const [{ pruned }] = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`) as unknown as [{ pruned: number }];
+    return pruned;
   }
   const { consumedTokens } = tablesOf(db);
   const old = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(lt(consumedTokens.consumedAt, sql`${clockMillis(db)} - ${SPENT_TOKENS_KEPT_MS}`)).limit(atMost);
