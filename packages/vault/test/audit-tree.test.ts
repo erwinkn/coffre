@@ -589,6 +589,26 @@ test('review r8: a pair held outside with a row\'s heads but another time is rep
   assert.ok(!v.ok && v.problems.some((p) => /same heads signed at another time/.test(p)), v.problems.join('\n'));
 });
 
+test('BarrierChecksFloor: a floor of at a writer lowered is refused at the next tick, alerted; the floor is signed into each pair', async () => {
+  const { k, store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const signed = cp.pair.pair.floor;
+  assert.ok(signed > 0 && signed === store.floor, 'the pair carries the floor its barrier set');
+  assert.equal((await openPair(store.rows.get(cp.pair.pair.upto)!, k.verifiers))!.floor, signed);
+  store.floor = signed - 60_000;
+  store.append('uses', 'late', '{}', signed - 30_000);
+  const t = await cp.tick();
+  assert.ok(!t.signed && /floor of at is .* below/.test(t.failures.join()), t.failures.join());
+  assert.ok(alerts.some((a) => /lowered by a writer/.test(a)));
+  // Raised (a barrier whose pair a crash kept from being signed) is honest.
+  const { store: other, open: openOther } = await setup(2);
+  const cp2 = await openOther();
+  await traffic(other, cp2, 1);
+  other.floor += 5000;
+  await traffic(other, cp2, 1);
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {

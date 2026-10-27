@@ -168,19 +168,19 @@ type head struct {
 	origin   string
 	size     int64
 	root     tlog.Hash
-	upto, at string
+	upto, at string // at: its time and its floor, which a pair shares
 }
 
 func open(raw string, verifiers note.Verifiers) head {
 	n := must(note.Open([]byte(raw), verifiers))
 	lines := strings.Split(n.Text, "\n")
-	if len(lines) != 6 || !strings.HasPrefix(lines[3], "upto ") || !strings.HasPrefix(lines[4], "at ") {
+	if len(lines) != 7 || !strings.HasPrefix(lines[3], "upto ") || !strings.HasPrefix(lines[4], "at ") || !strings.HasPrefix(lines[5], "floor ") {
 		log.Fatalf("not a coffre checkpoint: %q", n.Text)
 	}
 	if len(n.Sigs) != 1 || n.Sigs[0].Name != lines[0] {
 		log.Fatalf("checkpoint for %s signed by %v", lines[0], n.Sigs)
 	}
-	return head{lines[0], must(strconv.ParseInt(lines[1], 10, 64)), must(tlog.ParseHash(lines[2])), lines[3][5:], lines[4][3:]}
+	return head{lines[0], must(strconv.ParseInt(lines[1], 10, 64)), must(tlog.ParseHash(lines[2])), lines[3][5:], lines[4][3:] + " " + lines[5][6:]}
 }
 
 func hashes(b []string) []tlog.Hash {

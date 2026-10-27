@@ -135,6 +135,7 @@ async function walk(
   let cursor = start.pair.upto;
   let previous = start.pair.upto;
   let time = start.pair.at;
+  let floor = start.pair.floor;
   const walkEntries = (entries: readonly LogEntry[]) => {
     for (const e of entries) {
       if (e.number <= previous) problems.push(`${e.number}: numbered at or below the entry before (${previous}): two entries with one number, or out of order`);
@@ -176,7 +177,9 @@ async function walk(
         // Time never runs back along one history: retention's freshness step rests on it. Equal is honest (a window of
         // gaps keeps the time).
         if (stop.pair.at < time) problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: signed at ${stop.pair.at}, before the pair before it (${time}): time runs back`);
+        if (stop.pair.floor < floor) problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: its floor of at (${stop.pair.floor}) is below the one before it (${floor})`);
         time = Math.max(time, stop.pair.at);
+        floor = Math.max(floor, stop.pair.floor);
         cursor = stop.pair.upto;
         const wrong = TREES.filter((tree) => edges[tree].size !== stop.pair[tree].size || !edges[tree].root().equals(stop.pair[tree].root));
         if (wrong.length > 0) {

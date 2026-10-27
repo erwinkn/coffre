@@ -50,9 +50,14 @@ export class MemoryStore implements CheckpointStore {
     this.next += 1n;
   }
 
-  async close(after: bigint) {
+  /** The floor of `at`, as the fence's row holds it: raised by each barrier, lowered only by a writer. */
+  floor = 0;
+
+  async close(after: bigint, _from: number) {
     const upto = this.next - 1n;
-    return { upto, newest: await this.newest(), entries: this.between(after, upto) };
+    const found = this.floor;
+    this.floor = Math.max(this.floor, Date.now() - 3000);
+    return { upto, newest: await this.newest(), entries: this.between(after, upto), floor: { found, set: this.floor } };
   }
 
   async newest(): Promise<StoredPair | null> {

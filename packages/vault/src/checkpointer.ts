@@ -65,8 +65,13 @@ export type CheckpointStore = LogReader & {
    * pair, as `newest()` reads it. The window is read after the barrier's lock
    * is let go, in a snapshot of its own (`close_one`, then one read): a
    * snapshot from before the lock would miss what committed while it waited.
+   *
+   * The barrier also raises the floor of `at` (`close_one`): `floor.found` is
+   * the floor it found, null if none, and `floor.set` the one it left. The
+   * window's uses are read from `from`, the floor the signer holds, as the
+   * last barrier set it.
    */
-  close(after: bigint): Promise<{ upto: bigint; newest: StoredPair | null; entries: LogEntry[] }>;
+  close(after: bigint, from: number): Promise<{ upto: bigint; newest: StoredPair | null; entries: LogEntry[]; floor: { found: number | null; set: number } }>;
   /**
    * The newest pair: each tree's own newest note, `upto` the larger of theirs
    * (Seal.tla's PairChecked). Stored as one row a pair, that is the newest
@@ -201,6 +206,11 @@ export class Checkpointer {
    * pair for its place.
    */
   private pending: Pending | null = null;
+  /**
+   * The floor of `at` the signer's last barrier set: signed into each pair,
+   * so a restart starts from the last signed one, which is no higher.
+   */
+  private floor: number;
 
   private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
@@ -216,6 +226,7 @@ export class Checkpointer {
     };
     this.edges = edges;
     this.head = head;
+    this.floor = head.pair.floor;
   }
 
   /** The newest pair the signer signed and the database holds. */
@@ -325,9 +336,14 @@ export class Checkpointer {
     }
     const { pair } = this.head;
     const t0 = performance.now();
-    const { upto, newest, entries } = await this.store.close(pair.upto);
+    const { upto, newest, entries, floor } = await this.store.close(pair.upto, this.floor);
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
+    // The floor is an unsigned row (HotPathOne.tla's BarrierChecksFloor): a writer who lowered it would let a use in
+    // below it, which a window read from the floor the signer holds misses. Found lower than the signer set it: an
+    // alarm, and nothing signed. Higher is honest: a barrier whose pair a crash kept from being signed raised it.
+    if (floor.found === null || floor.found < this.floor) failures.push(`the floor of at is ${floor.found ?? 'gone'}, below the ${this.floor} the signer's barrier set: lowered by a writer`);
+    else this.floor = Math.max(this.floor, floor.set);
     // A running signer seals from the pair it holds and never takes the database's word for it; but the database's
     // newest row must still be that pair, note for note. Rows deleted or replaced since show here, within a tick;
     // nothing is signed over them.
@@ -368,7 +384,7 @@ export class Checkpointer {
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
-    const next = await signPair(this.signers, upto, at, heads);
+    const next = await signPair(this.signers, upto, at, heads, this.floor);
     this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.

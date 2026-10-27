@@ -9,7 +9,7 @@ import type { Hash } from './tree.ts';
  * with its own origin and key, so any C2SP witness or Go's tlog reads either
  * one alone. They stay one log by moving as one pair:
  *
- * - one tick signs both, with the same `upto` and `at`;
+ * - one tick signs both, with the same `upto`, `at` and `floor`;
  * - the signer remembers both in one record, before the database has either;
  * - one statement writes both;
  * - opening, each tick and witnesses check both, as one value.
@@ -20,7 +20,7 @@ import type { Hash } from './tree.ts';
 export const TREES = ['changes', 'uses'] as const;
 export type TreeName = (typeof TREES)[number];
 
-export type Pair = { upto: bigint; at: number; changes: Checkpoint; uses: Checkpoint };
+export type Pair = { upto: bigint; at: number; floor: number; changes: Checkpoint; uses: Checkpoint };
 
 /** The pair as it is stored, remembered and published: each tree's signed note. */
 export type PairNotes = { changes: string; uses: string };
@@ -46,19 +46,19 @@ export async function pairVerifiers(keys: Record<TreeName, string>): Promise<Pai
 
 export type Heads = Record<TreeName, { size: number; root: Hash }>;
 
-/** One tick's signatures: both heads, at one `upto` and one `at`. */
-export async function signPair(signers: PairSigners, upto: bigint, at: number, heads: Heads): Promise<{ pair: Pair; notes: PairNotes }> {
-  const checkpoint = (tree: TreeName): Checkpoint => ({ origin: signers[tree].name, size: heads[tree].size, root: heads[tree].root, upto, at });
-  const pair: Pair = { upto, at, changes: checkpoint('changes'), uses: checkpoint('uses') };
+/** One tick's signatures: both heads, at one `upto`, `at` and `floor` (the floor of `at` its barrier set; 0 at genesis). */
+export async function signPair(signers: PairSigners, upto: bigint, at: number, heads: Heads, floor = 0): Promise<{ pair: Pair; notes: PairNotes }> {
+  const checkpoint = (tree: TreeName): Checkpoint => ({ origin: signers[tree].name, size: heads[tree].size, root: heads[tree].root, upto, at, floor });
+  const pair: Pair = { upto, at, floor, changes: checkpoint('changes'), uses: checkpoint('uses') };
   const [changes, uses] = await Promise.all(TREES.map((tree) => signNote(checkpointBody(pair[tree]), [signers[tree]])));
   return { pair, notes: { changes: changes!, uses: uses! } };
 }
 
-/** The pair two notes make, if each is signed by its tree's key and both name the same `upto` and `at`; else null. */
+/** The pair two notes make, if each is signed by its tree's key and both name the same `upto`, `at` and `floor`; else null. */
 export async function openPair(notes: PairNotes, verifiers: PairVerifiers): Promise<Pair | null> {
   const [changes, uses] = await Promise.all(TREES.map((tree) => openCheckpoint(notes[tree], verifiers[tree])));
-  if (!changes || !uses || changes.upto !== uses.upto || changes.at !== uses.at) return null;
-  return { upto: changes.upto, at: changes.at, changes, uses };
+  if (!changes || !uses || changes.upto !== uses.upto || changes.at !== uses.at || changes.floor !== uses.floor) return null;
+  return { upto: changes.upto, at: changes.at, floor: changes.floor, changes, uses };
 }
 
 /** Whether two pairs are the same heads: same place, same sizes and roots in both trees. Not `at`: callers that need one signing compare it too. */

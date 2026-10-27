@@ -61,7 +61,7 @@ it with these rules (`packages/core/src/audit/pair.ts`, `checkpointer.ts`):
 | rule | in the code |
 |---|---|
 | two logs, two origins, two keys | `pairSigners(origin, seed)`: `<origin>/changes` and `<origin>/uses`, Ed25519 keys derived from one seed by HKDF |
-| one tick signs both, at one `upto` and `at` | `signPair`; `openPair` refuses two notes whose `upto` or `at` differ |
+| one tick signs both, at one `upto`, `at` and `floor` | `signPair`; `openPair` refuses two notes whose `upto`, `at` or `floor` differ |
 | one memory record | `encodePair`: one JSON record holding both notes; `remember` before `write` |
 | one write | `CheckpointStore.write(row, tiles)`: both trees' tiles and the pair's row, one statement |
 | `open()` takes the pair as one value | the newest row must open as a pair; the memory must be equal, a prefix in both trees, or re-derived to both heads, else refused |
@@ -133,6 +133,18 @@ signer's pair. A replay of a use whose day retention dropped is caught that
 way, because no lookup can match it. Any failure refuses the tick and
 alerts. The newest row must be the signer's pair, note for note, so a row
 deleted or replaced under a running signer shows within a tick.
+
+**Each pair signs its floor.** A checkpoint note carries three extension
+lines: `upto N` (every number at or below it is final), `at T` (when it was
+signed) and `floor F`. The floor is the lowest `at` a use may still be
+written with once that tick's barrier ran. Its row in the database is
+unsigned, so a writer could lower it and let in a late use below it, which a
+window read from the floor would miss (`HotPathOne.tla`'s
+BarrierChecksFloor). So the signer holds the floor its last barrier set,
+signed into each pair, and a barrier that finds it lower is refused and
+alerted. Found higher is honest: a crash can come after a barrier raised it
+and before the pair was signed. The verifier reports a floor that comes
+down between pairs.
 
 **The pair's `at` never comes down, and never runs far ahead.** Retention's
 freshness step (plan PR 7) rests on the first half. A replay of a dropped
@@ -346,6 +358,7 @@ the code holds it and the tests that break it.
 | protection (`Seal.tla`) | in the code | tests (`packages/vault/test/audit-tree.test.ts`) |
 |---|---|---|
 | NumberUnderLock, CloseLocks | `CheckpointStore.close`: the barrier (`close_one`) | 6b, over migration 0022 |
+| BarrierChecksFloor (`HotPathOne.tla`) | `tick`: the floor `close_one` found must be no lower than the one the signer's last barrier set; each pair signs its floor | "BarrierChecksFloor: …" |
 | RememberFirst | `tick`: `memory.remember` before `store.write` | (e) |
 | SignerMemory | `open()`: memory equal, a prefix in both trees, or re-derived; else refused | (b), (c), (g), (j), "a memory restored…" |
 | RowChecked, PairChecked | `tick`: the newest pair, each tree's own newest note, byte for byte | (m), "PairChecked: …", "review r1: a row replaced…" |
