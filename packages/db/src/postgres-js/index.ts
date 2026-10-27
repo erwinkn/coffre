@@ -178,9 +178,11 @@ export default function postgres(given: Options): Sql {
     const c = open.length
       ? open.pop()!
       : await new Promise<Connection>((resolve, reject) => {
+        // Coffre: what a connection opens for, given it once open (connection.ts, ReadyForQuery), or what waits for
+        // one, never both: upstream did both, and a reservation taken from the queue to open a connection lost its.
         const query: Reservation = { reserve: resolve, reject };
-        queries.push(query);
         if (closed.length) connect(closed.shift()!, query);
+        else queries.push(query);
       });
     return move(c, reserved);
   }
@@ -216,8 +218,15 @@ export default function postgres(given: Options): Sql {
     let savepoints = 0;
     /** The transaction's first statement, which carries its BEGIN (`toBuffer`, connection.ts), once asked. */
     let first: Query | null = null;
-    /** Its BEGIN failed: nothing more is sent, which would run outside the transaction. */
-    let refused: Error | null = null;
+    /**
+     * Why nothing more of the transaction is sent, which would run outside it: its BEGIN failed, its connection closed,
+     * or it has ended, and its connection is the pool's again (what its work left running may still ask).
+     */
+    let stopped: Error | null = null;
+    const stop = (error: Error) => {
+      stopped ??= error;
+      while (queries.length) queries.shift()!.reject(stopped);
+    };
 
     // Coffre: the transaction holds its connection from its first statement, BEGIN with it, until it has ended, and
     // gives it back then. Upstream sent BEGIN alone, waited for it, and gave the connection back once Postgres said it
@@ -226,8 +235,7 @@ export default function postgres(given: Options): Sql {
     const mine: Reserved = {
       next: () => {
         if (first !== null && !first.began) {
-          refused ??= Errors.generic('TRANSACTION_NOT_BEGUN', 'The transaction did not begin, so its statements were not sent');
-          while (queries.length) queries.shift()!.reject(refused);
+          stop(Errors.generic('TRANSACTION_NOT_BEGUN', 'The transaction did not begin, so its statements were not sent'));
           return void move(c, reserved);
         }
         // What waited for the BEGIN goes at once, as many as the connection pipelines; upstream sent one an answer.
@@ -240,9 +248,13 @@ export default function postgres(given: Options): Sql {
     try {
       return await Promise.race([
         scope(fn),
-        new Promise<never>((_, reject) => (c.onclose = reject)),
+        new Promise<never>((_, reject) => (c.onclose = (error) => {
+          stop(error);
+          reject(error);
+        })),
       ]);
     } finally {
+      stop(Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent'));
       c.onclose = null;
       // Closed meanwhile, the connection is the pool's again already.
       if (c.reserved === mine) giveBack(c);
@@ -267,9 +279,10 @@ export default function postgres(given: Options): Sql {
 
         if (uncaughtError) throw uncaughtError;
       } catch (e) {
-        // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed.
+        // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed; nor one whose
+        // connection closed, which Postgres rolled back.
         if (!name) await first?.catch(() => {});
-        if (name || first?.began) await own(name ? 'rollback to ' + quote(name) : 'rollback');
+        if (!stopped && (name || first?.began)) await own(name ? 'rollback to ' + quote(name) : 'rollback');
         throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
       }
 
@@ -280,13 +293,15 @@ export default function postgres(given: Options): Sql {
       /** A statement of the transaction's: one that fails and is not waited for fails the transaction all the same. */
       function inTransaction(q: Query): void {
         q.catch((e: unknown) => uncaughtError || (uncaughtError = e));
-        if (refused) return q.reject(refused);
+        if (stopped) return q.reject(stopped);
         if (first === null) {
           first = q;
           q.begin = 'begin ' + mode.replace(/[^a-z ]/gi, '');
         }
+        // Nothing follows the BEGIN until Postgres has answered it, whatever execute says: a statement that failed to
+        // be written, its BEGIN with it, has the next wait all the same, to be refused.
         if (c.queue === full) queries.push(q);
-        else if (!c.execute(q)) move(c, full);
+        else if (!c.execute(q) || q === first) move(c, full);
       }
     }
   }

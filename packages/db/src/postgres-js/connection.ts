@@ -492,14 +492,14 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       // Open: what opened it goes now, a statement sent, a reservation given the connection.
       if (!isReservation(initial)) execute(initial);
       options.shared.retries = 0;
-      // Coffre: a reserve() that opened the connection is given it now, or, the connection ending meanwhile, it ends.
-      // Upstream gave it after fetch_types's own query, and without fetch_types never: that reserve() waited for ever.
-      const reserving = initial !== null && isReservation(initial);
+      // Coffre: a reserve() that opened the connection is given it now, itself, even as the client ends: asked before,
+      // it is served, and its release closes the connection, which end() waits for. Upstream gave it after
+      // fetch_types's own query, and without fetch_types never; and it gave the connection to the pool's first waiting,
+      // which the reservation, taken from the queue to open this connection again after one closed, no longer was:
+      // that reserve() waited for ever.
+      const opened = initial;
       initial = null;
-      if (reserving) {
-        if (ending) terminate();
-        else onopen(connection);
-      }
+      if (opened !== null && isReservation(opened)) opened.reserve(connection);
       return;
     }
 

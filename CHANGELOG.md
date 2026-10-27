@@ -41,7 +41,9 @@
     alone and waited; and a transaction queued behind as many statements
     as a connection pipelines was left without its connection, inside a
     transaction no one would end: a transaction now waits for a connection
-    of its own;
+    of its own. What a transaction's work asks once it has ended, or once
+    its connection closed, is refused, not sent where it would run outside
+    it;
   - a client whose connection was cut under a query, or as it opened,
     closes: upstream waited for the query for ever; and the next query on
     that connection answers its own rows, where upstream gave it the dead
@@ -51,7 +53,8 @@
   - a client asked to end opens no connection again, for a waiting query or
     a `reserve()`;
   - a `reserve()` that opens its connection gets it: without `fetch_types`,
-    upstream never gave it;
+    upstream never gave it, nor, after a connection closed, to the
+    `reserve()` or transaction that opened it again;
   - an opening that cannot be finished (TLS with a key it cannot read, a
     sign-in's hash or a server's SCRAM message, a sign-in the client has
     not, such as GSSAPI, a `socket` factory that throws) fails the query

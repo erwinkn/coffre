@@ -58,10 +58,21 @@ Eight, each marked `Coffre:` in the code:
   fails has Postgres skip the statement, which so never runs outside its
   transaction; what waited behind it is not sent, nor anything the
   transaction asks after, which fails `TRANSACTION_NOT_BEGUN`, and nothing
-  is rolled back. A transaction that asks nothing sends nothing. It holds
-  its connection from the start, as `reserve()` does, and gives it back
-  once it has ended: upstream gave it back once Postgres said the
-  connection was idle, which it also says after a BEGIN that failed. This
+  is rolled back. Nothing waits behind the BEGIN's statement for less: one
+  the client failed to write (a value it cannot send) takes its BEGIN with
+  it. A transaction that asks nothing sends nothing. It holds its
+  connection from the start, as `reserve()` does, and gives it back once
+  it has ended: upstream gave it back once Postgres said the connection
+  was idle, which it also says after a BEGIN that failed. What its work
+  left running asks once it has ended (`TRANSACTION_ENDED`), or once its
+  connection closed (the close's error), is not sent either: it would run
+  on the pool's connection, outside it, or open a transaction there no one
+  ends; nor is a ROLLBACK for a connection gone. Through Hyperdrive, the
+  first statement reaches the pooler with its BEGIN, in one batch: the
+  pooler keeps the connection for the transaction from the ReadyForQuery
+  after it, which says so (`T`), and coffre's Hyperdrive configurations
+  cache nothing (`docs/deploy.md`), so that statement is never answered
+  from a cache. This
   replaces PR A's fix for a BEGIN queued behind `max_pipeline` statements,
   which left `begin()` without its connection: a transaction now waits for
   a connection of its own instead.
@@ -91,9 +102,15 @@ Eight, each marked `Coffre:` in the code:
   `end()` and released after it closes, which `end()` waits for, where
   upstream gave it back to the pool.
 - **A `reserve()` that opens its connection gets it** (`ReadyForQuery`, in
-  `connection.ts`). Upstream handed it over after `fetch_types`'s own
-  query, so without `fetch_types`, as coffre opened every client, a
-  `reserve()` on a pool with no connection open waited for ever.
+  `connection.ts`; `hold`, in `index.ts`). Upstream handed it over after
+  `fetch_types`'s own query, so without `fetch_types`, as coffre opened
+  every client, a `reserve()` on a pool with no connection open waited for
+  ever. And upstream's reservation both waited in the pool's queue and
+  opened a connection, which gave itself to the queue's first: one taken
+  from the queue to open a connection again, after one closed, was no
+  longer there, and waited for ever, as a transaction waiting for the
+  connection its predecessor lost would have. A reservation now either
+  waits or opens a connection, which is given to it.
 - **The pool takes the connection idle the shortest** (`Queue.pop`, in
   `queue.ts` and `index.ts`), as pg-pool does. Upstream takes the one idle the
   longest, so a steady load cycles every connection of the pool and each
