@@ -143,9 +143,10 @@ export function splitNote(note: string): { text: string; signatures: { name: str
 
 /**
  * The note's text if `verifier` signed it, else null; null for anything that
- * is not a signed note too. As Go's note.Open given this one key, a signature
- * line that names this key and does not verify makes the whole note invalid,
- * whatever other lines say. (Given several keys, Go also refuses a bad line
+ * is not a signed note too. As Go's note.Open given this one key, the first
+ * signature line that names this key decides: if it does not verify, the
+ * whole note is invalid, whatever other lines say; later lines by the key are
+ * ignored. (Given several keys, Go also refuses a bad line
  * by any of them; each tree's note is opened with its own key alone.)
  */
 export async function openNote(note: string, verifier: NoteVerifier): Promise<string | null> {

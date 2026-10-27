@@ -61,7 +61,7 @@ export async function openPair(notes: PairNotes, verifiers: PairVerifiers): Prom
   return { upto: changes.upto, at: changes.at, changes, uses };
 }
 
-/** Whether two pairs are the same heads: same place, same sizes and roots in both trees. */
+/** Whether two pairs are the same heads: same place, same sizes and roots in both trees. Not `at`: callers that need one signing compare it too. */
 export const samePair = (a: Pair, b: Pair) =>
   a.upto === b.upto && TREES.every((tree) => a[tree].size === b[tree].size && a[tree].root.equals(b[tree].root));
 

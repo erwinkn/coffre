@@ -88,7 +88,7 @@ async function walk(
     if (trusted === null) return (problems.push('the pair to start from is not signed by the log'), done(null));
     const row = await reader.pair(trusted.upto);
     const pair = row === null ? null : await open(row);
-    if (pair === null || !samePair(pair, trusted)) return (problems.push(`no checkpoint at ${trusted.upto} with the pair to start from: checkpoints were deleted or replaced`), done(null));
+    if (pair === null || !sameNotes(pair, trusted)) return (problems.push(`no checkpoint at ${trusted.upto} with the pair to start from: checkpoints were deleted or replaced`), done(null));
     start = { pair, notes: row!.notes, row: true };
   } else {
     const [row] = await reader.pairs(-1n, 1);
@@ -113,7 +113,7 @@ async function walk(
     } else {
       const row = await reader.pair(anchor.upto);
       const pair = row === null ? null : await open(row);
-      if (pair !== null && !samePair(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: a second history`);
+      if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time' : 'a second history'}`);
       // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside.
       for (const tree of TREES) {
         const [from, to] = [anchor[tree], start.pair[tree]];
@@ -156,7 +156,7 @@ async function walk(
       const anchor = above.shift()!;
       const row = stops.find((s) => s.pair.upto === anchor.pair.upto);
       if (row !== undefined) {
-        if (!samePair(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: a second history`);
+        if (!sameNotes(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: ${samePair(row.pair, anchor.pair) ? 'the same heads signed at another time' : 'a second history'}`);
       } else if (final && anchor.pair.upto > newest) {
         problems.push(`the database ends up to ${newest}; a pair held outside seals up to ${anchor.pair.upto}: entries or checkpoints were deleted`);
       } else {
@@ -197,6 +197,13 @@ async function walk(
   verdict.unsealed = unsealed.length;
   return done(last.notes);
 }
+
+/**
+ * Whether a pair held outside is the row at its place: the same heads, and
+ * the same time. Two notes for one place signed at two times take the
+ * signer's key twice; honest pairs held outside are copies of rows.
+ */
+const sameNotes = (a: Pair, b: Pair) => samePair(a, b) && a.at === b.at;
 
 /** Both trees' edges at a pair, from their tiles; throws unless each gives its signed head. */
 export async function loadEdges(reader: Pick<LogReader, 'tiles'>, pair: Pair): Promise<Record<TreeName, Edge>> {

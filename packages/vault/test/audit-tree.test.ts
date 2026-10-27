@@ -579,6 +579,16 @@ test('review r7: time never runs back at the memory-ahead start, nor in the veri
   }
 });
 
+test('review r8: a pair held outside with a row\'s heads but another time is reported', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 4);
+  const { pair } = cp.pair;
+  const resigned = await signPair(k.signers, pair.upto, pair.at + 3_600_000, { changes: pair.changes, uses: pair.uses });
+  const v = await verify(store, k, { anchors: [resigned.notes] });
+  assert.ok(!v.ok && v.problems.some((p) => /same heads signed at another time/.test(p)), v.problems.join('\n'));
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {
