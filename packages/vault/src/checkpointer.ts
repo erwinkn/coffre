@@ -62,9 +62,9 @@ export type CheckpointStore = LogReader & {
   /**
    * The barrier and the window, as one statement: `upto`, such that every
    * number at or below it has ended; the entries in (after, upto], by number;
-   * and the `upto` of the newest checkpoint row, or null if there is none.
+   * and the newest checkpoint row, or null if there is none.
    */
-  close(after: bigint): Promise<{ upto: bigint; newest: bigint | null; entries: LogEntry[] }>;
+  close(after: bigint): Promise<{ upto: bigint; newest: StoredPair | null; entries: LogEntry[] }>;
   /** The newest checkpoint row, if any. */
   newest(): Promise<StoredPair | null>;
   /** One statement: both trees' tiles and the pair's row. No state holds one head without the other. */
@@ -119,6 +119,8 @@ export type Sealed = {
   failures: string[];
   /** The pair as each witness that took it in time cosigned it. */
   cosigned: PairNotes[];
+  /** The change's entry, proved in the pair: what the admin's client checks and can keep. */
+  proof: InclusionProof;
 };
 
 export type InclusionProof = {
@@ -143,6 +145,8 @@ type Pump = {
   waiters: { upto: bigint; done: () => void }[];
 };
 
+type Pending = { next: { pair: Pair; notes: PairNotes }; edges: Record<TreeName, Edge>; tiles: Record<TreeName, Tile[]> };
+
 type Options = {
   memory: Memory;
   witnesses?: readonly Witness[];
@@ -162,6 +166,13 @@ export class Checkpointer {
   private head: { pair: Pair; notes: PairNotes };
   private running: Promise<unknown> = Promise.resolve();
   private pumps = new Map<Witness, Pump>();
+  /**
+   * A pair signed, perhaps remembered, not known to be written: the memory
+   * may hold it, or the database may (a write that committed, then threw).
+   * It is finished before anything else is signed, never replaced by another
+   * pair for its place.
+   */
+  private pending: Pending | null = null;
 
   private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
@@ -267,14 +278,16 @@ export class Checkpointer {
   }
 
   private async tickNow(): Promise<Tick> {
+    if (this.pending !== null) await this.finish(this.pending);
     const { pair } = this.head;
     const t0 = performance.now();
     const { upto, newest, entries } = await this.store.close(pair.upto);
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
     // A running signer seals from the pair it holds and never takes the database's word for it; but the database's
-    // newest row must still be that pair. Rows deleted since show here, within a tick; nothing is signed over them.
-    if (newest !== pair.upto) failures.push(`the database's newest checkpoint is ${newest ?? 'gone'}, the signer's is at ${pair.upto}`);
+    // newest row must still be that pair, note for note. Rows deleted or replaced since show here, within a tick;
+    // nothing is signed over them.
+    if (!holds(newest, this.head)) failures.push(`the database's newest checkpoint is ${newest === null ? 'gone' : newest.upto === pair.upto ? 'another pair' : newest.upto}, the signer's is at ${pair.upto}`);
     if (upto < pair.upto) failures.push(`the barrier says ${upto} is final, below the signer's ${pair.upto}`);
     let previous = pair.upto;
     for (const e of entries) {
@@ -301,22 +314,48 @@ export class Checkpointer {
       }
       return result(false);
     }
-    // The edges move on a copy, kept only once the pair is written: a failure at any step leaves the signer at the pair
-    // the database holds. (A pair remembered but not written is the memory being ahead, which the next tick passes.)
+    // The edges move on a copy, kept once the pair is written. Until then the pair is pending: a failure leaves it to
+    // be finished by the next tick, and the signer at the pair the database holds meanwhile.
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
     const next = await signPair(this.signers, upto, Math.max(this.options.now(), pair.at), heads);
+    this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.
     await this.options.memory.remember(encodePair(next.notes));
     const t1 = performance.now();
     await this.store.write({ upto, notes: next.notes }, tiles);
     const writeMs = performance.now() - t1;
-    this.edges = edges;
-    this.head = next;
-    this.publish();
+    this.commit(this.pending);
     return result(true, writeMs);
+  }
+
+  /**
+   * Finishes a pending pair: remembered again (the first try may have failed,
+   * or not), then held by the database, which may hold it already; else it is
+   * written now over the pair the signer holds. A database at neither pair
+   * is refused until the checkpointer is reopened, whose rules then apply.
+   */
+  private async finish(p: Pending): Promise<void> {
+    await this.options.memory.remember(encodePair(p.next.notes));
+    const row = await this.store.newest();
+    if (!holds(row, p.next)) {
+      if (!holds(row, this.head)) {
+        const message = `the database's newest checkpoint is ${row?.upto ?? 'gone'}; the signer's is at ${this.head.pair.upto}, with ${p.next.pair.upto} to write: reopen the checkpointer`;
+        this.options.alert(`audit checkpoint refused: ${message}`);
+        throw new Error(message);
+      }
+      await this.store.write({ upto: p.next.pair.upto, notes: p.next.notes }, p.tiles);
+    }
+    this.commit(p);
+  }
+
+  private commit(p: Pending): void {
+    this.edges = p.edges;
+    this.head = p.next;
+    this.pending = null;
+    this.publish();
   }
 
   /**
@@ -327,6 +366,11 @@ export class Checkpointer {
    * unwitnessed, alerted: the change is in force either way, and its entry is
    * sealed in the database and in the signer's memory. A tick that cannot seal
    * (an entry failing its MAC) fails the wait rather than spinning.
+   *
+   * A pair covering the number is not enough: the entry must be in it. An
+   * entry deleted before its tick leaves its number a gap the pair calls
+   * final, and nothing could ever show the change again; so the change is
+   * proved in the pair, and refused, alerted, if it is not there.
    */
   async sealThrough(number: bigint, deadline = WITNESS_DEADLINE_MS): Promise<Sealed> {
     while (this.head.pair.upto < number) {
@@ -334,21 +378,33 @@ export class Checkpointer {
       const t = await this.tick();
       if (this.head.pair.upto === before) throw new Error(`cannot seal ${number}: ${t.failures.join('; ') || 'the barrier has not passed it'}`);
     }
-    const { pair, notes } = this.head;
+    const head = this.head;
+    const proof = await this.proveAt(number, head);
+    if (proof === null) {
+      const message = `change ${number} is not in the signed trees: its entry was lost before its seal`;
+      this.options.alert(message);
+      throw new Error(message);
+    }
     const failures = await this.witnessed(number, deadline);
     const cosigned = this.options.witnesses.map((w) => this.pump(w)).filter((p) => p.acked >= number && p.cosigned !== null).map((p) => p.cosigned!);
     const witnessed = this.options.witnesses.length === 0 ? null : failures.length === 0;
     if (witnessed === false) this.options.alert(`change ${number} answered unwitnessed: ${failures.join('; ')}`);
-    return { pair, notes, witnessed, failures, cosigned };
+    return { pair: head.pair, notes: head.notes, witnessed, failures, cosigned, proof };
   }
 
   /** Entry `number`'s inclusion proof against the newest pair, checked before it is handed out; null if not sealed. */
-  async prove(number: bigint): Promise<InclusionProof | null> {
-    const { pair, notes } = this.head;
+  prove(number: bigint): Promise<InclusionProof | null> {
+    return this.proveAt(number, this.head);
+  }
+
+  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }): Promise<InclusionProof | null> {
     if (number > pair.upto) return null;
     const found = await this.store.locate(number);
     if (found === null) return null;
     const { entry, index } = found;
+    if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
+      throw new Error(`the database answered for another entry than ${number}`);
+    }
     const size = pair[entry.tree].size;
     if (index >= size) return null;
     const nodes = nodesFrom(tileMap(await this.store.tiles(entry.tree, tilesFor((n) => inclusionProof(n, index, size)))));
@@ -449,6 +505,10 @@ export function localWitness(name: string, log: PairVerifiers, self: NoteSigner)
     },
   };
 }
+
+/** Whether a row is exactly this pair: the same place and the same two notes, byte for byte. */
+const holds = (row: StoredPair | null, head: { pair: Pair; notes: PairNotes }) =>
+  row !== null && row.upto === head.pair.upto && row.notes.changes === head.notes.changes && row.notes.uses === head.notes.uses;
 
 const sizes = (heads: Record<TreeName, { size: number }>) => ({ changes: heads.changes.size, uses: heads.uses.size });
 

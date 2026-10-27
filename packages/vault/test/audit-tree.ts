@@ -28,6 +28,8 @@ export class MemoryStore implements CheckpointStore {
   writes = 0;
   /** Runs before a write lands; throw to make it fail. */
   beforeWrite: (() => void) | null = null;
+  /** Runs after a write lands; throw to make it fail all the same (a reply lost after the commit). */
+  afterWrite: (() => void) | null = null;
 
   private macKey: Buffer;
 
@@ -50,7 +52,7 @@ export class MemoryStore implements CheckpointStore {
 
   async close(after: bigint) {
     const upto = this.next - 1n;
-    return { upto, newest: this.newestUpto(), entries: this.between(after, upto) };
+    return { upto, newest: await this.newest(), entries: this.between(after, upto) };
   }
 
   async newest(): Promise<StoredPair | null> {
@@ -83,6 +85,7 @@ export class MemoryStore implements CheckpointStore {
     for (const tree of ['changes', 'uses'] as const) for (const t of tiles[tree]) this.tileStore[tree].set(`${t.level}/${t.index}`, Buffer.from(t.hashes));
     this.rows.set(row.upto, row.notes);
     this.writes += 1;
+    this.afterWrite?.();
   }
 
   async locate(number: bigint): Promise<{ entry: LogEntry; index: number } | null> {

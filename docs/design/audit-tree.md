@@ -40,7 +40,7 @@ change waiting for its seal. 6b comes after plan PRs 2 (the schema) and 4
   `TileHashReader` still proves everything above the cut. W212 could not run
   this check; it passes.
 - **The signer's memory stays in core** (R54). It costs 0.6 ms of wall time
-  a tick at p50 on Node, as an fsynced file, and one 488-byte write a tick
+  a tick at p50 on Node, as an fsynced file, and one write of about 0.5 KB a tick
   on Workers.
 - **Level-0 tiles stay, for both trees.** Dropping them for the uses tree
   would save 25% of a use's storage and 17% of the log's WAL. It would also
@@ -65,7 +65,7 @@ it with these rules (`packages/core/src/audit/pair.ts`, `checkpointer.ts`):
 | one memory record | `encodePair`: one JSON record holding both notes; `remember` before `write` |
 | one write | `CheckpointStore.write(row, tiles)`: both trees' tiles and the pair's row, one statement |
 | `open()` takes the pair as one value | the newest row must open as a pair; the memory must be equal, a prefix in both trees, or re-derived to both heads, else refused |
-| each tick checks the row | `close` returns the newest row's `upto`; any other than the signer's refuses the tick |
+| each tick checks the row | `close` returns the newest row; anything but the signer's pair, note for note, refuses the tick |
 | witnesses get the pair | `witnessPair`: both notes in one request, each tree's consistency checked, a fork of either refused whole |
 | the verifier merges both trees by number | `verifyLog`: one walk in number order, each entry to its tree, both heads required at every row |
 
@@ -120,7 +120,7 @@ stay behind them. The database is behind `CheckpointStore`:
 
 - `close(after)`: the barrier and the window, one statement (`close_one`):
   every number at or below `upto` has ended, the entries above `after`, and
-  the newest row's `upto`;
+  the newest row;
 - `write(row, tiles)`: the pair and both trees' tiles, one statement;
 - `newest()`, `entries()`, `tiles()`, `pairs()`, `pair()` and `locate()`:
   the reads.
@@ -130,21 +130,40 @@ The window must hold numbers that increase, all inside it, each in a tree,
 each with a MAC that holds, and none more than 10 minutes older than the
 signer's pair. A replay of a use whose day retention dropped is caught that
 way, because no lookup can match it. Any failure refuses the tick and
-alerts. The trees grow on a copy, kept only once the write succeeds. So a
-failed memory or write leaves the signer at the pair the database holds,
-and #365's "broken until reopened" state is gone by construction.
+alerts. The newest row must be the signer's pair, note for note, so a row
+deleted or replaced under a running signer shows within a tick.
+
+**A failed tick** leaves its pair pending. The trees grow on a copy, so the
+signer stays at the pair the database holds. The next tick finishes the
+pending pair before anything else: it remembers the pair again, then
+adopts it if the database holds it (a write that committed, then threw),
+or writes it as it was if the database is still at the signer's pair. It
+never signs another pair for that place, even if an entry of it was
+deleted since: the pair goes in as signed, and the verifier reports the
+loss. A database at neither pair is refused until the checkpointer is
+reopened. #365's "broken until reopened" state is gone.
 
 **A change** waits for its seal (R51). `sealThrough` ticks at once unless a
-pair already covers it, then waits for every witness to hold a pair that
-covers it, for at most 2 s. Each witness has a pump that always sends the
+pair already covers it. A pair covering the number is not enough: an entry
+deleted before its tick leaves a gap the pair calls final. So the change is
+proved in the pair, and its answer carries that proof; if the entry is not
+there, the change is refused and alerted. Then it waits for every witness
+to hold a pair that covers it, for at most 2 s. Each witness has a pump that always sends the
 newest pair, one at a time. A witness that refuses is asked again every
 100 ms until the deadline, and never after it. A silent witness lets the
 change answer `witnessed: false`, alerted. With no witness, `witnessed` is
 `null`. 6b records unwitnessed answers where the plugin's alerts read them.
 
-**A proof** is checked against the signed head before it is handed out. A
-database that changed the entry makes `prove` throw instead of returning a
-proof that fails later.
+**A proof** is checked against the signed head before it is handed out, and
+must be for the entry asked. A database that changed the entry, or
+answered for another, makes `prove` throw instead of returning a proof that
+fails later.
+
+**Notes are read as strictly as Go's `note.Open`.** That means canonical
+base64, at most 100 signature lines, and no control characters. A line
+that names the log's key and does not verify spoils the whole note. So a
+row the database holds opens here only if every Go reader and C2SP witness
+would open it too.
 
 **Witnesses** (R40's plugin) implement `Witness.publish(notes, proofs)`.
 `localWitness` runs `witnessPair` in process, as the witness's Durable Object
@@ -165,7 +184,9 @@ W209's attack table (#365).
 | crashes the signer between memory and write | the next start | rewrites the remembered pair; with an entry of it deleted, refuses |
 | deletes every row | the signer | refuses to start a new log over a remembered one |
 | forges a pair at the newest row's place | the signer | refuses to start |
-| deletes the newest row under a running signer | the next tick, with no traffic | "the database's newest checkpoint is …" |
+| deletes or replaces the newest row under a running signer | the next tick, with no traffic | "the database's newest checkpoint is …" |
+| deletes a change's entry before its tick | `sealThrough` | the change is refused, alerted, never answered as sealed |
+| holds a fork both as a row and as a pair held outside, below where a walk starts | the verifier | each such pair must be a prefix of the start, row or not |
 | forges an entry, replays an old one, or duplicates a number | the tick | refuses to sign; a change waiting on it fails with the alarm |
 | stores notes of two ticks as one row or memory record | `open()`, the verifier | "not a pair" |
 | moves an entry from one tree to the other | the verifier | both heads differ |
@@ -213,14 +234,16 @@ shares no code with ours. Run on 2026-10-27:
 one in a hundred a change. Measured with `packages/vault/scripts/audit-tree-bench.ts`,
 in Node on this host. The p99s include garbage collection.
 
-| signer's memory | checkpointer CPU, p50 / p99 | tick wall time, p50 / p99 | memory write, p50 / p99 |
+| signer's memory | checkpointer CPU, p50 / p99 | tick wall time over the in-memory store, p50 / p99 | memory write, p50 / p99 |
 |---|---|---|---|
 | in a variable | 4.6 / 41–46 ms | 4.4–4.7 / 23–26 ms | 0 |
 | a file, fsynced before the write (Node) | 5.0–5.2 / 74–80 ms | 5.1–5.3 / 41–42 ms | 0.6 / 2.8–7.5 ms |
 
 That is about 9 µs an entry: the MAC check, the leaf hash, the tree, and
 two Ed25519 signatures. At two ticks a second, the memory costs about 0.1%
-of a core on Node. On Workers it is one 488-byte write to the Durable
+of a core on Node. The wall time leaves out the database: `close_one` and
+the write are 6b's to measure (W212 measured the write at 1.46 ms p50). On
+Workers the memory is one write of about 0.5 KB to the Durable
 Object's storage a tick, 172,800 a day. **R54: the memory stays in core.**
 
 **Level-0 tiles for the uses tree.** Plan PR 6 asked for this decision by
@@ -262,7 +285,7 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 | the 32-bit power-of-two bug fixed (`n & (n - 1)` past 2^32 leaves) | day 50 at 1,000/s | W212; regression tests in `audit-tree.test.ts` |
 | the signer's memory in core | +0.6 ms wall a tick (Node, fsynced); 2 DO writes a second | R54, measured here |
 | level-0 tiles kept for the uses tree | saving 47.5 B a use (25%) and 17% of WAL, against a second source of truth for level 0 | this PR, by the numbers above |
-| a failed tick leaves the trees as they were (copy, then commit) | removes #365's "broken until reopened" state | this PR |
+| a failed tick leaves its pair pending, finished by the next tick (copy, then commit) | removes #365's "broken until reopened" state; never two pairs for one place | this PR, review r1 |
 | the leaf: tagged, length-prefixed columns, its tree and number in it | injective; pinned by vectors | this PR, after `audit/chain.ts`'s encoding |
 | a 500 ms tick; a change waits for its seal and at most 2 s for witnesses | sealed within ~530 ms p99 (W209) | R51, R54 |
 

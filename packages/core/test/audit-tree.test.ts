@@ -222,6 +222,19 @@ test('a signed checkpoint opens with its key and no other, and nothing but a che
     body.replace(/^.*\n/, 'has space\n'),
   ]) assert.throws(() => parseCheckpoint(text), /not a checkpoint/, text);
   assert.equal(await openNote('garbage', verifier), null);
+  // As strict as Go's note.Open (review r1): a bad signature by this key spoils the note whatever follows; base64 must be
+  // canonical; at most 100 signature lines; no control characters.
+  const line = note.slice(note.lastIndexOf('\n\n') + 2);
+  const [, name, encoded] = /^— (\S+) (\S+)\n$/.exec(line)!;
+  const raw = Buffer.from(encoded!, 'base64');
+  raw[10] = raw[10]! ^ 1;
+  const bad = `— ${name} ${raw.toString('base64')}\n`;
+  assert.equal(await openNote(`${body}\n${bad}${line}`, verifier), null, 'an invalid line, then a valid one');
+  assert.equal(await openNote(note.replace(/=+\n$/, '\n'), verifier), null, 'unpadded');
+  assert.equal(await openNote(`${body}\n${line}${'— other.example AAAAAAA=\n'.repeat(100)}`, verifier), null, '101 lines');
+  assert.equal(await openNote(`${body}\n${line}${'— other.example AAAAAAA=\n'.repeat(99)}`, verifier), body, '100 lines');
+  assert.equal(await openNote(note.replace('coffre', 'cof\u0007fre'), verifier), null, 'a control character');
+  assert.equal(await openNote(`${body}\n${line}${line}`, verifier), body, 'a repeated signature is dropped, as Go does');
   await assert.rejects(noteVerifier('name+00000000+AQ=='), /Ed25519/);
 });
 

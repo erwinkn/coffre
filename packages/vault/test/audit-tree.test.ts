@@ -261,6 +261,94 @@ test('a signer with no memory on an existing log starts from the database, says 
   assert.ok(alerts.some((a) => /remembers no pair/.test(a)));
 });
 
+test('review r1: a write that commits, then throws, is adopted at the next tick instead of wedging the signer', async () => {
+  const { k, store, memory, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  store.append('uses', 'a');
+  store.afterWrite = () => {
+    store.afterWrite = null;
+    throw new Error('reply lost');
+  };
+  await assert.rejects(cp.tick(), /reply lost/);
+  await traffic(store, cp, 2);
+  assert.ok((await verify(store, k, { anchors: [decodePair(memory.record!)!] })).ok);
+  assert.deepEqual(alerts, []);
+});
+
+test('review r1: a pair remembered but not written is written as it was at the next tick, never signed again for its place', async () => {
+  const { k, store, memory, open } = await setup();
+  let clock = 100_000;
+  const cp = await open({ now: () => clock });
+  await traffic(store, cp, 2);
+  const deleted = store.append('uses', 'a');
+  store.append('uses', 'b');
+  store.beforeWrite = () => {
+    store.beforeWrite = null;
+    throw new Error('connection reset');
+  };
+  await assert.rejects(cp.tick(), /connection reset/);
+  const remembered = memory.record!;
+  // Time passes and a writer deletes an entry the pending pair sealed: the next tick still writes that pair, at its
+  // first `at`, rather than a second one without the entry.
+  clock += 5000;
+  store.deleteEntry(deleted);
+  const t = await cp.tick();
+  assert.ok(!t.signed || t.upto > (await openPair(decodePair(remembered)!, k.verifiers))!.upto);
+  const pending = (await openPair(decodePair(remembered)!, k.verifiers))!;
+  assert.deepEqual(store.rows.get(pending.upto), decodePair(remembered), 'the pair the signer remembered is the row at its place');
+  const v = await verify(store, k);
+  assert.ok(!v.ok && v.problems.some((p) => /uses head differ/.test(p)), 'and the deleted entry shows');
+});
+
+test('review r1: a row replaced by another pair at the same place, under a running signer, is caught at the next tick', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const { pair } = cp.pair;
+  const fork = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 5) } });
+  store.rows.set(pair.upto, fork.notes);
+  const t = await cp.tick();
+  assert.ok(!t.signed && /newest checkpoint is another pair/.test(t.failures.join()), t.failures.join());
+});
+
+test('review r1: a change whose entry was deleted before its tick is refused, not answered', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  const number = store.append('changes', 'revoke');
+  store.deleteEntry(number);
+  await assert.rejects(cp.sealThrough(number), /lost before its seal/);
+  assert.ok(alerts.some((a) => /lost before its seal/.test(a)));
+});
+
+test('review r1: prove() refuses an answer for another entry than the one asked', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const locate = store.locate.bind(store);
+  store.locate = async (number) => locate(number - 1n);
+  await assert.rejects(cp.prove(store.log[5]!.number), /another entry/);
+  store.locate = async (number) => {
+    const found = await locate(number);
+    return found && { ...found, entry: { ...found.entry, tree: 'other' as never } };
+  };
+  await assert.rejects(cp.prove(store.log[5]!.number), /another entry/);
+});
+
+test('review r1: a pair held outside below the start must be a prefix of it, even when the row at its place agrees', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 6);
+  const from = cp.pair.notes;
+  const older = [...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-4)!;
+  const pair = (await openPair(store.rows.get(older)!, k.verifiers))!;
+  const fork = await signPair(k.signers, older, pair.at, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 6) } });
+  store.rows.set(older, fork.notes);
+  const v = await verify(store, k, { from, anchors: [fork.notes] });
+  assert.ok(!v.ok && v.problems.some((p) => /not a prefix of the start/.test(p)), v.problems.join('\n'));
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {
@@ -270,8 +358,9 @@ test('a change answers once sealed: witnessed null without a witness, and its pr
   const s = await cp.sealThrough(number);
   assert.equal(s.witnessed, null);
   assert.ok(s.pair.upto >= number);
-  const p = (await cp.prove(number))!;
+  const p = s.proof;
   assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, s.pair.changes.root));
+  assert.equal(p.number, number);
 });
 
 test('a change waits for the witness, then answers unwitnessed at the deadline, alerted; a refusal is retried within it', async () => {

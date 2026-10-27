@@ -106,21 +106,44 @@ export async function cosignNote(note: string, signer: NoteSigner): Promise<stri
   return `${note}${await signatureLine(splitNote(note).text, signer)}`;
 }
 
+/** At most this many signature lines, as Go's note.Open: a crafted row cannot make a reader verify without end. */
+const MAX_SIGNATURES = 100;
+
+/** A key name, as Go's: not empty, no white space, no '+'. */
+const validName = (name: string) => name.length > 0 && !/[\s\u0085+]/u.test(name) && !/[\uD800-\uDFFF]/u.test(name);
+
+/**
+ * A signed note's text and signature lines, read as strictly as Go's
+ * note.Open, so that a note stored in the database opens here only if every
+ * Go reader and C2SP witness would open it too. Throws on anything else.
+ */
 export function splitNote(note: string): { text: string; signatures: { name: string; id: Buffer; signature: Buffer }[] } {
+  // Well-formed Unicode, and no ASCII control character but the newline.
+  if (/[\u0000-\u0009\u000b-\u001f]/.test(note) || /[\uD800-\uDFFF]/u.test(note)) throw new Error('not a signed note');
   const at = note.lastIndexOf('\n\n');
-  if (at < 0 || !note.endsWith('\n')) throw new Error('not a signed note');
+  if (at < 0 || note.length === at + 2 || !note.endsWith('\n')) throw new Error('not a signed note');
   const text = note.slice(0, at + 1);
-  const signatures = note.slice(at + 2, -1).split('\n').map((line) => {
-    const m = /^— (\S+) ([A-Za-z0-9+/]+={0,2})$/.exec(line);
-    if (m === null) throw new Error('malformed signature line');
-    const raw = Buffer.from(m[2]!, 'base64');
-    if (raw.length < 5) throw new Error('malformed signature line');
-    return { name: m[1]!, id: raw.subarray(0, 4), signature: raw.subarray(4) };
+  const lines = note.slice(at + 2, -1).split('\n');
+  if (lines.length > MAX_SIGNATURES) throw new Error('too many signature lines');
+  const signatures = lines.map((line) => {
+    if (!line.startsWith('— ')) throw new Error('malformed signature line');
+    const rest = line.slice(2);
+    const space = rest.indexOf(' ');
+    const [name, encoded] = space < 0 ? [rest, ''] : [rest.slice(0, space), rest.slice(space + 1)];
+    // Canonical base64 only: what decodes here decodes to the same bytes in Go's StdEncoding.
+    const raw = Buffer.from(encoded, 'base64');
+    if (!validName(name) || encoded === '' || raw.toString('base64') !== encoded || raw.length < 5) throw new Error('malformed signature line');
+    return { name, id: raw.subarray(0, 4), signature: raw.subarray(4) };
   });
   return { text, signatures };
 }
 
-/** The note's text if `verifier` signed it, else null; null for anything that is not a signed note too. */
+/**
+ * The note's text if `verifier` signed it, else null; null for anything that
+ * is not a signed note too. As Go's note.Open, a signature line that names
+ * this key and does not verify makes the whole note invalid, whatever other
+ * lines say.
+ */
 export async function openNote(note: string, verifier: NoteVerifier): Promise<string | null> {
   let parts: ReturnType<typeof splitNote>;
   try {
@@ -128,10 +151,13 @@ export async function openNote(note: string, verifier: NoteVerifier): Promise<st
   } catch {
     return null;
   }
+  let verified = false;
   for (const s of parts.signatures) {
-    if (s.name === verifier.name && s.id.equals(verifier.id) && (await verifier.verify(Buffer.from(parts.text), s.signature))) return parts.text;
+    if (s.name !== verifier.name || !s.id.equals(verifier.id) || verified) continue;
+    if (s.signature.length !== 64 || !(await verifier.verify(Buffer.from(parts.text), s.signature))) return null;
+    verified = true;
   }
-  return null;
+  return verified ? parts.text : null;
 }
 
 /** A checkpoint if `verifier` signed it and it names that key's log as its origin, else null. */

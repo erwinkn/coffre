@@ -109,7 +109,8 @@ async function walk(
   let edges = await loadEdges(start.pair);
 
   // Pairs held outside. Those at or below the start are not walked (verified before), but each must still be the row
-  // at its place, if there is one, and a prefix of the start, by a consistency proof from the tiles, in both trees.
+  // at its place, if there is one, and, whether or not there is, a prefix of the start, by a consistency proof from the
+  // tiles, in both trees.
   const above: Stop[] = [];
   for (const notes of opts.anchors ?? []) {
     const anchor = await openPair(notes, opts.verifiers);
@@ -120,10 +121,8 @@ async function walk(
     } else {
       const row = await reader.pair(anchor.upto);
       const pair = row === null ? null : await open(row);
-      if (pair !== null) {
-        if (!samePair(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: a second history`);
-        continue;
-      }
+      if (pair !== null && !samePair(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: a second history`);
+      // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside.
       for (const tree of TREES) {
         const [from, to] = [anchor[tree], start.pair[tree]];
         const proof = from.size > to.size ? null : await proveConsistency(reader, tree, from.size, to.size).catch(() => null);
