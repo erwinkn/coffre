@@ -86,7 +86,11 @@ Nine, each marked `Coffre:` in the code:
   pooler keeps the connection for the transaction from the ReadyForQuery
   after it, which says so (`T`), and coffre's Hyperdrive configurations
   cache nothing (`docs/deploy.md`), so that statement is never answered
-  from a cache. A first statement described first (Parse, Describe, Flush,
+  from a cache. Both shapes reach the pooler: Parse, Bind and Execute under
+  one Sync, and one Query message of two statements. Before a release,
+  check both on a real Hyperdrive: `select pg_backend_pid()` as a
+  transaction's first statement (with a parameter, and without) and again
+  as its second, the same pid; then a write and a rollback, nothing kept. A first statement described first (Parse, Describe, Flush,
   then a wait) would reach Hyperdrive before any ReadyForQuery had pinned
   the connection, a flow Cloudflare says hangs under its pooling; coffre
   sends none (`postgresClient`), and none is supported there. This

@@ -368,6 +368,13 @@ test('a transaction that asks nothing sends nothing, and one that asks sends BEG
       await tx.unsafe('select 2');
     });
     assert.deepEqual(sent, ['begin read only', 'select $1::int', 'select 2', 'commit']);
+    // A first statement without parameters, its BEGIN in its Query message: the modes hold, past that message too.
+    const [modes] = await client.begin('isolation level repeatable read read only', async (tx) => {
+      const [first] = await tx.unsafe<[{ ro: string; level: string }]>("select current_setting('transaction_read_only') as ro, current_setting('transaction_isolation') as level");
+      const [second] = await tx.unsafe<[{ ro: string }]>('select current_setting($1) as ro', ['transaction_read_only']);
+      return [{ ...first, after: second.ro }];
+    });
+    assert.deepEqual(modes, { ro: 'on', level: 'repeatable read', after: 'on' });
   } finally {
     await client.end();
   }
@@ -685,7 +692,10 @@ test('a transaction\'s error says what failed: a first statement\'s syntax, the 
   const { client } = sending('coffre-tx-blame');
   try {
     // Parsed with its BEGIN, in one Query message: the statement's, where in it.
-    const syntax = await client.begin((tx) => tx.unsafe('selec 1')).catch((e: { code?: string; query?: string; position?: string }) => e);
+    const syntax = await client.begin((tx) => tx.unsafe('selec 1')).then(
+      () => assert.fail('resolved'),
+      (e: { code?: string; query?: string; position?: string }) => e,
+    );
     assert.deepEqual([syntax.code, syntax.query, syntax.position], ['42601', 'selec 1', '1']);
     // A savepoint's failure caught and rolled back to; then another left unwaited, which the COMMIT meets.
     await assert.rejects(client.begin(async (tx) => {
