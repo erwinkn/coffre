@@ -287,7 +287,7 @@ SealLocks == (IF RowFirst THEN <<>> ELSE Rows) \o AppRows
 ChangeLocks ==
     IF ~DualFence THEN <<"fence">>
     ELSE IF AppObject THEN IF AppHeadFirst THEN <<"head", "obj", "issue", "fence">> ELSE <<"obj", "head", "issue", "fence">>
-    ELSE (IF RowFirst THEN <<"obj">> ELSE <<>>) \o (IF ChangeHeadFirst THEN <<"head", "issue", "fence">> ELSE <<"fence", "head", "issue">>)
+    ELSE (IF RowFirst THEN <<"obj">> ELSE <<>>) \o (IF ChangeHeadFirst THEN <<"head", "issue", "fence">> ELSE <<"issue", "fence", "head">>)
          \o (IF RowFirst THEN <<>> ELSE <<"obj">>)
 \* A 0.15 sign-in's locks: 0.14's head (`audited()`), then `app_change`'s issue lock, shared. One
 \* that also revokes the account's earlier sessions (Mixed): its append's trigger, for the revokes'
