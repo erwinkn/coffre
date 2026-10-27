@@ -6,7 +6,7 @@ import * as gs from '@hegeldev/hegel/generators';
 import { EVERYWHERE, type CallerKind, type InstanceRole } from '@coffre/core/access';
 import type { Purpose } from '@coffre/core/vault';
 
-import { refreshMs, USE_DEADLINE_MS, type BulkRows } from '../src/bulk.ts';
+import { refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS, type BulkRows } from '../src/bulk.ts';
 import { decideUse, useEnvironments, type UseCode, type UseRequest, type UseView } from '../src/decide.ts';
 import { limitOp, objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
 import { emptyReplay, readUse, replay } from '../src/log-replay.ts';
@@ -262,7 +262,7 @@ function inputsOf(view: UseView, request: UseRequest): string[] {
   ];
 }
 
-test(`the bulk cap: no rolling window releases more than count keys, uses decided in number order with times up to the deadline apart, seed ${settings.seed}`, () => hegel.test((tc) => {
+test(`the bulk cap: no rolling window releases more than count keys, uses decided in number order with times up to the deadline behind or a minute ahead, seed ${settings.seed}`, () => hegel.test((tc) => {
   const count = tc.draw(gs.integers({ minValue: 1, maxValue: 3 }));
   const windowMs = pick(tc, [1_000, 10_000, 60_000]);
   const world = new World();
@@ -276,8 +276,9 @@ test(`the bulk cap: no rolling window releases more than count keys, uses decide
   let clock = 100_000;
   for (let i = tc.draw(gs.integers({ minValue: 5, maxValue: 40 })); i > 0; i -= 1) {
     clock += tc.draw(gs.integers({ minValue: 0, maxValue: windowMs / 2 }));
-    // Stamped by a Worker up to the deadline before the use is numbered (a slow isolate, a skewed clock).
-    const at = clock - tc.draw(gs.integers({ minValue: 0, maxValue: USE_DEADLINE_MS }));
+    // Stamped by a Worker up to the deadline before the use is numbered (a slow isolate, a skewed clock), or up to a minute
+    // after it (a clock running ahead, as far as `ahead` lets by).
+    const at = clock + tc.draw(gs.integers({ minValue: -USE_DEADLINE_MS, maxValue: USE_AHEAD_MS }));
     const secretId = pick(tc, KEYS.slice(0, count + 2));
     if (world.use({ credential: CREDENTIALS[0]!, secretId, place: null, purpose: 'use', keepsSensitive: false, at }) === null) released.push({ key: secretId, at });
   }

@@ -173,9 +173,15 @@ REMOVALS=(
   "HotPathOneBulk PrincipalLocks BulkCapHolds"
   "HotPathOneBulk PrincipalLocks BulkReplayAgrees"
   "HotPathOneBulk RefreshOnUse BulkCapHolds"
+  # One principal's hot keys: moves take its lock shared and write their period, so they never queue (T127, R44).
+  "HotPathOneBulk RefreshShared RefreshesNeverQueue"
+  "HotPathOneBulk RefreshLocks BulkReplayAgrees"
+  "HotPathOneBulk RefreshPeriods BulkReplayAgrees"
   "HotPathOneBulk CoverFresh BulkCapHolds"
   "HotPathOneBulk DeadlineSlack BulkCapHolds"
   "HotPathOneBulkSlack Slack BulkCapHolds"
+  # A use whose Worker's clock runs ahead is decided before one stamped earlier: other keys count that much longer (W228).
+  "HotPathOneBulkSkew AheadSlack BulkCapHolds"
   "HotPathOnePolicy CapFromPolicy BulkReplayAgrees"
   "HotPathOnePolicy CapSealed BulkReplayAgrees"
   "HotPathOnePolicyWindow CapFromPolicy BulkReplayAgrees"

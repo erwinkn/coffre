@@ -215,7 +215,9 @@ $$;
 DO $$
 DECLARE
     r use_row;
-    t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    -- Now, or the next minute's start if that is under 5 s away: the uses below, up to 3 ms apart, share one refresh
+    -- period (a minute, at this window), as covers need (CoverFresh).
+    t bigint := (SELECT c + CASE WHEN c % 60000 > 55000 THEN 60000 - c % 60000 ELSE 0 END FROM (SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS c) n);
     tag bytea := decode(repeat('ab', 16), 'hex');
 BEGIN
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000));
@@ -228,8 +230,8 @@ BEGIN
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM log_uses WHERE number = r.number AND at = t AND request_id = 7 AND purpose = 258 AND place = '22222222-2222-2222-2222-222222222222' AND log_uses.mac = tag
-    ) OR (SELECT last FROM log_bulk WHERE principal = 'token:deploy' AND secret = '44444444-4444-4444-4444-444444444441') <> t THEN
-        RAISE EXCEPTION 'FAIL: the use''s entry or its key''s bulk row is not as asked';
+    ) OR (SELECT last FROM log_bulk WHERE principal = 'token:deploy' AND secret = '44444444-4444-4444-4444-444444444441') <> t - t % 60000 THEN
+        RAISE EXCEPTION 'FAIL: the use''s entry or its key''s bulk row (its refresh period''s start) is not as asked';
     END IF;
     BEGIN
         PERFORM use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, NULL, tag, t + 2000);

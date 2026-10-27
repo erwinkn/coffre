@@ -3,7 +3,7 @@ import type { Database, Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { refreshMs, USE_DEADLINE_MS } from './bulk.ts';
+import { periodOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
 import { objectKey, type Kind } from './inputs.ts';
 import type { UseCall, UseRow } from './use.ts';
 
@@ -91,13 +91,14 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
 
   // The cap's rule (bulk.ts, as 0022 and 0024 write it): the key's row, and the others only for a key not in the set.
   const refresh = refreshMs(limit);
+  const period = periodOf(call.at, refresh);
   const b = c === undefined ? undefined : await one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${c.principal} AND secret = ${call.secretId}`);
   const inSet = b !== undefined && b.last > call.at - limit.windowMs - refresh;
-  const stale = b === undefined || b.last <= call.at - refresh;
+  const stale = b === undefined || b.last < period;
   const others = c === undefined || inSet ? 0 : Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
-    SELECT 1 FROM log_bulk WHERE principal = ${c.principal} AND secret <> ${call.secretId} AND last > ${call.at - limit.windowMs - refresh - USE_DEADLINE_MS} LIMIT ${limit.count})`))!.n);
+    SELECT 1 FROM log_bulk WHERE principal = ${c.principal} AND secret <> ${call.secretId} AND last > ${call.at - limit.windowMs - refresh - USE_DEADLINE_MS - USE_AHEAD_MS} LIMIT ${limit.count})`))!.n);
   const cover = call.cover;
-  const covered = cover !== undefined && b !== undefined && b.last > call.at - refresh && (cached || BigInt(cover.number) > (inputs ?? 0n))
+  const covered = cover !== undefined && b !== undefined && b.last >= period && (cached || BigInt(cover.number) > (inputs ?? 0n))
     && (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
       AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined;
   let number: string | null = null;
@@ -114,8 +115,8 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     number = String(next);
   }
   if (c !== undefined && !covered && stale && (inSet || others < limit.count)) {
-    await rowsOf(tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${c.principal}, ${call.secretId}, ${call.at})
-      ON CONFLICT (principal, secret) DO UPDATE SET last = excluded.last`);
+    await rowsOf(tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${c.principal}, ${call.secretId}, ${period})
+      ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
   }
   // Past its deadline by the end, the call rolls back and writes nothing (DeadlineChecked), as Postgres's does.
   if (Date.now() > call.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });

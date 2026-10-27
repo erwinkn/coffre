@@ -952,15 +952,18 @@ The cap allows `count` distinct keys per principal per rolling `window`
 most a day). It is built into the use's one statement:
 
 - **What it keeps.** One row per (principal, key), holding `last`, the time of
-  that key's last logged use.
+  that key's last logged use. Since T127 (W228), the start of that use's
+  refresh period, `at − at % refresh`: below.
 - **What counts.** A key is counted at time t if `last > t − window −
   refresh`.
 - **A use of a counted key** passes the cap.
 - **A use of an uncounted key** passes only if fewer than `count` other keys
-  are counted, and then it enters (`last := at`).
+  are counted, and then it enters (`last := at`; since W228, the start of
+  its refresh period, below).
 - **Refresh.** A use whose key's row is older than `refresh` (a minute, or a
   tenth of the window) moves it on. So a hot key writes its row at most once
-  a minute, not once per use.
+  a minute, not once per use. Since T127: a row from an earlier refresh
+  period than the use's moves on to the start of the use's period.
 - **The slack.** `last` lags the key's newest use by at most `refresh`, so
   the bound adds `refresh`. Over any rolling `window`, at most `count` keys
   are released. A key is counted up to a minute too long, never too short.
@@ -968,10 +971,25 @@ most a day). It is built into the use's one statement:
   decided in number order, not in the order of their `at`, so a key that
   entered at a later `at` can already be in when an earlier use is decided.
   TLC found two keys released in one window without this margin.
+  - **Amended by W228 (migration 0028): plus 60 s.** A Worker's clock may run
+    up to a minute ahead of Postgres's (`ahead` refuses past that), so a use
+    can be decided up to `deadline + 60 s` before one stamped earlier. With
+    the clock run past HotPathOneBulkSkew's bound, TLC let two keys out in
+    one window on 0024 too. The margin is now `window + refresh + deadline +
+    60 s`: a key counts against a new one about two minutes past its window
+    by default, never less than the window.
 - **Ordering.** A use that may write a row (the key new, or its row stale)
   takes its principal's own lock first, and reads again. So writes come in
   number order, and the replay decides each use the same. Other uses take no
   lock.
+  - **Amended by T127 (W228, migration 0028).** One principal's uses queued
+    on that lock at each refresh: every use that saw a stale row took it
+    exclusive in turn. Now only a key entering the set takes it exclusive; a
+    key moved on takes it shared, and moves wait for no other move. Two
+    moves of one key at once write the same period, or the greater stands,
+    so the row ends where the replay's does whichever commits first.
+    [`0.15-plan.md`](0.15-plan.md#one-hot-principal-cold-backends-t127-t131-w228)
+    has the design, the spec and the numbers.
 - **Requests, not releases.** Every request counts, allowed or refused for
   any reason but the cap. 0.14 counted releases (Open decisions, 1).
 
@@ -1283,7 +1301,7 @@ open to him.
 | 6 | **The statement in two forms**, one without the seal probes for the cached case | one form with its probes skipped by a condition | the condition skipped the probes but not their plan nodes: 0.34 → 0.29 ms cached | the function holds the statement twice |
 | 7 | **Generic plans for the vault's login** (`plan_cache_mode`) | Postgres's auto mode | auto made 411 plans of the statement in 15 s at 1,000/s, 26 ms each under load; generic: 44 | a plan that is not tuned per call (the statement is all index probes, so nothing is lost) |
 | 8 | **Per-isolate covers** (Erwin, R53), invalidated by a change to any of the four inputs, and only while the key's bulk row is fresh | a shared, MAC'd cover table; a counter row per tick (rejected: R44) | 0.22 entries per use locally at 80% repeats; 0.51 on Workers | the log keeps the first read in a window, not each one |
-| 9 | **The bulk cap counts requests**, a key from its last logged use, refreshed at most every `refresh`, counted over `window + refresh` (others over `+ deadline` too); new and refreshed keys serialise on the principal's lock | count releases (0.14's meaning: needs a second statement after the decision); count from the log (scans history, R48); refresh on every use (a hot row per key) | count 10 over a day: the 11th key refused, 6 at once with room for 2 admit 2, replay agrees; locally 14,890 `bulk` refusals all replayed equal | a key stays counted up to `refresh` (a minute) longer than its window; a token probing keys it cannot read uses up its budget; refusals by the cap take the lock |
+| 9 | **The bulk cap counts requests**, a key from its last logged use, refreshed at most every `refresh`, counted over `window + refresh` (others over `+ deadline` too); new and refreshed keys serialise on the principal's lock (amended by W228, migration 0028: refreshes take it shared and write their period; others count 60 s longer) | count releases (0.14's meaning: needs a second statement after the decision); count from the log (scans history, R48); refresh on every use (a hot row per key) | count 10 over a day: the 11th key refused, 6 at once with room for 2 admit 2, replay agrees; locally 14,890 `bulk` refusals all replayed equal | a key stays counted up to `refresh` (a minute) longer than its window; a token probing keys it cannot read uses up its budget; refusals by the cap take the lock |
 | 10 | **The slim row with a 16-byte MAC** (Erwin, R53) | 32-byte MAC; the prototype's text row | 140.8 B per use at 1M rows (341 before); 248 B of WAL per use (442) | 128 bits against forgery, as HMAC truncation guidance allows |
 | 11 | **A hard deadline ≤ 3 s, held in Postgres too** (Erwin, R53, R54): refused at the lock, and rolled back at the end of the call if passed | the Worker's race alone | a use held 500 ms past its 300 ms deadline by its principal's lock wrote nothing (fence-one) | a use that waits too long fails instead of finishing late |
 | 12 | **`at` days** (Erwin, R54) | days by number (W209) | retention: DETACH 3 ms, DROP 26–52 ms at 10M (W208) | a replay must land in its day: (at, request id) is the replay's key |
