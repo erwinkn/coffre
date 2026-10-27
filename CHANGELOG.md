@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **0.15's log, expanded: one migration, nothing calls it yet.**
+  `0022_log_015` on Postgres (`0018_log_015` on SQLite) adds the tables,
+  seals, functions and login 0.15's hot path will run on
+  ([log-015.md](docs/design/log-015.md)). This release behaves as 0.14.5,
+  which keeps serving on the new schema, so the order of the deploy and a
+  rollback need no care.
+  - **It makes a role**, `coffre_vault_hot`, the hot path's login, unable
+    to log in until 0.15 gives it a password. So the login that runs
+    `coffre migrate` needs `CREATEROLE` (or to be a superuser), as 0019
+    did, unless the role exists already with its settings; without either
+    the migration fails, saying what to run, and changes nothing. Check
+    as the migrating login: `SELECT rolsuper OR rolcreaterole FROM
+    pg_roles WHERE rolname = current_user`.
+  - **Every 0.14 entry that changes access takes a new lock**, which
+    nothing else takes before 0.15: an advisory lock, uncontended, in the
+    append's own transaction. Reads and uses take none.
+  - It adds nullable columns to five tables, and checks that scan nothing
+    (`NOT VALID`), so it runs in a moment.
+
 - **The CLI is an image.** Each release now publishes
   `ghcr.io/erwinkn/coffre-cli` for amd64 and arm64, tagged `<version>`,
   `<major>.<minor>` and `latest`, after npm: npm's own tarball of the

@@ -711,7 +711,7 @@ export class WorkloadService {
           },
         }));
         return {
-          binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath, planned.policy),
+          binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, planned.policy),
           replaced: planned.replaces.map((replaced) => replaced.id),
         };
       });
@@ -819,7 +819,7 @@ export class WorkloadService {
               replaces: [old.id],
             },
           }));
-          bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null }, byPath, shown(old.policy)));
+          bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, shown(old.policy)));
         }
         return { bindings, replaced: plan.replaces };
       });

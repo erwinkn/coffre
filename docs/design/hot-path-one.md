@@ -182,43 +182,43 @@ The PR 1 of the plan merges them.
 
 ## The schema on main (W215, #372)
 
-Plan PR 2 built the prototype's tables and functions on the real schema
-(`docs/design/log-015.md` on #372). Where it departs from the prototype,
-and why:
+Plan PR 2 built the prototype's tables and functions on coffre's real
+schema, as migration `0022_log_015`: [`log-015.md`](log-015.md) says what
+it adds. Its decisions, where it departs from the prototype and why, each
+with its numbers:
 
-- **Names.** `log_changes`, `log_uses`, `log_bulk`, `log_fence`,
-  `log_checkpoints` and `log_tiles`. A deployment may own tables in
-  `public`, and one named `changes` would fail the migration.
-- **`SECURITY DEFINER` functions,** the vault's only way to write the log.
-  Measured within noise of the prototype's invoker functions.
-- **Six sealed inputs per plain use:** the credential, its member, the
-  secret, its environment and project, and the policy, which holds the bulk
-  cap (W216: the cap is read in the use's statement, not passed in). Roles,
-  the place asked at and a reference's source come in PR 5.
-- **The object key** is the first 16 bytes of
-  SHA-256('coffre.object.v1' 0 kind 0 id), as a uuid. The function is
-  `STABLE`: declared `IMMUTABLE` over a stable function, Postgres did not
-  inline it (32.4 against 3.7 µs).
-- **The keys are computed once, then probed by value.** In each probe's
-  condition, the planner seq-scanned a small table at 0.4–0.55 ms a probe.
-  Probed by value, each costs 11–18 µs, flat from 7 to 200,000 changes.
-- **`purpose` also carries whether a use may keep a sensitive value.** A
-  ninth column would widen the tuple header. Measured: 142.6 B a use, heap
-  and index, at 200,000 uses through `use_credential` (the prototype: 141).
-- **One `log_checkpoints` row per pair of heads,** so W212's rule 3 (both
-  heads in one write) holds by the schema.
-- **The hot path's login, `coffre_vault_hot`,** made by the migration with
-  the 1 s / 2 s timeouts and generic plans. Set on the vault's own login,
-  these would change 0.14.5 between the migration and the deploy.
-- **The OldWritesFence trigger** (Migration015.tla). It fires on every
-  0.14 entry that changes an input. Reads, uses and sign-ins never take it.
+Measured on Postgres 16.14 in Docker, on this host. Each call's server
+time comes from a loop of 20,000 calls, each its own transaction, with
+`synchronous_commit` off so that the commit's flush does not hide the
+statement. W211's prototype (`schema-one.sql` on #366) ran on the same
+container as the baseline.
 
-**The cost on real tables.** The use's call, same container: **0.74 ms**
-with the probes, **0.38 ms** from the seal cache, against the prototype's
-0.42 and 0.26 ms. Most of the difference is the real rows' width and a
-larger plan to start. Weighted by Cloudflare's 27% probing share, that is
-about 0.48 ms a use. The probing form is over the plan's ~0.6 ms budget:
-plan, PR 5, "Risk".
+| # | decision | against | numbers | cost |
+|---|---|---|---|---|
+| 1 | **The vault writes the log only through `SECURITY DEFINER` functions**, each with `SET search_path = pg_catalog, pg_temp` | the prototype's invoker functions with table grants | invoker and definer within noise: 1.043 against 1.055 ms a call over pgbench (3 rounds, ±0.01), 0.886 against 0.885 ms in the loop. 0.14.5's own conformance (`test:compat`) fails any write grant to the vault outside its four tables | none measured; every name in the functions is schema-qualified |
+| 2 | **`log_object` is `STABLE`** | `IMMUTABLE` | declared IMMUTABLE over STABLE `convert_to`, Postgres does not inline it: 32.4 µs a call in a statement, against 3.7 µs inlined | none: nothing indexes it |
+| 3 | **The probing form computes its keys once**, in a materialized step, then probes them | keys in each probe's condition | on a small table the planner seq-scans, and the condition hashes again for every row: 0.4 to 0.55 ms a probe at 7 changes. Probed by value: 11 to 18 µs each, index-only, flat from 7 to 200,000 changes | one more CTE |
+| 4 | **Five inputs, W216's objects: the credential, its principal, the secret, its environment, and the policy** | the prototype's four; a project of its own (an environment's `deleted` says its project's) | a project and the policy probed added about 60 µs to the probing form; the principal's grants array costs about 35 µs in both | roles, the environment asked at and a reference's source wait for PR 5's statement |
+| 5 | **`purpose` carries whether a use may keep a sensitive value** (256 added to its code: 0 reveal, 1 run, 2 compare, 3 copy, 4 use, 5 expose, core's `Purpose`) | a ninth column, `keeps_sensitive` | nine columns make the null bitmap two bytes, and the tuple header 32 bytes instead of 24: 117 against 109 B of heap a use. Measured at 200,000 uses through `use_credential`: **110.9 B heap + 31.7 B index = 142.6 B a use** (the prototype: 141), WAL 256 to 275 B | one column holds two things |
+| 6 | **The bulk cap is the policy's newest change's**, read in the use's statement (W216; W211's CapSealed, CapFromPolicy) | the cap as call parameters (the prototype); the policy's row | the cached form goes from 0.35 to about 0.41 ms: one more probe, its heap tuple and 2.3 µs of JSON. A row put back moves nothing (`log-owner.sql`) | a use before the policy is logged, or under one that names no count or window, answers `unconfigured` and writes nothing |
+| 7 | **One `log_checkpoints` row per pair of heads** | a row per tree (W212's bench) | no measurable difference (one row a tick) | none: the pair rule (W212, rule 3) holds by the schema, not by the code |
+| 8 | **`log_*` names**, `log_config` included | the plan's `changes`, `uses`, `bulk`, `fence`, `checkpoints`; `vault_config` | none | public may hold a deployment's own tables (`FOREIGN_OWNERS` in migrate.ts): a table named `changes` there would fail the migration. And 0.14.5's conformance takes every `vault_*` table for a members' table and probes its `principal` (review r1): `vault_config` failed `test:compat` |
+| 9 | **Tiles keyed by `(tree, level, leaf)`**, `leaf` the first leaf a tile covers; partitioned by tree, the uses tree's by level: its leaf tiles by leaf range, its levels above in one table (W217, #370) | `(level, idx)`; every level by leaf range | a partitioned table's key must hold its partition key. A tile above level 0 spans far past its first leaf (2/0 covers 16.7M leaves): by range, dropping old leaves would drop a tile that still holds the cut. Leaf tiles are 255/256 of the bytes, so dropping their ranges keeps W212's 1.16 s against 13.8 s | retention deletes the few upper tiles wholly below the cut (about 1,300 a day at 1,000/s) |
+| 10 | **A role for the hot path, made by the migration**, as 0019 makes `coffre_backup`, and refused, saying what to run, to a login without `CREATEROLE` | settings on `coffre_vault_runtime`; settings in the functions | a role's settings apply only to the role that logs in, never through a group; set on the vault's login, they would change 0.14.5 from the migration to the deploy; `statement_timeout` cannot be set from inside a function | a deployment whose migrating login has no `CREATEROLE` makes the role by hand first, as for 0019 |
+| 11 | **`change_input` takes its locks in 0.14's order**: the member's queue and row (a principal's, or a credential's principal's), then 0.14's head, then the fence | the fence first (the prototype) | with 0.14's vault holding a member's row, the fence first deadlocks (40P01, `test-schema.sh` against the old order); in this order the change waits and passes, beside a 0.14 decision that writes the member or only reads it | every 0.15 change waits for 0.14's head until 0.16, as the spec's ChangeHeadFirst has it |
+| 12 | **A change checks the row against its object's newest change** (ChangeChecksSeal, W211's spec after Fable's review of #373), on top of the CAS | the CAS alone (the prototype) | one probe of `log_changes_object_idx` per change; without it, a row put back from before a revoke, validly sealed once, would be sealed again under the next change (`log-owner.sql` fails without the check) | a change on a tampered row fails `stale` (data_corrupted) rather than repairing it: adoption (PR 9) or an Owner's reseal does |
+| 13 | **A use's `at` bounded above: more than a minute past the database's clock answers `ahead`** and writes nothing (W217, #376's review) | no upper bound (the prototype); a wider window for `locate` | uses have one index, `(at, request_id)`, so a proof finds a use from its window's floor to the barrier plus a slack (deadline + 60 s); a use stamped past it is unprovable, and the honest ones after it read as changed: a false tamper alarm | a Worker whose clock runs over a minute ahead of Postgres's has its uses refused until NTP catches up |
+
+The use's call on the real tables, same container: **0.64 ms** with the
+probes and **0.41 ms** from the seal cache (0.35 before the cap was read
+from the policy's change; 0.74 and 0.38 with a sixth, project, input),
+against the prototype's 0.42 and 0.26 ms. Past decisions
+1 to 6, the difference is the real rows' width and a larger plan to
+start: the statement's nodes run in about 0.2 ms of what an execution
+takes. On Cloudflare, 27% of W211's calls took the probing path, so about
+0.47 ms a use, weighted. The probing form is over the plan's ~0.6 ms a
+use: PR 5's bench holds it to the budget, with its cuts (W211's open
+decision 5) if it misses.
 
 ## In short (W208, round 1)
 

@@ -24,7 +24,7 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
 export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promise<void> {
   await client.query(`DO $$ BEGIN
     EXECUTE format(
-      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
+      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_vault_hot, coffre_backup',
       current_database()
     );
   END $$`);
@@ -33,7 +33,7 @@ export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promi
 /** Why `login` cannot be the backup login, before anything runs, or null when it may. */
 export function backupLoginProblem(login: string): string | null {
   if (login === '') return 'the backup login is empty: name the role to grant coffre_backup';
-  if (['coffre_backup', 'coffre_app', 'coffre_vault', 'coffre_runtime', 'coffre_vault_runtime'].includes(login)) {
+  if (['coffre_backup', 'coffre_app', 'coffre_vault', 'coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'].includes(login)) {
     return `the backup login is ${login}, one of coffre's own roles: name the login that backs up`;
   }
   return null;

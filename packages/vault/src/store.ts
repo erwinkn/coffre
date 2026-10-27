@@ -182,7 +182,9 @@ export async function instanceOwners(db: Queryable): Promise<Member[]> {
  * removal off for ever. So each row comes with an advisory lock on its
  * principal, which the lock manager queues in order: a read asked after a
  * writer waits behind it. The same statement takes it, then the row, one
- * principal after another.
+ * principal after another. 0.15's `change_input` (0022_log_015) takes the
+ * same two in one statement, before the log's head, and
+ * scripts/test-schema.sh holds the pair to that order: keep them together.
  */
 export async function lockMembers(tx: Transaction, principals: readonly string[], shared = false): Promise<Map<string, Member>> {
   const { vaultMembers } = tablesOf(tx);

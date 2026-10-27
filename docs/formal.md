@@ -1205,6 +1205,11 @@ bounded):
 - **Time in covers:** a cover is ended only by a change, a missing entry or
   a stale bulk row. Its window and the credential's expiry are not in the
   model, and are tested on Postgres.
+- **A use's `at` from above:** the model bounds a Worker's skew to a tick,
+  so no use is stamped past where a proof looks for it. On Postgres,
+  `use_credential` refuses one stamped over a minute past the database's
+  clock (`ahead`, 0022_log_015), tested in `packages/db/test/log-guarantees.sql`.
+  A refused request is not logged, so no invariant over entries sees it.
 
 ### Seal.tla
 
