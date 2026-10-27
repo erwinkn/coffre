@@ -427,7 +427,7 @@ test('an environment of an archived project asks its secrets alone, though you r
 
 test('the page shows a break either check found, and the walk from the first entry only while the newer check agrees', () => {
   const intact = (remaining: number, whole: boolean): ChainResult => ({
-    integrity: 'intact', whole, through: 100 - remaining, entries: 101 - remaining, from: whole ? 0 : 90, remaining, checkpoint: null, pending: 0,
+    integrity: 'intact', whole, through: 100 - remaining, entries: 101 - remaining, from: whole ? 0 : 90, remaining, checkpoint: null, pending: 0, treesFailed: null, trees: null,
   });
   const broken: ChainResult = { integrity: 'broken', through: 4, failedAtSeq: 5, author: 'app', reason: 'hash does not match the entry' };
   const unknown: ChainResult = { integrity: 'unknown', problem: 'the request never got an answer' };
@@ -443,4 +443,7 @@ test('the page shows a break either check found, and the walk from the first ent
   assert.equal(shownChain(broken, walked), broken);
   assert.equal(shownChain(intact(12_000, false), walked)?.integrity === 'intact' && (shownChain(intact(12_000, false), walked) as { remaining: number }).remaining, 12_000);
   assert.equal(shownChain(unknown, walked), unknown);
+  // A newer check whose check of the sealed log could not run says so over the walk's seal (review r10).
+  const unchecked = { ...intact(0, false), treesFailed: 'coffre could not check the sealed log: the request failed with HTTP 503' } as ChainResult;
+  assert.equal(shownChain(unchecked, walked), unchecked);
 });

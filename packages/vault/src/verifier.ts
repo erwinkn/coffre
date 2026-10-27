@@ -88,11 +88,11 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     // use below it, so retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
     const newest = whole ? null : await store.newest();
     const replayed = whole ? emptyReplay() : null;
-    // The whole walk's uses start at the newest retention cut: from there, each principal's cap is the replay's only
-    // once it is known to be (`Settling`).
+    // The whole walk's uses start at the newest retention cut, and pruning has gone by every window the log had: each
+    // principal's cap is the replay's only once it is known to be (`Settling`).
     const retained = whole ? await store.retention() : null;
     const cut = retained === null ? null : retentionCut(retained.entry);
-    const settling = cut === null ? null : new Settling(cut.at + AT_SLACK_MS + 1);
+    const settling = cut === null ? new Settling(-Infinity, false) : new Settling(cut.at + AT_SLACK_MS + 1, true);
     const requests = new Requests();
     const macHolds = authentic(keys.mac);
     const check = (entry: LogEntry): string | null => {
@@ -101,12 +101,13 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       const one = logged(entry);
       if (typeof one === 'string') return one;
       if (replayed === null || one === null) return null;
-      if (settling !== null && one.kind === 'use' && replayed.limit !== null) {
+      if (one.kind === 'use' && replayed.limit !== null) {
         const credential = replayed.rows.get(objectKey({ kind: 'credential', id: one.request.credential }))?.row;
         if (credential?.kind === 'credential') settling.use(credential.principal, one.request.at, influence(replayed.limit));
       }
-      const faults = replayed.faults.length;
+      const [faults, before] = [replayed.faults.length, replayed.limit];
       replay(keys.seals, [one], undefined, replayed);
+      if (before !== null && replayed.limit !== null && influence(replayed.limit) > influence(before)) settling.widened();
       return replayed.faults.length > faults ? replayed.faults.splice(faults).map((fault) => fault.replace(/^\d+: /, '')).join('; ') : null;
     };
     const verdict = await verifyLog(store, {
@@ -174,36 +175,57 @@ function influence(limit: BulkLimit): number {
 }
 
 /**
- * Each principal's bulk cap after retention's cut, from when the replay
- * knows it (review r9). The uses below the cut are not walked, and one of
- * them can still count against a use after it: a cap of one key a day, a
- * use just before the cut, and the live cap refuses a second key the next
- * morning, which the replay, starting empty, admits. While that cap stays
- * full, each answer can part the two again. Once a principal has gone
- * `influence` with no use, both caps are empty, and from its next use on
- * the replay's is the live one; a principal with no use since the cut has
- * rows the cut alone bounds.
+ * Each principal's bulk cap, from when the replay knows it. Two things part
+ * the replay's cap from the live one, which the walk cannot see:
+ * - **retention's cut** (review r9): the uses below it are not walked, and
+ *   one of them can still count against a use after it. A cap of one key a
+ *   day, a use just before the cut, and the live cap refuses a second key
+ *   the next morning, which the replay, starting empty, admits;
+ * - **a window widened** (review r10): `prune_bulk` removed, under the
+ *   shorter window, rows the replay, which prunes nothing, still holds, and
+ *   counts under the longer one.
+ * While the cap stays full, each answer can part the two again. Once a
+ * principal has gone `influence` with no use, both caps are empty, and
+ * from its next use on the replay's is the live one. Until then its rows
+ * are not judged; then, those from that use on. A principal with no use
+ * since the cut has rows the cut alone bounds.
  */
 class Settling {
   readonly #last = new Map<string, number>();
   readonly #from = new Map<string, number>();
+  readonly #unsettled = new Set<string>();
 
-  /** The first `at` past every use below the cut. */
+  /** The first `at` past every use below the cut; `-Infinity` with no cut. */
   readonly after: number;
+  /** Whether a principal is unsettled at its first walked use: after a cut, whose uses before it are not walked. */
+  readonly cut: boolean;
 
-  constructor(after: number) {
+  constructor(after: number, cut: boolean) {
     this.after = after;
+    this.cut = cut;
   }
 
   use(principal: string, at: number, influence: number): void {
     const last = this.#last.get(principal);
-    if (!this.#from.has(principal) && at - (last ?? this.after) >= influence) this.#from.set(principal, at);
+    if (this.#unsettled.has(principal) || (last === undefined && this.cut)) {
+      if (at - (last ?? this.after) >= influence) {
+        this.#unsettled.delete(principal);
+        this.#from.set(principal, at);
+      } else {
+        this.#unsettled.add(principal);
+      }
+    }
     this.#last.set(principal, Math.max(at, last ?? -Infinity));
+  }
+
+  /** A policy change widened the window: every principal that used a key may hold one the live cap pruned. */
+  widened(): void {
+    for (const principal of this.#last.keys()) this.#unsettled.add(principal);
   }
 
   /** The `at` from which a principal's bulk rows are the replay's to judge: never, for one whose cap is not known yet. */
   from(principal: string): number {
-    return this.#from.get(principal) ?? (this.#last.has(principal) ? Infinity : this.after);
+    return this.#unsettled.has(principal) ? Infinity : (this.#from.get(principal) ?? this.after);
   }
 }
 
@@ -238,10 +260,11 @@ class Requests {
  * seal and is 0.14's, before the cutover (plan PR 9), but for the roles'
  * and the policy's, which only a change writes. Then each principal's bulk
  * rows, those that may still count: the database forgets older ones
- * (`prune_bulk`), the replay too; after retention's cut, only those from
- * when the replay knows the principal's cap (`Settling`).
+ * (`prune_bulk`), the replay too; only those from when the replay knows
+ * the principal's cap (`Settling`): after retention's cut, or a window
+ * widened.
  */
-function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>, bulk: Map<string, Map<string, number>>, now: number, settling: Settling | null): string[] {
+function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>, bulk: Map<string, Map<string, number>>, now: number, settling: Settling): string[] {
   const problems: string[] = [];
   const name = (key: string) => {
     const row = replayed.rows.get(key)?.row;
@@ -270,12 +293,12 @@ function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>
     if ([...bulk.values()].some((rows) => rows.size > 0)) problems.push('bulk rows, and no cap in the log to move them');
     return problems;
   }
-  // As prune_bulk bounds it, by the database's clock: older rows may be gone from either side. After retention's cut,
-  // only rows from when the replay knows the principal's cap (`Settling`).
+  // As prune_bulk bounds it, by the database's clock: older rows may be gone from either side. Only rows from when the
+  // replay knows the principal's cap (`Settling`).
   const horizon = now - influence(limit);
   for (const principal of new Set([...bulk.keys(), ...replayed.bulk.keys()])) {
     const [stored, made] = [bulk.get(principal) ?? new Map<string, number>(), replayed.bulk.get(principal) ?? new Map<string, number>()];
-    const from = settling?.from(principal) ?? -Infinity;
+    const from = settling.from(principal);
     for (const secret of new Set([...stored.keys(), ...made.keys()])) {
       const [a, b] = [stored.get(secret) ?? -Infinity, made.get(secret) ?? -Infinity];
       if ((a <= horizon && b <= horizon) || (a < from && b < from)) continue;

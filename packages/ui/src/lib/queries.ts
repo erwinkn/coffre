@@ -432,13 +432,17 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
  * log whole too does the walk's verdict, which read further back, stand
  * over it.
  *
- *   whole broken                                  → whole
- *   whole intact, quick intact with 0 remaining   → whole
- *   whole intact, quick anything else             → quick
+ *   whole broken                                              → whole
+ *   whole intact, quick intact, 0 remaining, sealed log checked → whole
+ *   whole intact, quick anything else                         → quick
+ *
+ * A newer check that could not check the sealed log (review r10) is
+ * "anything else": the walk's seal would stand over a log nobody can now
+ * say holds.
  */
 export function shownChain(quick: ChainResult, whole: ChainResult | null): ChainResult {
   if (whole === null || whole.integrity === 'broken') return whole ?? quick;
-  return quick.integrity === 'intact' && quick.remaining === 0 && whole.integrity === 'intact' ? whole : quick;
+  return quick.integrity === 'intact' && quick.remaining === 0 && quick.treesFailed === null && whole.integrity === 'intact' ? whole : quick;
 }
 
 /** Why the log's verdict is not known: closed to the caller, or no answer. */

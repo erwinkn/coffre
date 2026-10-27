@@ -5,17 +5,17 @@
 // after its seal, numbers swapped inside the window.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import { decodePair, openPair } from '@coffre/core/merkle';
+import { decodePair, Edge, entryLeaf, macData, openPair, pairSigners, signPair } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { eq, sql } from 'drizzle-orm';
 
 import { genesisCall, type ChangeKeys } from '../src/changes.ts';
-import type { SealThrough } from '../src/checkpointer.ts';
+import { logOrigin, type SealThrough } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { noEdits, ROLES_REF, sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
@@ -26,7 +26,7 @@ import { credentialObject, environmentObject, secretObject } from '../src/object
 import * as store from '../src/store.ts';
 import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
-import { verifierKeys } from '../src/verifier.ts';
+import { verifierKeys, verifyTrees } from '../src/verifier.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
@@ -484,4 +484,52 @@ test('review r9: after retention\'s cut, a principal\'s bulk rows wait until the
   const planted = randomUUID();
   await db.owner.insert(logBulk).values({ principal: BO, secret: planted, last: pair.at + 120_000 });
   assert.deepEqual((await w.whole()).problems.map((p) => p.replace(/ says \d+,/, ' says …,')), [`the bulk cap of ${BO}: its row for ${planted} says …, the log none`]);
+});
+
+test('review r10: a window widened after prune_bulk went by under the shorter one: the principal\'s rows wait until its cap is known', async () => {
+  // A cap of one key in 15 minutes, a use, and the log as it would stand had it all happened two hours ago: every
+  // entry restamped and MAC'd again, both trees signed again over them, the bulk row as old.
+  const w = await instance({}, { count: 1, windowMs: 15 * 60_000 });
+  const other = await w.key();
+  assert.ok((await w.use()).ok);
+  await w.cp.tick();
+  const log = logStore(db.vault);
+  const upto = w.cp.pair.pair.upto;
+  const entries = await log.entries(0n, upto, { floor: 0 });
+  const shift = 2 * 3_600_000;
+  for (const entry of entries) {
+    const columns = [...entry.columns];
+    entry.at -= shift;
+    columns[0] = BigInt(entry.at);
+    const mac = createHmac('sha256', w.keys.mac).update(macData(entry.tree, columns.slice(0, -1))).digest().subarray(0, 16);
+    columns[columns.length - 1] = mac;
+    entry.columns = columns;
+    await run(db.owner, sql`UPDATE ${sql.raw(entry.tree === 'changes' ? 'log_changes' : 'log_uses')} SET at = ${entry.at}, mac = ${mac} WHERE number = ${entry.number}`);
+  }
+  await run(db.owner, sql`UPDATE log_bulk SET last = last - ${shift}`);
+  for (const table of ['log_tiles', 'log_checkpoints']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  const signers = await pairSigners(await logOrigin(w.seed), w.seed);
+  const edges = { changes: Edge.empty(), uses: Edge.empty() };
+  const heads = () => ({ changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } });
+  await log.write({ upto: 0n, notes: (await signPair(signers, 0n, 0, heads())).notes }, { changes: [], uses: [] });
+  const leaves = (tree: 'changes' | 'uses') => entries.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns));
+  const tiles = { changes: edges.changes.append(leaves('changes')), uses: edges.uses.append(leaves('uses')) };
+  const pair = await signPair(signers, upto, Date.now() - shift, heads(), Date.now() - shift - 3000);
+  await log.write({ upto, notes: pair.notes }, tiles);
+  const keys = await verifierKeys([w.seed]);
+  clean(await verifyTrees(db.vault, keys, { whole: true, anchors: [pair.notes] }));
+  // Upkeep prunes the row, as the 15-minute window lets it; then the vault starts with a window of a day, and logs it.
+  assert.equal(await log.pruneBulk(100), 1);
+  clean(await verifyTrees(db.vault, keys, { whole: true, anchors: [pair.notes] }));
+  const cp = await openLogCheckpointer({ store: log, seed: w.seed, memory: variableMemory() });
+  const widened = speaking(await openLocalVault(db.vault, { ...w.config, bulkLimit: { count: 1, windowMs: 86_400_000 } }, { log: '0.15', sealThrough: (n) => cp.sealThrough(n) }, async () => {}, hot));
+  const checked = await widened.verifyTrees!({ whole: true });
+  assert.ok(checked.kept);
+  clean(checked);
+  // The live cap, the old row pruned, admits another key; the replay, which still holds it, refuses: neither is judged.
+  const at = Date.now();
+  assert.ok((await widened.use({ credential: w.credential, secretId: other, place: null, purpose: 'run', requestId: newRequestId(), at, deadline: at + 3000 })).ok);
+  const after = await widened.verifyTrees!({ whole: true });
+  assert.ok(after.kept);
+  clean(after);
 });
