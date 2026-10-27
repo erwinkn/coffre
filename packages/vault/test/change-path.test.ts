@@ -356,6 +356,10 @@ test('an Owner\'s role edit is a change of the roles object, once the cutover ha
   assert.ok((await define('user', ['secret.use'])).ok);
   assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'reader', definition: null } })).ok);
   assert.deepEqual(await opsOf(w.keys, { kind: 'roles', id: 'instance' }), ['genesis', 'role.define', 'role.define']);
+  // Each edit names the policy.change entry it came with (UsesSeeOldWrites).
+  const policies = await rows<{ seq: string }>(db.owner, sql`SELECT seq FROM audit_log WHERE action = 'policy.change' AND decision = 'allow' ORDER BY seq`);
+  const cited = (await changeRows()).filter((row) => row.object === objectKey({ kind: 'roles', id: 'instance' })).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
+  assert.deepEqual(cited, [undefined, ...policies.slice(-2).map(({ seq }) => seq.toString())]);
   const replayed = await holdsReplay(w.keys, [{ kind: 'roles', id: 'instance' }]);
   const roles = replayed.rows.get(objectKey({ kind: 'roles', id: 'instance' }))!.row;
   assert.deepEqual(roles.kind === 'roles' && Object.keys(roles.roles), ['user']);
