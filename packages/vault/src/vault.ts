@@ -103,12 +103,16 @@ import {
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
-import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/grants';
+import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
+import { Changes, Moved, NotLogged, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
+import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
+import { limitChange, objectKey, POLICY_REF, ROLES_REF, sealKey, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
+import { logMacKey } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
@@ -127,7 +131,23 @@ export type VaultOptions = {
   clockOffset?: () => number;
   /** How far one call walks the log (`WALKS`); tests shorten them. */
   walks?: Partial<Walks>;
+  /**
+   * Which log the vault keeps (0.15's plan, "Behind one switch"): 0.14's
+   * alone, the default until 0.15's flip (plan PR 10), or 0.15's too, where
+   * each decision that changes an input also logs it as a change of
+   * 0.15's log (`changes.ts`). Not a deployment's to set.
+   */
+  log?: '0.14' | '0.15';
+  /**
+   * Under 0.15's log, what a change waits for before it answers: its entry
+   * sealed in a signed checkpoint, and witnessed or past the witnesses'
+   * bound (R51): the checkpointer's `sealThrough` (checkpointer.ts). A
+   * change whose entry it does not seal fails, though committed. Required
+   * with `log: '0.15'`.
+   */
+  sealThrough?: SealThrough;
 };
+
 
 /**
  * A vault's configuration made ready to use, once per process, or once per
@@ -147,7 +167,15 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough'>> & { walks: Walks };
+  /**
+   * 0.15's log, when it is on: the keys its changes are sealed and MACed
+   * with, from the vault's signing keys, and what each waits on to answer.
+   * Null under 0.14's alone.
+   */
+  log015: (ChangeKeys & { sealThrough: SealThrough }) | null;
+  /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
+  limited: boolean;
   /** How far the chain is rehashed, by any call of this process: its head must still be there. */
   verified: Position;
   /** What member rows are sealed under now; rows.ts. */
@@ -177,6 +205,8 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
+    log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough) : null,
+    limited: false,
     verified: START,
     reported: new Set(),
     since: null,
@@ -185,6 +215,12 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     wrongKek: null,
     converted: false,
   };
+}
+
+/** 0.15's change keys from the vault's signing keys, the first sealing and MACing, each checking a seal. */
+function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined): ChangeKeys & { sealThrough: SealThrough } {
+  if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -276,6 +312,25 @@ const KEY_ROTATE = 'key.rotate';
 
 /** A new member row, before the decision seals it (`#seal`). */
 const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
+
+/** A member's object in 0.15's log (inputs.ts). */
+function memberRef(principal: string) {
+  return { kind: 'principal' as const, id: principal };
+}
+
+/** An instance role and its scope as a member's row gives them back (`roleColumns`, then `storedRole`): what 0.15's ops carry, so that the object they make is the row's. */
+function asStored(role: InstanceRole, scope: Scope): { role: InstanceRole; scope: Scope } {
+  return storedRole(roleColumns(role, scope));
+}
+
+/** A grant's place, and what it holds, as a member's object in 0.15's log has it. */
+function inputGrant(grant: Pick<GrantRow, 'projectId' | 'environmentId' | 'environmentSlug' | 'role' | 'expiresAt'>) {
+  return { projectId: grant.projectId, environmentId: grant.environmentId, environmentSlug: grant.environmentSlug, role: grant.role, expiresAt: grant.expiresAt };
+}
+
+function placeOf(grant: store.Place) {
+  return { projectId: grant.projectId ?? null, environmentId: grant.environmentId ?? null, environmentSlug: grant.environmentSlug ?? null };
+}
 
 /** Why a change to a tampered member is refused. */
 const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: remove them to start over";
@@ -432,6 +487,8 @@ type Decision = {
    * was deciding. A `Refused` there refuses the decision.
    */
   underLock: ((locked: Queryable) => Promise<void>)[];
+  /** Under 0.15's log, the changes its writes make, each staged beside its write (`changes.ts`); null under 0.14's alone. */
+  changes: Changes | null;
 };
 
 /**
@@ -580,7 +637,8 @@ class VaultService implements Vault {
       } catch (error) {
         // A member who had no row when this decision locked theirs, and has
         // one now: another decision admitted them meanwhile. Again, with it.
-        if (attempt < 3 && (error instanceof Retry || isUniqueViolation(error))) continue;
+        // A 0.15 change's row moved from the seal it read (ChangeCAS): read it again (ChangeRereads).
+        if (attempt < 3 && (error instanceof Retry || error instanceof Moved || isUniqueViolation(error))) continue;
         throw error;
       }
     }
@@ -588,15 +646,19 @@ class VaultService implements Vault {
 
   async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline }: How): Promise<Outcome<T>> {
     try {
-      const result = await this.#db.transaction(async (tx) => {
+      const committed = await this.#db.transaction(async (tx) => {
         await store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared);
         const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals, shared);
         // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
         const reads = await this.#snapshot(tx, principals, asked, !late, shared);
+        const log015 = this.#prepared.log015;
         const d: Decision = {
           tx, members, at: this.#at(reads), reads, log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
+          changes: log015 === null ? null : new Changes(log015),
         };
         const result = await decide(d);
+        // Each object 0.15's log will change, read and checked before the writes change its rows.
+        await d.changes?.prepare(tx);
         // A read is logged once per place, whichever way it ends (`readsByPlace`).
         const entries = [...reports, ...readsByPlace(d.log)];
         let at = d.at;
@@ -617,12 +679,25 @@ class VaultService implements Vault {
         const sealing = new Set([...d.touched, ...accessSeq.keys()]);
         // Under a share lock, a write to the row would wait for every other read holding it, and they for it.
         if (shared && sealing.size > 0) throw new Error('a read changes no member, and seals no row');
-        for (const principal of sealing) await this.#seal(d, principal, accessSeq.get(principal));
-        return result;
+        const written = new Map<string, Input>();
+        for (const principal of sealing) {
+          const resealed = await this.#seal(d, principal, accessSeq.get(principal));
+          if (resealed === null) continue;
+          written.set(objectKey(memberRef(principal)), resealed.object);
+          d.changes?.cite(memberRef(principal), resealed.accessSeq);
+        }
+        // Last: the fence, which they take exclusive (0.14's append took it already, OldWritesFence), is held from
+        // here to the commit, so as few round trips as can be.
+        const numbers = d.changes === null ? [] : await d.changes.commit(tx, at, written);
+        return { result, numbers };
       });
       this.#reported(reports);
-      return { ok: true, ...result };
-    } catch (error) {
+      // A change answers once its entries are sealed (R51; HotPathOne's CommitBeforeAnswer): the newest of them, with
+      // every number below it.
+      if (committed.numbers.length > 0) await this.#prepared.log015!.sealThrough(committed.numbers.reduce((a, b) => (a > b ? a : b)));
+      return { ok: true, ...committed.result };
+    } catch (caught) {
+      const error = caught instanceof NotLogged ? this.#notLogged(reports, caught) : caught;
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
       const entries = [...reports, ...readsByPlace(error.entries)];
       if (entries.length > 0) {
@@ -646,11 +721,12 @@ class VaultService implements Vault {
    * naming `accessSeq`, their newest access entry, when it wrote one. The
    * table must hold exactly that: a grant written around the vault while it
    * decided (its row lock does not stop one) is refused, with the decision,
-   * rather than sealed in.
+   * rather than sealed in. It answers the member's object as the rows now
+   * hold it, and the access entry their row names, for 0.15's log.
    */
-  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<void> {
+  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<{ object: PrincipalInput; accessSeq: bigint } | null> {
     const row = await store.member(d.tx, principal);
-    if (row === undefined) return;
+    if (row === undefined) return null;
     const decided = d.grants.get(principal);
     if (decided === undefined) throw new Error(`sealing ${principal} without the grants this decision verified`);
     if (!sameGrants(await store.grants(d.tx, principal), decided)) {
@@ -659,6 +735,9 @@ class VaultService implements Vault {
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
     await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
+    // The member's object as the rows hold it now, which 0.15's change of it must have left, and the access entry its
+    // row names, which that change accounts for (`changes.ts`).
+    return { object: store.principalObject(row, decided), accessSeq: next.accessSeq };
   }
 
   /**
@@ -742,6 +821,18 @@ class VaultService implements Vault {
     reports.push(entry);
   }
 
+  /**
+   * A change refused because 0.15's log does not hold its object as its row
+   * is (`changes.ts`): a row put back, or written around the vault. Reported
+   * as a tampered row is, and refused: adoption or a reseal (plan PR 9)
+   * makes it the log's again, never a change on top of it.
+   */
+  #notLogged(reports: NewEntry[], error: NotLogged): Refused {
+    const { ref } = error;
+    this.#report(reports, ref?.kind === 'principal' ? ref.id : null, error.fault === 'tampered' ? 'mac' : 'stale', ref === null ? 'log.object' : `log.${ref.kind}:${ref.id}`);
+    return new Refused(refusal('tampered', error.message), []);
+  }
+
   /** Mark these reports as logged, once their transaction has committed. */
   #reported(reports: readonly NewEntry[]): void {
     for (const entry of reports) {
@@ -772,6 +863,7 @@ class VaultService implements Vault {
     if (prepared.since === null && prepared.superseded === null) await this.#settle();
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert();
+    if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit();
     return prepared.superseded;
   }
 
@@ -803,6 +895,22 @@ class VaultService implements Vault {
     this.#prepared.converted = await this.#declare(this.#config.owners.map((email) => `user:${email}`));
   }
 
+  /**
+   * Under 0.15's log, the deployment's bulk cap written into it before the
+   * vault serves anything (plan PR 3, `limitChange`): a `bulk.limit` change
+   * whenever the log's policy says otherwise, as any change, under the head
+   * and the fence. Uses read the cap from it (CapSealed), never from the
+   * configuration. Once per process; until it lands, each call tries again.
+   */
+  async #limit(): Promise<void> {
+    const outcome = await this.#decideNow([], async (d) => {
+      const { row } = await store.readObject(d.tx, POLICY_REF as Ref & { kind: 'policy' });
+      const op = limitChange(row?.kind === 'policy' ? row : null, this.#config.bulkLimit);
+      if (op !== null) d.changes!.stage(POLICY_REF as Ref & { kind: 'policy' }, op, VAULT_ACTOR);
+    });
+    if (outcome.ok) this.#prepared.limited = true;
+  }
+
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
     const row = d.members.get(principal);
     const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
@@ -826,6 +934,7 @@ class VaultService implements Vault {
 
     for (const grant of everyProject) {
       drop(grant);
+      d.changes?.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(grant) }, VAULT_ACTOR);
       // A lapsed one goes with no entry: it changes nothing anyone holds.
       if (!live(grant, d.at)) continue;
       const narrowed = conversion.narrowed.filter((loss) => loss.grant.environmentSlug === grant.environmentSlug);
@@ -846,6 +955,7 @@ class VaultService implements Vault {
         reason: 'every-project',
       }));
       d.writes.push(() => store.updateMember(d.tx, principal, after));
+      d.changes?.stage(memberRef(principal), { op: 'member.role', ...asStored(after.role, after.scope) }, VAULT_ACTOR);
     }
     for (const given of conversion.grants) {
       const place = { projectId: given.projectId, environmentId: given.environmentId, environmentSlug: null };
@@ -857,6 +967,7 @@ class VaultService implements Vault {
         await store.insertGrant(d.tx, grant);
         d.grants.get(principal)!.push(grant);
       });
+      d.changes?.stage(memberRef(principal), { op: 'access.grant', grant: inputGrant({ ...place, role: given.role, expiresAt: given.expiresAt }) }, VAULT_ACTOR);
       d.log.push({
         ...accessEntry(VAULT_ACTOR, 'access.grant', principal, 'allow', correlation, {
           role: given.role,
@@ -1738,6 +1849,12 @@ class VaultService implements Vault {
     d.grants.set(principal, [...subject.stored]);
     d.touched.add(principal);
     if (tampered) await this.#startOver(d, VAULT_ACTOR, principal, row, subject.fault!, correlation, (code, message) => new Refused(refusal(code, message ?? MESSAGES[code]), []));
+    // Started over, their row is one 0.15's log does not hold, and changes nothing there: adoption or a reseal does
+    // (plan PR 9). Otherwise, the change the writes below make.
+    if (!tampered) {
+      const op = row === undefined ? 'member.add' : row.status === 'removed' ? 'member.restore' : 'member.role';
+      d.changes?.stage(memberRef(principal), { op, ...asStored(owner.role, owner.scope) }, VAULT_ACTOR);
+    }
     if (row === undefined && !tampered) {
       d.log.push(accessEntry(VAULT_ACTOR, 'member.add', principal, 'allow', correlation, { ...owner, reason }));
       d.writes.push((at) => store.insertMember(d.tx, {
@@ -2020,6 +2137,7 @@ class VaultService implements Vault {
 
     if (change.role === null) {
       clear();
+      if (existing !== undefined) d.changes?.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(place) }, actor);
       if (current === undefined) return 'unchanged';
       entry('access.revoke', null);
       return 'revoked';
@@ -2032,6 +2150,8 @@ class VaultService implements Vault {
       await store.insertGrant(d.tx, grant);
       d.grants.get(principal)!.push(grant);
     });
+    // In place of whatever it held there, lapsed or not, as clearing it then inserting this does.
+    d.changes?.stage(memberRef(principal), { op: 'access.grant', grant: inputGrant({ ...placeOf(place), role, expiresAt }) }, actor);
     entry('access.grant', role);
     return current === undefined ? 'created' : 'updated';
   }
@@ -2079,6 +2199,7 @@ class VaultService implements Vault {
       if (changed) {
         d.log.push(accessEntry(actor, 'member.role', principal, 'allow', input, { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope }));
         d.writes.push(() => store.updateMember(d.tx, principal, { role: wanted.role, scope: wanted.scope }));
+        d.changes?.stage(memberRef(principal), { op: 'member.role', ...asStored(wanted.role, wanted.scope) }, actor);
         return { created: false, ...wanted, generation: row.generation };
       }
       return { created: false, role: row.role, scope: row.scope, generation: row.generation };
@@ -2120,6 +2241,7 @@ class VaultService implements Vault {
     if (wanted?.role === 'owner' && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
     const { role, scope } = wanted ?? { role: 'member' as const, scope: EVERYWHERE };
     d.log.push(accessEntry(actor, row === undefined ? 'member.add' : 'member.restore', principal, 'allow', correlation, { role, scope }));
+    d.changes?.stage(memberRef(principal), { op: row === undefined ? 'member.add' : 'member.restore', ...asStored(role, scope) }, actor);
     d.writes.push(async (at) => {
       if (row === undefined) {
         await store.insertMember(d.tx, {
@@ -2185,6 +2307,11 @@ class VaultService implements Vault {
       }
       const generation = row.generation + 1;
       d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', input, { revoked: revoked.length, generation }));
+      // In 0.15's log, what the writes below do, op by op: every grant revoked, lapsed ones too, the role back to a
+      // Member's, then the removal.
+      for (const grant of held) d.changes?.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(grant) }, actor);
+      if (row.role !== 'member') d.changes?.stage(memberRef(principal), { op: 'member.role', ...asStored('member', EVERYWHERE) }, actor);
+      d.changes?.stage(memberRef(principal), { op: 'member.remove' }, actor);
       d.touched.add(principal);
       d.writes.push(async (at) => {
         await store.deleteGrants(d.tx, principal);
@@ -2316,6 +2443,8 @@ class VaultService implements Vault {
       if (!readable && !owner) throw refused('not_allowed', "the vault cannot read its own policy: only an Owner of the whole instance writes it again, from the roles as they ship");
       // Those the policy no longer holds stay out: a deleted environment's id, and an unwritten fork's past its window,
       // neither of which comes back, the window being one a fork writes its row well within.
+      // What 0.15's log changes with it: the roles object, or each environment whose protection moves.
+      const changes: { ref: Ref & { kind: 'roles' | 'environment' }; op: Op }[] = [];
       const next: PolicyEdits = {
         roles: { ...edits.roles },
         instanceRoles: { ...edits.instanceRoles },
@@ -2343,6 +2472,7 @@ class VaultService implements Vault {
             throw refused('invalid', `${change.role} is granted on environments: as it ships, it holds a project-wide permission, which would make those grants incoherent`);
           }
           delete table[change.role];
+          changes.push({ ref: ROLES_REF as Ref & { kind: 'roles' }, op: { op: 'role.define', table: instance ? 'instanceRoles' : 'roles', role: change.role, definition: null } });
         } else {
           const problem = definitionProblem(change.definition);
           if (problem !== null) throw refused('invalid', problem);
@@ -2354,6 +2484,7 @@ class VaultService implements Vault {
           const shipped = instance ? INSTANCE_ROLES[change.role as InstanceRole] : isBuiltinRole(change.role) ? ROLES[change.role] : undefined;
           if (shipped !== undefined && JSON.stringify(normalDefinition(shipped)) === JSON.stringify(definition)) delete table[change.role];
           else table[change.role] = definition;
+          changes.push({ ref: ROLES_REF as Ref & { kind: 'roles' }, op: { op: 'role.define', table: instance ? 'instanceRoles' : 'roles', role: change.role, definition } });
         }
       } else if (change?.kind === 'protect') {
         if (typeof change.projectId !== 'string' || !UUID.test(change.projectId) || !Array.isArray(change.environmentIds) || change.environmentIds.length === 0
@@ -2366,15 +2497,25 @@ class VaultService implements Vault {
         const found = await store.environmentsById(d.tx, change.environmentIds);
         if ([...found.values()].some((environment) => environment.projectId !== change.projectId)) throw refused('invalid', 'each environment is one of the project\'s');
         if (change.environmentIds.length === 1 && found.has(change.environmentIds[0]!)) at.environmentId = change.environmentIds[0];
+        // An environment whose object 0.15's log changes with this: one with a row, not deleted (`environment.protect`).
+        const live015 = (id: string) => found.get(id)?.deleted === false;
         if (change.protected) {
           if (!allows(acting.live, 'environment.manage', { projectId: change.projectId })) throw refused('not_allowed', 'protecting an environment takes managing its project\'s environments');
           const known = new Set(next.protected.map((place) => place.environmentId));
+          // An id with no row yet, a fork's, is no object of 0.15's log: its creation carries its protection (plan PR 4b).
+          // A deleted one changes no more there: 0.14 keeps its id in the edits, which its policy reads past.
+          for (const id of change.environmentIds) if (!known.has(id) && live015(id)) changes.push({ ref: { kind: 'environment', id }, op: { op: 'environment.protect', protected: true } });
           next.protected = [...next.protected, ...change.environmentIds.filter((id) => !known.has(id)).map((environmentId) => ({ projectId: change.projectId, environmentId, at: d.at }))]
             .sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1));
         } else {
           // Unprotecting widens what people hold there: an Owner of the project's to do, or of the whole instance's (R30).
           // It takes off only what the project protects: a fork's id, with no row yet, is another project's to unprotect.
           if (!ownsProject(acting.live, change.projectId)) throw refused('not_allowed', 'only an Owner of its project, or of the whole instance, unprotects an environment');
+          for (const place of next.protected) {
+            if (place.projectId === change.projectId && change.environmentIds.includes(place.environmentId) && live015(place.environmentId)) {
+              changes.push({ ref: { kind: 'environment', id: place.environmentId }, op: { op: 'environment.protect', protected: false } });
+            }
+          }
           next.protected = next.protected.filter((place) => place.projectId !== change.projectId || !change.environmentIds.includes(place.environmentId));
         }
       } else {
@@ -2385,6 +2526,10 @@ class VaultService implements Vault {
       if (!readable || JSON.stringify(next) !== JSON.stringify(edits)) {
         const made = entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) });
         d.log.push(made);
+        for (const { ref, op } of changes) d.changes?.stage(ref, op, actor);
+        d.after.push((seqOf) => {
+          for (const { ref } of changes) d.changes?.cite(ref, BigInt(seqOf(made)));
+        });
         d.after.push((seqOf) => (answer.seq = seqOf(made)));
       }
       return answer;

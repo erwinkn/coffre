@@ -8,6 +8,7 @@ import { forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import pg from 'pg';
 
+import type { Sealed, SealThrough } from '../src/checkpointer.ts';
 import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
 
 /**
@@ -56,9 +57,24 @@ function said(input: unknown): unknown {
 /** The vault in this process, as the tests speak to it (`speaking`). */
 export type LocalVault = SpeakingVault<RawLocalVault>;
 
-/** `openLocalVault`, spoken to as the app does (`speaking`). */
-export async function openLocalVault(...args: Parameters<typeof openRawVault>): Promise<LocalVault> {
-  return speaking(await openRawVault(...args));
+/**
+ * Which log the suite's vaults keep (`VaultOptions.log`): 0.14's unless
+ * `COFFRE_TEST_LOG` says 0.15, which runs every vault test with 0.15's log
+ * on too (0.15's plan: each PR runs the suite on both settings). Its changes
+ * answer once committed here: no checkpointer runs (`sealed`).
+ */
+export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
+
+/**
+ * A checkpointer that seals everything at once: what a change waits on,
+ * under 0.15's log, in a test with no tree. The vault answers nothing of
+ * what it is given back.
+ */
+export const sealed: SealThrough = async () => ({}) as Sealed;
+
+/** `openLocalVault`, spoken to as the app does (`speaking`), keeping the suite's log (`LOG`). */
+export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
+  return speaking(await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed } : {}), ...options }, close));
 }
 
 export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; close(): Promise<void> };
@@ -90,6 +106,20 @@ export async function openTestDatabase(): Promise<TestDatabase> {
     },
   };
 }
+
+/**
+ * Options that run a test under 0.14's log alone (`LOG`), saying why 0.15's
+ * answers otherwise, beside whatever else skips it.
+ */
+export function log014Only(reason: string, options: { skip?: string | false } = {}): { skip: string | false } {
+  return { skip: options.skip || (LOG === '0.15' ? `0.14's log only: ${reason}` : false) };
+}
+
+/** A grant on every project of 0.4, converted by the vault of 0.5: rows from long before 0.15's cutover, which 0.15's log never holds. */
+export const CONVERSION = "a grant on every project of 0.4 is converted on rows 0.14's log holds, before 0.15's cutover";
+
+/** A tampered member started over: 0.15's log refuses a change on top of a row it does not hold, and a reseal makes it the log's again (plan PR 9). */
+export const START_OVER = "0.15's log changes no tampered member until a reseal makes its row the log's again (plan PR 9), never 0.14's start over";
 
 /** Options that run a test on Postgres only, saying why. */
 export function postgresOnly(reason: string): { skip: string | false } {
@@ -136,7 +166,7 @@ export async function run(db: Queryable, query: SQL): Promise<void> {
 
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
-  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys } = tablesOf(owner);
+  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, credentials } = tablesOf(owner);
   await owner.delete(secretReferences);
   // SQLite checks a RESTRICT foreign key row by row, so entries that point
   // at others let go of them first.
@@ -147,7 +177,12 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
   // Kept from the log, and gone with it.
   await owner.delete(vaultReleases);
+  // 0.15's log, which only the cutover and the change path write.
+  await owner.delete(logChanges);
+  await owner.delete(logConfig);
   await owner.delete(vaultGrants);
+  // A session a test made, for a use to name.
+  await owner.delete(credentials);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);
   await owner.update(secrets).set({ currentVersionId: null });

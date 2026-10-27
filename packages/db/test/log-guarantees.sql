@@ -28,6 +28,10 @@ BEGIN
         $q$INSERT INTO log_checkpoints VALUES (1, 1, 1, 0, decode(repeat('00', 32), 'hex'), 'n', 0, decode(repeat('00', 32), 'hex'), 'n')$q$,
         $q$UPDATE credentials SET seal = NULL$q$,
         $q$UPDATE vault_members SET seal = NULL$q$,
+        $q$UPDATE service_bindings SET seal = NULL$q$,
+        $q$UPDATE environments SET seal = NULL$q$,
+        $q$UPDATE secrets SET seal = NULL$q$,
+        $q$UPDATE log_config SET seal = NULL$q$,
         $q$SELECT nextval('log_number')$q$,
         $q$CREATE TABLE log_uses_19700101 PARTITION OF log_uses FOR VALUES FROM (0) TO (86400000)$q$
     ] LOOP
@@ -48,7 +52,7 @@ DO $$
 BEGIN
     IF has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
        OR has_function_privilege('coffre_app', 'close_one()', 'EXECUTE')
-       OR has_function_privilege('coffre_backup', 'change_input(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
+       OR has_function_privilege('coffre_backup', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';
     END IF;
     RAISE NOTICE 'PASS: only the vault reaches the 0.15 log';
@@ -139,34 +143,34 @@ DECLARE
     tag bytea := decode(repeat('ee', 16), 'hex');
     sealed bytea := decode(repeat('5e', 16), 'hex');
 BEGIN
-    first := change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, sealed, tag);
-    IF first IS NULL OR change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, sealed, tag) <> first THEN
+    first := change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, NULL, sealed, tag);
+    IF first IS NULL OR change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":1,"windowMs":86400000}}}', NULL, NULL, sealed, tag) <> first THEN
         RAISE EXCEPTION 'FAIL: a retried change did not find its entry';
     END IF;
     BEGIN
-        PERFORM change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":9,"windowMs":86400000}}}', NULL, sealed, tag);
+        PERFORM change_input('policy', 'instance', 'genesis-policy', t, 'system:cutover', '{"op":"genesis","value":{"bulk":{"count":9,"windowMs":86400000}}}', NULL, NULL, sealed, tag);
         RAISE EXCEPTION 'FAIL: a request id named two changes';
     EXCEPTION WHEN unique_violation THEN NULL;
     END;
-    PERFORM change_input('roles', 'instance', 'genesis-roles', t, 'system:cutover', '{"op":"genesis","value":{"kind":"roles","roles":{},"instanceRoles":{}}}', NULL, sealed, tag);
-    PERFORM change_input('principal', 'token:deploy', 'genesis-member', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    PERFORM change_input('credential', '33333333-3333-3333-3333-333333333333', 'genesis-credential', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    PERFORM change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    PERFORM change_input('secret', '44444444-4444-4444-4444-444444444441', 'genesis-secret-1', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    PERFORM change_input('secret', '44444444-4444-4444-4444-444444444442', 'genesis-secret-2', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    PERFORM change_input('environment', '22222222-2222-2222-2222-222222222222', 'genesis-environment', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
+    PERFORM change_input('roles', 'instance', 'genesis-roles', t, 'system:cutover', '{"op":"genesis","value":{"kind":"roles","roles":{},"instanceRoles":{}}}', NULL, NULL, sealed, tag);
+    PERFORM change_input('principal', 'token:deploy', 'genesis-member', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag);
+    PERFORM change_input('credential', '33333333-3333-3333-3333-333333333333', 'genesis-credential', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag);
+    PERFORM change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag);
+    PERFORM change_input('secret', '44444444-4444-4444-4444-444444444441', 'genesis-secret-1', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag);
+    PERFORM change_input('secret', '44444444-4444-4444-4444-444444444442', 'genesis-secret-2', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag);
+    PERFORM change_input('environment', '22222222-2222-2222-2222-222222222222', 'genesis-environment', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag);
     IF (SELECT count(*) FROM log_changes) <> 8 OR (SELECT count(DISTINCT object) FROM log_changes) <> 8 THEN
         RAISE EXCEPTION 'FAIL: genesis logged % changes', (SELECT count(*) FROM log_changes);
     END IF;
     -- The row's seal is no longer the one read: nothing is done, and nothing logged.
-    IF change_input('principal', 'token:deploy', 'genesis-member-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
-       OR change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
-       OR change_input('principal', 'token:nobody', 'genesis-nobody', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
+    IF change_input('principal', 'token:deploy', 'genesis-member-again', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag) IS NOT NULL
+       OR change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding-again', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag) IS NOT NULL
+       OR change_input('principal', 'token:nobody', 'genesis-nobody', t, 'system:cutover', '{"op":"genesis"}', NULL, NULL, sealed, tag) IS NOT NULL
        OR (SELECT count(*) FROM log_changes) <> 8 THEN
         RAISE EXCEPTION 'FAIL: a change moved a seal it had not read';
     END IF;
     BEGIN
-        PERFORM change_input('principal', 'token:deploy', 'grant', t, 'system:x', '{"op":"access.grant"}', sealed, sealed, tag);
+        PERFORM change_input('principal', 'token:deploy', 'grant', t, 'system:x', '{"op":"credential.revoke"}', NULL, sealed, sealed, tag);
         RAISE EXCEPTION 'FAIL: change_input applied an op this schema does not know';
     EXCEPTION WHEN invalid_parameter_value THEN NULL;
     END;
@@ -348,5 +352,78 @@ BEGIN
         RAISE EXCEPTION 'FAIL: a refused checkpoint left a trace';
     END IF;
     RAISE NOTICE 'PASS: PairWrittenTogether, write_checkpoint writes tiles and pair as one, tiles only growing, one pair a place';
+END
+$$;
+
+-- The change path's ops (0023, plan PR 4a), on the objects genesis sealed above: an environment's change writes the
+-- object it carries, the policy's moves its value from its seal, a payload names its object, and a value comes exactly
+-- when the function writes the object's row. All of it rolled back after (a subtransaction ended by an error of its
+-- own), so that log-owner.sql finds the objects as genesis left them.
+DO $$
+DECLARE
+    t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    tag bytea := decode(repeat('ee', 16), 'hex');
+    sealed bytea := (SELECT seal FROM environments WHERE id = '22222222-2222-2222-2222-222222222222');
+    next bytea := decode(repeat('6e', 16), 'hex');
+    held bytea := (SELECT seal FROM log_config WHERE name = 'policy');
+    env jsonb;
+    n bigint;
+    cap text := '{"kind":"policy","bulk":{"count":5,"windowMs":60000}}';
+BEGIN
+BEGIN
+    SELECT jsonb_build_object('kind', 'environment', 'id', e.id::text, 'projectId', e.project_id::text, 'slug', 'renamed', 'owner', e.owner,
+                              'parentId', e.parent_id, 'protected', true, 'deleted', false, 'archived', true)
+      INTO env FROM environments e WHERE e.id = '22222222-2222-2222-2222-222222222222';
+    -- Each call its own statement: a check in the call's statement would read from before what the call wrote.
+    n := change_input('environment', '22222222-2222-2222-2222-222222222222', 'environment-renamed', t, 'user:admin@acme.example',
+                      '{"op":"environment.rename","ref":{"kind":"environment","id":"22222222-2222-2222-2222-222222222222"},"slug":"renamed"}',
+                      env::text, sealed, next, tag);
+    IF n IS NULL OR NOT EXISTS (SELECT 1 FROM environments WHERE id = '22222222-2222-2222-2222-222222222222'
+                       AND slug = 'renamed' AND protected AND archived_at IS NOT NULL AND seal = next) THEN
+        RAISE EXCEPTION 'FAIL: an environment''s change did not write the object it carried';
+    END IF;
+    -- An object whose project is not the row's: nothing is done.
+    IF change_input('environment', '22222222-2222-2222-2222-222222222222', 'environment-moved', t, 'user:admin@acme.example',
+                    '{"op":"environment.protect","ref":{"kind":"environment","id":"22222222-2222-2222-2222-222222222222"},"protected":false}',
+                    jsonb_set(env, '{projectId}', to_jsonb(gen_random_uuid()::text))::text, next, sealed, tag) IS NOT NULL THEN
+        RAISE EXCEPTION 'FAIL: an environment''s change moved it to another project';
+    END IF;
+    n := change_input('policy', 'instance', 'cap', t, 'system:vault', '{"op":"bulk.limit","ref":{"kind":"policy","id":"instance"},"value":' || cap || '}',
+                      cap, held, next, tag);
+    IF n IS NULL OR (SELECT value::jsonb FROM log_config WHERE name = 'policy') <> cap::jsonb THEN
+        RAISE EXCEPTION 'FAIL: the policy''s change did not write its value';
+    END IF;
+    BEGIN
+        PERFORM change_input('policy', 'instance', 'cap-elsewhere', t, 'system:vault', '{"op":"bulk.limit","ref":{"kind":"roles","id":"instance"},"value":' || cap || '}',
+                             cap, next, sealed, tag);
+        RAISE EXCEPTION 'FAIL: a payload naming another object was taken';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM change_input('policy', 'instance', 'cap-unnamed', t, 'system:vault', '{"op":"bulk.limit","value":' || cap || '}', cap, next, sealed, tag);
+        RAISE EXCEPTION 'FAIL: a payload naming no object was taken';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM change_input('principal', 'token:deploy', 'member-valued', t, 'system:vault', '{"op":"member.remove","ref":{"kind":"principal","id":"token:deploy"}}',
+                             '{}', (SELECT seal FROM vault_members WHERE principal = 'token:deploy'), next, tag);
+        RAISE EXCEPTION 'FAIL: a principal''s change carried a value its row is not written from';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM change_input('environment', '22222222-2222-2222-2222-222222222222', 'environment-unvalued', t, 'system:vault',
+                             '{"op":"environment.protect","ref":{"kind":"environment","id":"22222222-2222-2222-2222-222222222222"},"protected":false}',
+                             NULL, next, sealed, tag);
+        RAISE EXCEPTION 'FAIL: an environment''s change carried no object to write';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    IF (SELECT count(*) FROM log_changes WHERE request_id IN ('environment-renamed', 'cap')) <> 2
+       OR EXISTS (SELECT 1 FROM log_changes WHERE request_id IN ('environment-moved', 'cap-elsewhere', 'cap-unnamed', 'member-valued', 'environment-unvalued')) THEN
+        RAISE EXCEPTION 'FAIL: a refused change was logged, or a change was not';
+    END IF;
+    RAISE EXCEPTION 'rolled back' USING ERRCODE = 'C0FFE';
+EXCEPTION WHEN SQLSTATE 'C0FFE' THEN
+    RAISE NOTICE 'PASS: change_input writes an environment''s and the policy''s object from its value, under its CAS, and refuses a payload or value out of place';
+END;
 END
 $$;

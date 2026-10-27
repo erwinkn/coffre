@@ -1,5 +1,6 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
+import { isTombstone } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
@@ -7,6 +8,7 @@ import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/g
 import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
+import { objectKey, type Input, type Kind, type PrincipalInput, type Ref } from './inputs.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -803,4 +805,270 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
 function heldAs(secretVersions: ReturnType<typeof tablesOf>['secretVersions'], column: SQL): SQL {
   return sql`SELECT ${column} FROM secret_versions same WHERE same.secret_id = ${secretVersions.secretId}
     AND same.iv = ${secretVersions.iv} AND same.auth_tag = ${secretVersions.authTag} ORDER BY same.version DESC LIMIT 1`;
+}
+
+// --- 0.15's log: objects and changes ----------------------------------------------
+
+/**
+ * An object of 0.15's log as its rows hold it (inputs.ts), and the seal on
+ * them; `row` null when it has none. The roles' and the policy's rows are
+ * their objects as the change that made them wrote them.
+ *
+ * Each object is read from its own rows alone, as the change path writes
+ * them: an environment is deleted when its own slug is a tombstone, not its
+ * project's (a project's deletion writes its environments' rows, plan PR
+ * 4b), and it is unprotected until a change or the cutover says otherwise.
+ */
+export type HeldObject = { row: Input | null; seal: Buffer | null };
+
+/** The kinds whose objects the change path reads so far: the vault's own, an environment's, the roles' and the policy's. */
+export type ReadKind = Exclude<Kind, 'credential' | 'secret'>;
+
+export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<HeldObject> {
+  const { vaultMembers, environments, logConfig } = tablesOf(db);
+  switch (ref.kind) {
+    case 'principal': {
+      const [row] = await db
+        .select({ status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal })
+        .from(vaultMembers)
+        .where(eq(vaultMembers.principal, ref.id));
+      if (row === undefined) return { row: null, seal: null };
+      return { row: principalObject({ principal: ref.id, status: row.status as Member['status'], ...storedRole(row) }, await readGrants(db, { principal: ref.id })), seal: row.seal ?? null };
+    }
+    case 'environment': {
+      const [row] = await db
+        .select({
+          projectId: environments.projectId,
+          slug: environments.slug,
+          owner: environments.owner,
+          parentId: environments.parentId,
+          protected: environments.protected,
+          archivedAt: environments.archivedAt,
+          seal: environments.seal,
+        })
+        .from(environments)
+        .where(eq(environments.id, ref.id));
+      if (row === undefined) return { row: null, seal: null };
+      return {
+        row: {
+          kind: 'environment',
+          id: ref.id,
+          projectId: row.projectId,
+          slug: row.slug,
+          owner: row.owner,
+          parentId: row.parentId,
+          protected: row.protected === true,
+          deleted: isTombstone(row.slug),
+          archived: row.archivedAt !== null,
+        },
+        seal: row.seal ?? null,
+      };
+    }
+    case 'roles': case 'policy': {
+      const [row] = await db.select({ value: logConfig.value, seal: logConfig.seal }).from(logConfig).where(eq(logConfig.name, ref.kind));
+      if (row === undefined) return { row: null, seal: null };
+      // Whatever it holds: a value that is not the object fails its seal.
+      return { row: JSON.parse(row.value) as Input, seal: row.seal ?? null };
+    }
+  }
+}
+
+/** A member's object, from their row and their grants, lapsed ones too. */
+export function principalObject(member: Pick<Member, 'principal' | 'status' | 'role' | 'scope'>, grants: readonly GrantRow[]): PrincipalInput {
+  return {
+    kind: 'principal',
+    principal: member.principal,
+    status: member.status,
+    role: member.role,
+    scope: member.scope,
+    grants: grants.map(({ projectId, environmentId, environmentSlug, role, expiresAt }) => ({ projectId, environmentId, environmentSlug, role, expiresAt })),
+  };
+}
+
+/** The object's newest change in the log: whether it has one, and the seal it left (HotPathOne's NewestIn). */
+export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buffer | null } | null> {
+  const { logChanges } = tablesOf(db);
+  const [row] = await db
+    .select({ seal: logChanges.seal })
+    .from(logChanges)
+    .where(eq(logChanges.object, objectKey(ref)))
+    .orderBy(desc(logChanges.number))
+    .limit(1);
+  return row === undefined ? null : { seal: row.seal ?? null };
+}
+
+/**
+ * A change as `change_input` takes it: the object, the request it is (a
+ * retry finds its entry), when and by whom, what it does (`payload`, the
+ * op as logged), the object it leaves where the function writes it
+ * (`value`), the seal it was read at and the one it leaves, and the
+ * entry's MAC.
+ */
+export type ChangeCall = {
+  ref: Ref;
+  requestId: string;
+  at: number;
+  actor: string;
+  payload: string;
+  value: string | null;
+  sealFrom: Buffer | null;
+  seal: Buffer;
+  mac: Buffer;
+};
+
+/**
+ * Each change, in order, in one round trip, each `change_input` (0023):
+ * its entry's number, or null where the row's seal was no longer the one
+ * read, and nothing was done. A row that is not its object's newest
+ * change's fails the call (`isStale`), and its transaction with it.
+ *
+ * On Postgres, the calls are rows of one `VALUES`, scanned in order. On
+ * SQLite, which has no functions, `changeOnSqlite` does what it does, in
+ * the call's transaction, which holds the database's one write lock: the
+ * fence there is implicit (plan, "Postgres serves; SQLite is for tests").
+ */
+export async function changeInputs(tx: Transaction, calls: readonly ChangeCall[]): Promise<(bigint | null)[]> {
+  if (calls.length === 0) return [];
+  if (engineOf(tx) === 'sqlite') {
+    const numbers: (bigint | null)[] = [];
+    for (const call of calls) numbers.push(await changeOnSqlite(tx, call));
+    return numbers;
+  }
+  const rows = sql.join(calls.map((call, i) => sql`(${i}::int, ${call.ref.kind}::text, ${call.ref.id}::text, ${call.requestId}::text, ${call.at}::bigint, ${call.actor}::text, ${call.payload}::text, ${call.value}::text, ${call.sealFrom}::bytea, ${call.seal}::bytea, ${call.mac}::bytea)`), sql`, `);
+  // In order: one decision's changes to one object chain, each from the seal the one before leaves. A volatile
+  // function in the select list runs after the sort (Postgres 9.6 on), so each call runs in `ord`'s order.
+  const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`
+    SELECT c.ord, change_input(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.value, c.seal_from, c.seal, c.mac) AS number
+      FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, value, seal_from, seal, mac)
+     ORDER BY c.ord`);
+  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('change_input answered out of order');
+  return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
+}
+
+/** Postgres's `data_corrupted`, which `change_input` raises on a row that is not its object's newest change's. */
+const STALE = 'XX001';
+
+/** Whether `error` is `change_input`'s refusal of a stale row (ChangeChecksSeal). */
+export function isStale(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (cause instanceof StaleRow || (cause as { code?: unknown }).code === STALE) return true;
+  }
+  return false;
+}
+
+class StaleRow extends Error {}
+
+/** The ops `change_input` takes, by kind (0023): the cutover's genesis on any. */
+const KNOWN_OPS: Record<Kind, readonly string[]> = {
+  principal: ['member.add', 'member.role', 'member.remove', 'member.restore', 'access.grant', 'access.revoke'],
+  environment: ['environment.protect', 'environment.rename', 'environment.archive'],
+  roles: ['role.define'],
+  policy: ['bulk.limit'],
+  credential: [],
+  secret: [],
+};
+
+/** `change_input`, step for step, on SQLite. */
+async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint | null> {
+  const { logChanges, logUses, vaultMembers, environments, logConfig, credentials, serviceBindings, secrets } = tablesOf(tx);
+  const { ref } = call;
+  const target = objectKey(ref);
+  const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, call.requestId));
+  if (prior !== undefined) {
+    if (prior.object !== target || prior.payload !== call.payload || !sameBytes(prior.seal ?? null, call.seal)) {
+      throw Object.assign(new Error(`request ${call.requestId} names another change`), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
+    }
+    return BigInt(prior.number);
+  }
+  const op = (JSON.parse(call.payload) as { op?: unknown }).op;
+  if (typeof op !== 'string' || (op !== 'genesis' && !KNOWN_OPS[ref.kind].includes(op))) throw new Error(`this schema knows no change ${String(op)} to a ${ref.kind}`);
+  const named = (JSON.parse(call.payload) as { ref?: { kind?: unknown; id?: unknown } }).ref;
+  if ((op !== 'genesis' || named !== undefined) && (named?.kind !== ref.kind || named.id !== ref.id)) throw new Error(`a change names the object it is to: ${ref.kind}, ${ref.id}`);
+  const value = call.value === null ? null : (JSON.parse(call.value) as Record<string, unknown>);
+  const valued = ref.kind === 'environment' ? op !== 'genesis' && value === null : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null) : value !== null;
+  if (valued) throw new Error(`a ${ref.kind} change ${op} carries the object it leaves exactly when change_input writes it`);
+  // ChangeChecksSeal.
+  const held = await heldSeal(tx, ref);
+  const newest = await newestChange(tx, ref);
+  if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${ref.kind} object's row is not its newest change's: stale`);
+  // ChangeCAS.
+  const from = (column: SQLWrapper) => (call.sealFrom === null ? isNull(column) : eq(column as never, call.sealFrom));
+  let done: number;
+  switch (ref.kind) {
+    case 'principal':
+      done = changedRows(await tx.update(vaultMembers).set({ seal: call.seal }).where(and(eq(vaultMembers.principal, ref.id), from(vaultMembers.seal))));
+      break;
+    case 'credential':
+      done = changedRows(await tx.update(credentials).set({ seal: call.seal }).where(and(eq(credentials.id, ref.id), from(credentials.seal))))
+        || changedRows(await tx.update(serviceBindings).set({ seal: call.seal }).where(and(eq(serviceBindings.id, ref.id), from(serviceBindings.seal))));
+      break;
+    case 'secret':
+      done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(and(eq(secrets.id, ref.id), from(secrets.seal))));
+      break;
+    case 'environment': {
+      if (value === null) {
+        done = changedRows(await tx.update(environments).set({ seal: call.seal }).where(and(eq(environments.id, ref.id), from(environments.seal))));
+        break;
+      }
+      const [row] = await tx.select({ projectId: environments.projectId, parentId: environments.parentId, owner: environments.owner, slug: environments.slug, archivedAt: environments.archivedAt, seal: environments.seal }).from(environments).where(eq(environments.id, ref.id));
+      const deleted = value.deleted === true;
+      const holds = row !== undefined && sameBytes(row.seal ?? null, call.sealFrom) && value.kind === 'environment' && value.id === ref.id
+        && row.projectId === value.projectId && row.parentId === (value.parentId ?? null) && row.owner === (value.owner ?? null)
+        && isTombstone(row.slug) === deleted && isTombstone(String(value.slug)) === deleted && (!deleted || row.slug === value.slug);
+      if (!holds) {
+        done = 0;
+        break;
+      }
+      done = changedRows(await tx.update(environments).set({
+        slug: String(value.slug),
+        protected: value.protected === true,
+        archivedAt: value.archived === true ? (row.archivedAt ?? new Date(call.at)) : null,
+        seal: call.seal,
+      }).where(eq(environments.id, ref.id)));
+      break;
+    }
+    case 'roles': case 'policy': {
+      const config = op === 'genesis' ? (JSON.parse(call.payload) as { value?: unknown }).value : value;
+      if (ref.id !== 'instance' || config === null || typeof config !== 'object' || Array.isArray(config) || (op === 'genesis' && call.sealFrom !== null)) {
+        throw new Error(`the ${ref.kind} object is one, made once from its value and changed from its seal`);
+      }
+      done = call.sealFrom === null
+        ? changedRows(await tx.insert(logConfig).values({ name: ref.kind, value: JSON.stringify(config), seal: call.seal }).onConflictDoNothing())
+        : changedRows(await tx.update(logConfig).set({ value: JSON.stringify(config), seal: call.seal }).where(and(eq(logConfig.name, ref.kind), eq(logConfig.seal, call.sealFrom))));
+      break;
+    }
+  }
+  if (done === 0) return null;
+  // One sequence for both tables, as `log_number` is on Postgres: the transaction holds the database's write lock.
+  // Unlike the sequence, the newest number again once its entries are deleted: SQLite is for tests (the plan), where
+  // only a test deletes entries.
+  const [{ last }] = await tx.select({ last: sql<number | string | null>`max(n)` }).from(
+    sql`(SELECT max(${logChanges.number}) AS n FROM ${logChanges} UNION ALL SELECT max(${logUses.number}) FROM ${logUses})`,
+  );
+  const number = BigInt(last ?? 0) + 1n;
+  await tx.insert(logChanges).values({ number, at: call.at, requestId: call.requestId, object: target, actor: call.actor, payload: call.payload, seal: call.seal, mac: call.mac });
+  return number;
+}
+
+/** The seal on an object's row, null if it has none or no row (the credentials' table first: a binding's id never meets a token's). */
+async function heldSeal(db: Queryable, ref: Ref): Promise<Buffer | null> {
+  const { credentials, serviceBindings, secrets } = tablesOf(db);
+  switch (ref.kind) {
+    case 'credential': {
+      const [token] = await db.select({ seal: credentials.seal }).from(credentials).where(eq(credentials.id, ref.id));
+      if (token !== undefined) return token.seal ?? null;
+      const [binding] = await db.select({ seal: serviceBindings.seal }).from(serviceBindings).where(eq(serviceBindings.id, ref.id));
+      return binding?.seal ?? null;
+    }
+    case 'secret': {
+      const [row] = await db.select({ seal: secrets.seal }).from(secrets).where(eq(secrets.id, ref.id));
+      return row?.seal ?? null;
+    }
+    default:
+      return (await readObject(db, ref as Ref & { kind: ReadKind })).seal;
+  }
+}
+
+function sameBytes(a: Buffer | null, b: Buffer | null): boolean {
+  return a === null || b === null ? a === b : Buffer.compare(a, b) === 0;
 }

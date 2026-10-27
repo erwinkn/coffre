@@ -110,7 +110,7 @@ old=$!
 held 1668245101
 vault_psql -At >"$scratch/change.log" 2>&1 <<'SQL' || { cat "$scratch/change.log" >&2; echo 'a 0.15 change did not pass a 0.14 write in flight' >&2; exit 1; }
 SET lock_timeout = '10s';
-SELECT change_input('principal', 'token:deploy', 'reseal-under-0.14', 1, 'system:test', '{"op":"genesis"}',
+SELECT change_input('principal', 'token:deploy', 'reseal-under-0.14', 1, 'system:test', '{"op":"genesis"}', NULL,
     (SELECT seal FROM vault_members WHERE principal = 'token:deploy'), decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
 SQL
 wait "$old" || { cat "$scratch/old.log" >&2; echo "0.14's write failed beside a 0.15 change" >&2; exit 1; }
@@ -132,7 +132,7 @@ old=$!
 held 1668245101
 vault_psql -At >"$scratch/change.log" 2>&1 <<'SQL' || { cat "$scratch/change.log" >&2; echo "a 0.15 credential change did not pass a 0.14 decision in flight" >&2; exit 1; }
 SET lock_timeout = '10s';
-SELECT change_input('credential', '33333333-3333-3333-3333-333333333333', 'reseal-credential-under-0.14', 1, 'system:test', '{"op":"genesis"}',
+SELECT change_input('credential', '33333333-3333-3333-3333-333333333333', 'reseal-credential-under-0.14', 1, 'system:test', '{"op":"genesis"}', NULL,
     (SELECT seal FROM log_changes WHERE object = log_object('credential', '33333333-3333-3333-3333-333333333333') ORDER BY number DESC LIMIT 1),
     decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
 SQL

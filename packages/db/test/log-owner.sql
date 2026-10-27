@@ -56,12 +56,12 @@ DECLARE
     before bytea := (SELECT seal FROM vault_members WHERE principal = 'token:deploy');
     object record;
 BEGIN
-    IF change_input('principal', 'token:deploy', 'reseal-a', t, 'system:test', '{"op":"genesis"}', before, decode(repeat('6e', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NULL THEN
+    IF change_input('principal', 'token:deploy', 'reseal-a', t, 'system:test', '{"op":"genesis"}', NULL, before, decode(repeat('6e', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NULL THEN
         RAISE EXCEPTION 'FAIL: a change from the row''s own seal did nothing';
     END IF;
     UPDATE vault_members SET seal = before WHERE principal = 'token:deploy';
     BEGIN
-        PERFORM change_input('principal', 'token:deploy', 'reseal-b', t, 'system:test', '{"op":"genesis"}', before, decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
+        PERFORM change_input('principal', 'token:deploy', 'reseal-b', t, 'system:test', '{"op":"genesis"}', NULL, before, decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
         RAISE EXCEPTION 'FAIL: a change sealed a row put back from before the newest change';
     EXCEPTION WHEN data_corrupted THEN NULL;
     END;
@@ -78,7 +78,7 @@ BEGIN
     ) AS o (kind, id, tbl, keycol) LOOP
         EXECUTE format('UPDATE %I SET seal = decode(repeat(''9e'', 16), ''hex'') WHERE %I::text = %L', object.tbl, object.keycol, CASE object.kind WHEN 'roles' THEN 'roles' ELSE object.id END);
         BEGIN
-            PERFORM change_input(object.kind, object.id, 'stale-' || object.kind, t, 'system:test', '{"op":"genesis"}', decode(repeat('9e', 16), 'hex'), decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
+            PERFORM change_input(object.kind, object.id, 'stale-' || object.kind, t, 'system:test', '{"op":"genesis"}', NULL, decode(repeat('9e', 16), 'hex'), decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
             RAISE EXCEPTION 'FAIL: a % change sealed a row that is not its newest change''s', object.kind;
         EXCEPTION WHEN data_corrupted THEN NULL;
         END;
