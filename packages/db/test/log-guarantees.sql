@@ -23,6 +23,8 @@ BEGIN
         $q$UPDATE log_fence SET at_floor = 0$q$,
         $q$DELETE FROM log_bulk$q$,
         $q$TRUNCATE log_changes$q$,
+        $q$INSERT INTO log_tiles VALUES ('changes', 0, 0, decode(repeat('00', 32), 'hex'))$q$,
+        $q$INSERT INTO log_checkpoints VALUES (1, 1, 1, 0, decode(repeat('00', 32), 'hex'), 'n', 0, decode(repeat('00', 32), 'hex'), 'n')$q$,
         $q$UPDATE credentials SET seal = NULL$q$,
         $q$UPDATE vault_members SET seal = NULL$q$,
         $q$SELECT nextval('log_number')$q$,
@@ -273,5 +275,39 @@ BEGIN
     pruned := prune_bulk(100);
     IF pruned <> 0 OR NOT EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:deploy') THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
     RAISE NOTICE 'PASS: late uses write nothing (DeadlineChecked, FloorChecked), the barrier raises the floor, and pruning keeps what a window counts';
+END
+$$;
+
+-- PairWrittenTogether: a checkpoint's tiles and its pair of heads, in one call;
+-- a tile only grows; one pair a place.
+DO $$
+DECLARE
+    h bytea := decode(repeat('11', 32), 'hex');
+    h2 bytea := decode(repeat('11', 32) || repeat('22', 32), 'hex');
+    root bytea := decode(repeat('33', 32), 'hex');
+BEGIN
+    PERFORM write_checkpoint(100, 1, 1, 1, root, 'changes note', 1, root, 'uses note',
+        ARRAY['changes', 'uses', 'uses'], ARRAY[0, 0, 1]::smallint[], ARRAY[0, 0, 0]::bigint[], ARRAY[h, h, h]);
+    -- Grown, and written again with the same bytes: both fine.
+    PERFORM write_checkpoint(101, 2, 1, 2, root, 'changes note', 1, root, 'uses note',
+        ARRAY['changes', 'uses'], ARRAY[0, 0]::smallint[], ARRAY[0, 0]::bigint[], ARRAY[h2, h]);
+    IF (SELECT hashes FROM log_tiles WHERE tree = 'changes' AND level = 0 AND leaf = 0) <> h2
+       OR (SELECT count(*) FROM log_tiles) <> 3 OR (SELECT count(*) FROM log_checkpoints) <> 2 THEN
+        RAISE EXCEPTION 'FAIL: write_checkpoint did not write its tiles and its pair';
+    END IF;
+    BEGIN
+        PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', ARRAY['changes'], ARRAY[0]::smallint[], ARRAY[0]::bigint[], ARRAY[h]);
+        RAISE EXCEPTION 'FAIL: a tile shrank';
+    EXCEPTION WHEN data_corrupted THEN NULL;
+    END;
+    BEGIN
+        PERFORM write_checkpoint(101, 3, 1, 3, root, 'n', 1, root, 'n', ARRAY['uses'], ARRAY[1]::smallint[], ARRAY[0]::bigint[], ARRAY[h2]);
+        RAISE EXCEPTION 'FAIL: a second pair was written at one place';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    IF (SELECT count(*) FROM log_checkpoints) <> 2 OR (SELECT hashes FROM log_tiles WHERE tree = 'uses' AND level = 1) <> h THEN
+        RAISE EXCEPTION 'FAIL: a refused checkpoint left a trace';
+    END IF;
+    RAISE NOTICE 'PASS: PairWrittenTogether, write_checkpoint writes tiles and pair as one, tiles only growing, one pair a place';
 END
 $$;

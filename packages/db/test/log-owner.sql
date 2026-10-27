@@ -108,11 +108,11 @@ $$;
 DO $$
 BEGIN
     INSERT INTO log_tiles (tree, level, leaf, hashes) VALUES ('uses', 0, 256, decode(repeat('aa', 32), 'hex')), ('uses', 2, 0, decode(repeat('bb', 32), 'hex'));
-    IF (SELECT tableoid::regclass::text FROM log_tiles WHERE tree = 'uses' AND level = 0) <> 'log_tiles_uses_0'
-       OR (SELECT tableoid::regclass::text FROM log_tiles WHERE tree = 'uses' AND level = 2) <> 'log_tiles_uses_upper' THEN
+    IF (SELECT tableoid::regclass::text FROM log_tiles WHERE tree = 'uses' AND level = 0 AND leaf = 256) <> 'log_tiles_uses_0'
+       OR (SELECT tableoid::regclass::text FROM log_tiles WHERE tree = 'uses' AND level = 2 AND leaf = 0) <> 'log_tiles_uses_upper' THEN
         RAISE EXCEPTION 'FAIL: a tile went to the wrong table';
     END IF;
-    DELETE FROM log_tiles WHERE tree = 'uses';
+    DELETE FROM log_tiles WHERE (tree, level, leaf) IN (('uses', 0, 256), ('uses', 2, 0));
     RAISE NOTICE 'PASS: leaf tiles by range, the levels above in one table';
 END
 $$;

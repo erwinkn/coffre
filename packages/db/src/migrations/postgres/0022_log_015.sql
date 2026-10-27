@@ -74,7 +74,7 @@ CREATE TABLE "log_checkpoints" (
 	CONSTRAINT "log_checkpoints_uses_root_check" CHECK (octet_length("log_checkpoints"."uses_root") = 32)
 );
 --> statement-breakpoint
--- The two trees' tiles: the changes tree's kept for good in one table, the uses tree's by leaf range (make_tiles), so that retention drops a table.
+-- The two trees' tiles: the changes tree's kept for good in one table; the uses tree's leaf tiles by leaf range (make_tiles), so that retention drops a table, and its levels above in one table (below).
 CREATE TABLE "log_tiles" (
 	"tree" text NOT NULL,
 	"level" smallint NOT NULL,
@@ -508,6 +508,33 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
+-- A checkpoint, written as one (plan PR 6, W212's rule 3, PairWrittenTogether): the tiles that grew, and the pair of heads, in one call, so that no state holds one head without the other, or a head over tiles that disagree. A tile only grows (a partial one at the right edge is written again, wider, each tick): one whose stored hashes are not where the new ones start is refused, and so is the whole call. One written again with the same bytes is fine (a pair finished after an earlier attempt failed). A second pair for one `upto` is refused. A leaf tile needs its range (make_tiles) first. The window it seals is read in the statement after close_one's, whose snapshot sees every append the barrier waited for.
+CREATE FUNCTION write_checkpoint(
+    p_upto bigint, p_at bigint, p_at_floor bigint,
+    p_changes_size bigint, p_changes_root bytea, p_changes_note text,
+    p_uses_size bigint, p_uses_root bytea, p_uses_note text,
+    p_tree text[], p_level smallint[], p_leaf bigint[], p_hashes bytea[]
+) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    written integer;
+BEGIN
+    WITH grown AS (
+        INSERT INTO public.log_tiles AS t (tree, level, leaf, hashes)
+        SELECT * FROM unnest(p_tree, p_level, p_leaf, p_hashes)
+        ON CONFLICT (tree, level, leaf) DO UPDATE SET hashes = excluded.hashes
+         WHERE substr(excluded.hashes, 1, octet_length(t.hashes)) = t.hashes
+        RETURNING 1
+    )
+    SELECT count(*) INTO written FROM grown;
+    IF written <> coalesce(cardinality(p_tree), 0) THEN
+        RAISE EXCEPTION 'a tile would shrink or change: % of % written', written, coalesce(cardinality(p_tree), 0) USING ERRCODE = 'data_corrupted';
+    END IF;
+    INSERT INTO public.log_checkpoints (upto, at, at_floor, changes_size, changes_root, changes_note, uses_size, uses_root, uses_note)
+    VALUES (p_upto, p_at, p_at_floor, p_changes_size, p_changes_root, p_changes_note, p_uses_size, p_uses_root, p_uses_note);
+END
+$$;
+--> statement-breakpoint
 -- The bulk cap's rows that count for nothing any more, at most p_limit a call: older than the policy's window (its newest change's, as a use reads it), its refresh and the deadline, by the database's clock, less an hour for the clock stepping back (as prune_vault_releases). No caller chooses the bound, so the vault's login, which deletes no row itself, cannot forget a key the window counts; the replay keeps them, which changes none of its decisions. A row a use holds is left to the next call.
 CREATE FUNCTION prune_bulk(p_limit integer) RETURNS integer
     LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '3s' AS $$
@@ -549,9 +576,9 @@ CREATE TRIGGER audit_log_fence AFTER INSERT ON audit_log FOR EACH ROW
     ))
     EXECUTE FUNCTION log_fence_old_write();
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea), change_input(text, text, text, bigint, text, text, bytea, bytea, bytea), close_one(), prune_bulk(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea), change_input(text, text, text, bigint, text, text, bytea, bytea, bytea), close_one(), write_checkpoint(bigint, bigint, bigint, bigint, bytea, text, bigint, bytea, text, text[], smallint[], bigint[], bytea[]), prune_bulk(integer) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea), change_input(text, text, text, bigint, text, text, bytea, bytea, bytea), close_one(), prune_bulk(integer) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea), change_input(text, text, text, bigint, text, text, bytea, bytea, bytea), close_one(), write_checkpoint(bigint, bigint, bigint, bigint, bytea, text, bigint, bytea, text, text[], smallint[], bigint[], bytea[]), prune_bulk(integer) TO coffre_vault;
 --> statement-breakpoint
 -- The vault reads all of it; the backup reads every table, partitions included (pg_dump reads each), and the sequence. The app reads none: it never decides.
 GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles TO coffre_vault;

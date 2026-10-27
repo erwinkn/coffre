@@ -7,6 +7,8 @@ DELETE FROM log_bulk;
 DELETE FROM log_changes;
 TRUNCATE log_uses;
 DELETE FROM log_config;
+DELETE FROM log_checkpoints;
+DELETE FROM log_tiles;
 UPDATE log_fence SET at_floor = (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 3000;
 DELETE FROM credentials;
 DELETE FROM service_bindings;
