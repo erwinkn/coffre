@@ -334,6 +334,69 @@ async function headWaiters(): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
+/**
+ * Key A of `at` archived, then a request to bring it back (`unarchive`) prepared from it; before its transaction, others
+ * unarchive A, write a new value and archive it again (`meanwhile`): its seal is none again, as the request's change moves
+ * it from. The transaction must read again, never seal the value it read over the one written.
+ */
+async function rearchivedMeanwhile(at: string, archive: () => Promise<unknown>, unarchive: () => Promise<unknown>, meanwhile: () => Promise<unknown>): Promise<void> {
+  await root.access.set(CI, { [at]: 'viewer' });
+  const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const a = await keyIn(await environmentId(at.split('/')[1]!), 'A');
+  await archive();
+  const prepare = deps.vault.prepare!;
+  let raced = false;
+  deps.vault = { ...deps.vault, prepare: async (input: Parameters<typeof prepare>[0]) => {
+    const prepared = await prepare(input);
+    if (!raced && input.changes.some((change) => change.id === a)) {
+      raced = true;
+      await meanwhile();
+    }
+    return prepared;
+  } } as typeof deps.vault;
+  await unarchive();
+  assert.ok(raced);
+  // Read again: A back, with the value written meanwhile, its row its newest change's, and a use reads it.
+  const outcome = await use(token.id, a);
+  assert.equal(codeOf(outcome), 'ok', JSON.stringify(outcome));
+  assert.deepEqual((await opsOf('secret', a)).slice(-4), ['secret.write', 'secret.write', 'secret.delete', 'secret.write']);
+  await inputsLogged();
+}
+
+test('a key unarchived, written and archived again by others while `secrets.update` unarchives it: the transaction reads again', async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'one' });
+  await rearchivedMeanwhile(
+    'market/dev',
+    () => root.secrets.update('market/dev/A', { archived: true }),
+    () => root.secrets.update('market/dev/A', { archived: false }),
+    async () => {
+      await root.secrets.update('market/dev/A', { archived: false });
+      await root.secrets.set('market/dev', { A: 'two' });
+      await root.secrets.update('market/dev/A', { archived: true });
+    },
+  );
+});
+
+test('an override reset, overridden, written and reset again by others while `secrets.inherit` overrides it again: the transaction reads again', async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'parent' });
+  await root.environments.create('market/feature', { from: 'dev', inherit: true });
+  await root.secrets.set('market/feature', { A: 'one' });
+  await rearchivedMeanwhile(
+    'market/feature',
+    () => root.secrets.inherit('market/feature/A', true),
+    () => root.secrets.inherit('market/feature/A', false),
+    async () => {
+      await root.secrets.inherit('market/feature/A', false);
+      await root.secrets.set('market/feature', { A: 'two' });
+      await root.secrets.inherit('market/feature/A', true);
+    },
+  );
+});
+
 test('a write refused by `prepare` (a key\'s row not the vault\'s) stores nothing, and abandons the references the vault made for it', async () => {
   await root.projects.create('market');
   await root.environments.create('market/dev');

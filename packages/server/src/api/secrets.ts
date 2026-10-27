@@ -619,6 +619,20 @@ async function inheritedOf(db: Queryable, place: ResolvedPath): Promise<Awaited<
 /** A competing write invalidated the keys prepared outside the transaction. */
 class PrepareAgain extends Error {}
 
+/**
+ * Under the log's head: the key as `read` found it, archived or not, its
+ * object whole. Its seal alone cannot say so for a change prepared from no
+ * object (an unarchive), which moves the seal from none: a key unarchived,
+ * written and archived again meanwhile has none either, and the change
+ * would seal the version it read over the one written. Nor, when nothing
+ * was prepared, can anything: the key archived already, then unarchived
+ * meanwhile, would be archived with no change.
+ */
+async function stillAsRead(tx: Transaction, id: string, read: SecretRead | undefined): Promise<void> {
+  const now = (await secretObjects(tx, { ids: [id] })).get(id);
+  if (now === undefined || read === undefined || now.archived !== read.archived || JSON.stringify(now.columns) !== JSON.stringify(read.columns)) throw new ObjectMoved();
+}
+
 /** A key as `secretHeads` read it and as its object's read found it: archived or not, at the same version. */
 function sameHead(head: { archivedAt: Date | null; currentVersionId: string | null }, read: SecretRead | undefined): read is SecretRead {
   return read !== undefined && read.archived === (head.archivedAt !== null) && (read.columns.version?.id ?? null) === head.currentVersionId;
@@ -1338,10 +1352,7 @@ export async function patchSecret(
     return audited(ctx, async (tx, log) => {
       // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
       await checkEnvironment(tx, place, environment);
-      if (changes !== null) {
-        const [now] = await lock(tx, secrets, { id: secret.id });
-        if (now === undefined || read === undefined || (now.archivedAt !== null) !== read.archived) throw new ObjectMoved();
-      }
+      if (changes !== null) await stillAsRead(tx, secret.id, read);
       // A rename names the key it found: renamed meanwhile, the forks below would be searched for a name gone.
       if (renaming) {
         const [now] = await lock(tx, secrets, { id: secret.id });
@@ -1501,7 +1512,7 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
       await checkEnvironment(tx, place, environment);
       const [row] = await lock(tx, secrets, { id: secret.id });
       if (row === undefined) throw notFound('unknown secret');
-      if (changes !== null && (read === undefined || (row.archivedAt !== null) !== read.archived)) throw new ObjectMoved();
+      if (changes !== null) await stillAsRead(tx, secret.id, read);
       const folder = (await secretFolderOf(tx, environment.environmentId)).get(secret.id) ?? null;
       const inherited = await inheritedRows(tx, environment.environmentId);
       const held = inherited?.held.get(row.key);
