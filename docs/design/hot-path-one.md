@@ -408,8 +408,9 @@ workerd restarted each time (25 runs, per-thread CPU from schedstat).
   entry in 0.14; PR 4's change path must leave the row saying so, or the
   object stale.
 - **The principal's newest change names the 0.14 entry it accounts for** in its
-  payload, `old`. The cutover's genesis, an adoption, or a 0.15 change's
-  mirror (PR 9, plan PR 4) write it. A change that names none accounts for
+  payload, `old`. PR 4a's changes write it: the 0.14 access entry that the same
+  decision appended. The cutover's genesis and each adoption will write it too
+  (PR 9). A change that names none accounts for
   none, so the use is `stale` while 0.14 holds any access entry about the
   principal: it fails closed.
 - **The 0.14 probe reads only the principal.** Its entries are the vault's,

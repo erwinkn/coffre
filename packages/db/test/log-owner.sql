@@ -9,13 +9,13 @@ DECLARE
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 BEGIN
     UPDATE log_config SET value = '{"bulk":{"count":99,"windowMs":86400000}}' WHERE name = 'policy';
-    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 30, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000);
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 30, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000));
     IF r.state IS NOT NULL OR r.cap_count <> 1 OR r.in_set OR EXISTS (SELECT 1 FROM log_bulk WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
         RAISE EXCEPTION 'FAIL: the policy''s row moved the cap: %', r;
     END IF;
     INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
     VALUES (nextval('log_number'), t, 'policy-without-cap', log_object('policy', 'instance'), 'system:x', '{"op":"x","value":{}}', NULL, decode(repeat('00', 16), 'hex'));
-    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 31, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000);
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 31, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000));
     IF r.state IS DISTINCT FROM 'unconfigured' OR EXISTS (SELECT 1 FROM log_uses WHERE request_id = 31) THEN
         RAISE EXCEPTION 'FAIL: a policy that names no cap logged a use: %', r.state;
     END IF;
