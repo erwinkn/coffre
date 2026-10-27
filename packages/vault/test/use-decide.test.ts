@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 
 import { EVERYWHERE, ROLES } from '@coffre/core/access';
 
-import { bulkStep, refreshMs, USE_DEADLINE_MS } from '../src/bulk.ts';
+import { bulkStep, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from '../src/bulk.ts';
 import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
 import { limitOp, applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
 import { purposeCode, purposeOf, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
@@ -167,10 +167,10 @@ test('putting back an identical state is no rollback: grant, revoke, grant again
   assert.deepEqual(liveAndReplayed(w, [ask(2, 1)]), [null]);
 });
 
-test('the bulk cap: count keys a window, repeats pass, a refused request moves nothing, and others count over window + refresh + deadline', () => {
+test('the bulk cap: count keys a window, repeats pass, a refused request moves nothing, and others count over window + refresh + deadline + ahead', () => {
   const w = market({ count: 2, windowMs: 60_000 });
   // Ada reads keys 1 and 4, then 5 is a third: refused. 1 again passes; after the window and its margins, 5 passes.
-  const later = 1000 + 60_000 + refreshMs({ count: 2, windowMs: 60_000 }) + USE_DEADLINE_MS + 1;
+  const later = 1000 + 60_000 + refreshMs({ count: 2, windowMs: 60_000 }) + USE_DEADLINE_MS + USE_AHEAD_MS + 1;
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1), ask(1, 4), ask(1, 5), ask(1, 1, { at: 2000 }), ask(1, 5, { at: later })]), [null, null, 'bulk_limit', null, null]);
   // A request refused for any other reason counts all the same: Bo asks for prod's key, refused, and then has room for one key only.
   const v = market({ count: 2, windowMs: 60_000 });

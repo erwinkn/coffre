@@ -1161,7 +1161,10 @@ W208's one call per use, with W211's round 2 and review r1, in one module
   - a database writer who puts back earlier, validly sealed rows;
   - the checkpointer's barrier and the floor of `at`;
   - the deadline, with Hyperdrive holding calls;
-  - the bulk cap, its count from a sealed policy input;
+  - the bulk cap, its count from a sealed policy input; a key entering
+    the set takes the principal's lock exclusive, one moved on takes it
+    shared (T127), as Postgres grants it: a shared request waits behind a
+    waiting exclusive one;
   - sign-ins (`Issuers`, T123): each issues a new credential, a change no
     other use reads, under a lock of its own, the issue lock, shared; never
     the fence. The barrier takes the issue lock exclusive, then the fence.
@@ -1185,6 +1188,10 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | a change refuses a base row that is not its object's newest change (ChangeChecksSeal): a CAS alone passes a row a writer put back, and the change would re-seal the rollback | `EachChangeFlips`, `ReplaySound` |
 | the deadline checked in Postgres; the Worker's answer at it | `NoLateWork`, `ReleaseByDeadline` |
 | new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
+| a key moved on takes the principal's lock too, shared (RefreshLocks): without it, a key entering the set misses a move numbered before it, and the replay counts a key live did not | `BulkReplayAgrees` |
+| a row moves to the start of its use's refresh period, never to the use's time (RefreshPeriods): without it, two moves at once leave the row at the later time, where the replay's first move left it earlier | `BulkReplayAgrees` |
+| other keys count a skew longer again (AheadSlack): a use stamped by a Worker whose clock runs ahead is decided before one stamped earlier, up to D + MaxSkew. Without it, HotPathOneBulkSkew lets two keys out in one window. It was missing before W228: with periods a row starts earlier, and TLC reached the case within the scenario's clock; 0024's design breaks the same way with the clock run to 9 | `BulkCapHolds` |
+| moves take the lock shared, not exclusive (RefreshShared, T127). Its break is by definition (a move holding the lock exclusive while another waits); the harm, one principal's uses queued one behind the other at each refresh, the bench measures | `RefreshesNeverQueue` (R44) |
 | the cap's count and window from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed); HotPathOnePolicyWindow flips the window alone | `BulkReplayAgrees` |
 | an issue takes the issue lock, not the fence shared (IssueOwnLock); the barrier takes the issue lock before the fence (BarrierIssueFirst). With either off, a use waits on a sign-in, directly, or behind a barrier that holds the fence while it waits for an issue (HotPathOneIssue). IssueOwnLock's break is by definition (an issuer holding the fence): the harm, a barrier and then every use queued behind issuers, is Postgres's lock queue, which the model leaves out and the bench measures | `UsesNeverWaitOnIssues` (R58) |
 | the barrier waits for the issues in flight on the issue lock, exclusive (BarrierWaitsIssues); an issue's number taken under that lock (IssueNumberUnderLock) | `CheckpointsHold`: a checkpoint closed over an issue that commits after it |
@@ -1535,7 +1542,7 @@ the code.
 | `allowed_sealed`, `allowed_credential_sealed` | A 0.15 use is allowed only if every input it weighs (credential, principal, roles, policy, key, a reference's source, each environment) was read as its object's newest change left it, under the vault's seal. |
 | `stale_credential_refused` | A credential row that is not the log's newest refuses the use `stale` or `tampered`, whatever the row says: never a refusal the replay would give too (HotPathOne's `StaleFirst`). |
 | `allowed_keyread` | A 0.15 use allowed is one `KeyRead.decide`, 0.14's rules, allows on the reader its sealed inputs make. |
-| `allowed_within_cap`, `bulkRule_writes_admitted` | An allowed use's key is in its principal's set, or fewer than the log's count of other keys count; the cap's rule writes a key's row only for a request it admits, at the request's time. |
+| `allowed_within_cap`, `bulkRule_writes_admitted` | An allowed use's key is in its principal's set, or fewer than the log's count of other keys count; the cap's rule writes a key's row only for a request it admits, at the start of its refresh period, less than a refresh before its time (`periodOf_lags`). |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |
 | `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
 | `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |

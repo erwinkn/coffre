@@ -9,8 +9,8 @@
 (*   it takes the fence lock (an advisory lock) shared, and refuses an     *)
 (*   `at` below the floor;                                                 *)
 (*   statement A reads the principal's bulk row for its key and, if the    *)
-(*   key must enter the cap's set or be moved on, takes the principal's    *)
-(*   lock exclusive;                                                       *)
+(*   key must enter the cap's set, takes the principal's lock exclusive,   *)
+(*   or, if it is in the set and must be moved on, shared (T127);          *)
 (*   statement B, a snapshot of its own after every lock: past its         *)
 (*   deadline it writes nothing (`late`); else it reads every decision     *)
 (*   input, the seals of their newest changes, applies the cap's rule and  *)
@@ -114,18 +114,24 @@
 (* BulkWindow), FALSE for (BulkCountAlt, BulkWindowAlt), and a change      *)
 (* flips it; it allows every use itself. Each request is decided on the    *)
 (* policy in force at its number, live and in the replay. One row          *)
-(* per key the principal asked for, `last`: the time the key last entered *)
-(* the set or was moved on. A key is in the set at time t while            *)
-(* last > t - W - delta. A key that is not in the set enters it if fewer   *)
-(* than BulkCount others count at t, else the request is refused `bulk`;   *)
-(* another key counts while last > t - W - delta - D: a use is decided up  *)
-(* to D after its `at`, so it can be decided after a use stamped up to D   *)
-(* later, which must have counted its key. A key in the set is moved on    *)
-(* (last := t) only once its `last` is Refresh (delta) old, so that a hot  *)
-(* key does not write its row on every use. Every request counts but the   *)
-(* ones the cap refuses, whatever the decision on the inputs: the SQL that *)
-(* moves the row cannot know it, the log stores requests, and the replay   *)
-(* recomputes the cap from them in number order.                           *)
+(* per key the principal asked for, `last`: when the key last entered the *)
+(* set or was moved on, as the start of that use's refresh period (the     *)
+(* periods are Refresh, delta, long: t - t % delta). A key is in the set   *)
+(* at time t while last > t - W - delta. A key that is not in the set      *)
+(* enters it if fewer than BulkCount others count at t, else the request   *)
+(* is refused `bulk`; another key counts while last > t - W - delta - D - *)
+(* MaxSkew: a use is decided up to D after its `at`, and one stamped by a  *)
+(* Worker running ahead up to MaxSkew before its own, so it can be decided *)
+(* after a use stamped up to D + MaxSkew later, which must have counted    *)
+(* its key. A key in the set is moved on only once its `last` is from an  *)
+(* earlier period than the use's, so that a hot key does not write its row *)
+(* on every use. Uses that move one key on at once each write their      *)
+(* period, the greatest one kept: the rows end where the replay's do,      *)
+(* whichever commits first, so moves need not wait for one another        *)
+(* (T127). Every request counts but the ones the cap refuses, whatever the *)
+(* decision on the inputs: the SQL that moves the row cannot know it, the  *)
+(* log stores requests, and the replay recomputes the cap from them in     *)
+(* number order.                                                           *)
 (*                                                                         *)
 (* Hyperdrive may hold a call (Holds) and never run it; the Worker answers *)
 (* 503 at the deadline all the same. That answer is a step of its own only *)
@@ -202,15 +208,29 @@
 (*                         `at` scan misses);                              *)
 (*   WorkerHonoursDeadline the Worker answers 503 at the deadline, and a   *)
 (*                         value whose call returns later never leaves;    *)
-(*   PrincipalLocks        a key that enters the cap's set, or is moved    *)
-(*                         on, takes the principal's lock;                 *)
-(*   RefreshOnUse          a use moves its key on once `last` is delta old;*)
+(*   PrincipalLocks        a key that enters the cap's set takes the       *)
+(*                         principal's lock exclusive;                     *)
+(*   RefreshLocks          ... and a key moved on takes it too (shared     *)
+(*                         with RefreshShared), so that a key entering the *)
+(*                         set counts every move numbered before it;       *)
+(*   RefreshPeriods        a key moved on writes the start of its use's    *)
+(*                         refresh period, not its time, so that two moves *)
+(*                         at once write what the replay's one does;       *)
+(*   RefreshShared         a move takes the lock shared, not exclusive: so *)
+(*                         a hot key's uses never queue behind one another *)
+(*                         (RefreshesNeverQueue; T127);                    *)
+(*   RefreshOnUse          a use moves its key on once `last` is from an   *)
+(*                         earlier period (delta old, without periods);    *)
 (*   CoverFresh            a repeat rides a cover only while its key's     *)
-(*                         `last` is younger than delta;                   *)
+(*                         `last` is from its own period;                  *)
 (*   Slack                 the set keeps a key delta longer than W (its    *)
 (*                         last use may be up to delta after `last`);      *)
 (*   DeadlineSlack         another key counts against a new one D longer   *)
 (*                         than it stays in the set;                       *)
+(*   AheadSlack            ... and MaxSkew longer again: a use stamped by  *)
+(*                         a Worker whose clock runs ahead is decided up   *)
+(*                         to D + MaxSkew before one stamped earlier (in   *)
+(*                         Postgres, 60 s, the most `ahead` lets by);      *)
 (*   CapFromPolicy         the statement takes the cap's count from the    *)
 (*                         policy in its own snapshot, not a count the     *)
 (*                         caller passes from its config, which may lag    *)
@@ -282,7 +302,8 @@ CONSTANTS
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
     ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
-    PrincipalLocks, RefreshOnUse, CoverFresh, Slack, DeadlineSlack, CapFromPolicy, CapSealed,
+    PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, Slack, DeadlineSlack,
+    AheadSlack, CapFromPolicy, CapSealed,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
     IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue
 
@@ -295,7 +316,7 @@ VARIABLES
     nextSeq,   \* the sequence's next value
     holder,    \* the changer holding the lock exclusive, or None
     shared,    \* the uses holding it shared
-    plock,     \* the use holding the principal's lock, or None
+    plock,     \* the principal's lock: the use holding it exclusive (ex), or None, and those holding it shared (sh)
     u,         \* each use's state
     c,         \* each changer's state
     answered,  \* how many changes had committed when the last change answered
@@ -325,6 +346,10 @@ vars == <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, las
           cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, iholder, ishared, bar>>
 
 Max(a, b) == IF a > b THEN a ELSE b
+
+NoPlock == [ex |-> None, sh |-> {}]
+\* The principal's lock without use x: what its commit, or its end, leaves.
+PlockWithout(x) == [ex |-> IF plock.ex = x THEN None ELSE plock.ex, sh |-> plock.sh \ {x}]
 
 -----------------------------------------------------------------------------
 (* What a statement sees. `Committed`, the number of changes committed, orders it against the   *)
@@ -380,22 +405,24 @@ ReplayPolicyIn(L) == IF "policy" \in Inputs THEN PolicyOf(ReplayValue(L, "policy
 CountIn(L) == PolicyIn(L).n
 WindowIn(L) == PolicyIn(L).w
 Margin == IF Slack THEN Refresh ELSE 0
-CountMargin == Margin + (IF DeadlineSlack THEN D ELSE 0)
+CountMargin == Margin + (IF DeadlineSlack THEN D ELSE 0) + (IF AheadSlack THEN MaxSkew ELSE 0)
 
 \* The cap's set at time t under window w, on rows L; the other keys that count against a new one.
 InSet(L, k, t, w) == L[k] > t - w - Margin
 Counts(L, k, t, w) == L[k] > t - w - CountMargin
-Fresh(L, k, t) == L[k] > t - Refresh
+\* The start of t's refresh period (% is never negative for a positive divisor), or, without periods, t.
+Period(t) == IF RefreshPeriods THEN t - (t % Refresh) ELSE t
+Fresh(L, k, t) == IF RefreshPeriods THEN L[k] >= Period(t) ELSE L[k] > t - Refresh
 
 \* The cap's rule for a request for k at t under the policy p, on rows L: admitted or not, and the
 \* `last` it writes (NoTime: none). The live statement B and the replay apply the same rule.
 Rule(L, k, t, p) ==
     IF k = None THEN [admitted |-> TRUE, write |-> NoTime]
     ELSE IF InSet(L, k, t, p.w)
-    THEN [admitted |-> TRUE, write |-> IF RefreshOnUse /\ ~Fresh(L, k, t) THEN t ELSE NoTime]
+    THEN [admitted |-> TRUE, write |-> IF RefreshOnUse /\ ~Fresh(L, k, t) THEN Period(t) ELSE NoTime]
     ELSE IF Cardinality({k2 \in Keys \ {k} : Counts(L, k2, t, p.w)}) >= p.n
          THEN [admitted |-> FALSE, write |-> NoTime]
-         ELSE [admitted |-> TRUE, write |-> t]
+         ELSE [admitted |-> TRUE, write |-> Period(t)]
 
 \* The replay of the cap: the use entries of the log G in number order, the rule applied to each on
 \* the rows the ones before it left, under the policy the changes numbered before it left.
@@ -437,7 +464,7 @@ IdleUse == [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTr
             snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
             probed |-> FALSE, newest |-> AllTrue, newestChange |-> NoChange,
             key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE, write |-> NoTime,
-            replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE]
+            replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE, mode |-> None, enters |-> FALSE]
 \* A cover or a cache entry is the isolate's for one credential and key: a use's slot.
 Slots == KeysOr \X ({None} \cup Issuers)
 Slot(x) == <<u[x].key, u[x].fresh>>
@@ -447,7 +474,7 @@ Init ==
     /\ nextSeq = 1
     /\ holder = None
     /\ shared = {}
-    /\ plock = None
+    /\ plock = NoPlock
     /\ u = [x \in Uses |-> IdleUse]
     /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, value |-> FALSE]]
     /\ answered = 0
@@ -540,20 +567,30 @@ UseLock(x) ==
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Statement A: the key's bulk row, as committed, and the policy's window (which no change can move
-\* while the use holds the lock shared). A key that must enter the set or be moved on asks for the
-\* principal's lock.
+\* while the use holds the lock shared). A key that must enter the set asks for the principal's lock
+\* exclusive; one in the set that must be moved on, shared (or exclusive, without RefreshShared).
 UseRead(x) ==
     /\ u[x].pc = "locked"
     /\ LET k == u[x].key
            t == u[x].at
-       IN u' = [u EXCEPT ![x].pc = IF PrincipalLocks /\ (~InSet(bulk, k, t, WindowIn(log)) \/ ~Fresh(bulk, k, t)) THEN "waiting" ELSE "read"]
+           enters == k /= None /\ ~InSet(bulk, k, t, WindowIn(log))
+           moves == k /= None /\ ~enters /\ ~Fresh(bulk, k, t)
+           waits == PrincipalLocks /\ (enters \/ (moves /\ RefreshLocks))
+       IN u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF waits THEN "waiting" ELSE "read", !.enters = enters,
+                                          !.mode = IF ~waits THEN None ELSE IF moves /\ RefreshShared THEN "s" ELSE "x"]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
+\* As Postgres grants a lock: exclusive once no one holds it; shared once no one holds it exclusive or
+\* waits for it so (a shared request queues behind a waiting exclusive one).
 UsePrincipalLock(x) ==
     /\ u[x].pc = "waiting"
-    /\ plock = None
-    /\ plock' = x
+    /\ plock.ex = None
+    /\ IF u[x].mode = "x"
+       THEN /\ plock.sh = {}
+            /\ plock' = [plock EXCEPT !.ex = x]
+       ELSE /\ \A y \in Uses : ~(u[y].pc = "waiting" /\ u[y].mode = "x")
+            /\ plock' = [plock EXCEPT !.sh = @ \cup {x}]
     /\ u' = [u EXCEPT ![x].pc = "read"]
     /\ UNCHANGED <<log, nextSeq, holder, shared, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
@@ -564,7 +601,7 @@ UseLate(x) ==
     /\ DeadlineChecked /\ pnow > u[x].deadline
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
     /\ shared' = shared \ {x}
-    /\ plock' = IF plock = x THEN None ELSE plock
+    /\ plock' = PlockWithout(x)
     /\ UNCHANGED <<log, nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
@@ -644,7 +681,7 @@ UseCommit(x) ==
             /\ UNCHANGED log
     /\ bulk' = IF u[x].write = NoTime THEN bulk ELSE [bulk EXCEPT ![u[x].key] = Max(@, u[x].write)]
     /\ shared' = shared \ {x}
-    /\ plock' = IF plock = x THEN None ELSE plock
+    /\ plock' = PlockWithout(x)
     /\ u' = [u EXCEPT ![x].pc = "committed"]
     /\ UNCHANGED <<nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, tamper, tampers, cache, restores, pnow, backs, issueVars>>
@@ -655,7 +692,7 @@ UseFail(x) ==
     /\ Failures
     /\ u[x].pc = "ran"
     /\ shared' = shared \ {x}
-    /\ plock' = IF plock = x THEN None ELSE plock
+    /\ plock' = PlockWithout(x)
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
     /\ UNCHANGED <<log, nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
@@ -913,7 +950,7 @@ Crash ==
     /\ log' = {e \in log : e.durable}
     /\ holder' = None
     /\ shared' = {}
-    /\ plock' = None
+    /\ plock' = NoPlock
     /\ u' = [x \in Uses |-> IF u[x].pc \in {"started", "held", "locked", "waiting", "read", "ran"}
                             THEN [u[x] EXCEPT !.pc = "done", !.replied = TRUE] ELSE u[x]]
     /\ c' = [h \in Changers |-> IF c[h].pc \in {"started", "refused", "locked", "ran"} THEN [c[h] EXCEPT !.pc = "idle"] ELSE c[h]]
@@ -1079,6 +1116,19 @@ BulkReplayAgrees ==
     LET R == BulkReplay(log)
     IN /\ \A e \in UsesIn(log) : e.key /= None => <<e.seq, e.admitted>> \in R.decided
        /\ R.rows = bulk
+
+\* T127, R44: a use whose key is in its principal's set waits on the principal's lock only for a use
+\* entering a key (once per key and window), never for another use moving a key on: one principal's
+\* hot keys never queue their uses one behind the other.
+RefreshesNeverQueue ==
+    \A x \in Uses : (u[x].pc = "waiting" /\ ~u[x].enters) =>
+        \A y \in Uses \ {x} : (plock.ex = y \/ (u[y].pc = "waiting" /\ u[y].mode = "x")) => u[y].enters
+
+\* A use holding the principal's lock shared finds its key still in the set at its statement: a key
+\* only ever moves later, and the window cannot change under the fence. So the statement never needs
+\* the lock exclusive once it holds it shared.
+SharedStaysInSet ==
+    \A x \in plock.sh : u[x].pc = "read" => InSet(bulk, u[x].key, u[x].at, WindowIn(log))
 
 \* R58: a use never waits on an issue. No issue holds the fence, and the barrier never holds the
 \* fence while an issue holds the issue lock: a use waits only on changes and the barrier, the

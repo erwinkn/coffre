@@ -11,9 +11,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import type { UseOutcome } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
+import { tablesOf, type Queryable } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
+import { postgresSession } from '@coffre/db/connect';
 
 import { logOrigin } from '../src/checkpointer.ts';
 import { objectKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
@@ -22,8 +23,9 @@ import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { authentic } from '../src/log-entry.ts';
 import { purposeCode, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
+import { newRequestId } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, FENCE, isolate, MAC, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -354,6 +356,171 @@ test('the bulk cap at count 10 over a day: ten keys in, the eleventh refused, re
   for (const id of ids.slice(0, 10)) assert.ok(heard(await use(ask(w, id, { purpose: 'reveal' }))).ok);
   assert.equal(code(heard(await use(ask(w, ids[10]!)))), 'bulk_limit');
   assert.ok(await replayAgrees() >= 12);
+});
+
+/** One call of `use_credential` in the transaction `tx`, as the vault makes it, stamped `at`: what it answers. */
+async function call(tx: Queryable, w: { credentialId: string }, secretId: string, at: number): Promise<{ state: string | null }> {
+  const [row] = await rows<{ use: { state: string | null } }>(tx, sql`SELECT use_credential(${w.credentialId}, ${secretId}, ${newRequestId()}, ${at},
+    4::smallint, NULL, ${randomBytes(16)}, ${at + 3000}) AS use`);
+  return row!.use;
+}
+
+/** Waits until `n` calls wait for an advisory lock: a principal's (1668244066 and the principal's hash), or a key and period's (one bigint key). */
+async function waitForLock(lock: 'principal' | 'period', n = 1): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+      WHERE d.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted
+        AND (${lock} = 'period' AND l.objsubid = 1 OR ${lock} = 'principal' AND l.objsubid = 2 AND l.classid = 1668244066)`);
+    if (Number(row!.n) >= n) return;
+    await sleep(20);
+  }
+  throw new Error(`fewer than ${n} calls waited for a ${lock} lock`);
+}
+
+/** A transaction of its own on `connection`, run by `body` and held open until `release`, which commits it, or rolls it back. */
+function held(connection: Awaited<ReturnType<TestDatabase['connect']>>, body: (tx: Queryable) => Promise<void>, end: 'commit' | 'rollback' = 'commit') {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let ran!: () => void;
+  const done = new Promise<void>((resolve) => { ran = resolve; });
+  let ended = false;
+  const holding = connection.transaction(async (tx) => {
+    await body(tx);
+    ran();
+    await released;
+    if (end === 'rollback') throw new Error('rolled back');
+  }).catch((error: unknown) => {
+    if (!(end === 'rollback' && error instanceof Error && error.message === 'rolled back')) throw error;
+  }).finally(() => { ended = true; });
+  return { done, holding, ended: () => ended, release: () => (release(), holding) };
+}
+
+/** A time all of a test's uses share, so that they fall in one refresh period (a minute): now, or the next minute's start when it is under 10 s away. */
+function onePeriod(): number {
+  const now = Date.now();
+  return now % 60_000 > 50_000 ? now - (now % 60_000) + 60_000 : now;
+}
+
+const within = (answer: Promise<unknown>, ms = 1000) => Promise.race([answer.then(() => 'answered'), sleep(ms).then(() => 'waiting')]);
+
+test('RefreshShared: uses moving one principal\'s keys on wait for none of one another; one entering a key waits for them all (T127)', postgresOnly('advisory locks'), async () => {
+  const w = await world();
+  const [k1, k2, k3] = [await w.key(), await w.key(), await w.key()];
+  const { use } = await isolate();
+  for (const id of [k1, k2]) assert.ok(heard(await use(ask(w, id))).ok);
+  // Both rows from two periods before, still in the 15-minute window: the next use of each moves it on.
+  await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+  // Every use from here stamped the same: one refresh period.
+  const at = onePeriod();
+  const asked = (id: string) => ask(w, id, { at, deadline: at + 3000 });
+  // A, a use that moves k1 on and has not committed: it holds the principal's lock shared, k1's row, and k1's period.
+  const a = held(await db.connect(1), async (tx) => assert.equal((await call(tx, w, k1, at)).state, null));
+  await a.done;
+  let b: ReturnType<typeof held> | undefined;
+  try {
+    // k2's move waits for nothing: 0024 queued it behind k1's, on the principal's lock exclusive.
+    const k2Use = use(asked(k2));
+    assert.equal(await within(k2Use), 'answered');
+    assert.ok(heard(await k2Use).ok);
+    // B and C move k1 to the same period: both wait for A's commit, on k1's period, shared.
+    b = held(await db.connect(1), async (tx) => assert.equal((await call(tx, w, k1, at)).state, null));
+    const c = (await isolate()).use(asked(k1));
+    await waitForLock('period', 2);
+    // A key entering the set waits for every move in flight: it takes the principal's lock exclusive.
+    const k3Use = (await isolate()).use(asked(k3));
+    await waitForLock('principal');
+    await a.release();
+    // B has found k1 moved and not committed: C waits for nothing of B's (an UPDATE that waited on A's row and found it
+    // moved would hold the row to B's commit).
+    await b.done;
+    assert.equal(await within(c), 'answered');
+    assert.ok(heard(await c).ok);
+    assert.equal(await within(k3Use, 300), 'waiting', 'the entry waits for B, which holds the principal\'s lock shared');
+    await b.release();
+    assert.ok(heard(await k3Use).ok);
+  } finally {
+    await a.release();
+    await b?.release();
+  }
+  // Every row is the start of its last writer's refresh period (RefreshPeriods), a minute here.
+  for (const { last } of await rows<{ last: string }>(db.owner, sql`SELECT last FROM log_bulk WHERE principal = ${w.principal}`)) {
+    assert.equal(Number(last) % 60_000, 0);
+  }
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_bulk WHERE principal = ${w.principal}`)).length, 3);
+  assert.ok(await replayAgrees() >= 5);
+});
+
+test('RefreshShared after a rollback: the uses that waited elect one to move the key, and the rest wait for it alone (T127)', postgresOnly('advisory locks'), async () => {
+  const w = await world();
+  const k1 = await w.key();
+  assert.ok(heard(await (await isolate()).use(ask(w, k1))).ok);
+  await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+  // Every use from here stamped the same: one refresh period.
+  const at = onePeriod();
+  const asked = (id: string) => ask(w, id, { at, deadline: at + 3000 });
+  // A moves k1, then rolls back; B and C (held open once they answer) and D wait for it.
+  const a = held(await db.connect(1), async (tx) => assert.equal((await call(tx, w, k1, at)).state, null), 'rollback');
+  await a.done;
+  const b = held(await db.connect(1), async (tx) => assert.equal((await call(tx, w, k1, at)).state, null));
+  const c = held(await db.connect(1), async (tx) => assert.equal((await call(tx, w, k1, at)).state, null));
+  const d = (await isolate()).use(asked(k1));
+  try {
+    await waitForLock('period', 3);
+    await a.release();
+    // One of B, C and D moves k1 again; the others wait for it alone. The first of B and C to answer is that one, or
+    // answers after D moved it: let it commit. The other then answers, and D does while it is still open: none of the
+    // three queued on the row behind another (an UPDATE that found it moved would hold it to its commit).
+    const first = await Promise.race([b.done.then(() => b), c.done.then(() => c)]);
+    const second = first === b ? c : b;
+    await first.release();
+    assert.equal(await within(second.done, 2000), 'answered');
+    assert.equal(await within(d), 'answered');
+    assert.ok(heard(await d).ok);
+    assert.equal(second.ended(), false);
+    await second.release();
+  } finally {
+    await a.release();
+    await b.release();
+    await c.release();
+  }
+  const [after] = await rows<{ last: string }>(db.owner, sql`SELECT last FROM log_bulk WHERE principal = ${w.principal}`);
+  assert.equal(Number(after!.last), at - (at % 60_000), 'moved on to the uses\' period, by the one elected after the rollback');
+  assert.ok(await replayAgrees() >= 2);
+});
+
+test('a session\'s first call plans its four statements before it takes the fence (T131)', postgresOnly('the fence'), async () => {
+  const w = await world();
+  const id = await w.key();
+  const fence = postgresSession(OWNER_URL);
+  const fresh = postgresSession(OWNER_URL);
+  try {
+    // The hot login's generic plans, and a lock wait cut short.
+    await fresh.unsafe(`SET plan_cache_mode = force_generic_plan`);
+    await fresh.unsafe(`SET lock_timeout = '200ms'`);
+    await fence.unsafe('BEGIN');
+    await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
+    const at = Date.now();
+    await assert.rejects(
+      fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
+      { code: '55P03' },
+    );
+    // The call never held the fence, and yet the session holds a plan of each of its four statements (the contexts name
+    // them by their first 1,024 bytes): made before the fence.
+    const [plans] = await fresh.unsafe<{ n: string }[]>(`SELECT count(*) AS n FROM pg_backend_memory_contexts WHERE name = 'CachedPlan' AND ident LIKE 'WITH i AS MATERIALIZED%'`);
+    assert.equal(Number(plans!.n), 4);
+    await fence.unsafe('ROLLBACK');
+    // Its next call, now the fence is free, is answered; the setting says the plans are made.
+    await fresh.unsafe(`SET lock_timeout = 0`);
+    const again = Date.now();
+    const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6) AS use`,
+      [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
+    assert.equal(answer!.use.state, null);
+    const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
+    assert.equal(setting!.planned, '0028');
+  } finally {
+    await fence.end();
+    await fresh.end();
+  }
 });
 
 test('covers: a repeat rides its entry, and writes none, until any input changes', async () => {

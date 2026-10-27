@@ -22,11 +22,15 @@
 // With `--proxy <rate>` instead, the uses beside are the whole app's `/use`, the credential proxy on 100 people's
 // handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--cgroup <dir>`, the Postgres
 // container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over the uses sent).
+// `--principals` spreads the uses over that many services (1: one hot principal, T127), `--keys` gives ci/dev that many
+// keys (7 by default, the reveal's), and `--use-cold <n>` makes n uses a second more, each on a new connection of its
+// own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
+// the cap's window in minutes (1 by default; its rows move on every tenth of it), its count a million.
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
-//     [--signin-only] [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
+//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -67,6 +71,10 @@ const { values } = parseArgs({
     idle: { type: 'string', default: '5' },
     warm: { type: 'string', default: '3' },
     'use-pool': { type: 'string', default: '100' },
+    principals: { type: 'string', default: '100' },
+    'use-cold': { type: 'string', default: '0' },
+    keys: { type: 'string', default: '7' },
+    window: { type: 'string', default: '1' },
     'signin-only': { type: 'boolean', default: false },
     proxy: { type: 'string', default: '0' },
     threads: { type: 'string', default: '4' },
@@ -82,6 +90,7 @@ const SIGNIN_ONLY = values['signin-only'];
 const PROXY = Number(values.proxy);
 /** The Postgres container's CPU so far, in µs, when `--cgroup` names its cgroup. */
 const cpuUsec = () => (values.cgroup === undefined ? 0 : Number(/usage_usec (\d+)/.exec(readFileSync(join(values.cgroup, 'cpu.stat'), 'utf8'))![1]));
+const BULK = { count: 1_000_000, windowMinutes: Number(values.window) };
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -141,7 +150,7 @@ try {
     checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), seed: derivedSigningKey(kek), memory: join(memory, 'memory') });
   }
   const log = checkpointer === null ? {} : { log: '0.15' as const, sealThrough: checkpointer.sealThrough };
-  const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, { kek }, {}, log) });
+  const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: BULK }, { kek }, {}, log) });
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -167,7 +176,7 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, log) };
+        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: BULK }, log) };
       })();
       instance.pool.cost = cost;
       cost.vaultCalls += 1;
@@ -191,7 +200,8 @@ try {
   const root = clientFor(deps, ROOT);
   await root.projects.create('ci', { name: 'CI' });
   await root.environments.create('ci/dev', { name: 'dev' });
-  await root.secrets.set('ci/dev', Object.fromEntries(SEVEN.map((key) => [key, `${key.toLowerCase()}-value`])));
+  const keys = [...SEVEN, ...Array.from({ length: Math.max(0, Number(values.keys) - SEVEN.length) }, (_, n) => `MORE_${n}`)];
+  await root.secrets.set('ci/dev', Object.fromEntries(keys.map((key) => [key, `${key.toLowerCase()}-value`])));
   await root.members.add(MEMBER);
   await root.access.set(MEMBER, { 'ci/dev': 'viewer' });
   let binding: string | null = null;
@@ -249,11 +259,10 @@ try {
   if (USES > 0) {
     const today = Date.now();
     await db.owner.execute(sql`SELECT make_day(${new Date(today).toISOString().slice(0, 10)}::date), make_day(${new Date(today + 86_400_000).toISOString().slice(0, 10)}::date)`);
-    // A fleet's uses: 100 services' credentials, each of the seven keys, so that no one principal's bulk row serializes
-    // them (a key's refresh takes its principal's lock), as one service's thousand a second would. What the vault
-    // then decides on them does not change what the statement costs.
+    // A fleet's uses: `--principals` services' credentials (100 by default), each of the seven keys. What the vault then
+    // decides on them does not change what the statement costs.
     const credentials: string[] = [];
-    for (let n = 0; n < 100; n += 1) {
+    for (let n = 0; n < Number(values.principals); n += 1) {
       const principal = `token:fleet-${n}`;
       const id = crypto.randomUUID();
       await db.owner.execute(sql`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
@@ -263,7 +272,7 @@ try {
       credentials.push(id);
     }
     const secrets = (await db.owner.execute<{ id: string }>(sql`SELECT id FROM secrets`)).map(({ id }) => id);
-    const load: UseLoad = { url: TEST_HOT_DATABASE_URL, rtt: RTT, rate: USES, pool: Number(values['use-pool']), credentials, secrets, seed: derivedSigningKey(kek) };
+    const load: UseLoad = { url: TEST_HOT_DATABASE_URL, rtt: RTT, rate: USES, pool: Number(values['use-pool']), cold: Number(values['use-cold']), credentials, secrets, seed: derivedSigningKey(kek) };
     loader = new Worker(new URL('./uses.ts', import.meta.url), { workerData: load });
     await new Promise((resolve) => loader!.once('message', resolve));
   }
@@ -382,9 +391,10 @@ try {
       const refused = Object.entries(use.refused).map(([why, n]) => `${why} ${n}`).join(', ') || 'none';
       const used = cpu.get(use.phase);
       console.log(
-        `  ${use.phase.padEnd(8)} ${String(use.sent).padStart(6)} uses  p50 ${use.p50.toFixed(1).padStart(6)}  p90 ${use.p90.toFixed(1).padStart(6)}  p99 ${use.p99.toFixed(1).padStart(6)}  ` +
+        `  ${use.phase.padEnd(8)} ${String(use.sent).padStart(6)} uses  p50 ${use.p50.toFixed(1).padStart(6)}  p90 ${use.p90.toFixed(1).padStart(6)}  p99 ${use.p99.toFixed(1).padStart(6)}  p99.9 ${use.p999.toFixed(1).padStart(6)}  ` +
           `max ${use.max.toFixed(1).padStart(7)}  past 2 rtt ${(use.slow * 100).toFixed(1).padStart(5)}%` +
-          `${used === undefined || values.cgroup === undefined ? '' : `  Postgres CPU ${(used / 1000 / Math.max(1, use.sent)).toFixed(2)} ms/use`}  refused: ${refused}`,
+          `${used === undefined || values.cgroup === undefined ? '' : `  Postgres CPU ${(used / 1000 / Math.max(1, use.sent)).toFixed(2)} ms/use`}  refused: ${refused}` +
+          (use.cold === 0 ? '' : `  beside ${use.cold} each on a new backend: p50 ${use.coldP50.toFixed(1)}, max ${use.coldMax.toFixed(1)}`),
       );
     }
   }
