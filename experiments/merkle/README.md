@@ -16,3 +16,15 @@ node experiments/merkle/fill.ts --url … && node experiments/merkle/src/server.
 (cd experiments/merkle/go && go run . -key '<verifier key>')         # Go's sumdb code checks it all
 scripts/formal-seal.sh --workers 8                                    # the TLA+ model
 ```
+
+W212's comparison of tree shapes (one tree, split by retention class, per
+day, per tick, chained, MMR), in `shapes/`; the numbers are in the doc's
+"Tree shape, by numbers":
+
+```
+node --test experiments/merkle/shapes/shapes.test.ts                 # each shape against the RFC tree
+node experiments/merkle/shapes/bench.ts --url … --shape split --start 31536000000 --ticks 600
+node experiments/merkle/shapes/proofs.ts [--chain-year]               # proof sizes, verify and walk costs
+node experiments/merkle/shapes/retain.ts --url …                      # after bench.ts's 10M runs
+node experiments/merkle/shapes/midnight.ts --url …                    # stragglers at each `at`-day boundary
+```
