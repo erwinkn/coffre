@@ -97,6 +97,7 @@ test('the edge computes the head itself, reloads from the edge tiles alone, and 
 test('inclusion and consistency proofs verify, and fail when anything is off', () => {
   const { tiles, all } = grow([70001]);
   const nodes = nodesFrom(tiles);
+  const root5 = () => treeHash(nodes, 5);
   for (const n of [1, 2, 3, 5, 8, 255, 256, 257, 1000, 65536, 70001]) {
     const root = treeHash(nodes, n);
     for (const m of [0, 1, n >> 1, n - 2, n - 1].filter((m) => m >= 0 && m < n)) {
@@ -113,6 +114,7 @@ test('inclusion and consistency proofs verify, and fail when anything is off', (
   }
   assert.ok(!verifyInclusion(all[0]!, -1, 5, [], EMPTY_ROOT));
   assert.ok(!verifyConsistency(5, 3, EMPTY_ROOT, EMPTY_ROOT, []));
+  assert.ok(verifyConsistency(0, 5, EMPTY_ROOT, root5(), []) && !verifyConsistency(0, 5, all[0]!, root5(), []), 'the empty tree has one head');
 });
 
 test('a proof reads about one tile per 8 levels', () => {

@@ -293,9 +293,9 @@ test('review r1: a pair remembered but not written is written as it was at the n
   // first `at`, rather than a second one without the entry.
   clock += 5000;
   store.deleteEntry(deleted);
-  const t = await cp.tick();
-  assert.ok(!t.signed || t.upto > (await openPair(decodePair(remembered)!, k.verifiers))!.upto);
   const pending = (await openPair(decodePair(remembered)!, k.verifiers))!;
+  const t = await cp.tick();
+  assert.ok(t.signed && t.upto === pending.upto, 'the tick reports the pair it finished');
   assert.deepEqual(store.rows.get(pending.upto), decodePair(remembered), 'the pair the signer remembered is the row at its place');
   const v = await verify(store, k);
   assert.ok(!v.ok && v.problems.some((p) => /uses head differ/.test(p)), 'and the deleted entry shows');
@@ -347,6 +347,51 @@ test('review r1: a pair held outside below the start must be a prefix of it, eve
   store.rows.set(older, fork.notes);
   const v = await verify(store, k, { from, anchors: [fork.notes] });
   assert.ok(!v.ok && v.problems.some((p) => /not a prefix of the start/.test(p)), v.problems.join('\n'));
+});
+
+test('review r2, KindInMac: a change deleted and a use renumbered into its place is refused, not answered from the uses tree', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  const number = store.append('changes', 'revoke');
+  const use = store.append('uses', 'u');
+  store.deleteEntry(number);
+  store.log.find((e) => e.number === use)!.number = number;
+  await assert.rejects(cp.sealThrough(number), /not in the signed changes tree.*a use holds its number/);
+  assert.ok(alerts.some((a) => /signed changes tree/.test(a)));
+});
+
+test('KindInMac: an entry moved from one tree to the other before its tick fails its MAC, and nothing is sealed', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  const number = store.append('changes', 'revoke');
+  store.log.find((e) => e.number === number)!.tree = 'uses';
+  const t = await cp.tick();
+  assert.ok(!t.signed && /MAC does not hold/.test(t.failures.join()), t.failures.join());
+});
+
+test('PairChecked: one tree\'s newest note gone under a running signer (its previous note shows instead) is caught at the next tick', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const rows = [...store.rows.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+  const [upto, newest] = rows.at(-1)!;
+  store.rows.set(upto, { changes: newest.changes, uses: rows.at(-2)![1].uses });
+  const t = await cp.tick();
+  assert.ok(!t.signed && /newest checkpoint is another pair/.test(t.failures.join()), t.failures.join());
+});
+
+test('review r2: a remembered genesis with every row gone is written back as it was, not signed again', async () => {
+  const { store, memory, open } = await setup();
+  let clock = 1000;
+  await open({ now: () => clock });
+  const genesis = memory.record;
+  store.rows.clear();
+  clock = 2000;
+  await open({ now: () => clock });
+  assert.equal(memory.record, genesis);
+  assert.deepEqual(store.rows.get(0n), decodePair(genesis!));
 });
 
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.

@@ -131,7 +131,7 @@ export function verifyInclusion(leaf: Hash, m: number, n: number, proof: readonl
 export function verifyConsistency(m: number, n: number, first: Hash, second: Hash, proof: readonly Hash[]): boolean {
   if (!Number.isSafeInteger(m) || !Number.isSafeInteger(n) || m < 0 || m > n) return false;
   if (m === n) return proof.length === 0 && first.equals(second);
-  if (m === 0) return proof.length === 0;
+  if (m === 0) return proof.length === 0 && first.equals(EMPTY_ROOT);
   const path = isPowerOfTwo(m) ? [first, ...proof] : [...proof];
   if (path.length === 0) return false;
   let fn = m - 1;

@@ -182,7 +182,9 @@ W209's attack table (#365).
 | cuts the tail (rows and entries) | a pair held outside; the signer at its next start | "the database ends up to …"; "lost entries the signer sealed" |
 | rolls back and gets a second history signed by a signer without memory | the witness; the signer with memory | "split view"; refuses to start |
 | crashes the signer between memory and write | the next start | rewrites the remembered pair; with an entry of it deleted, refuses |
-| deletes every row | the signer | refuses to start a new log over a remembered one |
+| deletes every row | the signer | refuses to start a new log over a remembered one; a remembered genesis is written back as it was |
+| deletes a change and renumbers a use into its place before the tick | `sealThrough` | the number's proof is from the uses tree: refused, alerted (KindInMac) |
+| moves an entry to the other tree before its tick | the tick | its MAC, which covers its tree, fails (KindInMac) |
 | forges a pair at the newest row's place | the signer | refuses to start |
 | deletes or replaces the newest row under a running signer | the next tick, with no traffic | "the database's newest checkpoint is …" |
 | deletes a change's entry before its tick | `sealThrough` | the change is refused, alerted, never answered as sealed |
@@ -223,8 +225,10 @@ shares no code with ours. Run on 2026-10-27:
 - **Cuts.** Uses-tree cuts at 40,000, 65,536, 65,537 and 70,002 keep only
   the tiles `keptAbove` keeps, from 121 down to 3 of 277. Go's
   `TileHashReader`, which checks each tile it loads against the signed head,
-  still proves every sampled leaf above each cut and every size above it,
-  with our bytes. Leaf 0 is no longer provable.
+  still proves, with our bytes, about 40 sampled leaves above each cut and
+  consistency from each sampled size: the cut, the cut plus one, and every
+  tick's head at or above it. Leaf 0 is no longer provable. (Every leaf and
+  every size above a cut is the TypeScript test's, on the 1,500-leaf tree.)
 - **It fails when it should.** A flipped byte in one tile, or one pair's
   uses note swapped for the next pair's, stops it.
 
@@ -299,6 +303,30 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
   tree's coordinates, and dropping tile partitions below it.
 - **PR 8, the verifier's surfaces:** MACs and request IDs through
   `verifyLog`'s `check`, starting from a retention cut, and the UI and CLI.
-- **The pair in the model:** plan PR 1 puts the pair into `Seal.tla`, with
-  a write of one head without the other failing an invariant. This PR
-  follows that spec where they differ.
+
+## The spec, and where the code holds it
+
+Plan PR 1 (W211) models the pair in `formal/Seal.tla`, and TLC shows each
+protection necessary. The names below are the spec's; each row names where
+the code holds it and the tests that break it.
+
+| protection (`Seal.tla`) | in the code | tests (`packages/vault/test/audit-tree.test.ts`) |
+|---|---|---|
+| NumberUnderLock, CloseLocks | `CheckpointStore.close`: the barrier (`close_one`) | 6b, over migration 0022 |
+| RememberFirst | `tick`: `memory.remember` before `store.write` | (e) |
+| SignerMemory | `open()`: memory equal, a prefix in both trees, or re-derived; else refused | (b), (c), (g), (j), "a memory restored…" |
+| RowChecked, PairChecked | `tick`: the newest pair, each tree's own newest note, byte for byte | (m), "PairChecked: …", "review r1: a row replaced…" |
+| PairWrittenTogether | `CheckpointStore.write`: both notes and both trees' tiles, one statement | the store's contract; 6b's stores hold it |
+| PairRemembered | `encodePair`: one memory record for both notes | "the pair is one value…" |
+| KindInMac | `authentic` covers the tree; `sealThrough` proves a change in the changes tree | "KindInMac: …", "review r2, KindInMac: …" |
+| MacChecked | `tick` refuses an entry whose MAC fails | "nothing is sealed over a forged entry…" |
+| WaitForSeal | `sealThrough`: sealed, proved, then witnessed or 2 s | "a change answers once sealed…", "review r1: a change whose entry…" |
+| Witness | `witnessPair`, the pumps | (c), "a change waits for the witness…" |
+| RequestIdChecked | `verifyLog`'s `check` | PR 8 |
+
+**Where this PR is stricter than the spec.** The spec lets `open()` repair
+a half-written pair: rows of the two trees at different `upto`s, checked
+each against the one remembered pair. This code refuses them instead. With
+PairWrittenTogether, only a database writer can leave a pair half written.
+Refusing is the safe side of the same rule and costs no liveness to an
+honest crash.

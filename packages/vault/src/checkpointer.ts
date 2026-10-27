@@ -62,12 +62,21 @@ export type CheckpointStore = LogReader & {
   /**
    * The barrier and the window, as one statement: `upto`, such that every
    * number at or below it has ended; the entries in (after, upto], by number;
-   * and the newest checkpoint row, or null if there is none.
+   * and the newest pair, as `newest()` reads it.
    */
   close(after: bigint): Promise<{ upto: bigint; newest: StoredPair | null; entries: LogEntry[] }>;
-  /** The newest checkpoint row, if any. */
+  /**
+   * The newest pair: each tree's own newest note, `upto` the larger of theirs
+   * (Seal.tla's PairChecked). Stored as one row a pair, that is the newest
+   * row; stored as a row a tree, never one tree's newest row for both, since
+   * deleting the other tree's newest row would then pass unseen. Notes of two
+   * places then fail every check that wants one pair.
+   */
   newest(): Promise<StoredPair | null>;
-  /** One statement: both trees' tiles and the pair's row. No state holds one head without the other. */
+  /**
+   * One statement: both trees' tiles and both notes (PairWrittenTogether). No
+   * state holds one head without the other.
+   */
   write(row: StoredPair, tiles: Record<TreeName, Tile[]>): Promise<void>;
   /** Entry `number` and its leaf index in its tree, if it is in the log. */
   locate(number: bigint): Promise<{ entry: LogEntry; index: number } | null>;
@@ -99,7 +108,7 @@ export const FRESH_MS = 10 * 60_000;
 export const WITNESS_DEADLINE_MS = 2000;
 
 export type Tick = {
-  /** Whether a new pair was signed and written. */
+  /** Whether a pair landed in the database this tick: a new one, or a pending one finished. */
   signed: boolean;
   upto: bigint;
   sizes: Record<TreeName, number>;
@@ -150,7 +159,12 @@ type Pending = { next: { pair: Pair; notes: PairNotes }; edges: Record<TreeName,
 type Options = {
   memory: Memory;
   witnesses?: readonly Witness[];
-  /** Whether an entry's MAC holds: the vault checks it with its key before anything is sealed. */
+  /**
+   * Whether an entry's MAC holds: the vault checks it with its key before
+   * anything is sealed. The MAC must cover the entry's tree (Seal.tla's
+   * KindInMac): otherwise a change moved into the uses partition before its
+   * tick would be sealed into the uses tree, and pruned with the uses.
+   */
   authentic: (entry: LogEntry) => boolean;
   /** Where alarms go: refused ticks, unwitnessed changes, memory and database out of step. */
   alert?: (message: string) => void;
@@ -221,9 +235,10 @@ export class Checkpointer {
       if (mine !== null && (mine.pair.upto !== 0n || TREES.some((tree) => mine.pair[tree].size > 0))) {
         throw new Error(`the database holds no checkpoint; the signer signed up to ${mine.pair.upto} (${sizes(mine.pair)})`);
       }
-      // A new log: both trees empty at number 0, sealing nothing, so the first tick seals every entry there is.
+      // A new log: both trees empty at number 0, sealing nothing, so the first tick seals every entry there is. A
+      // genesis already remembered (a crash before its write) is written as it was, never signed again.
       const empty = { size: 0, root: EMPTY_ROOT };
-      const genesis = await signPair(signers, 0n, (options.now ?? Date.now)(), { changes: empty, uses: empty });
+      const genesis = mine ?? (await signPair(signers, 0n, (options.now ?? Date.now)(), { changes: empty, uses: empty }));
       await options.memory.remember(encodePair(genesis.notes));
       await store.write({ upto: 0n, notes: genesis.notes }, { changes: [], uses: [] });
       return new Checkpointer(store, signers, options, { changes: Edge.empty(), uses: Edge.empty() }, genesis);
@@ -278,7 +293,11 @@ export class Checkpointer {
   }
 
   private async tickNow(): Promise<Tick> {
-    if (this.pending !== null) await this.finish(this.pending);
+    let finished = false;
+    if (this.pending !== null) {
+      await this.finish(this.pending);
+      finished = true;
+    }
     const { pair } = this.head;
     const t0 = performance.now();
     const { upto, newest, entries } = await this.store.close(pair.upto);
@@ -300,7 +319,7 @@ export class Checkpointer {
       previous = e.number > previous ? e.number : previous;
     }
     const result = (signed: boolean, writeMs = 0): Tick => ({
-      signed, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
+      signed: signed || finished, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
     });
     if (failures.length > 0) {
       for (const f of failures) this.options.alert(`audit checkpoint refused: ${f}`);
@@ -379,9 +398,11 @@ export class Checkpointer {
       if (this.head.pair.upto === before) throw new Error(`cannot seal ${number}: ${t.failures.join('; ') || 'the barrier has not passed it'}`);
     }
     const head = this.head;
+    // From the changes tree (KindInMac): the MAC does not cover the number, so a writer could delete the change and
+    // renumber a use into its place before the tick; that use is sealed, and provable, but in the uses tree.
     const proof = await this.proveAt(number, head);
-    if (proof === null) {
-      const message = `change ${number} is not in the signed trees: its entry was lost before its seal`;
+    if (proof === null || proof.tree !== 'changes') {
+      const message = `change ${number} is not in the signed changes tree: its entry was lost before its seal${proof === null ? '' : ', and a use holds its number'}`;
       this.options.alert(message);
       throw new Error(message);
     }
