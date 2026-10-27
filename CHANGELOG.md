@@ -4,28 +4,45 @@
 
 - **One Postgres driver: postgres.js, coffre's own copy.** node-postgres
   (`pg`) is gone from every package. `@coffre/db` ships postgres.js 3.4.9
-  in `vendor/postgres`, its Node build and its Workers build, with seven
-  changes. A statement's values go with it, as node-postgres sends them,
-  where postgres.js first asked the server for their types, a round trip
-  more for every statement with parameters: so each statement is still one
-  round trip, on Workers through Hyperdrive and on Node, and a
-  transaction's options still go in its `BEGIN`. And Node's pool takes the
-  connection idle the shortest, as node-postgres's does: postgres.js cycled
-  through all of them, and Postgres spent ~8% more CPU per use at a pool
-  of 16. And a transaction queued behind as many statements as a
-  connection pipelines still learns its connection: postgres.js left that
-  connection inside a transaction no one would end. A client whose
-  connection was cut under a query closes: postgres.js waited for the
-  query for ever. A connection closed while it opens fails its query, an
-  outage, as node-postgres's did: postgres.js dialled again, for ever. A
-  client asked to end opens no connection again, for what was waiting nor
-  for a `reserve()` or a `listen()`. And a `reserve()` that opens its
-  connection gets it: without `fetch_types`, postgres.js never gave it. And what keeps a session across statements (`coffre
-  migrate`'s lock, `coffre backup`'s and `restore`'s snapshot, `coffre
-  setup`'s probes, each rolled back) stops at a lost connection, where a
-  postgres.js client would go on, on a new one, without it. Deployments install
-  nothing for it: the copy is part of `@coffre/db`. Connection URLs are
-  read as before, TLS included (`sslmode`, `sslrootcert=system`).
+  as TypeScript, one tree for Node and Workers, with what coffre uses of
+  it (no COPY, LISTEN/NOTIFY, cursors or tagged template). Deployments
+  install nothing for it. Connection URLs are read as before, TLS included
+  (`sslmode`, `sslrootcert=system`); a URL names its user. It differs from
+  upstream in eight places:
+  - a statement's values go with it, as node-postgres sends them: upstream
+    asked the server for their types first, a round trip more for every
+    statement with parameters, so each statement is still one round trip,
+    on Workers through Hyperdrive and on Node;
+  - Node's pool takes the connection idle the shortest, as node-postgres's
+    does: upstream cycled through all of them, and Postgres spent ~8% more
+    CPU per use at a pool of 16;
+  - a transaction queued behind as many statements as a connection
+    pipelines still learns its connection, which upstream left inside a
+    transaction no one would end;
+  - a client whose connection was cut under a query, or as it opened,
+    closes: upstream waited for the query for ever; and the next query on
+    that connection answers its own rows, where upstream gave it the dead
+    query's error, or its rows after holes;
+  - a connection closed while it opens fails its query, an outage, as
+    node-postgres's did: upstream dialled again, for ever;
+  - a client asked to end opens no connection again, for a waiting query or
+    a `reserve()`;
+  - a `reserve()` that opens its connection gets it: without `fetch_types`,
+    upstream never gave it;
+  - an opening that cannot be finished (TLS with a key it cannot read, a
+    sign-in's hash or a server's SCRAM message, a sign-in the client has
+    not, such as GSSAPI, a `socket` factory that throws) fails the query
+    that waited for it and closes the connection, which opens again for the
+    next: upstream left an unhandled rejection, which ends a Node process,
+    or the connection opening until its `connect_timeout`, if any, every
+    query after it waiting. A step of the opening that finishes after its
+    socket has closed (on Workers, the server's answers and the hashes are
+    asynchronous) does nothing to the connection opened again.
+
+  What keeps a session across statements (`coffre migrate`'s lock,
+  `coffre backup`'s and `restore`'s snapshot, `coffre setup`'s probes, each
+  rolled back) stops at a lost connection, where a postgres.js client would
+  go on, on a new one, without it.
   - **For code that imports `@coffre/db`, a plugin's for one:** a
     hand-written statement (`db.execute(sql…)`) answers its rows as an
     array, with `.count`, where it answered `{ rows, rowCount }`

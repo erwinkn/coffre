@@ -1,0 +1,105 @@
+import type { Connection } from './connection.ts';
+import type { RowList } from './index.ts';
+import type { Column } from './result.ts';
+
+/** A statement as sent: its text, its parameters' types (0 for the server to say), and its columns once described. */
+export interface Statement {
+  string: string;
+  types: number[];
+  /** Once described: by a RowDescription, or NoData's none. */
+  columns: Column[] | null;
+}
+
+export interface QueryOptions {
+  /** Sent with the simple protocol, one Query message: what a statement with no parameters is, by default. */
+  simple: boolean;
+  /** Told which connection the statement went to, once written: a transaction's BEGIN (`begin` in index.ts). */
+  onexecute?: ((connection: Connection) => void) | undefined;
+}
+
+/**
+ * A statement, sent once awaited (`then`, `catch`, `finally`) or `execute`d,
+ * a task later, through the pool or the transaction that made it: its
+ * `handler`. A promise of its result, its rows as objects or, after
+ * `values()`, as arrays.
+ */
+export class Query<T = unknown> extends Promise<T> {
+  readonly text: string;
+  readonly args: unknown[];
+  readonly options: QueryOptions;
+  readonly #handler: (query: Query) => void;
+  /** Where it was made, when the client debugs. */
+  readonly #origin: Error | null;
+  /** Its rows as arrays of values rather than objects. */
+  arrays = false;
+  executed = false;
+
+  // What the connection works out as it sends it.
+  parameters: unknown[] = [];
+  statement: Statement | null = null;
+  /** Whether its parameters' types are asked of the server before its values go (`typedByServer`, connection.ts). */
+  describeFirst = false;
+
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: unknown) => void;
+
+  constructor(text: string, args: unknown[], handler: (query: Query) => void, options: QueryOptions, debug: boolean) {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    super((a, b) => {
+      resolve = a;
+      reject = b;
+    });
+    this.text = text;
+    this.args = args;
+    this.options = options;
+    this.#handler = handler;
+    this.#origin = debug ? new Error() : null;
+    this.resolve = resolve as (value: unknown) => void;
+    this.reject = reject;
+  }
+
+  /** Where it was made, for its error's stack: nothing unless the client debugs. */
+  get origin(): string {
+    return this.#origin?.stack ?? '';
+  }
+
+  /** What `then` and the like make: a plain promise, not another statement. */
+  static get [Symbol.species](): PromiseConstructor {
+    return Promise;
+  }
+
+  values(): Query<RowList<unknown[][]>> {
+    this.arrays = true;
+    return this as never;
+  }
+
+  execute(): this {
+    void this.#handle();
+    return this;
+  }
+
+  // `any` for what it fails with, as Promise's own `then` and `catch` take it.
+  override then<A = T, B = never>(onfulfilled?: ((value: T) => A | PromiseLike<A>) | null, onrejected?: ((reason: any) => B | PromiseLike<B>) | null): Promise<A | B> {
+    void this.#handle();
+    return super.then(onfulfilled, onrejected);
+  }
+
+  override catch<B = never>(onrejected?: ((reason: any) => B | PromiseLike<B>) | null): Promise<T | B> {
+    void this.#handle();
+    return super.catch(onrejected);
+  }
+
+  override finally(onfinally?: (() => void) | null): Promise<T> {
+    void this.#handle();
+    return super.finally(onfinally);
+  }
+
+  /** Sent once, a task after it is first asked for. */
+  async #handle(): Promise<void> {
+    if (this.executed) return;
+    this.executed = true;
+    await null;
+    this.#handler(this);
+  }
+}

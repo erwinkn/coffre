@@ -10,7 +10,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { createServer, type AddressInfo } from 'node:net';
+import { connect as tcp, createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,18 +92,33 @@ test('a cancel request, on a connection of its own, reaches the session in the s
   const port = await listen('db');
   const client = appClient(port, HANDLE);
   try {
+    // The key the tunnel gave the app, at its startup.
+    const { state } = await client.unsafe('SELECT 1');
     const sleeping = client.unsafe('SELECT pg_sleep(30)').execute();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const started = Date.now();
-    // postgres.js sends it as psql does: a CancelRequest with the key it was given, on a new connection to the listener.
-    void sleeping.cancel();
-    // The database's own answer: postgres.js fails a query it has not sent yet with 57014 itself.
+    // As psql sends one: a CancelRequest with the key the session was given, on a new connection to the listener.
+    const cancel = tcp({ host: '127.0.0.1', port });
+    await once(cancel, 'connect');
+    cancel.write(cancelRequest(state));
+    // The database's own answer, for the statement it was running.
     await assert.rejects(sleeping, (error: { code?: string; name?: string }) => error.code === '57014' && error.name === 'PostgresError');
     assert.ok(Date.now() - started < 5000);
+    cancel.destroy();
   } finally {
     await client.end();
   }
 });
+
+/** A CancelRequest, as psql sends one, with the key a session was given. */
+function cancelRequest({ pid, secret }: { pid: number; secret: number }): Buffer {
+  const packet = Buffer.alloc(16);
+  packet.writeInt32BE(16, 0);
+  packet.writeInt32BE(80877102, 4);
+  packet.writeUInt32BE(pid >>> 0, 8);
+  packet.writeUInt32BE(secret >>> 0, 12);
+  return packet;
+}
 
 test("a revoked handle's session ends at the object's recheck", { skip, timeout: 60_000 }, async () => {
   const client = appClient(await listen('db', REVOKED), REVOKED);

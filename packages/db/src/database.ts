@@ -12,9 +12,9 @@ import {
 } from 'drizzle-orm';
 import { PgDatabase, PgDialect, type PgQueryResultHKT, type PgTransactionConfig } from 'drizzle-orm/pg-core';
 import { PostgresJsSession, PostgresJsTransaction } from 'drizzle-orm/postgres-js/session';
-import type postgres from '#postgres';
 
 import { trackCommits } from './commits.ts';
+import type { Row, RowList } from './postgres-js/index.ts';
 import { textTypes, type PostgresClient } from './postgres.ts';
 import * as schema from './schema.ts';
 
@@ -23,7 +23,7 @@ export type { PostgresClient } from './postgres.ts';
 
 /** What a hand-written statement answers on Postgres: its rows, with `count` and `command`. */
 export interface QueryResult extends PgQueryResultHKT {
-  type: postgres.RowList<Assume<this['row'], postgres.Row>[]>;
+  type: RowList<Assume<this['row'], Row>[]>;
 }
 
 /**
@@ -66,11 +66,6 @@ function guarded(client: Client): Client {
     if (open?.open === true && open.client === target) throw new QueryOutsideTransaction();
   };
   return new Proxy(client, {
-    // The client's tagged template, which Drizzle never calls, all the same.
-    apply(target, self, args: unknown[]) {
-      refuse(target);
-      return Reflect.apply(target as unknown as (...args: unknown[]) => unknown, self, args);
-    },
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (typeof value !== 'function' || !ASKS.has(key)) return value;

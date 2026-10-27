@@ -54,9 +54,7 @@ export type AppClient = PostgresClient & { ended: Promise<number> };
  * handle, as `coffre run` puts it in DATABASE_URL): one session, as a
  * node-postgres Client is. Once the tunnel ends its connection, every
  * statement after fails (`SessionLost`), where a postgres.js client would
- * dial again; `ended` says when its own connection closed, not a LISTEN's
- * or a cancel's, which dial connections of their own through the same
- * listener.
+ * dial again; `ended` says when its connection closed.
  */
 export function appClient(port: number, password: string): AppClient {
   let ended!: (at: number) => void;
