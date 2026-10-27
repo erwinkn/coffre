@@ -1,0 +1,314 @@
+// The 0.15 checkpointer behind its seam, over an in-memory database a writer
+// can tamper with: W209's attacks (docs/design/audit-tree.md, "What it
+// catches"), the pair's rules (W212), and R51's change rule with witnesses.
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import { decodePair, encodePair, noteSigner, openPair, signPair, verifyInclusion, verifyLog, leafHash, type PairNotes } from '@coffre/core/merkle';
+
+import { Checkpointer, FRESH_MS, localWitness, type Witness } from '../src/checkpointer.ts';
+import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
+
+async function setup(seed = 1) {
+  const k = await keys(seed);
+  const store = new MemoryStore(k.macKey);
+  const memory = variableMemory();
+  const alerts: string[] = [];
+  const open = (opts: { witnesses?: Witness[]; memory?: typeof memory; now?: () => number } = {}) =>
+    Checkpointer.open(store, k.signers, { memory: opts.memory ?? memory, witnesses: opts.witnesses, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), now: opts.now });
+  return { k, store, memory, alerts, open };
+}
+
+/** `n` ticks of traffic: about 20 uses and one change a tick, with an aborted append now and then. */
+async function traffic(store: MemoryStore, cp: Checkpointer, ticks: number) {
+  for (let t = 0; t < ticks; t += 1) {
+    for (let i = 0; i < 20; i += 1) store.append('uses', `u-${store.next}`);
+    if (t % 3 === 0) store.skip();
+    store.append('changes', `c-${store.next}`, '{"action":"member.revoke"}');
+    const tick = await cp.tick();
+    assert.ok(tick.signed, tick.failures.join('; '));
+  }
+}
+
+const verify = (store: MemoryStore, k: Keys, opts: { anchors?: PairNotes[]; from?: PairNotes } = {}) =>
+  verifyLog(store, { verifiers: k.verifiers, check: (e) => (authentic(k.macKey)(e) ? null : 'mac'), ...opts });
+
+test('an honest log: both trees sealed every tick as one pair, verified, and every entry provable', async () => {
+  const { k, store, memory, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 12);
+  const unsealed = store.append('uses', 'late');
+  const v = await verify(store, k, { anchors: [decodePair(memory.record!)!] });
+  assert.ok(v.ok, v.problems.join('\n'));
+  assert.deepEqual([v.checkpoints, v.sealed, v.unsealed], [12, 12 * 21, 1]);
+  assert.equal(encodePair(v.head!), memory.record, 'the newest row is the pair the signer remembers');
+  // Every row is one pair: two notes, one upto, one at, each signed under its tree's origin.
+  for (const notes of store.rows.values()) assert.ok(await openPair(notes, k.verifiers));
+  assert.deepEqual(cp.pair.pair.changes.size, 12);
+  assert.deepEqual(cp.pair.pair.uses.size, 240);
+  for (const { number } of [store.log[0]!, store.log[20]!, store.log[100]!, store.log.at(-2)!]) {
+    const p = (await cp.prove(number))!;
+    assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair[p.tree].root), `${number}`);
+  }
+  assert.equal(await cp.prove(unsealed), null, 'not sealed yet');
+  // An incremental walk from the head verified before reads only what came after (R25).
+  await traffic(store, cp, 2);
+  const again = await verify(store, k, { from: v.head! });
+  assert.ok(again.ok && again.checkpoints === 2 && again.sealed === 43, again.problems.join('\n'));
+  assert.deepEqual(alerts, []);
+});
+
+test('(a) a sealed entry deleted from the middle is caught by the next pair', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 5);
+  store.deleteEntry(30n);
+  const v = await verify(store, k);
+  assert.ok(!v.ok && v.problems.some((p) => /uses head differ/.test(p)), v.problems.join('\n'));
+  await assert.rejects(cp.prove(31n), /database changed it/);
+});
+
+test('(b) a tail cut, rows and entries, is caught against the pair held outside and at the signer\'s next start', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 8);
+  const held = decodePair(memory.record!)!;
+  const keep = [...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-4)!;
+  store.rollBack(keep);
+  assert.ok((await verify(store, k)).ok, 'the database alone shows a consistent, shorter log');
+  const v = await verify(store, k, { anchors: [held] });
+  assert.ok(!v.ok && v.problems.some((p) => /the database ends up to/.test(p)), v.problems.join('\n'));
+  await assert.rejects(open(), /lost entries the signer sealed/);
+});
+
+test('(c) a split view: rolled back, one entry dropped, sealed again by a signer without memory, then refused', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 6);
+  const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
+  const witness = localWitness('w', k.verifiers, self);
+  const watched = await open({ witnesses: [witness] });
+  await traffic(store, watched, 1);
+  await watched.sealThrough(store.next - 1n);
+  const keep = [...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-3)!;
+  const dropped = keep + 3n;
+  const after = store.log.filter((e) => e.number > keep && e.number !== dropped);
+  store.rollBack(keep);
+  store.log.push(...after);
+  // A signer whose memory is gone takes the database's word, and signs a second history.
+  const forgetful = variableMemory();
+  const stateless = await open({ memory: forgetful, witnesses: [witness] });
+  const t = await stateless.tick();
+  assert.ok(t.signed);
+  const sealed = await stateless.sealThrough(stateless.pair.pair.upto, 300);
+  assert.equal(sealed.witnessed, false, 'the witness refuses the second history');
+  assert.match(sealed.failures.join(), /split view/, JSON.stringify(sealed.failures));
+  // The signer with its memory refuses to sign on top of it.
+  await assert.rejects(open(), /not the pair the signer signed|does not extend|lost entries/);
+  void memory;
+});
+
+test('(e) a crash after remembering a pair, before writing it: written again at restart; with an entry of it deleted, refused', async () => {
+  for (const tamper of [false, true]) {
+    const { k, store, memory, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 3);
+    store.append('uses', 'x');
+    store.append('changes', 'y');
+    store.beforeWrite = () => {
+      throw new Error('crash');
+    };
+    await assert.rejects(cp.tick(), /crash/);
+    store.beforeWrite = null;
+    assert.equal(decodePair(memory.record!) !== null && (await openPair(decodePair(memory.record!)!, k.verifiers))!.upto, store.next - 1n, 'remembered first');
+    if (tamper) {
+      store.deleteEntry(store.next - 1n);
+      await assert.rejects(open(), /lost entries the signer sealed/);
+    } else {
+      const reopened = await open();
+      assert.equal(reopened.pair.pair.upto, store.next - 1n);
+      assert.ok((await verify(store, k)).ok);
+    }
+  }
+});
+
+test('a failed write or memory leaves the signer at the pair the database holds; the next tick seals on', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const before = cp.pair;
+  store.append('uses', 'a');
+  memory.failNext = true;
+  await assert.rejects(cp.tick(), /storage unavailable/);
+  assert.equal(cp.pair, before);
+  store.beforeWrite = () => {
+    throw new Error('connection reset');
+  };
+  await assert.rejects(cp.tick(), /connection reset/);
+  store.beforeWrite = null;
+  assert.equal(cp.pair, before);
+  await traffic(store, cp, 2);
+  const v = await verify(store, k, { anchors: [decodePair(memory.record!)!] });
+  assert.ok(v.ok, v.problems.join('\n'));
+});
+
+test('(g) every row deleted: the signer refuses to start a new log', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  store.rows.clear();
+  await assert.rejects(open(), /holds no checkpoint/);
+});
+
+test('(j) another pair at the same place, signed by a signer without memory, is refused at the next start', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  // A forged pair at the newest row's place: the same upto, another uses head.
+  const row = (await store.newest())!;
+  const pair = (await openPair(row.notes, k.verifiers))!;
+  const forged = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 7) } });
+  store.rows.set(row.upto, forged.notes);
+  await assert.rejects(open(), /the newest checkpoint|not the pair the signer signed|tiles at the edge/);
+  void memory;
+});
+
+test('(m) the newest row deleted under a running signer is caught at the next tick, with no traffic', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  store.rows.delete(cp.pair.pair.upto);
+  const t = await cp.tick();
+  assert.ok(!t.signed);
+  assert.match(t.failures.join(), /newest checkpoint is \d+, the signer's is at/);
+  assert.ok(alerts.some((a) => /refused/.test(a)));
+});
+
+test('nothing is sealed over a forged entry, a replay older than the signer\'s pair, or an entry out of its window', async () => {
+  const cases: [string, (store: MemoryStore, k: Keys, cp: Checkpointer) => void, RegExp][] = [
+    ['forged', (store) => store.log.push({ ...store.log.at(-1)!, number: store.next++, columns: [1n, 'f', '{}', Buffer.alloc(16)] }), /MAC does not hold/],
+    ['replay', (store, k, cp) => store.log.push(entry(k.macKey, 'uses', store.next++, 'old', '{}', cp.pair.pair.at - FRESH_MS - 1)), /a replay/],
+    ['renumbered', (store) => store.log.push({ ...store.log[store.log.length - 1 - 0]!, number: store.append('uses', 'twin') }), /outside the window/],
+  ];
+  for (const [name, tamper, error] of cases) {
+    const { k, store, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 2);
+    tamper(store, k, cp);
+    const t = await cp.tick();
+    assert.ok(!t.signed && t.failures.some((f) => error.test(f)), `${name}: ${t.failures.join('; ')}`);
+    // A change that waits for its seal fails with the alarm instead of waiting forever.
+    const change = store.append('changes', `${name}-change`);
+    await assert.rejects(cp.sealThrough(change), error);
+  }
+});
+
+test('the pair is one value: a row or a memory holding notes of two ticks is refused, and so is an entry moved between trees', async () => {
+  {
+    const { k, store, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 3);
+    const rows = [...store.rows.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+    const [upto, newest] = rows.at(-1)!;
+    const [, older] = rows.at(-2)!;
+    store.rows.set(upto, { changes: newest.changes, uses: older.uses });
+    await assert.rejects(open(), /not a pair signed by this log/);
+    const v = await verify(store, k);
+    assert.ok(!v.ok && v.problems.some((p) => /not a pair signed by the log/.test(p)), v.problems.join('\n'));
+  }
+  {
+    const { store, memory, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 3);
+    const older = decodePair(memory.record!)!;
+    await traffic(store, cp, 1);
+    memory.record = encodePair({ changes: decodePair(memory.record!)!.changes, uses: older.uses });
+    await assert.rejects(open(), /remembers a pair it did not sign/);
+  }
+  {
+    const { k, store, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 3);
+    const moved = store.log.find((e) => e.tree === 'uses' && e.number === 5n)!;
+    moved.tree = 'changes';
+    const v = await verify(store, k);
+    assert.ok(!v.ok && v.problems.some((p) => /changes and uses heads differ/.test(p)), v.problems.join('\n'));
+  }
+});
+
+test('a memory restored from before the newest rows is accepted when it is a prefix of them, in both trees, and refused otherwise', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const old = memory.record;
+  await traffic(store, cp, 3);
+  memory.record = old;
+  const reopened = await open();
+  assert.equal(encodePair(reopened.pair.notes), memory.record, 'and remembers the newest row');
+  // A pair from another history at an older place: not a prefix.
+  const other = await signPair(k.signers, 3n, 1, { changes: { size: 1, root: Buffer.alloc(32, 1) }, uses: { size: 1, root: Buffer.alloc(32, 2) } });
+  memory.record = encodePair(other.notes);
+  await assert.rejects(open(), /does not extend the one the signer remembers/);
+});
+
+test('a signer with no memory on an existing log starts from the database, says so, and remembers it', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const fresh = variableMemory();
+  await open({ memory: fresh });
+  assert.equal(fresh.record, encodePair(cp.pair.notes));
+  assert.ok(alerts.some((a) => /remembers no pair/.test(a)));
+});
+
+// R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
+
+test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  const number = store.append('changes', 'revoke-1');
+  const s = await cp.sealThrough(number);
+  assert.equal(s.witnessed, null);
+  assert.ok(s.pair.upto >= number);
+  const p = (await cp.prove(number))!;
+  assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, s.pair.changes.root));
+});
+
+test('a change waits for the witness, then answers unwitnessed at the deadline, alerted; a refusal is retried within it', async () => {
+  const { k, store, open, alerts } = await setup();
+  const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
+  const honest = localWitness('honest', k.verifiers, self);
+  let refusals = 1;
+  let calls = 0;
+  const flaky: Witness = {
+    name: 'flaky',
+    async publish(notes, proofs) {
+      calls += 1;
+      if (refusals-- > 0) return { ok: false, reason: 'busy' };
+      return honest.publish(notes, proofs);
+    },
+  };
+  const cp = await open({ witnesses: [flaky] });
+  const s = await cp.sealThrough(store.append('changes', 'c1'), 2000);
+  assert.equal(s.witnessed, true, s.failures.join());
+  assert.equal(s.cosigned.length, 1);
+  assert.ok(calls >= 2, 'asked again within the deadline');
+
+  const silent: Witness = { name: 'silent', publish: () => new Promise(() => {}) };
+  const slow = await open({ witnesses: [silent] });
+  const t0 = performance.now();
+  const late = await slow.sealThrough(store.append('changes', 'c2'), 200);
+  assert.ok(performance.now() - t0 >= 190);
+  assert.equal(late.witnessed, false);
+  assert.match(late.failures.join(), /no answer within 200 ms/);
+  assert.ok(alerts.some((a) => /answered unwitnessed/.test(a)));
+
+  // A witness that always refuses is not asked again once the change has answered.
+  let asked = 0;
+  const refusing: Witness = { name: 'refusing', publish: async () => ((asked += 1), { ok: false, reason: 'no' }) };
+  const r = await open({ witnesses: [refusing] });
+  await r.sealThrough(store.append('changes', 'c3'), 250);
+  const after = asked;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(asked, after);
+});
