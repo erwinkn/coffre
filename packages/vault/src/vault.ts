@@ -107,7 +107,7 @@ import { everyProjectConversion, newestAccess, reportStands } from '@coffre/db/g
 import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { signer, type Signer } from './checkpoint.ts';
-import { keyRefusals, placeIn, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
+import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -254,9 +254,6 @@ function within(deadline: number | undefined, ms: number): number {
   if (left <= 0) throw new Overdue();
   return Math.min(ms, left);
 }
-
-/** A member: `user:<email>` or `token:<name>`. */
-const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 
 /** A person, and a service account: only a person sets one up (`givesService`). */
 const PERSON = /^user:/;
@@ -3466,10 +3463,6 @@ function accessEntry(
     requestId: correlation.requestId ?? null,
     metadata: JSON.stringify(PRINCIPAL.test(principal) ? { ...detail, ...traced(correlation) } : { subject: principal, ...detail, ...traced(correlation) }),
   };
-}
-
-function live(grant: GrantRow, at: number): boolean {
-  return grant.expiresAt === null || grant.expiresAt > at;
 }
 
 /**

@@ -47,6 +47,9 @@ import { encodeAad, type SecretContext } from '../packages/core/src/context.ts';
 import { handsBack, type RefusalCode } from '../packages/core/src/vault.ts';
 import { keyRefusals, referenceRefusal, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
 import type { EnvironmentRow } from '../packages/vault/src/store.ts';
+import { bulkRule } from '../packages/vault/src/bulk.ts';
+import { decideChecked, type Checked, type CheckedView, type UseRequest } from '../packages/vault/src/decide.ts';
+import type { CredentialInput, EnvironmentInput, Input, PrincipalInput, SecretInput } from '../packages/vault/src/inputs.ts';
 
 const [oracle, ...flags] = process.argv.slice(2);
 if (oracle === undefined || !flags.every((flag) => flag === '--long' || /^--seed=\d+$/.test(flag))) {
@@ -182,7 +185,7 @@ const canonical = (value: unknown): unknown =>
 // How often each yes-or-no function says yes, or a decision allows every key: a generator that only ever met one
 // answer would hold the model to nothing. Undefined for functions that answer otherwise.
 const yes = (op: string, value: unknown): boolean | undefined => {
-  if (op === 'referenceRefusal') return value === null;
+  if (op === 'referenceRefusal' || op === 'decideUse') return value === null;
   if (typeof value === 'boolean') return value;
   if (Array.isArray(value)) return value.length > 0 && value.every((code) => code === null);
   if (typeof value === 'object' && value !== null && 'ok' in value) return value.ok === true;
@@ -370,6 +373,86 @@ repeat(6000, () => {
     { op: 'referenceRefusal', reader: who, holder, source, environments: [...rows].map(([id, row]) => ({ id, row })), nature },
     referenceRefusal(who, holder, source, rows, nature),
   );
+});
+
+// --- the 0.15 use: seals, then 0.14's rules, then the cap ---------------------
+// Each input's seal arrives checked (valid, current), as decideChecked takes it: HMAC is the driver's, as the
+// chain's MACs are. Mostly valid and current, so that the rules after them decide as often as the seals do.
+let sealsHold = false;
+const checkedOf = <T extends Input>(row: T | null): Checked<T> => ({ row, valid: sealsHold || chance(0.9), current: sealsHold || chance(0.85) });
+const maybeNull = <T>(p: number, make: () => T): T | null => (chance(p) ? null : make());
+/** Odd principals besides people and tokens, for `PRINCIPAL`: none a member can be. */
+const PRINCIPAL_NAMES = [...PEOPLE, 'user:', 'robot:x', 'user: ada', 'token::ci', 'user:a\u00a0b', 'user:ada\u2003'];
+const PURPOSES = ['reveal', 'run', 'compare', 'copy', 'use', 'use', 'expose'] as const;
+function credentialRow(): CredentialInput {
+  const principal = chance(0.85) ? pick(PEOPLE) : pick(PRINCIPAL_NAMES);
+  return {
+    kind: 'credential', id: 'c1', principal, caller: pick(KINDS),
+    scope: chance(0.6) ? null : some([scopeGrant(), scopeGrant(), { ...scopeGrant(), projectId: 'market', environmentId: null, reads: '*' as const }], 3),
+    expiresAt: chance(0.8) ? null : 900 + Math.floor(random() * 600), revoked: chance(0.05),
+  };
+}
+function principalRow(principal: string): PrincipalInput {
+  const strong = chance(0.5);
+  return {
+    kind: 'principal', principal, status: chance(0.9) ? 'active' : 'removed',
+    role: strong ? pick(['owner', 'developer'] as const) : pick(INSTANCE_ROLE_NAMES) as PrincipalInput['role'], scope: strong ? EVERYWHERE_SCOPE : scope(),
+    grants: some([grant(), grant(), grant()], 3).map((g) => ({ ...g, environmentSlug: null, expiresAt: chance(0.7) ? null : 900 + Math.floor(random() * 300) })),
+  };
+}
+function environmentRow(id: string): EnvironmentInput {
+  const personal = id.endsWith('@ada');
+  return {
+    kind: 'environment', id, projectId: chance(0.95) ? projectOf(id) : pick(PROJECTS), slug: slugOf(id) ?? 'none',
+    owner: personal ? (chance(0.8) ? 'user:ada' : null) : chance(0.05) ? pick(PEOPLE) : null,
+    parentId: personal || id.endsWith('fork') ? (chance(0.9) ? `${projectOf(id)}/dev` : pick(ENVIRONMENTS)) : null,
+    protected: chance(0.3), deleted: chance(0.06), archived: chance(0.1),
+  };
+}
+function secretRow(id: string): SecretInput {
+  const environmentId = chance(0.2) ? 'market/dev@ada' : pick(ENVIRONMENTS);
+  return {
+    kind: 'secret', id, projectId: chance(0.95) ? projectOf(environmentId) : pick(PROJECTS), environmentId, version: 'v1',
+    nature: pick(['plain', 'secret', 'sensitive'] as const), key: null, source: chance(0.25) ? pick(KEYS) : null,
+  };
+}
+repeat(20000, () => {
+  // Half the time every seal holds: the rows decide. A fifth of those, an Owner's session reads a key of an environment
+  // that is no personal config, which the rules allow unless a row in the way says otherwise.
+  sealsHold = chance(0.5);
+  const owner = sealsHold && chance(0.2);
+  const credential = checkedOf(owner
+    ? { kind: 'credential' as const, id: 'c1', principal: 'user:ada', caller: 'person' as const, scope: null, expiresAt: null, revoked: false }
+    : maybeNull(0.05, credentialRow));
+  const secret = checkedOf(owner ? { ...secretRow(pick(KEYS)), environmentId: pick(['market/dev', 'ops/prod', 'market/fork']), source: null } : maybeNull(0.08, () => secretRow(pick(KEYS))));
+  const given = policy();
+  const view: CheckedView = {
+    credential,
+    principal: credential.row === null ? null
+      : checkedOf(owner ? { ...principalRow('user:ada'), status: 'active' as const, role: 'owner' as const, scope: EVERYWHERE_SCOPE } : maybeNull(0.08, () => principalRow(credential.row!.principal))),
+    roles: checkedOf(maybeNull(0.1, () => ({ kind: 'roles' as const, roles: given.roles, instanceRoles: given.instanceRoles }))),
+    policy: checkedOf(maybeNull(0.03, () => ({ kind: 'policy' as const, bulk: { count: 1 + Math.floor(random() * 5), windowMs: 60_000 } }))),
+    secret,
+    source: secret.row?.source == null ? null : checkedOf(maybeNull(0.15, () => secretRow(secret.row!.source!))),
+    // Every environment a use may weigh, read: the decision names those it does.
+    environments: new Map(ENVIRONMENTS.map((id) => [id, checkedOf(id === '' || id === 'ghost' ? null : maybeNull(0.05, () => environmentRow(id)))])),
+    bulk: credential.row === null ? null : { inSet: chance(0.5), others: Math.floor(random() * 6) },
+  };
+  const request: UseRequest = {
+    credential: 'c1', secretId: secret.row?.id ?? pick(KEYS), place: owner || chance(0.7) ? null : chance(0.3) ? secret.row?.environmentId ?? null : pick(ENVIRONMENTS), purpose: pick(PURPOSES),
+    keepsSensitive: chance(0.5), at: 900 + Math.floor(random() * 300),
+  };
+  add(
+    { op: 'decideUse', view: { ...view, environments: [...view.environments].map(([id, read]) => ({ id, read })) }, request },
+    decideChecked(view, request),
+  );
+});
+repeat(6000, () => {
+  const at = 100_000 + Math.floor(random() * 1000);
+  const limit = { count: 1 + Math.floor(random() * 4), windowMs: pick([1_000, 10_000, 60_000, 600_001]) };
+  const rows = new Map(some(KEYS, 4).map((key) => [key, at - Math.floor(random() * 2.2 * limit.windowMs)]));
+  const key = pick(KEYS);
+  add({ op: 'bulkRule', rows: [...rows].map(([k, last]) => ({ key: k, last })), key, at, limit }, bulkRule(rows, key, at, limit));
 });
 
 // --- envelope: the AAD -------------------------------------------------------

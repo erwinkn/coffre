@@ -1391,6 +1391,11 @@ pnpm formal:lean --seed=42     # another reproducible set
   [`packages/vault/src/decide.ts`](../packages/vault/src/decide.ts):
   personal configs, references, deleted places, sensitive values, and what
   a workload's scope lists.
+- [`Use.lean`](../formal/lean/Coffre/Use.lean) is how 0.15 decides a use
+  on sealed inputs (`decideChecked` in `decide.ts`), and the bulk cap's rule
+  ([`packages/vault/src/bulk.ts`](../packages/vault/src/bulk.ts)): each
+  input's seal first, then `Decide.lean`'s rules on the reader the inputs
+  make, then the cap ([`docs/design/sealed-inputs.md`](design/sealed-inputs.md)).
 - [`Envelope.lean`](../formal/lean/Coffre/Envelope.lean) is the AAD and the
   envelope, and [`Audit.lean`](../formal/lean/Coffre/Audit.lean) the chain
   and its checkpoints.
@@ -1421,6 +1426,10 @@ the code.
 | `no_laundering` | A workload is handed back a value, for any purpose but the proxy's use, a fork's copy included, only if its scope lists the key, by ID, on a grant covering where the value is held: a reference's source, a fork's parent, never the place the read names (docs/design/workload-access.md, section 6.1). |
 | `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24); by a workload, only to a plain source or one its scope lists. |
 | `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
+| `allowed_sealed`, `allowed_credential_sealed` | A 0.15 use is allowed only if every input it weighs (credential, principal, roles, policy, key, a reference's source, each environment) was read as its object's newest change left it, under the vault's seal. |
+| `stale_credential_refused` | A credential row that is not the log's newest refuses the use `stale` or `tampered`, whatever the row says: never a refusal the replay would give too (HotPathOne's `StaleFirst`). |
+| `allowed_keyread` | A 0.15 use allowed is one `KeyRead.decide`, 0.14's rules, allows on the reader its sealed inputs make. |
+| `allowed_within_cap`, `bulkRule_writes_admitted` | An allowed use's key is in its principal's set, or fewer than the log's count of other keys count; the cap's rule writes a key's row only for a request it admits, at the request's time. |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |
 | `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
 | `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |
@@ -1481,6 +1490,7 @@ They run a batch of 20,000 at a time.
 | `heldColumns`, `issuedGrant`, `readsSensitive`, `ownsProject`, `mayManageAccess`, `runsInstance`, `readsWholeLog`, `makesProjects` | 4,000 each | `@coffre/core/access` |
 | `useOnly` | 6,000 | `@coffre/core/access` |
 | `keyRefusals`, `sensitiveRefusals`, `useOnlyRefusals`, `referenceRefusal` | 13,000, 10,000, 10,000, 6,000 | `packages/vault/src/decide.ts` |
+| `decideUse` (0.15), `bulkRule` | 20,000, 6,000 | `packages/vault/src/decide.ts` (`decideChecked`), `bulk.ts`; each input's seal as checked (valid, current), half the cases with every seal holding |
 | `encodeAad` | 2,000 | `@coffre/core/envelope` |
 | `verifyEntries` | 2,000 | `@coffre/core/audit`, real keys and hashes |
 
@@ -1492,7 +1502,9 @@ project, `readsSensitive` across projects, `ownsProject` for a service, a
 personal config's owner past their credential, a person handed a sensitive
 value, a reference made to a sensitive source without using it there,
 a workload's copy let through, a workload's reference to a plain source refused,
-`verifyEntries` letting a gap through, a lookup by an inherited name.
+`verifyEntries` letting a gap through, a lookup by an inherited name,
+the 0.15 decision checking the policy's seal before the roles' (146 cases),
+the cap counting other keys without the deadline's margin (650 cases).
 Changing the model the same way breaks the proofs first.
 
 The vault's per-key decision and its check of each reference made live in

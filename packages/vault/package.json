@@ -45,6 +45,7 @@
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
+    "@hegeldev/hegel": "0.4.7",
     "@types/node": "26.1.1",
     "@types/pg": "8.20.0",
     "pg": "8.16.3",

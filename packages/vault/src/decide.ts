@@ -1,5 +1,11 @@
-import { allows, ownsProject, readsSensitive, useOnly, withinCredential, type HeldKey, type Holdings, type Permission, type Place } from '@coffre/core/access';
-import { handsBack, type Access, type RefusalCode } from '@coffre/core/vault';
+import {
+  allows, EVERYWHERE, NOTHING, ownsProject, readsSensitive, useOnly, withinCredential,
+  type HeldKey, type Holdings, type Permission, type Place, type Policy,
+} from '@coffre/core/access';
+import { handsBack, type Access, type Purpose, type RefusalCode } from '@coffre/core/vault';
+
+import { overCap, type BulkRead } from './bulk.ts';
+import { builtinRoles, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
 import type { EnvironmentRow } from './store.ts';
 
 /**
@@ -195,4 +201,226 @@ export function referenceRefusal(
     ?? refuses(reader, 'secret.read', at, gone(source))
     ?? (nature === 'sensitive' ? refuses(reader, 'secret.use', at, gone(source)) : null)
     ?? (nature !== 'plain' && useOnly(reader.live, source) ? 'use_only' : null);
+}
+
+/** A member: `user:<email>` or `token:<name>`. */
+export const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
+
+/** Whether a grant still holds at `at`. */
+export function live(grant: { expiresAt: number | null }, at: number): boolean {
+  return grant.expiresAt === null || grant.expiresAt > at;
+}
+
+// --- a use, on sealed inputs (0.15) ---------------------------------------------
+
+/**
+ * A use as its log entry records it (plan, PR 3; the request, not the
+ * outcome): on which credential, which key, the place its permission is
+ * checked at, why, and when. `place` is null for the key's own
+ * environment; a fork reading its parent's key, or a reference's holder,
+ * names it as `keyRefusals`' `at` does.
+ */
+export type UseRequest = {
+  credential: string;
+  secretId: string;
+  place: string | null;
+  purpose: Purpose;
+  keepsSensitive: boolean;
+  /** Its time, ms since the epoch: what expiry is decided at, live and replayed. */
+  at: number;
+};
+
+/** Why a use is refused: the rules' codes, and those of sealed inputs. */
+export type UseCode =
+  | RefusalCode
+  /** An input's row is not its object's newest change's: put back from before one, deleted, or written around the log. */
+  | 'stale'
+  /** The credential is not one, was revoked, or had ended at the request's time. */
+  | 'credential'
+  /** No such key. */
+  | 'missing'
+  /** The log holds no policy, so no cap: never served, as the vault writes one before its first use. */
+  | 'no_policy';
+
+/** One input as a use read it: its row (null: none), the seal on it, and the seal its object's newest change left (null: none, or gone). */
+export type Read<T extends Input> = { row: T | null; seal: Buffer | null; newest: Buffer | null };
+
+/**
+ * Everything a use reads, in one snapshot: what the use's statement returns
+ * (PR 5), or what a replay built from the log; its seals checked once
+ * `checked` (`checkSeals`). `principal` and `bulk` are read for the
+ * credential's principal, and null with no credential row; `source` for a
+ * reference, null otherwise; `environments`, by id, every one
+ * `useEnvironments` names.
+ */
+export type UseView<checked extends boolean = false> = {
+  credential: In<CredentialInput, checked>;
+  principal: In<PrincipalInput, checked> | null;
+  roles: In<RolesInput, checked>;
+  policy: In<PolicyInput, checked>;
+  secret: In<SecretInput, checked>;
+  source: In<SecretInput, checked> | null;
+  environments: ReadonlyMap<string, In<EnvironmentInput, checked>>;
+  bulk: BulkRead | null;
+};
+export type CheckedView = UseView<true>;
+
+/** An input once its seal is checked: whether the seal is the vault's over its row, and whether it is its object's newest. */
+export type Checked<T extends Input> = { row: T | null; valid: boolean; current: boolean };
+
+type In<T extends Input, checked extends boolean> = checked extends true ? Checked<T> : Read<T>;
+
+/**
+ * Each input's seal checked, against the object it was read as: a row
+ * filed under another object's key carries no seal of the vault's for it.
+ * A row with none (none read) is valid, and current while its object has
+ * no newest seal either: never made, or gone.
+ */
+export function checkSeals(keys: SealKeys, view: UseView, request: Pick<UseRequest, 'credential' | 'secretId'>): CheckedView {
+  const check = <T extends Input>(read: Read<T>, ref: Ref): Checked<T> => ({
+    row: read.row,
+    valid: read.row === null ? read.seal === null : sealed(keys, ref, read.row, read.seal),
+    current: read.row === null ? read.newest === null : read.seal !== null && read.newest !== null && read.seal.equals(read.newest),
+  });
+  const credential = view.credential.row;
+  const secret = view.secret.row;
+  return {
+    credential: check(view.credential, { kind: 'credential', id: request.credential }),
+    principal: view.principal === null || credential === null ? null : check(view.principal, { kind: 'principal', id: credential.principal }),
+    roles: check(view.roles, { kind: 'roles', id: 'instance' }),
+    policy: check(view.policy, { kind: 'policy', id: 'instance' }),
+    secret: check(view.secret, { kind: 'secret', id: request.secretId }),
+    source: view.source === null || secret?.source == null ? null : check(view.source, { kind: 'secret', id: secret.source }),
+    environments: new Map([...view.environments].map(([id, read]) => [id, check(read, { kind: 'environment', id })])),
+    bulk: view.bulk,
+  };
+}
+
+/** `decideChecked` on what a use read, its seals checked with the vault's keys. */
+export function decideUse(keys: SealKeys, view: UseView, request: UseRequest): UseCode | null {
+  return decideChecked(checkSeals(keys, view, request), request);
+}
+
+/**
+ * The environments a use's decision weighs, in the order it reaches them:
+ * where its permission is checked, where its value is, and a personal
+ * config's parent. Read from the rows the view has, so the use's statement
+ * and the replay read the same ones.
+ */
+export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source' | 'environments'>, request: Pick<UseRequest, 'place'>): string[] {
+  const secret = view.secret.row;
+  if (secret === null) return [];
+  const value = secret.source === null ? secret : view.source?.row ?? null;
+  const ids = [request.place ?? secret.environmentId, secret.environmentId];
+  if (value !== null) {
+    ids.push(value.environmentId);
+    const own = view.environments.get(value.environmentId)?.row;
+    if (own?.owner != null && own.parentId !== null) ids.push(own.parentId);
+  }
+  return [...new Set(ids)];
+}
+
+/**
+ * Why a use is refused, or null to allow it: a function of what it read
+ * and of the request alone, so that the replay of the log decides the same
+ * (docs/design/sealed-inputs.md).
+ *
+ * 1. **Seals,** every input's, before anything its rows say: `tampered`
+ *    for a row whose seal is not the vault's, `stale` for one that is not
+ *    its object's newest. A row put back from before a change can make a
+ *    use refused or allowed that the log's state would decide otherwise;
+ *    checked first, every such use is `stale`, never another refusal
+ *    (HotPathOne's `StaleFirst`, `TamperVisible`).
+ * 2. **The credential and the key:** missing, revoked or ended at the
+ *    request's time; a key that is no more, a reference whose source is
+ *    gone (`ended`), and a place the key is not read at (`bad_claim`): its
+ *    own environment, a reference's holder, or a fork of its environment;
+ *    and a reference to a reference (`bad_claim`).
+ * 3. **0.14's rules, unchanged:** `keyRefusals`, then `useOnlyRefusals`,
+ *    then `sensitiveRefusals`, on the reader its principal, credential,
+ *    roles and environments make (`readerOf`). Nothing is `vet`ted: a
+ *    reference's end is its holder's row, sealed (`ended` above).
+ * 4. **The bulk cap,** on what the use read of it, with the policy's count.
+ */
+export function decideChecked(view: CheckedView, request: UseRequest): UseCode | null {
+  const credential = view.credential.row;
+  const secret = view.secret.row;
+  if ((credential === null) !== (view.principal === null) || (credential === null) !== (view.bulk === null)) {
+    throw new Error("a use reads its credential's principal and bulk rows with it, and none without it");
+  }
+  if ((secret?.source == null) !== (view.source === null)) throw new Error("a use reads a reference's source with it, and none for a key that is no reference");
+  const ids = useEnvironments(view, request);
+  const environments = ids.map((id) => {
+    const read = view.environments.get(id);
+    if (read === undefined) throw new Error(`a use weighs environment ${id}, which it did not read`);
+    return read;
+  });
+  const inputs: Checked<Input>[] = [view.credential, ...(view.principal === null ? [] : [view.principal]), view.roles, view.policy, view.secret,
+    ...(view.source === null ? [] : [view.source]), ...environments];
+  for (const input of inputs) {
+    if (input.row !== null && !input.valid) return 'tampered';
+    if (!input.current) return 'stale';
+  }
+  if (credential === null || credential.revoked || (credential.expiresAt !== null && request.at >= credential.expiresAt)) return 'credential';
+  if (secret === null) return 'missing';
+  const value = secret.source === null ? secret : view.source!.row;
+  if (value === null) return 'ended';
+  // A reference reads a key's own value: one to another reference is none the change path makes.
+  if (value.source !== null && secret.source !== null) return 'bad_claim';
+  const rows = new Map(ids.flatMap((id) => {
+    const row = view.environments.get(id)!.row;
+    return row === null ? [] : [[id, row] as const];
+  }));
+  const held = request.place ?? secret.environmentId;
+  const fork = held !== secret.environmentId && secret.source === null && rows.get(held)?.parentId === secret.environmentId;
+  if (held !== secret.environmentId && !fork) return 'bad_claim';
+  const policy = view.policy.row;
+  if (policy === null) return 'no_policy';
+  const reader = readerOf(view.principal!.row, credential, view.roles.row ?? builtinRoles(), rows.values(), request.at);
+  const at: SecretPlace = { projectId: fork ? rows.get(held)!.projectId : secret.projectId, environmentId: held };
+  const place: SecretPlace = { projectId: value.projectId, environmentId: value.environmentId };
+  const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived }]) => [id, { projectId, slug, owner, parentId, deleted, archived }]));
+  const permission: Permission = request.purpose === 'use' ? 'secret.use' : 'secret.read';
+  const byPlace = keyRefusals(reader, { principal: credential.principal, permission, secrets: [place], at: [at], environments: environmentRows, needs: [null] });
+  const listed = useOnlyRefusals(byPlace, reader, { action: 'secret.read', purpose: request.purpose, secrets: [{ ...place, secretId: value.id }] });
+  const [code] = sensitiveRefusals(listed, reader, {
+    action: 'secret.read', principal: credential.principal, purpose: request.purpose, keepsSensitive: request.keepsSensitive,
+    secrets: [{ projectId: value.projectId, sensitive: value.nature === 'sensitive' }], viaReference: [secret.source !== null],
+  });
+  if (code != null) return code;
+  return overCap(view.bulk!, policy.bulk) ? 'bulk_limit' : null;
+}
+
+/**
+ * What a use's principal holds through its credential, at `at`, as
+ * `#standing` and `through` in vault.ts make it from 0.14's rows: their
+ * role and grants, live and lapsed; the credential's scope and kind; and
+ * the policy, the roles as the log has them and, of the environments the
+ * use weighs, those protected and not deleted. `allows` asks the policy
+ * only whether the place it checks is protected, and every place a use
+ * checks is one of those, so the policy is as good as the whole one there.
+ */
+export function readerOf(principal: PrincipalInput | null, credential: CredentialInput, roles: RolesInput, environments: Iterable<EnvironmentInput>, at: number): Reader {
+  const through = { ...(credential.scope === null ? {} : { credentialScope: credential.scope }), kind: credential.caller };
+  const status = principal === null || !PRINCIPAL.test(credential.principal) ? 'unknown' : principal.status;
+  if (principal === null || status !== 'active') {
+    const none = { ...NOTHING, ...through };
+    return { status, live: none, all: none };
+  }
+  const guarded = [...environments].filter((environment) => environment.protected && !environment.deleted);
+  const policy: Policy = {
+    roles: roles.roles,
+    instanceRoles: roles.instanceRoles,
+    protected: guarded.map((environment) => environment.id),
+    protectedIn: guarded.reduce<Record<string, { environmentId: string; slug: string | null }[]>>(
+      (byProject, environment) => ({ ...byProject, [environment.projectId]: [...(byProject[environment.projectId] ?? []), { environmentId: environment.id, slug: environment.slug }] }),
+      {},
+    ),
+  };
+  const person = credential.principal.startsWith('user:');
+  const standing = person ? { role: principal.role, scope: principal.scope } : { role: 'member' as const, scope: EVERYWHERE };
+  const grants = (only: (grant: PrincipalInput['grants'][number]) => boolean) =>
+    principal.grants.filter(only).map(({ projectId, environmentId, role }) => ({ projectId, environmentId, role }));
+  const holdings = (held: Holdings['grants']): Holdings => ({ ...standing, grants: held, policy, service: !person, ...through });
+  return { status: 'active', live: holdings(grants((grant) => live(grant, at))), all: holdings(grants(() => true)) };
 }
