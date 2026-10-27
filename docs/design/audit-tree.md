@@ -133,15 +133,24 @@ way, because no lookup can match it. Any failure refuses the tick and
 alerts. The newest row must be the signer's pair, note for note, so a row
 deleted or replaced under a running signer shows within a tick.
 
-**The pair's `at` never comes down.** Retention's freshness step (plan PR
-7) rests on it: a replay of a dropped use must never become fresh again
-when a clock steps back. So a signer clock that has jumped ahead is caught
-before its time is signed. A tick whose clock reads more than 10 minutes
-after the newest entry in its window is refused and alerted ("the clocks
-disagree"), and the pair keeps its last time. Sealing resumes once the
-clock heals. Otherwise one tick an hour ahead would make every honest entry
-read as a replay for that hour (Fable's review). A window holding only gaps
-keeps the time last signed, having nothing to check the clock against.
+**The pair's `at` never comes down, and never runs far ahead.** Retention's
+freshness step (plan PR 7) rests on the first half. A replay of a dropped
+use must never become fresh again when a clock steps back, so `open()` and
+witnesses refuse a newer pair signed earlier than the one they hold. The
+second half is Fable's review. One tick on a signer clock an hour ahead
+would sign a time that makes every honest entry read as a replay for that
+hour. So a tick signs the signer's clock, held to at most 10 minutes past
+the newest entry in its window:
+
+```
+at = max(last at, min(now, newest entry's at + 10 min))
+```
+
+A clock ahead moves the time one bound at most, so sealing never stops on
+it. A signer that stalled past the bound on a quiet log still seals when it
+resumes (review r6). A window holding only gaps keeps the last time. The
+genesis pair seals nothing and carries `at 0`, so no clock is trusted
+before the first entry holds it.
 
 **A failed tick** leaves its pair pending. The trees grow on a copy, so the
 signer stays at the pair the database holds. The next tick finishes the

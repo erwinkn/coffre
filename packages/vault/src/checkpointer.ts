@@ -91,8 +91,13 @@ export type Memory = { last(): Promise<string | null>; remember(record: string):
 /** Somewhere each signed pair goes that a database writer cannot reach: a witness, an archive (R40's plugin). */
 export type Witness = {
   name: string;
-  /** Publishes the pair; `proofs(from)` gives each tree's consistency proof from the sizes the witness holds. */
-  publish(notes: PairNotes, proofs: (from: Record<TreeName, number>) => Promise<PairProofs>): Promise<WitnessAnswer>;
+  /**
+   * Publishes the pair; `proofs(from)` gives each tree's consistency proof
+   * from the sizes the witness holds. A try that outlives its bound (2 s) is
+   * a failure to the pump, and `signal` aborts: an implementation that makes
+   * a request passes it on, so abandoned tries do not pile up.
+   */
+  publish(notes: PairNotes, proofs: (from: Record<TreeName, number>) => Promise<PairProofs>, signal: AbortSignal): Promise<WitnessAnswer>;
 };
 
 /**
@@ -245,7 +250,8 @@ export class Checkpointer {
       // A new log: both trees empty at number 0, sealing nothing, so the first tick seals every entry there is. A
       // genesis already remembered (a crash before its write) is written as it was, never signed again.
       const empty = { size: 0, root: EMPTY_ROOT };
-      const genesis = mine ?? (await signPair(signers, 0n, (options.now ?? Date.now)(), { changes: empty, uses: empty }));
+      // Its time is 0: it seals nothing, and no clock is trusted before the first entry holds it (the tick's rule).
+      const genesis = mine ?? (await signPair(signers, 0n, 0, { changes: empty, uses: empty }));
       await options.memory.remember(encodePair(genesis.notes));
       await store.write({ upto: 0n, notes: genesis.notes }, { changes: [], uses: [] });
       return new Checkpointer(store, signers, options, { changes: Edge.empty(), uses: Edge.empty() }, genesis);
@@ -269,6 +275,8 @@ export class Checkpointer {
         head = mine;
       } else {
         // The database is ahead, which RememberFirst rules out for this signer (a memory restored from a backup, say):
+        // Time never comes down along one history either (what retention's freshness step rests on).
+        if (newest.at < mine.pair.at) throw new Error(`the database's newest pair (up to ${newest.upto}) was signed at ${newest.at}, before the one the signer remembers (${mine.pair.at})`);
         // accepted only if the remembered pair is a prefix of it, in both trees: by a consistency proof between the two
         // signed roots, never a head recomputed from tiles, which hold each subtree at several levels and could be
         // planted at one the newest head never reads.
@@ -333,15 +341,13 @@ export class Checkpointer {
       previous = e.number > previous ? e.number : previous;
     }
     // The pair's `at` never comes down: retention's freshness step (plan PR 7) needs the bound it sets to hold, so that
-    // a replay of a dropped use can never be fresh again when a clock steps back. So a signer clock that has jumped
-    // ahead must be caught before its time is signed, or every honest entry would read as a replay until real time
-    // caught up. Its entries were stamped within seconds of their numbers, so a clock more than the bound ahead of the
-    // window's newest is the signer's own: refused, recoverably, and the pair's `at` stays where it was.
-    const now = this.options.now();
+    // a replay of a dropped use can never be fresh again when a clock steps back. Nor may it run ahead: one tick on a
+    // signer clock that has jumped forward would otherwise sign a time that makes every honest entry read as a replay
+    // until real time caught up. So it is the signer's clock, held to at most the bound past the window's newest entry
+    // (stamped within seconds of its number): a clock ahead moves it one bound at most, a signer that stalled on a
+    // quiet log still seals, and a window of gaps alone, with no entry to hold the clock against, keeps the last time.
     const newestAt = entries.reduce((max, e) => Math.max(max, e.at), -Infinity);
-    if (entries.length > 0 && now > newestAt + this.options.freshMs) {
-      failures.push(`the signer's clock reads ${now}, more than ${this.options.freshMs} ms after the newest entry (${newestAt}): the clocks disagree`);
-    }
+    const at = entries.length === 0 ? pair.at : Math.max(pair.at, Math.min(this.options.now(), newestAt + this.options.freshMs));
     const result = (signed: boolean, writeMs = 0): Tick => ({
       signed: signed || finished, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
     });
@@ -359,8 +365,7 @@ export class Checkpointer {
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
-    // With no entry to hold the clock against (a window of gaps), the time stays the last one signed.
-    const next = await signPair(this.signers, upto, entries.length > 0 ? Math.max(now, pair.at) : pair.at, heads);
+    const next = await signPair(this.signers, upto, at, heads);
     this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.
@@ -504,7 +509,7 @@ export class Checkpointer {
       // A witness that holds more leaves than this pair has seen another history: no proof, and it refuses.
       const prove = (tree: TreeName, from: number) => (from > pair[tree].size ? [] : proveConsistency(this.store, tree, from, pair[tree].size));
       const proofs = async (from: Record<TreeName, number>) => ({ changes: await prove('changes', from.changes), uses: await prove('uses', from.uses) });
-      const a = await attempt(() => w.publish(notes, proofs), WITNESS_DEADLINE_MS);
+      const a = await attempt((signal) => w.publish(notes, proofs, signal), WITNESS_DEADLINE_MS);
       if (a.ok && pair.upto > p.acked) {
         p.acked = pair.upto;
         p.cosigned = a.cosigned;
@@ -559,13 +564,17 @@ export function localWitness(name: string, log: PairVerifiers, self: NoteSigner)
  * returns a promise, is a failed try, so its pump moves on to the next pair
  * instead of waiting on it for the life of the process.
  */
-async function attempt(publish: () => Promise<WitnessAnswer>, ms: number): Promise<WitnessAnswer> {
+async function attempt(publish: (signal: AbortSignal) => Promise<WitnessAnswer>, ms: number): Promise<WitnessAnswer> {
+  const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<WitnessAnswer>((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, reason: `no answer within ${ms} ms` }), ms);
+    timer = setTimeout(() => {
+      abort.abort(new Error(`no answer within ${ms} ms`));
+      resolve({ ok: false, reason: `no answer within ${ms} ms` });
+    }, ms);
   });
   try {
-    return await Promise.race([Promise.resolve().then(publish), expired]);
+    return await Promise.race([Promise.resolve().then(() => publish(abort.signal)), expired]);
   } catch (error) {
     return { ok: false, reason: `unreachable: ${(error as Error).message}` };
   } finally {

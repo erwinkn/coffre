@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { decodePair, encodePair, noteSigner, openPair, signPair, verifyInclusion, verifyLog, leafHash, type PairNotes } from '@coffre/core/merkle';
+import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 
 import { Checkpointer, FRESH_MS, localWitness, type Witness } from '../src/checkpointer.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
@@ -66,6 +66,22 @@ test('(a) a sealed entry deleted from the middle is caught by the next pair', as
   const v = await verify(store, k);
   assert.ok(!v.ok && v.problems.some((p) => /uses head differ/.test(p)), v.problems.join('\n'));
   await assert.rejects(cp.prove(31n), /database changed it/);
+});
+
+test('review r6: tiles that do not give their head are reported, and the walk goes on to report a tail cut too', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 8);
+  const held = decodePair(memory.record!)!;
+  store.deleteEntry(store.log[30]!.number);
+  const tile = Buffer.from(store.tileStore.uses.get('0/0')!);
+  tile[100] = tile[100]! ^ 1;
+  store.tileStore.uses.set('0/0', tile);
+  store.rollBack([...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-3)!);
+  const v = await verify(store, k, { anchors: [held] });
+  assert.ok(v.problems.some((p) => /tiles at its edge/.test(p)), v.problems.join('\n'));
+  assert.ok(v.problems.some((p) => /the database ends up to/.test(p)), v.problems.join('\n'));
+  assert.ok(v.checkpoints > 1);
 });
 
 test('(b) a tail cut, rows and entries, is caught against the pair held outside and at the signer\'s next start', async () => {
@@ -421,9 +437,9 @@ test('review r4: a witness that hangs once, or throws before it returns, does no
   let calls = 0;
   const hangsOnce: Witness = {
     name: 'hangs-once',
-    publish(notes, proofs) {
+    publish(notes, proofs, signal) {
       calls += 1;
-      return calls === 1 ? new Promise(() => {}) : honest.publish(notes, proofs);
+      return calls === 1 ? new Promise(() => {}) : honest.publish(notes, proofs, signal);
     },
   };
   const cp = await open({ witnesses: [hangsOnce] });
@@ -467,21 +483,58 @@ test('review r4: prove() refuses an index past the tree; open() re-syncs a memor
   assert.equal(memory.record, encodePair(cp.pair.notes));
 });
 
-test('Fable review: one tick on a signer clock an hour ahead is refused, recoverably; sealing resumes once the clock heals', async () => {
-  const { store, open, alerts } = await setup();
+test('Fable review: a tick on a signer clock an hour ahead signs at most one bound past its entries, and sealing goes on once the clock heals', async () => {
+  const { store, open } = await setup();
   let ahead = 0;
   const cp = await open({ now: () => Date.now() + ahead });
   await traffic(store, cp, 1);
-  const before = cp.pair.pair.at;
   ahead = 3_600_000;
-  store.append('uses', 'u1');
-  const t = await cp.tick();
-  assert.ok(!t.signed && /the clocks disagree/.test(t.failures.join()), t.failures.join());
-  assert.equal(cp.pair.pair.at, before, 'the pair keeps the last time it signed');
-  assert.ok(alerts.some((a) => /clocks disagree/.test(a)));
+  const stamped = Date.now();
+  store.append('uses', 'u1', '{}', stamped);
+  assert.ok((await cp.tick()).signed);
+  assert.ok(cp.pair.pair.at <= stamped + FRESH_MS, 'held to the newest entry plus the bound');
   ahead = 0;
+  await traffic(store, cp, 2);
   const s = await cp.sealThrough(store.append('changes', 'c1'));
-  assert.ok(s.pair.at < Date.now() + 1000, 'sealed at the healed time');
+  assert.ok(s.pair.upto >= 1n);
+});
+
+test('review r6: a signer that stalled past the bound on a quiet log seals on resume', async () => {
+  const { store, open, alerts } = await setup();
+  let clock = 1_800_000_000_000;
+  const cp = await open({ now: () => clock });
+  store.append('uses', 'u', '{}', clock);
+  await cp.tick();
+  const number = store.append('changes', 'c', '{}', clock + 1000);
+  clock += 11 * 60_000;
+  const s = await cp.sealThrough(number);
+  assert.ok(s.pair.upto >= number && s.pair.at <= clock);
+  assert.deepEqual(alerts, []);
+});
+
+test('time never runs back along one history: open() refuses a newer pair signed earlier; a witness refuses it too', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const { pair, notes } = cp.pair;
+  const remembered = encodePair(notes);
+  await traffic(store, cp, 1);
+  // The newest row re-signed with a time before the remembered pair's.
+  const row = (await store.newest())!;
+  const newest = (await openPair(row.notes, k.verifiers))!;
+  const back = await signPair(k.signers, newest.upto, pair.at - 1, { changes: newest.changes, uses: newest.uses });
+  store.rows.set(newest.upto, back.notes);
+  memory.record = remembered;
+  await assert.rejects(open(), /before the one the signer remembers/);
+  const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
+  const witness = localWitness('w', k.verifiers, self);
+  const none = async () => ({ changes: [], uses: [] });
+  assert.ok((await witness.publish(decodePair(remembered)!, none, new AbortController().signal)).ok);
+  const answer = await witness.publish(back.notes, async () => ({
+    changes: await proveConsistency(store, 'changes', pair.changes.size, newest.changes.size),
+    uses: await proveConsistency(store, 'uses', pair.uses.size, newest.uses.size),
+  }), new AbortController().signal);
+  assert.ok(!answer.ok && /time runs back/.test(answer.reason), JSON.stringify(answer));
 });
 
 test('a window of gaps alone keeps the time last signed', async () => {
@@ -519,10 +572,10 @@ test('a change waits for the witness, then answers unwitnessed at the deadline, 
   let calls = 0;
   const flaky: Witness = {
     name: 'flaky',
-    async publish(notes, proofs) {
+    async publish(notes, proofs, signal) {
       calls += 1;
       if (refusals-- > 0) return { ok: false, reason: 'busy' };
-      return honest.publish(notes, proofs);
+      return honest.publish(notes, proofs, signal);
     },
   };
   const cp = await open({ witnesses: [flaky] });

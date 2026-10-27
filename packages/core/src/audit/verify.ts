@@ -97,7 +97,8 @@ async function walk(
     if (!genesis) return (problems.push('no genesis checkpoint to start from: checkpoints were deleted or replaced'), done(null));
     start = { pair: pair!, notes: row!.notes, row: true };
   }
-  let edges = await loadEdges(reader, start.pair);
+  // Tiles that do not give their signed head are a problem to report, and the walk goes on where it can.
+  const reload = (pair: Pair) => loadEdges(reader, pair).catch((error: Error) => (problems.push(error.message), null));
 
   // Pairs held outside. Those at or below the start are not walked (verified before), but each must still be the row
   // at its place, if there is one, and, whether or not there is, a prefix of the start, by a consistency proof from the
@@ -124,6 +125,9 @@ async function walk(
     }
   }
   above.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
+  const loaded = await reload(start.pair);
+  if (loaded === null) return done(null);
+  let edges = loaded;
 
   // The walk: a page of rows at a time, with the outside pairs that fall among them, entries read once per page.
   let last = start;
@@ -170,7 +174,7 @@ async function walk(
         if (wrong.length > 0) {
           problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: the ${wrong.join(' and ')} head${wrong.length > 1 ? 's' : ''} differ from the entries: entries deleted, added, changed or moved, or a second history`);
           // Carry on from the signed row, so one problem is reported once.
-          if (stop.row) edges = await loadEdges(reader, stop.pair);
+          if (stop.row) edges = (await reload(stop.pair)) ?? edges;
         }
         if (stop.row) {
           verdict.checkpoints += 1;
