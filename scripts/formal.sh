@@ -20,7 +20,8 @@
 #   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
 #                                     large, rest, hotpath, hotpath-policy,
 #                                     hotpath-bulk, hotpath-skew, seal,
-#                                     seal-plugin or seal-retention
+#                                     seal-plugin, seal-retention or
+#                                     seal-retention-crash
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
 #   scripts/formal.sh --heap 4g       TLC's JVM heap (default 1g)
 #   scripts/formal.sh --list          what would run, not running TLC
@@ -211,14 +212,13 @@ REMOVALS=(
   "SealCore PairChecked+PairVerified SealedDeletionDetected"
   "Seal KindInMac KindKept"
   # Retention (plan PR 7, W229): a cut drops a day of uses below a sealed retention change, keeps every change.
-  "SealRetention FreshChecked DroppedNeverResealed"
-  "SealRetention DropAfterSeal NoFalseAlarm"
-  "SealRetention FreshBeforeDrop DroppedNeverResealed"
   "SealRetention CutSealed KeptNotLost"
   "SealRetention KeepCutTiles NoFalseAlarm"
-  "SealRetentionChange CutUsesOnly ChangesUntouched"
-  "SealRetentionChange CutUsesOnly NoFalseAlarm"
-  "SealRetentionChange FreshChecked DroppedNeverResealed"
+  "SealRetentionCrash FreshChecked DroppedNeverResealed"
+  "SealRetentionCrash DropAfterSeal NoFalseAlarm"
+  "SealRetentionCrash FreshBeforeDrop DroppedNeverResealed"
+  "SealRetentionCrash CutUsesOnly ChangesUntouched"
+  "SealRetentionCrash CutUsesOnly NoFalseAlarm"
   # 0.15's cutover from 0.14 (Migration015.tla; docs/design/0.15-plan.md, PR 9).
   "Migration015 CutoverHeadLock+CutoverFence+RowFirst OneCutover"
   "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence+RowFirst NewLogFollowsOld"
@@ -267,14 +267,14 @@ EXPECTED=(
 # CI's shards, balanced by what each scenario took on a runner (seconds,
 # `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
 # `rest`, every other scenario, about 260. 0.15's models (HotPathOne, Seal,
-# Migration015) have seven of their own, each about 5 minutes of TLC with 4
+# Migration015) have eight of their own, each about 5 minutes of TLC with 4
 # workers on a shared host, which CI's runners took about twice as long to
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
 # scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
 # slack and clock-skew scenarios), seal (Seal and Migration015),
-# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention and
-# SealRetentionChange). A scenario in no case below is in `rest`.
-SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
+# seal-plugin (SealPlugin and SealCore), seal-retention and
+# seal-retention-crash (a retention scenario each). A scenario in no case below is in `rest`.
+SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention seal-retention-crash"
 shard_of() {
   case "$1" in
     Tampering) echo tampering ;;
@@ -284,7 +284,8 @@ shard_of() {
     HotPathOneLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
     SealPlugin|SealCore) echo seal-plugin ;;
-    SealRetention*) echo seal-retention ;;
+    SealRetention) echo seal-retention ;;
+    SealRetentionCrash) echo seal-retention-crash ;;
     Seal|Migration015*) echo seal ;;
     *) echo rest ;;
   esac

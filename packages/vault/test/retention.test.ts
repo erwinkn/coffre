@@ -51,7 +51,11 @@ after(() => db?.close());
 beforeEach(async () => {
   await log.empty();
   await log.days();
-  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_day(${D10}::date), make_day(${D9}::date)`);
+  if (ENGINE === 'postgres') {
+    // A day a test left detached (dropped by a run it did not make) goes, and both days are made again.
+    for (const day of [D10, D9]) await run(db.owner, sql.raw(`DROP TABLE IF EXISTS log_uses_${day.replaceAll('-', '')}`));
+    await run(db.owner, sql`SELECT make_day(${D10}::date), make_day(${D9}::date)`);
+  }
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -118,7 +122,13 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
   for (const n of d10) assert.equal(await store.locate(n), null, `${n} dropped`);
   for (const n of d9) assert.ok(await store.locate(n), `${n}, a straggler below the cut, kept`);
-  if (ENGINE === 'postgres') assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), false);
+  // On Postgres the day is detached, and dropped by the next run, seconds or an hour later: never right after.
+  assert.deepEqual(r.detached, ENGINE === 'postgres' ? [D10] : []);
+  if (ENGINE === 'postgres') {
+    assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
+    assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey })).detached, []);
+    assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), false);
+  }
   // The uses tree's leaf tiles below the cut: the range [0, 512) gone, the tile holding the cut kept, at each level.
   if (ENGINE === 'postgres') {
     assert.equal(await exists('log_tiles_uses_0'), false);
@@ -141,6 +151,8 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   const next = await retain(cp, store, { keepDays: 1, macKey });
   assert.deepEqual(next.dropped, [{ day: D9, change: null }]);
   for (const n of d9) assert.equal(await store.locate(n), null);
+  await retain(cp, store, { keepDays: 1, macKey });
+  assert.deepEqual(await store.days(), [dayOf(Date.now()), dayOf(Date.now() + DAY_MS)].slice(0, ENGINE === 'postgres' ? 2 : 1));
   const again = await verify(store);
   assert.ok(again.ok, again.problems.join('\n'));
   // Incrementally, from a head the walk verified: the uses tree from there on.
@@ -161,6 +173,7 @@ test('a dropped use put back is never sealed again', async () => {
   const [copy] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_uses WHERE number = ${d10[0]!}`);
   await later(cp);
   assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey })).waiting, null);
+  await retain(cp, store, { keepDays: 9, macKey });
   // A writer who read it before puts it back (its day made again, on Postgres), at a fresh number: its MAC holds, and no
   // original is left for a request-ID check to find. (Beside its original, the replay's key, (at, request_id), refuses
   // it.) Stamped weeks before the floor of `at`, no tick's window reads it (BarrierChecksFloor); one that did would find
@@ -232,6 +245,8 @@ test('a crash between the retention change and the drop: the next run finishes, 
   await later(cp);
   const r = await retain(cp, crashing, { keepDays: 1, macKey });
   assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), [[D10, null], [D9, null]]);
+  await retain(cp, crashing, { keepDays: 1, macKey });
+  for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
   const [count] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
   assert.equal(Number(count!.n), 1);
   assert.ok((await verify(store)).ok);

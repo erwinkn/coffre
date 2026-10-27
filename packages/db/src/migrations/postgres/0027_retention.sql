@@ -41,7 +41,7 @@ $$;
 --> statement-breakpoint
 -- A day of uses dropped, a step a call, each its own short transaction: 'detached', then 'dropped', then 'gone'. Only a day before yesterday, and only below the newest cut: the first checkpoint whose floor of at is past the day's end, which every use of the day took its number at or below (the floor holds a use's at to it), must be at or below log_cut()'s.
 --
--- DETACH takes log_uses ACCESS EXCLUSIVE for its own few milliseconds: uses queue behind it meanwhile, and lock_timeout bounds how long it waits for a reader before it gives up and tries again later (DETACH … CONCURRENTLY cannot run in a function, and the vault's login owns no table; docs/design/hot-path-one.md, "Retention", measures both). DROP of the detached table, in the next call, locks nothing a use reads.
+-- DETACH takes log_uses ACCESS EXCLUSIVE for its own few milliseconds: uses queue behind it meanwhile, and lock_timeout bounds how long it waits for a reader before it gives up and tries again later. (DETACH … CONCURRENTLY cannot run in a function, and the vault's login owns no table; measured, it buys nothing here: docs/design/0.15-plan.md, "As built: PR 7".) The DROP of the detached table locks nothing a use reads; the vault asks for it a run later, never right after the DETACH, whose invalidation every backend's plan of log_uses is still replanning from.
 CREATE FUNCTION drop_day(p_day date) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '100ms' AS $$
 DECLARE

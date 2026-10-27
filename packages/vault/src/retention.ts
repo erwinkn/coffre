@@ -26,7 +26,10 @@ import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPay
  *    so no copy of a dropped use, which keeps its stamp and has no original
  *    left for a request-ID check to find, is ever sealed again. Two bounds,
  *    not one: one for the clocks.
- * 4. The day's partition: detached, then dropped (`drop_day`, a call each).
+ * 4. The day's partition: detached, and dropped by the next run (`drop_day`).
+ *    Measured at 1,000 uses a second (0.15-plan.md, "As built: PR 7"): a DROP
+ *    right after the DETACH lands while every backend replans its plan of
+ *    `log_uses`, and stalls uses 200 to 400 ms; seconds later, it stalls none.
  *    A crash between any two steps is finished by the next run.
  * Then the tiles below the newest cut (`drop_tiles`).
  *
@@ -59,8 +62,10 @@ export const DAY_MS = 86_400_000;
 export const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
 export type RetentionRun = {
-  /** The days dropped, each with the retention change written for it, if one was. */
+  /** The days whose uses went this run, each with the retention change written for it, if one was. */
   dropped: { day: string; change: bigint | null }[];
+  /** Of those, the days detached and not dropped yet: the next run drops them. */
+  detached: string[];
   /** Why the run stopped before a due day, when it waits for something (the log to move on): no alarm. */
   waiting: string | null;
   /** Tiles deleted or leaf ranges dropped below the newest cut. */
@@ -83,7 +88,7 @@ type Options = {
 export async function retain(cp: Checkpointer, store: CheckpointStore & RetentionStore, options: Options): Promise<RetentionRun> {
   if (!Number.isSafeInteger(options.keepDays) || options.keepDays < 1) throw new Error(`keepDays must be a whole number of days, at least 1, not ${options.keepDays}`);
   const now = options.now ?? Date.now;
-  const run: RetentionRun = { dropped: [], waiting: null, tiles: 0 };
+  const run: RetentionRun = { dropped: [], detached: [], waiting: null, tiles: 0 };
   const last = dayOf(now() - (options.keepDays + 1) * DAY_MS);
   for (const day of (await store.days()).filter((d) => d <= last)) {
     const done = await retainDay(cp, store, day, options.macKey, now);
@@ -92,6 +97,7 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
       break;
     }
     run.dropped.push({ day, change: done.change });
+    if (done.detached) run.detached.push(day);
   }
   const newest = await sealedCut(cp, store);
   if (newest !== null) run.tiles = await store.dropTiles(newest.uses.size);
@@ -99,7 +105,7 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
 }
 
 /** One day: dropped, with the change written for it if any; or why it waits. */
-async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: Buffer, now: () => number): Promise<{ change: bigint | null } | string> {
+async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: Buffer, now: () => number): Promise<{ change: bigint | null; detached: boolean } | string> {
   const end = Date.parse(`${day}T00:00:00Z`) + DAY_MS;
   const head = cp.pair.pair;
   if (head.floor < end) return `the signer's newest pair (up to ${head.upto}) is not past the day's end yet`;
@@ -140,9 +146,11 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   // 3. Freshness, against the signer's own pair, never a row.
   const bound = Math.max(cut.at, end) + 2 * cp.freshMs;
   if (freshAt < bound) return `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet`;
-  // 4. The day's partition: detached, then dropped, each its own short transaction.
-  for (let step = 0; step < 3; step += 1) if ((await store.dropDay(day)) === 'gone') return { change };
-  throw new Error(`retention of ${day}: its uses were not dropped`);
+  // 4. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above).
+  const state = await store.dropDay(day);
+  if (state === 'detached') return { change, detached: true };
+  if (state === 'dropped' && (await store.dropDay(day)) !== 'gone') throw new Error(`retention of ${day}: its uses were not dropped`);
+  return { change, detached: false };
 }
 
 /** The newest retention change's cut, proved in the signer's pair; null if there is none. */

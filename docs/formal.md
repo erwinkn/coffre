@@ -1279,7 +1279,8 @@ genesis and the uses tree from the newest honoured cut.
 `KeptNotLost` is `SealedDeletionDetected` less what retention drops: every
 change, and every use above the cut. `NoUndetectedReplay` holds for replays
 whose entries are both kept. The protections of `Seal.cfg` stay on, and
-`SealRetentionCrash` checks the same across a signer crash.
+`SealRetentionCrash` checks the same across a signer crash, with one
+attacker step.
 
 `EXPECTED`, with every protection on: below a cut only changes are kept.
 - `BelowCutKept`: a straggler (a use of the next day numbered below the cut,
@@ -1377,8 +1378,8 @@ shortest one.
 
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
-tests do; skipped, seconds. With 0.15's models the suite is 239 TLC runs in
-nine shards; the six new ones are 0.15's. On a shared host with 4 workers,
+tests do; skipped, seconds. With 0.15's models the suite is 265 TLC runs in
+eleven shards; the eight new ones are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
 shards 10.9 (5.8 and 5.5 here).
@@ -1391,6 +1392,8 @@ shards 10.9 (5.8 and 5.5 here).
 | hotpath-skew | 5.4 min | 29 min | 11.0 min (measured) |
 | seal | 4.9 min | 23 min | about 10 min (estimated) |
 | seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
+| seal-retention | 5.5 min | not measured | about 11 min (estimated) |
+| seal-retention-crash | 2.6 min | not measured | about 5 min (estimated) |
 
 Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
@@ -1417,23 +1420,24 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is nine jobs in parallel.** `scripts/formal.sh --shard
+- **A run is eleven jobs in parallel.** `scripts/formal.sh --shard
   <name>` runs the scenarios of one
   (`shard_of`), each with its runs without a protection, balanced by what
   they took:
   - Tampering's 7 to 11 minutes (17.5 million states) alone;
   - Overtaking, Walking, Sharing, Rows and Mixed together;
-  - 0.15's models in six:
+  - 0.15's models in eight:
     - `hotpath`;
     - `hotpath-policy` (the policy, liveness and stale-bulk scenarios);
     - `hotpath-bulk` (the bulk cap's main scenario);
     - `hotpath-skew` (its slack and clock-skew scenarios);
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin and SealCore);
+    - `seal-retention` and `seal-retention-crash` (a retention scenario each);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints
-  what a run would run, without TLC; a test holds the nine to a partition
+  what a run would run, without TLC; a test holds the eleven to a partition
   of it. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
   default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g
