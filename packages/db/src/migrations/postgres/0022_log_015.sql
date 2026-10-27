@@ -519,6 +519,12 @@ CREATE FUNCTION write_checkpoint(
 DECLARE
     written integer;
 BEGIN
+    -- The tiles as four lists of one length, each tile once: a caller's mistake, said as one, never retried as a tamper.
+    IF p_tree IS NULL OR p_level IS NULL OR p_leaf IS NULL OR p_hashes IS NULL
+       OR cardinality(p_level) <> cardinality(p_tree) OR cardinality(p_leaf) <> cardinality(p_tree) OR cardinality(p_hashes) <> cardinality(p_tree)
+       OR (SELECT count(DISTINCT (tree, level, leaf)) FROM unnest(p_tree, p_level, p_leaf) AS x (tree, level, leaf)) <> cardinality(p_tree) THEN
+        RAISE EXCEPTION 'the tiles are four lists of one length, each tile once' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     WITH grown AS (
         INSERT INTO public.log_tiles AS t (tree, level, leaf, hashes)
         SELECT * FROM unnest(p_tree, p_level, p_leaf, p_hashes)
@@ -527,8 +533,8 @@ BEGIN
         RETURNING 1
     )
     SELECT count(*) INTO written FROM grown;
-    IF written <> coalesce(cardinality(p_tree), 0) THEN
-        RAISE EXCEPTION 'a tile would shrink or change: % of % written', written, coalesce(cardinality(p_tree), 0) USING ERRCODE = 'data_corrupted';
+    IF written <> cardinality(p_tree) THEN
+        RAISE EXCEPTION 'a tile would shrink or change: % of % written', written, cardinality(p_tree) USING ERRCODE = 'data_corrupted';
     END IF;
     INSERT INTO public.log_checkpoints (upto, at, at_floor, changes_size, changes_root, changes_note, uses_size, uses_root, uses_note)
     VALUES (p_upto, p_at, p_at_floor, p_changes_size, p_changes_root, p_changes_note, p_uses_size, p_uses_root, p_uses_note);

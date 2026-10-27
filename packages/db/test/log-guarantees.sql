@@ -285,6 +285,7 @@ DECLARE
     h bytea := decode(repeat('11', 32), 'hex');
     h2 bytea := decode(repeat('11', 32) || repeat('22', 32), 'hex');
     root bytea := decode(repeat('33', 32), 'hex');
+    bad record;
 BEGIN
     PERFORM write_checkpoint(100, 1, 1, 1, root, 'changes note', 1, root, 'uses note',
         ARRAY['changes', 'uses', 'uses'], ARRAY[0, 0, 1]::smallint[], ARRAY[0, 0, 0]::bigint[], ARRAY[h, h, h]);
@@ -295,17 +296,46 @@ BEGIN
        OR (SELECT count(*) FROM log_tiles) <> 3 OR (SELECT count(*) FROM log_checkpoints) <> 2 THEN
         RAISE EXCEPTION 'FAIL: write_checkpoint did not write its tiles and its pair';
     END IF;
+    -- A tile that would shrink, change at one width, or grow from other bytes; and a call whose leaf tile has no range.
+    FOR bad IN SELECT * FROM (VALUES (h), (decode(repeat('44', 64), 'hex')), (decode(repeat('44', 32) || repeat('22', 32), 'hex'))) AS b (hashes) LOOP
+        BEGIN
+            PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', ARRAY['changes'], ARRAY[0]::smallint[], ARRAY[0]::bigint[], ARRAY[bad.hashes]);
+            RAISE EXCEPTION 'FAIL: a tile became %', bad.hashes;
+        EXCEPTION WHEN data_corrupted THEN NULL;
+        END;
+    END LOOP;
     BEGIN
-        PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', ARRAY['changes'], ARRAY[0]::smallint[], ARRAY[0]::bigint[], ARRAY[h]);
-        RAISE EXCEPTION 'FAIL: a tile shrank';
-    EXCEPTION WHEN data_corrupted THEN NULL;
+        PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', ARRAY['uses'], ARRAY[0]::smallint[], ARRAY[4294967296]::bigint[], ARRAY[h]);
+        RAISE EXCEPTION 'FAIL: a leaf tile with no range was written';
+    EXCEPTION WHEN check_violation THEN NULL;
     END;
+    -- A caller's own mistakes: a tile twice, lists of other lengths, no lists.
+    BEGIN
+        PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', ARRAY['changes', 'changes'], ARRAY[0, 0]::smallint[], ARRAY[0, 0]::bigint[], ARRAY[h2, h2]);
+        RAISE EXCEPTION 'FAIL: one tile was written twice in a call';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', ARRAY['changes', 'uses'], ARRAY[0]::smallint[], ARRAY[0]::bigint[], ARRAY[h2]);
+        RAISE EXCEPTION 'FAIL: lists of other lengths were taken';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM write_checkpoint(102, 3, 1, 2, root, 'n', 1, root, 'n', NULL, NULL, NULL, NULL);
+        RAISE EXCEPTION 'FAIL: no lists were taken for none';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    IF (SELECT hashes FROM log_tiles WHERE tree = 'changes' AND level = 0 AND leaf = 0) <> h2 OR EXISTS (SELECT 1 FROM log_checkpoints WHERE upto = 102) THEN
+        RAISE EXCEPTION 'FAIL: a refused checkpoint changed a tile or wrote its pair';
+    END IF;
+    -- No tile grew this tick: an empty list writes the pair alone.
+    PERFORM write_checkpoint(103, 4, 1, 2, root, 'n', 1, root, 'n', ARRAY[]::text[], ARRAY[]::smallint[], ARRAY[]::bigint[], ARRAY[]::bytea[]);
     BEGIN
         PERFORM write_checkpoint(101, 3, 1, 3, root, 'n', 1, root, 'n', ARRAY['uses'], ARRAY[1]::smallint[], ARRAY[0]::bigint[], ARRAY[h2]);
         RAISE EXCEPTION 'FAIL: a second pair was written at one place';
     EXCEPTION WHEN unique_violation THEN NULL;
     END;
-    IF (SELECT count(*) FROM log_checkpoints) <> 2 OR (SELECT hashes FROM log_tiles WHERE tree = 'uses' AND level = 1) <> h THEN
+    IF (SELECT count(*) FROM log_checkpoints) <> 3 OR (SELECT hashes FROM log_tiles WHERE tree = 'uses' AND level = 1) <> h THEN
         RAISE EXCEPTION 'FAIL: a refused checkpoint left a trace';
     END IF;
     RAISE NOTICE 'PASS: PairWrittenTogether, write_checkpoint writes tiles and pair as one, tiles only growing, one pair a place';
