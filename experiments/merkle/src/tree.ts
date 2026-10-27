@@ -38,10 +38,13 @@ function split(n: number): number {
 
 const log2 = (n: number) => Math.round(Math.log2(n));
 
+/** Whether n is a power of two. Not `n & (n - 1)`: JavaScript's bitwise operators cut to 32 bits, and a log passes 2^32 leaves in 50 days at 1,000 a second. */
+const isPowerOfTwo = (n: number) => n > 0 && 2 ** log2(n) === n;
+
 /** MTH(D[start:start+n]): the hash of any range, from the perfect subtrees it decomposes into. */
 export function rangeHash(nodes: Nodes, start: number, n: number): Hash {
   if (n === 0) return createHash('sha256').digest();
-  if ((n & (n - 1)) === 0 && start % n === 0) return nodes(log2(n), start / n);
+  if (isPowerOfTwo(n) && start % n === 0) return nodes(log2(n), start / n);
   const k = split(n);
   return nodeHash(rangeHash(nodes, start, k), rangeHash(nodes, start + k, n - k));
 }
@@ -109,7 +112,7 @@ export function verifyConsistency(m: number, n: number, first: Hash, second: Has
   if (m === n) return proof.length === 0 && first.equals(second);
   if (m === 0) return proof.length === 0;
   let path = [...proof];
-  if ((m & (m - 1)) === 0) path = [first, ...path];
+  if (isPowerOfTwo(m)) path = [first, ...path];
   if (path.length === 0) return false;
   let fn = m - 1;
   let sn = n - 1;

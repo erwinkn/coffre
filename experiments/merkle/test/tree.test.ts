@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 
 import { checkpointBody, openNote, parseCheckpoint, signerFrom, signNote, verifierFrom } from '../src/note.ts';
+import { sparseConsistency } from '../shapes/sparse.ts';
 import { Edge, edgeOf, nodesFrom, parseTilePath, tileMap, tilePath, tilesFor, type Tile } from '../src/tiles.ts';
 import { consistencyProof, inclusionProof, leafHash, referenceHash, treeHash, verifyConsistency, verifyInclusion } from '../src/tree.ts';
 
@@ -93,4 +94,22 @@ test('a signed checkpoint opens with its key and no other', async () => {
   assert.equal(await openNote(note, await verifierFrom(other.verifierKey)), null);
   assert.equal(await openNote(note.replace('\n3\n', '\n4\n'), await verifierFrom(signer.verifierKey)), null);
   assert.equal(parseCheckpoint(body).upto, '42');
+});
+
+test('a tree past 2^32 leaves splits as the RFC says (no 32-bit arithmetic)', () => {
+  const asked: string[] = [];
+  const nodes = (level: number, index: number) => {
+    asked.push(`${level}/${index}`);
+    return Buffer.alloc(32);
+  };
+  // 2^32 + 1 leaves: the perfect tree of the first 2^32, then the last leaf alone.
+  treeHash(nodes, 2 ** 32 + 1);
+  assert.deepEqual(asked, ['32/0', '0/4294967296']);
+  asked.length = 0;
+  treeHash(nodes, 2 ** 33 + 2 ** 32);
+  assert.deepEqual(asked, ['33/0', '32/2']);
+  // A consistency proof from 2^32 + 1 leaves is not treated as one from a power of two, made or checked.
+  assert.equal(consistencyProof(() => Buffer.alloc(32), 2 ** 32 + 1, 2 ** 32 + 2).length, 3);
+  const { first, second, proof } = sparseConsistency(2 ** 32 + 1, 2 ** 32 + 500);
+  assert.ok(verifyConsistency(2 ** 32 + 1, 2 ** 32 + 500, first, second, proof));
 });

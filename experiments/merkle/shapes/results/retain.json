@@ -1,0 +1,76 @@
+{
+ "oneTileRead": {
+  "p50": 0.5648159999999791,
+  "p99": 0.924712999999997
+ },
+ "one": {
+  "keptBytesPerLeaf": 0.1254848,
+  "delete": {
+   "ms": 1577.3987280000001,
+   "walBytes": 347058440,
+   "rows": 39063,
+   "msPerMillionLeaves": 157.7398728,
+   "walPerLeaf": 34.705844
+  }
+ },
+ "split": {
+  "keptBytesPerLeaf": 0.0318848,
+  "delete": {
+   "ms": 1600.751076,
+   "walBytes": 347564336,
+   "rows": 39178,
+   "msPerMillionLeaves": 160.07510760000002,
+   "walPerLeaf": 34.7564336
+  }
+ },
+ "day": {
+  "keptBytesPerLeaf": 0,
+  "delete": {
+   "ms": 1615.1602199999998,
+   "walBytes": 347696392,
+   "rows": 39217,
+   "msPerMillionLeaves": 161.51602199999996,
+   "walPerLeaf": 34.7696392
+  }
+ },
+ "mmr": {
+  "keptBytesPerLeaf": 0.0007936,
+  "delete": {
+   "ms": 3061.306503,
+   "walBytes": 692675296,
+   "rows": 78124,
+   "msPerMillionLeaves": 306.1306503,
+   "walPerLeaf": 69.2675296
+  }
+ },
+ "tick": {
+  "keptBytesPerLeaf": 0.0642496,
+  "delete": {
+   "ms": 0.24671800000032817,
+   "walBytes": 0,
+   "rows": 0,
+   "msPerMillionLeaves": 0.024671800000032815,
+   "walPerLeaf": 0
+  }
+ },
+ "dayDropTable": {
+  "ms": 2.757819999998901,
+  "walBytes": 28120,
+  "rows": 0
+ },
+ "entryBytes": 213.082112,
+ "leavesFromEntries256": {
+  "p50": 2.0838239999993675,
+  "p99": 16.537458999999217
+ },
+ "leavesFromEntries500": {
+  "p50": 3.179176000001462,
+  "p99": 49.35099699999955
+ },
+ "rebuildFromEntries": {
+  "usPerEntry": 7.219418886000001,
+  "secondsPerDay": 623.7577917504001
+ },
+ "leafBytes": 203,
+ "hmacUs": 3.345895909999999
+}
