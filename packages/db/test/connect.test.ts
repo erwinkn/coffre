@@ -156,6 +156,8 @@ test("a URL's other parts are read as node-postgres reads them, and no query par
   assert.throws(() => postgresOptions('postgresql://u@db/coffre?sslnegotiation=sideways'), /sslnegotiation is postgres or direct/);
   assert.throws(() => postgresOptions('postgresql://u@db/coffre?channel_binding=require'), /channel_binding=require is not supported/);
   assert.equal((postgresOptions('postgresql://u@db/coffre?sslmode=verify-full&sslpassword=key-pass').ssl as ConnectionOptions).passphrase, 'key-pass');
+  // No user: named, rather than the operating system's taken.
+  assert.throws(() => postgresOptions('postgresql:///coffre?host=/var/run/postgresql'), /names its user/);
   // node-postgres's own client-side bound, refused rather than ignored.
   assert.throws(() => postgresOptions('postgresql://u@db/coffre?query_timeout=5000'), /query_timeout is not supported/);
   // The URL's sslnegotiation reaches the driver, past the client's own defaults.

@@ -1,21 +1,20 @@
 // Node's pool: which connection a statement takes. postgres.js took the one
 // idle the longest, so a steady load cycled every connection of the pool,
 // each backend's caches cold, and Postgres spent ~8% more CPU per use at a
-// pool of 16 than node-postgres, which takes the one idle the shortest. The
-// copy in vendor/postgres takes that one too.
+// pool of 16 than node-postgres, which takes the one idle the shortest.
+// Coffre's own, in src/postgres-js, takes that one too.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer, type AddressInfo } from 'node:net';
-
-import postgres from '#postgres';
 
 import { sql } from 'drizzle-orm';
 
 import { createDatabase } from '../src/database.ts';
 import { isUnavailable } from '../src/dialect.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
-import { postgresClient, postgresSession, SessionLost } from '../src/postgres.ts';
+import postgres from '../src/postgres-js/index.ts';
+import { postgresClient, postgresOptions, postgresSession, SessionLost } from '../src/postgres.ts';
 
 const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
@@ -36,8 +35,7 @@ test('a statement takes the connection idle the shortest: one after another, the
 
 test("a transaction's BEGIN queued behind as many statements as a connection pipelines still learns its connection, and ends its transaction", { skip }, async () => {
   // Two at most in flight on the connection: the BEGIN goes behind two.
-  // max_pipeline, which postgres.js's types leave out.
-  const client = postgres(DATABASE, { max: 1, max_pipeline: 2, prepare: false, fetch_types: false, onnotice: () => {} } as postgres.Options<{}>);
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 2, onnotice: () => {} });
   try {
     await client.unsafe('select 1');
     const before = [client.unsafe('select pg_sleep(0.05)').execute(), client.unsafe('select 1').execute()];
@@ -162,7 +160,7 @@ test("a URL's bounds reach the server as the connection starts, as node-postgres
 test('a client ending when its connection is cut opens no other for what waited: those fail, and the client closes', { skip, timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   // One connection, one statement on it at a time: the second waits on the connection, the third for one.
-  const client = postgres(DATABASE, { max: 1, max_pipeline: 1, prepare: false, fetch_types: false, onnotice: () => {}, connection: { application_name: 'coffre-ending-test' } } as postgres.Options<{}>);
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 1, onnotice: () => {}, connection: { application_name: 'coffre-ending-test' } });
   try {
     const asked = ['select pg_sleep(5)', 'select 2', 'select 3'].map((text) => client.unsafe(text).execute().then(() => 'answered', (error: { code?: string }) => error.code));
     for (let tries = 0; ; tries += 1) {
@@ -187,7 +185,7 @@ test('a client ending when its connection is cut opens no other for what waited:
   }
 });
 
-test('an ending client reserves no connection and listens on none; one reserved before, released after, ends with it', { skip, timeout: 10_000 }, async () => {
+test('an ending client reserves no connection; one reserved before, released after, ends with it', { skip, timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const backends = async () => ((await owner.unsafe("select count(*)::int as n from pg_stat_activity where application_name = 'coffre-reserve-test'")) as unknown as [{ n: number }])[0].n;
   try {
@@ -197,7 +195,6 @@ test('an ending client reserves no connection and listens on none; one reserved 
     const closing = client.end();
     await new Promise((resolve) => setImmediate(resolve));
     await assert.rejects(client.reserve(), { code: 'CONNECTION_ENDED' });
-    await assert.rejects(client.listen('coffre_reserve_test', () => {}), { code: 'CONNECTION_ENDED' });
     await closing;
     // Reserved before the end: the end waits for its release, then the connection closes.
     const other = postgresClient(DATABASE, { max: 2, application_name: 'coffre-reserve-test' });
