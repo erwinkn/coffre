@@ -53,10 +53,33 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
   if (credential.row !== null) {
     const held = bulk.get(credential.row.principal) ?? new Map<string, number>();
     bulk.set(credential.row.principal, held);
-    // No policy row, no cap to move: the decision refuses the use (`no_policy`).
-    cap = policy.row === null ? { inSet: false, others: 0 } : bulkStep(held, request.secretId, request.at, policy.row.bulk);
+    // Only on the policy's newest row, which the statement can tell by its seal: none, or one put back, moves nothing,
+    // and the decision refuses the use (`no_policy`, `stale`). One edited under its seal is the vault's to refuse.
+    const current = policy.row !== null && policy.seal !== null && policy.newest !== null && policy.seal.equals(policy.newest);
+    cap = current ? bulkStep(held, request.secretId, request.at, policy.row!.bulk) : { inSet: false, others: 0 };
   }
   return { credential, principal, roles: read('roles', ROLES_REF.id), policy, secret, source, environments, bulk: cap };
+}
+
+/**
+ * A use's purpose and keepsSensitive as its row stores them, in one
+ * smallint (schema 0022): the purpose's code, plus 256 when a copy keeps
+ * values sensitive.
+ */
+export const PURPOSES = ['reveal', 'run', 'compare', 'copy', 'use', 'expose'] as const satisfies readonly UseRequest['purpose'][];
+
+// Every purpose has a code: one missing here fails to compile.
+const everyPurpose: [Exclude<UseRequest['purpose'], (typeof PURPOSES)[number]>] extends [never] ? true : never = true;
+void everyPurpose;
+
+export function purposeCode(request: Pick<UseRequest, 'purpose' | 'keepsSensitive'>): number {
+  return PURPOSES.indexOf(request.purpose) + (request.keepsSensitive ? 256 : 0);
+}
+
+/** The purpose and keepsSensitive a row's code stores; null for a code no release writes. */
+export function purposeOf(code: number): Pick<UseRequest, 'purpose' | 'keepsSensitive'> | null {
+  const purpose = PURPOSES[code % 256];
+  return Number.isInteger(code) && code >= 0 && code < 512 && purpose !== undefined ? { purpose, keepsSensitive: code >= 256 } : null;
 }
 
 /** The log replayed: the rows it says the tables hold, each object's newest seal, every principal's bulk rows, and what does not hold. */

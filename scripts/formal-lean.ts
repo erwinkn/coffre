@@ -406,7 +406,7 @@ function environmentRow(id: string): EnvironmentInput {
     kind: 'environment', id, projectId: chance(0.95) ? projectOf(id) : pick(PROJECTS), slug: slugOf(id) ?? 'none',
     owner: personal ? (chance(0.8) ? 'user:ada' : null) : chance(0.05) ? pick(PEOPLE) : null,
     parentId: personal || id.endsWith('fork') ? (chance(0.9) ? `${projectOf(id)}/dev` : pick(ENVIRONMENTS)) : null,
-    protected: chance(0.3), deleted: chance(0.06), archived: chance(0.1),
+    protected: chance(0.3), deleted: chance(0.06), archived: chance(0.08),
   };
 }
 function secretRow(id: string): SecretInput {
@@ -430,7 +430,11 @@ repeat(20000, () => {
     credential,
     principal: credential.row === null ? null
       : checkedOf(owner ? { ...principalRow('user:ada'), status: 'active' as const, role: 'owner' as const, scope: EVERYWHERE_SCOPE } : maybeNull(0.08, () => principalRow(credential.row!.principal))),
-    roles: checkedOf(maybeNull(0.1, () => ({ kind: 'roles' as const, roles: given.roles, instanceRoles: given.instanceRoles }))),
+    // An Owner's edits: some of the policy's roles, over the release's own.
+    roles: checkedOf(maybeNull(0.1, () => ({
+      kind: 'roles' as const, roles: Object.fromEntries(Object.entries(given.roles).filter(() => chance(0.4))),
+      instanceRoles: Object.fromEntries(Object.entries(given.instanceRoles).filter(() => chance(0.4))),
+    }))),
     policy: checkedOf(maybeNull(0.03, () => ({ kind: 'policy' as const, bulk: { count: 1 + Math.floor(random() * 5), windowMs: 60_000 } }))),
     secret,
     source: secret.row?.source == null ? null : checkedOf(maybeNull(0.15, () => secretRow(secret.row!.source!))),

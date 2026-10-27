@@ -1,6 +1,6 @@
 import { createHash, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
-import { INSTANCE_ROLES, ROLES, type CallerKind, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope } from '@coffre/core/access';
+import { INSTANCE_ROLES, normalDefinition, ROLES, type CallerKind, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope } from '@coffre/core/access';
 import type { WrappedKey } from '@coffre/core/vault';
 
 import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
@@ -89,10 +89,17 @@ export type EnvironmentInput = {
   archived: boolean;
 };
 
+/**
+ * An Owner's edits of the roles, and the roles they made: only what differs
+ * from the release's own tables, which a decision merges them over
+ * (`readerOf`), as 0.14's `livePolicy` does. A release that changes a role
+ * as it ships changes it wherever nobody edited it, and the log, which
+ * never held the shipped tables, replays the same under any release.
+ */
 export type RolesInput = {
   kind: 'roles';
   roles: Readonly<Record<string, RoleDefinition>>;
-  instanceRoles: Readonly<Record<InstanceRole, RoleDefinition>>;
+  instanceRoles: Readonly<Partial<Record<InstanceRole, RoleDefinition>>>;
 };
 
 export type PolicyInput = { kind: 'policy'; bulk: BulkLimit };
@@ -280,24 +287,24 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       return op.op === 'environment.archive' ? { ...environment, archived: op.archived } : { ...environment, deleted: true };
     }
     case 'role.define': {
-      const tables = of('roles') ?? (created('roles') ? builtinRoles() : null);
-      if (tables === null) return undefined;
-      const table: Record<string, RoleDefinition> = { ...tables[op.table] };
+      const edits = of('roles') ?? (created('roles') ? noEdits() : null);
+      if (edits === null) return undefined;
+      const table: Record<string, RoleDefinition> = { ...edits[op.table] };
       const shipped: Readonly<Record<string, RoleDefinition>> = op.table === 'roles' ? ROLES : INSTANCE_ROLES;
-      // No definition: a built-in role back as it ships, or a role of the instance's own gone.
-      if (op.definition !== null) table[op.role] = op.definition;
-      else if (Object.hasOwn(shipped, op.role)) table[op.role] = shipped[op.role]!;
-      else delete table[op.role];
-      return { ...tables, [op.table]: table };
+      const same = op.definition !== null && Object.hasOwn(shipped, op.role) && canonical(normalDefinition(shipped[op.role]!)) === canonical(normalDefinition(op.definition));
+      // No definition, or the one it ships with: no edit, so the release's own decides.
+      if (op.definition === null || same) delete table[op.role];
+      else table[op.role] = op.definition;
+      return { ...edits, [op.table]: table };
     }
     case 'bulk.limit':
       return (created('policy') || of('policy') !== null) && allowedLimit(op) ? { kind: 'policy', bulk: { count: op.count, windowMs: op.windowMs } } : undefined;
   }
 }
 
-/** The roles as they ship: the roles object of a log no Owner edited a role in. */
-export function builtinRoles(): RolesInput {
-  return { kind: 'roles', roles: ROLES, instanceRoles: INSTANCE_ROLES };
+/** No edits: the roles object of a log no Owner edited a role in. */
+export function noEdits(): RolesInput {
+  return { kind: 'roles', roles: {}, instanceRoles: {} };
 }
 
 /** A cap R52 allows: a whole count of at least one, a window above nothing and at most a day (`checkBulkLimit` in config.ts). */

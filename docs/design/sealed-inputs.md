@@ -27,7 +27,7 @@ Every input a decision reads is one object of the log. Its row carries a
 | credential | uuid | whose, what kind (person, bearer, workload), its scope, its end, revoked |
 | secret | the key's uuid | where it is, its current version, its nature, its wrapped data key, or a reference's source |
 | environment | uuid | project, slug, protected, a fork's parent, a personal config's owner, deleted, archived |
-| roles | one, `instance` | the role tables, as an Owner edited them |
+| roles | one, `instance` | an Owner's edits of the roles, and the roles they made |
 | policy | one, `instance` | the bulk cap's count and window (R52) |
 
 Two choices differ from 0.14's shapes:
@@ -38,6 +38,11 @@ Two choices differ from 0.14's shapes:
   object and the environments a use reads (`readerOf`). At an environment
   that is exact: `allows` asks the policy only `protects(environmentId)`, and
   every place a use checks is an environment it read.
+- **The roles object holds edits only,** as 0.14's policy entries do: a
+  role defined as it ships, or put back, is no edit. A decision merges the
+  edits over the running release's tables (`readerOf`), so a release that
+  changes a role as it ships changes it wherever nobody edited it, and the
+  log replays the same under any release: it never held the shipped tables.
 - **The policy object is the cap's configuration.** With roles and
   protection elsewhere, what is left is what the deployment sets that every
   decision reads: `bulkLimit`.
@@ -64,7 +69,7 @@ The log records the request, not its outcome (R53). A use's entry carries:
 | credential | `c1` |
 | key | `DFNS_KEY`'s uuid |
 | place | null: the key's own environment; a fork reading its parent's key names the fork |
-| purpose, keepsSensitive | `reveal`, false: one byte together |
+| purpose, keepsSensitive | `reveal`, false: one smallint, the purpose's code (0 reveal, 1 run, 2 compare, 3 copy, 4 use, 5 expose) plus 256 when a copy keeps values sensitive (`purposeCode`) |
 | time | 14:02:01.300 |
 
 Purpose and place are new against the prototype's slim row: the outcome
@@ -72,7 +77,8 @@ depends on them (a person's `reveal` of a sensitive value is refused, its
 `use` allowed). **Measured** on Postgres 16, 1M rows, heap and index: the
 flags byte and a null place cost nothing (140.8 B per use, as the
 prototype's 140.8 B: they fit in alignment padding). A place on 20% of
-uses: 143.8 B. On every use: 157.6 B.
+uses: 143.8 B. On every use: 157.6 B. (Measured with a one-byte column;
+schema 0022 stores a smallint, and PR 2 reports its size.)
 
 `decideChecked` decides it in four steps:
 
@@ -87,7 +93,9 @@ uses: 143.8 B. On every use: 157.6 B.
    request's time (`credential`); no such key (`missing`); a reference
    whose source is gone (`ended`); a place the key is not read at, or a
    reference to a reference (`bad_claim`); no policy in the log
-   (`no_policy`).
+   (`no_policy`). A key is read at its own environment (a reference's
+   holder's), or through a fork of it: a live, unarchived child of that
+   environment, in the same project, as 0.14's `throughOk` holds it.
 3. **0.14's rules, unchanged:** `keyRefusals`, `useOnlyRefusals`,
    `sensitiveRefusals`, on the reader `readerOf` makes.
 4. **The bulk cap,** with the policy row's count.
@@ -123,6 +131,20 @@ new configuration writes a `bulk.limit` change first (`limitChange`).
   refuses: the use's statement writes the row before the vault decides.
 - A key is the key asked for: two references to one source count twice.
   That is conservative (more counted, never fewer).
+- The statement moves the cap only on the policy's newest row (its seal is
+  the newest change's), which SQL can check; a row edited under its seal is
+  refused `tampered` by the vault after.
+
+**The bulk rows are outside the seals.** A use writes them in its one
+statement, at most once a `refresh` per key, and the replay rebuilds them;
+sealing them would put the vault's key, or a change entry, on that write.
+So a database writer who erases a principal's rows resets its cap, and the
+use that follows is allowed where the replay says `bulk_limit`, with no
+input `stale`. The cap is a rate, not a right: nothing it lets through is
+anything the principal may not read. PR 8's row audit holds every bulk row
+to the replay's, as W211's verifier does, and names the drift. The
+property tests state exactly this: bulk rows moved change a decision only
+between allowed and `bulk_limit`.
 
 ## Replay
 
@@ -152,7 +174,8 @@ the same.
   - rows perturbed (put back, edited, deleted, written with no change, moved
     from another object, sealed with another key): a decision differs from
     the replay's only as `stale` or `tampered`, and always is one when it
-    weighs a perturbed input;
+    weighs a perturbed input; bulk rows moved change it only between
+    allowed and `bulk_limit`;
   - the cap: requests decided in number order, stamped up to the deadline
     apart, never release more than `count` keys in a window.
   - Each fails with the stale check removed, or with a row read before the
@@ -166,11 +189,13 @@ the same.
 |---|---|---|---|---|
 | 1 | Protection on each environment; the policy object holds the cap | protection in the policy object, as 0.14 | `allows` at an environment asks only `protects(id)`: exact on the environments a use reads | the 0.14 `Policy` is rebuilt per use (a few objects) |
 | 2 | The cap's count and window from the sealed policy row | passed per call, as the prototype | live equals replay across a deploy with two configurations | one more input (cached with the rest) |
-| 3 | The use row carries purpose, keepsSensitive (one byte) and the place (null when the key's own) | the prototype's row (credential, key) | 140.8 B per use unchanged; 143.8 B with a place on 20% of uses | the replay can decide every purpose |
+| 3 | The use row carries purpose and keepsSensitive (one smallint, schema 0022) and the place (null when the key's own) | the prototype's row (credential, key) | 140.8 B per use unchanged; 143.8 B with a place on 20% of uses | the replay can decide every purpose |
 | 4 | A reference is the holder's own secret object, its `source` sealed | a reference object of its own | one object fewer per reference | a use through one reads one more input |
 | 5 | Object keys: SHA-256 of kind and id, cut to a uuid | text keys (`member:<id>`) | about 20% cheaper per probe (W211's estimate, open decision 2) | the SQL hashes the principal's id once per use |
 | 6 | Every seal before any row | each input's seal before its own row | both sound; the first gives `stale` for any input not the log's | none measured |
 | 7 | Seals under a key of their own (HKDF label `coffre.vault.seals.v1`) | 0.14's row key | separates 0.15's seals from 0.14's member MACs | none |
+| 8 | The roles object holds edits only, merged over the release's tables | the whole tables, sealed | a release that changes a shipped role replays the same log the same way (review r1: whole tables made the replay fault) | a decision merges two small tables |
+| 9 | The bulk rows outside the seals; the row audit (PR 8) checks them | sealed per principal | no seal, no key, on the use's statement's bulk write | an erased row resets one principal's cap until the audit names it |
 
 ## Open
 

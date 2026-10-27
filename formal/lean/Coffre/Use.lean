@@ -75,8 +75,10 @@ structure EnvIn where
   parent : Option String
   prot : Bool
   deleted : Bool
+  archived : Bool
   deriving Repr, Inhabited
 
+/-- `RolesInput`: an Owner's edits, over the release's own tables. -/
 structure RolesIn where
   roles : Table RoleDef
   instanceRoles : Table RoleDef
@@ -178,7 +180,7 @@ def readerOf (p : Option PrincipalIn) (c : CredentialIn) (roles : RolesIn) (envs
     else if !m.active then ⟨.removed, none', none'⟩
     else
       let guarded := envs.filter fun e => e.prot && !e.deleted
-      let pol : Policy := ⟨roles.roles, roles.instanceRoles, guarded.map (·.id), protectedInOf guarded⟩
+      let pol : Policy := ⟨roles.roles ++ builtinRoles, roles.instanceRoles ++ builtinInstanceRoles, guarded.map (·.id), protectedInOf guarded⟩
       let person := c.principal.startsWith "user:"
       let role := if person then m.role else "member"
       let scope := if person then m.scope else EVERYWHERE
@@ -189,8 +191,8 @@ def readerOf (p : Option PrincipalIn) (c : CredentialIn) (roles : RolesIn) (envs
 def capRefusal (count : Nat) (b : BulkIn) : Code :=
   if !b.inSet && b.others ≥ count then some "bulk_limit" else none
 
-/-- The roles as they ship, when the log has none. -/
-def shippedRoles : RolesIn := ⟨builtinRoles, builtinInstanceRoles⟩
+/-- No edits, when the log has no roles object. -/
+def noEdits : RolesIn := ⟨[], []⟩
 
 /-- What its rows say before 0.14's rules: its credential, its key, where it is read; then the key's read, as `KeyRead`. -/
 def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead :=
@@ -211,14 +213,16 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
         -- The rows read, by the id each was read by.
         let rows : Table EnvIn := ids.filterMap fun id => ((v.envs.get? id).bind (·.row)).map (id, ·)
         let held := r.place.getD s.env
-        let fork := held != s.env && s.source.isNone && (((rows.get? held).bind (·.parent)) == some s.env)
-        if held != s.env && !fork then .error "bad_claim"
+        -- Through a fork, as 0.14's `throughOk`: a live, unarchived child of the key's environment, in its project.
+        let forkOk := match rows.get? held with
+          | some f => f.parent == some s.env && f.project == s.project && !f.deleted && !f.archived
+          | none => false
+        if held != s.env && !forkOk then .error "bad_claim"
         else if v.policy.row.isNone then .error "no_policy"
         else
-          let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD shippedRoles) (rows.map (·.2)) r.time
-          let atProject := if fork then ((rows.get? held).map (·.project)).getD s.project else s.project
+          let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD noEdits) (rows.map (·.2)) r.time
           let envRows : Table EnvRow := rows.map fun (id, e) => (id, ⟨e.project, e.slug, e.owner, e.parent, e.deleted⟩)
-          .ok ⟨reader, c.principal, some r.purpose, r.keepsSensitive, ⟨x.project, x.env⟩, x.id, ⟨atProject, held⟩, envRows,
+          .ok ⟨reader, c.principal, some r.purpose, r.keepsSensitive, ⟨x.project, x.env⟩, x.id, ⟨s.project, held⟩, envRows,
             x.sensitive, s.source.isSome⟩
 
 /-- What refuses a use by its rows: before the rules, or by them. -/

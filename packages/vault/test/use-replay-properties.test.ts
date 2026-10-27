@@ -172,7 +172,7 @@ test(`a use decided on the rows is the replay's decision when the rows are the r
 
 type Perturbation = 'rollback' | 'edit' | 'delete' | 'unlogged' | 'foreign' | 'reseal';
 
-test(`rows that are not the replay's change a decision only to stale or tampered, and always when the decision weighs one, seed ${settings.seed}`, () => hegel.test((tc) => {
+test(`rows that are not the replay's change a decision only to stale or tampered, and always when the decision weighs one; bulk rows only the cap's, seed ${settings.seed}`, () => hegel.test((tc) => {
   const { world, at } = drawWorld(tc);
   const replayed = replay(SEAL_KEYS, world.log, undefined, emptyReplay());
   const rows = new Map(world.rows);
@@ -212,11 +212,20 @@ test(`rows that are not the replay's change a decision only to stale or tampered
   }
   const request = drawRequest(tc, at + tc.draw(gs.integers({ minValue: 0, maxValue: 3_000 })));
   const cloneBulk = (bulk: Map<string, BulkRows>) => new Map([...bulk].map(([principal, held]) => [principal, new Map(held)]));
-  const liveView = readUse(rows, world.newest, cloneBulk(world.bulk), request);
+  // The bulk rows are outside the seals (docs/design/sealed-inputs.md): erased or moved, now and then, they may change
+  // whether the cap refuses, and nothing else.
+  const liveBulk = cloneBulk(world.bulk);
+  const bulkMoved = tc.draw(gs.booleans());
+  if (bulkMoved) {
+    for (const held of liveBulk.values()) for (const key of [...held.keys()]) if (tc.draw(gs.booleans())) held.delete(key);
+    else held.set(key, held.get(key)! - tc.draw(gs.integers({ minValue: -120_000, maxValue: 120_000 })));
+  }
+  const liveView = readUse(rows, world.newest, liveBulk, request);
   const replayView = readUse(replayed.rows, replayed.newest, cloneBulk(replayed.bulk), request);
   const live = decideUse(SEAL_KEYS, liveView, request);
   const truth = decideUse(SEAL_KEYS, replayView, request);
-  if (live !== truth) assert.ok(live === 'stale' || live === 'tampered', `live ${live}, the replay ${truth}`);
+  const capOnly = bulkMoved && (live === null || live === 'bulk_limit') && (truth === null || truth === 'bulk_limit');
+  if (live !== truth) assert.ok(live === 'stale' || live === 'tampered' || capOnly, `live ${live}, the replay ${truth}`);
   // The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught.
   const weighed = inputsOf(replayView, request);
   if (weighed.some((key) => perturbed.has(key))) assert.ok(live === 'stale' || live === 'tampered', `a weighed input was not the log's, and live answered ${live}`);

@@ -1,11 +1,11 @@
 import {
-  allows, EVERYWHERE, NOTHING, ownsProject, readsSensitive, useOnly, withinCredential,
+  allows, EVERYWHERE, INSTANCE_ROLES, NOTHING, ROLES, ownsProject, readsSensitive, useOnly, withinCredential,
   type HeldKey, type Holdings, type Permission, type Place, type Policy,
 } from '@coffre/core/access';
 import { handsBack, type Access, type Purpose, type RefusalCode } from '@coffre/core/vault';
 
 import { overCap, type BulkRead } from './bulk.ts';
-import { builtinRoles, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
+import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
 import type { EnvironmentRow } from './store.ts';
 
 /**
@@ -334,8 +334,9 @@ export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source'
  * 2. **The credential and the key:** missing, revoked or ended at the
  *    request's time; a key that is no more, a reference whose source is
  *    gone (`ended`), and a place the key is not read at (`bad_claim`): its
- *    own environment, a reference's holder, or a fork of its environment;
- *    and a reference to a reference (`bad_claim`).
+ *    own environment (a reference's holder's), or a live, unarchived fork
+ *    of it in the same project, as 0.14's `throughOk`; and a reference to
+ *    a reference (`bad_claim`).
  * 3. **0.14's rules, unchanged:** `keyRefusals`, then `useOnlyRefusals`,
  *    then `sensitiveRefusals`, on the reader its principal, credential,
  *    roles and environments make (`readerOf`). Nothing is `vet`ted: a
@@ -371,13 +372,16 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
     const row = view.environments.get(id)!.row;
     return row === null ? [] : [[id, row] as const];
   }));
+  // Read through a fork (0.14's `throughOk`): a live, unarchived child of the key's environment, a reference's holder's
+  // included, in the same project.
   const held = request.place ?? secret.environmentId;
-  const fork = held !== secret.environmentId && secret.source === null && rows.get(held)?.parentId === secret.environmentId;
-  if (held !== secret.environmentId && !fork) return 'bad_claim';
+  const fork = rows.get(held);
+  if (held !== secret.environmentId
+    && (fork === undefined || fork.parentId !== secret.environmentId || fork.projectId !== secret.projectId || fork.deleted || fork.archived)) return 'bad_claim';
   const policy = view.policy.row;
   if (policy === null) return 'no_policy';
-  const reader = readerOf(view.principal!.row, credential, view.roles.row ?? builtinRoles(), rows.values(), request.at);
-  const at: SecretPlace = { projectId: fork ? rows.get(held)!.projectId : secret.projectId, environmentId: held };
+  const reader = readerOf(view.principal!.row, credential, view.roles.row ?? noEdits(), rows.values(), request.at);
+  const at: SecretPlace = { projectId: secret.projectId, environmentId: held };
   const place: SecretPlace = { projectId: value.projectId, environmentId: value.environmentId };
   const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived }]) => [id, { projectId, slug, owner, parentId, deleted, archived }]));
   const permission: Permission = request.purpose === 'use' ? 'secret.use' : 'secret.read';
@@ -395,7 +399,7 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
  * What a use's principal holds through its credential, at `at`, as
  * `#standing` and `through` in vault.ts make it from 0.14's rows: their
  * role and grants, live and lapsed; the credential's scope and kind; and
- * the policy, the roles as the log has them and, of the environments the
+ * the policy, the release's roles with the log's edits over them and, of the environments the
  * use weighs, those protected and not deleted. `allows` asks the policy
  * only whether the place it checks is protected, and every place a use
  * checks is one of those, so the policy is as good as the whole one there.
@@ -409,8 +413,8 @@ export function readerOf(principal: PrincipalInput | null, credential: Credentia
   }
   const guarded = [...environments].filter((environment) => environment.protected && !environment.deleted);
   const policy: Policy = {
-    roles: roles.roles,
-    instanceRoles: roles.instanceRoles,
+    roles: { ...ROLES, ...roles.roles },
+    instanceRoles: { ...INSTANCE_ROLES, ...roles.instanceRoles },
     protected: guarded.map((environment) => environment.id),
     protectedIn: guarded.reduce<Record<string, { environmentId: string; slug: string | null }[]>>(
       (byProject, environment) => ({ ...byProject, [environment.projectId]: [...(byProject[environment.projectId] ?? []), { environmentId: environment.id, slug: environment.slug }] }),

@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { EVERYWHERE } from '@coffre/core/access';
+import { EVERYWHERE, ROLES } from '@coffre/core/access';
 
 import { bulkStep, refreshMs, USE_DEADLINE_MS } from '../src/bulk.ts';
 import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
-import { applyOp, limitChange, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
-import { replay, type LoggedUse } from '../src/log-replay.ts';
+import { applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
+import { purposeCode, purposeOf, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
 import type { UseCode } from '../src/decide.ts';
 import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World } from './world.ts';
 
@@ -250,4 +250,60 @@ test("a personal config's owner on a token: Ada's viewer token for dev reads her
     scope: [{ projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }],
   });
   assert.deepEqual(liveAndReplayed(w, [ask(4, 6), ask(4, 6, { purpose: 'use' }), ask(4, 3)]), [null, null, 'no_grant']);
+});
+
+test('a fork is read through only as 0.14 does: live, unarchived, a child of the key\'s environment, in its project', () => {
+  const w = market({ count: 100, windowMs: 60_000 });
+  const other = '00000000-0000-4000-8000-0000000000f1';
+  // Bo's only grant is on a fork of dev made in another project: it opens nothing of market's.
+  w.change({ kind: 'environment', id: other }, { op: 'environment.create', projectId: '00000000-0000-4000-8000-00000000000f', slug: 'fork', owner: null, parentId: DEV, protected: false });
+  w.change({ kind: 'principal', id: BO }, { op: 'access.revoke', place: { projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, environmentSlug: null } });
+  w.change({ kind: 'principal', id: BO }, { op: 'access.grant', grant: { projectId: '00000000-0000-4000-8000-00000000000f', environmentId: other, environmentSlug: null, role: 'viewer', expiresAt: null } });
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: FORK }), ask(2, 1, { place: other }), ask(1, 9, { place: FORK })]), [null, 'bad_claim', null]);
+  w.change({ kind: 'environment', id: FORK }, { op: 'environment.archive', archived: true });
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: FORK })]), ['bad_claim']);
+  w.change({ kind: 'environment', id: FORK }, { op: 'environment.delete' });
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: FORK })]), ['bad_claim']);
+});
+
+test("the roles object holds an Owner's edits only: a role as it ships is no edit, and the release's tables decide the rest", () => {
+  const ref = { kind: 'roles', id: 'instance' } as const;
+  const viewer = ROLES.viewer;
+  assert.deepEqual(applyOp(null, ref, { op: 'role.define', table: 'roles', role: 'viewer', definition: null }), noEdits());
+  assert.deepEqual(applyOp(null, ref, { op: 'role.define', table: 'roles', role: 'viewer', definition: { ...viewer, permissions: [...viewer.permissions].reverse() } }), noEdits());
+  const narrowed = { ...viewer, permissions: ['secret.use' as const], protected: ['secret.use' as const] };
+  const edited = applyOp(null, ref, { op: 'role.define', table: 'roles', role: 'viewer', definition: narrowed });
+  assert.deepEqual(edited, { kind: 'roles', roles: { viewer: narrowed }, instanceRoles: {} });
+  assert.deepEqual(applyOp(edited!, ref, { op: 'role.define', table: 'roles', role: 'viewer', definition: null }), noEdits());
+  // Narrowed, a Viewer no longer reveals dev's key, and uses it still; put back as it ships, reveals it again.
+  const w = market({ count: 100, windowMs: 60_000 });
+  w.change(ref, { op: 'role.define', table: 'roles', role: 'viewer', definition: narrowed });
+  assert.deepEqual(liveAndReplayed(w, [ask(2, 1), ask(2, 1, { purpose: 'use' })]), ['no_grant', null]);
+  w.change(ref, { op: 'role.define', table: 'roles', role: 'viewer', definition: null });
+  assert.deepEqual(liveAndReplayed(w, [ask(2, 1)]), [null]);
+});
+
+test('the bulk rows are outside the seals: erased, they let a request the replay refuses bulk_limit through, which the row audit names', () => {
+  // A database writer who erases a principal's bulk rows resets its cap, and no input reads stale: the cap is a rate,
+  // not a right, and PR 8's row audit holds every bulk row to the replay's (docs/design/sealed-inputs.md).
+  const w = market({ count: 2, windowMs: 60_000 });
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 1), ask(1, 4)]), [null, null]);
+  w.bulk.clear();
+  const live = w.use(ask(1, 5));
+  const replayed: (UseCode | null)[] = [];
+  const result = replay(SEAL_KEYS, w.log, (_, code) => replayed.push(code));
+  assert.equal(live, null);
+  assert.equal(replayed.at(-1), 'bulk_limit');
+  assert.notDeepEqual(result.bulk.get(ADA), w.bulk.get(ADA));
+});
+
+test('purpose and keepsSensitive are one smallint in the use row: the purpose code, plus 256 for a copy kept sensitive', () => {
+  assert.deepEqual([...PURPOSES], ['reveal', 'run', 'compare', 'copy', 'use', 'expose']);
+  for (const purpose of PURPOSES) {
+    for (const keepsSensitive of [false, true]) assert.deepEqual(purposeOf(purposeCode({ purpose, keepsSensitive })), { purpose, keepsSensitive });
+  }
+  assert.equal(purposeCode({ purpose: 'copy', keepsSensitive: true }), 259);
+  assert.equal(purposeOf(6), null);
+  assert.equal(purposeOf(512), null);
+  assert.equal(purposeOf(-1), null);
 });

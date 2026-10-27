@@ -215,7 +215,7 @@ def secretIn (j : Json) : Parse SecretIn := do
 
 def envIn (j : Json) : Parse EnvIn := do
   pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "slug"), ← optStr (field j "owner"), ← optStr (field j "parentId"),
-    ← (← req j "protected").getBool?, ← (← req j "deleted").getBool?⟩
+    ← (← req j "protected").getBool?, ← (← req j "deleted").getBool?, ← (← req j "archived").getBool?⟩
 
 def rolesIn (j : Json) : Parse RolesIn := do pure ⟨← table roleDef (← req j "roles"), ← table roleDef (← req j "instanceRoles")⟩
 
