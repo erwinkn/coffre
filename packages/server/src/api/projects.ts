@@ -35,7 +35,7 @@ import {
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
-import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectMoved, retrying, secretChange } from './changes.ts';
+import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectMoved, retrying, sameIds, secretChange } from './changes.ts';
 import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, vaultCredential, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
@@ -632,12 +632,6 @@ export async function patchEnvironment(
       };
     }, changes);
   });
-}
-
-/** Two sets of ids alike. */
-function sameIds(a: readonly string[], b: readonly string[]): boolean {
-  const set = new Set(a);
-  return set.size === new Set(b).size && b.every((id) => set.has(id));
 }
 
 /**

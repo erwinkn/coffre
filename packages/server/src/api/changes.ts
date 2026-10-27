@@ -98,9 +98,8 @@ export class AppChanges {
    * log's.
    */
   expectRevoked(ids: Iterable<string>): void {
-    const prepared = new Set(this.#changes.filter((change) => change.kind === 'credential' && change.before !== null && !change.before.columns.revoked && change.after.revoked).map(({ id }) => id));
-    const written = new Set(ids);
-    if (prepared.size !== written.size || [...written].some((id) => !prepared.has(id))) throw new ObjectMoved();
+    const prepared = this.#changes.filter((change) => change.kind === 'credential' && change.before !== null && !change.before.columns.revoked && change.after.revoked).map(({ id }) => id);
+    if (!sameIds([...ids], prepared)) throw new ObjectMoved();
   }
 
   /** The write ends without writing what these changes are of (a code expired, a token unknown): none is made, unless kept again. */
@@ -199,6 +198,12 @@ export function credentialChange(
   };
 }
 
+/** Two sets of ids alike: a set a write chose again under the head, and the one it prepared. */
+export function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  const set = new Set(a);
+  return set.size === new Set(b).size && b.every((id) => set.has(id));
+}
+
 /** A seal as `prepare` takes it. */
 function sealText(seal: Buffer | null): string | null {
   return seal === null ? null : seal.toString('base64');
@@ -212,6 +217,8 @@ function sealText(seal: Buffer | null): string | null {
  * of its own, and the envelope's AEAD binds the ciphertext to it.
  */
 export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null): ObjectChange {
+  // Archiving leaves no seal (`secret.delete`): an archived row with one was archived around coffre, and no change moves it.
+  if (before?.archived === true && before.seal !== null) throw new Error(`the key ${id} was archived around coffre, its seal kept: its row is not its newest change's`);
   return { kind: 'secret', id, before: before === undefined || before.archived ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
 }
 
