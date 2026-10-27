@@ -1,6 +1,7 @@
 import { EVERYWHERE } from '@coffre/core/access';
 
 import type { BulkRows } from '../src/bulk.ts';
+import type { BulkLimit } from '../src/config.ts';
 import { decideUse, type UseCode, type UseRequest } from '../src/decide.ts';
 import { applyOp, objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { readUse, type Logged } from '../src/log-replay.ts';
@@ -18,6 +19,8 @@ export class World {
   /** Each object's newest seal, as the changes table has it. */
   readonly newest = new Map<string, Buffer | null>();
   readonly bulk = new Map<string, BulkRows>();
+  /** The cap the policy's newest change logged, as the changes table has it. */
+  limit: BulkLimit | null = null;
   readonly log: Logged[] = [];
   /** Every row each object has had, with its seal: what a database writer could put back. */
   readonly history = new Map<string, { row: Input; seal: Buffer }[]>();
@@ -35,6 +38,7 @@ export class World {
       this.history.set(key, [...(this.history.get(key) ?? []), { row: after, seal: seal! }]);
     }
     this.newest.set(key, seal);
+    if (after?.kind === 'policy') this.limit = after.bulk;
     this.log.push({ kind: 'change', number: (this.#number += 1n), at, ref, op, seal });
     return true;
   }
@@ -42,7 +46,7 @@ export class World {
   /** A use: read, logged, decided. */
   use(request: UseRequest): UseCode | null {
     this.log.push({ kind: 'use', number: (this.#number += 1n), request });
-    return decideUse(SEAL_KEYS, readUse(this.rows, this.newest, this.bulk, request), request);
+    return decideUse(SEAL_KEYS, readUse(this.rows, this.newest, this.limit, this.bulk, request), request);
   }
 }
 

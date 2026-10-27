@@ -215,10 +215,11 @@ export function live(grant: { expiresAt: number | null }, at: number): boolean {
 
 /**
  * A use as its log entry records it (plan, PR 3; the request, not the
- * outcome): on which credential, which key, the place its permission is
- * checked at, why, and when. `place` is null for the key's own
- * environment; a fork reading its parent's key, or a reference's holder,
- * names it as `keyRefusals`' `at` does.
+ * outcome): on which credential, which key, through which environment,
+ * why, and when. `place` is 0.14's `through`: a fork an inherited value is
+ * read in, which decides nothing but names the read; null when the key is
+ * read in its own environment (a reference's holder's), where it is
+ * decided either way.
  */
 export type UseRequest = {
   credential: string;
@@ -303,15 +304,15 @@ export function decideUse(keys: SealKeys, view: UseView, request: UseRequest): U
 
 /**
  * The environments a use's decision weighs, in the order it reaches them:
- * where its permission is checked, where its value is, and a personal
- * config's parent. Read from the rows the view has, so the use's statement
+ * the one it is read through, the key's own (where its permission is
+ * checked), where its value is, and a personal config's parent. Read from the rows the view has, so the use's statement
  * and the replay read the same ones.
  */
 export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source' | 'environments'>, request: Pick<UseRequest, 'place'>): string[] {
   const secret = view.secret.row;
   if (secret === null) return [];
   const value = secret.source === null ? secret : view.source?.row ?? null;
-  const ids = [request.place ?? secret.environmentId, secret.environmentId];
+  const ids = [...(request.place === null ? [] : [request.place]), secret.environmentId];
   if (value !== null) {
     ids.push(value.environmentId);
     const own = view.environments.get(value.environmentId)?.row;
@@ -333,10 +334,11 @@ export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source'
  *    (HotPathOne's `StaleFirst`, `TamperVisible`).
  * 2. **The credential and the key:** missing, revoked or ended at the
  *    request's time; a key that is no more, a reference whose source is
- *    gone (`ended`), and a place the key is not read at (`bad_claim`): its
- *    own environment (a reference's holder's), or a live, unarchived fork
- *    of it in the same project, as 0.14's `throughOk`; and a reference to
- *    a reference (`bad_claim`).
+ *    gone (`ended`), a reference to a reference, and a place it is read
+ *    through that 0.14's `throughOk` refuses (`bad_claim`): one but a live,
+ *    unarchived environment of the key's project other than the key's own.
+ *    Permission is decided at the key's own environment (a reference's
+ *    holder's), whatever it is read through.
  * 3. **0.14's rules, unchanged:** `keyRefusals`, then `useOnlyRefusals`,
  *    then `sensitiveRefusals`, on the reader its principal, credential,
  *    roles and environments make (`readerOf`). Nothing is `vet`ted: a
@@ -372,16 +374,16 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
     const row = view.environments.get(id)!.row;
     return row === null ? [] : [[id, row] as const];
   }));
-  // Read through a fork (0.14's `throughOk`): a live, unarchived child of the key's environment, a reference's holder's
-  // included, in the same project.
-  const held = request.place ?? secret.environmentId;
-  const fork = rows.get(held);
-  if (held !== secret.environmentId
-    && (fork === undefined || fork.parentId !== secret.environmentId || fork.projectId !== secret.projectId || fork.deleted || fork.archived)) return 'bad_claim';
+  // Read through a fork (0.14's `throughOk`): a live, unarchived environment of the key's project, not its own. It
+  // decides nothing: the key is decided where it is held.
+  if (request.place !== null) {
+    const fork = rows.get(request.place);
+    if (request.place === secret.environmentId || fork === undefined || fork.projectId !== secret.projectId || fork.deleted || fork.archived) return 'bad_claim';
+  }
   const policy = view.policy.row;
   if (policy === null) return 'no_policy';
   const reader = readerOf(view.principal!.row, credential, view.roles.row ?? noEdits(), rows.values(), request.at);
-  const at: SecretPlace = { projectId: secret.projectId, environmentId: held };
+  const at: SecretPlace = { projectId: secret.projectId, environmentId: secret.environmentId };
   const place: SecretPlace = { projectId: value.projectId, environmentId: value.environmentId };
   const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived }]) => [id, { projectId, slug, owner, parentId, deleted, archived }]));
   const permission: Permission = request.purpose === 'use' ? 'secret.use' : 'secret.read';

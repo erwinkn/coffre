@@ -167,7 +167,9 @@ test(`a use decided on the rows is the replay's decision when the rows are the r
   // The rows, the newest seals and the cap's rows the replay ends with are the tables'.
   assert.deepEqual(new Map([...result.rows].map(([k, v]) => [k, v.row])), new Map([...world.rows].map(([k, v]) => [k, v.row])));
   assert.deepEqual(result.newest, world.newest);
+  // BulkReplayAgrees: the cap's rows are the replay's, every request the cap admitted counted, `stale` ones included.
   assert.deepEqual(result.bulk, world.bulk);
+  assert.deepEqual(result.limit, world.limit);
 }, settings));
 
 type Perturbation = 'rollback' | 'edit' | 'delete' | 'unlogged' | 'foreign' | 'reseal';
@@ -220,8 +222,8 @@ test(`rows that are not the replay's change a decision only to stale or tampered
     for (const held of liveBulk.values()) for (const key of [...held.keys()]) if (tc.draw(gs.booleans())) held.delete(key);
     else held.set(key, held.get(key)! - tc.draw(gs.integers({ minValue: -120_000, maxValue: 120_000 })));
   }
-  const liveView = readUse(rows, world.newest, liveBulk, request);
-  const replayView = readUse(replayed.rows, replayed.newest, cloneBulk(replayed.bulk), request);
+  const liveView = readUse(rows, world.newest, world.limit, liveBulk, request);
+  const replayView = readUse(replayed.rows, replayed.newest, replayed.limit, cloneBulk(replayed.bulk), request);
   const live = decideUse(SEAL_KEYS, liveView, request);
   const truth = decideUse(SEAL_KEYS, replayView, request);
   const capOnly = bulkMoved && (live === null || live === 'bulk_limit') && (truth === null || truth === 'bulk_limit');

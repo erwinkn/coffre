@@ -79,10 +79,10 @@ test('the 0.14 rules decide, on the objects: grants, protection, sensitivity, pe
     ask(1, 3), // Ada, an Owner, reads prod: protected, which an Owner reads still
     ask(1, 6), // Ada's own personal config
     ask(2, 6), // nobody else's, whatever they hold
-    ask(2, 9, { place: FORK }), // the fork's reference: Bo holds nothing in the fork
-    ask(1, 9, { place: FORK }), // Ada does
-    ask(1, 1, { place: FORK }), // the fork reads its parent's key
-    ask(1, 1, { place: PROD }), // prod is no place dev's key is read at
+    ask(2, 9), // the fork's reference: Bo holds nothing in the fork
+    ask(1, 9), // Ada does
+    ask(1, 1, { place: FORK }), // the fork reads its parent's key, decided in dev
+    ask(1, 1, { place: DEV }), // a key is never read through its own environment
     ask(3, 1), // ci, a Viewer of market
     ask(2, 1, { at: 1_000_000 }), // Bo's session has ended
     ask(7, 1), // no such credential
@@ -96,7 +96,7 @@ test('a revoke, a removal and a deleted environment refuse, as the replay does',
   w.change({ kind: 'principal', id: CI }, { op: 'member.remove' });
   w.change({ kind: 'environment', id: PROD }, { op: 'environment.delete' });
   w.change({ kind: 'secret', id: key(1) }, { op: 'secret.delete' });
-  assert.deepEqual(liveAndReplayed(w, [ask(2, 4), ask(3, 4), ask(1, 3), ask(1, 9, { place: FORK }), ask(1, 1)]), ['no_grant', 'removed', 'deleted', 'ended', 'missing']);
+  assert.deepEqual(liveAndReplayed(w, [ask(2, 4), ask(3, 4), ask(1, 3), ask(1, 9), ask(1, 1)]), ['no_grant', 'removed', 'deleted', 'ended', 'missing']);
 });
 
 test('a row put back from before a change is stale, a row edited is tampered, and the replay names neither: rows must be the log\'s', () => {
@@ -177,7 +177,7 @@ test('the bulk cap: count keys a window, repeats pass, a refused request moves n
   assert.deepEqual(liveAndReplayed(v, [ask(2, 3), ask(2, 1), ask(2, 4)]), ['no_grant', null, 'bulk_limit']);
 });
 
-test('a stale use still moves the cap, live and replayed alike', () => {
+test('a stale use still moves the cap, live and replayed alike (HotPathOneStaleBulk)', () => {
   const w = market({ count: 1, windowMs: 60_000 });
   const c = objectKey({ kind: 'credential', id: credential(1) });
   const row = w.rows.get(c)!;
@@ -188,7 +188,7 @@ test('a stale use still moves the cap, live and replayed alike', () => {
   assert.deepEqual(liveAndReplayed(w, [ask(1, 4)]), ['bulk_limit']);
 });
 
-test("the cap's count is the log's: changed at a restart, the replay holds live across the change", () => {
+test("the cap's count is the log's newest policy change: changed at a restart, the replay holds live across the change (CapSealed, BulkReplayAgrees)", () => {
   const w = market({ count: 1, windowMs: 60_000 });
   const policy = () => w.rows.get(objectKey({ kind: 'policy', id: 'instance' }))!.row as PolicyInput;
   assert.equal(limitChange(policy(), { count: 1, windowMs: 60_000 }), null);
@@ -252,18 +252,33 @@ test("a personal config's owner on a token: Ada's viewer token for dev reads her
   assert.deepEqual(liveAndReplayed(w, [ask(4, 6), ask(4, 6, { purpose: 'use' }), ask(4, 3)]), [null, null, 'no_grant']);
 });
 
-test('a fork is read through only as 0.14 does: live, unarchived, a child of the key\'s environment, in its project', () => {
+test("a fork is read through as 0.14 does: it gates the read and decides nothing, the key is decided where it is held", () => {
   const w = market({ count: 100, windowMs: 60_000 });
+  const dev = { projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, environmentSlug: null };
+  // Bo, a Viewer of dev alone, reads dev's key through the fork: decided in dev.
+  assert.deepEqual(liveAndReplayed(w, [ask(2, 1, { place: FORK })]), [null]);
+  // A Viewer of the fork alone reads none of dev's keys through it: inherited values take read on the parent.
+  w.change({ kind: 'principal', id: BO }, { op: 'access.revoke', place: dev });
+  w.change({ kind: 'principal', id: BO }, { op: 'access.grant', grant: { ...dev, environmentId: FORK, role: 'viewer', expiresAt: null } });
+  assert.deepEqual(liveAndReplayed(w, [ask(2, 1, { place: FORK }), ask(2, 9)]), ['no_grant', null]);
+  // Through an environment of another project, or the key's own: refused, whatever is held.
   const other = '00000000-0000-4000-8000-0000000000f1';
-  // Bo's only grant is on a fork of dev made in another project: it opens nothing of market's.
   w.change({ kind: 'environment', id: other }, { op: 'environment.create', projectId: '00000000-0000-4000-8000-00000000000f', slug: 'fork', owner: null, parentId: DEV, protected: false });
-  w.change({ kind: 'principal', id: BO }, { op: 'access.revoke', place: { projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, environmentSlug: null } });
-  w.change({ kind: 'principal', id: BO }, { op: 'access.grant', grant: { projectId: '00000000-0000-4000-8000-00000000000f', environmentId: other, environmentSlug: null, role: 'viewer', expiresAt: null } });
-  assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: FORK }), ask(2, 1, { place: other }), ask(1, 9, { place: FORK })]), [null, 'bad_claim', null]);
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: other }), ask(1, 1, { place: DEV }), ask(1, 1, { place: FORK })]), ['bad_claim', 'bad_claim', null]);
   w.change({ kind: 'environment', id: FORK }, { op: 'environment.archive', archived: true });
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: FORK })]), ['bad_claim']);
   w.change({ kind: 'environment', id: FORK }, { op: 'environment.delete' });
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1, { place: FORK })]), ['bad_claim']);
+});
+
+test('a replay resumed on its own state goes on from its last number: an entry repeated at the seam is out of order', () => {
+  const w = market();
+  w.use(ask(1, 1));
+  const state = replay(SEAL_KEYS, w.log);
+  assert.deepEqual(state.faults, []);
+  replay(SEAL_KEYS, w.log.slice(-1), undefined, state);
+  assert.equal(state.faults.length, 1);
+  assert.match(state.faults[0]!, /out of number order/);
 });
 
 test("the roles object holds an Owner's edits only: a role as it ships is no edit, and the release's tables decide the rest", () => {
@@ -306,4 +321,18 @@ test('purpose and keepsSensitive are one smallint in the use row: the purpose co
   assert.equal(purposeOf(6), null);
   assert.equal(purposeOf(512), null);
   assert.equal(purposeOf(-1), null);
+});
+
+test("a policy row put back moves the cap as the log's newest policy change does, never as the row says (CapSealed)", () => {
+  const w = market({ count: 1, windowMs: 60_000 });
+  const p = objectKey({ kind: 'policy', id: 'instance' });
+  const old = w.rows.get(p)!;
+  w.change({ kind: 'policy', id: 'instance' }, { op: 'bulk.limit', count: 5, windowMs: 60_000 });
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 1)]), [null]);
+  // The count-1 row put back: the use is stale, and the cap moves by the logged count of 5, as the replay's does.
+  w.rows.set(p, old);
+  assert.equal(w.use(ask(1, 4)), 'stale');
+  const result = replay(SEAL_KEYS, w.log);
+  assert.deepEqual(result.bulk, w.bulk);
+  assert.equal(w.bulk.get(ADA)?.has(key(4)), true);
 });

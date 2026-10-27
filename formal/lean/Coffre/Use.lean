@@ -12,6 +12,12 @@ HMAC is the driver's to compute, as the audit chain's MACs are
 (`verifyEntries`); the order the decision checks them in, what it weighs,
 and everything after, are the model's.
 
+The code throws on a view no use's statement reads (a credential read
+without its principal or its bulk row, a reference without its source, an
+environment it weighs left unread); the model answers `unread` there. The
+comparison draws only views as `readUse` builds them, so code and model
+are compared on those; the theorems hold for every view.
+
 - `allowed_sealed`: an allowed use read every input it weighs as the log's
   newest, each validly sealed.
 - `stale_credential_refused`: a credential row that is not the log's
@@ -102,7 +108,7 @@ structure UseView where
   bulk : Option BulkIn
   deriving Repr, Inhabited
 
-/-- `UseRequest`, but its credential and key, which the view was read by. -/
+/-- `UseRequest`, but its credential and key, which the view was read by; `place`, 0.14's `through`. -/
 structure UseReq where
   place : Option String
   purpose : String
@@ -136,7 +142,7 @@ def useEnvs (v : UseView) (place : Option String) : List String :=
           | some e => if e.owner.isSome then e.parent.toList else []
           | none => []
         x.env :: personalParent
-    dedup ([place.getD s.env, s.env] ++ more)
+    dedup (place.toList ++ [s.env] ++ more)
 
 /-- Each input's seal refusal, in the order the decision reaches them. -/
 def sealRefusals (v : UseView) (envs : List (In EnvIn)) : List Code :=
@@ -212,17 +218,18 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
         if x.source.isSome && s.source.isSome then .error "bad_claim" else
         -- The rows read, by the id each was read by.
         let rows : Table EnvIn := ids.filterMap fun id => ((v.envs.get? id).bind (·.row)).map (id, ·)
-        let held := r.place.getD s.env
-        -- Through a fork, as 0.14's `throughOk`: a live, unarchived child of the key's environment, in its project.
-        let forkOk := match rows.get? held with
-          | some f => f.parent == some s.env && f.project == s.project && !f.deleted && !f.archived
-          | none => false
-        if held != s.env && !forkOk then .error "bad_claim"
+        -- Through a fork, as 0.14's `throughOk`: a live, unarchived environment of the key's project, not its own.
+        let throughOk := match r.place with
+          | none => true
+          | some p => p != s.env && match rows.get? p with
+            | some f => f.project == s.project && !f.deleted && !f.archived
+            | none => false
+        if !throughOk then .error "bad_claim"
         else if v.policy.row.isNone then .error "no_policy"
         else
           let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD noEdits) (rows.map (·.2)) r.time
           let envRows : Table EnvRow := rows.map fun (id, e) => (id, ⟨e.project, e.slug, e.owner, e.parent, e.deleted⟩)
-          .ok ⟨reader, c.principal, some r.purpose, r.keepsSensitive, ⟨x.project, x.env⟩, x.id, ⟨s.project, held⟩, envRows,
+          .ok ⟨reader, c.principal, some r.purpose, r.keepsSensitive, ⟨x.project, x.env⟩, x.id, ⟨s.project, s.env⟩, envRows,
             x.sensitive, s.source.isSome⟩
 
 /-- What refuses a use by its rows: before the rules, or by them. -/

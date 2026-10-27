@@ -68,7 +68,7 @@ The log records the request, not its outcome (R53). A use's entry carries:
 |---|---|
 | credential | `c1` |
 | key | `DFNS_KEY`'s uuid |
-| place | null: the key's own environment; a fork reading its parent's key names the fork |
+| place | 0.14's `through`: the fork an inherited value is read in; null when read in the key's own environment |
 | purpose, keepsSensitive | `reveal`, false: one smallint, the purpose's code (0 reveal, 1 run, 2 compare, 3 copy, 4 use, 5 expose) plus 256 when a copy keeps values sensitive (`purposeCode`) |
 | time | 14:02:01.300 |
 
@@ -91,14 +91,19 @@ schema 0022 stores a smallint, and PR 2 reports its size.)
    outright, and a row written with no change at all.
 2. **The credential and the key:** missing, revoked or ended at the
    request's time (`credential`); no such key (`missing`); a reference
-   whose source is gone (`ended`); a place the key is not read at, or a
-   reference to a reference (`bad_claim`); no policy in the log
-   (`no_policy`). A key is read at its own environment (a reference's
-   holder's), or through a fork of it: a live, unarchived child of that
-   environment, in the same project, as 0.14's `throughOk` holds it.
+   whose source is gone (`ended`); a reference to a reference, or a place
+   0.14's `throughOk` refuses (`bad_claim`); no policy in the log
+   (`no_policy`). The place a key is read through **decides nothing**, as
+   in 0.14: it must be a live, unarchived environment of the key's project
+   other than the key's own, and the key is decided where it is held (a
+   reference's holder). Example: Bo, a Viewer of `market/dev` alone, reads
+   dev's key through `market/fork`: allowed. Bo, a Viewer of the fork
+   alone: `no_grant`, as forking.md says (inherited values take read on the
+   parent).
 3. **0.14's rules, unchanged:** `keyRefusals`, `useOnlyRefusals`,
    `sensitiveRefusals`, on the reader `readerOf` makes.
-4. **The bulk cap,** with the policy row's count.
+4. **The bulk cap,** with the policy's count (its row, checked current by
+   then).
 
 Example: Bo is a Viewer of `market/dev`. Ada revokes him (seal S0 after
 S1). An attacker with database access puts back Bo's row with his grant
@@ -117,11 +122,14 @@ seals, the property tests fail.
 ## The bulk cap
 
 As W211 built it (hot-path-one.md, "The bulk cap"), with **both numbers
-from the policy row**, sealed, not from the call. During a deploy, two
-vaults with different `bulkLimit` configurations can serve at once; with
-the numbers passed in, live would count with one and the replay with the
-other. Read from the row, live equals replay, and a vault starting with a
-new configuration writes a `bulk.limit` change first (`limitChange`).
+from the policy's newest change** (the spec's `CapSealed`,
+`CapFromPolicy`), read in the use's own snapshot, never passed in. During a
+deploy, two vaults with different `bulkLimit` configurations can serve at
+once; with the numbers passed in, live would count with one and the replay
+with the other. Not from the policy's row either: the statement moves the
+cap before anyone checks the row's seal, so a row put back would move it
+otherwise than the replay (`BulkReplayAgrees`). A vault starting with a new
+configuration writes a `bulk.limit` change first (`limitChange`).
 
 - A key counts at `t` while its row's `last > t − window − refresh`.
 - Other keys count over `window + refresh + deadline` (`USE_DEADLINE_MS`,
@@ -131,9 +139,8 @@ new configuration writes a `bulk.limit` change first (`limitChange`).
   refuses: the use's statement writes the row before the vault decides.
 - A key is the key asked for: two references to one source count twice.
   That is conservative (more counted, never fewer).
-- The statement moves the cap only on the policy's newest row (its seal is
-  the newest change's), which SQL can check; a row edited under its seal is
-  refused `tampered` by the vault after.
+- Every request the cap admits moves it, `stale` ones included
+  (`HotPathOneStaleBulk`): the replay counts them the same way.
 
 **The bulk rows are outside the seals.** A use writes them in its one
 statement, at most once a `refresh` per key, and the replay rebuilds them;
@@ -188,7 +195,7 @@ the same.
 | # | decision | alternatives | numbers | tradeoff |
 |---|---|---|---|---|
 | 1 | Protection on each environment; the policy object holds the cap | protection in the policy object, as 0.14 | `allows` at an environment asks only `protects(id)`: exact on the environments a use reads | the 0.14 `Policy` is rebuilt per use (a few objects) |
-| 2 | The cap's count and window from the sealed policy row | passed per call, as the prototype | live equals replay across a deploy with two configurations | one more input (cached with the rest) |
+| 2 | The cap's count and window from the policy's newest change (`CapSealed`) | passed per call, as the prototype; the policy's row | live equals replay across a deploy with two configurations, and with the row put back | the statement reads the newest policy change (cached with the seals) |
 | 3 | The use row carries purpose and keepsSensitive (one smallint, schema 0022) and the place (null when the key's own) | the prototype's row (credential, key) | 140.8 B per use unchanged; 143.8 B with a place on 20% of uses | the replay can decide every purpose |
 | 4 | A reference is the holder's own secret object, its `source` sealed | a reference object of its own | one object fewer per reference | a use through one reads one more input |
 | 5 | Object keys: SHA-256 of kind and id, cut to a uuid | text keys (`member:<id>`) | about 20% cheaper per probe (W211's estimate, open decision 2) | the SQL hashes the principal's id once per use |
@@ -203,6 +210,11 @@ the same.
   policy, key, source, three environments) against the plan's "about six".
   PR 5 measures it against the 30-buffer budget; grouping roles and policy
   is the plan's cut.
-- **Forks of forks:** a key is read at its own environment, a reference's
-  holder, or a fork of its environment, one level. Deeper forks need the
-  chain read; 0.14's app names `at` itself.
+- **A project's deletion** reaches a decision as each of its environments'
+  `deleted`: the decision reads no project object (schema 0022 has none).
+  PR 4's change path writes one change per environment when a project goes.
+- **For PR 4 and PR 5, from the spec (W211):** a change refused by its
+  seal's compare-and-set reads the row again before it retries
+  (`ChangeRereads`); the Worker answers 503 at the deadline even if its call
+  never returns, and a value whose call returns late never leaves
+  (`WorkerGivesUp`). Neither is in this pure code.

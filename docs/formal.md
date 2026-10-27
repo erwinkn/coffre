@@ -1490,7 +1490,7 @@ They run a batch of 20,000 at a time.
 | `heldColumns`, `issuedGrant`, `readsSensitive`, `ownsProject`, `mayManageAccess`, `runsInstance`, `readsWholeLog`, `makesProjects` | 4,000 each | `@coffre/core/access` |
 | `useOnly` | 6,000 | `@coffre/core/access` |
 | `keyRefusals`, `sensitiveRefusals`, `useOnlyRefusals`, `referenceRefusal` | 13,000, 10,000, 10,000, 6,000 | `packages/vault/src/decide.ts` |
-| `decideUse` (0.15), `bulkRule` | 20,000, 6,000 | `packages/vault/src/decide.ts` (`decideChecked`), `bulk.ts`; each input's seal as checked (valid, current), half the cases with every seal holding |
+| `decideUse` (0.15), `bulkRule` | 20,000, 6,000 | `packages/vault/src/decide.ts` (`decideChecked`), `bulk.ts`; each input's seal as checked (valid, current), half the cases with every seal holding; only views a use's statement reads (`decideChecked` throws on others, which the model answers `unread`) |
 | `encodeAad` | 2,000 | `@coffre/core/envelope` |
 | `verifyEntries` | 2,000 | `@coffre/core/audit`, real keys and hashes |
 

@@ -1,4 +1,5 @@
 import { bulkStep, type BulkRows } from './bulk.ts';
+import type { BulkLimit } from './config.ts';
 import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
 import { applyOp, objectKey, POLICY_REF, ROLES_REF, sealed, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
 
@@ -29,10 +30,15 @@ export type Rows = ReadonlyMap<string, { row: Input; seal: Buffer | null }>;
  * seal from the changes (`newest`), in one snapshot: the credential, its
  * principal, the roles and the policy, the key and a reference's source,
  * and the environments the decision weighs. It moves the cap as the
- * statement does, on `bulk`'s rows of the principal, with the policy row's
- * count and window: every request counts, however it is decided after.
+ * statement does, on `bulk`'s rows of the principal, with `limit`, the
+ * count and window the policy's newest change logged (HotPathOne's
+ * `CapSealed`, `CapFromPolicy`): never the policy's row, which the
+ * statement reads before anyone checks its seal, so a row put back would
+ * move the cap otherwise than the replay (`BulkReplayAgrees`). Every request
+ * the cap admits moves it, however it is decided after, `stale` included
+ * (`HotPathOneStaleBulk`).
  */
-export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, bulk: Map<string, BulkRows>, request: UseRequest): UseView {
+export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, limit: BulkLimit | null, bulk: Map<string, BulkRows>, request: UseRequest): UseView {
   const read = <K extends Kind>(kind: K, id: string): Read<Extract<Input, { kind: K }>> => {
     const key = objectKey({ kind, id });
     // Each kind is a table of its own: a key's row is one of its kind or none.
@@ -53,10 +59,8 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
   if (credential.row !== null) {
     const held = bulk.get(credential.row.principal) ?? new Map<string, number>();
     bulk.set(credential.row.principal, held);
-    // Only on the policy's newest row, which the statement can tell by its seal: none, or one put back, moves nothing,
-    // and the decision refuses the use (`no_policy`, `stale`). One edited under its seal is the vault's to refuse.
-    const current = policy.row !== null && policy.seal !== null && policy.newest !== null && policy.seal.equals(policy.newest);
-    cap = current ? bulkStep(held, request.secretId, request.at, policy.row!.bulk) : { inSet: false, others: 0 };
+    // No policy in the log, no cap to move: the decision refuses the use (`no_policy`).
+    cap = limit === null ? { inSet: false, others: 0 } : bulkStep(held, request.secretId, request.at, limit);
   }
   return { credential, principal, roles: read('roles', ROLES_REF.id), policy, secret, source, environments, bulk: cap };
 }
@@ -87,13 +91,17 @@ export type Replayed = {
   /** Each object, with the seal its newest change left. */
   rows: Map<string, { row: Input; seal: Buffer | null }>;
   newest: Map<string, Buffer | null>;
+  /** The cap the policy's newest change logged: what moves the bulk rows. */
+  limit: BulkLimit | null;
   bulk: Map<string, BulkRows>;
+  /** The last entry's number: a replay resumed on this state goes on from it. */
+  last: bigint;
   /** Entries out of number order, changes that do nothing, and seals that are not their object's. */
   faults: string[];
 };
 
 export function emptyReplay(): Replayed {
-  return { rows: new Map(), newest: new Map(), bulk: new Map(), faults: [] };
+  return { rows: new Map(), newest: new Map(), limit: null, bulk: new Map(), last: -1n, faults: [] };
 }
 
 /**
@@ -106,15 +114,14 @@ export function replay(
   decided?: (use: LoggedUse, code: UseCode | null) => void,
   replayed: Replayed = emptyReplay(),
 ): Replayed {
-  let last = -1n;
   for (const entry of entries) {
-    if (entry.number <= last) replayed.faults.push(`${entry.number}: after ${last}, out of number order`);
-    last = entry.number;
+    if (entry.number <= replayed.last) replayed.faults.push(`${entry.number}: after ${replayed.last}, out of number order`);
+    replayed.last = entry.number;
     if (entry.kind === 'change') {
       change(keys, replayed, entry);
       continue;
     }
-    const code = decideUse(keys, readUse(replayed.rows, replayed.newest, replayed.bulk, entry.request), entry.request);
+    const code = decideUse(keys, readUse(replayed.rows, replayed.newest, replayed.limit, replayed.bulk, entry.request), entry.request);
     decided?.(entry, code);
   }
   return replayed;
@@ -133,5 +140,6 @@ function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   }
   if (after === null) replayed.rows.delete(key);
   else replayed.rows.set(key, { row: after, seal: entry.seal });
+  if (after?.kind === 'policy') replayed.limit = after.bulk;
   replayed.newest.set(key, entry.seal);
 }
