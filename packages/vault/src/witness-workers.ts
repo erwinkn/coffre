@@ -97,20 +97,20 @@ export function durableWitness(namespace: ObjectNamespace, options: { name?: str
           // The sizes it holds, or why it answers none: a witness that refuses (one whose pair no longer opens says to
           // name a new one) is a failed try with its reason, and nothing is cached.
           const response = await object.fetch(new Request('https://witness/', { method: 'GET', signal }));
-          const body = (await response.json().catch(() => ({}))) as { held?: Record<TreeName, number>; reason?: string };
-          const sizes = body.held;
-          if (!response.ok || sizes === undefined || !Number.isSafeInteger(sizes.changes) || !Number.isSafeInteger(sizes.uses)) {
-            return { ok: false, reason: body.reason ?? `the witness answered ${response.status}` };
-          }
+          const body = (await response.json().catch(() => ({}))) as { held?: unknown; reason?: string };
+          const sizes = sizesIn(body.held);
+          if (!response.ok || sizes === null) return { ok: false, reason: body.reason ?? `the witness answered ${response.status}` };
           held = sizes;
         }
         const from = held;
         const p = await proofs(from);
         const body: Publication = { notes, from, proofs: { changes: p.changes.map((h) => h.toString('base64')), uses: p.uses.map((h) => h.toString('base64')) } };
         const response = await object.fetch(new Request('https://witness/', { method: 'POST', body: JSON.stringify(body), signal }));
-        const answer = (await response.json()) as WitnessAnswer & { held?: Record<TreeName, number> };
-        if (response.status === 409 && answer.held !== undefined) {
-          held = answer.held;
+        const answer = (await response.json().catch(() => ({ ok: false }))) as WitnessAnswer & { held?: unknown };
+        if (response.status === 409) {
+          // The sizes it holds, sent from again; none that make sense, and the next try asks for them afresh.
+          held = sizesIn(answer.held);
+          if (held === null) return { ok: false, reason: `the witness answered 409 without sizes it holds` };
           continue;
         }
         if (!answer.ok) return { ok: false, reason: answer.reason ?? `the witness answered ${response.status}` };
@@ -120,6 +120,13 @@ export function durableWitness(namespace: ObjectNamespace, options: { name?: str
       return { ok: false, reason: 'the witness kept holding other sizes' };
     },
   };
+}
+
+/** Sizes a witness says it holds, if they are sizes: whole numbers, none below zero. */
+function sizesIn(value: unknown): Record<TreeName, number> | null {
+  const sizes = value as Record<TreeName, unknown> | null | undefined;
+  const size = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0;
+  return sizes != null && size(sizes.changes) && size(sizes.uses) ? { changes: sizes.changes as number, uses: sizes.uses as number } : null;
 }
 
 /** Each tree's size, read from its note (the checkpointer's own, just signed). */
