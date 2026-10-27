@@ -24,7 +24,7 @@ import { readUse, replay, type LoggedChange, type Replayed } from '../src/log-re
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
-import { emptyDatabase, ENGINE, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, postgresOnly, rows, run, sealed, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
+import { emptyDatabase, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, postgresOnly, rows, sealed, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
