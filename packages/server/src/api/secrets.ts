@@ -619,6 +619,11 @@ async function inheritedOf(db: Queryable, place: ResolvedPath): Promise<Awaited<
 /** A competing write invalidated the keys prepared outside the transaction. */
 class PrepareAgain extends Error {}
 
+/** A key as `secretHeads` read it and as its object's read found it: archived or not, at the same version. */
+function sameHead(head: { archivedAt: Date | null; currentVersionId: string | null }, read: SecretRead | undefined): read is SecretRead {
+  return read !== undefined && read.archived === (head.archivedAt !== null) && (read.columns.version?.id ?? null) === head.currentVersionId;
+}
+
 async function optimistic<T>(ctx: ApiContext, work: () => Promise<T>): Promise<T> {
   return withRefusals(ctx, async () => {
     // Bound the work under sustained contention; an ordinary burst can retry.
@@ -769,6 +774,9 @@ export async function setSecrets(
     // write stores none of the references the vault just made: they are abandoned, as when its transaction fails.
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       const objects = await secretObjects(ctx.db, { ids: heads.map((row) => row.id) });
+      // The rows as `heads` read them, which the transaction holds them to: one archived, unarchived or written between
+      // the two reads is prepared again, or a change prepared from one state would be committed beside a write from the other.
+      if (heads.some((row) => !sameHead(row, objects.get(row.id)))) throw new PrepareAgain();
       const at = (id: string) => ({ id, ...environment });
       const after = new Map<string, SecretColumns | null>();
       // Unarchived with nothing written: as it was (a reference written again unchanged).
@@ -1666,7 +1674,8 @@ export async function restoreVersion(
     // With 0.15's log, the key's change: the old value back as a new version of its own. Its row is held below.
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       const read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
-      if (read === undefined) return [];
+      // As `prepared` read it, which the transaction holds it to.
+      if (!sameHead(prepared, read)) throw new PrepareAgain();
       return [secretChange(secret.id, read, writtenSecret(read.columns, versionColumns(versionId, rewrapped.values[0]!, { sensitive: level === 'sensitive', plaintext })))];
     });
     return audited(ctx, async (tx, log) => {

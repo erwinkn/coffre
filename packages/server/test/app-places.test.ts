@@ -260,15 +260,20 @@ test('a personal config made while its environment is archived: the archive read
   await inputsLogged();
 });
 
-test('a key archived, then unarchived, by others between an archive\'s read of it and its transaction: the transaction finds it live, and reads again', postgresOnly('the order of two writes is held on the log head\'s row lock'), async () => {
+/**
+ * Key A archived, then unarchived, by others between an archive's read of it and its transaction: `archive` is that
+ * archive. A fresh vault object, whose first question (`about`, once per object) comes after the request's first read
+ * of A, live, and before the read its changes are prepared from: there another write archives A, so the archive would
+ * prepare nothing; an unarchive is then queued on the log's head ahead of the archive's transaction, which so finds A
+ * live again. The transaction must read again, never archive A with no change.
+ */
+async function archivedAndBack(archive: () => Promise<unknown>): Promise<void> {
   await root.projects.create('market');
   await root.environments.create('market/dev');
   await root.secrets.set('market/dev', { A: 'one' });
   await root.access.set(CI, { 'market/dev': 'viewer' });
   const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const a = await keyIn(await environmentId('dev'), 'A');
-  // A fresh vault object, whose first question (`about`, once per object) comes between the router's read of the key,
-  // live, and the archive's own read of it: archived there by another write, the archive prepares nothing.
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
   let holding: Promise<unknown> = Promise.resolve();
@@ -295,7 +300,7 @@ test('a key archived, then unarchived, by others between an archive\'s read of i
     return vault.about();
   } } as typeof vault;
   try {
-    await root.secrets.update('market/dev/A', { archived: true });
+    await archive();
     await unarchiving;
   } finally {
     release();
@@ -306,7 +311,15 @@ test('a key archived, then unarchived, by others between an archive\'s read of i
   const outcome = await use(token.id, a);
   assert.ok(!['ok', 'stale', 'tampered'].includes(codeOf(outcome)), JSON.stringify(outcome));
   await inputsLogged();
-});
+}
+
+const ORDERED = postgresOnly('the order of two writes is held on the log head\'s row lock');
+
+test('a key archived and unarchived by others while `secrets.update` archives it: the transaction finds it live, and reads again', ORDERED, () =>
+  archivedAndBack(() => root.secrets.update('market/dev/A', { archived: true })));
+
+test('a key archived and unarchived by others while `secrets.set` archives it: the transaction finds it live, and reads again', ORDERED, () =>
+  archivedAndBack(() => root.secrets.set('market/dev', { A: null })));
 
 async function until(condition: () => Promise<boolean>, what: string): Promise<void> {
   for (let tries = 0; !(await condition()); tries += 1) {
