@@ -11,6 +11,8 @@ export default defineConfig({
     kek: 'src/kek/index.ts',
     // MCP's scopes and client rules, for the server and the consent page.
     mcp: 'src/mcp.ts',
+    // 0.15's audit trees: the tree, tiles, checkpoints, the head pair and the verifier's walk.
+    merkle: 'src/audit/merkle.ts',
     pages: 'src/pages.ts',
     // How a generated value is made, for the pages, the CLI and the server's checks.
     recipe: 'src/recipe.ts',
