@@ -88,7 +88,7 @@ test('a sparse inclusion proof verifies against the root it implies, and fails w
 });
 
 test('a sparse consistency proof verifies against the heads it implies, and is as long as the real one', () => {
-  for (const [m, n] of [[1, 2], [4, 9], [500, 1000], [2 ** 32, 2 ** 32 + 500], [31_449_600_000, 31_536_000_000], [500, 31_536_000_000]] as const) {
+  for (const [m, n] of [[1, 2], [4, 9], [500, 1000], [2 ** 32, 2 ** 32 + 500], [2 ** 32 + 1, 2 ** 32 + 500], [31_449_600_000, 31_536_000_000], [500, 31_536_000_000]] as const) {
     const { first, second, proof } = sparseConsistency(m, n);
     assert.ok(verifyConsistency(m, n, first, second, proof), `${m} to ${n}`);
     assert.ok(!verifyConsistency(m, n, first, Buffer.alloc(32, 7), proof));
@@ -99,26 +99,29 @@ test('a sparse consistency proof verifies against the heads it implies, and is a
 });
 
 test('below a retention cut, one tile per level is all that proofs above it read', () => {
-  // A tree of 300,000 leaves cut at 200,003: every tile wholly below the cut goes, at every level, but the tile
-  // that holds the cut at each level. Proofs of every leaf above the cut, and consistency from any size above it,
-  // still find every hash they need (nodesFrom throws on a missing one).
-  const n = 300_000;
-  const cut = 200_003;
-  const all = leaves(n);
-  const edge = Edge.empty();
-  const tiles = new Map<string, Buffer>();
-  for (let i = 0; i < n; i += 997) for (const t of edge.append(all.slice(i, i + 997))) tiles.set(`${t.level}/${t.index}`, t.hashes);
-  for (const key of [...tiles.keys()]) {
-    const [level, index] = key.split('/').map(Number) as [number, number];
-    const span = 2 ** (HEIGHT * (level + 1));
-    if ((index + 1) * span <= cut) tiles.delete(key);
-  }
-  assert.ok(tiles.size < 300_000 / 256 - 700, `${tiles.size} tiles kept`);
-  const nodes = nodesFrom(tiles);
-  const head = treeHash(nodes, n);
-  assert.ok(head.equals(edge.root()));
-  for (let m = cut; m < n; m += 1013) assert.ok(verifyInclusion(all[m]!, m, n, inclusionProof(nodes, m, n), head), `leaf ${m}`);
-  for (const from of [cut, cut + 1, 2 ** 18, 299_999]) {
-    assert.ok(verifyConsistency(from, n, referenceHash(all.slice(0, from)), head, consistencyProof(nodes, from, n)), `from ${from}`);
-  }
+  // Every tile wholly below the cut goes, at every level, but the tile that holds the cut at each level. Then every
+  // leaf above the cut is proved, and consistency checked from every size above it, exhaustively, for cuts on and
+  // around tile edges (nodesFrom throws on a missing hash). A larger tree, sampled, crosses level 2.
+  const check = (n: number, cuts: number[], stride: number) => {
+    const all = leaves(n);
+    const edge = Edge.empty();
+    const tiles = new Map<string, Buffer>();
+    for (let i = 0; i < n; i += 997) for (const t of edge.append(all.slice(i, i + 997))) tiles.set(`${t.level}/${t.index}`, t.hashes);
+    const full = nodesFrom(tiles);
+    for (const cut of cuts) {
+      const kept = new Map([...tiles].filter(([key]) => {
+        const [level, index] = key.split('/').map(Number) as [number, number];
+        return (index + 1) * 2 ** (HEIGHT * (level + 1)) > cut;
+      }));
+      const nodes = nodesFrom(kept);
+      const head = treeHash(nodes, n);
+      assert.ok(head.equals(edge.root()));
+      for (let m = cut; m < n; m += stride) assert.ok(verifyInclusion(all[m]!, m, n, inclusionProof(nodes, m, n), head), `cut ${cut}, leaf ${m}`);
+      for (let from = Math.max(1, cut); from <= n; from += stride) {
+        assert.ok(verifyConsistency(from, n, treeHash(full, from), head, consistencyProof(nodes, from, n)), `cut ${cut}, from ${from}`);
+      }
+    }
+  };
+  check(1500, [1, 255, 256, 257, 700, 1024, 1499], 1);
+  check(300_000, [65_535, 65_536, 200_003], 1013);
 });

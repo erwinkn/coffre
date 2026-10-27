@@ -31,7 +31,9 @@ const LEAVES = Number(values.leaves);
 const CHANGE_RATE = Number(values['change-rate']);
 const DAY = 86_400_000;
 const shape = shapeAt(name, START, { changeRate: CHANGE_RATE, dayLeaves: DAY, tickLeaves: LEAVES, dayOffset: values['day-offset'] === undefined ? undefined : Number(values['day-offset']) });
-const signer = await signerFrom('coffre.example/audit', randomBytes(32));
+// One origin, and key, per log: `split`'s two trees are two logs, as a witness keyed by origin needs them to be.
+const origin = (tree: number) => (name === 'split' ? `coffre.example/audit/${tree === 1 ? 'changes' : 'uses'}` : 'coffre.example/audit');
+const signers = new Map(await Promise.all([0, 1].map(async (tree) => [tree, await signerFrom(origin(tree), randomBytes(32))] as const)));
 
 const db = new pg.Client({ connectionString: values.url });
 await db.connect();
@@ -65,7 +67,10 @@ for (let t = 0; t < TICKS; t += 1) {
   index += LEAVES;
   const cpu0 = process.cpuUsage();
   const { rows, heads } = shape.seal(leaves);
-  const notes = await Promise.all(heads.map((h) => signNote(`${checkpointBody({ origin: signer.name, size: h.size, root: h.root, upto: String(index), at: Date.now() })}${h.extra === undefined ? '' : `${h.extra}\n`}`, [signer])));
+  const notes = await Promise.all(heads.map((h) => {
+    const signer = signers.get(name === 'split' ? h.tree : 0)!;
+    return signNote(`${checkpointBody({ origin: signer.name, size: h.size, root: h.root, upto: String(index), at: Date.now() })}${h.extra === undefined ? '' : `${h.extra}\n`}`, [signer]);
+  }));
   const cpu = process.cpuUsage(cpu0);
   const t0 = performance.now();
   const { rows: [r] } = await db.query({ ...WRITE, values: [

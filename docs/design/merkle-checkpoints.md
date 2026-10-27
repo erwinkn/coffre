@@ -162,15 +162,18 @@ section does that, numbers first, then taste.
 class.** One tree holds changes and is never pruned. The other holds uses
 and is pruned from the left, a day at a time. Each is #365's tree, tiles and
 C2SP checkpoint, unchanged. A tick seals both and signs both heads with the
-same `upto`. Measured against #365's single tree, the split costs 8% more
-bytes a tick, the same WAL within noise, and 0.2 ms more signer CPU (a
-second signature); storage, proof sizes and walk cost are the same. It wins
+same `upto`, and the two heads are kept, written and checked as one pair
+("What `split` needs to stay one log", below). Measured against #365's single tree, a tick of the split
+writes 7 to 8% more bytes and WAL (2 KB, under 0.5% of what the whole log
+writes a tick) and costs 0.2 to 0.6 ms more signer CPU (a second
+signature). Storage, proof sizes and walk cost are the same. It wins
 on retention:
 
 - no daily rebuild of the dropped day before dropping it (10 minutes of CPU
   a day at 1,000/s);
 - no digest of the kept changes in the retention entry;
-- a change stays provable forever, in 25 hashes or fewer.
+- a change stays provable forever: 25 hashes after a year at one change a
+  second, growing as log₂ of the number of changes (29 after ten years).
 
 That is the part of #365 that drew a review finding in each of rounds 3 to 9.
 
@@ -223,20 +226,39 @@ are left out. For scale, #365's whole log, with entries and tiles, writes
 | WAL, mean (p50) | 39.2 (32.1) KB | 38.3 (33.6) KB | 36.6 (31.0) KB | 5.7 (5.6) KB | 0.5 (0.5) KB | 45.9 (42.2) KB |
 | write statement, p50 / p99 | 1.39 / 2.99 ms | 1.46 / 3.06 ms | 1.36 / 2.78 ms | 0.57 / 1.16 ms | 0.35 / 0.65 ms | 1.71 / 2.97 ms |
 | signer CPU (tree + signatures), p50 | 1.27 ms | 1.50 ms | 1.22 ms | 1.01 ms | 0.81 ms | 0.76 ms |
-| flat as the log grows (R48): WAL at 0 → 10M → 1 day → 1 year | 27.9 → 27.9 → 27.9 → 27.7 KB | 29.6 → 30.1 → 29.8 → 29.9 KB | 27.8 → 27.8 → 27.8 → 29.0 KB | 4.9 → 5.0 → 4.9 → 4.9 KB | 0.5 KB throughout | 40.7 → 40.9 → 40.8 → 40.9 KB |
+| flat as the log grows (R48): WAL at 0 → 10M → 1 day → 1 year, synthetic start states (below) | 27.9 → 27.9 → 27.9 → 27.7 KB | 29.6 → 30.1 → 29.8 → 29.9 KB | 27.8 → 27.8 → 27.8 → 29.0 KB | 4.9 → 5.0 → 4.9 → 4.9 KB | 0.5 KB throughout | 40.7 → 40.9 → 40.8 → 40.9 KB |
 
-- **Every shape is flat.** The last row's runs (600 ticks each) start from
-  logs of 0, 10M, 86.4M and 31.5B leaves, the shape's state set up at that
-  size (`shapeAt`). A tick touches the tree's right edge, one tile per
-  level, and the levels above 1 only when a tile below them fills.
+- **Every shape writes the same a tick at any size.** The last row's runs
+  (600 ticks each) start from logs of 0, 10M, 86.4M and 31.5B leaves. These
+  are synthetic start states: the shape's right edge is set up in memory at
+  that size (`shapeAt`), and the tile tables start empty. So they measure
+  what a tick writes at that size: its rows, bytes and WAL. They do not
+  measure a 1.3 TB tile store's index depth, cache pressure or vacuum
+  state. The 10M rows of the table, and #365's `history.ts`, do
+  materialize 10M leaves (seal p50 2.2 → 2.3 ms from 70,000 to 10M). A tick
+  touches the tree's right edge, one tile per level, and the levels above
+  1 only when a tile below them fills.
 - **The tree is under a tenth of the log's write load** in `one`, `split`
   and `day`: 30 to 40 KB of the 443 KB. `tick` and `chain` write less
   because they store no leaf-level hashes, not because of their shape (see
   "Leaf-level tiles", below). The MMR writes 46% more than `one`, because
   it keeps every node.
-- **The split's second tree costs 1.4 rows, 8% more bytes, and 0.2 ms more
-  signer CPU** (a second Ed25519 signature) a tick. Its WAL is within noise
-  of `one`.
+- **The split's second tree costs, a tick:**
+  - 1.4 more rows;
+  - 7 to 8% more bytes and WAL;
+  - 0.2 to 0.6 ms more signer CPU, mostly a second Ed25519 signature.
+
+  Three interleaved repeats of 600 ticks each, `one` then `split`, give
+  this WAL:
+
+  | | from an empty log | from a year |
+  |---|---|---|
+  | one | 27.5 KB, identical in all three | 27.7 KB, identical |
+  | split | 29.5–29.7 KB | 29.9–30.2 KB |
+
+  So the split writes +2.1 KB a tick, under 0.5% of the log's 443 KB. The
+  table's 20,000-tick means are one run each, with vacuum and checkpoints
+  in them. Those put `split` below `one`, which is noise, not a result.
 - Not in the table, common to all: verifying 500 MACs and hashing 500 leaves
   costs about 2.3 ms of signer CPU (3.3 µs and 1.1 µs an entry).
 
@@ -248,21 +270,23 @@ are left out. For scale, #365's whole log, with entries and tiles, writes
 | signed heads per entry | 0.71 B | 1.41 B | 0.83 B | 0.83 B | 0.83 B | 0.71 B |
 | retention can delete | level-0 tiles below the cut | the uses tree below the cut, every level | the day's whole tree | (nothing stored per entry) | nothing: every link stays for the chain to verify | node chunks below the cut |
 | retention must keep, a day of 86.4M entries | higher-level tiles: 10.8 MB a day, forever (as #365 does; 1 tile per level would do, below) | the changes tree (32 B a change, kept as a feature); 1 tile per level of the uses tree | 32 B (the day's root) | one root per tick: 5.5 MB a day (1 tile per level would do) | 172,800 links: 72 MB a day, forever | the peaks |
-| deleting a day's tiles | 13.8 s, 3.0 GB of WAL (DELETE) | the same | 2.8 ms, 28 KB (DROP of its own table) | — | — | 26 s, 6.0 GB |
-| checked before dropping (round 9) | the window below the cut rebuilt from its entries: **10.4 min of CPU a day** (7.2 µs an entry, read, hashed, into the tree) | **nothing**: retention commits to the cut alone and never touches the changes | nothing, if changes are in a tree of their own; otherwise as `one` | as `one` | as `one` | as `one` |
+| deleting a day's tiles | 13.8 s, 3.0 GB of WAL (DELETE; measured at 10M leaves, × 8.64) | the same | 1.16 s, 294 KB of WAL: DROP of a table holding a day's 2.9 GB of tiles | — | — | 26 s, 6.0 GB |
+| checked before dropping (round 9), beyond the freshness step every shape keeps | the window below the cut rebuilt from its entries: **10.4 min of CPU a day** (7.2 µs an entry, read, hashed, into the tree) | **nothing**: retention names the cut alone and never touches the changes | nothing, if changes are in a tree of their own; otherwise as `one` | as `one` | as `one` | as `one` |
 | digest of kept changes in the retention entry | yes, and the verifier re-reads every cut's changes on every walk, so its cost grows with history | none | as `split` or `one` | yes | yes | yes |
-| a change from a dropped day, proved later | not from the tree (its siblings' hashes are gone): its retention entry's inclusion, plus the cut's kept changes, all of them, to rebuild the digest | **25 hashes**, the same as before the drop | as `split` or `one` | as `one` | as `one` | as `one` |
+| a change from a dropped day, proved later | not from the tree (its siblings' hashes are gone): its retention entry's inclusion, plus the cut's kept changes, all of them, to rebuild the digest | **25 hashes** a year in, at one change a second (log₂ of the changes), as before the drop | as `split` or `one` | as `one` | as `one` | as `one` |
 | uses of the next day below a cut ("stragglers", `at` days) | 275 p50, 306 max at each midnight | the same | **none**: a day's tree holds exactly its partition | as `one` | as `one` | as `one` |
 
 - **The deletes are a layout choice, not a shape.** `one` and `split`
   delete a prefix of a tree, so their tiles can be partitioned by leaf range
-  and dropped whole, as `day` does: from 3 GB of WAL a day to almost none.
+  and dropped whole, as `day` does: from 13.8 s and 3 GB of WAL a day to
+  1.2 s and 0.3 MB.
   Worth doing in either.
 - **One tile per level is enough below a cut.** Proofs of entries above a
   cut, and consistency proofs from heads above it, read only the tile that
   holds the cut at each level. Every tile wholly below it can go, at every
-  level (`shapes.test.ts`: a tree of 300,000 leaves cut at 200,003, every
-  proof above the cut checked). That turns #365's 10.8 MB a day kept forever
+  level. `shapes.test.ts` checks this exhaustively on a tree of 1,500 leaves
+  cut on and around tile edges (every leaf above the cut, consistency from
+  every size above it), and sampled on 300,000 leaves. That turns #365's 10.8 MB a day kept forever
   into five tiles, in any shape. Not yet checked against Go's
   `TileHashReader`, which also reads each tile's parent to check it. The
   parents of those tiles hold the cut too, so they would be kept.
@@ -277,8 +301,8 @@ are left out. For scale, #365's whole log, with entries and tiles, writes
   1,000 appends a second, days 5 s long, 34 midnights. Each midnight's cut
   falls on the first tick past the day's last number, so about half a tick
   of the next day lies below it. With a use held to R53's 3 s deadline, the
-  bound is 3.5 s of uses: 3,500. That is 3 in a million uses, unprotected
-  for one day.
+  bound is 3.5 s of uses: 3,500. Measured, that is 3 in a million of a
+  day's uses, unprotected for one day; at the bound, 40 in a million.
 
 ### Proofs, a year in
 
@@ -293,11 +317,13 @@ A year at 1,000 a second is 31.5 billion entries. Proof sizes come from RFC
 | inclusion, entry 1 min old | 28 hashes, 896 B, 82 µs | use 29; change 16 | 21 | 26 | 129: 10.8 KB, 0.5 ms |
 | inclusion, 1 day old | 32, 1.0 KB, 77 µs | use 32; change 25 | 32 | 35 | 172,809 links: 15 MB, 0.65 s |
 | inclusion, 1 year old | 35, 1.1 KB, 69 µs | use 35; change 25 | 36 | 35 | 63M links: 5.6 GB, ~3 min |
-| consistency, heads 1 tick apart | 23 hashes, 76 µs | 30 (both trees), 113 µs | 16 (custom) | 18 | 1 link, 88 B |
-| consistency, 1 day apart | 21, 62 µs | 41, 132 µs | 31 (custom) | 17 | 172,800 links: 15 MB, 0.5 s |
-| consistency, 1 year apart | 34, 81 µs | 59, 226 µs | 38 (custom) | 26 | 63M links: 5.6 GB, 181 s (all walked) |
+| consistency, heads 1 tick apart | 23 hashes, 76 µs | a tick of 500 uses: 28, 97 µs; of 499 uses and a change: 28 + 19 = 47, 169 µs | 16 (custom) | 18 | 1 link, 88 B |
+| consistency, 1 day apart | 21, 62 µs | 41 (both trees), 162 µs | 31 (custom) | 17 | 172,800 links: 15 MB, 0.5 s |
+| consistency, 1 year apart | 34, 81 µs | 35 (the changes tree was empty a year back), 71 µs | 29 (custom: the old open day to its end, its place in the top tree), 72 µs | 26 | 63M links: 5.6 GB, 181 s (all walked) |
 | one proof is | one RFC 9162 path | one RFC 9162 path, in its tree | two paths (day, top), or one for today | two paths (tick, top) | a path and every link since |
 
+Proof lengths move by a few hashes with the sizes' binary digits (`one`'s 23
+against the uses tree's 28 for one tick is that, not a cost of splitting).
 Every tree shape verifies anything in under a quarter of a millisecond. The
 chain does not: its proofs grow with age. That rules it out on R48 alone.
 
@@ -305,10 +331,10 @@ chain does not: its proofs grow with age. That rules it out on R48 alone.
 
 | | one | split | day | tick | chain | mmr |
 |---|---|---|---|---|---|---|
-| full walk, tree part per entry (10M) | 2.49 µs | 2.62 µs | 2.49 µs (as `one`) | 2.57 µs | 2.49 µs | 2.37 µs |
+| full walk, tree part per entry (10M; ±0.15 µs between runs) | 2.49 µs | 2.62 µs | 2.44 µs | 2.57 µs | 2.49 µs | 2.37 µs |
 | walk all changes, alone | no: the tree mixes them with uses, all walked | **yes**: a year at one change a second is 31.5M entries, against 31.5B | no | no | no | no |
 | a witness stores | the newest note (229 B) | two notes | the newest note | the newest note | the newest note | the newest note |
-| a witness checks, per tick | signature (138 µs) + 23-hash consistency (75 µs) | the same, for each tree | the top tree; **the open day only with a witness of our own** | as `one`, on the top tree | one link, and it **must see every link** (a missed one needs all since) | as `one` |
+| a witness checks, per tick | signature (138 µs) + 23-hash consistency (75 µs) | two signatures; consistency of 28 hashes (110 µs), or 47 (200 µs) on a tick with a change | the top tree; **the open day only with a witness of our own** | as `one`, on the top tree | one link, and it **must see every link** (a missed one needs all since) | as `one` |
 | Go's `sumdb/tlog`, C2SP witnesses | yes (#365's Go check) | yes: each tree is #365's bytes | the top tree only | the top tree; an entry's proof is two `CheckRecord`s | no | only hashed as RFC 9162, when it is `one` |
 
 - **Walks cost the same in every shape.** A tree costs about one node hash
@@ -324,11 +350,107 @@ chain does not: its proofs grow with age. That rules it out on R48 alone.
 | | lines and moving parts vs #365 (estimated by file, not ported) | TLA+ (`formal/Seal.tla`) | round 9's retention fix |
 |---|---|---|---|
 | one | — | — | needed (rebuild below the cut before dropping) |
-| split | about even in lines. Added: a second edge, head and note in the checkpointer; per-tree `open()` checks; a `tree` column on tiles and checkpoints; two origins for witnesses. Removed: the window rebuild, `keptBetween` and the kept-changes digest in retention and in the verifier | nothing for today's invariants: the model seals one sequence, and the two trees are its projections by kind, signed together. A retention model, when written, is smaller: changes are never pruned | **not needed**: no sealed change is ever below a cut |
+| split | about even in lines. Added: a second edge, head and note in the checkpointer, kept as one pair (below); pair checks in `open()` and at each tick; a `tree` column on tiles and checkpoints; two origins for witnesses. Removed: the window rebuild, `keptBetween` and the kept-changes digest in retention and in the verifier | none for today's invariants, by the reduction below, provided the pair rules hold; the pair belongs in the model when the port starts. A retention model, when written, is smaller: changes are never pruned | **not needed**: no sealed change is ever below a cut. The freshness step (#365's step 2) stays, as in every shape |
 | day | +~120: day trees, a top tree, closing a day once its 3 s deadline has passed, a checkpoint format of our own, a witness of our own | the witness's check splits in two, and a standard one checks only the top | needed for changes, unless they are split out too |
 | tick | +~60: a tree per tick, a top tree, proofs in two parts | as is | needed |
 | chain | −120 (no tiles), but proofs walk links, and the witness pump must send every head, not the newest | publication must keep every head (today it keeps the newest only) | needed |
 | mmr | +~80: a node array instead of tiles, its own proofs; non-standard if position-hashed | as is | needed |
+
+### What `split` needs to stay one log (review r1)
+
+Two trees are only as strong as #365's one tree if the two heads behave as
+one head everywhere the model and the code use "the head". Built as two
+independent logs, a crash between writing one tree's checkpoint and the
+other's would leave them at different `upto`s. A restart that repaired each
+tree on its own could then sign a uses head for a window whose changes head
+is already out: a fork of one tree that the other tree's witness never
+sees. So the two heads form a **pair**, under these rules:
+
+1. **Two logs, two origins.** `coffre.example/audit/changes` and
+   `coffre.example/audit/uses`, two Ed25519 keys derived from the vault's
+   signing secret. Each checkpoint is a standard C2SP one. Both carry the
+   same `upto` and `at` lines. The bench signs them this way since review r1.
+2. **One tick signs both.** Both notes go to the signer's memory in **one
+   write**, one record holding the two, before the database has either
+   (RememberFirst).
+3. **One statement writes both.** It writes both trees' tiles and both
+   checkpoint rows, as `shapes/bench.ts` does. No database state holds one
+   without the other.
+4. **`open()` takes the pair as one value.**
+   - The database's newest rows must be a pair at one `upto`. Two rows at
+     different `upto`s are refused.
+   - #365's rules apply to the pair: equal, a prefix of it, or re-derived.
+     A re-derivation rebuilds both trees from the same window of entries,
+     and must give both remembered heads, or it refuses.
+5. **Each tick checks both rows.** The database's newest pair must be the
+   pair the signer holds (RowChecked).
+6. **Witnesses get the pair.**
+   - The pump sends both notes in one publication: one request to a witness
+     of our own, or each note to the standard witness of its origin.
+   - A change answers (R51) once a pair at or above its `upto` is
+     witnessed on both logs. With no witness, it answers once that pair is
+     sealed.
+7. **The verifier walks both trees from one start `upto` and merges them by
+   number.** Numbers and request IDs must be unique across both trees. Each
+   leaf's `kind` must match its tree: the kind is in the MAC and the leaf, so
+   an entry moved between trees fails. Pairs must share their `upto`.
+
+**Why the model needs no change for today's invariants, under rules 2 to
+5.** Every action `formal/Seal.tla` takes on the head acts on the pair as one
+value: signing, remembering, writing, comparing at `open()` and at each tick.
+The pair is a function of the sealed sequence the model already tracks: its
+two projections by kind, at one `upto`. So each model state maps to exactly
+one state of the split. Each invariant stated over heads (Complete,
+SealedDeletionDetected, SplitViewDetected, AnsweredChangeKept, NoFalseAlarm)
+holds for pairs if it holds for heads.
+
+Two things this argument does not cover:
+- **Standard witnesses see one log each.** A fork of one tree is a fork of
+  that log, which its own witness refuses. That is what each needs to
+  check.
+- **A reader that pairs notes itself.** Notes from different ticks carry
+  different `upto`s, and rule 7 rejects them.
+
+Putting the pair into `Seal.tla` explicitly, with a crash between the two
+notes, is the first step of the port (R45). It is an argument here, not a
+TLC run.
+
+### Retention with `split`, step by step (review r1)
+
+The freshness step stays, and the cut is named in the uses tree's own
+coordinates:
+
+1. **Seal a pair at least two freshness bounds after the day's cut**
+   (#365's step 2, unchanged). Append an `audit.retention.begin` change and
+   wait for its seal. From then on, the signer refuses any entry stamped
+   before the cut, less its bound. This is what keeps copies of dropped uses
+   out, since no lookup can match them once their originals are gone.
+2. **Append the `audit.retention` change.** It holds `{day, prev: {upto,
+   usesSize}, cut: {upto, usesSize}}`. The cut is the first pair at or above
+   the day's highest number. `usesSize` is read from that pair's signed
+   uses note, not from a row, and is the uses tree's size, not the log's.
+   The change is sealed in the changes tree, which is never pruned.
+3. **Drop the day's uses partition**, after the entry. A crash between the
+   two is finished by a retry, as in #365.
+4. **Delete the uses tree's tiles below the cut**, by uses-tree leaf index
+   (`cut.usesSize`), at every level, except the tile holding the cut at each
+   level.
+
+**What the verifier does.**
+- It walks the changes tree from genesis, or from its last verified changes
+  head. Every retention entry is on that walk, and each must chain from the
+  one before, be sealed, and sit above its own cut.
+- It walks the uses tree from the newest cut's `usesSize`. It starts from
+  the kept edge tiles, checked against that pair's signed uses head.
+
+**What goes, against #365.** Step 1 (rebuilding the window below the cut
+from its entries) and step 3's digest of the kept changes. Both existed so
+that a sealed change could not be lost across retention. In `split`, no
+change ever lies below a cut.
+
+**What stays.** The freshness step and its bound. The stragglers: up to
+half a tick of the next day's uses at each midnight, below the cut and
+unprotected until their own day goes, as in #365.
 
 ### The decision, numbers then taste
 
@@ -340,15 +462,16 @@ chain does not: its proofs grow with age. That rules it out on R48 alone.
   verification: an entry's proof comes in two parts, and `day`'s open day
   is invisible to a standard witness. That is the one protection #365 found
   against the Cloudflare account itself.
-- That leaves `one` and `split`. A tick costs within 8% (bytes; WAL within
-  noise) and 0.2 ms of signer CPU of each other; a proof or a walk costs the
-  same. `split` drops what `one` needs for
+- That leaves `one` and `split`. A tick of `split` costs 7 to 8% more
+  bytes and WAL (2 KB) and 0.2 to 0.6 ms more signer CPU. A proof or a walk
+  costs the same in both. `split` drops what `one` needs for
   retention:
   - the 10-minute daily rebuild;
   - the kept-changes digest;
   - a verifier cost that grows with history.
 
-  It also keeps every change provable forever. The only measured gap in
+  It also keeps every change provable forever (25 hashes a year in, at one
+  change a second). The only measured gap in
   favour of `day` is the stragglers: 275 uses at each midnight, against a
   non-standard checkpoint.
 
@@ -363,7 +486,8 @@ constant: one more signature, one more origin, one more row a tick.
 
 - **Below a cut, keep one tile per level**, not every level above 0.
 - **Partition tiles by leaf range**, so retention drops a table instead of
-  deleting a day's rows: 13.8 s and 3 GB of WAL a day, down to milliseconds.
+  deleting a day's rows: 13.8 s and 3 GB of WAL a day, down to 1.2 s and
+  0.3 MB.
 - **Optionally, store no leaf-level tiles for the uses tree** (`one-0` in
   the bench). The level-0 tile is rebuilt from its 256 entries when a proof
   or a tile request needs it.

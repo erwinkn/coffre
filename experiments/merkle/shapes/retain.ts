@@ -4,6 +4,7 @@
 // on the same database.
 //
 //   node experiments/merkle/shapes/retain.ts --url postgresql://… [--entries 1000000]
+//   node experiments/merkle/shapes/retain.ts --url postgresql://… --drop-day     # a day's tiles, dropped
 import { createHmac, randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
@@ -12,7 +13,7 @@ import pg from 'pg';
 import { leafData, leafOf, type Entry } from '../src/log.ts';
 import { Edge } from '../src/tiles.ts';
 
-const { values } = parseArgs({ options: { url: { type: 'string' }, entries: { type: 'string', default: '1000000' }, leaves: { type: 'string', default: '10000000' } } });
+const { values } = parseArgs({ options: { url: { type: 'string' }, 'drop-day': { type: 'boolean', default: false }, entries: { type: 'string', default: '1000000' }, leaves: { type: 'string', default: '10000000' } } });
 const db = new pg.Client({ connectionString: values.url });
 await db.connect();
 const LEAVES = Number(values.leaves);
@@ -29,6 +30,24 @@ async function measured(sql: string): Promise<{ ms: number; walBytes: number; ro
 const bytes = async (where: string, table: string) => Number((await db.query(`SELECT coalesce(sum(octet_length(hashes)), 0) AS b, count(*) AS n FROM ${table} WHERE ${where}`)).rows[0].b);
 
 const out: Record<string, unknown> = {};
+// A day's tiles in a table of their own (`day`, or any shape partitioned by leaf range): a day at 1,000 a second is
+// 337,500 level-0 tiles and 1,318 above, random, 8 KB each. Dropping it is one statement. With --drop-day, only this.
+if (values['drop-day']) {
+  await db.query('DROP TABLE IF EXISTS w212_day_tiles');
+  await db.query('CREATE TABLE w212_day_tiles (tree int NOT NULL, level smallint NOT NULL, idx bigint NOT NULL, hashes bytea NOT NULL, PRIMARY KEY (tree, level, idx))');
+  for (const [level, count] of [[0, 337_500], [1, 1_318]] as const) {
+    for (let i = 0; i < count; i += 500) {
+      const n = Math.min(500, count - i);
+      await db.query('INSERT INTO w212_day_tiles SELECT 0, $1, i, h FROM unnest($2::bigint[], $3::bytea[]) AS u(i, h)',
+        [level, Array.from({ length: n }, (_, j) => i + j), Array.from({ length: n }, () => randomBytes(8192))]);
+    }
+  }
+  const { rows: [b] } = await db.query("SELECT pg_total_relation_size('w212_day_tiles') AS b");
+  out.dayDropTable = { bytes: Number(b.b), ...(await measured('DROP TABLE w212_day_tiles')) };
+  console.log(JSON.stringify(out, null, 1));
+  await db.end();
+  process.exit(0);
+}
 const pct = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.ceil((p / 100) * xs.length) - 1)]!;
 // A proof's leaf-level read, for the shapes that store it: one tile, by key.
 const tileTimes: number[] = [];
@@ -58,10 +77,6 @@ for (const [shape, droppable, kept] of [
   const dropped = await measured(`DELETE FROM ${table} WHERE ${droppable}`);
   out[shape] = { keptBytesPerLeaf: keptBytes / LEAVES, delete: { ...dropped, msPerMillionLeaves: (dropped.ms / LEAVES) * 1e6, walPerLeaf: dropped.walBytes / LEAVES } };
 }
-// A day's tiles in a table of their own (`day`, partitioned by tree): the drop is one statement, whatever its size.
-await db.query('DROP TABLE IF EXISTS w212_day_copy');
-await db.query('CREATE TABLE w212_day_copy AS SELECT * FROM w212_tiles_one');
-out.dayDropTable = await measured('DROP TABLE w212_day_copy');
 
 // Entries, shaped as #365's (`audit_uses`), to time what reads them: serving a proof without leaf-level tiles,
 // and #365's retention check, which rebuilds the day below the cut from its entries before dropping it.

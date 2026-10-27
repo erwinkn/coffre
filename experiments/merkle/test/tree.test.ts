@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 
 import { checkpointBody, openNote, parseCheckpoint, signerFrom, signNote, verifierFrom } from '../src/note.ts';
+import { sparseConsistency } from '../shapes/sparse.ts';
 import { Edge, edgeOf, nodesFrom, parseTilePath, tileMap, tilePath, tilesFor, type Tile } from '../src/tiles.ts';
 import { consistencyProof, inclusionProof, leafHash, referenceHash, treeHash, verifyConsistency, verifyInclusion } from '../src/tree.ts';
 
@@ -107,6 +108,8 @@ test('a tree past 2^32 leaves splits as the RFC says (no 32-bit arithmetic)', ()
   asked.length = 0;
   treeHash(nodes, 2 ** 33 + 2 ** 32);
   assert.deepEqual(asked, ['33/0', '32/2']);
-  // A consistency proof from 2^32 + 1 leaves is not treated as one from a power of two.
+  // A consistency proof from 2^32 + 1 leaves is not treated as one from a power of two, made or checked.
   assert.equal(consistencyProof(() => Buffer.alloc(32), 2 ** 32 + 1, 2 ** 32 + 2).length, 3);
+  const { first, second, proof } = sparseConsistency(2 ** 32 + 1, 2 ** 32 + 500);
+  assert.ok(verifyConsistency(2 ** 32 + 1, 2 ** 32 + 500, first, second, proof));
 });

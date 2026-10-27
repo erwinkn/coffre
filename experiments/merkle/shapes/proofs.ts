@@ -45,7 +45,7 @@ function inclusion(m: number, n: number) {
 }
 
 function consistency(m: number, n: number) {
-  if (m === n) return { hashes: 0, us: 0 };
+  if (m === n || m === 0) return { hashes: 0, us: 0 };
   const { first, second, proof } = sparseConsistency(m, n);
   if (!verifyConsistency(m, n, first, second, proof)) throw new Error(`consistency ${m}/${n}`);
   return { hashes: proof.length, us: micros(() => verifyConsistency(m, n, first, second, proof)) };
@@ -103,16 +103,23 @@ for (const [label, N] of [['year', YEAR]] as const) {
     const back = seconds * RATE;
     const from = Math.max(TICK, N - back);
     put('one', `${label}: consistency ${gap}`, consistency(from, N));
-    put('split', `${label}: consistency ${gap}`, sum(
-      consistency(Math.max(1, Math.round(from * (1 - CHANGE_RATE))), uses),
-      consistency(Math.max(1, Math.round(from * CHANGE_RATE)), changes),
-    ));
+    if (gap === '1 tick') {
+      // A real tick adds whole entries: 500 uses, or 499 uses and a change (one tick in two, at one change a second).
+      put('split', `${label}: consistency ${gap} (no change)`, consistency(uses - TICK, uses));
+      put('split', `${label}: consistency ${gap} (one change)`, sum(consistency(uses - TICK + 1, uses), consistency(changes - 1, changes)));
+    } else {
+      put('split', `${label}: consistency ${gap}`, sum(
+        consistency(Math.max(1, uses - Math.round(back * (1 - CHANGE_RATE))), uses),
+        consistency(Math.max(0, changes - Math.round(back * CHANGE_RATE)), changes),
+      ));
+    }
     if (gap === '1 tick') put('day', `${label}: consistency ${gap}`, consistency(today - TICK, today));
     else {
-      // The old head's open day, carried to its final root, which is a leaf of the new top tree, which extends the old one.
+      // The old head (also at noon) had its own open day, half full: carried to that day's final root, which is a leaf
+      // of the new top tree, which extends the old top tree (empty a year back: nothing to prove).
       const oldClosed = Math.max(0, closed - Math.round(seconds / 86_400));
       put('day', `${label}: consistency ${gap}`, sum(
-        consistency(today, DAY), { hashes: 1, us: 0 }, inclusion(oldClosed, closed), consistency(Math.max(1, oldClosed), closed),
+        consistency(today, DAY), { hashes: 1, us: 0 }, inclusion(oldClosed, closed), consistency(oldClosed, closed),
       ));
     }
     put('tick', `${label}: consistency ${gap}`, consistency(Math.max(1, ticks - seconds * TICKS_PER_SECOND), ticks));
@@ -140,7 +147,9 @@ const openUs = ((performance.now() - t0) * 1000) / 2000;
 const witness = {
   noteBytes: note.length, openNoteUs: openUs,
   one: consistency(YEAR - TICK, YEAR),
-  split: sum(consistency(YEAR - TICK, YEAR), consistency(Math.round((YEAR - TICK) * CHANGE_RATE), Math.round(YEAR * CHANGE_RATE))),
+  // Each tree's own sizes: a tick of 500 uses, or of 499 uses and a change.
+  splitNoChange: consistency(YEAR * (1 - CHANGE_RATE) - TICK, YEAR * (1 - CHANGE_RATE)),
+  splitOneChange: sum(consistency(YEAR * (1 - CHANGE_RATE) - TICK + 1, YEAR * (1 - CHANGE_RATE)), consistency(YEAR * CHANGE_RATE - 1, YEAR * CHANGE_RATE)),
   tick: consistency(YEAR / TICK - 1, YEAR / TICK),
   chain: walkChain(1),
 };
@@ -166,6 +175,18 @@ const walk = {
       const batch = leaves.slice(i, i + TICK);
       e[0]!.append(batch.filter((_, j) => (i + j) % 1000 !== 0));
       e[1]!.append(batch.filter((_, j) => (i + j) % 1000 === 0));
+    }
+  }),
+  // A day's tree at a time (days of a million leaves here), each closed root into the top tree.
+  day: per(() => {
+    const top = Edge.empty();
+    let today = Edge.empty();
+    for (let i = 0; i < W; i += TICK) {
+      if (i > 0 && i % 1_000_000 === 0) {
+        top.append([today.root()]);
+        today = Edge.empty();
+      }
+      today.append(leaves.slice(i, i + TICK));
     }
   }),
   tick: per(() => {
