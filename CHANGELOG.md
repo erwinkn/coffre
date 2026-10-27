@@ -45,7 +45,9 @@
     what its work asks from then on, or once its connection closed, is
     refused, not sent behind the COMMIT or ROLLBACK where it would run
     outside it, and it ends once what it asked has answered, rolling back
-    if any of it failed;
+    if any of it failed, or if its work asked more once settled, rather
+    than commit part of it; and a COMMIT that Postgres answers with
+    ROLLBACK fails it;
   - a client whose connection was cut under a query, or as it opened,
     closes: upstream waited for the query for ever; and the next query on
     that connection answers its own rows, where upstream gave it the dead

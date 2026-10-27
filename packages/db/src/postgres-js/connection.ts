@@ -346,6 +346,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (isReservation(q)) return q.reject(err);
 
     const e = err && typeof err === 'object' ? err : new Error(String(err));
+    // The statement's own error, when its BEGIN went before it in one Query message: its position, in the statement.
+    if (q.begin !== null && q.began && q.options.simple && e instanceof Errors.PostgresError && e.position !== undefined) {
+      Object.defineProperty(e, 'position', { value: String(Number(e.position) - (q.begin.length + 2)), enumerable: true });
+    }
     if (!('query' in e) && !('parameters' in e)) {
       const debug = Boolean(options.debug);
       // Postgres refusing the BEGIN a statement carried refused the BEGIN: named as such.

@@ -68,7 +68,12 @@ Nine, each marked `Coffre:` in the code:
   asks from then on is refused, unsent (`TRANSACTION_ENDED`), as is what it
   asks once its connection closed (the close's error); the transaction
   then waits for every statement it asked to answer, and ends with a
-  ROLLBACK if any failed, waited for or not, else a COMMIT. Upstream sent
+  ROLLBACK if any failed, waited for or not, or if its work asked anything
+  once settled (`TRANSACTION_UNFINISHED`: it would commit only part of
+  it), else a COMMIT; and a COMMIT that Postgres answers with ROLLBACK (a
+  savepoint's statement that failed once its savepoint's work had
+  returned) fails it. A refused BEGIN's error names the BEGIN; a first
+  statement's error its position in the statement. Upstream sent
   the COMMIT or ROLLBACK at once: a statement asked during it ran after it,
   outside the transaction, in autocommit, kept even when the transaction
   rolled back; and a statement that failed unwaited left a COMMIT, which
@@ -80,7 +85,10 @@ Nine, each marked `Coffre:` in the code:
   pooler keeps the connection for the transaction from the ReadyForQuery
   after it, which says so (`T`), and coffre's Hyperdrive configurations
   cache nothing (`docs/deploy.md`), so that statement is never answered
-  from a cache. This
+  from a cache. A first statement described first (Parse, Describe, Flush,
+  then a wait) would reach Hyperdrive before any ReadyForQuery had pinned
+  the connection, a flow Cloudflare says hangs under its pooling; coffre
+  sends none (`postgresClient`), and none is supported there. This
   replaces PR A's fix for a BEGIN queued behind `max_pipeline` statements,
   which left `begin()` without its connection: a transaction now waits for
   a connection of its own instead.

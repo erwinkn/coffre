@@ -221,6 +221,12 @@ export default function postgres(given: Options): Sql {
     const asked = new Set<Query>();
     /** Its end is decided, COMMIT or ROLLBACK: what its work asks now is refused, unsent. */
     let decided = false;
+    /** Asked of it once its end was decided, and refused, before its COMMIT went: its work is not all done, it rolls back. */
+    let unfinished: Error | null = null;
+    /** Its COMMIT or ROLLBACK has gone: what is refused now changes nothing. */
+    let closing = false;
+    /** The first of its statements to fail, a savepoint's included: what a COMMIT Postgres answered with ROLLBACK says. */
+    let failure: unknown;
     /**
      * Why nothing more of the transaction is sent, which would run outside it: its BEGIN failed, its connection closed,
      * or it has ended, and its connection is the pool's again (what its work left running may still ask).
@@ -280,6 +286,7 @@ export default function postgres(given: Options): Sql {
         });
         if (!name) await settle();
         if (uncaughtError) throw uncaughtError;
+        if (!name && unfinished) throw unfinished;
       } catch (e) {
         if (!name) await settle();
         // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed; nor one whose
@@ -288,18 +295,31 @@ export default function postgres(given: Options): Sql {
         throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
       }
 
-      if (!name && first !== null) await last('commit');
+      if (!name && first !== null) {
+        // Coffre: Postgres answers the COMMIT of a transaction a statement of which failed, unwaited, in a savepoint
+        // its work had left, with ROLLBACK, not an error: the transaction fails. Upstream resolved.
+        const committed = (await last('commit')) as unknown as ResultMeta;
+        if (committed.command === 'ROLLBACK') {
+          throw failure ?? Errors.generic('TRANSACTION_ROLLED_BACK', 'Postgres rolled the transaction back at its COMMIT');
+        }
+      }
 
       return result;
 
       /** A statement of the transaction's: one that fails and is not waited for fails the transaction all the same. */
       function inTransaction(q: Query): void {
-        // Coffre: refused once the end is decided, and not counted against a transaction that may commit.
+        // Coffre: refused once the end is decided; before the COMMIT goes, the transaction's work is not all done, and it
+        // rolls back rather than commit part of it.
         if (decided) {
+          const refused = stopped ?? Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent');
+          if (!closing) unfinished ??= Errors.generic('TRANSACTION_UNFINISHED', 'The transaction\'s work asked a statement once it had settled, so the transaction rolled back');
           q.catch(() => {});
-          return q.reject(stopped ?? Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent'));
+          return q.reject(refused);
         }
-        q.catch((e: unknown) => uncaughtError || (uncaughtError = e));
+        q.catch((e: unknown) => {
+          uncaughtError ||= e;
+          failure ??= e;
+        });
         asked.add(q);
         send(q);
       }
@@ -318,6 +338,7 @@ export default function postgres(given: Options): Sql {
 
     /** The transaction's COMMIT or ROLLBACK, past the door that settle closed. */
     function last(text: string): Query {
+      closing = true;
       return new Query(text, [], send, { simple: true }, Boolean(options.debug));
     }
 

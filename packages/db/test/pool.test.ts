@@ -577,7 +577,8 @@ test('what a transaction\'s work asks once its end is decided is not sent: not b
     const refused: string[] = [];
     const later = (tx: TransactionSql, n: number) => tx.unsafe('select pg_sleep(0.05)').then(() => tx.unsafe('insert into decided values ($1)', [n])).catch((e: { code?: string }) => void refused.push(String(e.code)));
     // The work resolves, a statement of its still answering, and another asked after it: behind the COMMIT, upstream.
-    await client.begin((tx) => void later(tx, 1));
+    // Its work not all done, the transaction rolls back.
+    await assert.rejects(client.begin((tx) => void later(tx, 1)), { code: 'TRANSACTION_UNFINISHED' });
     // The work fails, the same left running: behind the ROLLBACK, upstream, kept.
     await assert.rejects(client.begin(async (tx) => {
       await tx.unsafe('insert into decided values ($1)', [100]);
@@ -623,6 +624,38 @@ test('a statement the client cannot write, left unwaited behind the first, rolls
       return 'ok';
     }), { code: 'MAX_PARAMETERS_EXCEEDED' });
     assert.deepEqual([...await client.unsafe('select count(*)::int as n from unwritable')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test('a transaction Postgres did not commit whole does not resolve: a savepoint\'s failure left behind, its work cut short', { skip }, async () => {
+  const { client } = sending('coffre-tx-whole');
+  try {
+    await client.unsafe('create temporary table whole (n int)');
+    // A statement of a savepoint fails once the savepoint's work has returned: Postgres answers the COMMIT with ROLLBACK.
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into whole values ($1)', [1]);
+      await tx.savepoint((sp) => {
+        sp.unsafe('select 1/0').catch(() => {});
+        return 'ok';
+      });
+      return 'ok';
+    }), { code: '22012' });
+    // Work the transaction left running asks again once it has settled: refused, and what it did before rolls back.
+    await assert.rejects(client.begin((tx) => {
+      void (async () => {
+        await tx.unsafe('insert into whole values ($1)', [2]);
+        await tx.unsafe('insert into whole values ($1)', [3]).catch(() => {});
+      })();
+      return 'ok';
+    }), { code: 'TRANSACTION_UNFINISHED' });
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from whole')], [{ n: 0 }]);
+    // A first statement's error says where in it, though its BEGIN went before it in one Query message.
+    const outside = await client.unsafe('select nonsense_column').catch((e: { position?: string }) => e.position);
+    const first = await client.begin((tx) => tx.unsafe('select nonsense_column')).catch((e: { position?: string }) => e.position);
+    assert.equal(first, outside);
+    assert.equal(outside, '8');
   } finally {
     await client.end();
   }
