@@ -27,7 +27,7 @@ import { auditWatch, walkOn } from '../src/plugins/audit-watch.ts';
 import { watchContext } from '../src/watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, holdSomething, openTestDatabase, resetDatabase, testAnchor, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testAnchor, testDeps, type FixtureDeps } from './api-fixture.ts';
 import {
   auditLog,
   credentials,
@@ -179,7 +179,7 @@ test('from its first step, the old key writes no more; after it, it verifies onl
   const old = startUnder(A);
   const next = startUnder(B, [A]);
   // One step, as a Worker takes it: the rotation is under way, and A is retired already.
-  assert.equal((await rotateStep(deps.db, next, { rows: 2 })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, next, { rows: 2, vault: deps.vault })).kind, 'rotating');
   const late = await old.db.transaction((tx) => appendAudit(tx, A, [{ actorType: 'system', actorId: 'late', action: 'secret.read', decision: 'allow' }])).catch((error: unknown) => error);
   assert.ok(late instanceof KeyRetired);
   // Refused as an instance a newer deployment replaces, not a bug.
@@ -223,8 +223,8 @@ test('from its first step, the old key writes no more; after it, it verifies onl
 
 test('a rotation cut short goes on from its last step, and every row is signed once', async () => {
   const first = startUnder(B, [A]);
-  assert.equal((await rotateStep(deps.db, first, { rows: 3 })).kind, 'rotating');
-  assert.equal((await rotateStep(deps.db, first, { rows: 3 })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, first, { rows: 3, vault: deps.vault })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, first, { rows: 3, vault: deps.vault })).kind, 'rotating');
   // The process dies here. Another start, which knows nothing of it, goes on from where the log says.
   const second = startUnder(B, [A]);
   const standing = await keyState(deps.db, second);
@@ -242,7 +242,7 @@ test('starts that race each other rotate once, each step going on from the one b
   const starts = Array.from({ length: 6 }, () => startUnder(B, [A]));
   await Promise.all(starts.map(async (start) => {
     for (let state = await keyState(deps.db, start); state.kind === 'rotating' || state.kind === 'sealing';) {
-      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, { rows: 2 }) : await finishRotation(deps.db, start);
+      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, { rows: 2, vault: deps.vault }) : await finishRotation(deps.db, start);
     }
   }));
   const entries = await appEntries();
@@ -302,7 +302,7 @@ test('a key the log refuses: one the log moved on from, or not the one a rotatio
   };
   // A lost key, or the wrong one: the instance serves, everyone signed out, as before; the server's log says which key.
   assert.equal(await refusal(startUnder(C)), 'settled');
-  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2 })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2, vault: deps.vault })).kind, 'rotating');
   assert.equal(await refusal(startUnder(C, [A, B])), `a rotation to ${appLogKey(B).keyId} is under way, and this app's key is ${appLogKey(C).keyId}: deploy that one as auditChainKey to finish it`);
   assert.equal(await refusal(startUnder(B)), `the rotation under way moves from ${appLogKey(A).keyId}, a key missing from previousAuditChainKeys: put it back to finish it`);
   await settleKey(startUnder(B, [A]));
@@ -364,7 +364,7 @@ test('a rotation cut short before its anchor was sealed again seals it at the ne
   await runScheduled(startUnder(A, [], [auditWatch({ anchor })]));
   // Every row signed, and the process died before the anchor was sealed again: no key.rotate yet.
   const cut = startUnder(B, [A]);
-  assert.equal((await rotateStep(deps.db, cut)).kind, 'sealing');
+  assert.equal((await rotateStep(deps.db, cut, { vault: deps.vault })).kind, 'sealing');
   assert.equal((await appEntries()).filter((entry) => entry.action === 'key.rotate').length, 0);
   assert.equal((await anchor.read())!.keyId, appLogKey(A).keyId);
   const next = startUnder(B, [A], [auditWatch({ anchor })]);
@@ -452,12 +452,13 @@ test('a CLI login approved but not yet taken is used up: everyone signs in again
   assert.deepEqual(await next.signin!.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null }), { status: 'expired' });
 });
 
-test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', postgresOnly('SQLite runs one transaction at a time'), async () => {
+// Its step runs inside a transaction of the test's own, standing in for another start: with 0.15's log, a step's prepare is a vault call, which no transaction may be open around (AGENTS.md).
+test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', { skip: postgresOnly('SQLite runs one transaction at a time').skip || (LOG === '0.15' && "its step's prepare is a vault call, made here inside the test's own transaction") }, async () => {
   const keys = startUnder(B, [A]);
   // Its first read sees no step yet; another start's first step commits before the next.
   const seen = await deps.db.transaction(async (tx) => {
     const first = await newestMove(tx);
-    assert.equal((await rotateStep(db.owner, keys, { rows: 2 })).kind, 'rotating');
+    assert.equal((await rotateStep(db.owner, keys, { rows: 2, vault: deps.vault })).kind, 'rotating');
     return { first, then: await keyState(tx, keys) };
   }, SNAPSHOT);
   assert.equal(seen.first, undefined);
@@ -479,7 +480,7 @@ test('a step the door takes while another start holds the head leaves it to that
   });
   await holding;
   try {
-    assert.deepEqual(await rotateStep(deps.db, next, { wait: false }), { kind: 'busy' });
+    assert.deepEqual(await rotateStep(deps.db, next, { wait: false, vault: deps.vault }), { kind: 'busy' });
     assert.deepEqual(await keyReady(next), { kind: 'rotating' });
     assert.equal((await appEntries()).filter((entry) => entry.action === 'key.reseal').length, 0);
   } finally {
@@ -515,7 +516,7 @@ test('a beat of an instance still under the old key, during the rotation, leaves
   assert.equal(sealed.finding, null);
   // The old instance has served, its key known settled; the new one's first step retires A.
   const next = startUnder(B, [A], [auditWatch({ anchor })]);
-  assert.equal((await rotateStep(deps.db, next, { rows: 2 })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, next, { rows: 2, vault: deps.vault })).kind, 'rotating');
   await assert.rejects(runScheduled(old), /heartbeat failed/);
   assert.deepEqual(await anchor.read(), sealed, 'the replaced instance wrote nothing');
   assert.equal(await keyReady(next), null);
@@ -545,7 +546,7 @@ test('an instance the log moved on from leaves the anchor as it is, whatever its
   const backlog = sealAnchor(A, { ...fields, verified: null, epoch: caught.epoch + 1 });
   assert.equal(await anchor.write(caught, backlog), true);
   // The new key's first step, then a walk of the old instance, which meets B's entry where the checkpoint is: it writes nothing.
-  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2 })).kind, 'rotating');
+  assert.equal((await rotateStep(deps.db, startUnder(B, [A]), { rows: 2, vault: deps.vault })).kind, 'rotating');
   const context = watchContext({ db: deps.db, chainKey: A, vault: deps.vault, warn: () => {} });
   assert.equal(await context.log.movedOn(), true);
   assert.equal(await walkOn(context, anchor), false);

@@ -176,6 +176,13 @@
       "when": 1793094000246,
       "tag": "0024_use_015",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793100000000,
+      "tag": "0025_app_change",
+      "breakpoints": true
     }
   ]
 }

@@ -13,11 +13,17 @@
 // binding issues at most 60 credentials a minute, so the service is bound
 // afresh before a round would pass that, and a level runs at most 60 jobs
 // at once. With 5 to 15 runs a level, its p99 is its slowest run.
+// With `--log 0.15`, the vault keeps 0.15's log: the sign-in's credential is a change of it, which a Node
+// checkpointer seals before the sign-in answers (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own
+// connection, near.
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
-//     [--rtt 20] [--rounds 5] [--jobs 1,3,10]
+//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { connect, createServer, type Server } from 'node:net';
 import { parseArgs } from 'node:util';
 
@@ -25,7 +31,10 @@ import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { derivedSigningKey } from '@coffre/vault';
+import { localVault, runCheckpointer, type LocalVault, type RunningCheckpointer } from '@coffre/vault/node';
+import { sql } from 'drizzle-orm';
+import pg from 'pg';
 
 import { resolveConfig } from '../../src/config.ts';
 import { EXCHANGES_PER_BINDING_MINUTE } from '../../src/api/workloads.ts';
@@ -42,6 +51,7 @@ const { values } = parseArgs({
     rtt: { type: 'string', default: '20' },
     rounds: { type: 'string', default: '5' },
     jobs: { type: 'string', default: '1,3,10' },
+    log: { type: 'string', default: '0.14' },
   },
 });
 const RTT = Number(values.rtt);
@@ -125,10 +135,20 @@ class TimedPool {
 const db = await openTestDatabase();
 const [farApp, farVault] = await Promise.all([farPostgres(TEST_RUNTIME_DATABASE_URL, RTT), farPostgres(TEST_VAULT_DATABASE_URL, RTT)]);
 const idle: { vault: LocalVault; pool: TimedPool }[] = [];
+const checkpointerPool = new pg.Pool({ connectionString: TEST_VAULT_DATABASE_URL, max: 4 });
+const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
+let checkpointer: RunningCheckpointer | null = null;
 try {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, { kek }) });
+  if (values.log === '0.15') {
+    await db.owner.execute(sql`DELETE FROM log_checkpoints`);
+    await db.owner.execute(sql`DELETE FROM log_tiles`);
+    await db.owner.execute(sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
+    checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), seed: derivedSigningKey(kek), memory: join(memory, 'memory') });
+  }
+  const log = checkpointer === null ? {} : { log: '0.15' as const, sealThrough: checkpointer.sealThrough };
+  const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, { kek }, {}, log) });
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -154,7 +174,7 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: await localVault({ database: createDatabase(pool), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: { count: 1_000_000, windowMinutes: 1 } }) };
+        return { pool, vault: await localVault({ database: createDatabase(pool), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, log) };
       })();
       instance.pool.cost = cost;
       cost.vaultCalls += 1;
@@ -255,5 +275,8 @@ try {
 } finally {
   await Promise.all(idle.map(({ vault, pool }) => vault.close().then(() => pool.end())));
   await Promise.all([farApp.close(), farVault.close()]);
+  await checkpointer?.stop();
+  await checkpointerPool.end();
+  rmSync(memory, { recursive: true, force: true });
   await db.close();
 }

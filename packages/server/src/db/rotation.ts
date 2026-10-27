@@ -64,7 +64,7 @@ function signedTable(db: Queryable, table: AuthTable) {
  * take the log's head, a session's renewal, waits for it, then finds the
  * row signed again and refuses, rather than the step missing it.
  */
-export async function signedRowsAfter(tx: Transaction, table: AuthTable, after: string | null, limit: number): Promise<AuthRow[]> {
+export async function signedRowsAfter(tx: Queryable, table: AuthTable, after: string | null, limit: number): Promise<AuthRow[]> {
   const rows = signedTable(tx, table);
   const query = tx.select().from(rows);
   return (await forUpdate(tx, (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit))) as AuthRow[];

@@ -21,12 +21,15 @@
 //   (the anchor sealed again)
 //   key.rotate  { from: 'app:1f…' }
 import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
+import type { Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
 
+import { AppChanges, COFFRE_ACTOR, retrying, revokes } from './api/changes.ts';
 import { signedAgain, signedBy, type AuthRow, type AuthTable } from './auth-rows.ts';
 import { appendAudit, appLogKey, type AppKeys, type AuditEntry } from './db/audit.ts';
+import type { CredentialRow } from './db/queries.ts';
 import { movedFrom, newestAppEntry, newestMove, reseal, signedRowsAfter, wroteUnder, type Resealed } from './db/rotation.ts';
 
 /** Every table whose rows carry the app's MAC, in the order a rotation signs them again. */
@@ -161,15 +164,27 @@ async function headFor(tx: Transaction, wait: boolean): Promise<boolean> {
  * before, and named. Where the app stands after: `sealing` once every row
  * is signed.
  */
-export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS, wait = true }: { rows?: number; wait?: boolean } = {}): Promise<KeyState> {
+export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS, wait = true, vault }: { rows?: number; wait?: boolean; vault: Vault }): Promise<KeyState> {
+  // With 0.15's log, each session it signs out is a change: prepared from the rows the step will read, read before its
+  // transaction as it reads them, which must find the same (`expectRevoked`). Read again while another start's step
+  // comes between, each moving the rotation on: starts racing each other at an app's deploy take turns, a few at most.
+  return retrying(async () => {
+  const prepared = await AppChanges.prepare(vault, COFFRE_ACTOR, async () => {
+    const before = await keyState(db, keys);
+    return revokes(before.kind === 'rotating' ? await sessionsEnded(db, keys, before, rows) : []);
+  });
   const unsigned: { table: AuthTable; id: string }[] = [];
   const state = await db.transaction(async (tx): Promise<KeyState> => {
     if (!(await headFor(tx, wait))) return busy;
     const standing = await keyState(tx, keys);
-    if (standing.kind !== 'rotating') return standing;
+    if (standing.kind !== 'rotating') {
+      prepared?.expectRevoked([]);
+      return standing;
+    }
     const { from } = standing;
     let next: Cursor | null = standing.next;
     let [left, resealed, signedOut, later] = [rows, 0, 0, 0];
+    const ended: string[] = [];
     // Keys listed beside the one moved from and still to move from: a row one of them signed is its own rotation's to sign, next.
     const { others } = standing;
     const now = new Date();
@@ -190,8 +205,10 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
       const changed = new Set(await reseal(tx, table, changes));
       for (const change of changes) {
         if (!changed.has(change.id)) unsigned.push({ table, id: change.id });
-        else if (change.ends !== null) signedOut += 1;
-        else resealed += 1;
+        else if (change.ends !== null) {
+          signedOut += 1;
+          if (table === 'credentials') ended.push(change.id);
+        } else resealed += 1;
       }
       left -= read.length;
       // A table read to its end goes on to the next; one cut short by the budget, after its last row read.
@@ -206,12 +223,44 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
       subject: fromId,
       metadata: { from: fromId, resealed, signedOut, later, unsigned: unsigned.slice(0, NAMED), unsignedCount: unsigned.length, next },
     }]);
+    prepared?.expectRevoked(ended);
+    await prepared?.commit(tx);
     return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others };
   });
+  await prepared?.sealed();
   if (unsigned.length > 0) {
     console.error({ event: 'auth_row_unsigned', rows: unsigned.slice(0, NAMED), count: unsigned.length }, 'rows neither app key signed are left as they are, and fail as before');
   }
   return state;
+  }, ROTATION_TRIES);
+}
+
+/** How many times a step is read and prepared again while other starts' steps come between it and its transaction. */
+const ROTATION_TRIES = 20;
+
+/**
+ * The live sessions a step from `standing` would sign out, read as it reads
+ * its rows, outside its transaction: what 0.15's changes of it are
+ * prepared from. The tables before the credentials' take their share of
+ * the step's rows first.
+ */
+async function sessionsEnded(db: Database, keys: AppKeys, standing: Extract<KeyState, { kind: 'rotating' }>, rows: number): Promise<CredentialRow[]> {
+  const now = new Date();
+  const ended: CredentialRow[] = [];
+  let next: Cursor | null = standing.next;
+  let left = rows;
+  while (next !== null && left > 0) {
+    const { table, after }: Cursor = next;
+    const read = await signedRowsAfter(db, table, after, left);
+    for (const row of table === 'credentials' ? read : []) {
+      const end = endsAt(table, row, now);
+      if (end !== null && signedAgain(standing.from, keys.chainKey, table, row, end as never) !== null) ended.push(row as unknown as CredentialRow);
+    }
+    const following: AuthTable | undefined = SIGNED_TABLES[SIGNED_TABLES.indexOf(table) + 1];
+    next = read.length < left ? (following === undefined ? null : { table: following, after: null }) : { table, after: read.at(-1)!.id };
+    left -= read.length;
+  }
+  return ended;
 }
 
 /**

@@ -374,11 +374,26 @@ export class Checkpointer {
 
   private closed = false;
 
+  /**
+   * A tick: the one queued behind the running one, if there is one yet,
+   * else a new one. Its barrier comes after every commit made before it
+   * starts, so whoever asks before it starts is sealed by it as well as by
+   * one of their own: many changes waiting at once share ticks, rather than
+   * each waiting for a tick per change before it (0.15-plan.md, "As built:
+   * PR 4b", measured).
+   */
   tick(): Promise<Tick> {
-    const run = this.running.then(() => this.tickNow());
+    if (this.queued !== null) return this.queued;
+    const run = this.running.then(() => {
+      this.queued = null;
+      return this.tickNow();
+    });
+    this.queued = run;
     this.running = run.catch(() => {});
     return run;
   }
+
+  private queued: Promise<Tick> | null = null;
 
   private async tickNow(): Promise<Tick> {
     if (this.closed) throw new Error('this checkpointer was closed: another took over its memory');

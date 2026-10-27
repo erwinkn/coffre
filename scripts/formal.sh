@@ -212,6 +212,10 @@ REMOVALS=(
   "Migration015 OldWritesFence NothingAllowedAfterAnswer"
   "Migration015 ChangeHeadFirst NoWaitCycle"
   "Migration015 RowFirst NoWaitCycle"
+  # An object of the app's rows, changed in the app's own transaction (plan PR 4b): head, row, fence.
+  "Migration015App AppHeadFirst NoWaitCycle"
+  "Migration015App DualFence NothingAllowedAfterAnswer"
+  "Migration015App OldWritesFence NothingAllowedAfterAnswer"
   "Migration015 Adopt EveryOldWriteAdopted"
   "Migration015 AdoptRepeats EveryOldWriteAdopted"
   "Migration015Tamper VerifyChain AnchorHolds"

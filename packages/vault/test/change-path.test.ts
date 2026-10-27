@@ -116,19 +116,6 @@ async function genesis(keys: ChangeKeys, ref: Ref, input: Input): Promise<void> 
   assert.ok(number !== null, `${ref.kind} ${ref.id} sealed`);
 }
 
-/** `genesis`, written as the owner around change_input: its entry, numbered, and the row's seal. */
-async function genesisAround(keys: ChangeKeys, ref: Ref & { kind: 'environment' }, input: Input): Promise<void> {
-  const call = genesisCall(keys, ref, input, Date.now(), 'system:cutover');
-  await db.owner.transaction(async (tx) => {
-    const [{ n }] = await rows<{ n: string | number }>(tx, ENGINE === 'postgres'
-      ? sql`SELECT nextval('log_number') AS n`
-      : sql`SELECT coalesce(max(n), 0) + 1 AS n FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
-    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-      VALUES (${BigInt(n)}, ${call.at}, ${call.requestId}, ${objectKey(ref)}, ${call.actor}, ${call.payload}, ${call.seal}, ${call.mac})`);
-    await run(tx, sql`UPDATE environments SET seal = ${call.seal} WHERE id = ${ref.id}`);
-  });
-}
-
 const member = (principal: string) => ({ kind: 'principal' as const, id: principal });
 
 test('every change a decision makes to a member is an entry of 0.15\'s log, op by op, beside 0.14\'s, and the log replays to the rows', async () => {
@@ -366,10 +353,8 @@ test('protecting two sealed environments in one call is two changes, each from i
   await db.owner.insert(environments).values({ id: gone, projectId: w.project, slug: 'old~1', name: 'Old' });
   await genesis(w.keys, { kind: 'environment', id: w.dev }, environment(w.project, w.dev, 'dev'));
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
-  // A deleted environment's object keeps the slug it had (objects.ts: the part before its tombstone). 0023's
-  // change_input takes a deleted one's value only with the tombstone in it, which a later migration lifts (plan PR 4b):
-  // until then, its genesis is written as change_input would, as the owner.
-  await genesisAround(w.keys, { kind: 'environment', id: gone }, { ...environment(w.project, gone, 'old'), deleted: true });
+  // A deleted one's object holds its slug before the tombstone (objects.ts; 0025).
+  await genesis(w.keys, { kind: 'environment', id: gone }, { ...environment(w.project, gone, 'old'), deleted: true });
   // An Owner protects all three, from a page shown before one of them was deleted: 0.14 takes it, as it did.
   const outcome = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev, w.prod, gone], protected: true } });
   assert.ok(outcome.ok, JSON.stringify(outcome));

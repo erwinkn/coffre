@@ -20,6 +20,7 @@ import type {
   RemoveInput,
   ReferenceInput,
   EndReferencesInput,
+  PrepareInput,
   RewrapInput,
   SetAccessInput,
   SetSettingsInput,
@@ -76,7 +77,7 @@ const ready = new WeakMap<object, { database: PostgresDatabase; hotDatabase?: Po
  * call is done.
  */
 export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
-  async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T> {
+  async #call<T>(run: (vault: Required<Vault>) => Promise<T>): Promise<T> {
     const { prepared, database } = await this.#ready();
     const pool = new HyperdrivePool(database.hyperdrive.connectionString);
     try {
@@ -130,6 +131,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async about() { return this.#call((vault) => vault.about()); }
   async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
+  async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
+  async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

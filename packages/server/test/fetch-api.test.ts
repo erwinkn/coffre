@@ -8,7 +8,7 @@ import { eq } from 'drizzle-orm';
 
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://coffre.test';
 const ROOT = 'admin@acme.example';
@@ -191,7 +191,7 @@ test('someone signed in but not a member reaches /me and nothing else', async ()
   await assert.rejects(client.projects.list(), { status: 403, code: 'registration_required' });
 });
 
-test('a member whose record fails the vault\'s check is told so, and listed so, until an owner starts them over', async () => {
+test('a member whose record fails the vault\'s check is told so, and listed so, until an owner starts them over', { skip: START_OVER_014 }, async () => {
   const { vaultMembers } = tablesOf(db.owner);
   // Someone who owns the database makes DEV an owner, around the vault.
   await db.owner.update(vaultMembers).set({ owner: true, role: 'admin' }).where(eq(vaultMembers.principal, `user:${DEV}`));

@@ -60,6 +60,8 @@ import {
   liveBindings,
   memberStanding,
   places,
+  liveCredentialsOf,
+  liveCredentialsWhere,
   revokeLiveCredentials,
   secretHeads,
   standingBinding,
@@ -70,12 +72,14 @@ import {
   type PlaceRow,
 } from '../db/queries.ts';
 import { databaseNow, frozenTargets, insertSession, keyNames, renewSession, workloadCandidates } from '../db/workloads.ts';
+import { sessionScope } from '../workload-sessions.ts';
 import { awsProof } from '../workloads/aws.ts';
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { expectedAudiences, PROFILE_RULES } from '../workloads/profiles.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { newestPolicySeq } from './caller.ts';
+import { AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes } from './changes.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, credentialStill, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
@@ -96,7 +100,7 @@ import {
   type ScopeByPath,
 } from './services.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound } from './errors.ts';
-import { parsePath } from './paths.ts';
+import { formatMember, parsePath } from './paths.ts';
 
 export type WorkloadServiceDeps = {
   db: Database;
@@ -656,6 +660,12 @@ export class WorkloadService {
       });
       if (options.dryRun) return plan(replaced);
 
+      return retrying(async () => {
+      // With 0.15's log, the credentials of those it replaces, ended with them: those it replaces now, read again on a retry.
+      const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => {
+        const ending = inherits ? replaced : replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+        return ending.map(({ id }) => id);
+      });
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
@@ -688,8 +698,9 @@ export class WorkloadService {
           createdBy: ctx.caller.principal.id,
         };
         await insertBinding(tx, this.#deps.chainKey, row);
+        const ended: string[] = [];
         for (const replaced of planned.replaces) {
-          await this.#revoke(tx, replaced.id, `token:${serviceId}`, ctx.caller.principal.id, now);
+          ended.push(...(await this.#revoke(tx, replaced.id, `token:${serviceId}`, ctx.caller.principal.id, now)).credentials);
           log.push(allowed(ctx, 'token.unbind', {
             metadata: { bindingId: replaced.id, principalType: 'service', principalId: serviceId, reason: replaced.why === 'asked' ? 'replaced' : 'keys_moved', by: id },
           }));
@@ -710,10 +721,12 @@ export class WorkloadService {
             replaces: planned.replaces.map((replaced) => replaced.id),
           },
         }));
+        changes?.expectRevoked(ended);
         return {
           binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, planned.policy),
           replaced: planned.replaces.map((replaced) => replaced.id),
         };
+      }, changes);
       });
     });
   }
@@ -772,6 +785,8 @@ export class WorkloadService {
       // Each new binding's policy, its old one's, shown by path and name.
       const shown = await this.#shownPolicies(replaced);
 
+      return retrying(async () => {
+      const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => plan.replaces);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
@@ -781,6 +796,7 @@ export class WorkloadService {
         if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
         const now = new Date();
         const bindings: BindingView[] = [];
+        const ended: string[] = [];
         for (const [i, old] of live.entries()) {
           const id = randomUUID();
           const { scope, byPath } = scopes.get(old.id)!;
@@ -801,7 +817,7 @@ export class WorkloadService {
             createdBy: ctx.caller.principal.id,
           };
           await insertBinding(tx, this.#deps.chainKey, row);
-          await this.#revoke(tx, old.id, member, ctx.caller.principal.id, now);
+          ended.push(...(await this.#revoke(tx, old.id, member, ctx.caller.principal.id, now)).credentials);
           log.push(allowed(ctx, 'token.unbind', {
             metadata: { bindingId: old.id, principalType: 'service', principalId: serviceId, reason: 'keys_replaced', by: id },
           }));
@@ -821,7 +837,9 @@ export class WorkloadService {
           }));
           bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, shown(old.policy)));
         }
+        changes?.expectRevoked(ended);
         return { bindings, replaced: plan.replaces };
+      }, changes);
       });
     });
   }
@@ -833,16 +851,21 @@ export class WorkloadService {
     return withRefusals(this.#deps, async () => {
       // Logged as a denial, which no tombstone check counts.
       if (!(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) throw notManager(ctx, 'token.unbind', metadata, 'remove its trust bindings');
-      // Who manages it was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
-      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
-        const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
-        const live = row !== null && row.revokedAt === null
-          && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
-        if (!live || (await this.#revoke(tx, bindingId, member, ctx.caller.principal.id, new Date())) === 0) {
-          throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
-        }
-        log.push(allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } }));
-        return { unbound: true as const };
+      return retrying(async () => {
+        const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => [bindingId]);
+        // Who manages it was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
+        return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+          const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
+          const live = row !== null && row.revokedAt === null
+            && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
+          const ended = live ? await this.#revoke(tx, bindingId, member, ctx.caller.principal.id, new Date()) : null;
+          if (ended === null || ended.revoked === 0) {
+            throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
+          }
+          changes?.expectRevoked(ended.credentials);
+          log.push(allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } }));
+          return { unbound: true as const };
+        }, changes);
       });
     });
   }
@@ -942,10 +965,23 @@ export class WorkloadService {
    * credential checks its binding too, so these rows are belt and braces;
    * the expired ones are dead already and are left as they are.
    */
-  async #revoke(tx: Transaction, id: string, member: string, by: string, at: Date): Promise<number> {
+  async #revoke(tx: Transaction, id: string, member: string, by: string, at: Date): Promise<{ revoked: number; credentials: string[] }> {
     const revoked = await updateAuth(tx, this.#deps.chainKey, serviceBindings, { id, revokedAt: null }, { revokedAt: at, revokedBy: by });
-    await revokeLiveCredentials(tx, this.#deps.chainKey, { principal: member, createdBy: issuedBy(id), at }, { revokedAt: at, revokedBy: by });
-    return revoked;
+    const credentials = await revokeLiveCredentials(tx, this.#deps.chainKey, { principal: member, createdBy: issuedBy(id), at }, { revokedAt: at, revokedBy: by });
+    return { revoked, credentials };
+  }
+
+  /**
+   * The changes revoking these bindings makes to 0.15's log: one per live
+   * credential each issued, as `#revoke` finds them, read before the
+   * transaction (`AppChanges.expectRevoked` holds the two to each other).
+   */
+  async #revokes(actor: string, member: string, bindings: () => Promise<readonly string[]>): Promise<AppChanges | null> {
+    return AppChanges.prepare(this.#deps.vault, actor, async () => {
+      const at = new Date();
+      const live = await Promise.all((await bindings()).map((id) => liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, liveCredentialsOf({ principal: member, createdBy: issuedBy(id), at }))));
+      return revokes(live.flat());
+    });
   }
 
   /**
@@ -1084,7 +1120,29 @@ export class WorkloadService {
 
     const service = member.slice('token:'.length);
     const actor = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
-    const made = await audited(this.#deps, async (tx, log) => {
+    // The session's ends and scope, from what its proof decides under the head (`commit`), at `now`.
+    const hours = POLICY_FIELDS[binding.profile as WorkloadProfile].includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : null;
+    const logged = await keeps015(vault);
+    const shape = (committed: CommittedProof, now: number) => {
+      // The hard end: the binding's hours, where its profile has them, and every end its proof gave.
+      const ends = [hours === null ? null : now + hours * 3_600_000, verified.notAfter?.getTime() ?? null, committed.notAfter?.getTime() ?? null]
+        .filter((end): end is number => end !== null);
+      const notAfter = new Date(Math.min(...(ends.length === 0 ? [now + POLICY_DEFAULTS.sessionHours * 3_600_000] : ends)));
+      const scope = committed.scope ?? null;
+      // With 0.15's log, the scope its uses hold, its binding's reads with it, which its row then carries (`sessionScope`
+      // reads the same from it): a credential's object is all its uses decide on.
+      const stored = logged ? sealedSessionScope(scope, binding, policy) : scope;
+      return { notAfter, expiresAt: new Date(Math.min(now + kind.lifetimeMs, notAfter.getTime())), scope, stored };
+    };
+    // What the proof decides under the head, as a first try takes it (nothing: the binding's), then as it decided.
+    let decided: CommittedProof = {};
+    const made = await retrying(async () => {
+    const id = randomUUID();
+    const planned = shape(decided, Date.now());
+    const changes = logged
+      ? await AppChanges.prepare(vault, member, [credentialChange(null, { id, principal: member, kind: 'workload', scope: planned.stored, revokedAt: null, expiresAt: planned.expiresAt, notAfter: planned.notAfter })])
+      : null;
+    return audited(this.#deps, async (tx, log) => {
       const now = new Date();
       if (!(await stillMember(tx, member, standing)) || (await standingBinding(tx, chainKey, binding.id, member, binding.generation)) === null) throw unbound();
       if ((await frozenTargets(tx, ['instance', member, `binding:${binding.id}`])).length > 0) {
@@ -1097,17 +1155,15 @@ export class WorkloadService {
       if (spent !== undefined && !(await consumeToken(tx, spent))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your platform for a fresh one');
       const committed = kind.commit === undefined ? {} : await kind.commit(tx, verified, ctx);
       if (committed instanceof ExchangeRefused) throw committed;
-      // The hard end: the binding's hours, where its profile has them, and every end its proof gave.
-      const hours = POLICY_FIELDS[binding.profile as WorkloadProfile].includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : null;
-      const ends = [hours === null ? null : now.getTime() + hours * 3_600_000, verified.notAfter?.getTime() ?? null, committed.notAfter?.getTime() ?? null]
-        .filter((end): end is number => end !== null);
-      const notAfter = new Date(Math.min(...(ends.length === 0 ? [now.getTime() + POLICY_DEFAULTS.sessionHours * 3_600_000] : ends)));
+      // The change was sealed for what the proof would decide: decided otherwise (an enrollment's scope and end), made again with it.
+      if (changes !== null && ((committed.scope ?? null) !== (decided.scope ?? null) || committed.notAfter?.getTime() !== decided.notAfter?.getTime())) {
+        decided = committed;
+        throw new ObjectMoved();
+      }
+      const { notAfter, expiresAt, scope, stored } = changes !== null ? planned : shape(committed, now.getTime());
       if (notAfter.getTime() <= now.getTime()) throw new ExchangeRefused('expired', 'the proof has expired');
-      const expiresAt = new Date(Math.min(now.getTime() + kind.lifetimeMs, notAfter.getTime()));
-      const scope = committed.scope ?? null;
       const reached = environmentsOf(readScope(scope ?? binding.scope) ?? [], known);
       const token = generateToken('workload');
-      const id = randomUUID();
       await insertSession(tx, chainKey, {
         id,
         kind: 'workload',
@@ -1120,7 +1176,7 @@ export class WorkloadService {
         createdBy: issuedBy(binding.id),
         expiresAt,
         revokedAt: null,
-        scope,
+        scope: stored,
         // Where `/use/<credential>` goes when it names no environment: the one it reaches, if one.
         places: JSON.stringify(reached.map(({ id: environmentId }) => ({ environmentId, personal: false }))),
         jkt: meta.jkt,
@@ -1148,6 +1204,7 @@ export class WorkloadService {
         },
       }));
       return { id, token, expiresAt, notAfter, committed, reached };
+    }, changes);
     });
     if (kind.after !== undefined) {
       // The session is made: what runs after it never unmakes it.
@@ -1173,17 +1230,31 @@ export class WorkloadService {
     const proof = proofOf(binding.profile);
     if (proof === null) throw new ExchangeRefused('no_match', 'this release renews no session of this binding\'s profile');
     const { kind } = proof;
-    const expiresAt = await db.transaction(async (tx) => {
-      const refusal = kind.renew === undefined ? null : await kind.renew.check(tx, row);
-      if (refusal !== null) throw refusal;
-      const now = await databaseNow(tx);
-      const next = Math.min(now + kind.lifetimeMs, row.notAfter!.getTime());
-      // At its hard end already: nothing to move, and nothing revived.
-      if (next <= row.expiresAt.getTime()) return row.expiresAt;
-      if (!(await renewSession(tx, chainKey, row, new Date(next)))) {
-        throw new ExchangeRefused('expired', 'the session ended, or was renewed or revoked meanwhile: sign in again');
-      }
-      return new Date(next);
+    // With 0.15's log, the end it moves to is a change, sealed before the transaction, from the database's clock read
+    // before it: in `audited`, whose head comes before the row, as every change of the app's takes them (AppHeadFirst).
+    const logged = await keeps015(this.#deps.vault);
+    const expiresAt = await retrying(async () => {
+      const planned = logged ? Math.min((await databaseNow(db)) + kind.lifetimeMs, row.notAfter!.getTime()) : null;
+      const changes = planned === null || planned <= row.expiresAt.getTime()
+        ? null
+        : await AppChanges.prepare(this.#deps.vault, row.principal, [credentialChange(row, { ...row, expiresAt: new Date(planned) })]);
+      const renew = async (tx: Transaction) => {
+        const refusal = kind.renew === undefined ? null : await kind.renew.check(tx, row);
+        if (refusal !== null) throw refusal;
+        const until = async () => Math.min((await databaseNow(tx)) + kind.lifetimeMs, row.notAfter!.getTime());
+        const next = planned ?? (await until());
+        if (next <= row.expiresAt.getTime()) {
+          // Planned before a wait for the head, an end that would move now is made again from now (`retrying`).
+          if (planned !== null && (await until()) > row.expiresAt.getTime()) throw new ObjectMoved();
+          // At its hard end already: nothing to move, and nothing revived.
+          return row.expiresAt;
+        }
+        if (!(await renewSession(tx, chainKey, row, new Date(next)))) {
+          throw new ExchangeRefused('expired', 'the session ended, or was renewed or revoked meanwhile: sign in again');
+        }
+        return new Date(next);
+      };
+      return logged ? audited(this.#deps, renew, changes) : db.transaction(renew);
     });
     if (kind.renew !== undefined) {
       const ctx: ProofContext = { db, chainKey, config, transport, publicUrl, service: row.principal, jkt: row.jkt!, sourceIp: meta.sourceIp, requestId: meta.requestId };
@@ -1209,11 +1280,22 @@ export class WorkloadService {
 
     const service = member.slice('token:'.length);
     const ctx = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
+    return retrying(async () => {
+    // With 0.15's log, the credential is a change of it, and carries its binding's scope, as stored: its uses decide on
+    // it alone (0.14 reads the binding's, which this is), and the binding's end revokes it, a change too (`#revoke`).
+    const scoped = (await keeps015(vault)) ? (unsealedScope(binding.scope) ? (await findBinding(db, chainKey, member, binding.id))?.scope ?? null : binding.scope) : undefined;
+    const { row, issued: credential } = this.#deps.signin.exchangedCredential(service, {
+      generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS),
+      ...(scoped === undefined ? {} : { scope: readScope(scoped) ?? [] }),
+    });
+    const changes = await AppChanges.prepare(vault, member, [credentialChange(null, row)]);
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
       // The member, the binding and its rate, in one read: every statement here holds the head, which every append waits for.
       const still = await exchangeStill(tx, chainKey, binding, new Date(now.getTime() - 60_000), EXCHANGES_PER_BINDING_MINUTE);
       if (!still.stands) throw unbound();
+      // The scope the credential carries is the binding's still.
+      if (scoped !== undefined && still.scope !== scoped) throw new ObjectMoved();
       // The times again, should the request have waited.
       const seconds = now.getTime() / 1000;
       if (decoded.claims.exp <= seconds - CLOCK_TOLERANCE_SECONDS) throw new ExchangeRefused('expired', 'the token has expired');
@@ -1222,8 +1304,6 @@ export class WorkloadService {
       if (still.recent >= EXCHANGES_PER_BINDING_MINUTE) {
         throw new ExchangeRefused('busy', `this binding issued ${EXCHANGES_PER_BINDING_MINUTE} credentials in the last minute: try again shortly`, 429);
       }
-      const expiresAt = new Date(now.getTime() + EXCHANGED_CREDENTIAL_MS);
-      const { row, issued: credential } = this.#deps.signin.exchangedCredential(service, { generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt });
       // The token spent, and only then the credential issued and the binding's last use stamped.
       if (!(await exchangeToken(tx, decoded.signingInputHash, row, binding.id, now))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
       log.push(allowed(ctx, 'token.exchange', {
@@ -1237,8 +1317,19 @@ export class WorkloadService {
         },
       }));
       return { token: credential.token, expiresAt: credential.expiresAt };
+    }, changes);
     });
   }
+}
+
+/**
+ * A workload session's scope as its row stores it with 0.15's log: what its
+ * uses hold (`sessionScope`), its binding's per-key reads included, so that
+ * its object, all a 0.15 use decides on, is no wider than what 0.14 decides
+ * on from its binding.
+ */
+export function sealedSessionScope(scope: string | null, binding: Pick<BindingRow, 'scope'>, policy: BindingPolicy): string {
+  return storedScope(sessionScope({ scope }, binding, policy), { reads: true });
 }
 
 /** An uploaded key set, checked (`uploadedKeys`), or a 400 saying what is wrong with it. */

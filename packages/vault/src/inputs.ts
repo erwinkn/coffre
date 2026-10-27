@@ -206,6 +206,10 @@ export type Op =
   | { op: 'access.revoke'; place: GrantPlace }
   | { op: 'credential.issue'; principal: string; caller: CallerKind; scope: CredentialScope | null; expiresAt: number | null }
   | { op: 'credential.revoke' }
+  /** A live credential's end moved: a workload's session renewed (never past its hard end, the app's to hold). */
+  | { op: 'credential.renew'; expiresAt: number | null }
+  /** A live credential's scope written: a token of 0.4's, which carried none, sealed to what its account held (`token.seal`). */
+  | { op: 'credential.scope'; scope: CredentialScope | null }
   | { op: 'secret.write'; projectId: string; environmentId: string; version: string; nature: Nature; key: WrappedKey | null; source: string | null }
   | { op: 'secret.delete' }
   | { op: 'environment.create'; projectId: string; slug: string; owner: string | null; parentId: string | null; protected: boolean }
@@ -275,6 +279,15 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
     case 'credential.revoke': {
       const credential = of('credential');
       return credential !== null && !credential.revoked ? { ...credential, revoked: true } : undefined;
+    }
+    case 'credential.renew': {
+      const credential = of('credential');
+      return credential !== null && !credential.revoked ? { ...credential, expiresAt: op.expiresAt } : undefined;
+    }
+    case 'credential.scope': {
+      const credential = of('credential');
+      const scoped = credential === null || credential.revoked ? null : { ...credential, scope: op.scope };
+      return scoped !== null && callerFits(scoped) ? scoped : undefined;
     }
     case 'secret.write': {
       const secret = of('secret');

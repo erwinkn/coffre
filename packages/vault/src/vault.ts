@@ -79,6 +79,8 @@ import {
   type LogVerification,
   type Outcome,
   type PolicyChange,
+  type Prepared,
+  type PrepareInput,
   type Purpose,
   type ReferenceInput,
   type Refusal,
@@ -108,7 +110,7 @@ import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, Moved, NotLogged, type ChangeKeys } from './changes.ts';
+import { Changes, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
@@ -253,7 +255,7 @@ const DEFAULT_CONNECTIONS = 10;
  * login (`coffre_vault_hot`: its lock and statement timeouts, generic
  * plans; schema 0022). Cheap: on Workers, one per call, over that call's connections.
  */
-export function openVault(db: Database, prepared: PreparedVault, hot?: Database): Vault {
+export function openVault(db: Database, prepared: PreparedVault, hot?: Database): Required<Vault> {
   return new VaultService(db, prepared, hot);
 }
 
@@ -3021,7 +3023,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: [] }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15' }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3031,7 +3033,41 @@ class VaultService implements Vault {
       owners: [...this.#config.owners],
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
+      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const }),
     };
+  }
+
+  /**
+   * The app's changes, sealed (`prepareChanges`, plan PR 4b): no read, no
+   * lock, nothing written, but the report of a row that is not the vault's,
+   * which refuses them all (`tampered`), as a decision of its own would.
+   */
+  async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
+    const log015 = this.#log015();
+    if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
+    try {
+      return { ok: true, changes: prepareChanges(log015, Date.now() + this.#prepared.options.clockOffset(), input.actor, input.changes) };
+    } catch (error) {
+      if (!(error instanceof NotLogged)) throw error;
+      const reports: NewEntry[] = [];
+      const refused = this.#notLogged(reports, error);
+      await this.#record(reports);
+      return { ok: false, refusal: refused.refusal };
+    }
+  }
+
+  /** Once entry `number` is sealed and witnessed, or its witnesses past their 2 s (R51): what a change the app made waits for. */
+  async waitSealed(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>> {
+    const log015 = this.#log015();
+    if (typeof input?.number !== 'string' || !/^[1-9][0-9]{0,18}$/.test(input.number)) throw new Error('waitSealed takes an entry\'s number, in decimal');
+    const sealed = await log015.sealThrough(BigInt(input.number));
+    return { ok: true, witnessed: sealed.witnessed ?? null };
+  }
+
+  #log015(): NonNullable<PreparedVault['log015']> {
+    const log015 = this.#prepared.log015;
+    if (log015 === null) throw new Error("this vault keeps 0.14's log: the app writes its rows as 0.14 does (`about().log`)");
+    return log015;
   }
 
   async keyChecks(): Promise<KeyChecks> {

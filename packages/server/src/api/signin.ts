@@ -15,7 +15,7 @@ import {
   type SigninProfile,
 } from '@coffre/core/identity';
 import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
-import type { Access, Vault } from '@coffre/core/vault';
+import type { Access, ObjectChange, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
@@ -36,11 +36,16 @@ import {
   principalOf,
   resolvePath,
   type PlaceRow,
+  credentialsBy,
+  liveCredentialsWhere,
+  priorCredentials,
+  revokeCredentialsWhere,
   revokePriorMembership,
   update,
   updateAuth,
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
+import { AppChanges, COFFRE_ACTOR, credentialChange, retrying, revokes } from './changes.ts';
 import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
@@ -139,7 +144,8 @@ const PENDING_TTL_SECONDS = 10 * 60;
 export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
 /** What a credential is issued with, beyond its kind and principal. */
-type CredentialOptions = { generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[] };
+/** A credential's row, as its issuer writes it; `id` chosen before the transaction, so that 0.15's change of it is too (`#issueChange`). */
+type CredentialOptions = { id?: string; generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[] };
 
 /** A service or personal token as issued: its value, once, and what it reaches, by path. */
 export type IssuedToken = IssuedCredential & TokenPlan;
@@ -445,6 +451,13 @@ export class SigninService {
       const standing = match?.access ?? await this.#standing(principal);
       if (standing.status === 'tampered') throw refuse('tampered', preparedId);
       if (standing.status !== 'active') throw refuse('deactivated', preparedId);
+      return retrying(async () => {
+      // The session, and, binding a new account, the credentials of an earlier membership it revokes (`revokePriorMembership`).
+      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.browserSessionHours * 3_600_000) };
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
+        const prior = previous === null ? await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, priorCredentials(principal, standing.generation, new Date())) : [];
+        return [this.#issueChange('browser', principal, plan), ...revokes(prior)];
+      });
       return audited(this.#deps, async (tx, log) => {
         if (!(await this.#stillMember(tx, principal, standing))) throw refuse('deactivated', preparedId);
         const now = new Date();
@@ -469,7 +482,8 @@ export class SigninService {
           principalId = preparedId;
           generation = standing.generation;
           // A crashed older attempt may have committed after the removal sweep.
-          await revokePriorMembership(tx, this.#deps.chainKey, principal, generation, 'system:signin');
+          const ended = await revokePriorMembership(tx, this.#deps.chainKey, principal, generation, 'system:signin');
+          changes?.expectRevoked(ended);
 
           const [person] = await members(tx, this.#deps.chainKey, { member: { type: 'user', id: principalId } }, now);
           const others = (person?.identities ?? []).filter(
@@ -492,12 +506,13 @@ export class SigninService {
           });
         }
 
+        if (bound !== null) changes?.expectRevoked([]);
         const credential = await this.#issue(tx, 'browser', principal, {
+          ...plan,
           generation,
           identityId,
           label: meta.label,
           createdBy: principalId,
-          expiresAt: new Date(now.getTime() + this.#deps.signin.browserSessionHours * 3_600_000),
         });
         log.push({
           ...base,
@@ -506,6 +521,7 @@ export class SigninService {
           metadata: { ...account, identityId, targetCredentialId: credential.id },
         });
         return { ok: true as const, principal, credential };
+      }, changes);
       });
     });
   }
@@ -629,10 +645,16 @@ export class SigninService {
     return issued;
   }
 
+  /** The change issuing a credential makes to 0.15's log: the object of the row `#credential` writes, from the same options. */
+  #issueChange(kind: CredentialKind, principal: PrincipalRef, options: { id: string; expiresAt: Date; scope?: CredentialScope }): ObjectChange {
+    const scope = options.scope === undefined ? null : storedScope(options.scope);
+    return credentialChange(null, { id: options.id, principal: principalOf(principal), kind, scope, revokedAt: null, expiresAt: options.expiresAt });
+  }
+
   /** A credential's row, signed, and what its holder is given: written by whoever issues it. */
   #credential(kind: CredentialKind, principal: PrincipalRef, options: CredentialOptions): { row: typeof credentials.$inferInsert; issued: IssuedCredential } {
     const token = generateToken(kind);
-    const id = randomUUID();
+    const id = options.id ?? randomUUID();
     const row = {
       id,
       kind,
@@ -745,9 +767,17 @@ export class SigninService {
   /** Revoke the credential this token is. Unknown tokens are a quiet no-op. */
   async signOut(token: string, meta: Omit<ClientMeta, 'label'>): Promise<void> {
     if (!isCoffreToken(token)) return;
+    const tokenHash = hashToken(token);
+    await retrying(async () => {
+    // Its actor, the session's own principal: a sign-out acts for whoever holds the token.
+    const changes = await AppChanges.prepare(
+      this.#deps.vault,
+      (read) => read[0]?.after.principal ?? COFFRE_ACTOR,
+      async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash))),
+    );
     await audited(this.#deps, async (tx, log) => {
-      const row = await findCredential(tx, this.#deps.chainKey, { tokenHash: hashToken(token) });
-      if (row === null) return;
+      const row = await findCredential(tx, this.#deps.chainKey, { tokenHash });
+      if (row === null) return changes?.expectRevoked([]);
       const member = memberOf(row.principal);
       const revoked = await updateAuth(
         tx,
@@ -756,6 +786,7 @@ export class SigninService {
         { id: row.id, revokedAt: null },
         { revokedAt: new Date(), revokedBy: member.id },
       );
+      changes?.expectRevoked(revoked === 0 ? [] : [row.id]);
       if (revoked === 0) return;
       log.push({
         actorType: member.type,
@@ -767,6 +798,7 @@ export class SigninService {
         // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
         metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id } : {}) },
       });
+    }, changes);
     });
   }
 
@@ -778,6 +810,8 @@ export class SigninService {
    * as `'own handle'`, one that is not a handle of the caller's.
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
+    return retrying(async () => {
+    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId))));
     // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
     return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
@@ -800,18 +834,22 @@ export class SigninService {
         { revokedAt: new Date(), revokedBy: principal.id },
       );
       if (revoked === 0) throw unknown();
+      changes?.expectRevoked([credentialId]);
       log.push(
         allowed(ctx, 'token.revoke', {
           metadata: { targetCredentialId: credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
         }),
       );
       return { revoked: true as const };
+    }, changes);
     });
   }
 
   /** Unbind one of your sign-in accounts, ending the sessions it opened. */
   async unlinkIdentity(ctx: Asker, identityId: string): Promise<{ unlinked: true }> {
     const { principal } = ctx.caller;
+    return retrying(async () => {
+    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.identity(identityId))));
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
       const [self] = await members(tx, this.#deps.chainKey, { member: principal }, now);
@@ -826,16 +864,12 @@ export class SigninService {
           denied(ctx, 'account.unlink', 'unknown_identity', { metadata: { identityId } }),
         );
       }
-      const sessionsEnded = await updateAuth(
-        tx,
-        this.#deps.chainKey,
-        credentials,
-        { identityId, revokedAt: null },
-        { revokedAt: now, revokedBy: principal.id },
-      );
+      const ended = await revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.identity(identityId), { revokedAt: now, revokedBy: principal.id });
+      changes?.expectRevoked(ended);
       const row = { provider: identity.provider, subject: identity.subject };
-      log.push(allowed(ctx, 'account.unlink', { metadata: { identityId, ...row, sessionsEnded } }));
+      log.push(allowed(ctx, 'account.unlink', { metadata: { identityId, ...row, sessionsEnded: ended.length } }));
       return { unlinked: true as const };
+    }, changes);
     });
   }
 
@@ -919,18 +953,19 @@ export class SigninService {
       // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
       const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.create' });
       const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
+      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000), scope };
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan)]);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
         await credentialStill(ctx, tx, 'token.create');
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
+          ...plan,
           generation: standing.generation,
           identityId: null,
           label: input.label,
           createdBy: ctx.caller.principal.id,
-          expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
-          scope,
         });
         log.push(
           allowed(ctx, 'token.create', {
@@ -938,7 +973,7 @@ export class SigninService {
           }),
         );
         return { ...credential, scope: byPath, withheld };
-      });
+      }, changes);
     });
   }
 
@@ -990,20 +1025,21 @@ export class SigninService {
   async issuePersonalToken(ctx: Asker, input: PersonalTokenInput): Promise<IssuedToken> {
     return withRefusals(this.#deps, async () => {
       const { access, scope, byPath, details } = await this.#personalScope(ctx, input);
+      const person = ctx.caller.principal;
+      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope };
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
         if (standing === null) {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
         }
-        const person = ctx.caller.principal;
         const credential = await this.#issue(tx, 'personal', person, {
+          ...plan,
           generation: standing.generation,
           identityId: null,
           label: input.label,
           createdBy: person.id,
-          expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000),
-          scope,
         });
         log.push(
           allowed(ctx, 'token.create', {
@@ -1011,7 +1047,7 @@ export class SigninService {
           }),
         );
         return { ...credential, scope: byPath };
-      });
+      }, changes);
     });
   }
 
@@ -1055,6 +1091,8 @@ export class SigninService {
         needs: (role, place) => (role === 'contributor' ? ['secret.use'] : PERMISSIONS.filter((permission) => holds(ROLES.viewer, permission, place, holder))),
       });
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
+      const plan = { id: randomUUID(), expiresAt: new Date(ends), scope };
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
@@ -1062,12 +1100,11 @@ export class SigninService {
           throw new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
         }
         const credential = await this.#issue(tx, 'handle', person, {
+          ...plan,
           generation: standing.generation,
           identityId: null,
           label: input.label,
           createdBy: person.id,
-          expiresAt: new Date(ends),
-          scope,
           // What the proxy's stable URL, `/use/<credential>`, resolves to: the environments as asked, `@me` included.
           places: madeFor,
         });
@@ -1077,7 +1114,7 @@ export class SigninService {
           }),
         );
         return { ...credential, scope: byPath };
-      });
+      }, changes);
     });
   }
 
@@ -1143,15 +1180,17 @@ export class SigninService {
    */
   exchangedCredential(
     service: string,
-    options: { generation: number; bindingId: string; label: string | null; expiresAt: Date },
-  ): { row: typeof credentials.$inferInsert; issued: IssuedCredential } {
-    return this.#credential('service', { type: 'service', id: service }, {
+    options: { generation: number; bindingId: string; label: string | null; expiresAt: Date; scope?: CredentialScope },
+  ): { row: typeof credentials.$inferInsert & { id: string; principal: string; kind: string; scope: string | null; revokedAt: null; expiresAt: Date }; issued: IssuedCredential } {
+    const made = this.#credential('service', { type: 'service', id: service }, {
       generation: options.generation,
       identityId: null,
       label: options.label,
       createdBy: issuedBy(options.bindingId),
       expiresAt: options.expiresAt,
+      ...(options.scope === undefined ? {} : { scope: options.scope }),
     });
+    return made as typeof made & { row: { id: string; principal: string; kind: string; scope: string | null; revokedAt: null; expiresAt: Date } };
   }
 
   // --- device flow (RFC 8628), for `coffre login` ---------------------------
@@ -1273,9 +1312,13 @@ export class SigninService {
     if (prepared.decision === 'denied') return { status: 'denied' };
     const principal = memberOf(prepared.principal!) as PrincipalRef & { type: 'user' };
     const standing = await this.#standing(principal);
+    const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.cliSessionDays * 86_400_000) };
+    const changes = await AppChanges.prepare(this.#deps.vault, prepared.principal!, [this.#issueChange('cli', principal, plan)]);
     try {
       return await audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
         const now = new Date();
+        // Until the session is issued, no change is made: each way out before it leaves none.
+        changes?.drop();
         const [row] = await findDeviceAuthorizations(tx, this.#deps.chainKey, { deviceCodeHash: hashToken(deviceCode) });
         if (row === undefined || row.consumedAt !== null) return { status: 'expired' };
         if (row.decision === 'denied') return { status: 'denied' };
@@ -1300,12 +1343,13 @@ export class SigninService {
           return { status: 'denied' };
         }
 
+        changes?.keep();
         const credential = await this.#issue(tx, 'cli', principal, {
+          ...plan,
           generation: standing.generation,
           identityId: null,
           label: row.clientLabel,
           createdBy: principalId,
-          expiresAt: new Date(now.getTime() + this.#deps.signin.cliSessionDays * 86_400_000),
         });
         const entry: AuditEntry = {
           actorType: 'user',
@@ -1324,7 +1368,7 @@ export class SigninService {
         };
         log.push(entry);
         return { status: 'approved', principal, credential };
-      });
+      }, changes);
     } catch (error) {
       if (error instanceof SigninRefused) return { status: 'denied' };
       throw error;

@@ -1,5 +1,6 @@
 import { isCredentialScope, type CallerKind, type CredentialScope, type InstanceRole, type Scope } from '@coffre/core/access';
 import { TOMBSTONE } from '@coffre/core/schemas';
+import type { CredentialColumns } from '@coffre/core/vault';
 import { storedRole } from '@coffre/db/grants';
 
 import type { CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PrincipalInput, SecretInput } from './inputs.ts';
@@ -19,17 +20,8 @@ import type { CredentialInput, EnvironmentInput, Input, InputGrant, Nature, Prin
  * environments' changes, plan PR 4b).
  */
 
-/** A credential's columns: `credentials` (a session, a token, a workload's session). */
-export type CredentialColumns = {
-  id: string;
-  principal: string;
-  kind: string;
-  /** Its scope as stored, JSON; null for a session's. */
-  scope: string | null;
-  revoked: boolean;
-  /** The earlier of its expiry and its hard end, if any, in whole ms: a stored time's sub-millisecond part dropped, never rounded. */
-  expiresAt: number | null;
-};
+/** A credential's columns: `credentials` (a session, a token, a workload's session), as the app sends them too (`prepare`). */
+export type { CredentialColumns };
 
 /**
  * A credential: a person's on a `user:` principal, a workload's session, or
