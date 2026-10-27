@@ -215,7 +215,8 @@ test("a run's token.exchange changes no decision input but the credential it iss
   const [entry] = await appEntries('token.exchange');
   const issued = entry!.metadata.credentialId as string;
   assert.deepEqual(await decisionInputs(db.owner, [issued]), before);
-  const logged = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).slice(changes.length).map(({ payload }) => JSON.parse(payload) as { op: string; ref: { id: string } });
+  // By number: the heap need not keep the new rows after the old (use.test.ts, replayAgrees).
+  const logged = (await db.owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(asc(logChanges.number))).slice(changes.length).map(({ payload }) => JSON.parse(payload) as { op: string; ref: { id: string } });
   assert.deepEqual(logged.map(({ op, ref }) => [op, ref.id]), (await keeps015(deps.vault)) ? [['credential.issue', issued]] : []);
 });
 
