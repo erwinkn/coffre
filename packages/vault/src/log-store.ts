@@ -88,11 +88,13 @@ function toEntry(r: RawEntry): LogEntry {
 
 /**
  * The `at` a read of the entries in (after, upto] needs: from the floor of the pair at or below `after`, to the slack
- * past the floor of the first pair at or above `upto`, the barrier that sealed it; without one, no upper bound.
+ * past the floor of the first pair at or above `upto`, the barrier that sealed it; without one, no upper bound. A
+ * verifier gives the floor its pair signed (`floor`): the row's own is a column any writer may raise, which would hide
+ * every entry above the newest pair from it (review r9).
  */
-function bounds(after: bigint, upto: bigint): [SQL, SQL] {
+function bounds(after: bigint, upto: bigint, floor?: number): [SQL, SQL] {
   return [
-    sql`coalesce((SELECT k.at_floor FROM log_checkpoints k WHERE k.upto <= ${after} ORDER BY k.upto DESC LIMIT 1), 0)`,
+    floor === undefined ? sql`coalesce((SELECT k.at_floor FROM log_checkpoints k WHERE k.upto <= ${after} ORDER BY k.upto DESC LIMIT 1), 0)` : sql`${floor}`,
     sql`coalesce((SELECT k.at_floor FROM log_checkpoints k WHERE k.upto >= ${upto} ORDER BY k.upto LIMIT 1) + ${AT_SLACK_MS}, 9223372036854775807)`,
   ];
 }
@@ -190,14 +192,14 @@ function postgresStore(db: Database, range: number): LogStore {
    * The window as rows, by number: the tick's read, 500 entries every 500 ms at R44's rate, so no JSON is built
    * for it (measured: the window read 6.0 ms p50 as JSON).
    */
-  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`) => rowsOf<WindowRow>(db, sql`
+  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => rowsOf<WindowRow>(db, sql`
       SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac,
              NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place
         FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}
       UNION ALL
       SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL, NULL, NULL, NULL, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
         FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}
-      ORDER BY n`);
+      ORDER BY n${limit === undefined ? sql`` : sql` LIMIT ${limit}`}`);
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
   // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
   const made = new Set<number>();
@@ -234,11 +236,11 @@ function postgresStore(db: Database, range: number): LogStore {
     async pair(upto) {
       return toPair(await one<RawPair | null>(db, sql`SELECT ${PAIR} AS v FROM log_checkpoints k WHERE k.upto = ${upto}`));
     },
-    async entries(after, upto) {
+    async entries(after, upto, options = {}) {
       // The uses after `after` were admitted at or above the floor its barrier set (FloorChecked): read from there, up to
       // the slack past the floor of the barrier that sealed `upto`. Past the newest pair, unbounded: the head is near.
-      const [floor, ceiling] = bounds(after, upto);
-      return (await rows(after, upto, floor, ceiling)).map(fromRow);
+      const [floor, ceiling] = bounds(after, upto, options.floor);
+      return (await rows(after, upto, floor, ceiling, options.limit)).map(fromRow);
     },
     tiles,
     async write(row, tiles) {
@@ -336,11 +338,11 @@ function sqliteStore(db: Database): LogStore {
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
     'credential', u.credential, 'secret', u.secret, 'purpose', u.purpose, 'mac', hex(u.mac), 'place', u.place)`);
   const PAIR = sql.raw(`json_object('upto', CAST(k.upto AS TEXT), 'changes', k.changes_note, 'uses', k.uses_note)`);
-  const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
+  const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
       SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}
       UNION ALL
       SELECT u.number, ${USE} FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}
-      ORDER BY 1
+      ORDER BY 1${limit === undefined ? sql`` : sql` LIMIT ${limit}`}
     ) e)`;
   const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
   const tiles: LogStore['tiles'] = async (tree, keys) => {
@@ -383,9 +385,9 @@ function sqliteStore(db: Database): LogStore {
     async pair(upto) {
       return toPair(await one<RawPair | null>(db, sql`SELECT ${PAIR} AS v FROM log_checkpoints k WHERE k.upto = ${upto}`));
     },
-    async entries(after, upto) {
-      const [floor, ceiling] = bounds(after, upto);
-      return (await one<RawEntry[]>(db, sql`SELECT ${window(after, upto, floor, ceiling)} AS v`)).map(toEntry);
+    async entries(after, upto, options = {}) {
+      const [floor, ceiling] = bounds(after, upto, options.floor);
+      return (await one<RawEntry[]>(db, sql`SELECT ${window(after, upto, floor, ceiling, options.limit)} AS v`)).map(toEntry);
     },
     tiles,
     async write(row, tiles) {

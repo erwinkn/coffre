@@ -6,7 +6,8 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 import { refreshMs, USE_DEADLINE_MS } from './bulk.ts';
 import { loggedChange } from './changes.ts';
 import { FRESH_MS, logOrigin } from './checkpointer.ts';
-import { alike, refOf, sealKey, type SealKeys } from './inputs.ts';
+import type { BulkLimit } from './config.ts';
+import { alike, objectKey, refOf, sealKey, type SealKeys } from './inputs.ts';
 import { authentic, logMacKey, retentionCut } from './log-entry.ts';
 import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
 import { AT_SLACK_MS, logStore } from './log-store.ts';
@@ -87,6 +88,11 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     // use below it, so retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
     const newest = whole ? null : await store.newest();
     const replayed = whole ? emptyReplay() : null;
+    // The whole walk's uses start at the newest retention cut: from there, each principal's cap is the replay's only
+    // once it is known to be (`Settling`).
+    const retained = whole ? await store.retention() : null;
+    const cut = retained === null ? null : retentionCut(retained.entry);
+    const settling = cut === null ? null : new Settling(cut.at + AT_SLACK_MS + 1);
     const requests = new Requests();
     const macHolds = authentic(keys.mac);
     const check = (entry: LogEntry): string | null => {
@@ -95,6 +101,10 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       const one = logged(entry);
       if (typeof one === 'string') return one;
       if (replayed === null || one === null) return null;
+      if (settling !== null && one.kind === 'use' && replayed.limit !== null) {
+        const credential = replayed.rows.get(objectKey({ kind: 'credential', id: one.request.credential }))?.row;
+        if (credential?.kind === 'credential') settling.use(credential.principal, one.request.at, influence(replayed.limit));
+      }
       const faults = replayed.faults.length;
       replay(keys.seals, [one], undefined, replayed);
       return replayed.faults.length > faults ? replayed.faults.splice(faults).map((fault) => fault.replace(/^\d+: /, '')).join('; ') : null;
@@ -109,13 +119,8 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     });
     const problems = [...verdict.problems];
     if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
-    // At the present, the whole walk holds every row to its replay. Uses below retention's cut are not walked, so
-    // the bulk rows they last moved are not the replay's to know.
-    if (replayed !== null && verdict.done) {
-      const retained = await store.retention();
-      const cut = retained === null ? null : retentionCut(retained.entry);
-      problems.push(...audit(replayed, await heldObjects(tx), await bulkRows(tx), await now(tx), cut === null ? null : cut.at + AT_SLACK_MS));
-    }
+    // At the present, the whole walk holds every row to its replay.
+    if (replayed !== null && verdict.done) problems.push(...audit(replayed, await heldObjects(tx), await bulkRows(tx), await now(tx), settling));
     return { verdict, problems };
   }, SNAPSHOT);
   const { verdict, problems } = walked;
@@ -163,6 +168,45 @@ function logged(entry: LogEntry): Logged | string | null {
   return { kind: 'use', number: entry.number, request: { credential, secretId: secret, place, at: entry.at, ...purpose } };
 }
 
+/** How long a use counts against the next ones' cap, at most: the window, its refresh, the deadline and an hour, as `prune_bulk` bounds the rows. */
+function influence(limit: BulkLimit): number {
+  return limit.windowMs + refreshMs(limit) + USE_DEADLINE_MS + 3_600_000;
+}
+
+/**
+ * Each principal's bulk cap after retention's cut, from when the replay
+ * knows it (review r9). The uses below the cut are not walked, and one of
+ * them can still count against a use after it: a cap of one key a day, a
+ * use just before the cut, and the live cap refuses a second key the next
+ * morning, which the replay, starting empty, admits. While that cap stays
+ * full, each answer can part the two again. Once a principal has gone
+ * `influence` with no use, both caps are empty, and from its next use on
+ * the replay's is the live one; a principal with no use since the cut has
+ * rows the cut alone bounds.
+ */
+class Settling {
+  readonly #last = new Map<string, number>();
+  readonly #from = new Map<string, number>();
+
+  /** The first `at` past every use below the cut. */
+  readonly after: number;
+
+  constructor(after: number) {
+    this.after = after;
+  }
+
+  use(principal: string, at: number, influence: number): void {
+    const last = this.#last.get(principal);
+    if (!this.#from.has(principal) && at - (last ?? this.after) >= influence) this.#from.set(principal, at);
+    this.#last.set(principal, Math.max(at, last ?? -Infinity));
+  }
+
+  /** The `at` from which a principal's bulk rows are the replay's to judge: never, for one whose cap is not known yet. */
+  from(principal: string): number {
+    return this.#from.get(principal) ?? (this.#last.has(principal) ? Infinity : this.after);
+  }
+}
+
 /**
  * Each entry's request, seen once (RequestIdChecked): a change's by its id,
  * a use's by its time and id, which its MAC covers. A copy shares them, and
@@ -194,10 +238,10 @@ class Requests {
  * seal and is 0.14's, before the cutover (plan PR 9), but for the roles'
  * and the policy's, which only a change writes. Then each principal's bulk
  * rows, those that may still count: the database forgets older ones
- * (`prune_bulk`), the replay too; and none the walk did not replay, at or
- * before `cut`, the newest `at` a use below retention's cut may carry.
+ * (`prune_bulk`), the replay too; after retention's cut, only those from
+ * when the replay knows the principal's cap (`Settling`).
  */
-function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>, bulk: Map<string, Map<string, number>>, now: number, cut: number | null): string[] {
+function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>, bulk: Map<string, Map<string, number>>, now: number, settling: Settling | null): string[] {
   const problems: string[] = [];
   const name = (key: string) => {
     const row = replayed.rows.get(key)?.row;
@@ -226,15 +270,17 @@ function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>
     if ([...bulk.values()].some((rows) => rows.size > 0)) problems.push('bulk rows, and no cap in the log to move them');
     return problems;
   }
-  // As prune_bulk bounds it, by the database's clock: older rows may be gone from either side; and no older than the
-  // newest use below retention's cut may be (`cut`), which the walk did not replay.
-  const horizon = Math.max(now - limit.windowMs - refreshMs(limit) - USE_DEADLINE_MS - 3_600_000, cut ?? -Infinity);
+  // As prune_bulk bounds it, by the database's clock: older rows may be gone from either side. After retention's cut,
+  // only rows from when the replay knows the principal's cap (`Settling`).
+  const horizon = now - influence(limit);
   for (const principal of new Set([...bulk.keys(), ...replayed.bulk.keys()])) {
     const [stored, made] = [bulk.get(principal) ?? new Map<string, number>(), replayed.bulk.get(principal) ?? new Map<string, number>()];
+    const from = settling?.from(principal) ?? -Infinity;
     for (const secret of new Set([...stored.keys(), ...made.keys()])) {
-      const [a, b] = [stored.get(secret), made.get(secret)];
-      if ((a ?? -Infinity) <= horizon && (b ?? -Infinity) <= horizon) continue;
-      if (a !== b) problems.push(`the bulk cap of ${principal}: its row for ${secret} says ${a ?? 'none'}, the log ${b ?? 'none'}`);
+      const [a, b] = [stored.get(secret) ?? -Infinity, made.get(secret) ?? -Infinity];
+      if ((a <= horizon && b <= horizon) || (a < from && b < from)) continue;
+      const said = (last: number) => (last === -Infinity ? 'none' : String(last));
+      if (a !== b) problems.push(`the bulk cap of ${principal}: its row for ${secret} says ${said(a)}, the log ${said(b)}`);
     }
   }
   return problems;

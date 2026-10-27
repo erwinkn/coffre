@@ -44,8 +44,13 @@ export type LogReader = {
   pairs(after: bigint, limit: number): Promise<StoredPair[]>;
   /** The row at exactly `upto`, if any. */
   pair(upto: bigint): Promise<StoredPair | null>;
-  /** The entries numbered in (after, upto], by number, both trees. */
-  entries(after: bigint, upto: bigint): Promise<LogEntry[]>;
+  /**
+   * The entries numbered in (after, upto], by number, both trees; at most
+   * `limit`. Uses are read from `floor`, the floor of `at` signed in the
+   * pair at `after`, when the caller gives it: a reader that takes it from
+   * its rows lets a writer hide what lies above (FloorChecked).
+   */
+  entries(after: bigint, upto: bigint, options?: { floor?: number; limit?: number }): Promise<LogEntry[]>;
   tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]>;
   /** The newest retention change, if any, and its leaf index in the changes tree (plan PR 7). */
   retention?(): Promise<{ entry: LogEntry; index: number } | null>;
@@ -266,7 +271,8 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
-      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto)).filter((e) => !dropped(e));
+      // From the floor the pair at `cursor` signed, never its row's (review r9).
+      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, { floor })).filter((e) => !dropped(e));
       let at = 0;
       for (const stop of stops) {
         const window: LogEntry[] = [];
@@ -311,7 +317,14 @@ async function walk(
     }
     if (final) break;
   }
-  const unsealed = (await reader.entries(cursor, MAX_NUMBER)).filter((e) => !dropped(e));
+  // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9).
+  // Under `limit`, the entries left in it, and one more to tell a walk that would pass it.
+  const left = opts.limit === undefined || !Number.isFinite(opts.limit) ? undefined : Math.max(opts.limit - verdict.sealed, 0);
+  const unsealed = (await reader.entries(cursor, MAX_NUMBER, { floor, ...(left === undefined ? {} : { limit: left + 1 }) })).filter((e) => !dropped(e));
+  if (left !== undefined && unsealed.length > left) {
+    verdict.done = false;
+    return done(last.notes);
+  }
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);
