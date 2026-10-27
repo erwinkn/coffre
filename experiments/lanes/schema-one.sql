@@ -153,7 +153,10 @@ CREATE TYPE use_view AS (state text, number bigint, covered bigint, principal te
 -- isolate wrote earlier. If no change to any of the decision's inputs was numbered after it, and
 -- the key's bulk row is fresh (so the cap neither moves nor counts it), the use is a repeat of it:
 -- nothing is written (a read-only transaction, no WAL), and the Worker still decides on what was
--- read. The first use after any change writes its own entry (formal/HotPathOne.tla, Covers).
+-- read. The first use after any change writes its own entry (formal/HotPathOne.tla, Covers). The
+-- cover's entry must still be in the log (the isolate passes its `at` and request id: one probe of the
+-- uses' index): a database restored to before it was written would otherwise let a repeat release a
+-- value with no entry on disk (review r1).
 --
 -- Each input's newest change is one probe of changes_object, from the index alone: four probes, and
 -- the plan nodes around them, about half of the call's server time. So the isolate keeps the four
@@ -170,7 +173,8 @@ CREATE TYPE use_view AS (state text, number bigint, covered bigint, principal te
 -- against the probes. Two statements, not one with its probes skipped: a probe's plan nodes cost
 -- most of it even when it does not run (measured).
 CREATE OR REPLACE FUNCTION use_credential(p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_mac bytea, p_deadline bigint,
-  p_cover bigint, p_count int, p_window bigint, p_refresh bigint, p_known bigint DEFAULT NULL, p_known_mac bytea DEFAULT NULL)
+  p_cover bigint, p_count int, p_window bigint, p_refresh bigint, p_known bigint DEFAULT NULL, p_known_mac bytea DEFAULT NULL,
+  p_cover_at bigint DEFAULT NULL, p_cover_request bigint DEFAULT NULL)
 RETURNS use_view LANGUAGE plpgsql AS $$
 DECLARE
   r use_view;
@@ -195,6 +199,7 @@ BEGIN
           s.environment_id, s.nature, s.wrapped, s.iv, s.seal AS s_seal, ls.seal AS s_last,
           e.deleted, e.seal AS e_seal, le.seal AS e_last,
           p_cover IS NOT NULL AND b.last > p_at - p_refresh
+            AND EXISTS (SELECT 1 FROM uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover)
             AND (p_cover > coalesce(greatest(lc.number, lm.number, ls.number, le.number), 0)) AS is_covered,
           coalesce(b.last > p_at - p_window - p_refresh, false) AS is_in,
           coalesce(b.last <= p_at - p_refresh, true) AS stale,
@@ -252,6 +257,7 @@ BEGIN
           s.environment_id, s.nature, s.wrapped, s.iv, s.seal AS s_seal, NULL::bytea AS s_last,
           e.deleted, e.seal AS e_seal, NULL::bytea AS e_last,
           p_cover IS NOT NULL AND b.last > p_at - p_refresh
+            AND EXISTS (SELECT 1 FROM uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover)
             AS is_covered,
           coalesce(b.last > p_at - p_window - p_refresh, false) AS is_in,
           coalesce(b.last <= p_at - p_refresh, true) AS stale,

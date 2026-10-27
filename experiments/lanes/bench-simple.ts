@@ -156,9 +156,9 @@ async function maintain(at: number): Promise<void> {
   const timed = async (sql: string) => { const t = performance.now(); await ddl.query(sql); return (performance.now() - t).toFixed(0); };
   const ahead = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10);
   const made = await timed(`SELECT make_day('${ahead}')`);
-  const { rows: [oldest] } = await ddl.query(`SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'entries_uses'::regclass ORDER BY c.relname LIMIT 1`);
+  const { rows: [oldest] } = await ddl.query(`SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'uses'::regclass ORDER BY c.relname LIMIT 1`);
   const { rows: [{ n }] } = await ddl.query(`SELECT count(*)::int AS n FROM ${oldest.relname}`);
-  const detached = await timed(`ALTER TABLE entries_uses DETACH PARTITION ${oldest.relname} CONCURRENTLY`);
+  const detached = await timed(`ALTER TABLE uses DETACH PARTITION ${oldest.relname} CONCURRENTLY`);
   const dropped = await timed(`DROP TABLE ${oldest.relname}`);
   await ddl.end();
   maintenance = `at ${(at / 1000).toFixed(0)} s: made ${ahead}'s partition in ${made} ms; detached ${oldest.relname} (${n} entries) in ${detached} ms, dropped in ${dropped} ms`;

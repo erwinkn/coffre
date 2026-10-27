@@ -269,7 +269,7 @@ export function bulkStep(rows: Map<string, number>, secret: string, at: number, 
   return { inSet, others };
 }
 
-const USE = 'SELECT * FROM use_credential($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)';
+const USE = 'SELECT * FROM use_credential($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)';
 
 export type UseRow = {
   state: string | null; number: string | null; covered: string | null; principal: string | null; newest: string | null; newest_mac: Buffer | null; inputs: string | null;
@@ -316,7 +316,7 @@ export function viewOf(r: UseRow, input: UseInput, cached?: [Buffer | null, Buff
  * repeat passes it, and writes nothing if no change to any input came after
  * it and its key's bulk row is fresh.
  */
-export type Covers = { window: number; held: Map<string, { number: string; until: number }> };
+export type Covers = { window: number; held: Map<string, { number: string; at: number; requestId: string; until: number }> };
 
 /** A use's deadline is at most this long after its time (schema-one.sql's deadline_max()). */
 export const DEADLINE_MAX = 3000;
@@ -341,12 +341,14 @@ export async function use(db: Db, keys: Keys, input: UseInput, deadline: number,
   const known = seals?.held.get(key);
   const held = covers?.held.get(key);
   // A cover a change we know of came after is no cover; one we cannot judge, the statement judges.
-  const cover = held !== undefined && at < held.until && (known === undefined || known.inputs === null || BigInt(held.number) > BigInt(known.inputs)) ? held.number : null;
+  const covering = held !== undefined && at < held.until && (known === undefined || known.inputs === null || BigInt(held.number) > BigInt(known.inputs));
+  const cover = covering ? held.number : null;
   const mac = useMac(keys.log, { at, requestId: input.requestId, credential: input.credential, secret: input.secretId });
   let rows: UseRow[];
   try {
     ({ rows } = await run(db, 'use_credential', USE,
-      [input.credential, input.secretId, input.requestId, String(at), mac, String(deadline), cover, cap.count, String(cap.windowMs), String(cap.refreshMs), known?.newest ?? null, known?.newestMac ?? null]));
+      [input.credential, input.secretId, input.requestId, String(at), mac, String(deadline), cover, cap.count, String(cap.windowMs), String(cap.refreshMs), known?.newest ?? null, known?.newestMac ?? null,
+        covering ? String(held.at) : null, covering ? held.requestId : null]));
   } catch (error) {
     // A replay of a call whose answer was lost: its entry stands, its value never left. Not decided again.
     if (replayed(error)) return { ok: false, code: 'replayed', retryAfter: 1, statements: 1 };
@@ -377,7 +379,7 @@ export async function use(db: Db, keys: Keys, input: UseInput, deadline: number,
   }
   if (covers !== undefined && r.covered === null) {
     const expires = v.credential!.expiresAt === null ? Infinity : Number(v.credential!.expiresAt);
-    covers.held.set(key, { number: r.number!, until: Math.min(at + covers.window, expires) });
+    covers.held.set(key, { number: r.number!, at, requestId: input.requestId, until: Math.min(at + covers.window, expires) });
   }
   const dek = unwrap(keys.kek, r.s_wrapped!, r.s_iv!);
   const value = dek.toString('base64');
@@ -427,7 +429,17 @@ export async function change(db: Db, keys: Keys, object: string, op: Op, request
   for (let tries = 1; tries <= 20; tries += 1) {
     const { state, seal: from } = await readObject(db, object);
     const seal = applyOp(keys, state, object, op);
-    if (seal === null && op.op !== 'bulk.limit') throw new Error(`${op.op} does nothing to ${object}`);
+    if (seal === null && op.op !== 'bulk.limit') {
+      // A create whose answer was lost finds its object made: its entry answers the retry, as change_input's own lookup would.
+      if (request !== undefined) {
+        const { rows: [done] } = await db.query('SELECT number::text, object, payload FROM changes WHERE request_id = $1', [request.requestId]);
+        if (done !== undefined) {
+          if (done.object !== object || done.payload !== JSON.stringify(op)) throw new Error(`request ${request.requestId} names another change`);
+          return { number: done.number, tries };
+        }
+      }
+      throw new Error(`${op.op} does nothing to ${object}`);
+    }
     // A retry of the same change (`request`) finds its entry; a try refused on a moved seal wrote nothing.
     const at = request?.at ?? Date.now();
     const requestId = request?.requestId ?? randomUUID();

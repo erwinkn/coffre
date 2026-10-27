@@ -154,6 +154,22 @@ try {
     const { rows: [{ changes }] } = await db.query("SELECT count(*)::int AS changes FROM changes WHERE request_id = 'replay-2'");
     check(!again.ok && again.code === 'replayed' && c1 === c2 && other === 'refused' && uses === 1 && changes === 1,
       `replay   a use retried answered ${answer(again)} (the first ${answer(first)}); a change's #${c2} (first #${c1}), another change under its id ${other}; entries: ${uses} use, ${changes} change`);
+    // A create whose answer was lost, retried with its request: its number, one entry (review r1).
+    const creates: [string, Parameters<typeof change>[3]][] = [
+      ['member:svc-9', { op: 'member.add', status: 'active', role: null }],
+      [`credential:${credentialId(9)}`, { op: 'credential.issue', principal: 'svc-9', expiresAt: null }],
+      ['environment:00000000-0000-4000-8000-000000000009', { op: 'environment.create' }],
+      [`secret:${secretId(9)}`, { op: 'secret.create', environment: ENVIRONMENT, nature: 'secret', wrapped: 'aa', iv: 'bb' }],
+    ];
+    const retried: string[] = [];
+    for (const [object, op] of creates) {
+      const req = { requestId: `create-${object}`, at: Date.now() };
+      const one = (await change(db, keys, object, op, req)).number;
+      const two = await change(db, keys, object, op, req).then((d) => d.number, (error: Error) => error.message);
+      const { rows: [{ n }] } = await db.query('SELECT count(*)::int AS n FROM changes WHERE request_id = $1', [req.requestId]);
+      retried.push(`${op.op} #${one} → ${two === one ? 'its number' : two}${n === 1 ? '' : `, ${n} entries`}`);
+    }
+    check(retried.every((r) => r.endsWith('its number')), `creates  retried with their request: ${retried.join('; ')}`);
     // A retry after its deadline answers `late` and writes nothing more.
     const old = { ...input(0), at: Date.now() - 2_900 };
     const early = await use(db, keys, old, old.at + 3000, cap);
@@ -342,6 +358,8 @@ try {
         await change(db, keys, `environment:${ENVIRONMENT}`, { op: 'environment.restore' });
       }],
       ['bulk row stale', () => new Promise((resolve) => setTimeout(resolve, 450))],
+      // As a restore to before the cover was written: its entry is gone, so a repeat is an entry of its own (review r1).
+      ['cover entry gone', async () => { await db.query('DELETE FROM uses WHERE number = $1', [covers.held.values().next().value!.number]); }],
     ];
     const lines: string[] = [];
     let holds = true;

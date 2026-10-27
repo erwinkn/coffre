@@ -66,6 +66,15 @@ What round 2 found on the way, each measured, and each now in the design:
 - **The bulk cap needs a deadline margin** (TLC). Uses are decided in number
   order, not by `at`, so other keys are counted over `window + refresh +
   deadline`.
+- **Review r1** found two more gaps, both fixed and tested (fence-one):
+  - **A cover must still have its entry.** After a restore to before the
+    cover's entry, a repeat could release a value with no entry on disk. The
+    isolate now passes the cover's `at` and request id, and the statement
+    probes for the entry. That costs about 0.03 ms of Postgres CPU per use;
+    covers stay at 0.22 entries per use.
+  - **A retried create finds its entry.** `change` returns the logged number
+    when its request id is already in the log. Before, a create whose answer
+    was lost failed on retry, though the SQL was idempotent.
 
 ### Before and after
 
@@ -78,7 +87,7 @@ the baseline (`matrix.log`, `matrix2.log`, in thread storage `w211-raw/`).
 | 1,000/s for 120 s: p50 / p99 | 2.6 / 4.9 ms | 2.8 / 11.4 ms |
 | Postgres CPU per use | 0.36 ms | **0.58 ms** (0.72 without the seal cache) |
 | the call: server time, buffers, WAL records | 0.27 ms, 13.6, 2.0 | 0.56 ms, 14.2, 2.0 |
-| ceiling (under 1% refused, 20 s steps) | 4,000/s, clean | **2,500/s**; 3,000/s offered: 2,972 served, 2.2% refused |
+| ceiling (under 1% refused, 20 s steps) | 4,000/s, clean | **2,500/s** (0.8% refused); 3,000/s offered: 2,972 served, 1.1% refused (649 connection timeouts of about 60,400 requests) |
 | 8,000/s offered, cap 48 and deadline | 4,598/s at p50 3.8 ms | 2,985/s at p50 4.1 ms, the rest refused at once |
 | covers, 80% repeats: entries per use | 0.215 (W208's run) | 0.220 |
 | revocation at 2,000/s: own pool / the uses' pool | (3,800/s: 25.5 / 6.4 ms) | 29.0 / 7.7 ms, 0 allowed after |
@@ -124,17 +133,20 @@ deletion verified):
 
 `HotPathOne.tla` grows inputs, seals, a database writer and the seal cache.
 `HotPathOneClock.tla` is new: time, the deadline, the floor of `at`, and the
-bulk cap. TLC (W211's run, `w211-formal.txt`):
+bulk cap. TLC (W211's run after review r1, `formal-r1.txt`):
 
 | scenario | distinct states |
 |---|---|
 | HotPathOne (two inputs, no writer) | 4,638,719 |
 | HotPathOneCovers (member and secret) | 6,798,323 |
-| HotPathOneSeals (four inputs, one rollback, the cache) | 1,445,421 |
-| HotPathOneRestore (a log restored, then a rollback) | 6,409,651 |
+| HotPathOneSeals (four inputs, one rollback, the cache) | 1,502,293 |
+| HotPathOneRestore (a log restored, then a rollback) | 7,583,063 |
+| HotPathOneRestoreCovers (a restore under the cache and covers; review r1) | 29,169 |
+| HotPathOneCAS (two changers racing on one input; review r1) | 16,582 |
 | HotPathOneClock (deadline, floor, Postgres's clock stepping back) | 670,105 |
 | HotPathOneBulk (count 1, two keys, covers) | 11,521,159 |
 | HotPathOneBulkSlack (a refresh longer than the deadline) | 6,041,726 |
+| HotPathOneBulkSkew (the same, Worker clocks off by one; review r1) | 25,861,902 |
 
 Each new protection, removed, breaks its invariant:
 
@@ -150,12 +162,15 @@ Each new protection, removed, breaks its invariant:
 | the Worker's answer at its deadline | `ReleaseByDeadline` |
 | new and stale keys under the principal's lock | `BulkCapHolds`, `BulkReplayAgrees` |
 | refresh on use; covers only while the row is fresh | `BulkCapHolds` |
+| a change writes only if its object's row is still what it read (ChangeCAS) | `EachChangeFlips` |
+| a cover only while its entry is in the log (CoverExists) | `RepeatsAreTheirCover`, `DurableBeforeRelease` |
 | the refresh's slack; the deadline's slack | `BulkCapHolds` |
 
-W208's 18 removals and W201's 16 still fail as before: 53 of 53 in all.
+W208's 18 removals and W201's 16 still fail as before: 12 scenarios hold, and 56 of 56 removals fail.
 
 **What the model leaves out:**
-- one principal, one isolate, and two or three uses;
+- one principal, one isolate, and two or three uses (clock skew only in
+  BulkSkew);
 - liveness;
 - clocks in `HotPathOne` (and changes in `HotPathOneClock`);
 - writer forgeries (the writer only puts back older, validly sealed rows);

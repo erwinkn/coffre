@@ -69,7 +69,13 @@
 (*                         is the one the isolate's cache was read at;     *)
 (*   CacheSameChange       ... the same change (its number and MAC), not   *)
 (*                         only a number no higher: a log restored from a  *)
-(*                         backup has other changes under the same numbers.*)
+(*                         backup has other changes under the same numbers;*)
+(*   ChangeCAS             a change, which reads its row outside the lock, *)
+(*                         writes only if the row is still the one it read *)
+(*                         (`WHERE seal = p_seal_from`), else reads again; *)
+(*   CoverExists           a covered use's cover entry is still in the log *)
+(*                         (its number, time and request id: a restore may *)
+(*                         have taken it out).                             *)
 (*                                                                         *)
 (* The inputs (W211): every decision reads several rows, each sealed by    *)
 (* the vault (a MAC over it): the member with its grants, the credential,  *)
@@ -95,6 +101,12 @@
 (* flight; the isolates keep their caches. Changes made after it take the  *)
 (* numbers again. A change's MAC covers its request id, so two changes     *)
 (* are never the same: here, each change has an id of its own (`made`).   *)
+(* The history before a restore is gone, and so are the ghosts about it   *)
+(* (`released`, `repeats`); the isolates keep their caches and covers.     *)
+(*                                                                         *)
+(* Changers: the change processes, each one change at a time. Two can     *)
+(* race on one input: each reads the row outside the lock and works out   *)
+(* the next state from what it read.                                       *)
 (*                                                                         *)
 (* Covers (fewer rows): once an allowed use's entry #k has committed, the  *)
 (* isolate passes k with the next uses of the same credential and secret.  *)
@@ -107,7 +119,8 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS
     Uses,            \* the uses, each one request, one call
-    MaxChanges,      \* changes made in a behaviour: revoke, grant, revoke...
+    Changers,        \* the change processes
+    MaxChanges,      \* changes each changer makes in a behaviour
     MaxAborts,       \* change statements that fail after taking the lock
     MaxCheckpoints,  \* checkpoints signed in a behaviour
     MaxCrashes,      \* Postgres crashes in a behaviour
@@ -118,7 +131,7 @@ CONSTANTS
     MaxRestores,     \* restores from a backup in a behaviour
     UseLocks, StatementSnapshot, UseNumberUnderLock, ChangeLocks, ChangeNumberUnderLock,
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks, CoverChecksChanges,
-    CoverChecksAllInputs, SealMember, SealCredential, SealSecret, SealEnvironment, StaleFirst, CacheChecked, CacheSameChange
+    CoverChecksAllInputs, SealMember, SealCredential, SealSecret, SealEnvironment, StaleFirst, CacheChecked, CacheSameChange, ChangeCAS, CoverExists
 
 None == "none"
 Change == "change"
@@ -127,16 +140,16 @@ Checkpointer == "checkpointer"
 VARIABLES
     log,       \* the committed entries; `durable` once flushed
     nextSeq,   \* the sequence's next value
-    holder,    \* who holds the lock exclusive
+    holder,    \* the changer holding the lock exclusive, or None
     shared,    \* the uses holding it shared
     u,         \* each use's state
-    c,         \* the change's state
+    c,         \* each changer's state
     answered,  \* how many changes had committed when the last change answered
     released,  \* the uses whose value has left
     cp,        \* the checkpointer: whether it closed numbers it has not signed yet, and up to which
     signed,    \* the checkpoints signed: their floor and the numbers at or below it
     crashes,   \* Postgres crashes so far
-    cover,     \* the isolate's cover: the number of the last allowed entry it wrote and saw commit, or 0
+    cover,     \* the isolate's cover: the number (0: none) and use of the last allowed entry it wrote and saw commit
     repeats,   \* the values released on a cover: the use, its cover, what it saw, the changes answered
     tamper,    \* each input's row as a database writer put it back (`on`), else the row its newest change wrote
     tampers,   \* rows put back so far
@@ -160,7 +173,7 @@ Newest == [i \in Inputs |-> NewestIn(log, i)]
 \* The log's newest change, as its number and MAC (here, its id) say it, or none.
 NewestChange ==
     LET cs == ChangesIn(log)
-    IN IF cs = {} THEN [seq |-> 0, made |-> 0]
+    IN IF cs = {} THEN [seq |-> 0, made |-> <<>>]
        ELSE LET e == CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq IN [seq |-> e.seq, made |-> e.made]
 Rows == [i \in Inputs |-> IF tamper[i].on THEN tamper[i].value ELSE NewestIn(log, i)]
 
@@ -187,12 +200,13 @@ ReplayAllows(seq) == \A i \in Inputs : NewestIn({d \in log : d.seq < seq}, i)
 \* flushed yet.
 UseEntry(seq, id, seen, allow, code, answeredAt, durable) ==
     [seq |-> seq, kind |-> "use", id |-> id, seen |-> seen, allow |-> allow, code |-> code, answeredAt |-> answeredAt,
-     input |-> None, value |-> FALSE, made |-> 0, durable |-> durable]
+     input |-> None, value |-> FALSE, made |-> <<>>, durable |-> durable]
 ChangeEntry(seq, input, value, made, durable) ==
     [seq |-> seq, kind |-> "change", id |-> Change, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
      input |-> input, value |-> value, made |-> made, durable |-> durable]
 
 AllTrue == [i \in Inputs |-> TRUE]
+NoCover == [seq |-> 0, id |-> None]
 
 Init ==
     /\ log = {}
@@ -200,19 +214,19 @@ Init ==
     /\ holder = None
     /\ shared = {}
     /\ u = [x \in Uses |-> [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTrue, snapNewest |-> AllTrue,
-                            snapNewestChange |-> [seq |-> 0, made |-> 0], covered |-> 0, allow |-> FALSE, code |-> None,
-                            probed |-> FALSE, newest |-> AllTrue, newestChange |-> [seq |-> 0, made |-> 0]]]
-    /\ c = [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, value |-> FALSE]
+                            snapNewestChange |-> [seq |-> 0, made |-> <<>>], covered |-> 0, coverId |-> None, allow |-> FALSE,
+                            code |-> None, probed |-> FALSE, newest |-> AllTrue, newestChange |-> [seq |-> 0, made |-> <<>>]]]
+    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, value |-> FALSE]]
     /\ answered = 0
     /\ released = {}
     /\ cp = [open |-> FALSE, upto |-> 0]
     /\ signed = {}
     /\ crashes = 0
-    /\ cover = 0
+    /\ cover = NoCover
     /\ repeats = {}
     /\ tamper = [i \in Inputs |-> [on |-> FALSE, value |-> TRUE]]
     /\ tampers = 0
-    /\ cache = [on |-> FALSE, seals |-> AllTrue, change |-> [seq |-> 0, made |-> 0]]
+    /\ cache = [on |-> FALSE, seals |-> AllTrue, change |-> [seq |-> 0, made |-> <<>>]]
     /\ restores = 0
 
 LockFree == holder = None /\ shared = {}
@@ -242,9 +256,11 @@ UseLock(x) ==
 \* Without LockToCommit the lock goes here, before the commit. Without ReleaseAfterCommit the value
 \* leaves on what was read. With a cover that no change was numbered after, it writes nothing.
 \* Without CoverChecksAllInputs, only changes to the member count (W208's first scope).
+\* Without CoverExists, the cover's entry is not looked for.
+CoverThere == cover.seq /= 0 /\ (CoverExists => \E e \in log : e.kind = "use" /\ e.seq = cover.seq /\ e.id = cover.id)
 CoverHolds ==
-    /\ cover /= 0
-    /\ CoverChecksChanges => \A d \in ChangesIn(log) : (CoverChecksAllInputs \/ d.input = "member") => d.seq < cover
+    /\ CoverThere
+    /\ CoverChecksChanges => \A d \in ChangesIn(log) : (CoverChecksAllInputs \/ d.input = "member") => d.seq < cover.seq
 
 \* With the isolate's cache passed (a use may pass it or not), the probes are skipped if the log's
 \* newest change is the cached one (without CacheSameChange: if its number is no higher; without
@@ -262,8 +278,9 @@ UseRun(x) ==
            skip == passed /\ (CacheChecked => CacheHolds(newestChange))
            newest == IF skip THEN cache.seals ELSE probes
            code == Code(read, newest)
-           covered == Covers /\ (IF skip THEN cover /= 0 /\ cover > cache.change.seq ELSE CoverHolds)
-       IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seen = seen, !.covered = IF covered THEN cover ELSE 0,
+           covered == Covers /\ (IF skip THEN CoverThere /\ cover.seq > cache.change.seq ELSE CoverHolds)
+       IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seen = seen, !.covered = IF covered THEN cover.seq ELSE 0,
+                                     !.coverId = IF covered THEN cover.id ELSE None,
                                      !.allow = (code = "allow"), !.code = code,
                                      !.probed = ~skip, !.newest = newest, !.newestChange = newestChange,
                                      !.seq = IF UseNumberUnderLock /\ ~covered THEN nextSeq ELSE @]]
@@ -280,7 +297,7 @@ UseCommit(x) ==
     /\ IF u[x].covered = 0
        THEN /\ log' = log \cup {UseEntry(u[x].seq, x, u[x].seen, u[x].allow, u[x].code, answered, SyncCommit)}
             /\ UNCHANGED repeats
-       ELSE /\ repeats' = repeats \cup {[id |-> x, cover |-> u[x].covered, seen |-> u[x].seen, allow |-> u[x].allow, answeredAt |-> answered]}
+       ELSE /\ repeats' = repeats \cup {[id |-> x, cover |-> u[x].covered, coverId |-> u[x].coverId, seen |-> u[x].seen, allow |-> u[x].allow, answeredAt |-> answered]}
             /\ UNCHANGED log
     /\ shared' = shared \ {x}
     /\ u' = [u EXCEPT ![x].pc = "committed"]
@@ -302,7 +319,7 @@ UseRelease(x) ==
     /\ u[x].pc = "committed"
     /\ u' = [u EXCEPT ![x].pc = "done"]
     /\ released' = IF ReleaseAfterCommit /\ u[x].allow THEN released \cup {x} ELSE released
-    /\ cover' = IF ~u[x].allow THEN 0 ELSE IF u[x].covered = 0 THEN u[x].seq ELSE cover
+    /\ cover' = IF ~u[x].allow THEN NoCover ELSE IF u[x].covered = 0 THEN [seq |-> u[x].seq, id |-> x] ELSE cover
     /\ cache' = IF SealCache /\ u[x].probed THEN [on |-> TRUE, seals |-> u[x].newest, change |-> u[x].newestChange] ELSE cache
     /\ UNCHANGED <<log, nextSeq, holder, shared, c, answered, cp, signed, crashes, repeats, tamper, tampers, restores>>
 
@@ -312,57 +329,64 @@ UseCrash(x) ==
     /\ UNCHANGED <<log, nextSeq, holder, shared, c, answered, released, cp, signed, crashes, cover, repeats, tamper, tampers, cache, restores>>
 
 -----------------------------------------------------------------------------
-(* A change: one input revoked, or restored. *)
+(* A change: one input revoked, or restored, by one of the changers. *)
 
-\* The call starts, for one input. Without ChangeNumberUnderLock, its number was taken by a read
-\* before it.
-ChangeStart ==
-    /\ c.pc = "idle"
-    /\ c.n < MaxChanges
-    /\ \E i \in Inputs : c' = [c EXCEPT !.pc = "started", !.input = i, !.seq = IF ChangeNumberUnderLock THEN 0 ELSE nextSeq]
+\* The call starts, for one input: the vault reads its row, outside the lock, and works out the
+\* next state from it. Without ChangeNumberUnderLock, its number was taken by a read before it.
+ChangeStart(h) ==
+    /\ c[h].pc = "idle"
+    /\ c[h].n < MaxChanges
+    /\ \E i \in Inputs :
+          c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.input = i, !.read = Rows[i],
+                                          !.seq = IF ChangeNumberUnderLock THEN 0 ELSE nextSeq]]
     /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq ELSE nextSeq + 1
     /\ UNCHANGED <<log, holder, shared, u, answered, released, cp, signed, crashes, cover, repeats, tamper, tampers, cache, restores>>
 
 \* It gets the lock exclusive: no one holds it at all.
-ChangeLock ==
-    /\ c.pc = "started"
+ChangeLock(h) ==
+    /\ c[h].pc = "started"
     /\ ChangeLocks => LockFree
-    /\ holder' = IF ChangeLocks THEN Change ELSE holder
-    /\ c' = [c EXCEPT !.pc = "locked"]
+    /\ holder' = IF ChangeLocks THEN h ELSE holder
+    /\ c' = [c EXCEPT ![h].pc = "locked"]
     /\ UNCHANGED <<log, nextSeq, shared, u, answered, released, cp, signed, crashes, cover, repeats, tamper, tampers, cache, restores>>
 
-\* Its statement: the write (the input flipped from what its newest change left), and its entry's
+\* Its statement: if the row is no longer the one it read (ChangeCAS), nothing is written, the lock
+\* goes and the changer reads again. Else the write (the flip of what it read) and its entry's
 \* number. Without LockToCommit the lock goes here; without CommitBeforeAnswer it answers here.
-ChangeRun ==
-    /\ c.pc = "locked"
-    /\ c' = [c EXCEPT !.pc = "ran", !.value = ~NewestIn(log, c.input), !.seq = IF ChangeNumberUnderLock THEN nextSeq ELSE @]
-    /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq + 1 ELSE nextSeq
-    /\ holder' = IF LockToCommit THEN holder ELSE None
-    /\ answered' = IF CommitBeforeAnswer THEN answered ELSE Committed + 1
+ChangeRun(h) ==
+    /\ c[h].pc = "locked"
+    /\ IF ChangeCAS /\ Rows[c[h].input] /= c[h].read
+       THEN /\ c' = [c EXCEPT ![h].pc = "idle"]
+            /\ holder' = IF holder = h THEN None ELSE holder
+            /\ UNCHANGED <<nextSeq, answered>>
+       ELSE /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "ran", !.value = ~c[h].read, !.seq = IF ChangeNumberUnderLock THEN nextSeq ELSE @]]
+            /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq + 1 ELSE nextSeq
+            /\ holder' = IF LockToCommit THEN holder ELSE None
+            /\ answered' = IF CommitBeforeAnswer THEN answered ELSE Committed + 1
     /\ UNCHANGED <<log, shared, u, released, cp, signed, crashes, cover, repeats, tamper, tampers, cache, restores>>
 
 \* The commit: its entry, and the row it wrote, in place of whatever was there.
-ChangeCommit ==
-    /\ c.pc = "ran"
-    /\ log' = log \cup {ChangeEntry(c.seq, c.input, c.value, c.n + 1, SyncCommit)}
-    /\ holder' = IF holder = Change THEN None ELSE holder
-    /\ c' = [c EXCEPT !.pc = "committed"]
-    /\ tamper' = [tamper EXCEPT ![c.input] = [on |-> FALSE, value |-> TRUE]]
+ChangeCommit(h) ==
+    /\ c[h].pc = "ran"
+    /\ log' = log \cup {ChangeEntry(c[h].seq, c[h].input, c[h].value, <<h, c[h].n + 1>>, SyncCommit)}
+    /\ holder' = IF holder = h THEN None ELSE holder
+    /\ c' = [c EXCEPT ![h].pc = "committed"]
+    /\ tamper' = [tamper EXCEPT ![c[h].input] = [on |-> FALSE, value |-> TRUE]]
     /\ UNCHANGED <<nextSeq, shared, u, answered, released, cp, signed, crashes, cover, repeats, tampers, cache, restores>>
 
 \* Its statement fails instead (a deadline, a lost connection): rolled back, the lock let go; it
 \* starts over. Its number is a gap.
-ChangeAbort ==
-    /\ c.pc = "ran"
-    /\ c.aborts < MaxAborts
-    /\ holder' = IF holder = Change THEN None ELSE holder
-    /\ c' = [c EXCEPT !.pc = "idle", !.aborts = @ + 1]
+ChangeAbort(h) ==
+    /\ c[h].pc = "ran"
+    /\ c[h].aborts < MaxAborts
+    /\ holder' = IF holder = h THEN None ELSE holder
+    /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.aborts = @ + 1]]
     /\ UNCHANGED <<log, nextSeq, shared, u, answered, released, cp, signed, crashes, cover, repeats, tamper, tampers, cache, restores>>
 
-ChangeAnswer ==
-    /\ c.pc = "committed"
+ChangeAnswer(h) ==
+    /\ c[h].pc = "committed"
     /\ answered' = IF answered > Committed THEN answered ELSE Committed
-    /\ c' = [c EXCEPT !.pc = "idle", !.n = @ + 1]
+    /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, u, released, cp, signed, crashes, cover, repeats, tamper, tampers, cache, restores>>
 
 -----------------------------------------------------------------------------
@@ -402,7 +426,7 @@ Crash ==
     /\ holder' = None
     /\ shared' = {}
     /\ u' = [x \in Uses |-> IF u[x].pc \in {"started", "locked", "ran"} THEN [u[x] EXCEPT !.pc = "done"] ELSE u[x]]
-    /\ c' = IF c.pc \in {"started", "locked", "ran"} THEN [c EXCEPT !.pc = "idle"] ELSE c
+    /\ c' = [h \in Changers |-> IF c[h].pc \in {"started", "locked", "ran"} THEN [c[h] EXCEPT !.pc = "idle"] ELSE c[h]]
     /\ UNCHANGED <<nextSeq, answered, released, cp, signed, cover, repeats, tamper, tampers, cache, restores>>
 
 -----------------------------------------------------------------------------
@@ -418,25 +442,28 @@ Tamper ==
     /\ UNCHANGED <<log, nextSeq, holder, shared, u, c, answered, released, cp, signed, crashes, cover, repeats, cache, restores>>
 
 \* A restore from a backup, while no call is in flight: the log back to an earlier point, the rows
-\* and the sequence with it. What changes had answered is now what the restored log holds.
+\* and the sequence with it. What changes had answered is now what the restored log holds; the
+\* ghosts of what happened before it go with the history.
 Restore ==
     /\ restores < MaxRestores
     /\ \A x \in Uses : u[x].pc \in {"idle", "done"}
-    /\ c.pc = "idle"
+    /\ \A h \in Changers : c[h].pc = "idle"
     /\ ~cp.open
     /\ \E k \in 0..(nextSeq - 1) :
           /\ log' = {e \in log : e.seq <= k}
           /\ nextSeq' = k + 1
           /\ answered' = Cardinality(ChangesIn({e \in log : e.seq <= k}))
     /\ tamper' = [i \in Inputs |-> [on |-> FALSE, value |-> TRUE]]
+    /\ released' = {}
+    /\ repeats' = {}
     /\ restores' = restores + 1
-    /\ UNCHANGED <<holder, shared, u, c, released, cp, signed, crashes, cover, repeats, tampers, cache>>
+    /\ UNCHANGED <<holder, shared, u, c, cp, signed, crashes, cover, tampers, cache>>
 
 -----------------------------------------------------------------------------
 
 Next ==
     \/ \E x \in Uses : UseStart(x) \/ UseLock(x) \/ UseRun(x) \/ UseCommit(x) \/ UseFail(x) \/ UseRelease(x) \/ UseCrash(x)
-    \/ ChangeStart \/ ChangeLock \/ ChangeRun \/ ChangeCommit \/ ChangeAbort \/ ChangeAnswer
+    \/ \E h \in Changers : ChangeStart(h) \/ ChangeLock(h) \/ ChangeRun(h) \/ ChangeCommit(h) \/ ChangeAbort(h) \/ ChangeAnswer(h)
     \/ CheckpointClose \/ CheckpointSign
     \/ Flush \/ Crash \/ Tamper \/ Restore
 
@@ -472,7 +499,7 @@ NothingAllowedAfterAnswer ==
 Logged(seq, x) == \E e \in log : e.kind = "use" /\ e.seq = seq /\ e.allow /\ e.durable /\ (x = None \/ e.id = x)
 DurableBeforeRelease ==
     \A x \in released : (\E e \in log : e.kind = "use" /\ e.id = x /\ e.allow /\ e.durable)
-                        \/ (\E r \in repeats : r.id = x /\ r.allow /\ Logged(r.cover, None))
+                        \/ (\E r \in repeats : r.id = x /\ r.allow /\ Logged(r.cover, r.coverId))
 
 \* A repeat is its cover again: allowed on the state its cover was decided on (no change to any of
 \* its inputs numbered after the cover), and after no change it did not see had answered. So the
@@ -480,13 +507,19 @@ DurableBeforeRelease ==
 \* one before.
 RepeatsAreTheirCover ==
     \A r \in repeats : r.allow =>
-        /\ Logged(r.cover, None)
+        /\ Logged(r.cover, r.coverId)
         /\ r.seen = Cardinality({d \in ChangesIn(log) : d.seq < r.cover})
         /\ r.answeredAt <= r.seen
 
 \* What a checkpoint signed stays exactly the entries at or below its floor: none commits there later.
 CheckpointsHold ==
     \A k \in signed : {e.seq : e \in {d \in log : d.seq <= k.upto}} = k.seqs
+
+\* With no database writer, each change leaves the flip of what the change before it on its input
+\* left: the log says what was done to the row, and the row is what the log says (a change that
+\* worked from a row another one had moved since would log a second revoke over a revoke).
+EachChangeFlips ==
+    \A e \in ChangesIn(log) : e.value = ~NewestIn({d \in log : d.seq < e.seq}, e.input)
 
 NumbersUnique ==
     \A d, e \in log : d.seq = e.seq => d = e
