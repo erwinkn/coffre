@@ -680,8 +680,10 @@ class VaultService implements Vault {
         if (shared && sealing.size > 0) throw new Error('a read changes no member, and seals no row');
         const written = new Map<string, Input>();
         for (const principal of sealing) {
-          const object = await this.#seal(d, principal, accessSeq.get(principal));
-          if (object !== null) written.set(objectKey(memberRef(principal)), object);
+          const resealed = await this.#seal(d, principal, accessSeq.get(principal));
+          if (resealed === null) continue;
+          written.set(objectKey(memberRef(principal)), resealed.object);
+          d.changes?.cite(memberRef(principal), resealed.accessSeq);
         }
         // Last: the fence, which they take exclusive (0.14's append took it already, OldWritesFence), is held from
         // here to the commit, so as few round trips as can be.
@@ -719,9 +721,9 @@ class VaultService implements Vault {
    * table must hold exactly that: a grant written around the vault while it
    * decided (its row lock does not stop one) is refused, with the decision,
    * rather than sealed in. It answers the member's object as the rows now
-   * hold it, for 0.15's log.
+   * hold it, and the access entry their row names, for 0.15's log.
    */
-  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<PrincipalInput | null> {
+  async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<{ object: PrincipalInput; accessSeq: bigint } | null> {
     const row = await store.member(d.tx, principal);
     if (row === undefined) return null;
     const decided = d.grants.get(principal);
@@ -732,8 +734,9 @@ class VaultService implements Vault {
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
     await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
-    // The member's object as the rows hold it now: what 0.15's change of it must have left (`changes.ts`).
-    return store.principalObject(row, decided);
+    // The member's object as the rows hold it now, which 0.15's change of it must have left, and the access entry its
+    // row names, which that change accounts for (`changes.ts`).
+    return { object: store.principalObject(row, decided), accessSeq: next.accessSeq };
   }
 
   /**
@@ -2520,6 +2523,9 @@ class VaultService implements Vault {
         const made = entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) });
         d.log.push(made);
         for (const { ref, op } of changes) d.changes?.stage(ref, op, actor);
+        d.after.push((seqOf) => {
+          for (const { ref } of changes) d.changes?.cite(ref, BigInt(seqOf(made)));
+        });
         d.after.push((seqOf) => (answer.seq = seqOf(made)));
       }
       return answer;

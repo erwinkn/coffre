@@ -141,8 +141,15 @@ test('every change a decision makes to a member is an entry of 0.15\'s log, op b
   assert.deepEqual(await opsOf(w.keys, { kind: 'policy', id: 'instance' }), ['bulk.limit']);
   await holdsReplay(w.keys, [member(ADA), member('token:ci'), member(ROOT), { kind: 'policy', id: 'instance' }]);
   // 0.14's log has every one of them too, until 0.16 (dual fencing).
-  const old = await rows<{ action: string }>(db.owner, sql`SELECT action FROM audit_log WHERE subject_principal = ${ADA} AND decision = 'allow' ORDER BY seq`);
+  const old = await rows<{ seq: string; action: string }>(db.owner, sql`SELECT seq, action FROM audit_log WHERE subject_principal = ${ADA} AND decision = 'allow' ORDER BY seq`);
   assert.deepEqual(old.map(({ action }) => action), ['member.add', 'access.grant', 'access.grant', 'access.grant', 'access.revoke', 'member.role', 'access.revoke', 'member.remove']);
+  // And each change names the newest of 0.14's entries it accounts for: its decision's newest about her, the access_seq
+  // her row names (UsesSeeOldWrites, plan PR 5).
+  const cited = (await changeRows()).filter((row) => row.object === objectKey(member(ADA))).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
+  assert.deepEqual(cited.at(-1), old.at(-1)!.seq.toString());
+  const [{ accessSeq }] = await db.owner.select({ accessSeq: tablesOf(db.owner).vaultMembers.accessSeq }).from(tablesOf(db.owner).vaultMembers).where(eq(tablesOf(db.owner).vaultMembers.principal, ADA));
+  assert.equal(cited.at(-1), accessSeq.toString());
+  assert.ok(cited.every((seq) => seq !== undefined));
 });
 
 test('a change to a member row put back from before a revoke is refused, though 0.14\'s log was cut to match it (ChangeChecksSeal)', async () => {
@@ -325,6 +332,10 @@ test('protecting an environment the cutover sealed is a change of its object; on
   assert.ok((await protect([w.prod], false)).ok);
   assert.ok((await protect([w.prod], true)).ok);
   assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.prod }), ['genesis', 'environment.protect', 'environment.protect', 'environment.protect']);
+  // Each names the policy.change entry it came with.
+  const policies = await rows<{ seq: string }>(db.owner, sql`SELECT seq FROM audit_log WHERE action = 'policy.change' AND decision = 'allow' ORDER BY seq`);
+  const cited = (await changeRows()).filter((row) => row.object === objectKey({ kind: 'environment', id: w.prod })).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
+  assert.deepEqual(cited, [undefined, ...policies.map(({ seq }) => seq.toString())]);
   // Dev has no seal and no change: 0.14's log holds its protection, which the cutover will seal.
   assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.dev }), []);
   const flags = await db.owner.select({ id: environments.id, protected: environments.protected }).from(environments).where(eq(environments.projectId, w.project));

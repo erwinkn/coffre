@@ -63,7 +63,7 @@ export type ChangeKeys = { seals: SealKeys; mac: Buffer };
 
 type Step = { op: Op; actor: string };
 type Read = { logged: false } | { logged: true; seal: Buffer | null; now: Input | null; afters: (Input | null)[] };
-type Staged = { ref: Ref & { kind: ReadKind }; steps: Step[]; read?: Read };
+type Staged = { ref: Ref & { kind: ReadKind }; steps: Step[]; read?: Read; old?: bigint };
 
 export class Changes {
   readonly #keys: ChangeKeys;
@@ -80,6 +80,19 @@ export class Changes {
     if (staged.read !== undefined) throw new Error('a change staged after its object was read: stage every op before the writes run');
     staged.steps.push({ op, actor });
     this.#staged.set(key, staged);
+  }
+
+  /**
+   * The newest entry of 0.14's log this decision's changes to `ref`
+   * account for: a member's newest access entry (the `access_seq` 0.14's
+   * row names), or the `policy.change` an environment's protection or a
+   * role came with. Each of its changes carries it (`payloadOf`'s `old`),
+   * so that a use sees a 0.14 write the new log has not accounted for
+   * (Migration015.tla's UsesSeeOldWrites, plan PR 5).
+   */
+  cite(ref: Ref, seq: bigint): void {
+    const staged = this.#staged.get(objectKey(ref));
+    if (staged !== undefined) staged.old = seq;
   }
 
   /**
@@ -125,7 +138,7 @@ export class Changes {
   async commit(tx: Transaction, at: number, written: ReadonlyMap<string, Input> = new Map()): Promise<bigint[]> {
     if ([...this.#staged.values()].some((staged) => staged.read === undefined)) throw new Error('changes committed before they were prepared: prepare reads each object before the writes run');
     const calls: ChangeCall[] = [];
-    for (const { ref, steps, read } of this.#staged.values()) {
+    for (const { ref, steps, read, old } of this.#staged.values()) {
       if (!read!.logged) continue;
       const { seal: base, now, afters } = read!;
       // The member's own rows, which the decision wrote: they must be what the ops leave, or something wrote around it.
@@ -139,7 +152,7 @@ export class Changes {
         // No op of these deletes an object: each leaves one to seal.
         const after = afters[i]!;
         const seal = sealOf(this.#keys.seals[0]!, ref, after);
-        const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op), seal };
+        const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op, old), seal };
         calls.push({ ref, ...row, value: writes(ref) ? canonical(after) : null, sealFrom: from, mac: entryMac(this.#keys.mac, { tree: 'changes', row }) });
         from = seal;
       });
@@ -168,13 +181,15 @@ function sameObject(key: Buffer, ref: Ref, a: Input | null, b: Input | null): bo
 }
 
 /**
- * A change's payload, as `log_changes` holds it: the op, and the object it
- * is to (`ref`), which the entry's `object` column holds only as a key a
- * replay cannot read back. Canonical JSON, so that a retry sends the same
- * bytes (`change_input` finds its entry by request id and payload).
+ * A change's payload, as `log_changes` holds it: the op, the object it is
+ * to (`ref`), which the entry's `object` column holds only as a key a
+ * replay cannot read back, and, when it has one, the newest entry of
+ * 0.14's log it accounts for (`old`, its seq in decimal: `cite`).
+ * Canonical JSON, so that a retry sends the same bytes (`change_input`
+ * finds its entry by request id and payload).
  */
-export function payloadOf(ref: Ref, op: Op): string {
-  return canonical({ ...op, ref: { kind: ref.kind, id: ref.id } });
+export function payloadOf(ref: Ref, op: Op, old?: bigint): string {
+  return canonical({ ...op, ref: { kind: ref.kind, id: ref.id }, ...(old === undefined ? {} : { old: old.toString() }) });
 }
 
 /**
@@ -184,7 +199,7 @@ export function payloadOf(ref: Ref, op: Op): string {
  * row's.
  */
 export function loggedChange(row: { number: bigint; at: number; object: string; payload: string; seal: Buffer | null }): LoggedChange | null {
-  const { ref: named, ...op } = JSON.parse(row.payload) as Op & { ref?: Ref };
+  const { ref: named, old: _, ...op } = JSON.parse(row.payload) as Op & { ref?: Ref; old?: string };
   const ref = named ?? (op.op === 'genesis' ? refOf(op.value) : undefined);
   if (ref === undefined || objectKey(ref) !== row.object) return null;
   return { kind: 'change', number: row.number, at: row.at, ref: { kind: ref.kind, id: ref.id }, op: op as Op, seal: row.seal };

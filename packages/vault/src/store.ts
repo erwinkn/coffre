@@ -935,9 +935,13 @@ export async function changeInputs(tx: Transaction, calls: readonly ChangeCall[]
     return numbers;
   }
   const rows = sql.join(calls.map((call, i) => sql`(${i}::int, ${call.ref.kind}::text, ${call.ref.id}::text, ${call.requestId}::text, ${call.at}::bigint, ${call.actor}::text, ${call.payload}::text, ${call.value}::text, ${call.sealFrom}::bytea, ${call.seal}::bytea, ${call.mac}::bytea)`), sql`, `);
-  const numbers = await rowsOf<{ number: string | number | null }>(tx, sql`
-    SELECT change_input(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.value, c.seal_from, c.seal, c.mac) AS number
-      FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, value, seal_from, seal, mac)`);
+  // In order: one decision's changes to one object chain, each from the seal the one before leaves. A volatile
+  // function in the select list runs after the sort (Postgres 9.6 on), so each call runs in `ord`'s order.
+  const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`
+    SELECT c.ord, change_input(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.value, c.seal_from, c.seal, c.mac) AS number
+      FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, value, seal_from, seal, mac)
+     ORDER BY c.ord`);
+  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('change_input answered out of order');
   return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
 }
 
@@ -1036,6 +1040,8 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
   }
   if (done === 0) return null;
   // One sequence for both tables, as `log_number` is on Postgres: the transaction holds the database's write lock.
+  // Unlike the sequence, the newest number again once its entries are deleted: SQLite is for tests (the plan), where
+  // only a test deletes entries.
   const [{ last }] = await tx.select({ last: sql<number | string | null>`max(n)` }).from(
     sql`(SELECT max(${logChanges.number}) AS n FROM ${logChanges} UNION ALL SELECT max(${logUses.number}) FROM ${logUses})`,
   );

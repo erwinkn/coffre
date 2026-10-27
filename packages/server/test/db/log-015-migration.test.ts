@@ -30,16 +30,17 @@ const TAGS: Record<Engine, string> = { postgres: '0022_log_015', sqlite: '0018_l
 const SEALED = ['credentials', 'environments', 'secrets', 'service_bindings', 'vault_members'];
 const hex = (byte: number, length = 32) => Buffer.alloc(length, byte).toString('hex');
 
-/** The engine's migrations up to the one before 0.15's: 0.14.5's schema. */
+/** The engine's migrations up to the one before 0.15's first: 0.14.5's schema. */
 function before(engine: Engine, dir: string): string {
   const folder = join(dir, 'migrations');
   cpSync(migrationsFolder(engine), folder, { recursive: true });
   const file = join(folder, 'meta/_journal.json');
   const journal = JSON.parse(readFileSync(file, 'utf8')) as { entries: { idx: number; tag: string }[] };
   const at = journal.entries.findIndex((entry) => entry.tag === TAGS[engine]);
-  assert.equal(at, journal.entries.length - 1, `${TAGS[engine]} is the newest migration`);
+  assert.ok(at > 0, `${TAGS[engine]} is one of the migrations`);
   writeFileSync(file, JSON.stringify({ ...journal, entries: journal.entries.slice(0, at) }));
-  rmSync(join(folder, `${TAGS[engine]}.sql`));
+  // It, and every one of 0.15's after it (0023_change_path, …).
+  for (const { tag } of journal.entries.slice(at)) rmSync(join(folder, `${tag}.sql`));
   return folder;
 }
 
