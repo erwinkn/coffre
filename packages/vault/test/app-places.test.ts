@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import { tombstoneOf } from '@coffre/core/schemas';
+import { deletedWithProject, tombstoneOf } from '@coffre/core/schemas';
 import type { EnvironmentColumns, ObjectChange, SecretColumns, UseOutcome, VersionColumns } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { appChanges, isStaleChange } from '@coffre/db/log';
@@ -251,12 +251,17 @@ test('an environment made protected, renamed, archived and restored through the 
   await replayAgrees();
 });
 
-test('an environment deleted with its keys: its slug a tombstone, each key erased, deleted and archived; a use there is refused live as replayed, never stale', async () => {
+/**
+ * An environment deleted with its keys, its slug made `tombstone`: each key
+ * erased, deleted and archived, and a use there refused live as replayed,
+ * never stale. Its object is the same whichever tombstone: the slug before it,
+ * deleted.
+ */
+async function deletedWithKeys(tombstone: string): Promise<void> {
   const w = await world();
   const ids = [await w.key('one'), await w.key('two')];
   assert.ok((await used(w, ids[0]!)).ok);
   const env = await readEnvironment(w.dev);
-  const tombstone = tombstoneOf('dev', new Date());
   const changes: ObjectChange[] = [
     { kind: 'environment', id: w.dev, before: env, after: { ...env.columns, slug: tombstone } },
     ...await Promise.all(ids.map((id) => keyChange(id, null))),
@@ -277,7 +282,13 @@ test('an environment deleted with its keys: its slug a tombstone, each key erase
   const now = await readEnvironment(w.dev);
   assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: w.dev, before: now, after: { ...now.columns, archived: true } }]), /does nothing/);
   await replayAgrees();
-});
+}
+
+test('an environment deleted with its keys: its slug a tombstone, each key erased, deleted and archived; a use there is refused live as replayed, never stale', () =>
+  deletedWithKeys(tombstoneOf('dev', new Date())));
+
+test("a project's environment deleted with it, `dev~deleted`: the same object, refused live as replayed, never stale", () =>
+  deletedWithKeys(deletedWithProject('dev')));
 
 test('a key erased but left unarchived, as 0.14 leaves it, would be `tampered` to a use: why the deletion archives it', async () => {
   const w = await world();

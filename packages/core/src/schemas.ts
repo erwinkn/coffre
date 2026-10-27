@@ -41,6 +41,17 @@ export function tombstoneOf(slug: string, day: Date, n = 1): string {
   const base = `${slug}${TOMBSTONE}deleted-${day.toISOString().slice(0, 10)}`;
   return n === 1 ? base : `${base}-${n}`;
 }
+
+/**
+ * The slug an environment deleted with its project keeps, with 0.15's log:
+ * `dev~deleted`, undated. Its project is deleted once, so within it no other
+ * environment holds it, and an environment deleted alone holds a dated one.
+ * The project's tombstone dates both; its old path still names it,
+ * `market~deleted-2026-10-05/dev` (`resolvePath`'s `tombstones`).
+ */
+export function deletedWithProject(slug: string): string {
+  return `${slug}${TOMBSTONE}deleted`;
+}
 export const displayName = z.string().trim().min(1).max(120);
 /** A folder: 1 to 64 characters, no `/`, no control character, no space at either end (the tables check it too). */
 export const folderName = z.string().min(1).max(64)
