@@ -2496,11 +2496,14 @@ class VaultService implements Vault {
         const found = await store.environmentsById(d.tx, change.environmentIds);
         if ([...found.values()].some((environment) => environment.projectId !== change.projectId)) throw refused('invalid', 'each environment is one of the project\'s');
         if (change.environmentIds.length === 1 && found.has(change.environmentIds[0]!)) at.environmentId = change.environmentIds[0];
+        // An environment whose object 0.15's log changes with this: one with a row, not deleted (`environment.protect`).
+        const live015 = (id: string) => found.get(id)?.deleted === false;
         if (change.protected) {
           if (!allows(acting.live, 'environment.manage', { projectId: change.projectId })) throw refused('not_allowed', 'protecting an environment takes managing its project\'s environments');
           const known = new Set(next.protected.map((place) => place.environmentId));
           // An id with no row yet, a fork's, is no object of 0.15's log: its creation carries its protection (plan PR 4b).
-          for (const id of change.environmentIds) if (!known.has(id) && found.has(id)) changes.push({ ref: { kind: 'environment', id }, op: { op: 'environment.protect', protected: true } });
+          // A deleted one changes no more there: 0.14 keeps its id in the edits, which its policy reads past.
+          for (const id of change.environmentIds) if (!known.has(id) && live015(id)) changes.push({ ref: { kind: 'environment', id }, op: { op: 'environment.protect', protected: true } });
           next.protected = [...next.protected, ...change.environmentIds.filter((id) => !known.has(id)).map((environmentId) => ({ projectId: change.projectId, environmentId, at: d.at }))]
             .sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1));
         } else {
@@ -2508,7 +2511,7 @@ class VaultService implements Vault {
           // It takes off only what the project protects: a fork's id, with no row yet, is another project's to unprotect.
           if (!ownsProject(acting.live, change.projectId)) throw refused('not_allowed', 'only an Owner of its project, or of the whole instance, unprotects an environment');
           for (const place of next.protected) {
-            if (place.projectId === change.projectId && change.environmentIds.includes(place.environmentId) && found.has(place.environmentId)) {
+            if (place.projectId === change.projectId && change.environmentIds.includes(place.environmentId) && live015(place.environmentId)) {
               changes.push({ ref: { kind: 'environment', id: place.environmentId }, op: { op: 'environment.protect', protected: false } });
             }
           }

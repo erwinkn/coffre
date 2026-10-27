@@ -344,6 +344,46 @@ test('protecting an environment the cutover sealed is a change of its object; on
   assert.deepEqual([...(await w.vault.policy()).protected].sort(), [w.dev, w.prod].sort());
 });
 
+test('protecting two sealed environments in one call is two changes, each from its own seal; a deleted one changes nothing in 0.15\'s log', async () => {
+  const w = await world();
+  const { environments } = tablesOf(db.owner);
+  const gone = randomUUID();
+  await db.owner.insert(environments).values({ id: gone, projectId: w.project, slug: 'old~1', name: 'Old' });
+  await genesis(w.keys, { kind: 'environment', id: w.dev }, environment(w.project, w.dev, 'dev'));
+  await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
+  await genesis(w.keys, { kind: 'environment', id: gone }, { ...environment(w.project, gone, 'old~1'), deleted: true });
+  // An Owner protects all three, from a page shown before one of them was deleted: 0.14 takes it, as it did.
+  const outcome = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev, w.prod, gone], protected: true } });
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  for (const id of [w.dev, w.prod]) assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id }), ['genesis', 'environment.protect']);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: gone }), ['genesis']);
+  await holdsReplay(w.keys, [w.dev, w.prod, gone].map((id) => ({ kind: 'environment' as const, id })));
+});
+
+test('a policy row planted with no seal is refused, not taken for one from before the cutover', async () => {
+  const config = configure();
+  const { logConfig } = tablesOf(db.owner);
+  await db.owner.insert(logConfig).values({ name: 'policy', value: JSON.stringify({ kind: 'policy', bulk: { count: 1_000_000, windowMs: 60_000 } }) });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
+  assert.equal((await vault.access(ROOT)).role, 'owner');
+  assert.deepEqual(await opsOf(keysOf(config), { kind: 'policy', id: 'instance' }), []);
+  const reports = await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered'`);
+  assert.deepEqual(reports.map(({ code }) => code), ['mac']);
+});
+
+test('an Owner the deployment names again after a removal is restored by the vault at its start, a change of the log', async () => {
+  const config = configure();
+  const eve = 'user:eve@acme.example';
+  const first = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
+  assert.equal((await first.access(ROOT)).role, 'owner');
+  assert.ok((await first.admit({ actor: ROOT, principal: eve, role: 'owner' })).ok);
+  assert.ok((await first.remove({ actor: ROOT, principal: eve })).ok);
+  const named = await openLocalVault(db.vault, { ...config, owners: [...config.owners, 'eve@acme.example'] }, { log: '0.15', sealThrough: sealed });
+  assert.equal((await named.access(eve)).role, 'owner');
+  assert.deepEqual(await opsOf(keysOf(config), member(eve)), ['member.add', 'member.role', 'member.remove', 'member.restore']);
+  await holdsReplay(keysOf(config), [member(eve)]);
+});
+
 test('an Owner\'s role edit is a change of the roles object, once the cutover has made it', async () => {
   const w = await world();
   const define = (role: string, permissions: Permission[]) => w.vault.changePolicy({

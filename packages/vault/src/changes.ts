@@ -24,7 +24,8 @@ import { changeInputs, isStale, newestChange, readObject, type ChangeCall, type 
  *    nothing there is a bug of the decision's, which fails it.
  * 2. **After them,** in the same transaction: a member's row and grants,
  *    which the decision wrote, are read back and must be the object the ops
- *    leave (a grant written around the vault meanwhile fails it); then every
+ *    leave (0.14's `#seal` refuses a grant written around the vault
+ *    meanwhile: a difference left is the decision's own bug); then every
  *    op is one call of `change_input`, which takes the fence exclusive,
  *    checks the row's seal against the newest change again under it
  *    (ChangeChecksSeal), moves it only from the seal read (ChangeCAS), writes
@@ -39,8 +40,11 @@ import { changeInputs, isStale, newestChange, readObject, type ChangeCall, type 
  * An object that has a row but no seal, and no change in the log, is one
  * from before the cutover (plan PR 9): 0.14's log is its record, and the
  * cutover's genesis seals it as 0.14 left it. A decision changes it as
- * 0.14 does, and logs nothing of it here. One with neither row nor change
- * is new: only an op that makes it applies.
+ * 0.14 does, and logs nothing of it here. So are the roles with no row
+ * yet, whose edits 0.14's policy holds until the cutover. The roles' and
+ * the policy's rows are written only sealed, by `change_input`: one with
+ * no seal was planted, and is refused. Any other object with neither row
+ * nor change is new: only an op that makes it applies.
  */
 
 /** Why an object a decision would change is not the log's: its seal is not the vault's over it, or not its newest change's. */
@@ -118,8 +122,12 @@ export class Changes {
   async #read(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Read> {
     const [{ row, seal }, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
     // Before the cutover: a row, unsealed, that the log has never heard of; or the roles, whose edits 0.14's policy
-    // holds until the cutover's genesis writes them (a role defined before it is 0.14's alone).
-    if (newest === null && seal === null && (row !== null || ref.kind === 'roles')) return { logged: false };
+    // holds until the cutover's genesis writes them (a role defined before it is 0.14's alone). Not the roles' or the
+    // policy's row, which only change_input writes, sealed: one with no seal was planted.
+    if (newest === null && seal === null) {
+      if (row === null ? ref.kind === 'roles' : ref.kind !== 'roles' && ref.kind !== 'policy') return { logged: false };
+      if (row !== null) throw new NotLogged(ref, 'tampered');
+    }
     if (row !== null && !sealed(this.#keys.seals, ref, row, seal)) throw new NotLogged(ref, 'tampered');
     // A row whose seal is not its newest change's; one with no row the log has a change for (deleted outright).
     if (newest !== null ? seal === null || newest.seal === null || !newest.seal.equals(seal) : row !== null) throw new NotLogged(ref, 'stale');
@@ -143,9 +151,11 @@ export class Changes {
       const { seal: base, now, afters } = read!;
       // The member's own rows, which the decision wrote: they must be what the ops leave, or something wrote around it.
       // As the decision read them back to seal them (`written`), or read again here.
+      // A grant written around the vault meanwhile is refused before this (`#seal`, under the member's row lock): what is
+      // left to differ is the decision's writes and its ops, a bug of the vault's, never the member's tampering.
       if (ref.kind === 'principal') {
         const held = written.get(objectKey(ref)) ?? (await readObject(tx, ref)).row;
-        if (!sameObject(this.#keys.seals[0]!, ref, held, now)) throw new NotLogged(ref, 'tampered');
+        if (!sameObject(this.#keys.seals[0]!, ref, held, now)) throw new Error(`the ${ref.kind} ${ref.id}'s rows are not what its staged changes leave: the decision and its changes disagree`);
       }
       let from = base;
       steps.forEach(({ op, actor }, i) => {
