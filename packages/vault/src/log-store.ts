@@ -32,7 +32,11 @@ import { changeEntry, useEntry } from './log-entry.ts';
 /** How many leaves of the uses tree one range of its leaf tiles holds: 2^24, about 4.7 hours at 1,000 uses a second, 512 MB of tiles. */
 export const TILE_RANGE = 2 ** 24;
 
-/** How far past its window's floor a use's `at` may lie: the deadline (3 s, `deadline_max`) and a minute of the Workers' clocks running ahead. */
+/**
+ * How far past its window's barrier floor a use's `at` may lie: the deadline (`deadline_max()`, 3 s) and the minute
+ * a Worker's clock may run ahead of Postgres's, which `use_credential` holds a use to (it answers `ahead`, and writes
+ * nothing, past it). `locate` reads a use's window through the uses' one index within it.
+ */
 const AT_SLACK_MS = 63_000;
 
 type Options = {

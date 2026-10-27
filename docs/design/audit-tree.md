@@ -419,9 +419,17 @@ functions.
      (PairWrittenTogether). A tile only grows, and a second pair at one
      place fails.
 - **No read scans history (R48).** Each read of uses is bounded by `at`
-  from the floor of the windows it reads. `locate` finds an old use between
-  its window's floor and the next floor plus a minute of slack. The
-  verifier's `entries` read from the floor of the pair it starts after.
+  from the floor of the windows it reads. The verifier's `entries` read
+  from the floor of the pair it starts after.
+- **`locate` finds an old use** through the uses' one index. It reads
+  between its window's floor and the sealing barrier's floor plus
+  `deadline_max()` and 60 s (63 s in all), then counts the window's uses
+  before it.
+  - **The bound is a rule, not an assumption** (review r2): `use_credential`
+    answers `ahead` and writes nothing for an `at` more than 60 s past
+    Postgres's clock (#372).
+  - **The cost** is about a minute of index entries per proof of a use at
+    1,000/s (unmeasured, PR note). Changes are found by their key.
 - **Leaf tiles go in ranges of 2^24 leaves** (`TILE_RANGE`, about 4.7 hours
   at 1,000 uses a second, 512 MB of tiles). `make_tiles` makes each range,
   and the next one, before a tile lands in it. Retention (PR 7) drops whole
