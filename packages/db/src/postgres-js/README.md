@@ -67,7 +67,11 @@ Eight, each marked `Coffre:` in the code:
   query opened the connection again: a Worker call whose connection was cut
   under a query, then closed (`HyperdrivePool.end`), hung until Cloudflare
   cancelled it. Likewise an `end()` asked while the connection opened or
-  answered: the connection's close ends it.
+  answered: the connection's close ends it. And what the cut query's answer
+  had left half read goes with it, its error, its row count, its results:
+  upstream kept them, so the next query on the connection, opened again,
+  failed with the dead one's error, and the one after answered its rows
+  after the dead one's count, holes first.
 - **An ending client opens no connection again** (`onclose`, in
   `index.ts`). Upstream opened a closed connection again for a query still
   waiting for one, even once `end()` had been asked, and answered: that
@@ -85,7 +89,8 @@ Eight, each marked `Coffre:` in the code:
   longest, so a steady load cycles every connection of the pool and each
   backend's caches stay cold: Postgres spent ~8% more CPU per use at a pool of
   16 (`packages/db/test/pool.test.ts`).
-- **A sign-in the client cannot work out fails its connection** (`Authentication`,
-  in `connection.ts`): a hash that throws, or a server's SCRAM message it
-  cannot read, fails what waits for the connection and closes it. Upstream
+- **An opening the client cannot finish fails its connection**
+  (`openingFailed`, in `connection.ts`): its TLS (a key or certificate it
+  cannot read), or its sign-in (a hash that throws, a server's SCRAM message
+  it cannot read), fails what waits for the connection and closes it. Upstream
   left the error unhandled, which ends a Node process.

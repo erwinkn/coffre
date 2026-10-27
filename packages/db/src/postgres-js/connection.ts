@@ -286,9 +286,9 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
     connectTimer.start();
 
-    if (options.socket) return ssl ? secure() : connected();
+    if (options.socket) return ssl ? secure().catch(openingFailed) : connected();
 
-    socket.on('connect', ssl ? () => void secure() : connected);
+    socket.on('connect', ssl ? () => void secure().catch(openingFailed) : connected);
   }
 
   function reconnect(): void {
@@ -387,6 +387,15 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     // answer, for ever, unless a later query opened the connection again. And an end() asked meanwhile, as the
     // connection opened or answered, is done: the connection it waited to close has.
     query = null;
+    // Coffre: and with it what its answer had left half read, its error, its rows, its results, and what was still to
+    // be written: upstream kept them, so the next query on the connection opened again failed with the dead one's
+    // error, or answered its own rows after the dead one's count, holes first.
+    errorResponse = null;
+    rows = 0;
+    result = new Result();
+    results = null;
+    chunk = null;
+    nextWriteTimer = null;
     if (ended) {
       ended();
       ending = ended = null;
@@ -408,7 +417,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       case 49: return; // 1, ParseComplete
       case 116: return ParameterDescription(x); // t
       case 84: return RowDescription(x); // T
-      case 82: return void Authentication(x).catch(authenticationFailed); // R
+      case 82: return void Authentication(x).catch(openingFailed); // R
       case 110: return NoData(); // n
       case 75: return BackendKeyData(x); // K
       case 69: return ErrorResponse(x); // E
@@ -584,9 +593,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     }
   }
 
-  // Coffre: what the client failed to work out to sign in, a hash or the server's message, fails what waits for the
-  // connection, and the connection closes. Upstream left the rejection unhandled, which ends a Node process.
-  function authenticationFailed(err: unknown): void {
+  // Coffre: what the client failed to do to open the connection, its TLS (a key it cannot read) or its sign-in (a hash,
+  // the server's message), fails what waits for the connection, and the connection closes. Upstream left the rejection
+  // unhandled, which ends a Node process.
+  function openingFailed(err: unknown): void {
     errored(err);
     socket?.destroy();
   }

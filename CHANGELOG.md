@@ -20,16 +20,19 @@
     pipelines still learns its connection, which upstream left inside a
     transaction no one would end;
   - a client whose connection was cut under a query, or as it opened,
-    closes: upstream waited for the query for ever;
+    closes: upstream waited for the query for ever; and the next query on
+    that connection answers its own rows, where upstream gave it the dead
+    query's error, or its rows after holes;
   - a connection closed while it opens fails its query, an outage, as
     node-postgres's did: upstream dialled again, for ever;
   - a client asked to end opens no connection again, for a waiting query or
     a `reserve()`;
   - a `reserve()` that opens its connection gets it: without `fetch_types`,
     upstream never gave it;
-  - a sign-in that cannot be worked out (a hash, a server's SCRAM message)
-    fails the query that waited for it: upstream left an unhandled
-    rejection, which ends a Node process.
+  - an opening that cannot be finished (TLS with a key it cannot read, a
+    sign-in's hash or a server's SCRAM message) fails the query that waited
+    for it: upstream left an unhandled rejection, which ends a Node
+    process.
 
   What keeps a session across statements (`coffre migrate`'s lock,
   `coffre backup`'s and `restore`'s snapshot, `coffre setup`'s probes, each
