@@ -1,0 +1,247 @@
+{
+ "results": {
+  "one": {
+   "year: inclusion 1 min": {
+    "hashes": 28,
+    "us": 81.9058375,
+    "bytes": 896
+   },
+   "year: inclusion 1 day": {
+    "hashes": 32,
+    "us": 76.9436854999999,
+    "bytes": 1024
+   },
+   "year: inclusion 1 year": {
+    "hashes": 35,
+    "us": 68.7260959999994,
+    "bytes": 1120
+   },
+   "year: consistency 1 tick": {
+    "hashes": 23,
+    "us": 76.22932549999952,
+    "bytes": 736
+   },
+   "year: consistency 1 day": {
+    "hashes": 21,
+    "us": 62.145840499999395,
+    "bytes": 672
+   },
+   "year: consistency 1 year": {
+    "hashes": 34,
+    "us": 81.06153799999993,
+    "bytes": 1088
+   }
+  },
+  "split": {
+   "year: inclusion 1 min (use)": {
+    "hashes": 29,
+    "us": 64.29502100000002,
+    "bytes": 928
+   },
+   "year: inclusion 1 min (change)": {
+    "hashes": 16,
+    "us": 37.2770835,
+    "bytes": 512
+   },
+   "year: inclusion 1 day (use)": {
+    "hashes": 32,
+    "us": 92.62366950000023,
+    "bytes": 1024
+   },
+   "year: inclusion 1 day (change)": {
+    "hashes": 25,
+    "us": 79.64205249999986,
+    "bytes": 800
+   },
+   "year: inclusion 1 year (use)": {
+    "hashes": 35,
+    "us": 67.37003549999919,
+    "bytes": 1120
+   },
+   "year: inclusion 1 year (change)": {
+    "hashes": 25,
+    "us": 48.211874999999964,
+    "bytes": 800
+   },
+   "year: consistency 1 tick": {
+    "hashes": 30,
+    "us": 112.53203049999955,
+    "bytes": 960
+   },
+   "year: consistency 1 day": {
+    "hashes": 41,
+    "us": 132.36731650000002,
+    "bytes": 1312
+   },
+   "year: consistency 1 year": {
+    "hashes": 59,
+    "us": 225.95648450000047,
+    "bytes": 1888
+   }
+  },
+  "day": {
+   "year: inclusion 1 min": {
+    "hashes": 21,
+    "us": 49.00429450000002,
+    "bytes": 672
+   },
+   "year: inclusion 1 day": {
+    "hashes": 32,
+    "us": 100.76355000000012,
+    "bytes": 1024
+   },
+   "year: inclusion 1 year": {
+    "hashes": 36,
+    "us": 85.71147149999977,
+    "bytes": 1152
+   },
+   "year: consistency 1 tick": {
+    "hashes": 16,
+    "us": 48.08075050000025,
+    "bytes": 512
+   },
+   "year: consistency 1 day": {
+    "hashes": 31,
+    "us": 84.25384100000156,
+    "bytes": 992
+   },
+   "year: consistency 1 year": {
+    "hashes": 38,
+    "us": 146.70988000000216,
+    "bytes": 1216
+   }
+  },
+  "tick": {
+   "year: inclusion 1 min": {
+    "hashes": 26,
+    "us": 56.082636500000035,
+    "bytes": 832
+   },
+   "year: inclusion 1 day": {
+    "hashes": 35,
+    "us": 117.67207599999983,
+    "bytes": 1120
+   },
+   "year: inclusion 1 year": {
+    "hashes": 35,
+    "us": 82.19304499999998,
+    "bytes": 1120
+   },
+   "year: consistency 1 tick": {
+    "hashes": 18,
+    "us": 65.3731540000008,
+    "bytes": 576
+   },
+   "year: consistency 1 day": {
+    "hashes": 17,
+    "us": 70.88437599999997,
+    "bytes": 544
+   },
+   "year: consistency 1 year": {
+    "hashes": 26,
+    "us": 69.26839250000012,
+    "bytes": 832
+   }
+  },
+  "chain": {
+   "year: inclusion 1 min": {
+    "hashes": 129,
+    "us": 544.8229635000371,
+    "bytes": 10848
+   },
+   "year: inclusion 1 day": {
+    "hashes": 172809,
+    "us": 647573.4910760008,
+    "bytes": 15206688
+   },
+   "year: inclusion 1 year": {
+    "hashes": 63072009,
+    "us": 185432183.28061146,
+    "bytes": 5550336288,
+    "note": "links walked: 200,000 of 63072000, the rest at the same rate"
+   },
+   "year: consistency 1 tick": {
+    "hashes": 1,
+    "us": 62.81999999919208,
+    "bytes": 88
+   },
+   "year: consistency 1 day": {
+    "hashes": 172800,
+    "us": 498015.22800000024,
+    "bytes": 15206400
+   },
+   "year: consistency 1 year": {
+    "hashes": 63072000,
+    "us": 180914325.979,
+    "bytes": 5550336000
+   }
+  },
+  "mmr": {
+   "year: inclusion 1 min": {
+    "hashes": 28,
+    "us": 81.9058375,
+    "bytes": 896,
+    "note": "the RFC 9162 tree is a mountain range: the same proof"
+   },
+   "year: inclusion 1 day": {
+    "hashes": 32,
+    "us": 76.9436854999999,
+    "bytes": 1024,
+    "note": "the RFC 9162 tree is a mountain range: the same proof"
+   },
+   "year: inclusion 1 year": {
+    "hashes": 35,
+    "us": 68.7260959999994,
+    "bytes": 1120,
+    "note": "the RFC 9162 tree is a mountain range: the same proof"
+   },
+   "year: consistency 1 tick": {
+    "hashes": 23,
+    "us": 76.22932549999952,
+    "bytes": 736,
+    "note": "the RFC 9162 tree is a mountain range: the same proof"
+   },
+   "year: consistency 1 day": {
+    "hashes": 21,
+    "us": 62.145840499999395,
+    "bytes": 672,
+    "note": "the RFC 9162 tree is a mountain range: the same proof"
+   },
+   "year: consistency 1 year": {
+    "hashes": 34,
+    "us": 81.06153799999993,
+    "bytes": 1088,
+    "note": "the RFC 9162 tree is a mountain range: the same proof"
+   }
+  }
+ },
+ "witness": {
+  "noteBytes": 229,
+  "openNoteUs": 137.85437999998976,
+  "one": {
+   "hashes": 23,
+   "us": 74.36766299999726
+  },
+  "split": {
+   "hashes": 23,
+   "us": 74.82136499999615
+  },
+  "tick": {
+   "hashes": 18,
+   "us": 60.35480250000546
+  },
+  "chain": {
+   "hashes": 1,
+   "us": 13.108999992255121,
+   "bytes": 88
+  }
+ },
+ "walk": {
+  "one": 2.490660471100002,
+  "split": 2.622431362699997,
+  "tick": 2.5666010955999954,
+  "chain": 2.4944106508,
+  "mmr": 2.3714474312999987,
+  "leafHash": 1.146889599999995
+ }
+}
