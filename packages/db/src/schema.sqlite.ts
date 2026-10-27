@@ -67,8 +67,11 @@ export const projects = sqliteTable(
     createdAt: createdAt(),
     archivedAt: time('archived_at'),
     folder: text(),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('projects_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', isPlaceSlug(table.slug)),
     folderCheck('projects_folder_check', table.folder),
@@ -86,8 +89,11 @@ export const environments = sqliteTable(
     archivedAt: time('archived_at'),
     parentId: text('parent_id'),
     owner: text(),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('environments_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
     check('environments_slug_check', isPlaceSlug(table.slug)),
@@ -125,8 +131,11 @@ export const secrets = sqliteTable(
     currentVersion: integer('current_version').notNull().default(0),
     archivedAt: time('archived_at'),
     folder: text(),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('secrets_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('secrets_project_id_environment_id_key_key').on(table.projectId, table.environmentId, table.key),
     check(
       'secrets_key_check',
@@ -240,8 +249,11 @@ export const vaultMembers = sqliteTable(
     statusChangedBy: text('status_changed_by').notNull(),
     accessSeq: int64('access_seq').notNull(),
     mac: bytes('mac').notNull(),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('vault_members_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
     // `^(user|token):[^[:space:]:][^[:space:]]*$`, without regular expressions.
     check(
@@ -552,8 +564,11 @@ export const serviceBindings = sqliteTable(
     lastUsedAt: time('last_used_at'),
     revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('service_bindings_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('service_bindings_principal_check', sql`${table.principal} LIKE 'token:%'`),
     check('service_bindings_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     check('service_bindings_claims_check', sql`json_valid(${table.claims})`),
@@ -778,8 +793,11 @@ export const credentials = sqliteTable(
     enrollmentId: text('enrollment_id'),
     approvedAt: time('approved_at'),
     approvedBy: text('approved_by'),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('credentials_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('credentials_token_hash_key').on(table.tokenHash),
     check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload')`),
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
@@ -855,6 +873,119 @@ export const deviceAuthorizations = sqliteTable(
       columns: [table.principal],
       foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
+  ],
+);
+
+/** 0.15's configuration objects (schema.ts). */
+export const vaultConfig = sqliteTable(
+  'vault_config',
+  {
+    name: text().primaryKey(),
+    value: text().notNull(),
+    seal: bytes('seal'),
+  },
+  (table) => [
+    check('vault_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
+    check('vault_config_value_check', sql`json_valid(${table.value})`),
+    check('vault_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
+ * 0.15's log (schema.ts). SQLite has one writer, so the fence is implicit,
+ * and nothing is partitioned: uses and tiles are one table each.
+ */
+export const logChanges = sqliteTable(
+  'log_changes',
+  {
+    number: int64('number').primaryKey(),
+    at: integer({ mode: 'number' }).notNull(),
+    requestId: text('request_id').notNull(),
+    object: text().notNull(),
+    actor: text().notNull(),
+    payload: text().notNull(),
+    seal: bytes('seal'),
+    mac: bytes('mac').notNull(),
+  },
+  (table) => [
+    unique('log_changes_request_id_key').on(table.requestId),
+    check('log_changes_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+    check('log_changes_mac_check', sql`octet_length(${table.mac}) = 16`),
+    index('log_changes_object_idx').on(table.object, table.number),
+  ],
+);
+
+export const logUses = sqliteTable(
+  'log_uses',
+  {
+    number: int64('number').notNull(),
+    at: integer({ mode: 'number' }).notNull(),
+    requestId: int64('request_id').notNull(),
+    credential: text().notNull(),
+    secret: text().notNull(),
+    purpose: integer().notNull(),
+    mac: bytes('mac').notNull(),
+    place: text(),
+  },
+  (table) => [
+    check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
+    uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
+  ],
+);
+
+export const logBulk = sqliteTable(
+  'log_bulk',
+  {
+    principal: text().notNull(),
+    secret: text().notNull(),
+    last: integer({ mode: 'number' }).notNull(),
+  },
+  (table) => [primaryKey({ name: 'log_bulk_pkey', columns: [table.principal, table.secret] })],
+);
+
+export const logFence = sqliteTable(
+  'log_fence',
+  {
+    onlyRow: flag('only_row').primaryKey().default(true),
+    atFloor: integer('at_floor', { mode: 'number' }).notNull(),
+  },
+  (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
+);
+
+export const logCheckpoints = sqliteTable(
+  'log_checkpoints',
+  {
+    upto: int64('upto').primaryKey(),
+    at: integer({ mode: 'number' }).notNull(),
+    atFloor: integer('at_floor', { mode: 'number' }).notNull(),
+    changesSize: int64('changes_size').notNull(),
+    changesRoot: bytes('changes_root').notNull(),
+    changesNote: text('changes_note').notNull(),
+    usesSize: int64('uses_size').notNull(),
+    usesRoot: bytes('uses_root').notNull(),
+    usesNote: text('uses_note').notNull(),
+  },
+  (table) => [
+    check('log_checkpoints_changes_root_check', sql`octet_length(${table.changesRoot}) = 32`),
+    check('log_checkpoints_uses_root_check', sql`octet_length(${table.usesRoot}) = 32`),
+  ],
+);
+
+export const logTiles = sqliteTable(
+  'log_tiles',
+  {
+    tree: text().notNull(),
+    level: integer().notNull(),
+    leaf: int64('leaf').notNull(),
+    hashes: bytes('hashes').notNull(),
+  },
+  (table) => [
+    primaryKey({ name: 'log_tiles_pkey', columns: [table.tree, table.level, table.leaf] }),
+    check('log_tiles_tree_check', sql`${table.tree} IN ('changes', 'uses')`),
+    check('log_tiles_level_check', sql`${table.level} BETWEEN 0 AND 7`),
+    // 256^8 is past 64 bits: the top level's one tile starts at 0.
+    check('log_tiles_leaf_check', sql`${table.leaf} >= 0 AND ((${table.level} = 7 AND ${table.leaf} = 0) OR (${table.level} < 7 AND ${table.leaf} % (1 << (8 * (${table.level} + 1))) = 0))`),
+    check('log_tiles_hashes_check', sql`octet_length(${table.hashes}) BETWEEN 32 AND 8192 AND octet_length(${table.hashes}) % 32 = 0`),
   ],
 );
 

@@ -106,6 +106,10 @@ Neither runtime login owns tables or may change or delete audit entries.
 Row-level security permits each to append only as its own author. Do not run
 either component as the owner or give the runtime logins additional roles.
 
+They also make `coffre_vault_hot`, a member of `coffre_vault` with its own
+lock and statement timeouts and generic plans, for 0.15's hot path. It
+cannot log in, and nothing uses it yet.
+
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
 existing role, on every run that names it. Migrate never makes the role,

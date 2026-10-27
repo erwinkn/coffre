@@ -9,6 +9,7 @@ import {
   integer,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -50,8 +51,12 @@ export const projects = pgTable(
     createdAt: createdAt(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
     folder: text(),
+    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
+    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('projects_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     folderCheck('projects_folder_check', table.folder),
@@ -74,8 +79,12 @@ export const environments = pgTable(
     // A personal config's owner, `user:<email>`: a fork whose values only they
     // read, the vault binding each to them. Set when it is made and never after.
     owner: text(),
+    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
+    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('environments_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('environments_project_id_slug_key').on(table.projectId, table.slug),
     unique('environments_project_scoped').on(table.id, table.projectId),
     check('environments_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
@@ -118,8 +127,12 @@ export const secrets = pgTable(
     archivedAt: timestamp('archived_at', { withTimezone: true }),
     // Within its environment: the same key elsewhere has its own.
     folder: text(),
+    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
+    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('secrets_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('secrets_project_id_environment_id_key_key').on(
       table.projectId,
       table.environmentId,
@@ -257,8 +270,12 @@ export const vaultMembers = pgTable(
     // The vault's MAC over the row and the member's grants, lapsed ones too:
     // a grant added, edited or deleted outside the vault fails it.
     mac: bytea().notNull(),
+    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
+    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('vault_members_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
     check('vault_members_principal_check', sql`${table.principal} ~ '^(user|token):[^[:space:]:][^[:space:]]*$'`),
     // A person is their email address, lowercased, as in sign-in.
@@ -604,8 +621,12 @@ export const serviceBindings = pgTable(
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokedBy: text('revoked_by'),
+    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
+    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('service_bindings_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('service_bindings_principal_check', sql`${table.principal} LIKE 'token:%'`),
     check('service_bindings_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     check('service_bindings_claims_check', sql`${table.claims}::jsonb IS NOT NULL`),
@@ -862,8 +883,12 @@ export const credentials = pgTable(
     enrollmentId: uuid('enrollment_id'),
     approvedAt: timestamp('approved_at', { withTimezone: true }),
     approvedBy: text('approved_by'),
+    // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
+    // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('credentials_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('credentials_token_hash_key').on(table.tokenHash),
     check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload')`),
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
@@ -946,6 +971,174 @@ export const deviceAuthorizations = pgTable(
       columns: [table.principal],
       foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
+  ],
+);
+
+/**
+ * 0.15's configuration objects (0022_log_015): decision inputs no other row
+ * holds, one row each, sealed as every input is. `policy` holds the bulk
+ * cap's count and window, which a use reads in its own statement; `roles`
+ * the role tables. JSON, as the vault writes it. Written only through
+ * `change_input`.
+ */
+export const vaultConfig = pgTable(
+  'vault_config',
+  {
+    name: text().primaryKey(),
+    value: text().notNull(),
+    seal: bytea(),
+  },
+  (table) => [
+    check('vault_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
+    check('vault_config_value_check', sql`${table.value}::jsonb IS NOT NULL`),
+    check('vault_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
+ * 0.15's log (0022_log_015, docs/design/hot-path-one.md): two tables numbered
+ * from one sequence, `log_number`, each number taken under the fence's lock,
+ * so that the number alone orders uses against changes. Nothing reads or
+ * writes them before 0.15's vault; the vault login reads them and writes
+ * them only through the migration's functions.
+ *
+ * A change: any write to a decision input, or to configuration, kept for
+ * good. `object` is the input it changes (`log_object(kind, id)`), `seal`
+ * that object's seal after it, `payload` what it does. The MAC is the
+ * vault's, HMAC-SHA256 cut to 16 bytes, over everything but the number,
+ * which the vault does not know when it asks.
+ */
+export const logChanges = pgTable(
+  'log_changes',
+  {
+    number: bigint({ mode: 'bigint' }).primaryKey(),
+    // Milliseconds since the epoch, the vault's clock when it asked.
+    at: bigint({ mode: 'number' }).notNull(),
+    // A request id names one change: a retry finds its entry.
+    requestId: text('request_id').notNull(),
+    object: uuid().notNull(),
+    actor: text().notNull(),
+    payload: text().notNull(),
+    seal: bytea(),
+    mac: bytea().notNull(),
+  },
+  (table) => [
+    unique('log_changes_request_id_key').on(table.requestId),
+    check('log_changes_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+    check('log_changes_mac_check', sql`octet_length(${table.mac}) = 16`),
+    // Each input's newest change, its seal from the index alone (INCLUDE (seal), in the migration's SQL: Drizzle
+    // has no INCLUDE): one probe per input.
+    index('log_changes_object_idx').on(table.object, table.number),
+  ],
+);
+
+/**
+ * A use, the slim row (R53): no principal (the credential's), no
+ * environment (the secret's, or `place`), no kind (the table says it).
+ * Partitioned by the day of `at` (`make_day`), which retention drops whole;
+ * fixed-width columns first, and eight of them, so the row pads to nothing. One index, the
+ * replay's: a retried call repeats its `at` and request id, both under its
+ * MAC, and lands in the same day.
+ */
+export const logUses = pgTable(
+  'log_uses',
+  {
+    number: bigint({ mode: 'bigint' }).notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    // Random, unique within its millisecond.
+    requestId: bigint('request_id', { mode: 'bigint' }).notNull(),
+    credential: uuid().notNull(),
+    secret: uuid().notNull(),
+    // What the use was for, as @coffre/vault codes it (a use, a reveal…), plus 256 when it may keep a sensitive value:
+    // one column, so that the row has eight and its null bitmap fits the header's padding (8 B a use, measured).
+    purpose: smallint().notNull(),
+    mac: bytea().notNull(),
+    // The environment it was asked at, when not the secret's own (a fork, a reference).
+    place: uuid(),
+  },
+  (table) => [
+    check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
+    uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
+  ],
+);
+
+/**
+ * The bulk cap (R28, R52): each principal's last logged use of each key,
+ * written only by a use that holds the principal's lock, at most once per
+ * refresh per key. A row older than the window and a refresh counts for
+ * nothing; `prune_bulk` forgets it.
+ */
+export const logBulk = pgTable(
+  'log_bulk',
+  {
+    principal: text().notNull(),
+    secret: uuid().notNull(),
+    last: bigint({ mode: 'number' }).notNull(),
+  },
+  (table) => [primaryKey({ name: 'log_bulk_pkey', columns: [table.principal, table.secret] })],
+);
+
+/**
+ * The fence's one row: the lowest `at` a use may still be written with,
+ * raised by each checkpoint's barrier (`close_one`), never lowered. Made
+ * by the migration; without it every use is refused.
+ */
+export const logFence = pgTable(
+  'log_fence',
+  {
+    onlyRow: boolean('only_row').primaryKey().default(true),
+    atFloor: bigint('at_floor', { mode: 'number' }).notNull(),
+  },
+  (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
+);
+
+/**
+ * A signed checkpoint: the pair of tree heads (W212), changes and uses, at
+ * one `upto`, every number at or below which is final. One row, so that no
+ * state holds one head without the other. `at_floor` is the floor its
+ * barrier set: the next window's uses have an `at` at or above it.
+ */
+export const logCheckpoints = pgTable(
+  'log_checkpoints',
+  {
+    upto: bigint({ mode: 'bigint' }).primaryKey(),
+    at: bigint({ mode: 'number' }).notNull(),
+    atFloor: bigint('at_floor', { mode: 'number' }).notNull(),
+    changesSize: bigint('changes_size', { mode: 'bigint' }).notNull(),
+    changesRoot: bytea('changes_root').notNull(),
+    // The signed note (C2SP tlog-checkpoint), as witnesses get it.
+    changesNote: text('changes_note').notNull(),
+    usesSize: bigint('uses_size', { mode: 'bigint' }).notNull(),
+    usesRoot: bytea('uses_root').notNull(),
+    usesNote: text('uses_note').notNull(),
+  },
+  (table) => [
+    check('log_checkpoints_changes_root_check', sql`octet_length(${table.changesRoot}) = 32`),
+    check('log_checkpoints_uses_root_check', sql`octet_length(${table.usesRoot}) = 32`),
+  ],
+);
+
+/**
+ * The two trees' tiles (C2SP tlog-tiles: height 8, up to 256 hashes of one
+ * level). Partitioned by tree, and the uses tree's by `leaf`, the first
+ * leaf a tile covers (`make_tiles`), so that retention drops a table rather
+ * than deleting a day's rows (W212).
+ */
+export const logTiles = pgTable(
+  'log_tiles',
+  {
+    tree: text().notNull(),
+    level: smallint().notNull(),
+    // idx · 256^(level + 1): a tile's place, in its tree's leaves.
+    leaf: bigint({ mode: 'bigint' }).notNull(),
+    hashes: bytea().notNull(),
+  },
+  (table) => [
+    primaryKey({ name: 'log_tiles_pkey', columns: [table.tree, table.level, table.leaf] }),
+    check('log_tiles_tree_check', sql`${table.tree} IN ('changes', 'uses')`),
+    check('log_tiles_level_check', sql`${table.level} BETWEEN 0 AND 7`),
+    check('log_tiles_leaf_check', sql`${table.leaf} >= 0 AND ${table.leaf} % (256::numeric ^ (${table.level} + 1)) = 0`),
+    check('log_tiles_hashes_check', sql`octet_length(${table.hashes}) BETWEEN 32 AND 8192 AND octet_length(${table.hashes}) % 32 = 0`),
   ],
 );
 
