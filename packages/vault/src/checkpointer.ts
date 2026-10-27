@@ -148,7 +148,9 @@ export type Sealed = {
   /**
    * Each witness's cosignature of the newest pair it took in time: a pair
    * covering the change, which may be later than `pair` if a tick landed
-   * meanwhile. Each note says its own place.
+   * meanwhile. Each note says its own place. An archive cosigns nothing and
+   * adds none: whether the change was witnessed is `witnessed`, never the
+   * length of this.
    */
   cosigned: PairNotes[];
   /** The change's entry, proved in the pair: what the admin's client checks and can keep. */
