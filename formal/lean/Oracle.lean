@@ -189,6 +189,48 @@ def verifyCase (j : Json) : Parse Json := do
   | .ok head next => pure (Json.mkObj [("ok", true), ("head", Json.str head), ("nextSeq", Json.num next)])
   | .fail seq => pure (Json.mkObj [("ok", false), ("failedAtSeq", Json.num seq)])
 
+/-! The 0.15 use (`Use.lean`): a checked view and a request, as `decideChecked` takes them. -/
+
+def int (j : Json) : Parse Int := j.getInt?
+
+def optInt (j : Json) : Parse (Option Int) := if j.isNull then pure none else some <$> j.getInt?
+
+def checked {α} (row : Json → Parse α) (j : Json) : Parse (In α) := do
+  let r := field j "row"
+  pure ⟨← if r.isNull then pure none else some <$> row r, ← (← req j "valid").getBool?, ← (← req j "current").getBool?⟩
+
+def principalIn (j : Json) : Parse PrincipalIn := do
+  let grants ← (← list (← req j "grants")).mapM fun g => do
+    pure (⟨⟨← optStr (← present g "projectId"), ← optStr (← present g "environmentId")⟩, ← str (← req g "role")⟩, ← optInt (field g "expiresAt"))
+  pure ⟨(← str (← req j "status")) == "active", ← str (← req j "role"), ← scope (← req j "scope"), grants⟩
+
+def credentialIn (j : Json) : Parse CredentialIn := do
+  let sc := field j "scope"
+  pure ⟨← str (← req j "principal"), (← str (← req j "caller")) == "workload",
+    ← if sc.isNull then pure none else some <$> (← list sc).mapM scopeGrant, ← optInt (field j "expiresAt"), ← (← req j "revoked").getBool?⟩
+
+def secretIn (j : Json) : Parse SecretIn := do
+  pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "environmentId"), (← str (← req j "nature")) == "sensitive",
+    !(← present j "key").isNull, ← optStr (field j "source")⟩
+
+def envIn (j : Json) : Parse EnvIn := do
+  pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "slug"), ← optStr (field j "owner"), ← optStr (field j "parentId"),
+    ← (← req j "protected").getBool?, ← (← req j "deleted").getBool?, ← (← req j "archived").getBool?⟩
+
+def rolesIn (j : Json) : Parse RolesIn := do pure ⟨← table roleDef (← req j "roles"), ← table roleDef (← req j "instanceRoles")⟩
+
+def countIn (j : Json) : Parse Nat := do (← req (← req j "bulk") "count").getNat?
+
+def useView (j : Json) : Parse UseView := do
+  let opt {α} (f : Json → Parse α) (x : Json) : Parse (Option α) := if x.isNull then pure none else some <$> f x
+  let envs ← (← list (← req j "environments")).mapM fun e => do pure (← str (← req e "id"), ← checked envIn (← req e "read"))
+  let bulk ← opt (fun b => do pure (⟨← (← req b "inSet").getBool?, ← (← req b "others").getNat?⟩ : BulkIn)) (field j "bulk")
+  pure ⟨← checked credentialIn (← req j "credential"), ← opt (checked principalIn) (field j "principal"), ← checked rolesIn (← req j "roles"),
+    ← checked countIn (← req j "policy"), ← checked secretIn (← req j "secret"), ← opt (checked secretIn) (field j "source"), envs, bulk⟩
+
+def useReq (j : Json) : Parse UseReq := do
+  pure ⟨← optStr (field j "place"), ← str (← req j "purpose"), ← flag (field j "keepsSensitive"), ← int (← req j "at")⟩
+
 def answer (j : Json) : Parse Json := do
   let op ← str (field j "op")
   match op with
@@ -264,6 +306,13 @@ def answer (j : Json) : Parse Json := do
       (← envRows (← req j "environments")) (← nature (← req j "nature"))))
   | "encodeAad" => pure (Json.str (String.ofList (Envelope.encodeAad (← aadCtx (field j "ctx")))))
   | "verifyEntries" => verifyCase j
+  | "decideUse" => pure (code (decideUse (← useView (← req j "view")) (← useReq (← req j "request"))))
+  | "bulkRule" =>
+    let rows ← (← list (← req j "rows")).mapM fun r => do pure (← str (← req r "key"), ← int (← req r "last"))
+    let limit ← req j "limit"
+    let (inSet, others, write) := bulkRule rows (← str (← req j "key")) (← int (← req j "at"))
+      ⟨← (← req limit "count").getNat?, ← int (← req limit "windowMs")⟩
+    pure (Json.mkObj [("inSet", Json.bool inSet), ("others", Json.num others), ("write", match write with | some t => Json.num t | none => Json.null)])
   | _ => throw s!"no op {op}"
 
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do

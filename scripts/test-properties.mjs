@@ -18,3 +18,4 @@ await import('../packages/core/test/workload-properties.test.ts');
 await import('../packages/server/test/workload-session-properties.test.ts');
 await import('../packages/core/test/use-only-properties.test.ts');
 await import('../packages/server/test/gate-properties.test.ts');
+await import('../packages/vault/test/use-replay-properties.test.ts');

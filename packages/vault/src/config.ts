@@ -187,8 +187,9 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
 
 
 function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {
-  if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0) || windowMinutes > MAX_BULK_WINDOW_MINUTES) {
-    throw new Error(`bulkLimit needs a whole count of at least 1 and a window above 0 minutes, a day (${MAX_BULK_WINDOW_MINUTES}) at most`);
+  // A whole number of milliseconds: what the 0.15 log's policy holds (`bulk.limit` in inputs.ts).
+  if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0) || windowMinutes > MAX_BULK_WINDOW_MINUTES || !Number.isInteger(windowMinutes * 60_000)) {
+    throw new Error(`bulkLimit needs a whole count of at least 1 and a window above 0 minutes, a day (${MAX_BULK_WINDOW_MINUTES}) at most, a whole number of milliseconds`);
   }
   return { count, windowMs: windowMinutes * 60_000 };
 }

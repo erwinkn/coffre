@@ -1,0 +1,42 @@
+[
+  {
+    "kind": "principal",
+    "id": "user:ada@acme.example",
+    "key": "e357e51a-07d4-a671-34f3-d3b47e0522c3"
+  },
+  {
+    "kind": "principal",
+    "id": "token:ci",
+    "key": "aea468b6-61e8-9582-0262-8b22f69e6812"
+  },
+  {
+    "kind": "principal",
+    "id": "user:zoë@exämple.fr",
+    "key": "759bfca0-9425-57c2-1902-154fe7c8d0a7"
+  },
+  {
+    "kind": "credential",
+    "id": "00000000-0000-4000-8002-000000000001",
+    "key": "3462b400-6f10-7337-5d8a-43257d15ffbc"
+  },
+  {
+    "kind": "secret",
+    "id": "00000000-0000-4000-8001-000000000001",
+    "key": "05aed852-dcc4-ea15-1a9d-e75712c15c40"
+  },
+  {
+    "kind": "environment",
+    "id": "00000000-0000-4000-8000-0000000000d1",
+    "key": "1e5f5d8d-b9e7-631a-f27f-778d634a545e"
+  },
+  {
+    "kind": "roles",
+    "id": "instance",
+    "key": "f7efff01-4561-2159-b22c-87275ad9837d"
+  },
+  {
+    "kind": "policy",
+    "id": "instance",
+    "key": "8b635b60-7b8e-30c1-1e14-118bf7ef71dd"
+  }
+]

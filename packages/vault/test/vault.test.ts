@@ -3241,6 +3241,7 @@ test('configuration', () => {
   // A window of a day at most: its releases are kept a day and an hour (prune_vault_releases).
   assert.deepEqual(resolveVaultConfig({ ...base, bulkLimit: { count: 1000, windowMinutes: 24 * 60 } }).bulkLimit, { count: 1000, windowMs: 24 * 3_600_000 });
   assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 1000, windowMinutes: 24 * 60 + 1 } }), /a day \(1440\) at most/);
+  assert.throws(() => resolveVaultConfig({ ...base, bulkLimit: { count: 10, windowMinutes: 1.234567 } }), /a whole number of milliseconds/);
   assert.throws(() => resolveVaultConfig({ ...base, kek: { id: 'kek-1', key: 'c2hvcnQ=' } }), /32 bytes/);
   assert.throws(() => resolveVaultConfig({ ...base, signingKey: '' }), /signing key/);
   assert.throws(() => resolveVaultConfig({ ...base, previousKeks: [{ id: 'kek-1', key }] }), /share an id/);
