@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   decodePair,
   Edge,
@@ -9,6 +11,7 @@ import {
   loadEdges,
   nodesFrom,
   openPair,
+  pairSigners,
   pairVerifiers,
   proveConsistency,
   samePair,
@@ -145,12 +148,31 @@ export type Sealed = {
   /**
    * Each witness's cosignature of the newest pair it took in time: a pair
    * covering the change, which may be later than `pair` if a tick landed
-   * meanwhile. Each note says its own place.
+   * meanwhile. Each note says its own place. An archive cosigns nothing and
+   * adds none: whether the change was witnessed is `witnessed`, never the
+   * length of this.
    */
   cosigned: PairNotes[];
   /** The change's entry, proved in the pair: what the admin's client checks and can keep. */
   proof: InclusionProof;
 };
+
+/**
+ * The change path's seam (plan PR 4): a change, once committed, asks for its
+ * seal and answers with what this gives it (R51). The Node checkpointer's
+ * `sealThrough` is one; on Workers, `durableSealThrough` asks the
+ * checkpointer's Durable Object.
+ */
+export type SealThrough = (number: bigint, deadline?: number) => Promise<Sealed>;
+
+/** An alarm the checkpointer raised, as its host keeps it for whoever watches (R40's plugin, PR 8's surfaces). */
+export type Alarm = { at: number; message: string };
+
+/** The log's origin for a signing seed: one per key, `coffre.log/<the first 8 bytes of SHA-256 of the seed's changes key, hex>`. */
+export async function logOrigin(seed: Uint8Array): Promise<string> {
+  const { changes } = await pairSigners('coffre.log', seed);
+  return `coffre.log/${createHash('sha256').update(changes.publicKey).digest('hex').slice(0, 16)}`;
+}
 
 export type InclusionProof = {
   number: bigint;
@@ -219,6 +241,8 @@ export class Checkpointer {
   private barrier: number | null = null;
   /** Set once a barrier finds the floor elsewhere: every tick refuses until the checkpointer is reopened. */
   private floorAlarm: string | null = null;
+  /** The failures the last refused tick alerted: a refusal that stands is alerted once, not every tick. */
+  private refused: string | null = null;
 
   private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
@@ -266,7 +290,7 @@ export class Checkpointer {
     const row = await store.newest();
     if (row === null) {
       if (mine !== null && (mine.pair.upto !== 0n || TREES.some((tree) => mine.pair[tree].size > 0))) {
-        throw new Error(`the database holds no checkpoint; the signer signed up to ${mine.pair.upto} (${sizes(mine.pair)})`);
+        throw new Error(`the database holds no checkpoint; the signer signed up to ${mine.pair.upto} (${said(mine.pair)})`);
       }
       // A new log: both trees empty at number 0, sealing nothing, so the first tick seals every entry there is. A
       // genesis already remembered (a crash before its write) is written as it was, never signed again.
@@ -293,7 +317,7 @@ export class Checkpointer {
         const tiles = appendWindow(edges, entries);
         const lost = TREES.filter((tree) => edges[tree].size !== mine.pair[tree].size || !edges[tree].root().equals(mine.pair[tree].root));
         if (lost.length > 0) {
-          throw new Error(`the database lost entries the signer sealed: up to ${mine.pair.upto} it holds ${sizes(edges)}, the signer signed ${sizes(mine.pair)}`);
+          throw new Error(`the database lost entries the signer sealed: up to ${mine.pair.upto} it holds ${said(edges)}, the signer signed ${said(mine.pair)}`);
         }
         await store.write({ upto: mine.pair.upto, notes: mine.notes }, tiles);
         head = mine;
@@ -337,6 +361,19 @@ export class Checkpointer {
    * publish it. Ticks run one at a time, the regular ones and those a change
    * asks for.
    */
+  /**
+   * Stops this checkpointer for good, once the tick in flight, if any, has
+   * ended: every tick after, and every change that would tick, is refused.
+   * A host that opens another over the same memory closes this one first,
+   * so that two signers never act at once.
+   */
+  close(): Promise<void> {
+    this.closed = true;
+    return this.running.then(() => {}, () => {});
+  }
+
+  private closed = false;
+
   tick(): Promise<Tick> {
     const run = this.running.then(() => this.tickNow());
     this.running = run.catch(() => {});
@@ -344,6 +381,7 @@ export class Checkpointer {
   }
 
   private async tickNow(): Promise<Tick> {
+    if (this.closed) throw new Error('this checkpointer was closed: another took over its memory');
     let finished = false;
     if (this.pending !== null) {
       await this.finish(this.pending);
@@ -395,9 +433,12 @@ export class Checkpointer {
       signed: signed || finished, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
     });
     if (failures.length > 0) {
-      for (const f of failures) this.options.alert(`audit checkpoint refused: ${f}`);
+      const said = failures.join('\n');
+      if (said !== this.refused) for (const f of failures) this.options.alert(`audit checkpoint refused: ${f}`);
+      this.refused = said;
       return result(false);
     }
+    this.refused = null;
     if (upto === pair.upto) {
       // Nothing new. A quiet log: hand the newest pair again to any witness that failed to take it.
       for (const w of this.options.witnesses) if (this.pump(w).acked < pair.upto) this.kick(w);
@@ -433,7 +474,9 @@ export class Checkpointer {
     if (!holds(row, p.next)) {
       if (!holds(row, this.head)) {
         const message = `the database's newest checkpoint is ${row?.upto ?? 'gone'}; the signer's is at ${this.head.pair.upto}, with ${p.next.pair.upto} to write: reopen the checkpointer`;
-        this.options.alert(`audit checkpoint refused: ${message}`);
+        // Alerted once while it stands, as a refused tick is: every tick finds it again.
+        if (message !== this.refused) this.options.alert(`audit checkpoint refused: ${message}`);
+        this.refused = message;
         throw new Error(message);
       }
       await this.store.write({ upto: p.next.pair.upto, notes: p.next.notes }, p.tiles);
@@ -557,7 +600,7 @@ export class Checkpointer {
       const a = await attempt((signal) => w.publish(notes, proofs, signal), WITNESS_DEADLINE_MS);
       if (a.ok && pair.upto > p.acked) {
         p.acked = pair.upto;
-        p.cosigned = a.cosigned;
+        p.cosigned = a.cosigned ?? null;
       }
       p.failure = a.ok ? null : a.reason;
       p.waiters = p.waiters.filter((x) => {
@@ -639,6 +682,8 @@ const holds = (row: StoredPair | null, head: { pair: Pair; notes: PairNotes }) =
   row !== null && row.upto === head.pair.upto && row.notes.changes === head.notes.changes && row.notes.uses === head.notes.uses;
 
 const sizes = (heads: Record<TreeName, { size: number }>) => ({ changes: heads.changes.size, uses: heads.uses.size });
+/** Both trees' sizes as a message says them: `changes 4, uses 120`. */
+const said = (heads: Record<TreeName, { size: number }>) => `changes ${heads.changes.size}, uses ${heads.uses.size}`;
 
 /** Appends a window's entries, in number order, each to its tree: the tiles to write. */
 function appendWindow(edges: Record<TreeName, Edge>, entries: readonly LogEntry[]): Record<TreeName, Tile[]> {

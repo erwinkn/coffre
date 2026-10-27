@@ -29,6 +29,8 @@ import type { VaultOptions } from './vault.ts';
 export type { Vault, VaultConfig };
 export * from './index.ts';
 export type { LocalVault, VaultOptions };
+/** 0.15's checkpointer on Node (docs/design/audit-tree.md): unused until 0.15's log is switched on (plan PR 10). */
+export { fileMemory, runCheckpointer, type RunningCheckpointer } from './checkpointer-node.ts';
 
 export type NodeVaultConfig = VaultConfig & {
   /**

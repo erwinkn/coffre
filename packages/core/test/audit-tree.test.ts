@@ -333,7 +333,7 @@ test('a witness cosigns a pair only if both trees extend the pair it holds', asy
   const second = await signPair(signers, 20n, 2, heads(4, 700));
   const next = await witnessPair(held.state, second.notes, proofs([3, 300], [4, 700]), log, self);
   assert.ok(next.answer.ok);
-  assert.ok((await openNote(next.answer.cosigned.uses, await noteVerifier(self.verifierKey))) !== null, 'cosigned');
+  assert.ok((await openNote(next.answer.cosigned!.uses, await noteVerifier(self.verifierKey))) !== null, 'cosigned');
   assert.ok((await witnessPair(next.state, second.notes, proofs([4, 700], [4, 700]), log, self)).answer.ok, 'the same pair again');
 
   // The changes head extends, the uses head is another history: refused whole, and the pair held stays.

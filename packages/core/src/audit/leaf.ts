@@ -24,10 +24,31 @@ export type LeafValue = Uint8Array | string | bigint | number | null;
 
 export function leafData(tree: TreeName, number: bigint, columns: readonly LeafValue[]): Buffer {
   if (number < 0n || number > MAX_NUMBER) throw new Error(`entry number ${number} is out of range`);
-  const head = Buffer.alloc(12);
+  const head = Buffer.alloc(8);
   head.writeBigUInt64BE(number, 0);
-  head.writeUInt32BE(columns.length, 8);
-  const parts: Buffer[] = [Buffer.from(`${LEAF_FORMAT}\n${tree}\n`, 'utf8'), head];
+  return Buffer.concat([Buffer.from(`${LEAF_FORMAT}\n${tree}\n`, 'utf8'), head, encodeColumns(columns)]);
+}
+
+/**
+ * What an entry's MAC covers: its tree and every column but its number,
+ * which the database takes, and the MAC itself, the same tagged encoding as
+ * a leaf's. The tree is in it (Seal.tla's KindInMac): a change moved into
+ * the uses table before its tick would otherwise be sealed into the uses
+ * tree, and pruned with the uses.
+ *
+ *   "coffre.log.mac.v1" 0x0a tree 0x0a column count(4), then the columns as a leaf's
+ */
+export const MAC_FORMAT = 'coffre.log.mac.v1';
+
+export function macData(tree: TreeName, columns: readonly LeafValue[]): Buffer {
+  return Buffer.concat([Buffer.from(`${MAC_FORMAT}\n${tree}\n`, 'utf8'), encodeColumns(columns)]);
+}
+
+/** The column count, then each column tagged and length-prefixed. */
+function encodeColumns(columns: readonly LeafValue[]): Buffer {
+  const count = Buffer.alloc(4);
+  count.writeUInt32BE(columns.length, 0);
+  const parts: Buffer[] = [count];
   for (const [i, value] of columns.entries()) {
     let tag: number;
     let bytes: Buffer;

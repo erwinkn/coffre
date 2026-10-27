@@ -18,10 +18,12 @@ in `experiments/merkle/` on those branches, not on `main`.
 - **Go's check:** `scripts/audit-tree-go.sh`.
 
 **Status.** Nothing calls this code yet, and 0.14 behaviour does not
-change. PR 6b wires it: the Postgres and SQLite stores over migration 0022's
-tables, the Workers checkpointer's Durable Object, the Node interval, and a
-change waiting for its seal. 6b comes after plan PRs 2 (the schema) and 4
-(the change path).
+change. PR 6a (#370) shipped the trees and the checkpointer behind its seam.
+PR 6b wires them to the database and the runtimes ("Where it runs",
+below): the store over migration 0022, the checkpointer on Node and in its
+Durable Object, and the witnesses. Every piece waits for 0.15's log to be
+switched on (plan PR 10). The change path (plan PR 4) calls `sealThrough`
+through the seam 6b leaves it.
 
 ## In short
 
@@ -301,6 +303,50 @@ the write are 6b's to measure (W212 measured the write at 1.46 ms p50). On
 Workers the memory is one write of about 0.5 KB to the Durable
 Object's storage a tick, 172,800 a day. **R54: the memory stays in core.**
 
+**A tick on Postgres (6b).** Measured with
+`packages/vault/scripts/checkpoint-bench.ts` on a Postgres 16 of this
+worker's own (2 vCPU, 2 GB, W212's rig).
+- **The load:** a loader appends 1,000 entries a second, one in a hundred a
+  change, each under the fence's lock shared as `use_credential` takes it,
+  so `close_one` waits for appends in flight.
+- **The checkpointer:** it ticks every 500 ms through the vault's login,
+  its memory an fsynced file.
+- **The runs:** two of 60 s each, 120 ticks of about 500 entries; the
+  first tenth of each run is left out.
+
+| per tick | p50 | p99 |
+|---|---|---|
+| barrier and window (`close_one`, then the read) | 3.6 ms | 6.4–6.7 ms |
+| write (`write_checkpoint`) | 2.5 ms | 5.2–5.6 ms |
+| tick, wall | 13.1–13.5 ms | 32–39 ms |
+| checkpointer CPU | 9.2–9.4 ms | 59–74 ms (garbage collection) |
+
+Postgres's CPU (`docker stats`, two samples a run) was 22.6% of a core for
+the loader alone and 26.5% with the checkpointer too: the checkpointer
+costs about four points of a core at R44's rate. The loader's appends are
+bare inserts, not `use_credential`'s whole statement, which adds nothing to
+the checkpointer's share.
+
+**A tick in the Durable Object (6b).** Measured with
+`packages/vault/scripts/checkpoint-bench-workers.ts`.
+- **The setup:** the object runs in workerd, as `wrangler dev` runs it, and
+  ticks on its alarm through Hyperdrive's local connection to the same
+  Postgres. Each pair goes to the witness's object and the R2 archive.
+- **The load:** the same loader, at 1,000 entries a second.
+- **The sample:** 111 ticks of 530 entries p50.
+
+| per tick | p50 | p99 |
+|---|---|---|
+| barrier and window | 5 ms | 10 ms |
+| write | 3 ms | 8 ms |
+| tick, wall in the object | 28 ms | 56 ms |
+
+workerd's clock moves only on I/O, so these are I/O times; the CPU is
+V8's, as in Node's 9 ms. A run on Cloudflare itself was not made. Executor's
+Cloudflare API runs code that may not fetch from GitHub, so the bundle could
+not be uploaded from there, and this host holds no Cloudflare token for
+`wrangler deploy`. Nothing was created; the account was checked afterwards.
+
 **Level-0 tiles for the uses tree.** Plan PR 6 asked for this decision by
 numbers. Measured with `packages/vault/scripts/audit-tree-level0.mjs` on a
 Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
@@ -346,15 +392,149 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 | a failed tick leaves its pair pending, finished by the next tick (copy, then commit) | removes #365's "broken until reopened" state; never two pairs for one place | this PR, review r1 |
 | the leaf: tagged, length-prefixed columns, its tree and number in it | injective; pinned by vectors | this PR, after `audit/chain.ts`'s encoding |
 | a 500 ms tick; a change waits for its seal and at most 2 s for witnesses | sealed within ~530 ms p99 (W209) | R51, R54 |
+| the window read as rows, the newest pair read with the barrier | 6.0 → 3.6 ms p50 a tick; three statements a tick | 6b, measured |
+| leaf tiles in ranges of 2^24 leaves, made ahead by the write | ~5 ranges a day at 1,000/s; a range is 512 MB | 6b |
+| the entry MAC covers the tree and every column but the number (KindInMac) | 16 B (R53) | 6b, after Seal.tla |
+| the log's origin from the signing key; no deployment option | — | 6b |
+| witnesses are vault config, opted into, fed by the checkpointer | the plugin's capability where the pairs are signed (R40) | 6b |
+| a refusal that stands is alerted once; alarms kept where the plugin reads them | — | 6b |
+| a tile read names its tiles as constants | planning 8.7 → 0.4 ms at 150 ranges | 6b, Fable's review |
+| the object's memory synced before the database write | one storage round trip a tick | 6b, Fable's review |
+
+## Where it runs (6b)
+
+**The store.** `packages/vault/src/log-store.ts` is `CheckpointStore` over
+migration 0022's tables (Postgres) and 0018's (SQLite), through the vault's
+own login, which reads `log_*` and writes them only through 0022's
+functions.
+
+- **A tick is three statements.**
+  1. `close_one()`, the barrier, with the newest pair read in the same
+     statement. Only the checkpointer writes that row, so a snapshot from
+     before the barrier's lock holds it.
+  2. The window, in the next statement, a snapshot taken after the lock:
+     changes by number, uses through their one index `(at, request_id)`
+     from the floor the newest pair signed, kept by number. It comes back
+     as rows: built as JSON, it took 6.0 ms p50 at 1,000/s; as rows,
+     3.6 ms.
+  3. `write_checkpoint(…)`: both trees' tiles and the pair, one call
+     (PairWrittenTogether). A tile only grows, and a second pair at one
+     place fails.
+- **A tile read names its tiles as constants** (`(level = 0 AND leaf =
+  256) OR …`), so Postgres prunes the leaf ranges as it plans. As an array,
+  every range was planned: 8.7 ms at 150 ranges, a month at 1,000 uses a
+  second, against 0.4 ms (Fable's review). It runs for every witness's
+  proof each tick and every change's proof.
+- **No read scans history (R48).** Each read of uses is bounded by `at`
+  on both sides: from the floor of the pair it starts after, to the slack
+  past the floor of the pair that seals where it ends (review r3). Only a
+  read past the newest pair, the head, is open-ended.
+- **`locate` finds an old use** through the uses' one index. It reads
+  between its window's floor and the sealing barrier's floor plus
+  `deadline_max()` and 60 s (63 s in all), then counts the window's uses
+  before it.
+  - **The bound is a rule, not an assumption** (review r2): `use_credential`
+    answers `ahead` and writes nothing for an `at` more than 60 s past
+    Postgres's clock (#372).
+  - **The cost** is about a minute of index entries per proof of a use at
+    1,000/s (unmeasured, PR note). Changes are found by their key.
+- **Leaf tiles go in ranges of 2^24 leaves** (`TILE_RANGE`, about 4.7 hours
+  at 1,000 uses a second, 512 MB of tiles). `make_tiles` makes each range,
+  and the next one, before a tile lands in it. Retention (PR 7) drops whole
+  ranges below a cut, and deletes the few upper tiles that end at or below
+  it.
+- **SQLite** has one writer: the barrier only moves the floor, every
+  number committed is final, and the write is the same statements in one
+  transaction.
+
+**The entries.** `packages/vault/src/log-entry.ts` turns a row of either
+table into its leaf: every column in the table's order but the number,
+with the MAC last. The MAC (`entryMac`) is HMAC-SHA256 under a key derived
+from the vault's signing seed, cut to 16 bytes (R53). It covers the tree
+and every column but the number and itself (`macData`, KindInMac). The
+change path (PR 4) and the use path (PR 5) compute it when they write an
+entry; the checkpointer checks it before it seals anything.
+
+**The log's origin** is derived from the vault's signing key:
+`coffre.log/<the first 8 bytes of SHA-256 of the changes key, hex>`. Each
+tree's origin is that plus `/changes` or `/uses`. A new signing key starts
+a new log; how a rotation carries the trees across is the cutover's
+(PR 9).
+
+**On Node** (`packages/vault/src/checkpointer-node.ts`):
+- `runCheckpointer({ database, seed, memory, witnesses })` ticks every
+  500 ms, a tick after the last ends. A tick that throws is an alarm, kept
+  once; `stop()` closes the checkpointer, so a handle kept after it never
+  ticks beside a runner started over the same file.
+- The memory is a file, written whole, synced, renamed over the last, and
+  the directory synced (`fileMemory`).
+- Alarms are appended to `<memory>.alarms`, one JSON line each.
+
+**On Workers** (`packages/vault/src/checkpointer-workers.ts`): one Durable
+Object, `export const CoffreCheckpointer = checkpointer()` beside `vault(…)`,
+configured by the same `vault(env => …)`.
+- **Its memory is its storage**, synced before `remember` returns
+  (RememberFirst). The output gate holds a Response and a new connection
+  until a write is durable, but not a query on a connection already open,
+  as the database write is. So `sync()` makes RememberFirst hold without
+  leaning on the gate (Fable's review).
+- **It ticks on its alarm** every 500 ms, holding one Hyperdrive connection
+  that closes when idle. A failed tick drops the connection and the
+  checkpointer, and the next alarm opens both again under `open()`'s rules.
+  The old checkpointer is closed first, its tick in flight ended, with
+  nothing else delivered meanwhile. A change still waiting on it can tick
+  it no more, so two never sign at once (review r3).
+- **A refused open and a tick that throws are alarms**, kept once while
+  they stand (Fable's review). A refused open is the gravest of states:
+  entries the signer sealed lost, another pair at its place, time run
+  back. A write that fails may be a tamper signal: a tile changed under
+  the signer. A refused open is never thrown inside the gate, which would
+  reset the object; the object stays up and says why.
+- **Asked with `fetch`**, as the anchor and the gates are:
+  - `startCheckpointer(env.CHECKPOINTER)` starts it;
+  - `durableSealThrough(env.CHECKPOINTER)` is the change path's seam;
+  - `checkpointerStatus` returns its last ticks and their timings;
+  - `checkpointerAlarms` returns its alarms, kept 30 days in its storage.
+- **Its workerd test** runs it, the witness's object and an R2 archive
+  in workerd itself (`packages/vault/test/checkpointer-workers.test.ts`).
+
+**Witnesses** (`packages/vault/src/witness-workers.ts`): a deployment opts
+in by listing them in its vault config (`witnesses: […]`). They are R40's
+optional capability, wired where the pairs are signed, in the vault.
+- **`durableWitness(env.WITNESS)`** is a Durable Object of its own,
+  `witness(env => ({ name, key, log }))`. It cosigns a pair only if both
+  trees extend the one it holds. Its client sends each tree's proof from
+  the sizes the object holds; on a 409 it learns those sizes and sends
+  again. It passes the try's abort signal to the object's request.
+  A pair it holds that no longer opens (its settings now name other keys,
+  a record damaged) is refused, never forgotten into a fresh witness: a
+  new witness is a new name (Fable's review).
+- **`r2Archive(env.ARCHIVE)`** puts each pair it is sent under
+  `audit/<upto>.json` without overwriting. The pump sends the newest pair,
+  so one a slow put skipped over is not kept; the next, which extends it,
+  is. A put over an object already there, answered with null or, under a
+  bucket lock, with an error, is the same pair sent again, which is fine,
+  or another, which is refused. Under a bucket lock, a Worker or a database
+  writer cannot overwrite or delete what it holds; an account admin can
+  lift the lock (R54).
+
+**Unwitnessed changes are recorded** as alarms: on Node in the alarms file,
+on Workers in the object's storage. A refused tick, a memory found behind
+the database and a change answered unwitnessed all land there, and a
+refusal that stands is alerted once, not every tick. R40's plugin and
+PR 8's surfaces read them from there.
+
+**The change path's seam** is `SealThrough`: `runCheckpointer(…).sealThrough`
+on Node, `durableSealThrough(…)` on Workers. `sealThroughDouble` in
+`packages/vault/test/audit-tree.ts` stands in for it in PR 4's tests.
 
 ## Not here yet
 
-- **6b, the wiring:** `close_one`, the tiles tables and their leaf-range
-  partitions, the checkpointer's Durable Object and its storage as the
-  memory, a synced file and an interval on Node, a change waiting on
-  `sealThrough`, and the witness plugin's Durable Object and R2 archive.
-- **PR 7, retention:** the freshness step, the cut named in the uses
-  tree's coordinates, and dropping tile partitions below it.
+- **PR 4, the change path:** a change waits on `SealThrough` and answers
+  with what it returns (R51).
+- **PR 7, retention:** days and tile ranges made ahead and dropped (with
+  `make_day`, `make_tiles`), the freshness step, and the cut named in the
+  uses tree's coordinates.
 - **PR 8, the verifier's surfaces:** MACs and request IDs through
   `verifyLog`'s `check`, starting from a retention cut, and the UI and CLI.
 
