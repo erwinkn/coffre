@@ -54,6 +54,7 @@ DO $$
 DECLARE
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
     before bytea := (SELECT seal FROM vault_members WHERE principal = 'token:deploy');
+    object record;
 BEGIN
     IF change_input('principal', 'token:deploy', 'reseal-a', t, 'system:test', '{"op":"genesis"}', before, decode(repeat('6e', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NULL THEN
         RAISE EXCEPTION 'FAIL: a change from the row''s own seal did nothing';
@@ -68,7 +69,22 @@ BEGIN
         RAISE EXCEPTION 'FAIL: a refused change left a trace';
     END IF;
     UPDATE vault_members SET seal = decode(repeat('6e', 16), 'hex') WHERE principal = 'token:deploy';
-    RAISE NOTICE 'PASS: ChangeChecksSeal, a change refuses a row that is not its newest change''s';
+    -- And each other kind's row, a binding's (the credential that is no token) and the roles' among them.
+    FOR object IN SELECT * FROM (VALUES
+        ('credential', '66666666-6666-6666-6666-666666666666', 'service_bindings', 'id'),
+        ('secret', '44444444-4444-4444-4444-444444444441', 'secrets', 'id'),
+        ('environment', '22222222-2222-2222-2222-222222222222', 'environments', 'id'),
+        ('roles', 'instance', 'log_config', 'name')
+    ) AS o (kind, id, tbl, keycol) LOOP
+        EXECUTE format('UPDATE %I SET seal = decode(repeat(''9e'', 16), ''hex'') WHERE %I::text = %L', object.tbl, object.keycol, CASE object.kind WHEN 'roles' THEN 'roles' ELSE object.id END);
+        BEGIN
+            PERFORM change_input(object.kind, object.id, 'stale-' || object.kind, t, 'system:test', '{"op":"genesis"}', decode(repeat('9e', 16), 'hex'), decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
+            RAISE EXCEPTION 'FAIL: a % change sealed a row that is not its newest change''s', object.kind;
+        EXCEPTION WHEN data_corrupted THEN NULL;
+        END;
+        EXECUTE format('UPDATE %I SET seal = decode(repeat(''5e'', 16), ''hex'') WHERE %I::text = %L', object.tbl, object.keycol, CASE object.kind WHEN 'roles' THEN 'roles' ELSE object.id END);
+    END LOOP;
+    RAISE NOTICE 'PASS: ChangeChecksSeal, a change refuses a row that is not its newest change''s, of every kind';
 END
 $$;
 

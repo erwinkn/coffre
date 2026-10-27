@@ -145,20 +145,21 @@ BEGIN
         RAISE EXCEPTION 'FAIL: a request id named two changes';
     EXCEPTION WHEN unique_violation THEN NULL;
     END;
+    PERFORM change_input('roles', 'instance', 'genesis-roles', t, 'system:cutover', '{"op":"genesis","value":{"kind":"roles","roles":{},"instanceRoles":{}}}', NULL, sealed, tag);
     PERFORM change_input('principal', 'token:deploy', 'genesis-member', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('credential', '33333333-3333-3333-3333-333333333333', 'genesis-credential', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('secret', '44444444-4444-4444-4444-444444444441', 'genesis-secret-1', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('secret', '44444444-4444-4444-4444-444444444442', 'genesis-secret-2', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
     PERFORM change_input('environment', '22222222-2222-2222-2222-222222222222', 'genesis-environment', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag);
-    IF (SELECT count(*) FROM log_changes) <> 7 OR (SELECT count(DISTINCT object) FROM log_changes) <> 7 THEN
+    IF (SELECT count(*) FROM log_changes) <> 8 OR (SELECT count(DISTINCT object) FROM log_changes) <> 8 THEN
         RAISE EXCEPTION 'FAIL: genesis logged % changes', (SELECT count(*) FROM log_changes);
     END IF;
     -- The row's seal is no longer the one read: nothing is done, and nothing logged.
     IF change_input('principal', 'token:deploy', 'genesis-member-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
        OR change_input('credential', '66666666-6666-6666-6666-666666666666', 'genesis-binding-again', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
        OR change_input('principal', 'token:nobody', 'genesis-nobody', t, 'system:cutover', '{"op":"genesis"}', NULL, sealed, tag) IS NOT NULL
-       OR (SELECT count(*) FROM log_changes) <> 7 THEN
+       OR (SELECT count(*) FROM log_changes) <> 8 THEN
         RAISE EXCEPTION 'FAIL: a change moved a seal it had not read';
     END IF;
     BEGIN
