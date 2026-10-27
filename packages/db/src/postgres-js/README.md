@@ -80,7 +80,8 @@ Nine, each marked `Coffre:` in the code:
   Postgres answers with ROLLBACK, not an error, and upstream took for
   success. No ROLLBACK goes to a connection gone. A held
   connection asked to end meanwhile, its `max_lifetime` say, closes once
-  given back (`release`, in `connection.ts`). Through Hyperdrive, the
+  given back (`release`, in `connection.ts`), and its socket draining
+  never gives it to the pool (`drain`), as upstream's could, mid-transaction. Through Hyperdrive, the
   first statement reaches the pooler with its BEGIN, in one batch: the
   pooler keeps the connection for the transaction from the ReadyForQuery
   after it, which says so (`T`), and coffre's Hyperdrive configurations

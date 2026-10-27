@@ -266,7 +266,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function drain(): void {
-    if (!query) onopen(connection);
+    // Coffre: not a held connection, which its holder gives back: upstream could give one to the pool mid-transaction.
+    if (!query && !connection.reserved) onopen(connection);
   }
 
   function data(x: Buffer): void {
@@ -346,14 +347,18 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (isReservation(q)) return q.reject(err);
 
     const e = err && typeof err === 'object' ? err : new Error(String(err));
-    // The statement's own error, when its BEGIN went before it in one Query message: its position, in the statement.
-    if (q.begin !== null && q.began && q.options.simple && e instanceof Errors.PostgresError && e.position !== undefined) {
-      Object.defineProperty(e, 'position', { value: String(Number(e.position) - (q.begin.length + 2)), enumerable: true });
+    // A statement that carried its transaction's BEGIN: whose error Postgres answered, the BEGIN's or its own. Sent in
+    // one Query message, the two are parsed together: an error placed past the BEGIN is the statement's, its position
+    // then counted from the statement's start.
+    let begin = false;
+    if (q.begin !== null && e instanceof Errors.PostgresError) {
+      const prefix = q.begin.length + 2;
+      const inStatement = q.options.simple && e.position !== undefined && Number(e.position) > prefix;
+      if (inStatement) Object.defineProperty(e, 'position', { value: String(Number(e.position) - prefix), enumerable: true });
+      begin = !q.began && !inStatement;
     }
     if (!('query' in e) && !('parameters' in e)) {
       const debug = Boolean(options.debug);
-      // Postgres refusing the BEGIN a statement carried refused the BEGIN: named as such.
-      const begin = q.begin !== null && !q.began && e instanceof Errors.PostgresError;
       Object.defineProperties(e, {
         stack: { value: ('stack' in e ? String(e.stack) : '') + q.origin.replace(/.*\n/, '\n'), enumerable: debug },
         query: { value: begin ? q.begin : q.text, enumerable: debug },

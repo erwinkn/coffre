@@ -660,3 +660,42 @@ test('a transaction Postgres did not commit whole does not resolve: a savepoint\
     await client.end();
   }
 });
+
+test('a connection cut as a transaction\'s BEGIN goes: nothing that waited behind it is sent, and the pool\'s next statement runs on the next connection', { skip, timeout: 30_000 }, async () => {
+  const owner = postgresClient(DATABASE, { max: 1 });
+  const { client, sent } = sending('coffre-tx-cut-begin');
+  try {
+    await owner.unsafe('drop table if exists cutbegin');
+    await owner.unsafe('create table cutbegin (n int)');
+    const cut = client.begin((tx) => Promise.all([tx.unsafe('select pg_sleep(5)'), tx.unsafe('insert into cutbegin values ($1)', [1])]));
+    const after = client.unsafe('insert into cutbegin values ($1)', [2]);
+    await cutWhileAsleep(owner, 'coffre-tx-cut-begin');
+    await assert.rejects(cut, { code: 'CONNECTION_CLOSED' });
+    await after;
+    assert.deepEqual([...await owner.unsafe('select n from cutbegin')], [{ n: 2 }]);
+    assert.ok(!sent.includes('insert into cutbegin values ($1) 1'));
+  } finally {
+    await client.end();
+    await owner.unsafe('drop table if exists cutbegin').catch(() => {});
+    await owner.end();
+  }
+});
+
+test('a transaction\'s error says what failed: a first statement\'s syntax, the failure that aborted it after a savepoint', { skip }, async () => {
+  const { client } = sending('coffre-tx-blame');
+  try {
+    // Parsed with its BEGIN, in one Query message: the statement's, where in it.
+    const syntax = await client.begin((tx) => tx.unsafe('selec 1')).catch((e: { code?: string; query?: string; position?: string }) => e);
+    assert.deepEqual([syntax.code, syntax.query, syntax.position], ['42601', 'selec 1', '1']);
+    // A savepoint's failure caught and rolled back to; then another left unwaited, which the COMMIT meets.
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.savepoint((sp) => sp.unsafe('select 1/0')).catch(() => {});
+      await tx.savepoint((sp) => {
+        sp.unsafe("select 'x'::int").catch(() => {});
+        return 'ok';
+      });
+    }), { code: '22P02' });
+  } finally {
+    await client.end();
+  }
+});

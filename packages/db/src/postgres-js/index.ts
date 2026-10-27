@@ -187,13 +187,6 @@ export default function postgres(given: Options): Sql {
     return move(c, reserved);
   }
 
-  /** `c`, held, given back to the pool. */
-  function giveBack(c: Connection): void {
-    // Coffre: given back once the client is ending, the connection ends, which end() waits for; upstream gave it back.
-    if (ending) c.terminate();
-    else c.release();
-  }
-
   async function reserve(): Promise<ReservedSql> {
     const queue = new Queue<Query>();
     const c = await hold();
@@ -201,7 +194,8 @@ export default function postgres(given: Options): Sql {
 
     return {
       unsafe: unsafeOn(onReserved),
-      release: () => giveBack(c),
+      // Coffre: given back once the client is ending, the connection closes, which end() waits for (Connection.release).
+      release: () => c.release(),
     };
 
     /** A statement on the connection held: sent, or queued until the connection can take more. */
@@ -225,7 +219,7 @@ export default function postgres(given: Options): Sql {
     let unfinished: Error | null = null;
     /** Its COMMIT or ROLLBACK has gone: what is refused now changes nothing. */
     let closing = false;
-    /** The first of its statements to fail, a savepoint's included: what a COMMIT Postgres answered with ROLLBACK says. */
+    /** Why it failed, a savepoint's statements included: what a COMMIT Postgres answered with ROLLBACK says. */
     let failure: unknown;
     /**
      * Why nothing more of the transaction is sent, which would run outside it: its BEGIN failed, its connection closed,
@@ -265,7 +259,7 @@ export default function postgres(given: Options): Sql {
       stop(Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent'));
       c.onclose = null;
       // Closed meanwhile, the connection is the pool's again already.
-      if (c.reserved === mine) giveBack(c);
+      if (c.reserved === mine) c.release();
     }
 
     async function scope<R>(fn: (sql: TransactionSql) => R | Promise<R>, name?: string): Promise<Settled<R>> {
@@ -292,7 +286,9 @@ export default function postgres(given: Options): Sql {
         // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed; nor one whose
         // connection closed, which Postgres rolled back.
         if (!stopped && (name || first?.began)) await (name ? own('rollback to ' + quote(name)) : last('rollback'));
-        throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
+        // "Current transaction is aborted" says nothing of why: what failed first, unwaited, or in a savepoint, does.
+        if (aborted(e)) throw (uncaughtError !== undefined && !aborted(uncaughtError) ? uncaughtError : failure) ?? e;
+        throw e;
       }
 
       if (!name && first !== null) {
@@ -318,7 +314,9 @@ export default function postgres(given: Options): Sql {
         }
         q.catch((e: unknown) => {
           uncaughtError ||= e;
-          failure ??= e;
+          // The latest error of Postgres's own: after a savepoint rolled back to, the one that aborted it again.
+          if (e instanceof PostgresError && !aborted(e)) failure = e;
+          else failure ??= e;
         });
         asked.add(q);
         send(q);
@@ -446,6 +444,9 @@ export default function postgres(given: Options): Sql {
     if (queries.length) connect(c, queries.shift()!);
   }
 }
+
+/** Postgres's "current transaction is aborted": a statement after one that failed. */
+const aborted = (error: unknown) => error instanceof PostgresError && error.code === '25P02';
 
 /** `options`, each one not given at its default. */
 function settle(options: Options): Settings {
