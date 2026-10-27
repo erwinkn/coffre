@@ -355,6 +355,8 @@ the code holds it and the tests that break it.
 | WaitForSeal | `sealThrough`: sealed, proved, then witnessed or 2 s | "a change answers once sealed…", "review r1: a change whose entry…" |
 | Witness | `witnessPair`, the pumps | (c), "a change waits for the witness…" |
 | RequestIdChecked | `verifyLog`'s `check` | PR 8 |
+| PairVerified | `verifyLog`: a row whose notes do not open as one pair is a problem | "the pair is one value…" |
+| invariants KindKept, PairConsistent, AnsweredChangeKept | the rows above together | as above |
 
 **Where this PR is stricter than the spec.** The spec lets `open()` repair
 a half-written pair: rows of the two trees at different `upto`s, checked
