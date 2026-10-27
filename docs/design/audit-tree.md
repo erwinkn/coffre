@@ -133,6 +133,16 @@ way, because no lookup can match it. Any failure refuses the tick and
 alerts. The newest row must be the signer's pair, note for note, so a row
 deleted or replaced under a running signer shows within a tick.
 
+**The pair's `at` never comes down.** Retention's freshness step (plan PR
+7) rests on it: a replay of a dropped use must never become fresh again
+when a clock steps back. So a signer clock that has jumped ahead is caught
+before its time is signed. A tick whose clock reads more than 10 minutes
+after the newest entry in its window is refused and alerted ("the clocks
+disagree"), and the pair keeps its last time. Sealing resumes once the
+clock heals. Otherwise one tick an hour ahead would make every honest entry
+read as a replay for that hour (Fable's review). A window holding only gaps
+keeps the time last signed, having nothing to check the clock against.
+
 **A failed tick** leaves its pair pending. The trees grow on a copy, so the
 signer stays at the pair the database holds. The next tick finishes the
 pending pair before anything else: it remembers the pair again, then
@@ -196,7 +206,7 @@ W209's attack table (#365).
 | forges an entry, replays an old one, or duplicates a number | the tick | refuses to sign; a change waiting on it fails with the alarm |
 | stores notes of two ticks as one row or memory record | `open()`, the verifier | "not a pair" |
 | moves an entry from one tree to the other | the verifier | both heads differ |
-| restores the memory from a backup | `open()` | accepted if a prefix in both trees, by a consistency proof between the signed roots, else refused |
+| restores the memory from a backup | `open()` | accepted, alerted, if a prefix in both trees, by a consistency proof between the signed roots; else refused |
 | plants a remembered root in a tile the newest head never reads | `open()` | the consistency proof binds both roots, so planted tiles cannot pass |
 
 **What it does not catch, as designed:** an entry deleted or reordered
@@ -272,7 +282,8 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 **The call: keep them.**
 
 - **For dropping:** 47.5 B a use, 25% of a use's storage, and 17% of the
-  log's WAL.
+  log's WAL. At R44's sustained 1,000 uses a second that is about 4.1 GB of
+  level-0 tiles a day, 120 GB held at a 30-day retention.
 - **Against dropping:**
   - **Every level-0 read would rebuild tiles from use rows.** All readers
     go through the store's `tiles()`, so the rebuild has one home there.

@@ -80,15 +80,6 @@ async function walk(
     else return pair;
     return null;
   };
-  const loadEdges = async (pair: Pair) => {
-    const edges = {} as Record<TreeName, Edge>;
-    for (const tree of TREES) {
-      const { size, root } = pair[tree];
-      edges[tree] = Edge.load(size, tileMap(await reader.tiles(tree, edgeOf(size).filter((e) => e.width > 0))));
-      if (!edges[tree].root().equals(root)) problems.push(`checkpoint ${pair.upto}: the ${tree} tiles at its edge do not give its head`);
-    }
-    return edges;
-  };
 
   // The start: a pair the caller trusts, which must be the row at its place, or the genesis row.
   let start: Stop;
@@ -106,7 +97,7 @@ async function walk(
     if (!genesis) return (problems.push('no genesis checkpoint to start from: checkpoints were deleted or replaced'), done(null));
     start = { pair: pair!, notes: row!.notes, row: true };
   }
-  let edges = await loadEdges(start.pair);
+  let edges = await loadEdges(reader, start.pair);
 
   // Pairs held outside. Those at or below the start are not walked (verified before), but each must still be the row
   // at its place, if there is one, and, whether or not there is, a prefix of the start, by a consistency proof from the
@@ -179,7 +170,7 @@ async function walk(
         if (wrong.length > 0) {
           problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: the ${wrong.join(' and ')} head${wrong.length > 1 ? 's' : ''} differ from the entries: entries deleted, added, changed or moved, or a second history`);
           // Carry on from the signed row, so one problem is reported once.
-          if (stop.row) edges = await loadEdges(stop.pair);
+          if (stop.row) edges = await loadEdges(reader, stop.pair);
         }
         if (stop.row) {
           verdict.checkpoints += 1;
@@ -193,6 +184,17 @@ async function walk(
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
   return done(last.notes);
+}
+
+/** Both trees' edges at a pair, from their tiles; throws unless each gives its signed head. */
+export async function loadEdges(reader: Pick<LogReader, 'tiles'>, pair: Pair): Promise<Record<TreeName, Edge>> {
+  const edges = {} as Record<TreeName, Edge>;
+  for (const tree of TREES) {
+    const { size, root } = pair[tree];
+    edges[tree] = Edge.load(size, tileMap(await reader.tiles(tree, edgeOf(size).filter((e) => e.width > 0))));
+    if (!edges[tree].root().equals(root)) throw new Error(`checkpoint ${pair.upto}: the ${tree} tiles at its edge do not give its signed head`);
+  }
+  return edges;
 }
 
 /** A consistency proof between two sizes of one tree, from its tiles. */

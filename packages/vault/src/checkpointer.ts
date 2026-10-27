@@ -1,12 +1,12 @@
 import {
   decodePair,
   Edge,
-  edgeOf,
   EMPTY_ROOT,
   encodePair,
   entryLeaf,
   inclusionProof,
   leafData,
+  loadEdges,
   nodesFrom,
   openPair,
   pairVerifiers,
@@ -278,6 +278,7 @@ export class Checkpointer {
           const prefix = proof !== null && verifyConsistency(size, newest[tree].size, root, newest[tree].root, proof);
           if (!prefix) throw new Error(`the database's ${tree} head (${newest[tree].size} up to ${newest.upto}) does not extend the one the signer remembers (${size} up to ${mine.pair.upto})`);
         }
+        options.alert?.(`the audit signer's memory (up to ${mine.pair.upto}) is behind the database (up to ${newest.upto}): restored from a backup, or another signer on this key; accepted as a prefix`);
         await options.memory.remember(encodePair(row.notes));
       }
       edges = await loadEdges(store, head.pair);
@@ -331,6 +332,16 @@ export class Checkpointer {
       else if (e.at < pair.at - this.options.freshMs) failures.push(`${e.number}: at ${e.at}, older than the signer's pair (${pair.at}): a replay`);
       previous = e.number > previous ? e.number : previous;
     }
+    // The pair's `at` never comes down: retention's freshness step (plan PR 7) needs the bound it sets to hold, so that
+    // a replay of a dropped use can never be fresh again when a clock steps back. So a signer clock that has jumped
+    // ahead must be caught before its time is signed, or every honest entry would read as a replay until real time
+    // caught up. Its entries were stamped within seconds of their numbers, so a clock more than the bound ahead of the
+    // window's newest is the signer's own: refused, recoverably, and the pair's `at` stays where it was.
+    const now = this.options.now();
+    const newestAt = entries.reduce((max, e) => Math.max(max, e.at), -Infinity);
+    if (entries.length > 0 && now > newestAt + this.options.freshMs) {
+      failures.push(`the signer's clock reads ${now}, more than ${this.options.freshMs} ms after the newest entry (${newestAt}): the clocks disagree`);
+    }
     const result = (signed: boolean, writeMs = 0): Tick => ({
       signed: signed || finished, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
     });
@@ -340,10 +351,7 @@ export class Checkpointer {
     }
     if (upto === pair.upto) {
       // Nothing new. A quiet log: hand the newest pair again to any witness that failed to take it.
-      for (const w of this.options.witnesses) {
-        const p = this.pump(w);
-        if (p.acked < pair.upto && !p.busy) this.publish();
-      }
+      for (const w of this.options.witnesses) if (this.pump(w).acked < pair.upto) this.kick(w);
       return result(false);
     }
     // The edges move on a copy, kept once the pair is written. Until then the pair is pending: a failure leaves it to
@@ -351,7 +359,8 @@ export class Checkpointer {
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
-    const next = await signPair(this.signers, upto, Math.max(this.options.now(), pair.at), heads);
+    // With no entry to hold the clock against (a window of gaps), the time stays the last one signed.
+    const next = await signPair(this.signers, upto, entries.length > 0 ? Math.max(now, pair.at) : pair.at, heads);
     this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.
@@ -462,11 +471,14 @@ export class Checkpointer {
   }
 
   private publish(): void {
-    for (const w of this.options.witnesses) {
-      const p = this.pump(w);
-      p.next = this.head;
-      if (!p.busy) void this.drain(w, p);
-    }
+    for (const w of this.options.witnesses) this.kick(w);
+  }
+
+  /** Hands a witness the newest pair: sent now if its pump is idle, else next. */
+  private kick(w: Witness): void {
+    const p = this.pump(w);
+    p.next = this.head;
+    if (!p.busy) void this.drain(w, p);
   }
 
   private async drain(w: Witness, p: Pump): Promise<void> {
@@ -479,10 +491,7 @@ export class Checkpointer {
     // Someone still waits on this witness after a failed try: try again shortly, with the newest pair.
     if (p.waiters.length > 0 && p.failure !== null) {
       const retry = setTimeout(() => {
-        if (!p.busy && p.waiters.length > 0) {
-          p.next = this.head;
-          void this.drain(w, p);
-        }
+        if (!p.busy && p.waiters.length > 0) this.kick(w);
       }, 100);
       (retry as { unref?: () => void }).unref?.();
     }
@@ -524,10 +533,7 @@ export class Checkpointer {
         p.waiters.push(waiter);
       });
       // A witness behind and idle (its last try failed) is asked again now, with the newest pair.
-      if (!p.busy) {
-        p.next = this.head;
-        void this.drain(w, p);
-      }
+      if (!p.busy) this.kick(w);
       return answer;
     }));
     return answers.filter((a): a is string => a !== null);
@@ -577,14 +583,4 @@ const sizes = (heads: Record<TreeName, { size: number }>) => ({ changes: heads.c
 function appendWindow(edges: Record<TreeName, Edge>, entries: readonly LogEntry[]): Record<TreeName, Tile[]> {
   const leaves = (tree: TreeName) => entries.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns));
   return { changes: edges.changes.append(leaves('changes')), uses: edges.uses.append(leaves('uses')) };
-}
-
-async function loadEdges(store: Pick<LogReader, 'tiles'>, pair: Pair): Promise<Record<TreeName, Edge>> {
-  const edges = {} as Record<TreeName, Edge>;
-  for (const tree of TREES) {
-    const { size, root } = pair[tree];
-    edges[tree] = Edge.load(size, tileMap(await store.tiles(tree, edgeOf(size).filter((e) => e.width > 0))));
-    if (!edges[tree].root().equals(root)) throw new Error(`the ${tree} tiles at the edge do not give the signed head (up to ${pair.upto})`);
-  }
-  return edges;
 }

@@ -134,31 +134,28 @@ export class Edge {
   }
 
   append(leaves: readonly Hash[]): Tile[] {
-    const changed = new Map<string, Tile>();
+    const changed: Tile[] = [];
+    // Levels whose partial tile grew: written as they stand once every leaf is in.
+    const grew = new Set<number>();
     for (const leaf of leaves) {
       let hash = leaf;
       for (let t = 0; ; t += 1) {
         const tile = (this.tiles[t] ??= []);
         tile.push(hash);
-        const index = Math.floor(this.size / 2 ** ((t + 1) * HEIGHT));
         if (tile.length < WIDTH) {
-          changed.set(tileKey(t, index), { level: t, index, hashes: Buffer.alloc(0) });
+          grew.add(t);
           break;
         }
-        changed.set(tileKey(t, index), { level: t, index, hashes: Buffer.concat(tile) });
+        // A full tile is written now and never again; its root goes up a level.
+        changed.push({ level: t, index: Math.floor(this.size / 2 ** ((t + 1) * HEIGHT)), hashes: Buffer.concat(tile) });
+        grew.delete(t);
         hash = hashUp(tile);
         this.tiles[t] = [];
       }
       this.size += 1;
     }
-    // Partial tiles are written as they stand once every leaf is in.
-    for (const [key, tile] of changed) {
-      if (tile.hashes.length > 0) continue;
-      const hashes = this.tiles[tile.level]!;
-      if (hashes.length === 0) changed.delete(key);
-      else tile.hashes = Buffer.concat(hashes);
-    }
-    return [...changed.values()];
+    for (const t of grew) changed.push({ level: t, index: Math.floor(this.size / 2 ** ((t + 1) * HEIGHT)), hashes: Buffer.concat(this.tiles[t]!) });
+    return changed;
   }
 
   /** The tree head now. */

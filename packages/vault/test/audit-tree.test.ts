@@ -169,7 +169,7 @@ test('(j) another pair at the same place, signed by a signer without memory, is 
   const pair = (await openPair(row.notes, k.verifiers))!;
   const forged = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 7) } });
   store.rows.set(row.upto, forged.notes);
-  await assert.rejects(open(), /the newest checkpoint|not the pair the signer signed|tiles at the edge/);
+  await assert.rejects(open(), /the newest checkpoint|not the pair the signer signed|tiles at its edge/);
   void memory;
 });
 
@@ -465,6 +465,36 @@ test('review r4: prove() refuses an index past the tree; open() re-syncs a memor
   memory.record = encodePair(resigned.notes);
   await open();
   assert.equal(memory.record, encodePair(cp.pair.notes));
+});
+
+test('Fable review: one tick on a signer clock an hour ahead is refused, recoverably; sealing resumes once the clock heals', async () => {
+  const { store, open, alerts } = await setup();
+  let ahead = 0;
+  const cp = await open({ now: () => Date.now() + ahead });
+  await traffic(store, cp, 1);
+  const before = cp.pair.pair.at;
+  ahead = 3_600_000;
+  store.append('uses', 'u1');
+  const t = await cp.tick();
+  assert.ok(!t.signed && /the clocks disagree/.test(t.failures.join()), t.failures.join());
+  assert.equal(cp.pair.pair.at, before, 'the pair keeps the last time it signed');
+  assert.ok(alerts.some((a) => /clocks disagree/.test(a)));
+  ahead = 0;
+  const s = await cp.sealThrough(store.append('changes', 'c1'));
+  assert.ok(s.pair.at < Date.now() + 1000, 'sealed at the healed time');
+});
+
+test('a window of gaps alone keeps the time last signed', async () => {
+  const { store, open } = await setup();
+  let clock = 1_800_000_000_000;
+  const cp = await open({ now: () => clock });
+  store.append('uses', 'u', '{}', clock);
+  await cp.tick();
+  const at = cp.pair.pair.at;
+  store.skip();
+  clock += 3_600_000;
+  const t = await cp.tick();
+  assert.ok(t.signed && cp.pair.pair.at === at);
 });
 
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
