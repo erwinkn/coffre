@@ -1003,6 +1003,12 @@ open to him.
 | 13 | **Admission: a per-isolate cap from the pool size**, with the login's lock 1 s / statement 2 s timeouts (Erwin, R53) | a shared counter in a Durable Object | per-isolate caps did not refuse fast across ~150 isolates (W208) | measured in T112, not here |
 | 14 | **Two Merkle trees by retention class** (W212, #368, settled by numbers per R54; Erwin reviews): changes (kept for good) and uses (dropped by day), each RFC 9162 with its own origin; one tick signs both heads with the same `upto`, as one pair (one record, one write, one witness) | one tree for both (#365); a tree per day, per tick, an MMR | +7–8% tree WAL (~2 KB a tick, under 0.5% of the log's WAL), +0.2–0.6 ms signer CPU; no 10.4 min/day retention rebuild, no digest of kept changes, changes provable for good | two heads that must move together (modelled first, plan PR 1) |
 | 15 | **The changes' Hyperdrive config kept warm by the checkpointer** | an idle config of its own; the uses' config | revocation 106–107 ms warm against 142–179 ms idle (W211, Cloudflare); W208 saw 892 ms cold | none: the checkpointer runs on that config anyway |
+| 16 | **Six sealed objects** (W216, plan PR 3, [`sealed-inputs.md`](sealed-inputs.md)): principal (with its grants), credential, secret (with its version, wrapped key, or a reference's source), environment (with its protection and slug), roles (an Owner's edits only, over the release's tables), policy (the cap) | protection kept in the policy, as 0.14; whole role tables; a reference object of its own | `allows` at an environment asks only `protects(id)`, so the 0.14 `Policy` rebuilt from the environments read is exact; edits only replay the same log under any release (review r1 found whole tables faulted it) | up to 9 probes on a cache miss through a reference (PR 5 measures) |
+| 17 | **The use row carries purpose (+256 when a copy keeps values sensitive) and the place read through** (W216, W215) | the prototype's row (credential, key) | 140.8 B per use with the place null, as before (alignment padding); 142.6 B with a place on 10% of uses (W215, schema 0022) | the replay decides every purpose; a fork's read is named |
+| 18 | **The place read through decides nothing** (0.14's `through`): a live, unarchived environment of the key's project, not its own; the key is decided where it is held | decide at the fork | a fork-only reader reads no inherited value, as forking.md says (review r2) | none |
+| 19 | **Every seal before any row; the cap from the policy's newest change** (`StaleFirst`, `CapSealed`) | each input's seal before its own row; the cap from the row or the call | the first gives `stale` for any input not the log's (mutation-tested); the second keeps live equal to replay with a policy row put back | none measured |
+| 20 | **The bulk rows outside the seals** | sealed per principal | no key and no change entry on the use statement's bulk write | an erased row resets one principal's cap until PR 8's row audit names it (property-tested: bulk rows change a decision only between allowed and `bulk_limit`) |
+| 21 | **Object keys: the first 16 bytes of SHA-256(`coffre.object.v1\0` kind `\0` id), as a uuid**, in TS (`objectKey`) and SQL (`log_object`, STABLE so it inlines: 3.7 against 32 µs a call, W215) | text keys | about a fifth cheaper per probe (W211's estimate); vectors in `packages/vault/test/object-keys.json`, checked by `pnpm test:schema` | the principal's id hashed once per use |
 
 ## Open decisions
 
@@ -1017,7 +1023,7 @@ for his review:
    than W208's `one` (0.58 against 0.36 ms with the cache, same container,
    same night): about 2,500 uses a second on 2 vCPU against 4,000, 2.5×
    R44's 1,000/s.
-   - uuid object keys stay in PR 3.
+   - uuid object keys landed in PR 3 (decision 21).
    - The other cuts (the fence and bulk rows read once, roles and policy
      grouped under one object) are done only if PR 5's bench misses its
      budget.

@@ -132,7 +132,7 @@ seals, the property tests fail.
 
 ## The bulk cap
 
-As W211 built it (hot-path-one.md, "The bulk cap"), with **both numbers
+As W211 built it ([hot-path-one.md](hot-path-one.md), "The bulk cap"; decisions 16 to 21 there are this PR's), with **both numbers
 from the policy's newest change** (the spec's `CapSealed`,
 `CapFromPolicy`), read in the use's own snapshot, never passed in. During a
 deploy, two vaults with different `bulkLimit` configurations can serve at
