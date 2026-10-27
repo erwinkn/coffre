@@ -8,7 +8,7 @@
 
 import { readFileSync } from 'node:fs';
 
-/** A TLA+ value as TLC prints it: records, functions, tuples, sets, strings, numbers, booleans. */
+/** A TLA+ value as TLC prints it: records, functions (a function of tuples, say, as `(d :> v @@ …)`), tuples, sets, strings, numbers, booleans. */
 function parse(text) {
   let i = 0;
   const space = () => {
@@ -57,6 +57,22 @@ function parse(text) {
           return [key, value()];
         }),
       );
+    }
+    if (text[i] === '(') {
+      // A function TLC cannot print as a record or a tuple: each argument `:>` its value, joined by `@@`, keyed here as shown.
+      i += 1;
+      const pairs = [];
+      for (;;) {
+        const argument = value();
+        expect(':>');
+        pairs.push([show(argument), value()]);
+        space();
+        if (text[i] === ')') {
+          i += 1;
+          return Object.fromEntries(pairs);
+        }
+        expect('@@');
+      }
     }
     if (text[i] === '"') {
       const end = text.indexOf('"', i + 1);

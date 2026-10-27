@@ -130,6 +130,28 @@
 (* (credentialStill). The cutover seals it last, under the head and the    *)
 (* fence. Another member's writes (OtherWrites) are the vault's either way.*)
 (*                                                                         *)
+(* Issues (T123, R58). A sign-in issues a new credential: nobody can name *)
+(* it before its issue commits, and it changes no input any other use      *)
+(* reads (HotPathOne's IssueOwnLock, NamedAfterIssue). So it never takes   *)
+(* the fence: 0.15's change of it takes a lock of its own, the issue lock, *)
+(* shared, and 0.14's `token.exchange` takes neither, the trigger letting  *)
+(* it by (ExchangeOnlyIssues: its transaction writes the new credential,   *)
+(* the spent token and the binding's last use, no decision input; the     *)
+(* suites hold the code to it). The checkpointer's barrier waits for the   *)
+(* issues in flight on that lock exclusive, then takes the fence; it never *)
+(* takes 0.14's head. Every lock in one order: the member's row, 0.14's    *)
+(* head, the issue lock (shared), the fence (Barriers, NewIssuers, Mixed): *)
+(*   - IssueBeforeFence: whatever takes the fence exclusive in a            *)
+(*     transaction that may issue too (0.14's trigger, `app_change`) takes *)
+(*     the issue lock shared first. Without, a sign-in that revokes its    *)
+(*     account's earlier sessions (its trigger: the fence) and then issues *)
+(*     holds the fence and waits for the issue lock, which the barrier     *)
+(*     holds, waiting for the fence: a cycle. The vault's own changes      *)
+(*     (NewChangers) never issue, and take no issue lock;                  *)
+(*   - BarrierIssueFirst: the barrier takes the issue lock before the      *)
+(*     fence. Without, it holds the fence and waits for an issue that      *)
+(*     waits for the fence: a cycle (and every use waits meanwhile).       *)
+(*                                                                         *)
 (* "Every 0.14 write ends up in the new log" is checked as an invariant at *)
 (* each tick (EveryOldWriteAdopted: what 0.14 had written when a tick ran, *)
 (* that tick adopted), which implies the eventual form under a fair tick.  *)
@@ -151,10 +173,14 @@ CONSTANTS
     MaxDrops,        \* 0.14 entries it deletes, or edits past their MAC
     OtherWrites,     \* 0.14 writes may be to another member: for the locks only
     AppObject,       \* the object is one of the app's rows, not a member (plan PR 4b)
+    Exchanges,       \* an old request may be 0.14's token.exchange, a sign-in
+    NewIssuers,      \* 0.15 sign-ins, each issuing once: head, issue lock (for the locks only)
+    Mixed,           \* 0.15 sign-ins that also revoke the account's earlier sessions, each once (for the locks only)
+    Barriers,        \* the checkpointer's barrier, once each (for the locks only)
     CutoverHeadLock, CutoverFence, Marker, VerifyChain, VerifyRows,
     DualFence, ChangeHeadFirst, RowFirst, OldWritesFence,
     Adopt, AdoptRepeats, AdoptVerifies, AdoptSealsEntry, AdoptAfterSeal, UsesSeeOldWrites, OldWriteMarksRow,
-    AppHeadFirst
+    AppHeadFirst, ExchangeOnlyIssues, IssueBeforeFence, BarrierIssueFirst
 
 None == "none"
 
@@ -179,10 +205,16 @@ VARIABLES
     truth,     \* ghost: the object as its legitimate writers (0.14's and 0.15's) left it, and whose write it was
     committed, \* ghost: legitimate writes committed, old and new
     answered,  \* ghost: how many had committed when the latest one answered
-    decisions  \* ghost: each use's outcome, old and new
+    decisions, \* ghost: each use's outcome, old and new
+    ix,        \* the issue lock held exclusive: the barrier, or None
+    is,        \* ... held shared
+    ni,        \* each 0.15 sign-in (NewIssuers, Mixed)
+    br,        \* each barrier
+    exchanged  \* ghost: 0.14 token.exchange transactions that changed the object
 
+issueVars == <<ix, is, ni, br, exchanged>>
 vars == <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
-          truth, committed, answered, decisions>>
+          truth, committed, answered, decisions, ix, is, ni, br, exchanged>>
 
 -----------------------------------------------------------------------------
 (* Helpers. *)
@@ -212,22 +244,31 @@ FenceFree == fx = None /\ fs = {}
 (* Locks. "obj" and "other" are members' rows (another member's only for the locks), "head" is   *)
 (* 0.14's head, "fence" is 0.15's fence. Take: exclusive, once no one else holds it. Release:     *)
 (* everything p holds, at its commit or rollback.                                                 *)
+(* "issue" is the issue lock shared, "issueX" exclusive (the barrier's).                           *)
 Members == {"obj", "other"}
 Holds(q, l) ==
     CASE l \in Members -> rx[l] = q \/ (l = "obj" /\ q \in rs)
       [] l = "head" -> head = q
       [] l = "fence" -> fx = q \/ q \in fs
+      [] l \in {"issue", "issueX"} -> ix = q \/ q \in is
+\* Whether q's hold on l keeps p from taking it: a shared hold of the issue lock keeps out only the
+\* exclusive one.
+Conflicts(p, q, l) == IF l = "issue" THEN ix = q ELSE Holds(q, l)
 Take(p, l) ==
     CASE l \in Members -> /\ rx[l] = None /\ (l = "obj" => rs \subseteq {p})
-                         /\ rx' = [rx EXCEPT ![l] = p] /\ UNCHANGED <<rs, head, fx, fs>>
-      [] l = "head" -> /\ head = None /\ head' = p /\ UNCHANGED <<rx, rs, fx, fs>>
-      [] l = "fence" -> /\ FenceFree /\ fx' = p /\ UNCHANGED <<rx, rs, head, fs>>
+                         /\ rx' = [rx EXCEPT ![l] = p] /\ UNCHANGED <<rs, head, fx, fs, ix, is>>
+      [] l = "head" -> /\ head = None /\ head' = p /\ UNCHANGED <<rx, rs, fx, fs, ix, is>>
+      [] l = "fence" -> /\ FenceFree /\ fx' = p /\ UNCHANGED <<rx, rs, head, fs, ix, is>>
+      [] l = "issue" -> /\ ix = None /\ is' = is \cup {p} /\ UNCHANGED <<rx, rs, head, fx, fs, ix>>
+      [] l = "issueX" -> /\ ix = None /\ is = {} /\ ix' = p /\ UNCHANGED <<rx, rs, head, fx, fs, is>>
 Release(p) ==
     /\ rx' = [m \in Members |-> IF rx[m] = p THEN None ELSE rx[m]]
     /\ rs' = rs \ {p}
     /\ head' = IF head = p THEN None ELSE head
     /\ fx' = IF fx = p THEN None ELSE fx
     /\ fs' = fs \ {p}
+    /\ ix' = IF ix = p THEN None ELSE ix
+    /\ is' = is \ {p}
 
 \* The orders locks are taken in. 0.14's vault takes the member's row first, then the head, then
 \* (the trigger) the fence; 0.14's app (AppObject's object) the head, then the row, then the
@@ -245,6 +286,16 @@ ChangeLocks ==
     ELSE IF AppObject THEN IF AppHeadFirst THEN <<"head", "obj", "fence">> ELSE <<"obj", "head", "fence">>
     ELSE (IF RowFirst THEN <<"obj">> ELSE <<>>) \o (IF ChangeHeadFirst THEN <<"head", "fence">> ELSE <<"fence", "head">>)
          \o (IF RowFirst THEN <<>> ELSE <<"obj">>)
+\* A 0.15 sign-in's locks: 0.14's head (`audited()`), then `app_change`'s issue lock, shared. One
+\* that also revokes the account's earlier sessions (Mixed): its append's trigger, for the revokes'
+\* 0.14 entries, takes the fence, and `app_change` the issue lock: with IssueBeforeFence, the issue
+\* lock first, as both do.
+IssuerLocks(p) ==
+    IF p \in Mixed THEN IF IssueBeforeFence THEN <<"head", "issue", "fence">> ELSE <<"head", "fence", "issue">>
+    ELSE <<"head", "issue">>
+\* The barrier's: the issue lock exclusive, then the fence; without BarrierIssueFirst, the other way.
+BarrierLocks == IF BarrierIssueFirst THEN <<"issueX", "fence">> ELSE <<"fence", "issueX">>
+
 \* A 0.14 write's two locks before its append: the app's to its row, the head first.
 OldFirst(m) == IF AppObject /\ m = "obj" THEN "head" ELSE m
 OldSecond(m) == IF AppObject /\ m = "obj" THEN m ELSE "head"
@@ -278,6 +329,11 @@ Init ==
     /\ committed = 0
     /\ answered = 0
     /\ decisions = {}
+    /\ ix = None
+    /\ is = {}
+    /\ ni = [p \in NewIssuers \cup Mixed |-> [pc |-> "idle", got |-> 0]]
+    /\ br = [b \in Barriers |-> [pc |-> "idle", got |-> 0]]
+    /\ exchanged = 0
 
 -----------------------------------------------------------------------------
 (* 0.14, on old isolates. *)
@@ -292,7 +348,7 @@ OldUseRead(x) ==
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "read", !.fence = fence14, !.allow = row.v /\ Genuine14(row),
                                          !.seen = committed, !.truth = truth]]
     /\ UNCHANGED <<rx, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* Under the head: refused if the fence moved; appends and commits. The value leaves after. Its
 \* entry (`credential.use`) changes no access, so the trigger lets it by: it never waits for the
@@ -305,7 +361,7 @@ OldUseCommit(x) ==
                                      answeredAt |-> answered, truth |-> o[x].truth, read |-> NoContent, seq |-> 0]}
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<rx, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered>>
+                   truth, committed, answered, issueVars>>
 
 \* A write (a grant or a revoke) to the object, or (OtherWrites) to another member, takes its first
 \* lock: the member's row; the head, for the app's write to its row (AppObject).
@@ -316,7 +372,7 @@ OldWriteRow(x) ==
           /\ Take(x, OldFirst(m))
           /\ \E v \in BOOLEAN : o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "rowed", !.v = v, !.m = m]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, ni, br, exchanged>>
 
 \* Then its second: the head; the row, for the app's.
 OldWriteHead(x) ==
@@ -324,14 +380,14 @@ OldWriteHead(x) ==
     /\ Take(x, OldSecond(o[x].m))
     /\ o' = [o EXCEPT ![x].pc = "headed"]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, ni, br, exchanged>>
 
 \* Its append (an access entry: with the trigger, once the fence is free; with OldWriteMarksRow,
 \* the trigger also marks the row with the entry's number), its row, its fence; commit and answer.
 \* A row 0.14 does not accept refuses it.
 OldWriteCommit(x) ==
     /\ o[x].pc = "headed"
-    /\ OldWritesFence => FenceFree
+    /\ OldWritesFence => FenceFree /\ (IssueBeforeFence => ix = None)
     /\ IF o[x].m = "obj" /\ Genuine14(row)
        THEN /\ oldLog' = Append(oldLog, [v |-> o[x].v, mac |-> TRUE, mirror |-> FALSE])
             /\ row' = [v |-> o[x].v, aseq |-> Len(oldLog) + 1, mac14 |-> TRUE,
@@ -340,10 +396,78 @@ OldWriteCommit(x) ==
             /\ truth' = [v |-> o[x].v, by |-> "0.14"]
             /\ committed' = committed + 1
             /\ Answer
-       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered>>
+       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered, ni, br, exchanged>>
     /\ Release(x)
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
-    /\ UNCHANGED << newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions>>
+    /\ UNCHANGED << newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions, ni, br, exchanged>>
+
+\* 0.14's token.exchange (Exchanges): under the head (`audited()`), the token spent, a new
+\* credential issued, the binding's last use stamped, `token.exchange` appended. The trigger lets
+\* it by: it takes no fence and no issue lock. With ExchangeOnlyIssues it writes no decision input;
+\* without, it also writes the object, as a revoke or a grant would.
+OldExchangeHead(x) ==
+    /\ Exchanges
+    /\ o[x].pc = "idle"
+    /\ o[x].n < MaxOldOps
+    /\ Take(x, "head")
+    /\ \E v \in BOOLEAN : o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "exchanging", !.v = v]]
+    /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
+                   truth, committed, answered, decisions, ni, br, exchanged>>
+
+OldExchangeCommit(x) ==
+    /\ o[x].pc = "exchanging"
+    /\ IF ~ExchangeOnlyIssues /\ Genuine14(row)
+       THEN /\ oldLog' = Append(oldLog, [v |-> o[x].v, mac |-> TRUE, mirror |-> FALSE])
+            /\ row' = [v |-> o[x].v, aseq |-> Len(oldLog) + 1, mac14 |-> TRUE, mark |-> row.mark]
+            /\ fence14' = fence14 + 1
+            /\ truth' = [v |-> o[x].v, by |-> "0.14"]
+            /\ committed' = committed + 1
+            /\ exchanged' = exchanged + 1
+            /\ Answer
+       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered, exchanged>>
+    /\ Release(x)
+    /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
+    /\ UNCHANGED <<newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions, ni, br>>
+
+-----------------------------------------------------------------------------
+(* 0.15 sign-ins, and the checkpointer's barrier: for the locks. *)
+
+\* A sign-in's locks, one at a time; then its credential's change, numbered under them, and the
+\* commit, which lets them go. It writes no input of the object.
+IssuerLock(p) ==
+    /\ ni[p].pc \in {"idle", "locking"}
+    /\ Started
+    /\ Take(p, IssuerLocks(p)[ni[p].got + 1])
+    /\ ni' = [ni EXCEPT ![p] = [pc |-> IF @.got + 1 = Len(IssuerLocks(p)) THEN "locked" ELSE "locking", got |-> @.got + 1]]
+    /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
+                   truth, committed, answered, decisions, br, exchanged>>
+
+IssuerCommit(p) ==
+    /\ ni[p].pc = "locked"
+    /\ newLog' = newLog \cup {Entry(nextSeq, "issue", FALSE, NoContent, 0)}
+    /\ nextSeq' = nextSeq + 1
+    /\ Release(p)
+    /\ ni' = [ni EXCEPT ![p].pc = "done"]
+    /\ UNCHANGED <<oldLog, row, fence14, o, vs, nu, nc, ticks, lastTick, tampers, forges,
+                   truth, committed, answered, decisions, br, exchanged>>
+
+\* The barrier: its first lock, held while it waits for the second; with the second, it closes its
+\* numbers and lets both go, in one statement.
+BarrierLock(b) ==
+    /\ br[b].pc = "idle"
+    /\ Started
+    /\ Take(b, BarrierLocks[1])
+    /\ br' = [br EXCEPT ![b] = [pc |-> "waiting", got |-> 1]]
+    /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
+                   truth, committed, answered, decisions, ni, exchanged>>
+
+BarrierClose(b) ==
+    /\ br[b].pc = "waiting"
+    /\ IF BarrierLocks[2] = "fence" THEN FenceFree ELSE ix = None /\ is = {}
+    /\ Release(b)
+    /\ br' = [br EXCEPT ![b] = [pc |-> "done", got |-> 0]]
+    /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
+                   truth, committed, answered, decisions, ni, exchanged>>
 
 -----------------------------------------------------------------------------
 (* A 0.15 vault's start: the cutover. *)
@@ -353,7 +477,7 @@ VaultStart(v) ==
     /\ vs[v].pc = "idle"
     /\ vs' = [vs EXCEPT ![v].pc = IF Cutovers /= {} THEN "started" ELSE IF CutoverLocks = <<>> THEN "locked" ELSE "locking"]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* Its locks, one at a time, in their order: before the marker's check (`locking`), and, without
 \* RowFirst, the rows it seals after it (`sealing`).
@@ -365,7 +489,7 @@ VaultLock(v) ==
                                                !.pc = IF vs[v].got + 1 < Len(ls) THEN @
                                                       ELSE IF @ = "locking" THEN "locked" ELSE "sealready"]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, ni, br, exchanged>>
 
 \* The marker again, under the locks; then 0.14's head, and its chain verified up to it.
 VaultVerify(v) ==
@@ -377,9 +501,9 @@ VaultVerify(v) ==
        THEN /\ vs' = [vs EXCEPT ![v].pc = "refused"]
             /\ Release(v)
        ELSE /\ vs' = [vs EXCEPT ![v] = [pc |-> IF SealLocks = <<>> THEN "sealready" ELSE "sealing", anchor |-> Len(oldLog), got |-> 0]]
-            /\ UNCHANGED <<rx, rs, head, fx, fs>>
+            /\ UNCHANGED <<rx, rs, head, fx, fs, ix, is>>
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, ni, br, exchanged>>
 
 \* A statement of its own: the row, checked as 0.14 would against the chain it verified; `genesis`
 \* sealing it, `cutover` naming the head; the commit lets the locks go.
@@ -387,14 +511,14 @@ VaultSeal(v) ==
     /\ vs[v].pc = "sealready"
     /\ IF VerifyRows /\ ~(row.mac14 /\ row.aseq = NewestGenuine(vs[v].anchor))
        THEN /\ vs' = [vs EXCEPT ![v].pc = "refused"]
-            /\ UNCHANGED <<newLog, nextSeq>>
+            /\ UNCHANGED <<newLog, nextSeq, ni, br, exchanged>>
        ELSE /\ newLog' = newLog \cup {Entry(nextSeq, "genesis", TRUE, Content(row), vs[v].anchor),
                                       Entry(nextSeq + 1, "cutover", FALSE, NoContent, vs[v].anchor)}
             /\ nextSeq' = nextSeq + 2
             /\ vs' = [vs EXCEPT ![v].pc = "started"]
     /\ Release(v)
     /\ UNCHANGED <<oldLog, row, fence14, o, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, ni, br, exchanged>>
 
 -----------------------------------------------------------------------------
 (* 0.15 uses, on a started vault. *)
@@ -407,7 +531,7 @@ NewUseLock(x) ==
     /\ fs' = fs \cup {x}
     /\ nu' = [nu EXCEPT ![x].pc = "locked"]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, newLog, nextSeq, o, vs, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* Whether the new log accounts for 0.14's newest authentic write: at or below the anchor, 0.15's
 \* own mirror, or adopted.
@@ -425,7 +549,7 @@ NewUseRun(x) ==
                                              !.read = Content(row), !.seen = committed, !.truth = truth]]
     /\ nextSeq' = nextSeq + 1
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, o, vs, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* The commit, which lets the lock go. Its value leaves after.
 NewUseCommit(x) ==
@@ -436,7 +560,7 @@ NewUseCommit(x) ==
     /\ fs' = fs \ {x}
     /\ nu' = [nu EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, nextSeq, o, vs, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered>>
+                   truth, committed, answered, issueVars>>
 
 -----------------------------------------------------------------------------
 (* 0.15 changes: a grant or a revoke, written as logged. *)
@@ -448,7 +572,7 @@ NewChangeStart(h) ==
     /\ Started
     /\ \E v \in BOOLEAN : nc' = [nc EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.read = Content(row), !.v = v]]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* Its locks, one at a time, in their order: the fence; with DualFence, 0.14's head and the
 \* object's row too.
@@ -458,7 +582,7 @@ NewChangeLock(h) ==
     /\ nc' = [nc EXCEPT ![h] = [@ EXCEPT !.got = IF @ + 1 = Len(ChangeLocks) THEN 0 ELSE @ + 1,
                                            !.pc = IF nc[h].got + 1 = Len(ChangeLocks) THEN "locked" ELSE "started"]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, ni, br, exchanged>>
 
 \* The CAS (the row is still the one it read, else it reads again); the write, sealed by its
 \* entry. With DualFence, also 0.14's: a mirror entry, the row naming it under 0.14's MAC, the
@@ -467,7 +591,7 @@ NewChangeRun(h) ==
     /\ nc[h].pc = "locked"
     /\ IF Content(row) /= nc[h].read
        THEN /\ nc' = [nc EXCEPT ![h].pc = "idle"]
-            /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, truth, committed>>
+            /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, truth, committed, ni, br, exchanged>>
        ELSE LET aseq == IF DualFence THEN Len(oldLog) + 1 ELSE row.aseq
                 new == [v |-> nc[h].v, aseq |-> aseq, mac14 |-> DualFence, mark |-> row.mark]
             IN /\ oldLog' = IF DualFence THEN Append(oldLog, [v |-> nc[h].v, mac |-> TRUE, mirror |-> TRUE]) ELSE oldLog
@@ -479,14 +603,14 @@ NewChangeRun(h) ==
                /\ committed' = committed + 1
                /\ nc' = [nc EXCEPT ![h].pc = "committed"]
     /\ Release(h)
-    /\ UNCHANGED << o, vs, nu, ticks, lastTick, tampers, forges, answered, decisions>>
+    /\ UNCHANGED << o, vs, nu, ticks, lastTick, tampers, forges, answered, decisions, ni, br, exchanged>>
 
 NewChangeAnswer(h) ==
     /\ nc[h].pc = "committed"
     /\ answered' = IF answered > committed THEN answered ELSE committed
     /\ nc' = [nc EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, ticks, lastTick, tampers, forges,
-                   truth, committed, decisions>>
+                   truth, committed, decisions, issueVars>>
 
 -----------------------------------------------------------------------------
 (* The checkpointer's tick, on a started vault, under both locks: it adopts 0.14's writes after  *)
@@ -510,11 +634,11 @@ Tick ==
        IN IF adopting
           THEN /\ newLog' = newLog \cup {Entry(nextSeq + rank(i), "adopt", seals(i), IF seals(i) THEN content(i) ELSE NoContent, i) : i \in todo}
                /\ nextSeq' = nextSeq + Cardinality(todo)
-          ELSE UNCHANGED <<newLog, nextSeq>>
+          ELSE UNCHANGED <<newLog, nextSeq, issueVars>>
     /\ ticks' = ticks + 1
     /\ lastTick' = Len(oldLog)
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, o, vs, nu, nc, tampers, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 -----------------------------------------------------------------------------
 (* The database writer, without the keys. *)
@@ -530,7 +654,7 @@ TamperRow ==
           /\ row' = r
     /\ tampers' = [tampers EXCEPT !.rows = @ + 1]
     /\ UNCHANGED <<rx, rs, oldLog, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* It clears the row's mark (OldWriteMarksRow): an unsigned column, like any other.
 ClearMark ==
@@ -539,7 +663,7 @@ ClearMark ==
     /\ row' = [row EXCEPT !.mark = 0]
     /\ tampers' = [tampers EXCEPT !.clears = @ + 1]
     /\ UNCHANGED <<rx, rs, oldLog, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* It deletes 0.14's newest entry, or edits it so that its MAC fails: 0.14's own checks, and a
 \* probe of the newest authentic entry, then pass it over. (0.14's anchor, outside the database,
@@ -550,7 +674,7 @@ DropNewest ==
     /\ oldLog' = [oldLog EXCEPT ![Len(oldLog)].mac = FALSE]
     /\ tampers' = [tampers EXCEPT !.drops = @ + 1]
     /\ UNCHANGED <<rx, rs, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, forges,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 \* It appends a 0.14 entry granting, and a row naming it: no MAC holds on either.
 ForgeEntry ==
@@ -559,12 +683,15 @@ ForgeEntry ==
     /\ row' = [v |-> TRUE, aseq |-> Len(oldLog) + 1, mac14 |-> FALSE, mark |-> row.mark]
     /\ forges' = forges + 1
     /\ UNCHANGED <<rx, rs, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers,
-                   truth, committed, answered, decisions>>
+                   truth, committed, answered, decisions, issueVars>>
 
 -----------------------------------------------------------------------------
 
 Next ==
     \/ \E x \in Olds : OldUseRead(x) \/ OldUseCommit(x) \/ OldWriteRow(x) \/ OldWriteHead(x) \/ OldWriteCommit(x)
+                      \/ OldExchangeHead(x) \/ OldExchangeCommit(x)
+    \/ \E p \in NewIssuers \cup Mixed : IssuerLock(p) \/ IssuerCommit(p)
+    \/ \E b \in Barriers : BarrierLock(b) \/ BarrierClose(b)
     \/ \E v \in Vaults : VaultStart(v) \/ VaultLock(v) \/ VaultVerify(v) \/ VaultSeal(v)
     \/ \E x \in NewUsers : NewUseLock(x) \/ NewUseRun(x) \/ NewUseCommit(x)
     \/ \E h \in NewChangers : NewChangeStart(h) \/ NewChangeLock(h) \/ NewChangeRun(h) \/ NewChangeAnswer(h)
@@ -623,22 +750,30 @@ EveryOldWriteAdopted ==
 NothingAllowedAfterAnswer ==
     \A d \in decisions : d.allow => d.answeredAt <= d.seen
 
+\* No 0.14 token.exchange, which the trigger lets by unfenced, changed a decision input.
+ExchangeChangesNoInput == exchanged = 0
+
 \* No wait cycle: no process waits for a lock held by one that waits, through at most three, for a
 \* lock it holds. (Postgres would break one after deadlock_timeout, 1 s, with the fence held
 \* exclusive and every 0.15 use waiting.) What each waits for, holding something:
 Wants(p) ==
     CASE p \in Olds /\ o[p].pc = "read" -> "head"
       [] p \in Olds /\ o[p].pc = "rowed" -> OldSecond(o[p].m)
-      [] p \in Olds /\ o[p].pc = "headed" /\ OldWritesFence -> "fence"
+      [] p \in Olds /\ o[p].pc = "headed" /\ OldWritesFence -> IF IssueBeforeFence /\ ix /= None THEN "issue" ELSE "fence"
+      [] p \in NewIssuers \cup Mixed /\ ni[p].pc = "locking" -> IssuerLocks(p)[ni[p].got + 1]
+      [] p \in Barriers /\ br[p].pc = "waiting" -> BarrierLocks[2]
       [] p \in Vaults /\ vs[p].pc = "locking" -> CutoverLocks[vs[p].got + 1]
       [] p \in Vaults /\ vs[p].pc = "sealing" -> SealLocks[vs[p].got + 1]
       [] p \in NewChangers /\ nc[p].pc = "started" /\ nc[p].got > 0 -> ChangeLocks[nc[p].got + 1]
       [] OTHER -> None
-Waiters == Olds \cup Vaults \cup NewChangers
-Blocks(p, q) == p /= q /\ Wants(p) /= None /\ Holds(q, Wants(p))
+Waiters == Olds \cup Vaults \cup NewChangers \cup NewIssuers \cup Mixed \cup Barriers
+Blocks(p, q) == p /= q /\ Wants(p) /= None /\ Conflicts(p, q, Wants(p))
 NoWaitCycle ==
     ~\E p, q \in Waiters :
         \/ Blocks(p, q) /\ Blocks(q, p)
         \/ \E w \in Waiters : Blocks(p, q) /\ Blocks(q, w) /\ Blocks(w, p)
+
+\* The barrier never holds 0.14's head, nor waits for it.
+BarrierAvoidsHead == \A b \in Barriers : head /= b /\ Wants(b) /= "head"
 
 =============================================================================

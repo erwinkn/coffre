@@ -177,6 +177,12 @@ REMOVALS=(
   "HotPathOnePolicy CapSealed BulkReplayAgrees"
   "HotPathOnePolicyWindow CapFromPolicy BulkReplayAgrees"
   "HotPathOnePolicyWindow CapSealed BulkReplayAgrees"
+  # Sign-ins issue under a lock of their own, never the fence (T123, R58).
+  "HotPathOneIssue IssueOwnLock UsesNeverWaitOnIssues"
+  "HotPathOneIssue BarrierIssueFirst UsesNeverWaitOnIssues"
+  "HotPathOneIssue BarrierWaitsIssues CheckpointsHold"
+  "HotPathOneIssue IssueNumberUnderLock CheckpointsHold"
+  "HotPathOneIssue NamedAfterIssue ReplayAgrees"
   # Liveness, under weak fairness (HotPathOneLive's PROPERTIES).
   "HotPathOneLive WorkerHonoursDeadline UseAnswered"
   "HotPathOneLive ChangeRereads ChangeAnswered"
@@ -216,6 +222,11 @@ REMOVALS=(
   "Migration015App AppHeadFirst NoWaitCycle"
   "Migration015App DualFence NothingAllowedAfterAnswer"
   "Migration015App OldWritesFence NothingAllowedAfterAnswer"
+  # Sign-ins and the barrier: the issue lock in the order row, head, issue lock, fence (T123).
+  "Migration015Issue IssueBeforeFence NoWaitCycle"
+  "Migration015Issue BarrierIssueFirst NoWaitCycle"
+  "Migration015Issue ExchangeOnlyIssues ExchangeChangesNoInput"
+  "Migration015Issue ExchangeOnlyIssues NothingAllowedAfterAnswer"
   "Migration015 Adopt EveryOldWriteAdopted"
   "Migration015 AdoptRepeats EveryOldWriteAdopted"
   "Migration015Tamper VerifyChain AnchorHolds"

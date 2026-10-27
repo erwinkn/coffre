@@ -173,9 +173,10 @@ export class Refusal extends Error {
  * was turned away is half of what an audit log is for.
  *
  * With 0.15's log, `changes` are the work's changes to the objects its
- * rows hold, sealed before it (`AppChanges`): committed last, after the
- * entries, so the fence is held from there to the commit only; answered
- * once sealed (R51).
+ * rows hold, sealed before it (`AppChanges`): committed last, in the
+ * statement that appends the entries, so the locks they take (the issue
+ * lock, and the fence but for an issue) are held from there to the commit
+ * only; answered once sealed (R51).
  */
 export async function audited<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq' | 'policy' | 'recalled'> },
@@ -189,8 +190,14 @@ export async function audited<T>(
       await lockLogHead(tx);
       if (ctx.caller !== undefined) await policyStill({ caller: ctx.caller }, tx);
       const result = await work(tx, log);
-      if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
-      await changes?.commit(tx);
+      if (changes === null) {
+        if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
+      } else if (log.length > 0) {
+        // The changes in the append's own statement: one round trip less under the head (T123).
+        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls)).changes);
+      } else {
+        await changes.commit(tx);
+      }
       return result;
     });
     await changes?.sealed();

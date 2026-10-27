@@ -19,11 +19,13 @@ import { ApiError, vaultRefused } from './errors.ts';
  * 1. **Before the transaction:** the vault seals the changes (`prepare`)
  *    from the rows as the app read them and as it will write them. No vault
  *    call is made inside a transaction (AGENTS.md).
- * 2. **In it** (`audited`), once the rows and 0.14's entries are written:
- *    `app_change`, one round trip, under the head the transaction holds,
- *    then the fence: head, row, fence (Migration015.tla's AppHeadFirst). A
- *    row whose seal moved since it was read refuses (`ObjectMoved`): the
- *    write is read and prepared again (`retrying`).
+ * 2. **In it** (`audited`), once the rows are written: `app_change`, in
+ *    the statement that appends 0.14's entries (no round trip of its own),
+ *    under the head the transaction holds, then the issue lock and, but for
+ *    an issue, the fence: head, row, issue lock, fence (Migration015.tla's
+ *    AppHeadFirst, IssueBeforeFence). A row whose seal moved since it was
+ *    read refuses (`ObjectMoved`): the write is read and prepared again
+ *    (`retrying`).
  * 3. **After its commit:** the vault answers once the newest is sealed.
  *
  * Row and entry commit together or not at all, as the app's rows and its
@@ -128,13 +130,18 @@ export class AppChanges {
     this.#only = written;
   }
 
-  /** In the transaction, its rows and 0.14 entries written: each change, under the fence (`app_change`). */
-  async commit(tx: Transaction): Promise<void> {
-    if (this.#dropped) return;
+  /**
+   * In the transaction, its rows written: each change (`app_change`), after
+   * the 0.14 entries; or, given `append`, which appends them, in its
+   * statement, one round trip less under 0.14's head (T123). `append` runs
+   * whatever this write dropped.
+   */
+  async commit(tx: Transaction, append?: (calls: readonly PreparedChange[]) => Promise<(bigint | null)[]>): Promise<void> {
     const only = this.#only;
+    const calls = this.#dropped ? [] : only === null ? this.#calls : this.#calls.filter((call) => only.has(call.id));
     let numbers: (bigint | null)[];
     try {
-      numbers = await appChanges(tx, only === null ? this.#calls : this.#calls.filter((call) => only.has(call.id)));
+      numbers = append === undefined ? await appChanges(tx, calls) : await append(calls);
     } catch (error) {
       if (isStaleChange(error)) throw new Error("an object this write changes is not its newest change's: a row was put back around coffre", { cause: error });
       throw error;

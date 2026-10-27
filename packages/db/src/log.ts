@@ -233,7 +233,14 @@ export async function appendEntries(
    * nothing to read again.
    */
   locked?: HeldHead,
-): Promise<Appended> {
+  /**
+   * 0.15's changes of the app's write these entries record (`appChanges`):
+   * on Postgres, made in the append's own statement, one round trip less
+   * under the head, which every sign-in waits for (T123). Their numbers
+   * come back as `changes`.
+   */
+  changes: readonly PreparedChange[] = [],
+): Promise<Appended & { changes: (bigint | null)[] }> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
 
@@ -289,17 +296,25 @@ export async function appendEntries(
     seq += 1n;
   }
 
-  if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
+  let numbers: (bigint | null)[] = [];
+  if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE && changes.length > 0) {
+    // The entries, the head that names the last of them, and the changes, in one statement. The changes run in the
+    // select list, in their order; the inserts after it, and their trigger (the fence, for an entry that changes
+    // access) at its end: each takes the issue lock before the fence, so either order is the locks' (migration 0026).
+    numbers = await callChanges(tx, changes, sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()}),
+      moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row) `);
+  } else if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
     await tx.execute(sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
       UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`);
   } else {
     await tx.insert(auditLog).values(rows);
     await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
+    numbers = await appChanges(tx, changes);
   }
   const written = { nextSeq: seq, headHash: prevHash };
   afterCommit(tx, () => remember(key, written));
-  return { seqStart: head.nextSeq, ...written, occurredAt: now };
+  return { seqStart: head.nextSeq, ...written, occurredAt: now, changes: numbers };
 }
 
 /** A head locked by a statement of the caller's, and what it read under the lock (`appendEntries`). */
@@ -537,12 +552,13 @@ export async function newestAuthentic(page: (limit: number, before: bigint | und
 
 /**
  * The app's changes to the objects its rows hold, as the vault sealed them
- * (`Vault.prepare`), each `app_change` (migration 0025), in its
+ * (`Vault.prepare`), each `app_change` (migrations 0025 and 0026), in its
  * transaction, once its rows and 0.14 entries are written: in order, in one
- * round trip. Each entry's number; 0 for a row of 0.14's, which logs nothing;
- * null where a row's seal moved since the app read it, and nothing was done
- * (ChangeCAS: read again). A row that is not its object's newest change's
- * fails the call (`isStaleChange`), and its transaction with it.
+ * round trip, or in the append's own (`appendEntries`). Each entry's number;
+ * 0 for a row of 0.14's, which logs nothing; null where a row's seal moved
+ * since the app read it, and nothing was done (ChangeCAS: read again). A row
+ * that is not its object's newest change's fails the call (`isStaleChange`),
+ * and its transaction with it.
  *
  * On SQLite, which has no functions, the same steps in the transaction,
  * which holds the database's one write lock: the fence is implicit there
@@ -556,9 +572,15 @@ export async function appChanges(tx: Transaction, calls: readonly PreparedChange
     for (const call of calls) numbers.push(await changeOnSqlite(tx, call, bytes));
     return numbers;
   }
+  return callChanges(tx, calls, sql``);
+}
+
+/** `app_change`, once per call, in order, in one statement: after `before`, a `WITH` of the caller's. */
+async function callChanges(tx: Transaction, calls: readonly PreparedChange[], before: SQL): Promise<(bigint | null)[]> {
+  const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'base64'));
   const rows = sql.join(calls.map((c, i) => sql`(${i}::int, ${c.kind}::text, ${c.id}::text, ${c.requestId}::text, ${c.at}::bigint, ${c.actor}::text, ${c.payload}::text, ${bytes(c.sealFrom)}::bytea, ${bytes(c.seal)}::bytea, ${bytes(c.mac)}::bytea)`), sql`, `);
   // A volatile function in the select list runs after the sort: each call in `ord`'s order, each from the seal the one before leaves.
-  const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`
+  const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`${before}
     SELECT c.ord, app_change(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.seal_from, c.seal, c.mac) AS number
       FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, seal_from, seal, mac)
      ORDER BY c.ord`);

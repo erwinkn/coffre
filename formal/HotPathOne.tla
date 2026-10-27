@@ -68,6 +68,23 @@
 (* checked against the cached number). Otherwise it probes, and the        *)
 (* isolate keeps what it read.                                             *)
 (*                                                                         *)
+(* Issues (Issuers, T123, R58): a sign-in issues a new credential, one    *)
+(* change of the log (`credential.issue`), in the app's transaction. It    *)
+(* never takes the fence: nobody can name a credential before its issue    *)
+(* commits (its token is handed out after), so no use overlaps it, and    *)
+(* it changes no input any other use reads. It takes a lock of its own,    *)
+(* the issue lock, shared, and its number under it; the lock goes with    *)
+(* the commit. The barrier waits for the issues in flight on that lock,    *)
+(* exclusive, before it takes the fence: so a use never waits on an issue, *)
+(* directly or behind the barrier (Postgres queues a shared request behind *)
+(* a waiting exclusive one: a barrier queued on the fence while it waited  *)
+(* for an issue would hold every use up for the issue's commit). A use     *)
+(* that names a new credential (`fresh`) finds it only once its issue has  *)
+(* committed, in its snapshot; the replay, once its issue is numbered      *)
+(* below the use. Covers and the seal cache are per credential and key.    *)
+(* The issue lock's order against 0.14's head and the other locks, and     *)
+(* that no wait cycle comes of it, are Migration015.tla's (Migration015Issue).*)
+(*                                                                         *)
 (* One isolate: each cover and cache entry is checked against the log and  *)
 (* the bulk rows on its own, never against another isolate's, so more      *)
 (* isolates only add more of the same kind.                                *)
@@ -202,7 +219,18 @@
 (*                         the isolate's cache when it holds), not from    *)
 (*                         the policy row, which a writer may have put     *)
 (*                         back: the SQL cannot check a MAC, and the cap's *)
-(*                         row moves whatever the Worker then decides.     *)
+(*                         row moves whatever the Worker then decides;     *)
+(*   IssueOwnLock          an issue takes the issue lock shared, not the   *)
+(*                         fence shared (which a barrier or a change       *)
+(*                         queued behind it would make every use wait on); *)
+(*   IssueNumberUnderLock  its number is taken under that lock;            *)
+(*   BarrierWaitsIssues    the barrier takes the issue lock exclusive, so  *)
+(*                         that every issue numbered so far has committed  *)
+(*                         or rolled back when it closes;                  *)
+(*   BarrierIssueFirst     ... before the fence, not holding the fence     *)
+(*                         while it waits for an issue;                    *)
+(*   NamedAfterIssue       a credential is named by a use only once its    *)
+(*                         issue has committed (its token handed out).     *)
 (*                                                                         *)
 (* What it abstracts. A row's seal is its content, and a writer can only  *)
 (* put back what the vault once sealed. A change flips its input; the      *)
@@ -225,7 +253,7 @@
 (* never starves a change (Postgres queues an exclusive lock request ahead *)
 (* of later shared ones; the model's uses are finite).                     *)
 (***************************************************************************)
-EXTENDS Integers, FiniteSets
+EXTENDS Integers, FiniteSets, Sequences
 
 CONSTANTS
     Uses,            \* the uses, each one request, one call
@@ -254,7 +282,9 @@ CONSTANTS
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
     ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
-    PrincipalLocks, RefreshOnUse, CoverFresh, Slack, DeadlineSlack, CapFromPolicy, CapSealed
+    PrincipalLocks, RefreshOnUse, CoverFresh, Slack, DeadlineSlack, CapFromPolicy, CapSealed,
+    Issuers,         \* the sign-ins, each issuing one new credential: {} for none
+    IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue
 
 None == "none"
 Change == "change"
@@ -284,10 +314,15 @@ VARIABLES
     restores,  \* restores so far
     bulk,      \* the principal's bulk rows, committed: each key's `last`, or NoTime
     pnow,      \* Postgres's clock
-    backs      \* its steps back so far
+    backs,     \* its steps back so far
+    iss,       \* each issuer's state
+    iholder,   \* the issue lock held exclusive: the barrier, or None
+    ishared,   \* ... held shared: the issuers
+    bar        \* the locks the barrier holds while it waits for its next
 
+issueVars == <<iss, iholder, ishared, bar>>
 vars == <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-          cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+          cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, iholder, ishared, bar>>
 
 Max(a, b) == IF a > b THEN a ELSE b
 
@@ -297,6 +332,10 @@ Max(a, b) == IF a > b THEN a ELSE b
 (* database writer put back an earlier one; the seal of the input's newest change is read from    *)
 (* the log in the same statement.                                                                 *)
 ChangesIn(L) == {e \in L : e.kind = "change"}
+\* An issue is a row of the change table too (`credential.issue`), of an object no input names.
+IssuesIn(L) == {e \in L : e.kind = "issue"}
+\* Whether issuer i's credential is in L: committed, or below a number.
+IssuedIn(L, i) == \E e \in IssuesIn(L) : e.id = i
 UsesIn(L) == {e \in L : e.kind = "use"}
 Committed == Cardinality(ChangesIn(log))
 
@@ -311,7 +350,7 @@ Rows == [i \in Inputs |-> IF tamper[i].on THEN tamper[i].value ELSE NewestIn(log
 \* The log's newest change, as its number and MAC (here, its id) say it, or none.
 NoChange == [seq |-> 0, made |-> <<>>]
 NewestChange ==
-    LET cs == ChangesIn(log)
+    LET cs == ChangesIn(log) \cup IssuesIn(log)
     IN IF cs = {} THEN NoChange
        ELSE LET e == CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq IN [seq |-> e.seq, made |-> e.made]
 
@@ -372,7 +411,10 @@ BulkReplay(G) == ReplayFrom({e \in UsesIn(G) : e.key /= None}, [k \in Keys |-> N
 \* What the log says of a use entry: every input as the changes numbered below it left it, and
 \* the cap's decision as the replay makes it.
 InputsAllowed(seq) == \A i \in Inputs \ {"policy"} : ReplayValue({d \in log : d.seq < seq}, i)
-ReplayAllows(e) == InputsAllowed(e.seq) /\ (e.key = None \/ <<e.seq, TRUE>> \in BulkReplay(log).decided)
+ReplayAllows(e) ==
+    /\ InputsAllowed(e.seq)
+    /\ e.fresh /= None => IssuedIn({d \in log : d.seq < e.seq}, e.fresh)
+    /\ e.key = None \/ <<e.seq, TRUE>> \in BulkReplay(log).decided
 
 \* Entries: a use's is its request (number, key, at, deadline) with ghosts: the changes it saw, its
 \* decision and code, when decided, the cap's decision, the changes answered when it committed. A
@@ -380,17 +422,25 @@ ReplayAllows(e) == InputsAllowed(e.seq) /\ (e.key = None \/ <<e.seq, TRUE>> \in 
 UseEntry(x, durable) ==
     [seq |-> u[x].seq, kind |-> "use", id |-> x, seen |-> u[x].seen, allow |-> u[x].allow, code |-> u[x].code,
      answeredAt |-> answered, key |-> u[x].key, at |-> u[x].at, deadline |-> u[x].deadline, decidedAt |-> u[x].decidedAt,
-     admitted |-> u[x].admitted, input |-> None, value |-> FALSE, made |-> <<>>, durable |-> durable]
+     admitted |-> u[x].admitted, input |-> None, value |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable]
 ChangeEntry(seq, input, value, made, durable) ==
     [seq |-> seq, kind |-> "change", id |-> Change, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> input, value |-> value, made |-> made, durable |-> durable]
+     input |-> input, value |-> value, made |-> made, fresh |-> None, durable |-> durable]
+\* An issue's: its number, its issuer (whose credential it makes).
+IssueEntry(seq, i, durable) ==
+    [seq |-> seq, kind |-> "issue", id |-> i, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
+     key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
+     input |-> None, value |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable]
 
 IdleUse == [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTrue, snapNewest |-> AllTrue,
             snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
             probed |-> FALSE, newest |-> AllTrue, newestChange |-> NoChange,
             key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE, write |-> NoTime,
-            replied |-> FALSE, gaveUp |-> FALSE]
+            replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE]
+\* A cover or a cache entry is the isolate's for one credential and key: a use's slot.
+Slots == KeysOr \X ({None} \cup Issuers)
+Slot(x) == <<u[x].key, u[x].fresh>>
 
 Init ==
     /\ log = {}
@@ -408,15 +458,19 @@ Init ==
     /\ signed = {}
     /\ floor = 0 - D   \* the schema's: below every use to come
     /\ crashes = 0
-    /\ cover = [k \in KeysOr |-> NoCover]
+    /\ cover = [s \in Slots |-> NoCover]
     /\ repeats = {}
     /\ tamper = [i \in Inputs |-> [on |-> FALSE, value |-> TRUE]]
     /\ tampers = 0
-    /\ cache = [k \in KeysOr |-> NoCache]
+    /\ cache = [s \in Slots |-> NoCache]
     /\ restores = 0
     /\ bulk = [k \in Keys |-> NoTime]
     /\ pnow = 0
     /\ backs = 0
+    /\ iss = [i \in Issuers |-> [pc |-> "idle", seq |-> 0]]
+    /\ iholder = None
+    /\ ishared = {}
+    /\ bar = 0
 
 LockFree == holder = None /\ shared = {}
 
@@ -427,7 +481,7 @@ Tick ==
     /\ pnow < MaxTime
     /\ pnow' = pnow + 1
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor,
-                   crashes, cover, repeats, tamper, tampers, cache, restores, bulk, backs>>
+                   crashes, cover, repeats, tamper, tampers, cache, restores, bulk, backs, issueVars>>
 
 ClockBack ==
     /\ backs < MaxClockBacks
@@ -435,7 +489,7 @@ ClockBack ==
     /\ pnow' = pnow - 1
     /\ backs' = backs + 1
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor,
-                   crashes, cover, repeats, tamper, tampers, cache, restores, bulk>>
+                   crashes, cover, repeats, tamper, tampers, cache, restores, bulk, issueVars>>
 
 -----------------------------------------------------------------------------
 (* A use: one call. *)
@@ -443,17 +497,21 @@ ClockBack ==
 \* It arrives, for a key, stamped by the Worker's clock, its deadline set; the call's outer
 \* statement starts, with its snapshot. Passed a number taken before (without UseNumberUnderLock),
 \* it takes it now.
+\* It names an old credential (None) or a new one, issuer i's: with NamedAfterIssue, once its issue
+\* has answered.
 UseStart(x) ==
     /\ u[x].pc = "idle"
     /\ pnow <= MaxStart
-    /\ \E k \in KeysOr, s \in -MaxSkew..MaxSkew :
+    /\ \E k \in KeysOr, s \in -MaxSkew..MaxSkew,
+          f \in {None} \cup {i \in Issuers : NamedAfterIssue => iss[i].pc = "answered"} :
           u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "started", !.key = k, !.at = pnow + s, !.deadline = pnow + s + D,
                                           !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest,
-                                          !.snapNewestChange = NewestChange,
+                                          !.snapNewestChange = NewestChange, !.fresh = f,
+                                          !.snapIssued = f /= None /\ IssuedIn(log, f),
                                           !.seq = IF UseNumberUnderLock THEN 0 ELSE nextSeq]]
     /\ nextSeq' = IF UseNumberUnderLock THEN nextSeq ELSE nextSeq + 1
     /\ UNCHANGED <<log, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Hyperdrive holds the call; it may run it later, or never.
 UseHold(x) ==
@@ -461,13 +519,13 @@ UseHold(x) ==
     /\ u[x].pc = "started"
     /\ u' = [u EXCEPT ![x].pc = "held"]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 UseResume(x) ==
     /\ u[x].pc = "held"
     /\ u' = [u EXCEPT ![x].pc = "started"]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* It gets the lock shared: no one holds it exclusive. Below the floor, it lets the lock go having
 \* written nothing (503 `late`). With a bulk cap, statement A comes next; without, statement B.
@@ -479,7 +537,7 @@ UseLock(x) ==
                                              !.replied = @ \/ late]]
           /\ shared' = IF UseLocks /\ ~late THEN shared \cup {x} ELSE shared
     /\ UNCHANGED <<log, nextSeq, holder, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Statement A: the key's bulk row, as committed, and the policy's window (which no change can move
 \* while the use holds the lock shared). A key that must enter the set or be moved on asks for the
@@ -490,7 +548,7 @@ UseRead(x) ==
            t == u[x].at
        IN u' = [u EXCEPT ![x].pc = IF PrincipalLocks /\ (~InSet(bulk, k, t, WindowIn(log)) \/ ~Fresh(bulk, k, t)) THEN "waiting" ELSE "read"]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 UsePrincipalLock(x) ==
     /\ u[x].pc = "waiting"
@@ -498,7 +556,7 @@ UsePrincipalLock(x) ==
     /\ plock' = x
     /\ u' = [u EXCEPT ![x].pc = "read"]
     /\ UNCHANGED <<log, nextSeq, holder, shared, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Statement B past its deadline: nothing written, the call ends, its locks go (503 `late`).
 UseLate(x) ==
@@ -508,20 +566,20 @@ UseLate(x) ==
     /\ shared' = shared \ {x}
     /\ plock' = IF plock = x THEN None ELSE plock
     /\ UNCHANGED <<log, nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* With a cover and the isolate's cache for its key passed (a use may pass the cache or not), the
 \* probes are skipped if the log's newest change is the cached one (without CacheSameChange: if its
 \* number is no higher; without CacheChecked: always): the rows are held to the cached seals, and the
 \* cover to the cached number. Without CoverExists, the cover's entry is not looked for; without
 \* CoverChecksAllInputs, only changes to the member count.
-CacheHolds(k, newestChange) ==
-    IF CacheSameChange THEN newestChange = cache[k].change ELSE newestChange.seq <= cache[k].change.seq
-CoverThere(k) ==
-    /\ cover[k].seq /= 0
-    /\ CoverExists => \E e \in UsesIn(log) : e.seq = cover[k].seq /\ e.id = cover[k].id
-CoverNoChange(k) ==
-    CoverChecksChanges => \A d \in ChangesIn(log) : (CoverChecksAllInputs \/ d.input = "member") => d.seq < cover[k].seq
+CacheHolds(sl, newestChange) ==
+    IF CacheSameChange THEN newestChange = cache[sl].change ELSE newestChange.seq <= cache[sl].change.seq
+CoverThere(sl) ==
+    /\ cover[sl].seq /= 0
+    /\ CoverExists => \E e \in UsesIn(log) : e.seq = cover[sl].seq /\ e.id = cover[sl].id
+CoverNoChange(sl) ==
+    CoverChecksChanges => \A d \in ChangesIn(log) : (CoverChecksAllInputs \/ d.input = "member") => d.seq < cover[sl].seq
 CoverInSet(k, t, w) == k /= None => InSet(bulk, k, t, w) /\ (CoverFresh => Fresh(bulk, k, t))
 
 \* The caps a caller may pass from its own config (without CapFromPolicy): any the policy has had.
@@ -538,26 +596,29 @@ CallerPolicies ==
 UseRun(x) ==
     /\ u[x].pc = "read"
     /\ DeadlineChecked => pnow <= u[x].deadline
-    /\ \E passed \in IF SealCache /\ cache[u[x].key].on THEN BOOLEAN ELSE {FALSE}, callerPolicy \in CallerPolicies :
+    /\ \E passed \in IF SealCache /\ cache[Slot(x)].on THEN BOOLEAN ELSE {FALSE}, callerPolicy \in CallerPolicies :
        LET k == u[x].key
+           sl == Slot(x)
            t == u[x].at
            seen == IF StatementSnapshot THEN Committed ELSE u[x].snap
            read == IF StatementSnapshot THEN Rows ELSE u[x].snapRows
            probes == IF StatementSnapshot THEN Newest ELSE u[x].snapNewest
            newestChange == IF StatementSnapshot THEN NewestChange ELSE u[x].snapNewestChange
-           skip == passed /\ (CacheChecked => CacheHolds(k, newestChange))
-           newest == IF skip THEN cache[k].seals ELSE probes
+           skip == passed /\ (CacheChecked => CacheHolds(sl, newestChange))
+           newest == IF skip THEN cache[sl].seals ELSE probes
            p == IF "policy" \notin Inputs THEN PolicyOf(TRUE)
                 ELSE IF ~CapFromPolicy THEN callerPolicy
                 ELSE PolicyOf(IF CapSealed THEN newest["policy"] ELSE read["policy"])
-           covered == /\ Covers /\ CoverThere(k) /\ CoverInSet(k, t, p.w)
-                      /\ IF skip THEN cover[k].seq > cache[k].change.seq ELSE CoverNoChange(k)
+           covered == /\ Covers /\ CoverThere(sl) /\ CoverInSet(k, t, p.w)
+                      /\ IF skip THEN cover[sl].seq > cache[sl].change.seq ELSE CoverNoChange(sl)
            r == Rule(bulk, k, t, p)
            admitted == covered \/ r.admitted
-           base == Code(read, newest)
+           \* A new credential is found only once its issue has committed, in the statement's snapshot (its row).
+           found == u[x].fresh = None \/ IF StatementSnapshot THEN IssuedIn(log, u[x].fresh) ELSE u[x].snapIssued
+           base == IF found THEN Code(read, newest) ELSE "refused"
            code == IF base = "allow" /\ ~admitted THEN "bulk" ELSE base
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seen = seen, !.decidedAt = pnow,
-                                     !.covered = IF covered THEN cover[k].seq ELSE 0, !.coverId = IF covered THEN cover[k].id ELSE None,
+                                     !.covered = IF covered THEN cover[sl].seq ELSE 0, !.coverId = IF covered THEN cover[sl].id ELSE None,
                                      !.allow = (code = "allow"), !.code = code, !.admitted = admitted,
                                      !.write = IF covered THEN NoTime ELSE r.write,
                                      !.probed = ~skip, !.newest = newest, !.newestChange = newestChange,
@@ -568,7 +629,7 @@ UseRun(x) ==
           /\ nextSeq' = IF UseNumberUnderLock /\ ~covered THEN nextSeq + 1 ELSE nextSeq
     /\ shared' = IF LockToCommit THEN shared ELSE shared \ {x}
     /\ UNCHANGED <<log, holder, plock, c, answered, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* The commit: the entry and the bulk row (the greater of the two times, as an upsert would), then
 \* the locks go (Postgres makes a commit visible before it releases the transaction's locks). A
@@ -586,7 +647,7 @@ UseCommit(x) ==
     /\ plock' = IF plock = x THEN None ELSE plock
     /\ u' = [u EXCEPT ![x].pc = "committed"]
     /\ UNCHANGED <<nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, tamper, tampers, cache, restores, pnow, backs>>
+                   cover, tamper, tampers, cache, restores, pnow, backs, issueVars>>
 
 \* The call fails before its commit (a lost connection): rolled back, nothing written, the Worker
 \* answers 503. Its number is a gap.
@@ -597,7 +658,7 @@ UseFail(x) ==
     /\ plock' = IF plock = x THEN None ELSE plock
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
     /\ UNCHANGED <<log, nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* The Worker, at the deadline, its call not back: 503, and it gives up on the call.
 WorkerGivesUp(x) ==
@@ -608,7 +669,7 @@ WorkerGivesUp(x) ==
     /\ pnow > u[x].deadline
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.replied = TRUE, !.gaveUp = TRUE]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* The call returns: the Worker answers on what it decided, and an allowed value leaves, unless the
 \* Worker gave up on the call (or its deadline has passed). An allowed entry of its own the Worker
@@ -617,17 +678,18 @@ WorkerGivesUp(x) ==
 UseRelease(x) ==
     /\ u[x].pc = "committed"
     /\ LET k == u[x].key
+           sl == Slot(x)
            answers == ~u[x].gaveUp /\ (WorkerHonoursDeadline => pnow <= u[x].deadline)
        IN /\ released' = IF ReleaseAfterCommit /\ u[x].allow /\ answers
                          THEN released \cup {[id |-> x, key |-> k, at |-> u[x].at, deadline |-> u[x].deadline, t |-> pnow]}
                          ELSE released
-          /\ cover' = IF ~u[x].allow THEN [cover EXCEPT ![k] = NoCover]
-                      ELSE IF answers /\ u[x].covered = 0 THEN [cover EXCEPT ![k] = [seq |-> u[x].seq, id |-> x]] ELSE cover
-          /\ cache' = IF SealCache /\ u[x].probed THEN [cache EXCEPT ![k] = [on |-> TRUE, seals |-> u[x].newest, change |-> u[x].newestChange]]
+          /\ cover' = IF ~u[x].allow THEN [cover EXCEPT ![sl] = NoCover]
+                      ELSE IF answers /\ u[x].covered = 0 THEN [cover EXCEPT ![sl] = [seq |-> u[x].seq, id |-> x]] ELSE cover
+          /\ cache' = IF SealCache /\ u[x].probed THEN [cache EXCEPT ![sl] = [on |-> TRUE, seals |-> u[x].newest, change |-> u[x].newestChange]]
                       ELSE cache
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   repeats, tamper, tampers, restores, bulk, pnow, backs>>
+                   repeats, tamper, tampers, restores, bulk, pnow, backs, issueVars>>
 
 \* The Worker dies between the commit and its answer: the log holds a request whose value never
 \* left, the safe side. The client sees the connection fail.
@@ -636,7 +698,7 @@ UseCrash(x) ==
     /\ u[x].pc = "committed"
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 -----------------------------------------------------------------------------
 (* A change: one input revoked, or restored, by one of the changers. *)
@@ -651,14 +713,14 @@ ChangeStart(h) ==
                                           !.seq = IF ChangeNumberUnderLock THEN 0 ELSE nextSeq]]
     /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq ELSE nextSeq + 1
     /\ UNCHANGED <<log, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* After a refused write, the vault reads the row again.
 ChangeReread(h) ==
     /\ c[h].pc = "refused"
     /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.read = Rows[c[h].input]]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* It gets the lock exclusive: no one holds it at all.
 ChangeLock(h) ==
@@ -667,7 +729,7 @@ ChangeLock(h) ==
     /\ holder' = IF ChangeLocks THEN h ELSE holder
     /\ c' = [c EXCEPT ![h].pc = "locked"]
     /\ UNCHANGED <<log, nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Its statement: if the row is no longer the one it read (ChangeCAS), or not the one its object's
 \* newest change wrote (ChangeChecksSeal), nothing is written, the lock goes and the vault reads
@@ -680,13 +742,13 @@ ChangeRun(h) ==
           \/ ChangeChecksSeal /\ Rows[c[h].input] /= NewestIn(log, c[h].input)
        THEN /\ c' = [c EXCEPT ![h].pc = IF ChangeRereads THEN "refused" ELSE "started"]
             /\ holder' = IF holder = h THEN None ELSE holder
-            /\ UNCHANGED <<nextSeq, answered>>
+            /\ UNCHANGED <<nextSeq, answered, issueVars>>
        ELSE /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "ran", !.value = ~c[h].read, !.seq = IF ChangeNumberUnderLock THEN nextSeq ELSE @]]
             /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq + 1 ELSE nextSeq
             /\ holder' = IF LockToCommit THEN holder ELSE None
             /\ answered' = IF CommitBeforeAnswer THEN answered ELSE Committed + 1
     /\ UNCHANGED <<log, shared, plock, u, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* The commit: its entry, and the row it wrote, in place of whatever was there.
 ChangeCommit(h) ==
@@ -696,7 +758,7 @@ ChangeCommit(h) ==
     /\ c' = [c EXCEPT ![h].pc = "committed"]
     /\ tamper' = [tamper EXCEPT ![c[h].input] = [on |-> FALSE, value |-> TRUE]]
     /\ UNCHANGED <<nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Its statement fails instead (a deadline, a lost connection): rolled back, the lock let go; it
 \* starts over. Its number is a gap.
@@ -706,14 +768,76 @@ ChangeAbort(h) ==
     /\ holder' = IF holder = h THEN None ELSE holder
     /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.aborts = @ + 1]]
     /\ UNCHANGED <<log, nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 ChangeAnswer(h) ==
     /\ c[h].pc = "committed"
     /\ answered' = IF answered > Committed THEN answered ELSE Committed
     /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
+
+-----------------------------------------------------------------------------
+(* An issue: a new credential, one change of the log, by one of the issuers, once. *)
+
+\* Its transaction starts. Without IssueNumberUnderLock, its number was taken before its lock.
+IssueStart(i) ==
+    /\ iss[i].pc = "idle"
+    /\ iss' = [iss EXCEPT ![i] = [pc |-> "started", seq |-> IF IssueNumberUnderLock THEN 0 ELSE nextSeq]]
+    /\ nextSeq' = IF IssueNumberUnderLock THEN nextSeq ELSE nextSeq + 1
+    /\ UNCHANGED <<log, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iholder, ishared, bar>>
+
+\* The issue lock shared, unless the barrier holds it; without IssueOwnLock, the fence shared.
+IssueLock(i) ==
+    /\ iss[i].pc = "started"
+    /\ IF IssueOwnLock
+       THEN /\ iholder = None
+            /\ ishared' = ishared \cup {i}
+            /\ UNCHANGED shared
+       ELSE /\ holder = None
+            /\ shared' = shared \cup {i}
+            /\ UNCHANGED ishared
+    /\ iss' = [iss EXCEPT ![i].pc = "locked"]
+    /\ UNCHANGED <<log, nextSeq, holder, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iholder, bar>>
+
+\* The credential's row and its change, numbered now.
+IssueRun(i) ==
+    /\ iss[i].pc = "locked"
+    /\ iss' = [iss EXCEPT ![i] = [pc |-> "ran", seq |-> IF IssueNumberUnderLock THEN nextSeq ELSE @.seq]]
+    /\ nextSeq' = IF IssueNumberUnderLock THEN nextSeq + 1 ELSE nextSeq
+    /\ UNCHANGED <<log, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iholder, ishared, bar>>
+
+\* The commit; its lock goes with it.
+IssueCommit(i) ==
+    /\ iss[i].pc = "ran"
+    /\ log' = log \cup {IssueEntry(iss[i].seq, i, SyncCommit)}
+    /\ ishared' = ishared \ {i}
+    /\ shared' = shared \ {i}
+    /\ iss' = [iss EXCEPT ![i].pc = "committed"]
+    /\ UNCHANGED <<nextSeq, holder, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iholder, bar>>
+
+\* It fails before its commit: rolled back, its number a gap; the sign-in is refused (asked again, it is another).
+IssueFail(i) ==
+    /\ Failures
+    /\ iss[i].pc = "ran"
+    /\ ishared' = ishared \ {i}
+    /\ shared' = shared \ {i}
+    /\ iss' = [iss EXCEPT ![i].pc = "failed"]
+    /\ UNCHANGED <<log, nextSeq, holder, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iholder, bar>>
+
+\* The sign-in answers: the credential's token is handed out, and uses may name it.
+IssueAnswer(i) ==
+    /\ iss[i].pc = "committed"
+    /\ iss' = [iss EXCEPT ![i].pc = "answered"]
+    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iholder, ishared, bar>>
+
+IssueStep(i) == IssueStart(i) \/ IssueLock(i) \/ IssueRun(i) \/ IssueCommit(i) \/ IssueAnswer(i)
 
 -----------------------------------------------------------------------------
 (* The checkpointer. *)
@@ -722,15 +846,40 @@ ChangeAnswer(h) ==
 \* never lowered; every number handed out so far closed. No lag: with every number taken under
 \* the lock, none is still in flight. With BarrierChecksFloor, a floor not at the value the signer
 \* last wrote is an alarm, and nothing more is closed or signed.
+\* With issues, the barrier waits for them on the issue lock exclusive, then the fence (or, without
+\* BarrierIssueFirst, the other way round); it takes them one at a time, holding the first while it
+\* waits for the second, and closes with the last. With no issuer the issue lock is always free:
+\* taken in the same step.
+BarrierLocks ==
+    LET fence == IF CheckpointLocks THEN <<"fence">> ELSE <<>>
+        issue == IF BarrierWaitsIssues /\ Issuers /= {} THEN <<"issue">> ELSE <<>>
+    IN IF BarrierIssueFirst THEN issue \o fence ELSE fence \o issue
+LockOpen(l) == IF l = "fence" THEN LockFree ELSE iholder = None /\ ishared = {}
+
+BarrierLock ==
+    /\ ~cp.open
+    /\ Cardinality(signed) < MaxCheckpoints
+    /\ bar + 1 < Len(BarrierLocks)
+    /\ LockOpen(BarrierLocks[bar + 1])
+    /\ holder' = IF BarrierLocks[bar + 1] = "fence" THEN "barrier" ELSE holder
+    /\ iholder' = IF BarrierLocks[bar + 1] = "issue" THEN "barrier" ELSE iholder
+    /\ bar' = bar + 1
+    /\ UNCHANGED <<log, nextSeq, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, ishared>>
+
 CheckpointClose ==
     /\ ~cp.open
     /\ Cardinality(signed) < MaxCheckpoints
-    /\ CheckpointLocks => LockFree
+    /\ bar + 1 >= Len(BarrierLocks)
+    /\ Len(BarrierLocks) > 0 => LockOpen(BarrierLocks[Len(BarrierLocks)])
     /\ BarrierChecksFloor => floor = lastFloor
     /\ floor' = Max(floor, pnow - D)
     /\ cp' = [open |-> TRUE, from |-> lastUpto, upto |-> nextSeq - 1, readFloor |-> lastFloor, floor |-> Max(floor, pnow - D)]
-    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, lastUpto, lastFloor, signed, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+    /\ holder' = IF holder = "barrier" THEN None ELSE holder
+    /\ iholder' = None
+    /\ bar' = 0
+    /\ UNCHANGED <<log, nextSeq, shared, plock, u, c, answered, released, lastUpto, lastFloor, signed, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, ishared>>
 
 \* Later, outside any lock: it reads the window (the changes by number, the uses through the `at`
 \* index from the previous barrier's floor) and signs their numbers.
@@ -743,7 +892,7 @@ CheckpointSign ==
     /\ lastFloor' = cp.floor
     /\ cp' = [cp EXCEPT !.open = FALSE]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 -----------------------------------------------------------------------------
 (* Postgres: the WAL flushed; a crash. *)
@@ -753,7 +902,7 @@ Flush ==
     /\ \E e \in log : ~e.durable
     /\ log' = {[e EXCEPT !.durable = TRUE] : e \in log}
     /\ UNCHANGED <<nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Postgres crashes and restarts: what was not flushed is gone, every statement in flight is
 \* rolled back, every lock let go (the Workers answer 503). The sequence never goes back below a
@@ -768,8 +917,12 @@ Crash ==
     /\ u' = [x \in Uses |-> IF u[x].pc \in {"started", "held", "locked", "waiting", "read", "ran"}
                             THEN [u[x] EXCEPT !.pc = "done", !.replied = TRUE] ELSE u[x]]
     /\ c' = [h \in Changers |-> IF c[h].pc \in {"started", "refused", "locked", "ran"} THEN [c[h] EXCEPT !.pc = "idle"] ELSE c[h]]
+    /\ iss' = [i \in Issuers |-> IF iss[i].pc \in {"started", "locked", "ran"} THEN [iss[i] EXCEPT !.pc = "idle"] ELSE iss[i]]
+    /\ iholder' = None
+    /\ ishared' = {}
+    /\ bar' = 0
     /\ UNCHANGED <<nextSeq, answered, released, cp, lastUpto, lastFloor, signed, floor, cover, repeats, tamper, tampers,
-                   cache, restores, bulk, pnow, backs>>
+                   cache, restores, bulk, pnow, backs, issueVars>>
 
 -----------------------------------------------------------------------------
 (* Attacks and accidents. *)
@@ -783,7 +936,7 @@ Tamper ==
              tamper' = [tamper EXCEPT ![i] = [on |-> TRUE, value |-> v]]
     /\ tampers' = tampers + 1
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
-                   cover, repeats, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* The writer lowers the floor of `at`, an unsigned row.
 TamperFloor ==
@@ -792,7 +945,7 @@ TamperFloor ==
     /\ floor' = floor - 1
     /\ tampers' = tampers + 1
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, crashes,
-                   cover, repeats, tamper, cache, restores, bulk, pnow, backs>>
+                   cover, repeats, tamper, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* A restore from a backup, while no call is in flight: the log back to an earlier point, the rows
 \* (the bulk rows as that log made them) and the sequence with it. What changes had answered is now
@@ -801,6 +954,8 @@ Restore ==
     /\ restores < MaxRestores
     /\ \A x \in Uses : u[x].pc \in {"idle", "done"}
     /\ \A h \in Changers : c[h].pc = "idle"
+    /\ \A i \in Issuers : iss[i].pc \in {"idle", "answered", "failed"}
+    /\ bar = 0
     /\ ~cp.open
     /\ \E k \in 0..(nextSeq - 1) :
           LET kept == {e \in log : e.seq <= k}
@@ -814,7 +969,7 @@ Restore ==
     /\ signed' = {}
     /\ lastUpto' = 0
     /\ restores' = restores + 1
-    /\ UNCHANGED <<holder, shared, plock, u, c, cp, lastFloor, floor, crashes, cover, tampers, cache, pnow, backs>>
+    /\ UNCHANGED <<holder, shared, plock, u, c, cp, lastFloor, floor, crashes, cover, tampers, cache, pnow, backs, issueVars>>
 
 -----------------------------------------------------------------------------
 
@@ -828,7 +983,8 @@ Next ==
     \/ Tick \/ ClockBack
     \/ \E x \in Uses : UseStart(x) \/ UseHold(x) \/ UseResume(x) \/ UseStep(x) \/ UseFail(x) \/ UseCrash(x)
     \/ \E h \in Changers : ChangeStep(h) \/ ChangeAbort(h)
-    \/ CheckpointClose \/ CheckpointSign
+    \/ \E i \in Issuers : IssueStep(i) \/ IssueFail(i)
+    \/ BarrierLock \/ CheckpointClose \/ CheckpointSign
     \/ Flush \/ Crash \/ Tamper \/ TamperFloor \/ Restore
 
 Spec == Init /\ [][Next]_vars
@@ -841,7 +997,8 @@ FairSpec ==
     /\ WF_vars(Tick)
     /\ \A x \in Uses : WF_vars(UseStep(x))
     /\ \A h \in Changers : WF_vars(ChangeStep(h))
-    /\ WF_vars(CheckpointClose) /\ WF_vars(CheckpointSign) /\ WF_vars(Flush)
+    /\ \A i \in Issuers : WF_vars(IssueStep(i))
+    /\ WF_vars(BarrierLock) /\ WF_vars(CheckpointClose) /\ WF_vars(CheckpointSign) /\ WF_vars(Flush)
 
 -----------------------------------------------------------------------------
 (* What must hold. *)
@@ -922,6 +1079,13 @@ BulkReplayAgrees ==
     LET R == BulkReplay(log)
     IN /\ \A e \in UsesIn(log) : e.key /= None => <<e.seq, e.admitted>> \in R.decided
        /\ R.rows = bulk
+
+\* R58: a use never waits on an issue. No issue holds the fence, and the barrier never holds the
+\* fence while an issue holds the issue lock: a use waits only on changes and the barrier, the
+\* barrier on the fence only once every issue numbered before it has ended (BarrierWaitsIssues).
+UsesNeverWaitOnIssues ==
+    /\ \A i \in Issuers : i \notin shared /\ holder /= i
+    /\ holder = "barrier" => ishared = {}
 
 (* Liveness. *)
 

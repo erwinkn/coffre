@@ -16,16 +16,19 @@
 // With `--log 0.15`, the vault keeps 0.15's log: the sign-in's credential is a change of it, which a Node
 // checkpointer seals before the sign-in answers (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own
 // connection, near.
+// With `--uses <rate>`, uses run beside, that many a second, each one `use_credential` call through a relay of its
+// own (uses.ts), and it reports their latency and refusals for each level, `0` jobs a level of uses alone (`--idle`
+// seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
-//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15]
+//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 [--use-pool 100] [--idle 5]] [--signin-only]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connect, createServer, type Server } from 'node:net';
 import { parseArgs } from 'node:util';
+import { Worker } from 'node:worker_threads';
 
 import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
@@ -44,7 +47,9 @@ import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transp
 import { auditWatch } from '../../src/plugins/audit-watch.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
-import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
+import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
+import { farPostgres, percentile } from './far.ts';
+import type { UseLoad, UsePhase } from './uses.ts';
 
 const { values } = parseArgs({
   options: {
@@ -52,11 +57,17 @@ const { values } = parseArgs({
     rounds: { type: 'string', default: '5' },
     jobs: { type: 'string', default: '1,3,10' },
     log: { type: 'string', default: '0.14' },
+    uses: { type: 'string', default: '0' },
+    idle: { type: 'string', default: '5' },
+    'use-pool': { type: 'string', default: '100' },
+    'signin-only': { type: 'boolean', default: false },
   },
 });
 const RTT = Number(values.rtt);
 const ROUNDS = Number(values.rounds);
 const JOBS = values.jobs.split(',').map(Number);
+const USES = Number(values.uses);
+const SIGNIN_ONLY = values['signin-only'];
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -66,27 +77,6 @@ const ISSUER = 'https://token.actions.githubusercontent.com';
 const KEYS = `${ISSUER}/.well-known/jwks`;
 const CLAIMS = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/market/.github/workflows/build.yml@refs/heads/dev', ref: 'refs/heads/dev', event_name: 'push' };
 const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
-
-/** Postgres as Hyperdrive serves it from far away: each chunk delayed by half the round trip, each way. */
-async function farPostgres(at: string, rtt: number): Promise<{ url: string; close(): Promise<void> }> {
-  const target = new URL(at);
-  const server: Server = createServer((client) => {
-    const upstream = connect(Number(target.port), target.hostname);
-    const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => from.on('data', (chunk) => setTimeout(() => to.write(chunk), rtt / 2));
-    relay(client, upstream);
-    relay(upstream, client);
-    const end = () => {
-      client.destroy();
-      upstream.destroy();
-    };
-    client.on('close', end).on('error', end);
-    upstream.on('close', end).on('error', end);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const url = new URL(at);
-  url.port = String((server.address() as { port: number }).port);
-  return { url: url.toString(), close: () => new Promise((resolve) => server.close(() => resolve())) };
-}
 
 /** What a phase ran: its statements on the app's connection and the vault's, and how long they took beyond the round trip each, by statement. */
 type Cost = { app: number; vault: number; vaultCalls: number; waitedMs: number; waits: Map<string, number> };
@@ -138,12 +128,14 @@ const idle: { vault: LocalVault; pool: TimedPool }[] = [];
 const checkpointerPool = new pg.Pool({ connectionString: TEST_VAULT_DATABASE_URL, max: 4 });
 const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
 let checkpointer: RunningCheckpointer | null = null;
+let loader: Worker | null = null;
 try {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
   if (values.log === '0.15') {
     await db.owner.execute(sql`DELETE FROM log_checkpoints`);
     await db.owner.execute(sql`DELETE FROM log_tiles`);
+    await db.owner.execute(sql`DELETE FROM log_uses`);
     await db.owner.execute(sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
     checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), seed: derivedSigningKey(kek), memory: join(memory, 'memory') });
   }
@@ -237,9 +229,10 @@ try {
       await pool.end();
     }
   };
-  /** One CI job: its sign-in, its list and its reveal, one after the other. */
+  /** One CI job: its sign-in, its list and its reveal, one after the other; or, with `--signin-only`, its sign-in. */
   const job = async () => {
     const oidc = await request(() => new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token() }) }));
+    if (SIGNIN_ONLY) return { oidc };
     const { token: credential } = oidc.body as { token: string };
     const authorization = `Bearer ${credential}`;
     const list = await request(() => new Request(`${ORIGIN}/api/secrets/ci/dev`, { headers: { authorization } }));
@@ -247,20 +240,61 @@ try {
     return { oidc, list, reveal };
   };
 
-  const percentile = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)]!;
-  console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: sign-in, list, reveal of ${SEVEN.length} keys, all as ${MEMBER}`);
+  console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}`);
   // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day.
   await room(1);
   await job();
+  // Uses beside, `--uses` a second (uses.ts), as 0.15's hot path makes them.
+  if (USES > 0) {
+    const today = Date.now();
+    await db.owner.execute(sql`SELECT make_day(${new Date(today).toISOString().slice(0, 10)}::date), make_day(${new Date(today + 86_400_000).toISOString().slice(0, 10)}::date)`);
+    // A fleet's uses: 100 services' credentials, each of the seven keys, so that no one principal's bulk row serializes
+    // them (a key's refresh takes its principal's lock), as one service's thousand a second would. What the vault
+    // then decides on them does not change what the statement costs.
+    const credentials: string[] = [];
+    for (let n = 0; n < 100; n += 1) {
+      const principal = `token:fleet-${n}`;
+      const id = crypto.randomUUID();
+      await db.owner.execute(sql`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+        VALUES (${principal}, 'active', 0, ${Date.now()}, 'system:bench', ${Date.now()}, 'system:bench', 0, ${Buffer.alloc(32)})`);
+      await db.owner.execute(sql`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at)
+        VALUES (${id}, 'service', ${Buffer.alloc(32)}, ${randomBytes(32)}, 'h', 0, ${principal}, 'system:bench', ${new Date(Date.now() + 86_400_000)})`);
+      credentials.push(id);
+    }
+    const secrets = (await db.owner.execute<{ id: string }>(sql`SELECT id FROM secrets`)).rows.map(({ id }) => id);
+    const load: UseLoad = { url: TEST_HOT_DATABASE_URL, rtt: RTT, rate: USES, pool: Number(values['use-pool']), credentials, secrets, seed: derivedSigningKey(kek) };
+    loader = new Worker(new URL('./uses.ts', import.meta.url), { workerData: load });
+    await new Promise((resolve) => loader!.once('message', resolve));
+  }
+  /** The uses from now on count toward `phase`, or none (null): the binding's renewal between rounds is no sign-in's. */
+  const usesIn = async (phase: string | null) => {
+    if (loader === null) return;
+    loader.postMessage({ phase });
+    await new Promise((resolve) => loader!.once('message', resolve));
+  };
+  // Every connection's plans made, and every key's bulk row written, before the first level.
+  await usesIn('warm');
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  await usesIn(null);
   for (const jobs of JOBS) {
+    if (jobs === 0) {
+      // Uses alone: the baseline the others are held to.
+      await usesIn('0 jobs');
+      await new Promise((resolve) => setTimeout(resolve, Number(values.idle) * 1000));
+      await usesIn(null);
+      continue;
+    }
     const phases = { oidc: [] as { ms: number; cost: Cost }[], list: [] as { ms: number; cost: Cost }[], reveal: [] as { ms: number; cost: Cost }[] };
     for (let round = 0; round < ROUNDS; round += 1) {
       await room(jobs);
+      await usesIn(`${jobs} jobs`);
       for (const done of await Promise.all(Array.from({ length: jobs }, job))) {
-        for (const phase of ['oidc', 'list', 'reveal'] as const) phases[phase].push(done[phase]);
+        for (const phase of ['oidc', 'list', 'reveal'] as const) if (done[phase] !== undefined) phases[phase].push(done[phase]);
       }
+      await usesIn(null);
     }
     for (const [phase, runs] of Object.entries(phases)) {
+      if (runs.length === 0) continue;
       const ms = runs.map((run) => run.ms).sort((a, b) => a - b);
       const mean = (pick: (cost: Cost) => number) => (runs.reduce((sum, run) => sum + pick(run.cost), 0) / runs.length).toFixed(1);
       const waits = new Map<string, number>();
@@ -272,7 +306,20 @@ try {
       for (const [what, waited] of [...waits].sort((a, b) => b[1] - a[1]).slice(0, 3)) console.log(`         ${(waited / runs.length).toFixed(0).padStart(5)} ms/run  ${what}`);
     }
   }
+  if (loader !== null) {
+    loader.postMessage({ report: true });
+    const { phases } = await new Promise<{ phases: UsePhase[] }>((resolve) => loader!.on('message', (message: { phases?: UsePhase[] }) => message.phases && resolve(message as { phases: UsePhase[] })));
+    console.log(`uses, ${USES}/s beside, each one round trip (ms; refused: the database's own answers and errors):`);
+    for (const use of phases.filter(({ phase }) => phase !== 'warm')) {
+      const refused = Object.entries(use.refused).map(([why, n]) => `${why} ${n}`).join(', ') || 'none';
+      console.log(
+        `  ${use.phase.padEnd(8)} ${String(use.sent).padStart(6)} uses  p50 ${use.p50.toFixed(1).padStart(6)}  p90 ${use.p90.toFixed(1).padStart(6)}  p99 ${use.p99.toFixed(1).padStart(6)}  ` +
+          `max ${use.max.toFixed(1).padStart(7)}  past 2 rtt ${(use.slow * 100).toFixed(1).padStart(5)}%  refused: ${refused}`,
+      );
+    }
+  }
 } finally {
+  await loader?.terminate();
   await Promise.all(idle.map(({ vault, pool }) => vault.close().then(() => pool.end())));
   await Promise.all([farApp.close(), farVault.close()]);
   await checkpointer?.stop();
