@@ -230,6 +230,8 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
   // The object, if it is of the kind the change is about: what every change but a create works on.
   const of = <K extends Kind>(kind: K) => (ref.kind === kind && before?.kind === kind ? (before as Extract<Input, { kind: K }>) : null);
   const created = (kind: Kind) => ref.kind === kind && before === null;
+  // The roles and the policy are one object each: a change to another of their kind does nothing.
+  if ((ref.kind === 'roles' || ref.kind === 'policy') && ref.id !== ROLES_REF.id) return undefined;
   switch (op.op) {
     case 'genesis': {
       const id = refOf(op.input);
@@ -333,6 +335,8 @@ function samePlace(a: GrantPlace, b: GrantPlace): boolean {
  * the log already says the same.
  */
 export function limitChange(policy: PolicyInput | null, configured: BulkLimit): Op | null {
+  // One no change would apply (a window of a fraction of a millisecond) must stop the start, not leave the log policy-less.
+  if (!allowedLimit(configured)) throw new Error(`bulkLimit must be a whole count of at least 1 and a whole number of milliseconds up to a day, got ${JSON.stringify(configured)}`);
   if (policy !== null && policy.bulk.count === configured.count && policy.bulk.windowMs === configured.windowMs) return null;
   return { op: 'bulk.limit', count: configured.count, windowMs: configured.windowMs };
 }

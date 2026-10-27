@@ -94,7 +94,7 @@ export type Replayed = {
   /** The cap the policy's newest change logged: what moves the bulk rows. */
   limit: BulkLimit | null;
   bulk: Map<string, BulkRows>;
-  /** The last entry's number: a replay resumed on this state goes on from it. */
+  /** The highest entry number seen: a replay resumed on this state goes on from it. */
   last: bigint;
   /** Entries out of number order, changes that do nothing, and seals that are not their object's. */
   faults: string[];
@@ -115,8 +115,9 @@ export function replay(
   replayed: Replayed = emptyReplay(),
 ): Replayed {
   for (const entry of entries) {
+    // Against the highest number seen: after 10, both 5 and 7 are out of order.
     if (entry.number <= replayed.last) replayed.faults.push(`${entry.number}: after ${replayed.last}, out of number order`);
-    replayed.last = entry.number;
+    else replayed.last = entry.number;
     if (entry.kind === 'change') {
       change(keys, replayed, entry);
       continue;
@@ -140,6 +141,6 @@ function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   }
   if (after === null) replayed.rows.delete(key);
   else replayed.rows.set(key, { row: after, seal: entry.seal });
-  if (after?.kind === 'policy') replayed.limit = after.bulk;
+  if (after?.kind === 'policy' && entry.ref.id === POLICY_REF.id) replayed.limit = after.bulk;
   replayed.newest.set(key, entry.seal);
 }

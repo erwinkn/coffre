@@ -279,6 +279,29 @@ test('a replay resumed on its own state goes on from its last number: an entry r
   replay(SEAL_KEYS, w.log.slice(-1), undefined, state);
   assert.equal(state.faults.length, 1);
   assert.match(state.faults[0]!, /out of number order/);
+  // Against the highest number seen: 10, then 5 and 7, faults twice.
+  const use = (number: bigint) => ({ kind: 'use' as const, number, request: ask(1, 1) });
+  const base = replay(SEAL_KEYS, w.log.slice(0, -1));
+  const at = base.last;
+  const after = replay(SEAL_KEYS, [use(at + 10n), use(at + 5n), use(at + 7n)], undefined, base);
+  assert.equal(after.faults.filter((fault) => /out of number order/.test(fault)).length, 2);
+  assert.equal(after.last, at + 10n);
+});
+
+test('the roles and the policy are one object each: a change to another of their kind does nothing, and moves no cap', () => {
+  const other = { kind: 'policy', id: 'other' } as const;
+  assert.equal(applyOp(null, other, { op: 'bulk.limit', count: 999, windowMs: 60_000 }), undefined);
+  assert.equal(applyOp(null, { kind: 'roles', id: 'other' }, { op: 'role.define', table: 'roles', role: 'viewer', definition: null }), undefined);
+  const w = market({ count: 1, windowMs: 60_000 });
+  const forged = { kind: 'policy' as const, bulk: { count: 999, windowMs: 60_000 } };
+  const result = replay(SEAL_KEYS, [...w.log, { kind: 'change', number: 1000n, at: 0, ref: other, op: { op: 'bulk.limit', count: 999, windowMs: 60_000 }, seal: sealOf(SEAL_KEYS[0]!, other, forged) }]);
+  assert.equal(result.faults.length, 1);
+  assert.deepEqual(result.limit, { count: 1, windowMs: 60_000 });
+});
+
+test('a vault start refuses a cap no change would apply, rather than leave the log with no policy', () => {
+  assert.throws(() => limitChange(null, { count: 10, windowMs: 74_074.02 }), /whole number of milliseconds/);
+  assert.throws(() => limitChange(null, { count: 0, windowMs: 60_000 }));
 });
 
 test("the roles object holds an Owner's edits only: a role as it ships is no edit, and the release's tables decide the rest", () => {
