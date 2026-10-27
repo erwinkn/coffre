@@ -119,6 +119,14 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Pin the JVM
+        # An exact Temurin build, downloaded rather than the image's: ubuntu-24.04 rolls out over days, so two jobs of
+        # one run can land on images with other Java builds, and the key hashes the JVM. The plan and every shard pin
+        # the same one; bump it in both (docs/formal.md, "In CI").
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 17.0.9+9
       - name: Hash the model's inputs and look for a green run of them
         id: plan
         env:
@@ -190,12 +198,20 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Pin the JVM
+        # An exact Temurin build, downloaded rather than the image's: ubuntu-24.04 rolls out over days, so two jobs of
+        # one run can land on images with other Java builds, and the key hashes the JVM. The plan and every shard pin
+        # the same one; bump it in both (docs/formal.md, "In CI").
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 17.0.9+9
       - name: Hold this runner's Java to the plan's
         env:
           KEY: ${{ needs.formal-plan.outputs.key }}
         run: |
           mine="$(scripts/formal-key.sh | tail -n 1)"
-          [ "$mine" = "$KEY" ] || { echo "::error::This runner's key is $mine, the plan's $KEY: another Java, or another checkout. Re-run all jobs, not only the failed ones."; exit 1; }
+          [ "$mine" = "$KEY" ] || { echo "::error::This runner's key is $mine, the plan's $KEY: another Java build, or another checkout. Re-run all jobs, not only the failed ones."; exit 1; }
       - name: Model-check the shard
         # TLC, pinned by its checksum in the script, on the runner's Java (docs/formal.md).
         run: scripts/formal.sh --workers 4 --heap 4g --shard ${{ matrix.shard }}

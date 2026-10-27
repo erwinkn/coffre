@@ -118,6 +118,19 @@ test('the shards partition formal.sh and the workflow runs each of them', () => 
     assert.ok(tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
 });
 
+test('the plan job and every formal shard run the same exact, pinned Java', () => {
+    // The key hashes the JVM, and a rolling ubuntu-24.04 image gives two jobs of one run other builds.
+    const pins = (job) => {
+        const body = workflow.match(new RegExp(`\\n  ${job}:\\n[\\s\\S]*?(?=\\n  [a-z0-9-]+:\\n)`))[0];
+        return [...body.matchAll(/uses: actions\/setup-java@([0-9a-f]{40}) # .*\n\s+with:\n((?:\s+[a-z-]+: .*\n)+)/g)].map((m) => m[2].replace(/\s+/g, ' ').trim());
+    };
+    const plan = pins('formal-plan');
+    const shard = pins('formal-shard');
+    assert.equal(plan.length, 1);
+    assert.deepEqual(shard, plan);
+    assert.match(plan[0], /distribution: temurin java-version: \d+\.\d+\.\d+\+\d+$/);
+});
+
 test('formal-key.sh is deterministic, keyed on the models and names the Java', () => {
     const cwd = new URL('..', import.meta.url).pathname;
     const key = () => spawnSync('scripts/formal-key.sh', { encoding: 'utf8', cwd });
