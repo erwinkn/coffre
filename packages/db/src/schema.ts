@@ -1063,10 +1063,12 @@ export const logUses = pgTable(
 );
 
 /**
- * The bulk cap (R28, R52): each principal's last logged use of each key,
- * written only by a use that holds the principal's lock, at most once per
- * refresh per key. A row older than the window and a refresh counts for
- * nothing; `prune_bulk` forgets it.
+ * The bulk cap (R28, R52): each principal's last logged use of each key, as
+ * the start of that use's refresh period, written only by a use that holds
+ * the principal's lock (exclusive to enter a key, shared to move it on:
+ * 0028), at most once per refresh per key. A row older than the window, a
+ * refresh, the deadline and a minute counts for nothing; `prune_bulk`
+ * forgets it an hour after that.
  */
 export const logBulk = pgTable(
   'log_bulk',

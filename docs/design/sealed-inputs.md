@@ -143,8 +143,10 @@ otherwise than the replay (`BulkReplayAgrees`). A vault starting with a new
 configuration writes a `bulk.limit` change first (`limitChange`).
 
 - A key counts at `t` while its row's `last > t − window − refresh`.
-- Other keys count over `window + refresh + deadline` (`USE_DEADLINE_MS`,
-  3 s): uses are decided in number order, not by time (TLC's finding).
+- Other keys count over `window + refresh + deadline + ahead`
+  (`USE_DEADLINE_MS`, 3 s; `USE_AHEAD_MS`, 60 s): uses are decided in
+  number order, not by time (TLC's finding), up to the deadline after their
+  `at` or, a Worker's clock ahead, a minute before it (W228, migration 0028).
 - `refresh` is a minute, or a tenth of a shorter window.
 - Every request counts, whatever else refuses it, but those the cap
   refuses: the use's statement writes the row before the vault decides.

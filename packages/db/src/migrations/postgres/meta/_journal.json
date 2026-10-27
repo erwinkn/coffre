@@ -202,7 +202,14 @@
       "idx": 28,
       "version": "7",
       "when": 1793130000000,
-      "tag": "0028_verifier_015",
+      "tag": "0028_use_stalls",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1793140000000,
+      "tag": "0029_verifier_015",
       "breakpoints": true
     }
   ]
