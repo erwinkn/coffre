@@ -108,6 +108,7 @@ import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuth
 
 import { Changes, Moved, NotLogged, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
+import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, objectKey, POLICY_REF, ROLES_REF, sealKey, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
@@ -139,14 +140,14 @@ export type VaultOptions = {
   log?: '0.14' | '0.15';
   /**
    * Under 0.15's log, what a change waits for before it answers: its entry
-   * sealed in a signed checkpoint (R51), the checkpointer's `sealThrough`
-   * (plan PR 6). Required with `log: '0.15'`.
+   * sealed in a signed checkpoint, and witnessed or past the witnesses'
+   * bound (R51): the checkpointer's `sealThrough` (checkpointer.ts). A
+   * change whose entry it does not seal fails, though committed. Required
+   * with `log: '0.15'`.
    */
   sealThrough?: SealThrough;
 };
 
-/** Resolves once the log's entry `number` is sealed in a signed checkpoint, and witnessed or past the witnesses' bound (R51): the checkpointer's. */
-export type SealThrough = (number: bigint) => Promise<unknown>;
 
 /**
  * A vault's configuration made ready to use, once per process, or once per

@@ -15,6 +15,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import pg from 'pg';
 
 import { Changes, genesisCall, loggedChange, NotLogged, payloadOf, type ChangeKeys } from '../src/changes.ts';
+import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { decideUse, type UseRequest } from '../src/decide.ts';
 import { noEdits, objectKey, sealKey, sealOf, type CredentialInput, type EnvironmentInput, type Input, type Op, type Ref, type SecretInput } from '../src/inputs.ts';
@@ -22,6 +23,7 @@ import { authentic, changeEntry, entryMac, logMacKey } from '../src/log-entry.ts
 import { readUse, replay, type LoggedChange, type Replayed } from '../src/log-replay.ts';
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
+import { sealThroughDouble } from './audit-tree.ts';
 import { emptyDatabase, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, postgresOnly, rows, sealed, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
@@ -421,30 +423,29 @@ test('the vault writes its bulk cap into the log at its start, once, and again w
 });
 
 test('a change answers only once its entry is sealed (R51, CommitBeforeAnswer)', async () => {
-  const asked: bigint[] = [];
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
-  const w = await world({ sealThrough: async (number) => {
-    asked.push(number);
-    // The start's own changes, then the one this case watches.
-    if (asked.length > 2) await held;
-  } });
+  // The start's own changes are sealed at once; the one this case watches waits until released.
+  const seal = sealThroughDouble(async () => {
+    if (seal.asked.length > 2) await held;
+    return {} as Sealed;
+  });
+  const w = await world({ sealThrough: seal });
   let answered = false;
   const admitted = w.vault.admit({ actor: ROOT, principal: ADA }).then((outcome) => {
     answered = true;
     return outcome;
   });
   // Committed, and visible to anyone, while the call has not answered: it waits on its seal, for its own entry.
-  for (let tries = 0; (await opsOf(w.keys, member(ADA))).length === 0; tries += 1) {
-    assert.ok(tries < 500, 'the change commits');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  await waitFor(async () => (await opsOf(w.keys, member(ADA))).length > 0, 'the change commits');
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(answered, false);
-  const number = (await changeRows()).at(-1)!.number;
-  assert.equal(asked.at(-1), number);
+  assert.equal(seal.asked.at(-1), (await changeRows()).at(-1)!.number);
   release();
   assert.ok((await admitted).ok);
+  // A seal that fails fails the call, though the change stands: it never answers done.
+  const failing = await world({ sealThrough: sealThroughDouble(() => new Error('its entry is not in the signed tree')) }, w.config);
+  await assert.rejects(failing.vault.admit({ actor: ROOT, principal: BO }), /signed tree/);
 });
 
 test('a change waits for every use in flight, and every use asked meanwhile waits for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {

@@ -8,6 +8,7 @@ import { forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import pg from 'pg';
 
+import type { Sealed, SealThrough } from '../src/checkpointer.ts';
 import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
 
 /**
@@ -64,8 +65,12 @@ export type LocalVault = SpeakingVault<RawLocalVault>;
  */
 export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
 
-/** A checkpointer that seals everything at once: what a change waits on, under 0.15's log, in a test with no tree. */
-export const sealed = async (): Promise<void> => {};
+/**
+ * A checkpointer that seals everything at once: what a change waits on,
+ * under 0.15's log, in a test with no tree. The vault answers nothing of
+ * what it is given back.
+ */
+export const sealed: SealThrough = async () => ({}) as Sealed;
 
 /** `openLocalVault`, spoken to as the app does (`speaking`), keeping the suite's log (`LOG`). */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
