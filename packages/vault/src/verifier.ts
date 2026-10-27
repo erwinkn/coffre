@@ -86,10 +86,25 @@ export type VerifyOptions = {
   anchors?: readonly PairNotes[];
   /** Added to the database's clock where a verdict's age is judged; tests move time with it. */
   clockOffset?: number;
+  /**
+   * A replay a stretch before handed on (`Walked.carry`): the job's run goes
+   * on from it in memory, rather than reading back and writing the whole
+   * replay every stretch (review r6).
+   */
+  carried?: Carried;
+  /** The caller carries each stretch's replay on (`Walked.carry`), and keeps where its run stops (`keepCarried`): no stretch is kept. */
+  carrying?: boolean;
 };
 
-/** How long a replay older than the newest is kept: a walk's next stretch asks for it within seconds. */
-export const REPLAYS_KEPT_MS = 3_600_000;
+/** A replay at a pair, in memory, for the next stretch of one run. */
+export type Carried = { upto: bigint; notes: PairNotes; replayed: Replayed };
+
+/**
+ * How long a kept row older than the newest verdict and the newest replay
+ * is kept: a whole walk's next stretch asks for the one before within
+ * seconds, and each stretch kept forgets the one it went on from.
+ */
+export const REPLAYS_KEPT_MS = 10 * 60_000;
 
 /**
  * How old the newest verdict may be before a page's check says it is out
@@ -106,8 +121,12 @@ export const VERDICT_STALE_MS = 15 * 60_000;
  */
 type Found = { at: number; problems: string[] };
 
-/** The verdict as `verifyTrees` gives it, and whether the database ended behind a pair held outside (`Verdict.behind`). */
-export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boolean };
+/**
+ * The verdict as `verifyTrees` gives it; whether the database ended behind
+ * a pair held outside (`Verdict.behind`); and, for a stretch that stopped
+ * short of the present over a log that holds, its replay to go on from.
+ */
+export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boolean; carry: Carried | null };
 
 /**
  * Two kinds of walk (review r5).
@@ -133,9 +152,10 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   /** Kept rows a walk passed over, not the vault's: named, and forgotten by the next row kept. */
   const passedOver: bigint[] = [];
   const result = (walk: Partial<Walked>): Walked => ({
-    kept: true as const, ok: problems.length === 0, problems, from: null, checkpoint: null, checkpoints: 0, sealed: 0, unsealed: 0, done: false, next: null, audited: null, behind: false, ...walk,
+    kept: true as const, ok: problems.length === 0, problems, from: null, checkpoint: null, checkpoints: 0, sealed: 0, unsealed: 0, done: false, next: null, audited: null, stale: false, behind: false, carry: null, ...walk,
   });
   const page = options.from === undefined && options.replay !== true;
+  const carrying = options.carrying === true || options.carried !== undefined;
 
   const walked = await db.transaction(async (tx) => {
     const store = logStore(tx as unknown as Database);
@@ -161,7 +181,9 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     };
     let start = null as Awaited<ReturnType<typeof opened>>;
     let replaying = !page;
-    if (page) {
+    if (options.carried !== undefined) {
+      start = { ...options.carried, found: null };
+    } else if (page) {
       start = await newestOpened('verdict');
       // No verdict kept yet: a walk that replays, as the job's.
       if (start === null) [replaying, start] = [true, await newestOpened('state')];
@@ -201,8 +223,9 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       ? { at, problems: [...problems, ...audit(replayed, await heldObjects(tx), await bulkRows(tx), at)] }
       : start?.found ?? null;
     return {
-      verdict, start, at, found, replaying, newest,
-      state: replayed === null ? null : JSON.stringify(verdict.done ? (atNewest ?? saved(replayed)) : saved(replayed)),
+      verdict, start, at, found, replaying, newest, replayed,
+      // A stretch whose replay a run carries on in memory is written once, where the run stops (`keepCarried`).
+      state: replayed === null || (!verdict.done && carrying) ? null : JSON.stringify(verdict.done ? (atNewest ?? saved(replayed)) : saved(replayed)),
     };
   }, SNAPSHOT);
   if ('refused' in walked) {
@@ -211,23 +234,25 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   }
   const { verdict, start, at, found, replaying, newest } = walked;
   const head = verdict.head === null ? null : await openPair(verdict.head, keys.verifiers);
+  // The kept row it went on from, a stretch's, forgotten once this one is kept: a whole walk holds one at a time.
+  const before = options.from !== undefined && options.from !== 'start' && start !== null ? [start.upto] : [];
   if (replaying && verdict.done && newest !== null && !verdict.behind) {
     // The verdict, at the newest pair, kept whatever it found, but a database behind the signer, which may be its own
-    // write a moment away; with the replay to go on from only over a log that holds.
-    const state = problems.length === 0 ? walked.state : null;
-    await keep(db, keys, { upto: newest.upto, notes: newest.notes, at, state, verdict: JSON.stringify(found) }, passedOver);
-  } else if (replaying && !verdict.done && head !== null && problems.length === 0) {
+    // write a moment away. The replay to go on from with it only over a log that holds, or one this walk replayed
+    // nothing past: the one it started from, still the vault's (review r6).
+    const state = problems.length === 0 || (start !== null && start.upto === newest.upto) ? walked.state : null;
+    await keep(db, keys, { upto: newest.upto, notes: newest.notes, at, state, verdict: JSON.stringify(found) }, passedOver, before);
+  } else if (replaying && !verdict.done && head !== null && problems.length === 0 && !carrying) {
     // A stretch's replay, for the next stretch to go on from.
-    await keep(db, keys, { upto: head.upto, notes: verdict.head!, at, state: walked.state, verdict: null }, passedOver);
+    await keep(db, keys, { upto: head.upto, notes: verdict.head!, at, state: walked.state, verdict: null }, passedOver, before);
   }
   // What it says: the kept rows it passed over; then a replaying walk's own verdict at the present, the log's problems
   // among them, or a page's check's, the log's problems and the verdict it went on from, if not out of date.
   const named = passedOver.map((upto) => `the replay kept at ${upto} is not the vault's over the checkpoint there: passed over`);
   const said = replaying ? (verdict.done && found !== null ? found.problems : [...problems]) : [...problems, ...(found?.problems ?? [])];
-  if (!replaying && found !== null && found.at < at + (options.clockOffset ?? 0) - VERDICT_STALE_MS) {
-    said.push(`the replay and every row were last verified at ${new Date(found.at).toISOString()}, more than ${VERDICT_STALE_MS / 60_000} minutes ago: the checkpoint job has not reached the present since`);
-  }
   problems.splice(0, problems.length, ...named, ...said);
+  // An out-of-date verdict is not known to hold, nor known not to: said apart from what is wrong (review r6).
+  const stale = !replaying && found !== null && found.at < at + (options.clockOffset ?? 0) - VERDICT_STALE_MS;
   return result({
     from: start === null ? null : start.upto.toString(),
     checkpoint: head === null ? null : { upto: head.upto.toString(), at: head.at },
@@ -237,15 +262,30 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     done: verdict.done,
     next: !replaying || verdict.done || head === null ? null : head.upto.toString(),
     audited: verdict.done ? (found?.at ?? null) : null,
+    stale,
     behind: verdict.behind,
+    carry: replaying && !verdict.done && head !== null && problems.length === 0 && walked.replayed !== null
+      ? { upto: head.upto, notes: verdict.head!, replayed: walked.replayed }
+      : null,
   });
 }
 
+/** Keep the replay a run carried, where it stopped short of the present: the next run goes on from it. */
+export function keepCarried(db: Database, keys: VerifierKeys, carry: Carried, at: number): Promise<void> {
+  return keep(db, keys, { upto: carry.upto, notes: carry.notes, at, state: JSON.stringify(saved(carry.replayed)), verdict: null }, [], []);
+}
+
 /** Keep a row at `upto`, MAC'd over the pair's notes, its replay's hash and its verdict. */
-function keep(db: Database, keys: VerifierKeys, row: { upto: bigint; notes: PairNotes; at: number; state: string | null; verdict: string | null }, forged: readonly bigint[]): Promise<void> {
+function keep(
+  db: Database,
+  keys: VerifierKeys,
+  row: { upto: bigint; notes: PairNotes; at: number; state: string | null; verdict: string | null },
+  forged: readonly bigint[],
+  done: readonly bigint[],
+): Promise<void> {
   const stateHash = row.state === null ? null : createHash('sha256').update(row.state).digest();
   const mac = keptMac(keys.replays[0]!, row.upto, row.notes, stateHash, row.verdict);
-  return keepReplay(db, { upto: row.upto, at: row.at, state: row.state, stateHash, verdict: row.verdict, mac }, REPLAYS_KEPT_MS, forged);
+  return keepReplay(db, { upto: row.upto, at: row.at, state: row.state, stateHash, verdict: row.verdict, mac }, REPLAYS_KEPT_MS, forged, done);
 }
 
 function parseUpto(from: string): bigint | null {

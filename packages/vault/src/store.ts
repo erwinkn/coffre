@@ -988,27 +988,29 @@ export async function keptReplay(db: Queryable, upto: bigint, withState: boolean
  *   it is never an older one.
  * - **A stretch's,** with no verdict, never replaces anything.
  *
- * Then it forgets:
+ * Then it forgets, but never the newest verdict or the newest replay:
  * - those at `forged`, which the walk found were not the vault's;
- * - those older than it and kept for longer than `keptMs` (a walk's next
- *   stretch goes on from the one before within seconds), but never the
- *   newest verdict or the newest replay.
+ * - those at `done`, a stretch's the walk went on from: a whole walk holds
+ *   one at a time (review r6);
+ * - those older than it and kept for longer than `keptMs`: each a full
+ *   copy of the replay.
  *
  * Within bounded lock waits: a row a writer holds locked fails the keep
  * rather than hanging the job. The vault's login deletes and inserts, never
  * updates: a kept row is never edited in place.
  */
-export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number, forged: readonly bigint[] = []): Promise<void> {
+export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number, forged: readonly bigint[] = [], done: readonly bigint[] = []): Promise<void> {
   const { logReplays } = tablesOf(db);
   await db.transaction(async (tx) => {
     await boundLockWaits(tx, 5000, true);
     await tx.delete(logReplays).where(inArray(logReplays.upto, replay.verdict === null ? [...forged] : [replay.upto, ...forged]));
     await tx.insert(logReplays).values(replay).onConflictDoNothing();
-    const newest = (column: SQLWrapper) => sql`coalesce((SELECT max(k.upto) FROM log_replays k WHERE ${column} IS NOT NULL), -1)`;
-    await tx.delete(logReplays).where(and(
-      lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs),
-      sql`${logReplays.upto} <> ${newest(sql.raw('k.verdict'))}`, sql`${logReplays.upto} <> ${newest(sql.raw('k.state_hash'))}`,
-    ));
+    const newest = (column: string) => sql`coalesce((SELECT max(k.upto) FROM log_replays k WHERE ${sql.raw(`k.${column}`)} IS NOT NULL), -1)`;
+    const kept = and(sql`${logReplays.upto} <> ${replay.upto}`, sql`${logReplays.upto} <> ${newest('verdict')}`, sql`${logReplays.upto} <> ${newest('state_hash')}`);
+    await tx.delete(logReplays).where(and(kept, or(
+      done.length === 0 ? sql`false` : inArray(logReplays.upto, [...done]),
+      and(lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs)),
+    )));
   });
 }
 

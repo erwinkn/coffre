@@ -194,13 +194,13 @@ test('review r5: a page\'s check never reads the replay kept, whatever its size:
   clean(await w.verify());
 });
 
-test('review r5: a verdict older than three runs of the job is out of date: the seal is withheld', async () => {
+test('review r5: a verdict older than three runs of the job is out of date: the seal is withheld, the log not called broken', async () => {
   const w = await instance();
   clean(await w.audited());
   w.clock.offset = 16 * 60_000;
+  // Not known to hold, nor known not to: out of date, not broken (review r6).
   const stale = await w.verify();
-  assert.equal(stale.problems.length, 1);
-  assert.match(stale.problems[0]!, /^the replay and every row were last verified at .*, more than 15 minutes ago: the checkpoint job has not reached the present since$/);
+  assert.ok(stale.ok && stale.stale, JSON.stringify(stale));
   // The job's next run brings a fresh one.
   await w.vault.checkpoint();
   w.clock.offset = 0;
@@ -470,4 +470,44 @@ test('review r4: the checkpoint job walks on, stretch after stretch, to the pres
   clean(checked);
   assert.equal(checked.sealed, 0, 'the job reached the present: nothing left for the page');
   assert.ok(checked.audited !== null);
+});
+
+test('review r6: the job carries its replay from stretch to stretch in memory and keeps it once; a whole walk holds one stretch at a time', async () => {
+  const w = await instance({ checkpoint: 2, verify: 2 });
+  for (let i = 0; i < 5; i += 1) {
+    await w.use();
+    await w.use();
+    await w.cp.tick();
+  }
+  const kept = async () => rows<{ upto: string | number; state: boolean; verdict: boolean }>(db.owner, sql`SELECT upto, state_hash IS NOT NULL AS state, verdict IS NOT NULL AS verdict FROM log_replays ORDER BY upto`);
+  await w.vault.checkpoint();
+  // Several stretches, one row: the verdict at the present, with its replay.
+  assert.deepEqual((await kept()).map((r) => [Boolean(r.state), Boolean(r.verdict)]), [[true, true]]);
+  // A whole walk: each stretch forgets the one before; the job's row stays.
+  for (let from: string | null = 'start'; from !== null; ) {
+    const stretch = await w.verify(from);
+    assert.deepEqual(stretch.problems, []);
+    assert.ok((await kept()).length <= 2, `${(await kept()).length} rows kept`);
+    from = stretch.next;
+  }
+  assert.equal((await kept()).length, 1, 'the whole walk ends at the job\'s pair, as its verdict');
+});
+
+test('review r6: a broken verdict at the pair the replay was kept at keeps that replay to go on from', async () => {
+  const w = await instance();
+  clean(await w.audited());
+  const [drop, add] = ENGINE === 'postgres'
+    ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
+    : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
+  await run(db.owner, drop);
+  try {
+    // A quiet log: the job's verdict says the index is gone, beside the replay it went on from, still the vault's.
+    await w.vault.checkpoint();
+    const [row] = await rows<{ state: boolean; verdict: string }>(db.owner, sql`SELECT state_hash IS NOT NULL AS state, verdict FROM log_replays WHERE verdict IS NOT NULL`);
+    assert.ok(Boolean(row!.state) && /the indexes that keep each request/.test(row!.verdict));
+  } finally {
+    await run(db.owner, add);
+  }
+  await w.vault.checkpoint();
+  clean(await w.verify());
 });

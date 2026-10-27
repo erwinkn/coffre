@@ -130,7 +130,7 @@ import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
-import { verifierKeys, verifyTrees, type VerifierKeys, type VerifyOptions } from './verifier.ts';
+import { keepCarried, verifierKeys, verifyTrees, type VerifierKeys, type VerifyOptions, type Walked } from './verifier.ts';
 
 export type VaultOptions = {
   /**
@@ -3099,7 +3099,9 @@ class VaultService implements Vault {
     if (from !== undefined && (typeof from !== 'string' || !/^(start|0|[1-9][0-9]{0,18})$/.test(from) || (from !== 'start' && BigInt(from) > MAX_NUMBER))) {
       throw new Error("verifyTrees goes on from `start` or a pair's number, in decimal");
     }
-    return this.#walkTrees({ ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify });
+    // What crosses to the app: the verdict, never the replay a stretch carries, nor the retry's signal.
+    const { behind: _behind, carry: _carry, ...verdict } = await this.#walkTrees({ ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify });
+    return verdict;
   }
 
   /**
@@ -3109,14 +3111,14 @@ class VaultService implements Vault {
    * that walk is walked again a tick later (review r4). A rollback is
    * still behind then.
    */
-  async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Extract<TreeVerification, { kept: true }>> {
+  async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Walked> {
     const anchors = await this.#prepared.log015!.heldOutside();
     const keys = await this.#verifierKeys();
-    const walk = () => verifyTrees(this.#db, keys, { ...options, anchors, clockOffset: this.#prepared.options.clockOffset() }).then(({ behind: _, ...verdict }) => ({ verdict, behind: _ }));
+    const walk = () => verifyTrees(this.#db, keys, { ...options, anchors, clockOffset: this.#prepared.options.clockOffset() });
     const first = await walk();
-    if (!first.behind) return first.verdict;
+    if (!first.behind) return first;
     await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
-    return (await walk()).verdict;
+    return walk();
   }
 
   /**
@@ -3131,12 +3133,13 @@ class VaultService implements Vault {
   async #replayOn(): Promise<void> {
     try {
       const began = Date.now();
-      let walked = await this.#walkTrees({ limit: this.#prepared.options.walks.checkpoint, replay: true });
-      while (walked.ok && !walked.done && walked.next !== null && Date.now() - began < REPLAY_ON_MS) {
-        walked = await this.#walkTrees({ from: walked.next, limit: this.#prepared.options.walks.checkpoint, replay: true });
-      }
+      const limit = this.#prepared.options.walks.checkpoint;
+      // Stretch after stretch, the replay carried on in memory, never read back between them (review r6).
+      let walked = await this.#walkTrees({ limit, replay: true, carrying: true });
+      while (walked.carry !== null && Date.now() - began < REPLAY_ON_MS) walked = await this.#walkTrees({ limit, replay: true, carried: walked.carry });
+      if (walked.carry !== null) await keepCarried(this.#db, await this.#verifierKeys(), walked.carry, await store.now(this.#db));
       if (!walked.ok) console.warn(`coffre audit: 0.15's log does not verify: ${walked.problems.slice(0, 3).join('; ')}`);
-      else if (!walked.done) console.warn(`coffre audit: 0.15's log is walked through ${walked.next}, short of the present: the next runs go on`);
+      else if (!walked.done) console.warn(`coffre audit: 0.15's log is replayed through ${walked.carry?.upto ?? walked.next}, short of the present: the next runs go on`);
     } catch (error) {
       console.warn(`coffre audit: 0.15's log was not checked: ${(error as Error).message}`);
     }

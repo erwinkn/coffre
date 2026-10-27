@@ -1744,6 +1744,7 @@ export type Api = {
       done: boolean;
       next: string | null;
       audited: number | null;
+      stale: boolean;
     };
   };
 };

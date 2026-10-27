@@ -374,7 +374,14 @@ async function verifyChain(client: CoffreClient) {
   // Each settled apart: a check of 0.15's log that could not run says so beside 0.14's verdict, never in its place.
   const [chain, trees] = await Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()]);
   if (chain.status === 'rejected') return chainUnknown(chain.reason);
-  if (trees.status === 'fulfilled') return chainResult(chain.value, false, trees.value);
+  if (trees.status === 'fulfilled') {
+    const result = chainResult(chain.value, false, trees.value);
+    // A verdict out of date is not known to hold: not checked, rather than broken.
+    const verdict = trees.value;
+    return verdict.kept && verdict.ok && verdict.stale && verdict.audited !== null && result.integrity === 'intact'
+      ? { ...result, treesFailed: `its last verdict, from ${new Date(verdict.audited).toISOString()}, is out of date: the checkpoint job has not reached the present since` }
+      : result;
+  }
   const unknown = chainUnknown(trees.reason);
   return { ...chainResult(chain.value, false), ...(unknown.integrity === 'unknown' && chain.value.ok ? { treesFailed: unknown.problem } : {}) };
 }

@@ -275,6 +275,12 @@ export type TreeVerification =
        * present.
        */
       audited: number | null;
+      /**
+       * Whether that audit is out of date: older than three runs of the
+       * checkpoint job. Not known to hold, nor known not to: the seal is
+       * withheld, the log not called broken.
+       */
+      stale: boolean;
     };
 
 /**

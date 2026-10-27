@@ -207,11 +207,15 @@ test('the audit page loads its entries and its verification together, and a chec
   assert.equal((verified.chain as { trees: unknown }).trees, null, "0.14's log alone: nothing more to show");
 
   // 0.15's log kept too: its verdict is the badge's, a problem it finds a broken log.
-  const trees = { kept: true, ok: true, problems: [], from: '40', checkpoint: { upto: '52', at: 1_793_000_000_000 }, checkpoints: 1, sealed: 12, unsealed: 0, done: true, next: null, audited: 1_792_999_900_000 };
+  const trees = { kept: true, ok: true, problems: [], from: '40', checkpoint: { upto: '52', at: 1_793_000_000_000 }, checkpoints: 1, sealed: 12, unsealed: 0, done: true, next: null, audited: 1_792_999_900_000, stale: false };
   const sealed = await load(intact, trees);
   assert.deepEqual((sealed.chain as { trees: unknown }).trees, { checkpoint: trees.checkpoint, done: true, audited: trees.audited });
   const problems = ['the principal token:ci: its rows carry another change\'s seal than the newest: put back, or written around the vault', 'one more'];
   const put = await load(intact, { ...trees, ok: false, problems });
+  // A verdict out of date is not checked, never broken.
+  const stale = await load(intact, { ...trees, stale: true });
+  assert.equal(stale.chain?.integrity, 'intact');
+  assert.match(String((stale.chain as { treesFailed: unknown }).treesFailed), /is out of date: the checkpoint job has not reached the present since/);
   // A check of the sealed log that cannot run says so beside the chain's verdict, which stands.
   const failing = await load(intact, Promise.reject(new Error('connection refused')));
   assert.equal(failing.chain?.integrity, 'intact');
