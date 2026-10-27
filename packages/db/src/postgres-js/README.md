@@ -49,12 +49,22 @@ Eight, each marked `Coffre:` in the code:
   as a boolean: `postgresClient` sends arrays as their text before the
   driver sees them) (porsager/postgres#1225). `postgresClient`
   (`packages/db/src/postgres.ts`) sends arrays, dates and objects as text, so none is.
-- **A transaction's BEGIN always learns its connection** (`execute`, in
-  `connection.ts`). Upstream told `begin()` which connection its BEGIN went
-  to only when more statements could follow it there, so a BEGIN queued
-  behind `max_pipeline` statements, or written to a full socket, left
-  `begin()` without its connection, and the connection inside a transaction
-  no one would end.
+- **A transaction's BEGIN goes with its first statement** (`begin`, in
+  `index.ts`; `toBuffer` and `CommandComplete`, in `connection.ts`), a round
+  trip less for every transaction. Upstream sent BEGIN alone and waited for
+  it. The two go under one Sync: as the extended protocol's Parse, Bind and
+  Execute ahead of the statement's, or, for a statement without parameters,
+  in one Query message (`begin;\n<statement>`). Either way, a BEGIN that
+  fails has Postgres skip the statement, which so never runs outside its
+  transaction; what waited behind it is not sent, nor anything the
+  transaction asks after, which fails `TRANSACTION_NOT_BEGUN`, and nothing
+  is rolled back. A transaction that asks nothing sends nothing. It holds
+  its connection from the start, as `reserve()` does, and gives it back
+  once it has ended: upstream gave it back once Postgres said the
+  connection was idle, which it also says after a BEGIN that failed. This
+  replaces PR A's fix for a BEGIN queued behind `max_pipeline` statements,
+  which left `begin()` without its connection: a transaction now waits for
+  a connection of its own instead.
 - **A connection closed while it opens fails its query** (`closed`, in
   `connection.ts`), as node-postgres's "Connection terminated
   unexpectedly" did. Upstream dialled again, at once and for ever (thousands

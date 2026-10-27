@@ -291,13 +291,13 @@ test('on Workers, each kind of value comes back as it was sent, each statement i
   const pool = new HyperdrivePool(proxy.url);
   try {
     await eachKindIn(createDatabase(pool), proxy);
-    // A transaction: BEGIN, its statements, COMMIT, each one round trip.
+    // A transaction: its statements, the first with BEGIN, then COMMIT, each one round trip.
     const before = proxy.trips;
     await createDatabase(pool).transaction(async (tx) => {
       await tx.execute(sql`select ${1}::int`);
       await tx.execute(sql`select ${'two'}::text`);
     });
-    assert.equal(proxy.trips - before, 4);
+    assert.equal(proxy.trips - before, 3);
   } finally {
     await pool.end();
   }

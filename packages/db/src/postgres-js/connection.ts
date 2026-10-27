@@ -70,7 +70,9 @@ let uid = 1;
 const Sync = b.typed('S').end();
 const Flush = b.typed('H').end();
 const SSLRequest = b.untyped().inc(4).i32(80877103).end(0);
-const ExecuteUnnamed = Buffer.concat([b.typed('E').str(N).i32(0).end(), Sync]);
+const ExecuteOnly = b.typed('E').str(N).i32(0).end();
+const ExecuteUnnamed = Buffer.concat([ExecuteOnly, Sync]);
+const BindNothing = b.typed('B').str(N).str(N).i16(0).i16(0).i16(0).end();
 const DescribeUnnamed = b.typed('D').str('S').str(N).end();
 const noop = () => {};
 
@@ -156,15 +158,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       else query = q;
 
       build(q);
-      const more = write(toBuffer(q)) && !q.describeFirst && sent.length < max_pipeline;
-      // Coffre: a transaction's BEGIN learns its connection once written, however many statements are queued before
-      // it or however full the socket. Upstream asked only when more could follow, so a BEGIN behind max_pipeline
-      // statements left begin() without its connection, and the connection in a transaction no one would end.
-      if (q.options.onexecute) {
-        q.options.onexecute(connection);
-        return false;
-      }
-      return more;
+      // Nothing follows a statement that carries its transaction's BEGIN until Postgres has said whether it took.
+      return write(toBuffer(q)) && !q.describeFirst && q.begin === null && sent.length < max_pipeline;
     } catch (e) {
       if (sent.length === 0) write(Sync);
       errored(e);
@@ -175,11 +170,13 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   function toBuffer(q: Query): Buffer {
     if (q.parameters.length >= 65534) throw Errors.generic('MAX_PARAMETERS_EXCEEDED', 'Max number of parameters (65534) exceeded');
 
-    return q.options.simple
-      ? b.typed('Q').str(q.statement!.string + N).end()
-      : q.describeFirst
-        ? Buffer.concat([Parse(q), DescribeUnnamed, Flush])
-        : Buffer.concat([Parse(q), DescribeUnnamed, bound(q)]);
+    // Coffre: a transaction's BEGIN goes with its first statement, a round trip less, and under the same Sync, so that
+    // a BEGIN that fails has Postgres skip the statement, which never runs outside the transaction: in one Query
+    // message, whose statements stop at the first that fails, or as the extended protocol's Parse, Bind and Execute
+    // ahead of the statement's. Upstream sent BEGIN alone and waited for it.
+    if (q.options.simple) return b.typed('Q').str((q.begin === null ? '' : q.begin + ';\n') + q.statement!.string + N).end();
+    const statement = q.describeFirst ? [Parse(q), DescribeUnnamed, Flush] : [Parse(q), DescribeUnnamed, bound(q)];
+    return Buffer.concat(q.begin === null ? statement : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly, ...statement]);
   }
 
   /** The statement's values, bound, and its execution: what follows its Parse once the values can be written. */
@@ -201,7 +198,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     q.describeFirst = parameters.length > 0 && typedByServer(parameters, types);
     q.statement = { string: q.text, types, columns: null };
 
-    if (typeof options.debug === 'function') options.debug(id, q.text, parameters, types);
+    if (typeof options.debug === 'function') {
+      if (q.begin !== null) options.debug(id, q.begin, [], []);
+      options.debug(id, q.text, parameters, types);
+    }
   }
 
   function write(x: Buffer): boolean {
@@ -525,6 +525,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function CommandComplete(x: Buffer): void {
+    // The BEGIN sent ahead of the statement: its answer, not the statement's.
+    if (query!.begin !== null && !query!.began) {
+      query!.began = true;
+      return;
+    }
     rows = 0;
 
     for (let i = x.length - 1; i > 0; i--) {

@@ -34,9 +34,14 @@
   - Node's pool takes the connection idle the shortest, as node-postgres's
     does: upstream cycled through all of them, and Postgres spent ~8% more
     CPU per use at a pool of 16;
-  - a transaction queued behind as many statements as a connection
-    pipelines still learns its connection, which upstream left inside a
-    transaction no one would end;
+  - a transaction's BEGIN goes with its first statement, under one Sync,
+    a round trip less per transaction (a use, a reveal, a change); a BEGIN
+    that fails has Postgres skip that statement, and nothing else of the
+    transaction is sent, so none of it runs outside it. Upstream sent BEGIN
+    alone and waited; and a transaction queued behind as many statements
+    as a connection pipelines was left without its connection, inside a
+    transaction no one would end: a transaction now waits for a connection
+    of its own;
   - a client whose connection was cut under a query, or as it opened,
     closes: upstream waited for the query for ever; and the next query on
     that connection answers its own rows, where upstream gave it the dead

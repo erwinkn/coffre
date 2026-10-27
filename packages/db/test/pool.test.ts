@@ -323,3 +323,52 @@ test('a COPY reaching the client fails, and leaves the connection to the next st
     await client.end();
   }
 });
+
+test('a BEGIN that fails runs none of its transaction outside it: not its first statement, sent with it, nor any after', { skip }, async () => {
+  const sent: string[] = [];
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {}, debug: (_: number, text: string, values: unknown[]) => void sent.push([text, ...values].join(' ')) });
+  try {
+    await client.unsafe('create temporary table kept (n int)');
+    // 'bogus' is no isolation level: Postgres refuses the BEGIN, and skips what came under its Sync.
+    const refused = { code: '42601' };
+    // The first statement with parameters (the extended protocol), without (the simple one), and several at once.
+    await assert.rejects(client.begin('isolation level bogus', (tx) => tx.unsafe('insert into kept values ($1)', [1])), refused);
+    await assert.rejects(client.begin('isolation level bogus', (tx) => tx.unsafe('insert into kept values (2)')), refused);
+    await assert.rejects(client.begin('isolation level bogus', (tx) => [tx.unsafe('insert into kept values ($1)', [3]), tx.unsafe('insert into kept values ($1)', [4])]), refused);
+    // Caught, and another asked: refused, never sent.
+    let after: unknown;
+    await assert.rejects(client.begin('isolation level bogus', async (tx) => {
+      await tx.unsafe('insert into kept values ($1)', [5]).catch(() => {});
+      after = await tx.unsafe('insert into kept values ($1)', [6]).catch((e: unknown) => e);
+    }), refused);
+    assert.equal((after as { code?: string }).code, 'TRANSACTION_NOT_BEGUN');
+    // Each first statement went with its BEGIN, and nothing else: not 4, behind it, nor 6, after it, nor a rollback.
+    const begin = 'begin isolation level bogus';
+    assert.deepEqual(sent.slice(1), [begin, 'insert into kept values ($1) 1', begin, 'insert into kept values (2)', begin, 'insert into kept values ($1) 3', begin, 'insert into kept values ($1) 5']);
+    // Nothing ran; the connection is the pool's again, and a transaction on it begins.
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from kept')], [{ n: 0 }]);
+    await client.begin((tx) => tx.unsafe('insert into kept values ($1)', [7]));
+    assert.deepEqual([...await client.unsafe('select n from kept')], [{ n: 7 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test('a transaction that asks nothing sends nothing, and one that asks sends BEGIN with its first statement', { skip }, async () => {
+  const sent: string[] = [];
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {}, debug: (_: number, text: string) => void sent.push(text) });
+  try {
+    await client.unsafe('select 1');
+    sent.length = 0;
+    assert.equal(await client.begin(() => 'nothing'), 'nothing');
+    await assert.rejects(client.begin(() => Promise.reject(new Error('before any statement'))), { message: 'before any statement' });
+    assert.deepEqual(sent, []);
+    await client.begin('read only', async (tx) => {
+      await tx.unsafe('select $1::int', [1]);
+      await tx.unsafe('select 2');
+    });
+    assert.deepEqual(sent, ['begin read only', 'select $1::int', 'select 2', 'commit']);
+  } finally {
+    await client.end();
+  }
+});

@@ -170,10 +170,10 @@ export default function postgres(given: Options): Sql {
     return (text, args = [], { simple = args.length === 0 } = {}) => new Query(text, args, handler, { simple }, Boolean(options.debug)) as never;
   }
 
-  async function reserve(): Promise<ReservedSql> {
+  /** A connection of the pool's own, held until given back: `reserve`'s, and a transaction's. */
+  async function hold(): Promise<Connection> {
     // Coffre: an ending client opens no connection again (onclose, below), not one to reserve either.
     if (ending) throw Errors.connection('CONNECTION_ENDED', options);
-    const queue = new Queue<Query>();
     // Coffre: the connection idle the shortest (queue.ts, pop), as for a query below.
     const c = open.length
       ? open.pop()!
@@ -182,18 +182,25 @@ export default function postgres(given: Options): Sql {
         queries.push(query);
         if (closed.length) connect(closed.shift()!, query);
       });
+    return move(c, reserved);
+  }
 
-    move(c, reserved);
+  /** `c`, held, given back to the pool. */
+  function giveBack(c: Connection): void {
+    c.reserved = null;
+    // Coffre: given back once the client is ending, the connection ends, which end() waits for; upstream gave it back.
+    if (ending) c.terminate();
+    else onopen(c);
+  }
+
+  async function reserve(): Promise<ReservedSql> {
+    const queue = new Queue<Query>();
+    const c = await hold();
     c.reserved = { next: () => (queue.length ? c.execute(queue.shift()!) : move(c, reserved)), untilReleased: true };
 
     return {
       unsafe: unsafeOn(onReserved),
-      release: () => {
-        c.reserved = null;
-        // Coffre: released once the client is ending, the connection ends, which end() waits for; upstream gave it back.
-        if (ending) c.terminate();
-        else onopen(c);
-      },
+      release: () => giveBack(c),
     };
 
     /** A statement on the connection held: sent, or queued until the connection can take more. */
@@ -207,20 +214,46 @@ export default function postgres(given: Options): Sql {
     const [mode, fn] = args.length === 1 ? ['', args[0]] : args;
     const queries = new Queue<Query>();
     let savepoints = 0;
-    let connection!: Connection;
+    /** The transaction's first statement, which carries its BEGIN (`toBuffer`, connection.ts), once asked. */
+    let first: Query | null = null;
+    /** Its BEGIN failed: nothing more is sent, which would run outside the transaction. */
+    let refused: Error | null = null;
 
-    await new Query('begin ' + mode.replace(/[^a-z ]/gi, ''), [], pooled, { simple: true, onexecute }, Boolean(options.debug)).execute();
-    return await Promise.race([
-      scope(connection, fn),
-      new Promise<never>((_, reject) => (connection.onclose = reject)),
-    ]);
+    // Coffre: the transaction holds its connection from its first statement, BEGIN with it, until it has ended, and
+    // gives it back then. Upstream sent BEGIN alone, waited for it, and gave the connection back once Postgres said it
+    // was idle, which a BEGIN that failed would also have said, its transaction still running.
+    const c = await hold();
+    const mine: Reserved = {
+      next: () => {
+        if (first !== null && !first.began) {
+          refused ??= Errors.generic('TRANSACTION_NOT_BEGUN', 'The transaction did not begin, so its statements were not sent');
+          while (queries.length) queries.shift()!.reject(refused);
+          return void move(c, reserved);
+        }
+        // What waited for the BEGIN goes at once, as many as the connection pipelines; upstream sent one an answer.
+        move(c, reserved);
+        while (queries.length) if (!c.execute(queries.shift()!)) return void move(c, full);
+      },
+      untilReleased: true,
+    };
+    c.reserved = mine;
+    try {
+      return await Promise.race([
+        scope(fn),
+        new Promise<never>((_, reject) => (c.onclose = reject)),
+      ]);
+    } finally {
+      c.onclose = null;
+      // Closed meanwhile, the connection is the pool's again already.
+      if (c.reserved === mine) giveBack(c);
+    }
 
-    async function scope<R>(c: Connection, fn: (sql: TransactionSql) => R | Promise<R>, name?: string): Promise<Settled<R>> {
+    async function scope<R>(fn: (sql: TransactionSql) => R | Promise<R>, name?: string): Promise<Settled<R>> {
       let uncaughtError: unknown;
       let result: Settled<R>;
       const sql: TransactionSql = {
         unsafe: unsafeOn(inTransaction),
-        savepoint: (fn) => scope(c, fn, 's' + savepoints++),
+        savepoint: (fn) => scope(fn, 's' + savepoints++),
       };
       // The transaction's own statements, sent as the simple protocol's, as a statement with no parameters is.
       const own = (text: string) => sql.unsafe(text);
@@ -234,26 +267,27 @@ export default function postgres(given: Options): Sql {
 
         if (uncaughtError) throw uncaughtError;
       } catch (e) {
-        await own(name ? 'rollback to ' + quote(name) : 'rollback');
+        // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed.
+        if (!name) await first?.catch(() => {});
+        if (name || first?.began) await own(name ? 'rollback to ' + quote(name) : 'rollback');
         throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
       }
 
-      if (!name) await own('commit');
+      if (!name && first !== null) await own('commit');
 
       return result;
 
       /** A statement of the transaction's: one that fails and is not waited for fails the transaction all the same. */
       function inTransaction(q: Query): void {
         q.catch((e: unknown) => uncaughtError || (uncaughtError = e));
+        if (refused) return q.reject(refused);
+        if (first === null) {
+          first = q;
+          q.begin = 'begin ' + mode.replace(/[^a-z ]/gi, '');
+        }
         if (c.queue === full) queries.push(q);
         else if (!c.execute(q)) move(c, full);
       }
-    }
-
-    function onexecute(c: Connection): void {
-      connection = c;
-      move(c, reserved);
-      c.reserved = { next: () => (queries.length ? c.execute(queries.shift()!) : move(c, reserved)), untilReleased: false };
     }
   }
 

@@ -436,7 +436,8 @@ Coffre swapped node-postgres for postgres.js (R56): its own copy, now
 TypeScript in `packages/db/src/postgres-js`, with eight changes from
 upstream ([its README](../../packages/db/src/postgres-js/README.md)).
 Unpatched, the swap was a regression in round trips and Node's Postgres CPU;
-the other six close a transaction leak under heavy pipelining, the ways a
+a third sends a transaction's BEGIN with its first statement, a round trip
+less per transaction; the other five close the ways a
 lost or ended connection left a client hanging, open or answering wrong, an
 opening that failed with nothing to catch it, and a `reserve()` that never
 answered.
@@ -452,24 +453,27 @@ answered.
     there: every statement of a use, a reveal or a change would have paid it.
   - Patched, the values go with the statement as text the server types, as
     node-postgres sends them: 1 round trip (11.8 ms), and 4 for the
-    transaction.
+    transaction; 3 once its BEGIN goes with its first statement, under one
+    Sync, so that a BEGIN that fails has Postgres skip the statement
+    (`packages/db/test/pool.test.ts`).
   - `postgresClient` sends arrays, dates and objects as node-postgres does,
     as text, so nothing coffre sends waits for a description at all. In
     workerd, over a whole vault call, not one Flush is sent
     (`packages/vault/test/workers.test.ts`).
 - **Round trips per vault call, warm, in workerd** (statements / round trips):
 
-  | call | node-postgres (main) | postgres.js (patched) |
-  |---|---|---|
-  | access | 1 / 1 | 1 / 1 |
-  | unwrap, a reveal | 7 / 7 | 7 / 7 |
-  | unwrap, a use | 7 / 7 | 7 / 7 |
-  | wrap, a change | 6 / 6 | 6 / 6 |
-  | verifyLog | 12 / 12 | 12 / 11 |
+  | call | node-postgres | postgres.js, patched | BEGIN with the first statement |
+  |---|---|---|---|
+  | access | 1 / 1 | 1 / 1 | 1 / 1 |
+  | unwrap, a reveal | 7 / 7 | 7 / 7 | 6 / 6 |
+  | unwrap, a use | 7 / 7 | 7 / 7 | 6 / 6 |
+  | wrap, a change | 6 / 6 | 6 / 6 | 5 / 5 |
+  | verifyLog | 12 / 12 | 12 / 11 | 11 / 10 |
 
-  The one fewer is two statements of a transaction sent together:
+  verifyLog's one fewer is two statements of a transaction sent together:
   postgres.js pipelines what a transaction asks at once, where node-postgres
-  queued it. The app's requests keep their statement budgets
+  queued it. The last column counts BEGIN and its statement as one, as the
+  proxy sees them: one Sync. The app's requests keep their statement budgets
   (`request-cost.test.ts`, unchanged in what it asserts), each a round trip;
   0.15's use is one statement (`use-cost.test.ts`), so one round trip.
 - **Node's pool.** Upstream takes the connection idle the longest, so a
