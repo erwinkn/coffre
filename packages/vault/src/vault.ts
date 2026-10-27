@@ -176,7 +176,7 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'uses'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
@@ -217,7 +217,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
   return {
     config,
     ...(await keysOf(config.signingKeys)),
-    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks }, uses: options.uses ?? {} },
+    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough) : null,
     limited: false,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),

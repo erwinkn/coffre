@@ -99,7 +99,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   const cover = call.cover;
   const covered = cover !== undefined && b !== undefined && b.last > call.at - refresh && (cached || BigInt(cover.number) > (inputs ?? 0n))
     && (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
-      AND credential = ${call.credential} AND secret = ${call.secretId}`)) !== undefined;
+      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined;
   let number: string | null = null;
   if (!covered) {
     const next = BigInt((await one<{ n: string }>(sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`))!.n);

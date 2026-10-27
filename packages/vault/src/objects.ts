@@ -27,7 +27,7 @@ export type CredentialColumns = {
   /** Its scope as stored, JSON; null for a session's. */
   scope: string | null;
   revoked: boolean;
-  /** The earlier of its expiry and its hard end, if any. */
+  /** The earlier of its expiry and its hard end, if any, in whole ms: a stored time's sub-millisecond part dropped, never rounded. */
   expiresAt: number | null;
 };
 

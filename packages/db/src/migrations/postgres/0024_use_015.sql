@@ -39,7 +39,7 @@ CREATE FUNCTION use_credential(
     p_cover bigint DEFAULT NULL, p_cover_at bigint DEFAULT NULL, p_cover_request bigint DEFAULT NULL, p_known bigint DEFAULT NULL, p_known_mac bytea DEFAULT NULL,
     p_cap_count integer DEFAULT NULL, p_cap_window bigint DEFAULT NULL
 ) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
 DECLARE
     r public.use_row;
     locked boolean := false;
@@ -59,7 +59,7 @@ BEGIN
                     f.at_floor, (lpol.payload::jsonb #>> '{value,bulk,count}')::integer AS cap_count, (lpol.payload::jsonb #>> '{value,bulk,windowMs}')::bigint AS cap_window,
                     lpol.number AS lpol_number, lpol.seal AS p_last,
                     c.principal AS p, c.kind AS c_kind, c.scope AS c_scope, c.revoked_at IS NOT NULL AS c_revoked,
-                    (extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
+                    floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
                     m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal,
                     cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
                     s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, NULL::uuid AS s_source, s.seal AS s_seal,
@@ -118,7 +118,11 @@ BEGIN
                              WHERE o.principal = i.p AND o.secret <> p_secret AND o.last > p_at - i.cap_window - cap.refresh - public.deadline_max()
                              LIMIT i.cap_count
                         ) z
-                    ) ELSE 0 END AS n_others
+                    ) ELSE 0 END AS n_others,
+                    -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing (CoverFresh).
+                    coalesce(p_cover IS NOT NULL AND i.bulk_last > p_at - cap.refresh AND p_cover > coalesce(greatest(lc.number, lm.number, lr.number, i.lpol_number, ls.number, l2.number, l4.number), 0)
+                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover
+                            AND u.credential = p_credential AND u.secret = p_secret AND u.purpose = p_purpose AND u.place IS NOT DISTINCT FROM p_place), false) AS is_covered
                   FROM i
                   CROSS JOIN LATERAL (SELECT least(60000, i.cap_window / 10) AS refresh) cap
                   -- Each input's newest change: one index-only probe each (log_changes_object_idx holds the seal), the principal's
@@ -133,9 +137,7 @@ BEGIN
             w AS (
                 INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place)
                 SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place
-                  FROM v WHERE v.state IS NULL AND NOT (
-                      p_cover IS NOT NULL AND v.bulk_last > p_at - v.refresh AND p_cover > coalesce(v.inputs, 0)
-                      AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover AND u.credential = p_credential AND u.secret = p_secret))
+                  FROM v WHERE v.state IS NULL AND NOT v.is_covered
                 RETURNING log_uses.number
             ),
             k AS (
@@ -144,7 +146,7 @@ BEGIN
                  WHERE v.state IS NULL AND v.p IS NOT NULL AND v.stale AND (v.is_in OR v.n_others < v.cap_count)
                 ON CONFLICT ON CONSTRAINT log_bulk_pkey DO UPDATE SET last = EXCLUDED.last
             )
-            SELECT v.state, (SELECT w.number FROM w), NULL::bigint, v.newest, v.newest_mac, v.inputs, true,
+            SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, v.inputs, true,
                 v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, v.c_last,
                 v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, v.m_last, v.m_old,
                 (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
@@ -175,7 +177,7 @@ BEGIN
                     f.at_floor, (lpol.payload::jsonb #>> '{value,bulk,count}')::integer AS cap_count, (lpol.payload::jsonb #>> '{value,bulk,windowMs}')::bigint AS cap_window,
                     lpol.number AS lpol_number, lpol.seal AS p_last,
                     c.principal AS p, c.kind AS c_kind, c.scope AS c_scope, c.revoked_at IS NOT NULL AS c_revoked,
-                    (extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
+                    floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
                     m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal,
                     cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
                     s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, ref.source_secret_id AS s_source, s.seal AS s_seal,
@@ -258,7 +260,11 @@ BEGIN
                              WHERE o.principal = i.p AND o.secret <> p_secret AND o.last > p_at - i.cap_window - cap.refresh - public.deadline_max()
                              LIMIT i.cap_count
                         ) z
-                    ) ELSE 0 END AS n_others
+                    ) ELSE 0 END AS n_others,
+                    -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing (CoverFresh).
+                    coalesce(p_cover IS NOT NULL AND i.bulk_last > p_at - cap.refresh AND p_cover > coalesce(greatest(lc.number, lm.number, lr.number, i.lpol_number, ls.number, lx.number, l1.number, l2.number, l3.number, l4.number), 0)
+                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover
+                            AND u.credential = p_credential AND u.secret = p_secret AND u.purpose = p_purpose AND u.place IS NOT DISTINCT FROM p_place), false) AS is_covered
                   FROM i
                   CROSS JOIN LATERAL (SELECT least(60000, i.cap_window / 10) AS refresh) cap
                   -- Each input's newest change: one index-only probe each (log_changes_object_idx holds the seal), the principal's
@@ -276,9 +282,7 @@ BEGIN
             w AS (
                 INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place)
                 SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place
-                  FROM v WHERE v.state IS NULL AND NOT (
-                      p_cover IS NOT NULL AND v.bulk_last > p_at - v.refresh AND p_cover > coalesce(v.inputs, 0)
-                      AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover AND u.credential = p_credential AND u.secret = p_secret))
+                  FROM v WHERE v.state IS NULL AND NOT v.is_covered
                 RETURNING log_uses.number
             ),
             k AS (
@@ -287,7 +291,7 @@ BEGIN
                  WHERE v.state IS NULL AND v.p IS NOT NULL AND v.stale AND (v.is_in OR v.n_others < v.cap_count)
                 ON CONFLICT ON CONSTRAINT log_bulk_pkey DO UPDATE SET last = EXCLUDED.last
             )
-            SELECT v.state, (SELECT w.number FROM w), NULL::bigint, v.newest, v.newest_mac, v.inputs, true,
+            SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, v.inputs, true,
                 v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, v.c_last,
                 v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, v.m_last, v.m_old,
                 (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
@@ -319,7 +323,7 @@ BEGIN
                 SELECT n.number AS newest, n.mac AS newest_mac, coalesce(n.number = p_known AND n.mac = p_known_mac, false) AS cached,
                     f.at_floor,
                     c.principal AS p, c.kind AS c_kind, c.scope AS c_scope, c.revoked_at IS NOT NULL AS c_revoked,
-                    (extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
+                    floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
                     m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal,
                     cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
                     s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, NULL::uuid AS s_source, s.seal AS s_seal,
@@ -365,16 +369,18 @@ BEGIN
                              WHERE o.principal = i.p AND o.secret <> p_secret AND o.last > p_at - p_cap_window - least(60000, p_cap_window / 10) - public.deadline_max()
                              LIMIT p_cap_count
                         ) z
-                    ) ELSE 0 END AS n_others
+                    ) ELSE 0 END AS n_others,
+                    -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing (CoverFresh).
+                    coalesce(p_cover IS NOT NULL AND i.bulk_last > p_at - least(60000, p_cap_window / 10)
+                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover
+                            AND u.credential = p_credential AND u.secret = p_secret AND u.purpose = p_purpose AND u.place IS NOT DISTINCT FROM p_place), false) AS is_covered
                   FROM i
             ),
             w AS (
                 INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place)
                 SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place
-                  FROM v WHERE v.state IS NULL AND NOT (
-                      -- The isolate held its cover to the cached seals' numbers when it read them.
-                      p_cover IS NOT NULL AND v.bulk_last > p_at - v.refresh
-                      AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover AND u.credential = p_credential AND u.secret = p_secret))
+                  -- The isolate held its cover to the cached seals' numbers when it read them.
+                  FROM v WHERE v.state IS NULL AND NOT v.is_covered
                 RETURNING log_uses.number
             ),
             k AS (
@@ -383,7 +389,7 @@ BEGIN
                  WHERE v.state IS NULL AND v.p IS NOT NULL AND v.stale AND (v.is_in OR v.n_others < p_cap_count)
                 ON CONFLICT ON CONSTRAINT log_bulk_pkey DO UPDATE SET last = EXCLUDED.last
             )
-            SELECT v.state, (SELECT w.number FROM w), NULL::bigint, v.newest, v.newest_mac, NULL::bigint, false,
+            SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, NULL::bigint, false,
                 v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, NULL::bytea,
                 v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, NULL::bytea, NULL::bigint,
                 (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
@@ -413,7 +419,7 @@ BEGIN
                 SELECT n.number AS newest, n.mac AS newest_mac, coalesce(n.number = p_known AND n.mac = p_known_mac, false) AS cached,
                     f.at_floor,
                     c.principal AS p, c.kind AS c_kind, c.scope AS c_scope, c.revoked_at IS NOT NULL AS c_revoked,
-                    (extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
+                    floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint AS c_expires, c.seal AS c_seal,
                     m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal,
                     cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
                     s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, ref.source_secret_id AS s_source, s.seal AS s_seal,
@@ -480,16 +486,18 @@ BEGIN
                              WHERE o.principal = i.p AND o.secret <> p_secret AND o.last > p_at - p_cap_window - least(60000, p_cap_window / 10) - public.deadline_max()
                              LIMIT p_cap_count
                         ) z
-                    ) ELSE 0 END AS n_others
+                    ) ELSE 0 END AS n_others,
+                    -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing (CoverFresh).
+                    coalesce(p_cover IS NOT NULL AND i.bulk_last > p_at - least(60000, p_cap_window / 10)
+                        AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover
+                            AND u.credential = p_credential AND u.secret = p_secret AND u.purpose = p_purpose AND u.place IS NOT DISTINCT FROM p_place), false) AS is_covered
                   FROM i
             ),
             w AS (
                 INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place)
                 SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place
-                  FROM v WHERE v.state IS NULL AND NOT (
-                      -- The isolate held its cover to the cached seals' numbers when it read them.
-                      p_cover IS NOT NULL AND v.bulk_last > p_at - v.refresh
-                      AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover AND u.credential = p_credential AND u.secret = p_secret))
+                  -- The isolate held its cover to the cached seals' numbers when it read them.
+                  FROM v WHERE v.state IS NULL AND NOT v.is_covered
                 RETURNING log_uses.number
             ),
             k AS (
@@ -498,7 +506,7 @@ BEGIN
                  WHERE v.state IS NULL AND v.p IS NOT NULL AND v.stale AND (v.is_in OR v.n_others < p_cap_count)
                 ON CONFLICT ON CONSTRAINT log_bulk_pkey DO UPDATE SET last = EXCLUDED.last
             )
-            SELECT v.state, (SELECT w.number FROM w), NULL::bigint, v.newest, v.newest_mac, NULL::bigint, false,
+            SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, NULL::bigint, false,
                 v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, NULL::bytea,
                 v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, NULL::bytea, NULL::bigint,
                 (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
@@ -524,8 +532,10 @@ BEGIN
                    WHERE g.principal = v.p
               ) gr ON v.m_status IS NOT NULL;
         END IF;
-        -- A repeat on its cover wrote nothing: say which entry it rode on.
-        IF r.state IS NULL AND r.number IS NULL THEN r.covered := p_cover; END IF;
+        -- A use the statement took writes its entry or rides its cover, never neither.
+        IF r.state IS NULL AND r.number IS NULL AND r.covered IS NULL THEN
+            RAISE EXCEPTION 'a use wrote no entry and rode no cover' USING ERRCODE = 'XX000';
+        END IF;
         IF r.state = 'reprobe' THEN probe := true; CONTINUE; END IF;
         IF r.state = 'whole' THEN whole := true; CONTINUE; END IF;
         EXIT WHEN r.state IS DISTINCT FROM 'lock';

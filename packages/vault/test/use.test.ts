@@ -320,6 +320,10 @@ test('covers: a repeat rides its entry, and writes none, until any input changes
   // Another purpose is another request: no cover.
   const reveal = heard(await use(ask(w, id, { purpose: 'reveal' })));
   assert.ok(reveal.ok && !reveal.covered);
+  // CoverFresh: with its key's bulk row gone (erased by a writer: it is no seal's), a repeat rides no cover, and is logged.
+  await run(db.owner, sql`DELETE FROM log_bulk`);
+  const unfresh = heard(await use(ask(w, id)));
+  assert.ok(unfresh.ok && !unfresh.covered, JSON.stringify(unfresh));
   // A change to the key (its value moved): the next repeat is an entry of its own.
   const key = w.keys[0]!.object as Extract<Input, { kind: 'secret' }>;
   const moved = { ...key, nature: 'secret' as const };
@@ -327,8 +331,8 @@ test('covers: a repeat rides its entry, and writes none, until any input changes
     seal('secrets', 'id', id));
   const after = heard(await use(ask(w, id)));
   assert.ok(after.ok && !after.covered, 'a cover from before a change covers nothing');
-  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 3);
-  assert.equal(await replayAgrees(), 3);
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 4);
+  assert.equal(await replayAgrees(), 4);
 });
 
 test('CoverExists: a cover whose entry is gone (a restore) covers nothing', async () => {
@@ -538,4 +542,26 @@ test('CacheSameChange: a newest change of the same number but another MAC (a log
   });
   // Trusting the cache by number alone would hold the row to the credential's old seal (`stale`); read again, it is revoked.
   assert.equal(code(await use(ask(w, id, { purpose: 'reveal' }))), 'credential');
+});
+
+test('a repeat its cover would carry, but the rows now refuse (its grant lapsed), is asked again uncovered and logged', async () => {
+  const w = await world();
+  const id = await w.key();
+  // The principal's one grant made to lapse shortly: a change, as PR 4's access.grant writes it.
+  const lapses = Date.now() + 400;
+  const before = w.objects.principal as Extract<Input, { kind: 'principal' }>;
+  const lapsing = { ...before.grants[0]!, expiresAt: lapses };
+  const after = { ...before, grants: [lapsing] };
+  await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: lapsing }, after, async (tx, value) => {
+    await run(tx, sql`UPDATE vault_grants SET expires_at = ${lapses} WHERE principal = ${w.principal}`);
+    await seal('vault_members', 'principal', w.principal)(tx, value);
+  });
+  const { use } = await isolate();
+  assert.ok(heard(await use(ask(w, id))).ok);
+  await sleep(500);
+  const repeat = heard(await use(ask(w, id)));
+  assert.equal(code(repeat), 'expired');
+  assert.ok(!repeat.ok && 'number' in repeat && repeat.number !== null, 'logged as an entry of its own');
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2);
+  assert.equal(await replayAgrees(), 2);
 });

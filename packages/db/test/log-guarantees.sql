@@ -210,12 +210,12 @@ BEGIN
     IF (SELECT count(*) FROM log_uses) <> 1 THEN RAISE EXCEPTION 'FAIL: a replay wrote an entry'; END IF;
 
     -- A repeat on its cover writes nothing; one whose cover has no entry writes its own.
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 8, t + 1, 258::smallint, NULL, tag, t + 2000,
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 8, t + 1, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000,
         (SELECT number FROM log_uses), t, 7));
     IF r.state IS NOT NULL OR r.number IS NOT NULL OR r.covered IS DISTINCT FROM (SELECT number FROM log_uses) THEN
         RAISE EXCEPTION 'FAIL: a covered repeat answered % % %', r.state, r.number, r.covered;
     END IF;
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 9, t + 1, 258::smallint, NULL, tag, t + 2000,
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 9, t + 1, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000,
         (SELECT number FROM log_uses), t, 6));
     IF r.covered IS NOT NULL OR r.number IS NULL THEN RAISE EXCEPTION 'FAIL: a cover with no entry covered'; END IF;
     -- A cover is its own credential's and secret's: another secret's entry, its key's row fresh, covers nothing, in either form.

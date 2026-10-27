@@ -298,6 +298,9 @@ Measured here, `to_json(r)` of the same row is cheaper on both sides:
   `rowOf` re-parses with each number's source text only when a bigint is past
   2^53, and fails closed on a runtime without source text. Both engines test
   numbers past 2^53.
+- **Bytes as hex, always.** `to_json` writes a bytea as the session's
+  `bytea_output` says. The function sets it to `hex` for itself, so a
+  database set to `escape` cannot turn every seal into other bytes.
 
 ### Measurements
 
