@@ -13,6 +13,13 @@
   publishes the image alone for a version already on npm, and Validate
   builds both platforms from the revision's packed CLI and runs
   `coffre serve` in the image against a fake coffre (`pnpm test:image`).
+- **A tunnel's late check no longer drops a newer session's cached URL.**
+  A check of a `coffre run` tunnel's handle that answered after its last
+  session had closed armed a watchdog for that gone group, which fired an
+  interval and a deadline later and dropped the URL the cache held for the
+  same handle, environment and tunnel: a session opened since then read
+  the vault again on its next connection. Such a check now arms nothing; a
+  refusal still drops the cache.
 
 ## 0.14.5 (2026-10-26)
 

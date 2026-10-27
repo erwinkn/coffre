@@ -133,22 +133,33 @@ test('a nonce the gate no longer knows is refused once, and the request sent aga
 });
 
 /**
- * Time, mocked, moved on by `ms`; then the I/O that set off, on real time, until `done` holds and a little after, so that what
- * the SDK does with an answer (its next timer) is done too.
+ * Time, mocked, moved on by `ms`; then the I/O that set off, on real time, until `done` holds. A count of the event
+ * loop's turns is no bound: a loaded runner takes more of them for a request on loopback and its proof's signature.
  */
 async function advance(t: test.TestContext, ms: number, done: () => boolean) {
   t.mock.timers.tick(ms);
-  const turn = () => new Promise((resolve) => setImmediate(resolve));
-  for (let i = 0; i < 2000 && !done(); i++) await turn();
-  for (let i = 0; i < 50; i++) await turn();
+  const until = performance.now() + 10_000;
+  while (!done() && performance.now() < until) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * How many times the SDK has set a timer `ms` on: a session's renewal or its next proof, set once the answer that
+ * brought the session is read. coffre's log says it answered; this says the SDK is done with the answer, so that the
+ * next tick finds the timer set, and a close the session. Time must be mocked first.
+ */
+function armed(t: test.TestContext, ms: number): () => number {
+  const set = t.mock.method(globalThis, 'setTimeout');
+  return () => set.mock.calls.filter((call) => call.arguments[1] === ms).length;
 }
 
 const count = (log: string[], line: string) => log.filter((each) => each === line).length;
 
 test('a session renews at half-life, and outlives its first expiry', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  // Each renewal set half an hour on: once signed in, then once each renewal.
+  const renewals = armed(t, 1800_000);
   const { coffre, session } = await signedIn(t);
-  for (let i = 1; i <= 3; i++) await advance(t, 1800_000, () => count(coffre.log, 'POST /api/auth/workload/renew 200') === i);
+  for (let i = 1; i <= 3; i++) await advance(t, 1800_000, () => renewals() === 1 + i);
   assert.equal(count(coffre.log, 'POST /api/auth/workload/renew 200'), 3, coffre.log.join('\n'));
   // Two hours on, past the first hour's expiry: the same session.
   assert.equal((await session.fetch(session.url('openai'))).status, 200);
@@ -157,8 +168,9 @@ test('a session renews at half-life, and outlives its first expiry', async (t) =
 
 test('an enrollment session renews every 30 seconds, its expiry its liveness', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const renewals = armed(t, 30_000);
   const { coffre } = await signedIn(t, { lifetimeMs: 90_000 }, enrollment(`coffre_enr_${'c'.repeat(43)}`));
-  for (let i = 1; i <= 4; i++) await advance(t, 30_000, () => count(coffre.log, 'POST /api/auth/workload/renew 200') === i);
+  for (let i = 1; i <= 4; i++) await advance(t, 30_000, () => renewals() === 1 + i);
   assert.equal(count(coffre.log, 'POST /api/auth/workload/renew 200'), 4, coffre.log.join('\n'));
   assert.equal(count(coffre.log, 'POST /api/auth/workload 200'), 1);
 });
@@ -429,10 +441,13 @@ test('a narrowed session signs with its own key, and ends with its parent', asyn
 
 test('closing after a new proof ends every session it proved, and their children', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  // Each session's next proof, set at 90% of the way to its 24-hour end: once signed in, then once the new proof is read.
+  const day = 24 * 3_600_000;
+  const proofs = armed(t, day - day / 10);
   const { coffre, session } = await signedIn(t, { lifetimeMs: 48 * 3_600_000 });
   const child = await session.narrow({ credentials: ['stripe'] });
   // At 90% of the way to its 24-hour end, the parent proves again: the child's root is the old session, alive until then.
-  await advance(t, 22 * 3_600_000, () => count(coffre.log, 'POST /api/auth/workload 200') === 2);
+  await advance(t, 22 * 3_600_000, () => proofs() === 2);
   assert.equal(count(coffre.log, 'POST /api/auth/workload 200'), 2, coffre.log.join('\n'));
   await session.close();
   assert.ok([...coffre.sessions.values()].filter((each) => each.parent === undefined).every((each) => each.revoked));
@@ -582,15 +597,15 @@ test("a session proved again waits at least the Retry-After coffre answers, not 
   // No spread: its backoff its least, coffre's 4 s exactly.
   t.mock.method(Math, 'random', () => 0);
   const busy = { status: 503, body: { error: 'unavailable', message: 'coffre cannot reach what it depends on right now' }, headers: { 'retry-after': '4' } };
-  const coffre = await fakeCoffre({ notAfterMs: 1000, exchange: (_proof, _jkt, attempt) => (attempt === 2 || attempt === 3 ? busy : null) });
+  // When coffre was asked for each exchange.
+  const asked: number[] = [];
+  const coffre = await fakeCoffre({ notAfterMs: 1000, exchange: (_proof, _jkt, attempt) => (asked.push(Date.now()), attempt === 2 || attempt === 3 ? busy : null) });
   t.after(() => coffre.close());
   const session = await workload({ url: coffre.url, service: 'api-prod', proof: oidc('id-token'), log: () => undefined });
   t.after(() => session.close().catch(() => undefined));
-  const exchanges = () => coffre.log.filter((line) => line.startsWith('POST /api/auth/workload ')).length;
   // Proved again at 90% of its second, refused; lost at its end, proved again at once, refused: then asked again 4 s on,
-  // where its own backoff said 1.5 to 2.5 s; checked before that session's own proof again, at 90% of its second.
-  await sleep(3800);
-  assert.equal(exchanges(), 3, coffre.log.join('\n'));
-  await sleep(1600);
-  assert.equal(exchanges(), 4, coffre.log.join('\n'));
+  // where its own backoff said 1.5 to 2.5 s. Measured between the two asks, which a loaded machine makes late alike.
+  for (let waited = 0; asked.length < 4 && waited < 15_000; waited += 100) await sleep(100);
+  assert.ok(asked.length >= 4, coffre.log.join('\n'));
+  assert.ok(asked[3]! - asked[2]! >= 4000, `asked again ${asked[3]! - asked[2]!} ms after the refusal`);
 });

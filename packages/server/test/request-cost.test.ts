@@ -490,8 +490,23 @@ test('a request runs the same statements, and reads the same rows, however large
 test("each hot request's statements read as many pages however long the log grows", POSTGRES, async () => {
   /** `count` entries more, older than any, copies of the reads and uses the log holds: what the hot paths would scan. */
   const grow = async (count: number) => {
-    // In parts, each within a statement's time on the fixture's connections.
-    for (let left = count; left > 0; left -= 5000) await db.owner.execute(more(Math.min(5000, left)));
+    // In parts, each within a statement's time on the fixture's connections. Each copy is older than the read it
+    // copies, so the copies release no key later than the log already did, and the trigger that keeps
+    // `vault_releases` is off while they go in. On, it would move the same few rows on thousands of times in each
+    // part's one transaction, which no read does: seconds a part, past the statement timeout on a loaded runner, and
+    // a table and its index hundreds of pages past their rows, whose ratio then picks the bulk count's plan.
+    const releases = async () => (await db.owner.execute(sql`SELECT principal, key, released_at FROM vault_releases ORDER BY principal, key`)).rows;
+    const released = await releases();
+    for (let left = count; left > 0; left -= 5000) {
+      await db.owner.transaction(async (tx) => {
+        // Planned for thousands of times the rows it makes, a part would compile them first (JIT), longer than it runs.
+        await tx.execute(sql`SET LOCAL jit = off`);
+        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_releases`);
+        await tx.execute(more(Math.min(5000, left)));
+        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_releases`);
+      });
+    }
+    assert.deepEqual(await releases(), released, 'the copies released no key later than the log did');
     // And a tenth as many keys, each read once by each reader over a day ago, past any window and its margin: what a
     // count of every key ever released would read. A checkpoint, as each scheduled run asks, forgets them (T111).
     for (let left = count / 10; left > 0; left -= 5000) await db.owner.execute(keys(Math.min(5000, left)));
@@ -500,9 +515,9 @@ test("each hot request's statements read as many pages however long the log grow
     const runs = Math.ceil((await old()) / 10_000) + 1;
     for (let run = 0; run < runs; run++) assert.ok((await signLog()).ok);
     assert.equal(await old(), 0, 'the checkpoints forgot them all');
-    // As autovacuum leaves it: a part moves each reader's keys on thousands of times in one transaction, which no read
-    // does (each moves them once, in place), and only a vacuum takes back.
-    await db.owner.execute(sql`VACUUM ANALYZE`);
+    // As autovacuum leaves it: the releases the checkpoints forgot taken back, and the grown log's statistics. One
+    // process, as autovacuum's: parallel workers share their dead rows through the container's small /dev/shm.
+    await db.owner.execute(sql`VACUUM (ANALYZE, PARALLEL 0)`);
   };
   const keys = (count: number) => sql`
       INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
@@ -510,12 +525,16 @@ test("each hot request's statements read as many pages however long the log grow
         'secret.read', 'allow', e.prev_hash, e.mac, e.hash, json_build_object('secrets', json_build_array(json_build_object('secretId', gen_random_uuid()::text)))::text
       FROM (SELECT DISTINCT ON (actor) * FROM audit_log WHERE author = 'vault' AND action = 'secret.read' AND decision = 'allow' AND seq >= 0 ORDER BY actor, seq DESC) e
       CROSS JOIN generate_series(1, ${count}) g`;
+  // As many rounds of copies as make `count`, no more: `count` rounds, each numbered before the limit, would sort
+  // hundreds of megabytes on disk a part.
   const more = (count: number) => sql`
+      WITH e AS (SELECT * FROM audit_log WHERE seq >= 0 AND action IN ('secret.read', 'credential.use'))
       INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, project_id, environment_id, secret_id,
         secret_version_id, operation_id, request_id, source_ip, related_seq, metadata, prev_hash, mac, hash)
-      SELECT (SELECT least(min(seq), 0) FROM audit_log) - row_number() OVER (), author, key_id, occurred_at - (g * 7919) % 86400000, actor, action, decision, code,
-        subject_principal, project_id, environment_id, secret_id, secret_version_id, operation_id, request_id, source_ip, related_seq, metadata, prev_hash, mac, hash
-      FROM (SELECT * FROM audit_log WHERE seq >= 0 AND action IN ('secret.read', 'credential.use')) e CROSS JOIN generate_series(1, ${count}) g
+      SELECT (SELECT least(min(seq), 0) FROM audit_log) - row_number() OVER (ORDER BY g, e.seq), author, key_id, occurred_at - (g * 7919) % 86400000, actor,
+        action, decision, code, subject_principal, project_id, environment_id, secret_id, secret_version_id, operation_id, request_id, source_ip, related_seq,
+        metadata, prev_hash, mac, hash
+      FROM e CROSS JOIN generate_series(1, ceil(${count}::numeric / greatest((SELECT count(*) FROM e), 1))::int) g
       ORDER BY g, e.seq LIMIT ${count}`;
   /** Each hot request's statements, and the pages each reads run again; null for a write that cannot run twice. */
   const pages = async () => {

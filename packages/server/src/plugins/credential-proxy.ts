@@ -904,7 +904,8 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
         checking = false;
         if (!made.stands) return;
         if (!stands) return close();
-        if (check.arms) arm(started);
+        // A group its last session has left arms nothing: its watchdog would close it later, dropping a newer group's cache.
+        if (check.arms && proxy.groups.get(key) === made) arm(started);
       };
       made.timers.push(setInterval(() => void recheck(), check.every));
       // A new group let in on the cache's values decides now: its first interval starts from an answer of its own.
