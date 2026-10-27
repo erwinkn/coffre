@@ -58,7 +58,8 @@ export function durableMemory(storage: ObjectState['storage']): Memory {
 
 /** How long alarms are kept. */
 const ALARMS_KEPT_MS = 30 * 86_400_000;
-const alarmKey = (at: number, n: number) => `alarm:${String(at).padStart(16, '0')}:${n}`;
+/** An alarm's key: its time, then random bytes, so that two at one millisecond never share one, evicted or not. */
+const alarmKey = (at: number, suffix = '') => `alarm:${String(at).padStart(16, '0')}:${suffix}`;
 
 /** The Durable Object class the deployment binds, configured from `env` as the vault is. */
 export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSettings | Promise<CheckpointerSettings>) {
@@ -67,7 +68,6 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     readonly #env: Env;
     #checkpointer: Checkpointer | null = null;
     #pool: HyperdrivePool | null = null;
-    #recorded = 0;
     /** The last ticks, newest last, with their wall time in the object: `status`. */
     readonly #ticks: (Tick & { wallMs: number; at: number })[] = [];
 
@@ -110,8 +110,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
 
     async #record(alarm: Alarm): Promise<void> {
       const storage = this.#state.storage;
-      await storage.put(alarmKey(alarm.at, this.#recorded++), alarm.message);
-      const old = await storage.list<string>({ prefix: 'alarm:', end: alarmKey(alarm.at - ALARMS_KEPT_MS, 0), limit: 128 });
+      await storage.put(alarmKey(alarm.at, crypto.randomUUID()), alarm.message);
+      const old = await storage.list<string>({ prefix: 'alarm:', end: alarmKey(alarm.at - ALARMS_KEPT_MS), limit: 128 });
       if (old.size > 0) await storage.delete([...old.keys()]);
     }
 
@@ -139,15 +139,17 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         }
         if (call.op === 'seal') return Response.json(sealedToJson(await (await this.#open()).sealThrough(BigInt(call.number), call.deadline)));
         if (call.op === 'status') {
+          // The object's own view: after an eviction, nothing until its next tick opens it again (`open: false`).
           const head = this.#checkpointer?.pair.pair;
           return Response.json({
+            open: this.#checkpointer !== null,
             upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
             ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
           });
         }
         if (call.op === 'alarms') {
           const since = call.since ?? 0;
-          const found = await this.#state.storage.list<string>({ prefix: 'alarm:', start: alarmKey(since, 0) });
+          const found = await this.#state.storage.list<string>({ prefix: 'alarm:', start: alarmKey(since) });
           return Response.json([...found].map(([key, message]) => ({ at: Number(key.split(':')[1]), message })));
         }
         return new Response('unknown op', { status: 400 });
@@ -178,7 +180,7 @@ export async function startCheckpointer(namespace: ObjectNamespace, name = 'chec
 }
 
 /** The object's head and its last ticks, each with its barrier, write and wall time. */
-export function checkpointerStatus(namespace: ObjectNamespace, name = 'checkpointer'): Promise<{ upto: string | null; sizes: Record<'changes' | 'uses', number> | null; ticks: (Omit<Tick, 'upto'> & { upto: string; wallMs: number; at: number })[] }> {
+export function checkpointerStatus(namespace: ObjectNamespace, name = 'checkpointer'): Promise<{ open: boolean; upto: string | null; sizes: Record<'changes' | 'uses', number> | null; ticks: (Omit<Tick, 'upto'> & { upto: string; wallMs: number; at: number })[] }> {
   return ask(namespace, name, { op: 'status' });
 }
 

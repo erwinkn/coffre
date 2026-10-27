@@ -458,7 +458,9 @@ export class Checkpointer {
     if (!holds(row, p.next)) {
       if (!holds(row, this.head)) {
         const message = `the database's newest checkpoint is ${row?.upto ?? 'gone'}; the signer's is at ${this.head.pair.upto}, with ${p.next.pair.upto} to write: reopen the checkpointer`;
-        this.options.alert(`audit checkpoint refused: ${message}`);
+        // Alerted once while it stands, as a refused tick is: every tick finds it again.
+        if (message !== this.refused) this.options.alert(`audit checkpoint refused: ${message}`);
+        this.refused = message;
         throw new Error(message);
       }
       await this.store.write({ upto: p.next.pair.upto, notes: p.next.notes }, p.tiles);

@@ -70,7 +70,7 @@ await new Promise((resolve) => loader.on('exit', resolve));
 const signed = [...ticks.values()].filter((t) => t.signed && t.entries > 100);
 const q = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(p * xs.length))]!;
 const line = (name: string, xs: number[]) => `${name} p50 ${q(xs, 0.5).toFixed(2)} / p99 ${q(xs, 0.99).toFixed(2)} ms`;
-console.log(`${signed.length} ticks sampled, ${q(signed.map((t) => t.entries), 0.5)} entries a tick p50, witnessed by the object's witness and archived in R2 each tick`);
+console.log(`${signed.length} ticks sampled, ${q(signed.map((t) => t.entries), 0.5)} entries a tick p50, each pair handed to the witness's object and the R2 archive`);
 console.log([line('barrier + window', signed.map((t) => t.closeMs)), line('write', signed.map((t) => t.writeMs)), line('tick wall', signed.map((t) => t.wallMs))].join('; '));
 await worker.stop();
 await owner.end();

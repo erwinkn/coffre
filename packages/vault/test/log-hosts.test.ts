@@ -18,7 +18,8 @@ import { checkpointerAlarms, checkpointerObject, durableSealThrough, startCheckp
 import { logMacKey } from '../src/log-entry.ts';
 import { durableWitness, r2Archive, witnessObject } from '../src/witness-workers.ts';
 import { authentic, keys, MemoryStore, sealThroughDouble, variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, VAULT_URL, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { sql } from 'drizzle-orm';
 import { logWriter } from './log-entries.ts';
 
 let db: TestDatabase;
@@ -64,8 +65,14 @@ function objectState(): ObjectState & { alarm: number | null; data: Map<string, 
       getAlarm: async () => state.alarm,
       setAlarm: async (at: number) => void (state.alarm = at),
     },
-    blockConcurrencyWhile: <T>(work: () => Promise<T>) => work(),
+    // Nothing else delivered while the work runs, as the runtime holds a Durable Object's other events.
+    blockConcurrencyWhile: <T>(work: () => Promise<T>): Promise<T> => {
+      const done = gate.then(work);
+      gate = done.catch(() => {});
+      return done;
+    },
   };
+  let gate: Promise<unknown> = Promise.resolve();
   return state;
 }
 
@@ -74,6 +81,7 @@ const namespaceOf = (object: { fetch(request: Request): Promise<Response> }): Ob
 
 test('on Node: ticks every interval, a change sealed through it, its memory a synced file, an alarm kept once', async () => {
   const memory = join(dir, `memory-${randomBytes(4).toString('hex')}`);
+  let forged = 0n;
   const running = await runCheckpointer({ database: db.vault, seed, memory, intervalMs: 20 });
   try {
     for (let i = 0; i < 5; i += 1) await log.use();
@@ -85,16 +93,15 @@ test('on Node: ticks every interval, a change sealed through it, its memory a sy
     assert.equal(sealed.proof.tree, 'changes');
     assert.ok(verifyInclusion(leafHash(sealed.proof.leaf), sealed.proof.index, sealed.proof.size, sealed.proof.proof, sealed.pair.changes.root));
     // A forged entry: refused on every tick, alarmed once.
-    await log.use(Date.now(), true);
+    forged = await log.use(Date.now(), true);
     await new Promise((resolve) => setTimeout(resolve, 200));
     const alarms = await running.alarms();
     assert.equal(alarms.filter((a) => /MAC does not hold/.test(a.message)).length, 1, JSON.stringify(alarms));
   } finally {
     await running.stop();
   }
-  // Started again over the same file and database: the memory and the rows agree, and it seals on.
-  await log.empty();
-  rmSync(memory, { force: true });
+  // Started again over the same file and database, the forged entry gone: the memory and the rows agree, and it seals on.
+  await run(ENGINE === 'sqlite' ? db.vault : db.owner, sql`DELETE FROM log_uses WHERE number = ${forged}`);
   const again = await runCheckpointer({ database: db.vault, seed, memory, intervalMs: 20 });
   try {
     const n = await log.change();
@@ -156,6 +163,17 @@ test('the witness\'s object cosigns pairs that extend its own, refuses a fork, a
   const fork = await signPair(k.signers, cp.pair.pair.upto + 1n, cp.pair.pair.at, { changes: cp.pair.pair.changes, uses: { size: cp.pair.pair.uses.size + 1, root: Buffer.alloc(32, 1) } }, cp.pair.pair.floor);
   const refused = await other.publish(fork.notes, async () => ({ changes: [], uses: [Buffer.alloc(32)] }), new AbortController().signal);
   assert.ok(!refused.ok && /split view/.test(refused.reason), JSON.stringify(refused));
+});
+
+test('review r1: the witness\'s object cosigns one of two forks sent at once, never both', async () => {
+  const k = await keys(6);
+  const Witness_ = witnessObject(() => ({ name: 'witness.test', key: Buffer.alloc(32, 9).toString('base64'), log: { changes: k.signers.changes.verifierKey, uses: k.signers.uses.verifierKey } }));
+  const object = new Witness_(objectState(), {});
+  const heads = (root: number) => ({ changes: { size: 1, root: Buffer.alloc(32, 1) }, uses: { size: 1, root: Buffer.alloc(32, root) } });
+  const [a, b] = await Promise.all([signPair(k.signers, 5n, 1, heads(2)), signPair(k.signers, 5n, 1, heads(3))]);
+  const send = (notes: PairNotes) => object.fetch(new Request('https://witness/', { method: 'POST', body: JSON.stringify({ notes, from: { changes: 0, uses: 0 }, proofs: { changes: [], uses: [] } }) }));
+  const answers = await Promise.all([send(a.notes), send(b.notes)]);
+  assert.deepEqual(answers.map((r) => r.status).sort(), [200, 409], 'the second finds the first one\'s pair held');
 });
 
 test('the witness\'s client hands the abort to the object\'s request', async () => {

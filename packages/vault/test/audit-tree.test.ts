@@ -706,6 +706,21 @@ test('review r10: pairs held outside below the start are held to time and floor 
   assert.ok(!v.ok && v.problems.some((p) => /time runs back/.test(p)), v.problems.join('\n'));
 });
 
+test('6b review r1: a pending pair the database stands at neither side of is alerted once, not every tick', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  store.append('uses', 'x');
+  store.beforeWrite = () => {
+    store.beforeWrite = null;
+    throw new Error('connection reset');
+  };
+  await assert.rejects(cp.tick(), /connection reset/);
+  store.rows.delete(cp.pair.pair.upto);
+  for (let i = 0; i < 3; i += 1) await assert.rejects(cp.tick(), /reopen the checkpointer/);
+  assert.equal(alerts.filter((a) => /reopen the checkpointer/.test(a)).length, 1, alerts.join('\n'));
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {

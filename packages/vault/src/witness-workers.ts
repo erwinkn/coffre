@@ -39,6 +39,13 @@ export function witnessObject<Env>(settings: (env: Env) => WitnessSettings | Pro
     }
 
     async fetch(request: Request): Promise<Response> {
+      // Read, check and write as one, nothing else delivered meanwhile: a Durable Object's handlers interleave at every
+      // await but storage's, so two forks sent at once would each be checked against the pair held, and both cosigned.
+      const body = request.method === 'GET' ? null : ((await request.json()) as Publication);
+      return this.#state.blockConcurrencyWhile(() => this.#answer(body));
+    }
+
+    async #answer(p: Publication | null): Promise<Response> {
       const s = await settings(this.#env);
       const log = await pairVerifiers(s.log);
       const self = await noteSigner(s.name, Buffer.from(s.key, 'base64'));
@@ -47,14 +54,12 @@ export function witnessObject<Env>(settings: (env: Env) => WitnessSettings | Pro
       const pair = notes === null ? null : await openPair(notes, log);
       const held: WitnessState = pair === null ? null : { pair, notes: notes! };
       const sizes = { changes: held?.pair.changes.size ?? 0, uses: held?.pair.uses.size ?? 0 };
-      if (request.method === 'GET') return Response.json({ held: sizes });
-      const p = (await request.json()) as Publication;
+      if (p === null) return Response.json({ held: sizes });
       // Proofs from other sizes than the ones held prove nothing here: the sender asks again, from these.
       if (p.from.changes !== sizes.changes || p.from.uses !== sizes.uses) return Response.json({ held: sizes }, { status: 409 });
       const proofs = { changes: p.proofs.changes.map((h) => Buffer.from(h, 'base64')), uses: p.proofs.uses.map((h) => Buffer.from(h, 'base64')) };
       const r = await witnessPair(held, p.notes, proofs, log, self);
       if (!r.answer.ok) return Response.json(r.answer, { status: 422 });
-      // The object's input gate keeps any other publication from running between the read above and this write.
       await this.#state.storage.put('pair', encodePair(p.notes));
       return Response.json(r.answer);
     }
