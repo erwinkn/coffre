@@ -12,13 +12,13 @@ GRANT SELECT ON secret_references TO coffre_vault;
 -- The use's row gains the value's text, when plain (its object's digest), each environment's project's archival, apart from its own (ArchivedApart), and the reference row the key and its source read through (ReferenceInObject).
 ALTER TYPE use_row ADD ATTRIBUTE v_plaintext text, ADD ATTRIBUTE e1_project_archived boolean, ADD ATTRIBUTE e2_project_archived boolean, ADD ATTRIBUTE e3_project_archived boolean, ADD ATTRIBUTE e4_project_archived boolean, ADD ATTRIBUTE s_reference uuid, ADD ATTRIBUTE x_reference uuid;
 --> statement-breakpoint
--- `use_credential` as 0028 made it (its comments and 0024's say how), but for what it reads: a reference's source, and the id of the row it is read through, only while its newest row has not ended; each environment's project's archival, a scalar subquery each, one primary-key probe of `projects` (as left joins of the statement they cost about 0.2 ms of Postgres CPU a use, measured; as subqueries about 0.02 ms); and a plain value's text.
+-- `use_credential` as 0028 made it (its comments and 0024's say how), but for what it reads: a reference's source, and the id of the row it is read through, only while its newest row has not ended; each environment's project's archival, a scalar subquery each, one primary-key probe of `projects` (as left joins of the statement they cost about 0.2 ms of Postgres CPU a use, measured; as subqueries about 0.02 ms); and a plain value's text. And no JIT, ever (`jit = off`): the statement's generic plan, the one the hot login keeps (`plan_cache_mode`), is estimated near `jit_above_cost` (100,000 by default; 0028's at about 97,000 on hot-path-one.md's rig, this one's at about 102,000 with the project reads), and the estimate grows with the tables. Past it, Postgres compiles the plan's expressions at every execution: about 130 ms a use, measured, where the use costs under 2 ms. A setting of the function's, not the login's, so that no deployment's server default can bring it back.
 CREATE OR REPLACE FUNCTION use_credential(
     p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_purpose smallint, p_place uuid, p_mac bytea, p_deadline bigint,
     p_cover bigint DEFAULT NULL, p_cover_at bigint DEFAULT NULL, p_cover_request bigint DEFAULT NULL, p_known bigint DEFAULT NULL, p_known_mac bytea DEFAULT NULL,
     p_cap_count integer DEFAULT NULL, p_cap_window bigint DEFAULT NULL
 ) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' SET jit = off AS $$
 DECLARE
     r public.use_row;
     -- The principal's lock held: exclusive (`locked`), to enter its key in the cap's set; shared (`moving`), to move it on.
@@ -860,3 +860,34 @@ $$;
 REVOKE ALL ON FUNCTION end_reference(uuid, bigint) FROM PUBLIC;
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION end_reference(uuid, bigint) TO coffre_vault;
+--> statement-breakpoint
+-- No JIT for any function that runs as its owner, as for use_credential above: each plans its statements once a session and keeps them, and an estimate that grows with its tables past jit_above_cost would compile them at every call. Every such function says so itself (use.test.ts holds them all to it).
+ALTER FUNCTION prune_consumed_tokens(integer) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION vault_releases_keep() SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION prune_vault_releases(integer) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION make_day(date) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION make_tiles(bigint, bigint) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION close_one() SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION write_checkpoint(bigint, bigint, bigint, bigint, bytea, text, bigint, bytea, text, text[], smallint[], bigint[], bytea[]) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION prune_bulk(integer) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION app_change(text, text, text, bigint, text, text, bytea, bytea, bytea) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION log_retention(text, bigint, text, bytea) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION log_cut() SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION drop_day(date) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION drop_tiles(bigint) SET jit = off;
+--> statement-breakpoint
+ALTER FUNCTION end_reference(uuid, bigint) SET jit = off;

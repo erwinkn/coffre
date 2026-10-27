@@ -11,7 +11,10 @@
   so a use through a fork of an archived project is refused as 0.14
   refuses it; and a plain value's object holds its text's digest, so a
   text edited in the database is refused as tampered. The vault's login
-  may now read `secret_references`. With the switch off, as every
+  may now read `secret_references`. Every function coffre runs as its
+  owner now turns JIT off for itself: 0028's `use_credential`, past
+  `jit_above_cost` for a use through a reference, compiled its plan at
+  every call, about 150 ms a use where it costs 4. With the switch off, as every
   deployment has it, one thing changes: a project archived (or restored)
   by two requests at once is archived once, with one entry, where the
   second used to write its row and its entry again

@@ -488,6 +488,16 @@ test('RefreshShared after a rollback: the uses that waited elect one to move the
   assert.ok(await replayAgrees() >= 2);
 });
 
+test('no function run as its owner compiles its statements (0029): JIT cost a use through a reference ~150 ms', postgresOnly('JIT'), async () => {
+  // Past jit_above_cost (100,000 by default), Postgres compiles a plan's expressions at every execution of it, a cached
+  // generic plan's included. 0028's use through a reference was past it (150 ms a use against 3.4), its probing use
+  // just under, and estimates grow with the tables: each function says no JIT itself, whatever the server's default.
+  const fns = await rows<{ fn: string; config: string[] | null }>(db.owner, sql`SELECT oid::regprocedure::text AS fn, proconfig AS config FROM pg_proc
+    WHERE pronamespace = 'public'::regnamespace AND prosecdef`);
+  assert.ok(fns.some((f) => f.fn.startsWith('use_credential(')), 'use_credential among them');
+  assert.deepEqual(fns.filter((f) => !f.config?.includes('jit=off')).map((f) => f.fn), []);
+});
+
 test('a session\'s first call plans its four statements before it takes the fence (T131)', postgresOnly('the fence'), async () => {
   const w = await world();
   const id = await w.key();
