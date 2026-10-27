@@ -1,6 +1,11 @@
-import type { CredentialColumns, ObjectChange, PreparedChange, Vault } from '@coffre/core/vault';
+import { protects } from '@coffre/core/access';
+import type { Envelope } from '@coffre/core/envelope';
+import type { CredentialColumns, EnvironmentColumns, ObjectChange, PreparedChange, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Transaction } from '@coffre/db';
 import { appChanges, isStaleChange } from '@coffre/db/log';
+
+import type { ObjectRead, SecretRead } from '../db/queries.ts';
+import type { Caller } from './caller.ts';
 
 import { ApiError, vaultRefused } from './errors.ts';
 
@@ -93,7 +98,7 @@ export class AppChanges {
    * log's.
    */
   expectRevoked(ids: Iterable<string>): void {
-    const prepared = new Set(this.#changes.filter(({ before, after }) => before !== null && !before.columns.revoked && after.revoked).map(({ id }) => id));
+    const prepared = new Set(this.#changes.filter((change) => change.kind === 'credential' && change.before !== null && !change.before.columns.revoked && change.after.revoked).map(({ id }) => id));
     const written = new Set(ids);
     if (prepared.size !== written.size || [...written].some((id) => !prepared.has(id))) throw new ObjectMoved();
   }
@@ -192,4 +197,54 @@ export function credentialChange(
     before: before === null ? null : { columns: credentialColumns(before), seal: before.seal === null ? null : before.seal.toString('base64') },
     after: credentialColumns(after),
   };
+}
+
+/** A seal as `prepare` takes it. */
+function sealText(seal: Buffer | null): string | null {
+  return seal === null ? null : seal.toString('base64');
+}
+
+/**
+ * A key's change: from its read (none, a key made now; archived, no object),
+ * to its columns after (null: archived, or erased with its place). Its
+ * object holds its version's id, nature and wrapped data key, never the
+ * ciphertext (0.15-plan.md, "As built: PR 4b"): each version has a data key
+ * of its own, and the envelope's AEAD binds the ciphertext to it.
+ */
+export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null): ObjectChange {
+  return { kind: 'secret', id, before: before === undefined || before.archived ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
+}
+
+/** A key's columns with a new version of its own: its value, no reference. */
+export function writtenSecret(at: Pick<SecretColumns, 'id' | 'projectId' | 'environmentId'>, version: VersionColumns): SecretColumns {
+  return { id: at.id, projectId: at.projectId, environmentId: at.environmentId, source: null, version };
+}
+
+/** A version's columns, as its row stores them: its id, whether it is sensitive and whether plain (a plaintext kept), and the data key wrapped in its envelope. */
+export function versionColumns(
+  id: string,
+  envelope: Pick<Envelope, 'kekProvider' | 'kekId' | 'kekVersion' | 'wrappedDek'>,
+  { sensitive, plaintext }: { sensitive: boolean; plaintext: string | null },
+): VersionColumns {
+  const { kekProvider, kekId, kekVersion, wrappedDek } = envelope;
+  return { id, sensitive, plain: plaintext !== null, kekProvider, kekId, kekVersion, wrappedDek: wrappedDek.toString('base64') };
+}
+
+/** An environment's change: made (no read), or from its row as read, with its seal. */
+export function environmentChange(before: ObjectRead<EnvironmentColumns> | undefined, after: EnvironmentColumns): ObjectChange {
+  return { kind: 'environment', id: after.id, before: before === undefined ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
+}
+
+/**
+ * A new environment's object, 0.15's (`environmentObject`): its own id's
+ * protection as the policy has it, a protected fork's (`protectIds`), which
+ * `audited` holds to the policy as it commits (`policyStill`).
+ */
+export function madeEnvironment(caller: Pick<Caller, 'policy'>, row: Omit<EnvironmentColumns, 'protected' | 'archived'>): EnvironmentColumns {
+  return { ...row, protected: protects(caller.policy, row.id), archived: false };
+}
+
+/** The protection a new environment's row carries with 0.15's log, its object's; none with 0.14's, which keeps it in the policy. */
+export function madeProtection(made: EnvironmentColumns, changes: AppChanges | null): { protected?: boolean } {
+  return changes === null ? {} : { protected: made.protected === true };
 }

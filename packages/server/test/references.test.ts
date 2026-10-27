@@ -6,7 +6,7 @@ import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { withTriggersLifted } from './db/engine.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // References between environments and projects (docs/design/environments.md).
 // market/prod/DATABASE_URL is the source; billing/prod holds references to it.
@@ -200,7 +200,7 @@ test("the source's access manager breaks it, and a run of the holder stops, sayi
   assert.ok(entries.some((entry) => entry.action === 'reference.end' && entry.decision === 'allow'), "billing/prod's log shows the reference broken");
 });
 
-test('an archived source refuses reads through it until it is back, and never reads as empty', async () => {
+test('an archived source refuses reads through it until it is back, and never reads as empty', { skip: LOG_014_ONLY }, async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
   // Archived before archiving a read source was refused (D41): as data from then has it.
   await db.owner.update(secrets).set({ archivedAt: new Date() }).where(eq(secrets.key, 'DATABASE_URL'));

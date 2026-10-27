@@ -11,3 +11,7 @@ export const TEST_RUNTIME_DATABASE_URL =
 
 export const TEST_VAULT_DATABASE_URL =
   `postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${port}/${database}`;
+
+/** 0.15's hot path's login (schema 0022), which setup-test-database.sh lets log in: what a vault's `use` runs as. */
+export const TEST_HOT_DATABASE_URL =
+  `postgresql://coffre_vault_hot:local-hot-only@127.0.0.1:${port}/${database}`;

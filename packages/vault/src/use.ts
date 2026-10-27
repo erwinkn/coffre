@@ -298,14 +298,14 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
     sensitive: row.v_sensitive === true, plain: row.v_plain === true, kekProvider: row.v_kek_provider!, kekId: row.v_kek_id!, kekVersion: row.v_kek_version!,
     wrappedDek: row.v_wrapped_dek.toString('base64'),
   };
-  const secret = read(row.s_environment === null ? null : secretObject(
-    { id: request.secretId, projectId: row.s_project!, environmentId: row.s_environment, source: row.s_source },
-    row.s_source === null && version !== null ? { id: row.s_version!, ...version } : null,
-  ), row.s_seal, last.s);
-  const source = row.s_source === null ? null : read(row.x_environment === null ? null : secretObject(
-    { id: row.s_source, projectId: row.x_project!, environmentId: row.x_environment, source: row.x_source },
-    row.x_source === null && version !== null ? { id: row.x_version!, ...version } : null,
-  ), row.x_seal, last.x);
+  const secret = read(row.s_environment === null ? null : secretObject({
+    id: request.secretId, projectId: row.s_project!, environmentId: row.s_environment, source: row.s_source,
+    version: row.s_source === null && version !== null ? { id: row.s_version!, ...version } : null,
+  }), row.s_seal, last.s);
+  const source = row.s_source === null ? null : read(row.x_environment === null ? null : secretObject({
+    id: row.s_source, projectId: row.x_project!, environmentId: row.x_environment, source: row.x_source,
+    version: row.x_source === null && version !== null ? { id: row.x_version!, ...version } : null,
+  }), row.x_seal, last.x);
   const environments = new Map<string, Read<EnvironmentInput>>();
   for (const slot of SLOTS) {
     const id = row[`${slot}_id`];

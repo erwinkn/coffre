@@ -1,6 +1,6 @@
 import { isCredentialScope, type CallerKind, type CredentialScope, type InstanceRole, type Scope } from '@coffre/core/access';
 import { TOMBSTONE } from '@coffre/core/schemas';
-import type { CredentialColumns } from '@coffre/core/vault';
+import type { CredentialColumns, EnvironmentColumns, SecretColumns, VersionColumns } from '@coffre/core/vault';
 import { storedRole } from '@coffre/db/grants';
 
 import type { CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PrincipalInput, SecretInput } from './inputs.ts';
@@ -61,50 +61,28 @@ export function memberStanding(row: { owner: boolean; role: string | null; scope
   return storedRole(row);
 }
 
-/** The version a key's value is: its ids, its nature and its wrapped data key. */
-export type VersionColumns = {
-  id: string;
-  sensitive: boolean;
-  /** Whether the value is plain: kept as text, with no data key the vault opens. */
-  plain: boolean;
-  kekProvider: string;
-  kekId: string;
-  kekVersion: string;
-  /** The wrapped data key, base64. */
-  wrappedDek: string;
-};
-
 /**
- * A key's columns (`secrets`), unarchived: an archived key is no object.
- * `source`: a reference's, the source its newest `secret_references` row
- * names while it has no version of its own; null for a key with a value.
+ * A key's columns (`secrets`, its version's in `secret_versions`),
+ * unarchived: an archived key is no object (`VersionColumns`,
+ * `SecretColumns`: @coffre/core/vault, the app sends them too).
  */
-export type SecretColumns = { id: string; projectId: string; environmentId: string; source: string | null };
+export type { SecretColumns, VersionColumns };
 
 /**
  * A key: its current version, nature and wrapped data key; or, for a
  * reference, its source, whose value and nature are its own (R23): a
  * reference holds no version, and is a secret by itself.
  */
-export function secretObject(row: SecretColumns, version: VersionColumns | null): SecretInput {
-  const { id, projectId, environmentId, source } = row;
+export function secretObject(row: SecretColumns): SecretInput {
+  const { id, projectId, environmentId, source, version } = row;
   if (source !== null || version === null) return { kind: 'secret', id, projectId, environmentId, version: '', nature: 'secret', key: null, source };
   const nature: Nature = version.sensitive ? 'sensitive' : version.plain ? 'plain' : 'secret';
   const key = nature === 'plain' ? null : { kekProvider: version.kekProvider, kekId: version.kekId, kekVersion: version.kekVersion, bytes: version.wrappedDek };
   return { kind: 'secret', id, projectId, environmentId, version: version.id, nature, key, source: null };
 }
 
-/** An environment's columns (`environments`). Its slug as stored: a deleted one's carries a tombstone, `dev~deleted-…`. */
-export type EnvironmentColumns = {
-  id: string;
-  projectId: string;
-  slug: string;
-  owner: string | null;
-  parentId: string | null;
-  /** Null until the cutover writes it (0022): not protected. */
-  protected: boolean | null;
-  archived: boolean;
-};
+/** An environment's columns (`environments`), as the app sends them too (@coffre/core/vault). */
+export type { EnvironmentColumns };
 
 /** An environment: its slug, as it was before any tombstone, and whether it was deleted. */
 export function environmentObject(row: EnvironmentColumns): EnvironmentInput {

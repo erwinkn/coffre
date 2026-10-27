@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto';
 import type { ObjectChange, PreparedChange } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 
-import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type CredentialInput, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac } from './log-entry.ts';
-import { credentialObject } from './objects.ts';
+import { credentialObject, environmentObject, secretObject } from './objects.ts';
 import { changeInputs, isStale, newestChange, readObject, type ChangeCall, type ReadKind } from './store.ts';
 
 /**
@@ -183,8 +183,9 @@ export class Changes {
 
 /**
  * The changes the app is about to write to objects its own rows hold (plan
- * PR 4b, `prepare`), sealed for its transaction to commit (`app_change`,
- * 0025), at `at`, by `actor`. Pure: the vault reads nothing.
+ * PR 4b, `prepare`): credentials, keys and environments, sealed for its
+ * transaction to commit (`app_change`, 0025), at `at`, by `actor`. Pure:
+ * the vault reads nothing.
  *
  * - **Before:** the row's columns as the app read them, and their seal,
  *   which must be the vault's over them (else `tampered`). That it is the
@@ -192,58 +193,108 @@ export class Changes {
  *   check under the fence (ChangeChecksSeal, ChangeCAS), as `change_input`
  *   does for the vault's own. A row with no seal is 0.14's, before the
  *   cutover: its call logs nothing, and only checks that the log has no
- *   change of its object either (as `Changes` leaves such a row alone).
+ *   change of its object either (as `Changes` leaves such a row alone). No
+ *   before is no object: no row, or a key archived, whose seal its delete
+ *   left null.
  * - **The changes:** what turns the object before into the object after,
  *   each one of the replay's ops (`opsBetween`), applied with `applyOp` and
- *   sealed in turn, each from the seal the one before leaves. Columns no op
- *   reaches (a credential's principal or kind, a revoke undone) are a bug of
- *   the app's, which fails the call. Columns no object holds (a credential's
- *   MAC, its last use) are no change.
+ *   sealed in turn, each from the seal the one before leaves; a key's
+ *   delete leaves none. Columns no op reaches (a credential's principal, a
+ *   key moved to another environment, an environment's parent or its
+ *   protection, which is the vault's) are a bug of the app's, which fails
+ *   the call. Columns no object holds (a credential's MAC, a key's name, an
+ *   environment's display name) are no change.
  */
 export function prepareChanges(keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[]): PreparedChange[] {
   const prepared: PreparedChange[] = [];
-  for (const { kind, id, before, after } of changes) {
-    if (kind !== 'credential' || after.id !== id || (before !== null && before.columns.id !== id)) throw new Error(`a change to a ${kind} names its row by its id, before and after`);
+  for (const change of changes) {
+    const { kind, id, before } = change;
+    if (!Object.hasOwn(OBJECTS, kind)) throw new Error(`the app makes no change to a ${String(kind)}`);
+    const after = objectOf(change);
+    if ((after !== null && refOf(after).id !== id) || (before !== null && before.columns.id !== id)) {
+      throw new Error(`a change to a ${kind} names its row by its id, before and after`);
+    }
     const ref: Ref = { kind, id };
     const object = objectKey(ref);
     if (before !== null && before.seal === null) {
       prepared.push({ kind, id, requestId: null, at, object, actor, payload: null, sealFrom: null, seal: null, mac: null });
       continue;
     }
-    let now: Input | null = before === null ? null : credentialObject(before.columns);
+    let now: Input | null = before === null ? null : OBJECTS[kind](before.columns as never);
     let from: Buffer | null = before === null ? null : Buffer.from(before.seal!, 'base64');
     if (now !== null && !sealed(keys.seals, ref, now, from)) throw new NotLogged(ref, 'tampered');
-    const wanted = credentialObject(after);
-    for (const op of opsBetween(now as CredentialInput | null, wanted)) {
+    for (const op of opsBetween(now, after)) {
       const next = applyOp(now, ref, op);
-      if (next === undefined || next === null) throw new Error(`${op.op} does nothing to the ${kind} ${id}: the app's write and its change disagree`);
-      const seal = sealOf(keys.seals[0]!, ref, next);
+      if (next === undefined) throw new Error(`${op.op} does nothing to the ${kind} ${id}: the app's write and its change disagree`);
+      // A key deleted leaves no object, and no seal: its row's is null, as a use reads it (decide.ts, checkSeals).
+      const seal = next === null ? null : sealOf(keys.seals[0]!, ref, next);
       const row = { at, requestId: randomUUID(), object, actor, payload: payloadOf(ref, op), seal };
       const mac = entryMac(keys.mac, { tree: 'changes', row });
-      prepared.push({ kind, id, ...row, seal: seal.toString('base64'), sealFrom: from === null ? null : from.toString('base64'), mac: mac.toString('base64') });
+      prepared.push({ kind, id, ...row, seal: seal?.toString('base64') ?? null, sealFrom: from?.toString('base64') ?? null, mac: mac.toString('base64') });
       now = next;
       from = seal;
     }
-    if (!sameObject(keys.seals[0]!, ref, now, wanted)) throw new Error(`the ${kind} ${id} the app would write is no change the log knows from the one it read`);
+    if (!sameObject(keys.seals[0]!, ref, now, after)) throw new Error(`the ${kind} ${id} the app would write is no change the log knows from the one it read`);
   }
   return prepared;
 }
 
+/** Each kind of the app's objects, from its columns (objects.ts). */
+const OBJECTS = { credential: credentialObject, secret: secretObject, environment: environmentObject } as const;
+
+/** The object a change leaves: null for a key archived or erased. */
+function objectOf(change: ObjectChange): Input | null {
+  if (change.after === null) return null;
+  return OBJECTS[change.kind](change.after as never);
+}
+
 /**
- * The ops that make a credential `after` from `before`, in the order they
- * apply: its issue (and a revoke, issued revoked); its scope written, its
- * end moved, then its revoke. Whatever else differs, they do not reach.
+ * The ops that make `after` from `before`, in the order they apply; what
+ * else differs, they do not reach.
+ * - a credential: its issue (and a revoke, issued revoked); its scope
+ *   written, its end moved, then its revoke;
+ * - a key: written whole, its value or its reference (`secret.write`); or
+ *   deleted, archived or erased;
+ * - an environment: made, with the protection its id was given; renamed,
+ *   archived or restored, then deleted.
  */
-function opsBetween(before: CredentialInput | null, after: CredentialInput): Op[] {
-  if (before === null) {
-    const { principal, caller, scope, expiresAt } = after;
-    return [{ op: 'credential.issue', principal, caller, scope, expiresAt }, ...(after.revoked ? [{ op: 'credential.revoke' } as const] : [])];
+function opsBetween(before: Input | null, after: Input | null): Op[] {
+  if (after === null) return before === null ? [] : [{ op: 'secret.delete' }];
+  switch (after.kind) {
+    case 'credential': {
+      if (before === null) {
+        const { principal, caller, scope, expiresAt } = after;
+        return [{ op: 'credential.issue', principal, caller, scope, expiresAt }, ...(after.revoked ? [{ op: 'credential.revoke' } as const] : [])];
+      }
+      if (before.kind !== 'credential') return [];
+      const ops: Op[] = [];
+      if (canonical(before.scope) !== canonical(after.scope)) ops.push({ op: 'credential.scope', scope: after.scope });
+      if (before.expiresAt !== after.expiresAt) ops.push({ op: 'credential.renew', expiresAt: after.expiresAt });
+      if (!before.revoked && after.revoked) ops.push({ op: 'credential.revoke' });
+      return ops;
+    }
+    case 'secret': {
+      if (before !== null && canonical(before) === canonical(after)) return [];
+      const { projectId, environmentId, version, nature, key, source } = after;
+      return [{ op: 'secret.write', projectId, environmentId, version, nature, key, source }];
+    }
+    case 'environment': {
+      const ops: Op[] = [];
+      if (before === null) {
+        const { projectId, slug, owner, parentId } = after;
+        ops.push({ op: 'environment.create', projectId, slug, owner, parentId, protected: after.protected });
+        if (after.archived) ops.push({ op: 'environment.archive', archived: true });
+        return ops;
+      }
+      if (before.kind !== 'environment') return [];
+      if (before.slug !== after.slug) ops.push({ op: 'environment.rename', slug: after.slug });
+      if (before.archived !== after.archived) ops.push({ op: 'environment.archive', archived: after.archived });
+      if (!before.deleted && after.deleted) ops.push({ op: 'environment.delete' });
+      return ops;
+    }
+    default:
+      return [];
   }
-  const ops: Op[] = [];
-  if (canonical(before.scope) !== canonical(after.scope)) ops.push({ op: 'credential.scope', scope: after.scope });
-  if (before.expiresAt !== after.expiresAt) ops.push({ op: 'credential.renew', expiresAt: after.expiresAt });
-  if (!before.revoked && after.revoked) ops.push({ op: 'credential.revoke' });
-  return ops;
 }
 
 /** Whether `change_input` writes the object's rows from its value: those the vault's login cannot write. */

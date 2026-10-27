@@ -772,7 +772,7 @@ export class SigninService {
     // Its actor, the session's own principal: a sign-out acts for whoever holds the token.
     const changes = await AppChanges.prepare(
       this.#deps.vault,
-      (read) => read[0]?.after.principal ?? COFFRE_ACTOR,
+      (read) => (read[0]?.kind === 'credential' ? read[0].after.principal : COFFRE_ACTOR),
       async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash))),
     );
     await audited(this.#deps, async (tx, log) => {

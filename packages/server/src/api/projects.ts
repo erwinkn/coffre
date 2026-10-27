@@ -3,25 +3,31 @@ import { randomUUID } from 'node:crypto';
 import { runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
-import { environments, projects } from '@coffre/db/schema';
+import { isTombstone, tombstoneOf } from '@coffre/core/schemas';
+import { environments, projects, secrets } from '@coffre/db/schema';
 
 
 import {
   deletionScope,
   dismissalsAcross,
   distinctSecretCounts,
+  environmentObjects,
   eraseVersions,
   forksOf,
   insert,
+  liveSecretsUnder,
   liveEnvironment,
   liveKeysIn,
   parentsOf,
   places,
   projectsInFolder,
   resolvePath,
+  secretObjects,
+  tombstoneEnvironments,
   tombstoneSlug,
   update,
   type Doomed,
+  type SecretRead,
   type PlaceRow,
   type ResolvedPath,
   fileProject,
@@ -29,6 +35,7 @@ import {
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
+import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectMoved, retrying, secretChange } from './changes.ts';
 import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, vaultCredential, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
@@ -448,6 +455,8 @@ export async function putEnvironment(
     const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt), protected: protectedFor(ctx.caller, environment) };
     return { environment: existing, created: false };
   }
+  const made = madeEnvironment(ctx.caller, { id, projectId: project.id, slug, owner: null, parentId });
+  const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [environmentChange(undefined, made)]);
   return audited(ctx, async (tx, log) => {
     // The project as it is under the head: archived, or deleted, since the router found it, it takes nothing new.
     if ((await stillThere(tx, place)).project.archivedAt !== null) {
@@ -472,7 +481,7 @@ export async function putEnvironment(
       );
     }
     try {
-      await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
+      await insert(tx, environments, { id, projectId: project.id, slug, name, parentId, ...madeProtection(made, changes) });
     } catch (error) {
       if (isUniqueViolation(error)) throw slugTaken('environment', slug);
       throw error;
@@ -483,7 +492,7 @@ export async function putEnvironment(
       metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
     }));
     return { environment: { slug, name, archivedAt: null, protected: protectedFor(ctx.caller, { id }) }, created: true };
-  });
+  }, changes);
 }
 
 /** What renaming or removing a folder did: the folder they are in now, none for a removal, and what moved. */
@@ -534,71 +543,101 @@ export async function patchEnvironment(
   const { renames, archivedAt } = placeChanges(environment, patch);
   const renamed = Object.keys(renames).length > 0;
   const scope = { projectId: project.id, environmentId: environment.id };
-  return audited(ctx, async (tx, log) => {
-    await stillThere(tx, place);
-    if (archivedAt != null) await refuseIfRead(ctx, tx, `${project.slug}/${environment.slug}`, scope, 'environment.archive', scope);
-    // A fork is restored only while every environment it inherits from is live.
-    if (archivedAt === null && environment.parentId !== null) {
-      const parents = await parentsOf(tx, environment.id);
-      const gone = parents === null ? { slug: '(a chain made around coffre)', deleted: true } : parents.find((parent) => parent.archived || parent.deleted);
-      if (gone !== undefined) {
+  // Its personal configs follow its archiving, below: with 0.15's log, the set chosen under the head is the one prepared.
+  const configsMoving = async (db: Queryable) => archivedAt === undefined
+    ? []
+    : (await forksOf(db, environment.id, { archived: true })).filter((fork) => fork.owner !== null && (fork.archivedAt === null) !== (archivedAt === null));
+  return retrying(async () => {
+    // With 0.15's log, each change prepared from the rows as read now; what the transaction finds under the head must be them.
+    let read: { archived: boolean; configs: string[] } | null = null;
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      const configs = (await configsMoving(ctx.db)).map((config) => config.id);
+      const rows = await environmentObjects(ctx.db, { ids: [environment.id, ...configs] });
+      const own = rows.get(environment.id);
+      if (own === undefined) return [];
+      read = { archived: own.columns.archived, configs };
+      return [
+        environmentChange(own, { ...own.columns, slug: renames.slug ?? own.columns.slug, archived: archivedAt === undefined ? own.columns.archived : archivedAt !== null }),
+        ...configs.flatMap((id) => {
+          const config = rows.get(id);
+          return config === undefined ? [] : [environmentChange(config, { ...config.columns, archived: archivedAt !== null })];
+        }),
+      ];
+    });
+    return audited(ctx, async (tx, log) => {
+      const now = await stillThere(tx, place);
+      if (changes !== null && (read === null || (now.environment!.archivedAt !== null) !== read.archived)) throw new ObjectMoved();
+      if (archivedAt != null) await refuseIfRead(ctx, tx, `${project.slug}/${environment.slug}`, scope, 'environment.archive', scope);
+      // A fork is restored only while every environment it inherits from is live.
+      if (archivedAt === null && environment.parentId !== null) {
+        const parents = await parentsOf(tx, environment.id);
+        const gone = parents === null ? { slug: '(a chain made around coffre)', deleted: true } : parents.find((parent) => parent.archived || parent.deleted);
+        if (gone !== undefined) {
+          throw new Refusal(
+            conflict(`${project.slug}/${environment.slug} inherits from ${project.slug}/${gone.slug}, which is ${gone.deleted ? 'deleted' : 'archived'}: restore that first`),
+            denied(ctx, 'environment.restore', 'parent_archived', { ...scope, metadata: { parent: gone.slug } }),
+          );
+        }
+      }
+      // A live fork reads its parent's keys: archiving the parent would leave it half empty (docs/design/forking.md).
+      // A personal config is no such fork: it is archived and restored with its parent, below.
+      const forks = archivedAt == null ? [] : (await forksOf(tx, environment.id)).filter((fork) => fork.owner === null).map((fork) => fork.slug);
+      if (forks.length > 0) {
         throw new Refusal(
-          conflict(`${project.slug}/${environment.slug} inherits from ${project.slug}/${gone.slug}, which is ${gone.deleted ? 'deleted' : 'archived'}: restore that first`),
-          denied(ctx, 'environment.restore', 'parent_archived', { ...scope, metadata: { parent: gone.slug } }),
+          conflict(`${project.slug}/${environment.slug} is inherited by ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: archive ${forks.length === 1 ? 'it' : 'them'} first`),
+          denied(ctx, 'environment.archive', 'inherited', { ...scope, metadata: { forks } }),
         );
       }
-    }
-    // A live fork reads its parent's keys: archiving the parent would leave it half empty (docs/design/forking.md).
-    // A personal config is no such fork: it is archived and restored with its parent, below.
-    const forks = archivedAt == null ? [] : (await forksOf(tx, environment.id)).filter((fork) => fork.owner === null).map((fork) => fork.slug);
-    if (forks.length > 0) {
-      throw new Refusal(
-        conflict(`${project.slug}/${environment.slug} is inherited by ${forks.map((fork) => `${project.slug}/${fork}`).join(', ')}: archive ${forks.length === 1 ? 'it' : 'them'} first`),
-        denied(ctx, 'environment.archive', 'inherited', { ...scope, metadata: { forks } }),
-      );
-    }
-    if (renamed || archivedAt !== undefined) {
-      try {
-        await update(tx, environments, { id: environment.id }, { ...renames, archivedAt });
-      } catch (error) {
-        if (!isUniqueViolation(error)) throw error;
-        throw new Refusal(
-          slugTaken('environment', renames.slug!),
-          denied(ctx, 'environment.update', 'slug_taken', { ...scope, metadata: { slug: renames.slug } }),
-        );
+      if (renamed || archivedAt !== undefined) {
+        try {
+          await update(tx, environments, { id: environment.id }, { ...renames, archivedAt });
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+          throw new Refusal(
+            slugTaken('environment', renames.slug!),
+            denied(ctx, 'environment.update', 'slug_taken', { ...scope, metadata: { slug: renames.slug } }),
+          );
+        }
       }
-    }
-    if (renamed) {
-      log.push(allowed(ctx, 'environment.update', {
-        ...scope,
-        metadata: { from: environment.slug, ...renames },
-      }));
-    }
-    if (archivedAt !== undefined) {
-      log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
-        ...scope,
-        metadata: { environmentSlug: renames.slug ?? environment.slug },
-      }));
-      // Its personal configs go with it, and come back with it: private and derived, they stop nobody archiving.
-      const personal = (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null && (fork.archivedAt === null) !== (archivedAt === null));
-      for (const config of personal) {
-        await update(tx, environments, { id: config.id }, { archivedAt });
-        log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
-          projectId: project.id,
-          environmentId: config.id,
-          metadata: { environmentSlug: config.slug, personal: environment.slug, with: environment.slug },
+      if (renamed) {
+        log.push(allowed(ctx, 'environment.update', {
+          ...scope,
+          metadata: { from: environment.slug, ...renames },
         }));
       }
-    }
-    return {
-      environment: {
-        slug: renames.slug ?? environment.slug,
-        name: renames.name ?? environment.name,
-        archivedAt: iso(archivedAt === undefined ? environment.archivedAt : archivedAt),
-        protected: protectedFor(ctx.caller, environment),
-      },
-    };
+      if (archivedAt !== undefined) {
+        log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
+          ...scope,
+          metadata: { environmentSlug: renames.slug ?? environment.slug },
+        }));
+        // Its personal configs go with it, and come back with it: private and derived, they stop nobody archiving.
+        const personal = await configsMoving(tx);
+        if (changes !== null && !sameIds(personal.map((config) => config.id), read!.configs)) throw new ObjectMoved();
+        for (const config of personal) {
+          await update(tx, environments, { id: config.id }, { archivedAt });
+          log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
+            projectId: project.id,
+            environmentId: config.id,
+            metadata: { environmentSlug: config.slug, personal: environment.slug, with: environment.slug },
+          }));
+        }
+      }
+      return {
+        environment: {
+          slug: renames.slug ?? environment.slug,
+          name: renames.name ?? environment.name,
+          archivedAt: iso(archivedAt === undefined ? environment.archivedAt : archivedAt),
+          protected: protectedFor(ctx.caller, environment),
+        },
+      };
+    }, changes);
   });
+}
+
+/** Two sets of ids alike. */
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  const set = new Set(a);
+  return set.size === new Set(b).size && b.every((id) => set.has(id));
 }
 
 /**
@@ -626,15 +665,73 @@ async function deletePersonal(ctx: ApiContext, place: ResolvedPath, { dryRun }: 
     });
     if (dryRun) return { dryRun: true, deletion: deletion(await tombstoneSlug(ctx.db, config.slug, new Date(), { projectId: project.id })) };
     const operationId = randomUUID();
-    return audited(ctx, async (tx, log) => {
-      const now = await resolvePath(tx, { project: project.slug, environment: config.slug });
-      if (now?.environment?.id !== config.id) throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
-      const erased = await erasePersonal(ctx, tx, doomed, config.slug, operationId, { path });
-      log.push(erased.entry);
-      return { dryRun: false, deletion: deletion(erased.tombstone, erased.versions) };
+    const going = async () => ({ environments: [config.id], places: [doomed] });
+    return retrying(async () => {
+      const erasure = await Erasure.prepare(ctx, going);
+      return audited(ctx, async (tx, log) => {
+        const now = await resolvePath(tx, { project: project.slug, environment: config.slug });
+        if (now?.environment?.id !== config.id) throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
+        await erasure.hold(tx, going);
+        const erased = await erasePersonal(ctx, tx, doomed, config.slug, operationId, { path });
+        log.push(erased.entry);
+        return { dryRun: false, deletion: deletion(erased.tombstone, erased.versions) };
+      }, erasure.changes);
     });
   });
 }
+
+/**
+ * What a deletion ends in 0.15's log (plan PR 4b): each environment it
+ * takes, a project's included, deleted, its slug a tombstone; and each live key under them, whose
+ * values it erases, deleted (`secret.delete`) and archived, so that a use
+ * reads no key there, as the log has none (`use_credential` reads only
+ * unarchived keys). Prepared from the rows as read before the deletion's
+ * transaction, which must find the same environments and keys under the
+ * head (`hold`), or reads them again (`retrying`). With 0.14's log, none of
+ * it: the keys stay unarchived, and a project's environments keep their
+ * slugs, as 0.14 leaves them.
+ */
+class Erasure {
+  readonly changes: AppChanges | null;
+  readonly #read: { environments: string[]; keys: string[] };
+
+  private constructor(changes: AppChanges | null, read: { environments: string[]; keys: string[] }) {
+    this.changes = changes;
+    this.#read = read;
+  }
+
+  /** `going`: the environments a deletion takes, by id, and the places whose keys it erases, as `db` has them. */
+  static async prepare(ctx: ApiContext, going: (db: Queryable) => Promise<Going>): Promise<Erasure> {
+    const read = { environments: [] as string[], keys: [] as string[] };
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      const { environments, places } = await going(ctx.db);
+      const rows = await environmentObjects(ctx.db, { ids: environments });
+      const live: SecretRead[] = [];
+      for (const under of places) live.push(...[...(await secretObjects(ctx.db, { under })).values()].filter((key) => !key.archived));
+      read.environments = environments;
+      read.keys = live.map((key) => key.columns.id);
+      const day = new Date();
+      return [
+        ...[...rows.values()].map((row) => environmentChange(row, { ...row.columns, slug: tombstoneOf(row.columns.slug, day) })),
+        ...live.map((key) => secretChange(key.columns.id, key, null)),
+      ];
+    });
+    return new Erasure(changes, read);
+  }
+
+  /** In the deletion's transaction, under the head, before it writes: the environments and keys prepared, still; then those keys archived. */
+  async hold(tx: Transaction, going: (db: Queryable) => Promise<Going>): Promise<void> {
+    if (this.changes === null) return;
+    const { environments, places } = await going(tx);
+    const keys: string[] = [];
+    for (const under of places) keys.push(...await liveSecretsUnder(tx, under));
+    if (!sameIds(environments, this.#read.environments) || !sameIds(keys, this.#read.keys)) throw new ObjectMoved();
+    if (keys.length > 0) await update(tx, secrets, { id: keys }, { archivedAt: new Date() });
+  }
+}
+
+/** What a deletion takes: the environments it deletes, by id, and the places whose keys it erases. */
+type Going = { environments: string[]; places: Doomed[] };
 
 /** Erase a personal config's values and make its slug a tombstone, under the head: the entry that says so. */
 async function erasePersonal(ctx: ApiContext, tx: Transaction, doomed: Doomed, slug: string, operationId: string, metadata: Record<string, unknown>) {
@@ -763,52 +860,74 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
     // No reference follows a tombstone, nor holds one: one made meanwhile, the place restored and archived again, is found under the head.
     await endReferences(ctx, references, operationId);
 
-    return audited(ctx, async (tx, log) => {
-      // Again, under the log's head, which every change to a place takes first.
-      const now = await resolvePath(tx, { project: project.slug, environment: environment?.slug });
-      if (now === null || now.project.id !== project.id || (environment !== null && now.environment?.id !== environment.id)) {
-        throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
+    // A project's every standing environment, or the environment and its personal configs.
+    const going = async (db: Queryable): Promise<Going> => {
+      if (environment === null) {
+        const standing = [...(await environmentObjects(db, { projectId: project.id })).values()].filter((row) => !isTombstone(row.columns.slug));
+        return { environments: standing.map((row) => row.columns.id), places: [doomed] };
       }
-      if (!archived(now)) {
-        throw new Refusal(
-          conflict(`${path} was restored while it was being deleted: nothing was erased, but the grants on it were revoked`),
-          denied(ctx, action, 'restored', fields),
-        );
-      }
-      const forksNow = await forked(tx);
-      if (forksNow.length > 0) throw parentOf(forksNow);
-      // A grant set there since the vault revoked them would outlive the place, named by no path that could revoke it.
-      if ((await deletionScope(tx, doomed)).grants.length > 0) {
-        throw new Refusal(
-          conflict(`${path} was granted while it was being deleted: ask again, and that grant is revoked too`),
-          denied(ctx, action, 'granted_meanwhile', fields),
-        );
-      }
-      // Nor may a reference made there since the vault ended them: held in a tombstone, no path could break it, and its source could never be archived.
-      if ((await referencesAt(tx, doomed)).length > 0) {
-        throw new Refusal(
-          conflict(`${path} was given a reference while it was being deleted: ask again, and that reference is ended too`),
-          denied(ctx, action, 'referenced_meanwhile', fields),
-        );
-      }
-      const tombstone = await tombstoneSlug(tx, slug, new Date(), within);
-      let versions = await eraseVersions(tx, doomed);
-      if (environment === null) await update(tx, projects, { id: project.id }, { slug: tombstone });
-      else await update(tx, environments, { id: environment.id }, { slug: tombstone });
-      // Its personal configs with it: none outlives the environment it is a config of.
-      const configs = environment === null ? [] : (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null);
-      for (const config of configs) {
-        const erased = await erasePersonal(ctx, tx, { projectId: project.id, environmentId: config.id }, config.slug, operationId, { path, with: environment!.slug });
-        versions += erased.versions;
-        log.push(erased.entry);
-      }
-      const done = deletion(tombstone, versions);
-      log.push(allowed(ctx, action, {
-        ...doomed,
-        operationId,
-        metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length, ...(configs.length === 0 ? {} : { personal: configs.length }) },
-      }));
-      return { dryRun: false, deletion: done };
+      const configs = (await forksOf(db, environment.id, { archived: true })).filter((fork) => fork.owner !== null);
+      return {
+        environments: [environment.id, ...configs.map((config) => config.id)],
+        places: [doomed, ...configs.map((config) => ({ projectId: project.id, environmentId: config.id }))],
+      };
+    };
+    return retrying(async () => {
+      const erasure = await Erasure.prepare(ctx, going);
+      return audited(ctx, async (tx, log) => {
+        // Again, under the log's head, which every change to a place takes first.
+        const now = await resolvePath(tx, { project: project.slug, environment: environment?.slug });
+        if (now === null || now.project.id !== project.id || (environment !== null && now.environment?.id !== environment.id)) {
+          throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
+        }
+        if (!archived(now)) {
+          throw new Refusal(
+            conflict(`${path} was restored while it was being deleted: nothing was erased, but the grants on it were revoked`),
+            denied(ctx, action, 'restored', fields),
+          );
+        }
+        const forksNow = await forked(tx);
+        if (forksNow.length > 0) throw parentOf(forksNow);
+        // A grant set there since the vault revoked them would outlive the place, named by no path that could revoke it.
+        const scopeNow = await deletionScope(tx, doomed);
+        if (scopeNow.grants.length > 0) {
+          throw new Refusal(
+            conflict(`${path} was granted while it was being deleted: ask again, and that grant is revoked too`),
+            denied(ctx, action, 'granted_meanwhile', fields),
+          );
+        }
+        // Nor may a reference made there since the vault ended them: held in a tombstone, no path could break it, and its source could never be archived.
+        if ((await referencesAt(tx, doomed)).length > 0) {
+          throw new Refusal(
+            conflict(`${path} was given a reference while it was being deleted: ask again, and that reference is ended too`),
+            denied(ctx, action, 'referenced_meanwhile', fields),
+          );
+        }
+        await erasure.hold(tx, going);
+        const day = new Date();
+        const tombstone = await tombstoneSlug(tx, slug, day, within);
+        let versions = await eraseVersions(tx, doomed);
+        if (environment === null) {
+          await update(tx, projects, { id: project.id }, { slug: tombstone });
+          // With 0.15's log, each of its environments too, as one deleted alone: 0.15's environment is deleted by its own
+          // slug. 0.14 takes the project's for theirs, and finds them by it (`coffre audit market~deleted-…/dev`).
+          if (erasure.changes !== null) await tombstoneEnvironments(tx, project.id, scopeNow.environments, day);
+        } else await update(tx, environments, { id: environment.id }, { slug: tombstone });
+        // Its personal configs with it: none outlives the environment it is a config of.
+        const configs = environment === null ? [] : (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null);
+        for (const config of configs) {
+          const erased = await erasePersonal(ctx, tx, { projectId: project.id, environmentId: config.id }, config.slug, operationId, { path, with: environment!.slug });
+          versions += erased.versions;
+          log.push(erased.entry);
+        }
+        const done = deletion(tombstone, versions);
+        log.push(allowed(ctx, action, {
+          ...doomed,
+          operationId,
+          metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length, ...(configs.length === 0 ? {} : { personal: configs.length }) },
+        }));
+        return { dryRun: false, deletion: done };
+      }, erasure.changes);
     });
   });
 }

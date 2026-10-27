@@ -1,7 +1,7 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, type Checkpoint } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
@@ -555,6 +555,31 @@ export async function eraseVersions(tx: Transaction, place: Doomed): Promise<num
     .where(and(inArray(secretVersions.secretId, under), holdsValue(secretVersions))));
 }
 
+/** The ids of the live keys under a place, archived ones apart: those its deletion erases with 0.15's log. */
+export async function liveSecretsUnder(db: Queryable, place: Doomed): Promise<string[]> {
+  const { secrets } = tablesOf(db);
+  return (await db.select({ id: secrets.id }).from(secrets).where(and(secretsUnder(secrets, place), isNull(secrets.archivedAt)))).map((row) => row.id);
+}
+
+/**
+ * Each of a deleted project's environments its own tombstone, as
+ * `tombstoneSlug` gives one, in one read and one write: under the log's
+ * head, which every change of a slug takes first.
+ */
+export async function tombstoneEnvironments(tx: Transaction, projectId: string, going: readonly { id: string; slug: string }[], day: Date): Promise<void> {
+  if (going.length === 0) return;
+  const { environments } = tablesOf(tx);
+  const taken = new Set((await tx.select({ slug: environments.slug }).from(environments)
+    .where(and(eq(environments.projectId, projectId), like(environments.slug, `%${tombstoneOf('', day)}%`)))).map((row) => row.slug));
+  const slugs = going.map(({ id, slug }) => {
+    let n = 1;
+    while (taken.has(tombstoneOf(slug, day, n))) n += 1;
+    taken.add(tombstoneOf(slug, day, n));
+    return sql` WHEN ${id} THEN ${tombstoneOf(slug, day, n)}`;
+  });
+  await tx.update(environments).set({ slug: sql`CASE ${environments.id}${sql.join(slugs)} END` }).where(inArray(environments.id, going.map(({ id }) => id)));
+}
+
 /**
  * The slug a deleted place keeps, `market~deleted-2026-10-05`, or
  * `market~deleted-2026-10-05-2` for the second that day: one that no
@@ -573,6 +598,90 @@ export async function tombstoneSlug(db: Queryable, slug: string, day: Date, with
   let n = 1;
   while (taken.has(tombstoneOf(slug, day, n))) n += 1;
   return tombstoneOf(slug, day, n);
+}
+
+// --- 0.15's objects -----------------------------------------------------------
+
+/** A row as an object of 0.15's log takes it (@coffre/core/vault's columns), with the seal on it. */
+export type ObjectRead<C> = { columns: C; seal: Buffer | null };
+
+/** A key's columns and seal; `archived`: no object while it is, and these columns what it serves unarchived. */
+export type SecretRead = ObjectRead<SecretColumns> & { archived: boolean };
+
+/**
+ * Keys as 0.15's objects take them (`secretObject`, packages/vault): each
+ * one's place, its current version's nature and wrapped data key, never its
+ * ciphertext, and, with no version of its own, the source its newest
+ * reference names, as `use_credential` reads them. By id, or every key
+ * under a place, archived ones included.
+ */
+export async function secretObjects(db: Queryable, by: { ids: readonly string[] } | { under: Doomed }): Promise<Map<string, SecretRead>> {
+  const { secrets, secretVersions, secretReferences } = tablesOf(db);
+  const source = sql<string | null>`(SELECT ${secretReferences.sourceSecretId} FROM ${secretReferences} WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  const read = (where: SQL) => db
+    .select({
+      id: secrets.id,
+      projectId: secrets.projectId,
+      environmentId: secrets.environmentId,
+      archivedAt: secrets.archivedAt,
+      seal: secrets.seal,
+      versionId: secrets.currentVersionId,
+      sensitive: secretVersions.sensitive,
+      plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`,
+      kekProvider: secretVersions.kekProvider,
+      kekId: secretVersions.kekId,
+      kekVersion: secretVersions.kekVersion,
+      wrappedDek: secretVersions.wrappedDek,
+      source,
+    })
+    .from(secrets)
+    .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
+    .where(where);
+  const rows = [];
+  if ('under' in by) rows.push(...await read(secretsUnder(secrets, by.under)));
+  else {
+    const unique = [...new Set(by.ids)];
+    for (let start = 0; start < unique.length; start += 1000) rows.push(...await read(inArray(secrets.id, unique.slice(start, start + 1000))));
+  }
+  return new Map(rows.map((row) => [row.id, {
+    columns: {
+      id: row.id,
+      projectId: row.projectId,
+      environmentId: row.environmentId,
+      source: row.versionId === null ? row.source : null,
+      version: row.versionId === null || row.wrappedDek === null ? null : {
+        id: row.versionId,
+        sensitive: row.sensitive === true,
+        plain: Boolean(row.plain),
+        kekProvider: row.kekProvider!,
+        kekId: row.kekId!,
+        kekVersion: row.kekVersion!,
+        wrappedDek: Buffer.from(row.wrappedDek).toString('base64'),
+      },
+    },
+    seal: row.seal ?? null,
+    archived: row.archivedAt !== null,
+  }]));
+}
+
+/** Environments as 0.15's objects take them (`environmentObject`), by id, or a project's every one, deleted ones included. */
+export async function environmentObjects(db: Queryable, by: { ids: readonly string[] } | { projectId: string }): Promise<Map<string, ObjectRead<EnvironmentColumns>>> {
+  const { environments } = tablesOf(db);
+  if ('ids' in by && by.ids.length === 0) return new Map();
+  const rows = await db
+    .select({
+      id: environments.id,
+      projectId: environments.projectId,
+      slug: environments.slug,
+      owner: environments.owner,
+      parentId: environments.parentId,
+      protected: environments.protected,
+      archivedAt: environments.archivedAt,
+      seal: environments.seal,
+    })
+    .from(environments)
+    .where('ids' in by ? inArray(environments.id, [...new Set(by.ids)]) : eq(environments.projectId, by.projectId));
+  return new Map(rows.map(({ archivedAt, seal, ...row }) => [row.id, { columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null }, seal: seal ?? null }]));
 }
 
 // --- members and sign-in ------------------------------------------------------

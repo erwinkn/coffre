@@ -578,12 +578,15 @@ class StaleRow extends Error {}
 
 const APP_OPS: Record<PreparedChange['kind'], readonly string[]> = {
   credential: ['credential.issue', 'credential.revoke', 'credential.renew', 'credential.scope'],
+  secret: ['secret.write', 'secret.delete'],
+  environment: ['environment.create', 'environment.rename', 'environment.archive', 'environment.delete'],
 };
 
 /** `app_change` on SQLite. */
 async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64: string | null) => Buffer | null): Promise<bigint | null> {
-  const { logChanges, logUses, credentials } = tablesOf(tx);
-  const [row] = await tx.select({ seal: credentials.seal }).from(credentials).where(eq(credentials.id, call.id));
+  const { logChanges, logUses } = tablesOf(tx);
+  const table = appTable(tx, call.kind);
+  const [row] = await tx.select({ seal: table.seal }).from(table).where(eq(table.id, call.id));
   const held = row?.seal ?? null;
   const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, call.object)).orderBy(desc(logChanges.number)).limit(1);
   if (call.requestId === null) {
@@ -605,7 +608,7 @@ async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64
   if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${call.kind} object's row is not its newest change's: stale`);
   // ChangeCAS.
   const from = bytes(call.sealFrom);
-  const done = changedRows(await tx.update(credentials).set({ seal }).where(and(eq(credentials.id, call.id), from === null ? isNull(credentials.seal) : eq(credentials.seal, from))));
+  const done = changedRows(await tx.update(table).set({ seal }).where(and(eq(table.id, call.id), from === null ? isNull(table.seal) : eq(table.seal, from))));
   if (done === 0) return null;
   // One sequence for both tables, as `log_number` is on Postgres.
   const [{ last }] = await tx.select({ last: sql<number | string | null>`max(n)` }).from(
@@ -614,6 +617,17 @@ async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64
   const number = BigInt(last ?? 0) + 1n;
   await tx.insert(logChanges).values({ number, at: call.at, requestId: call.requestId, object: call.object, actor: call.actor, payload: call.payload!, seal, mac: bytes(call.mac)! });
   return number;
+}
+
+/** The table whose rows hold an object of this kind, the app's. */
+function appTable(tx: Transaction, kind: PreparedChange['kind']) {
+  const { credentials, secrets, environments } = tablesOf(tx);
+  switch (kind) {
+    case 'credential': return credentials;
+    case 'secret': return secrets;
+    case 'environment': return environments;
+    default: throw new Error(`no object kind ${String(kind)}`);
+  }
 }
 
 function sameBytes(a: Buffer | null, b: Buffer | null): boolean {

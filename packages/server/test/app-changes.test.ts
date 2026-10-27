@@ -99,7 +99,7 @@ test('a sign-in account unlinked while another session of it is made reads its s
   // transaction finds one session more than it prepared, so it reads them again, rather than revoke one with no change.
   t.mock.method(deps.vault as Required<Vault>, 'prepare', async (input: Parameters<typeof prepare>[0]) => {
     const prepared = await prepare(input);
-    if (raced === null && input.changes.some(({ after }) => after.revoked)) {
+    if (raced === null && input.changes.some((change) => change.kind === 'credential' && change.after.revoked)) {
       raced = '';
       const again = await signin.completeSignin(account, meta());
       assert.ok(again.ok);

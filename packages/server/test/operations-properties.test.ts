@@ -8,7 +8,7 @@ import { defineSignin, github } from '@coffre/core/identity';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -567,9 +567,11 @@ async function scenario(operations: readonly Operation[]) {
         });
         model.forged = true;
         // And the genuine row, if billing follows one, edited to name another source: what it reads, and where it shows, stay the seal's.
+        // With 0.15's log, the edit moves its holder's object from under its seal: every later change of it is refused
+        // (`tampered`), which this model of 0.14's answers does not take (app-places.test.ts holds 0.15's).
         const { reference } = model.billing;
         const other = model.environments.find((each) => each.n !== reference?.source);
-        if (reference?.live === true && other !== undefined) {
+        if (LOG === '0.14' && reference?.live === true && other !== undefined) {
           const [otherSecret] = await database.owner.select({ id: storedSecrets.id }).from(storedSecrets)
             .where(and(eq(storedSecrets.environmentId, other.id), eq(storedSecrets.key, 'VALUE')));
           await database.owner.update(secretReferences)
