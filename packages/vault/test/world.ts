@@ -3,7 +3,7 @@ import { EVERYWHERE } from '@coffre/core/access';
 import type { BulkRows } from '../src/bulk.ts';
 import type { BulkLimit } from '../src/config.ts';
 import { decideUse, type UseCode, type UseRequest } from '../src/decide.ts';
-import { applyOp, objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
+import { limitOp, applyOp, objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { readUse, type Logged } from '../src/log-replay.ts';
 
 /**
@@ -65,7 +65,7 @@ export const WRAPPED = { kekProvider: 'local', kekId: 'k1', kekVersion: '1', byt
 
 export function market(limit = { count: 3, windowMs: 60_000 }): World {
   const w = new World();
-  w.change({ kind: 'policy', id: 'instance' }, { op: 'bulk.limit', ...limit });
+  w.change({ kind: 'policy', id: 'instance' }, limitOp(limit));
   w.change({ kind: 'roles', id: 'instance' }, { op: 'role.define', table: 'roles', role: 'viewer', definition: null });
   w.change({ kind: 'environment', id: DEV }, { op: 'environment.create', projectId: MARKET, slug: 'dev', owner: null, parentId: null, protected: false });
   w.change({ kind: 'environment', id: PROD }, { op: 'environment.create', projectId: MARKET, slug: 'prod', owner: null, parentId: null, protected: true });

@@ -8,7 +8,7 @@ import type { Purpose } from '@coffre/core/vault';
 
 import { refreshMs, USE_DEADLINE_MS, type BulkRows } from '../src/bulk.ts';
 import { decideUse, useEnvironments, type UseCode, type UseRequest, type UseView } from '../src/decide.ts';
-import { objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
+import { limitOp, objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
 import { emptyReplay, readUse, replay } from '../src/log-replay.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { SEAL_KEYS, World } from './world.ts';
@@ -84,7 +84,7 @@ function drawChange(tc: hegel.TestCase): [Ref, Op] {
       op: 'role.define', table: 'roles', role: pick(tc, ROLE_NAMES.filter((name) => name !== 'owner')),
       definition: tc.draw(gs.booleans()) ? null : { name: 'Edited', description: '', permissions: ['secret.read', 'secret.use'], protected: tc.draw(gs.booleans()) ? ['secret.use'] : [] },
     }];
-    default: return [POLICY_REF, { op: 'bulk.limit', count: tc.draw(gs.integers({ minValue: 1, maxValue: 4 })), windowMs: pick(tc, [1_000, 10_000, 60_000]) }];
+    default: return [POLICY_REF, limitOp({ count: tc.draw(gs.integers({ minValue: 1, maxValue: 4 })), windowMs: pick(tc, [1_000, 10_000, 60_000]) })];
   }
 }
 
@@ -102,7 +102,7 @@ function drawRequest(tc: hegel.TestCase, at: number): UseRequest {
 function drawWorld(tc: hegel.TestCase): { world: World; at: number; decided: Map<UseCode | null, number> } {
   const world = new World();
   const decided = new Map<UseCode | null, number>();
-  world.change(POLICY_REF, { op: 'bulk.limit', count: tc.draw(gs.integers({ minValue: 1, maxValue: 6 })), windowMs: 60_000 });
+  world.change(POLICY_REF, limitOp({ count: tc.draw(gs.integers({ minValue: 1, maxValue: 6 })), windowMs: 60_000 }));
   ENVIRONMENTS.forEach((id, n) => world.change({ kind: 'environment', id }, {
     op: 'environment.create', projectId: PROJECTS[n % 2]!, slug: pick(tc, ['dev', 'prod']), protected: tc.draw(gs.booleans()),
     // Odd ones a fork of the one before, or Ada's personal config of it.
@@ -262,7 +262,7 @@ test(`the bulk cap: no rolling window releases more than count keys, uses decide
   const count = tc.draw(gs.integers({ minValue: 1, maxValue: 3 }));
   const windowMs = pick(tc, [1_000, 10_000, 60_000]);
   const world = new World();
-  world.change(POLICY_REF, { op: 'bulk.limit', count, windowMs });
+  world.change(POLICY_REF, limitOp({ count, windowMs }));
   world.change({ kind: 'principal', id: 'token:ci' }, { op: 'member.add', role: 'member', scope: EVERYWHERE });
   world.change({ kind: 'principal', id: 'token:ci' }, { op: 'access.grant', grant: { projectId: PROJECTS[0]!, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null } });
   world.change({ kind: 'credential', id: CREDENTIALS[0]! }, { op: 'credential.issue', principal: 'token:ci', caller: 'bearer', scope: null, expiresAt: null });

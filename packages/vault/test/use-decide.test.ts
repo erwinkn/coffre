@@ -6,7 +6,7 @@ import { EVERYWHERE, ROLES } from '@coffre/core/access';
 
 import { bulkStep, refreshMs, USE_DEADLINE_MS } from '../src/bulk.ts';
 import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
-import { applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
+import { limitOp, applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
 import { purposeCode, purposeOf, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
 import type { UseCode } from '../src/decide.ts';
 import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World } from './world.ts';
@@ -54,9 +54,9 @@ test('a seal is 16 bytes, binds its object, and reads grants as a set', () => {
 
 test('a change that does nothing is never applied: creates of what exists, changes of what does not, limits R52 refuses', () => {
   const policy = { kind: 'policy', id: 'instance' } as const;
-  assert.equal(applyOp(null, policy, { op: 'bulk.limit', count: 0, windowMs: 60_000 }), undefined);
-  assert.equal(applyOp(null, policy, { op: 'bulk.limit', count: 10, windowMs: 24 * 3_600_000 + 1 }), undefined);
-  assert.deepEqual(applyOp(null, policy, { op: 'bulk.limit', count: 10, windowMs: 24 * 3_600_000 }), { kind: 'policy', bulk: { count: 10, windowMs: 24 * 3_600_000 } });
+  assert.equal(applyOp(null, policy, limitOp({ count: 0, windowMs: 60_000 })), undefined);
+  assert.equal(applyOp(null, policy, limitOp({ count: 10, windowMs: 24 * 3_600_000 + 1 })), undefined);
+  assert.deepEqual(applyOp(null, policy, limitOp({ count: 10, windowMs: 24 * 3_600_000 })), { kind: 'policy', bulk: { count: 10, windowMs: 24 * 3_600_000 } });
   const ci = { kind: 'credential', id: credential(9) } as const;
   assert.equal(applyOp(null, ci, { op: 'credential.issue', principal: CI, caller: 'person', scope: null, expiresAt: null }), undefined);
   assert.equal(applyOp(null, ci, { op: 'credential.issue', principal: CI, caller: 'workload', scope: null, expiresAt: null }), undefined);
@@ -195,7 +195,7 @@ test("the cap's count is the log's newest policy change: changed at a restart, t
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1), ask(1, 4)]), [null, 'bulk_limit']);
   // A restart with a count of 3: the vault writes the change before it serves a use.
   const change = limitChange(policy(), { count: 3, windowMs: 60_000 });
-  assert.deepEqual(change, { op: 'bulk.limit', count: 3, windowMs: 60_000 });
+  assert.deepEqual(change, limitOp({ count: 3, windowMs: 60_000 }));
   assert.equal(w.change({ kind: 'policy', id: 'instance' }, change!), true);
   assert.deepEqual(liveAndReplayed(w, [ask(1, 4, { at: 1100 }), ask(1, 5, { at: 1200 }), ask(1, 2, { at: 1300, purpose: 'use' })]), [null, null, 'bulk_limit']);
   const uses: LoggedUse[] = [];
@@ -290,11 +290,11 @@ test('a replay resumed on its own state goes on from its last number: an entry r
 
 test('the roles and the policy are one object each: a change to another of their kind does nothing, and moves no cap', () => {
   const other = { kind: 'policy', id: 'other' } as const;
-  assert.equal(applyOp(null, other, { op: 'bulk.limit', count: 999, windowMs: 60_000 }), undefined);
+  assert.equal(applyOp(null, other, limitOp({ count: 999, windowMs: 60_000 })), undefined);
   assert.equal(applyOp(null, { kind: 'roles', id: 'other' }, { op: 'role.define', table: 'roles', role: 'viewer', definition: null }), undefined);
   const w = market({ count: 1, windowMs: 60_000 });
   const forged = { kind: 'policy' as const, bulk: { count: 999, windowMs: 60_000 } };
-  const result = replay(SEAL_KEYS, [...w.log, { kind: 'change', number: 1000n, at: 0, ref: other, op: { op: 'bulk.limit', count: 999, windowMs: 60_000 }, seal: sealOf(SEAL_KEYS[0]!, other, forged) }]);
+  const result = replay(SEAL_KEYS, [...w.log, { kind: 'change', number: 1000n, at: 0, ref: other, op: limitOp({ count: 999, windowMs: 60_000 }), seal: sealOf(SEAL_KEYS[0]!, other, forged) }]);
   assert.equal(result.faults.length, 1);
   assert.deepEqual(result.limit, { count: 1, windowMs: 60_000 });
 });
@@ -350,7 +350,7 @@ test("a policy row put back moves the cap as the log's newest policy change does
   const w = market({ count: 1, windowMs: 60_000 });
   const p = objectKey({ kind: 'policy', id: 'instance' });
   const old = w.rows.get(p)!;
-  w.change({ kind: 'policy', id: 'instance' }, { op: 'bulk.limit', count: 5, windowMs: 60_000 });
+  w.change({ kind: 'policy', id: 'instance' }, limitOp({ count: 5, windowMs: 60_000 }));
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1)]), [null]);
   // The count-1 row put back: the use is stale, and the cap moves by the logged count of 5, as the replay's does.
   w.rows.set(p, old);
@@ -358,4 +358,18 @@ test("a policy row put back moves the cap as the log's newest policy change does
   const result = replay(SEAL_KEYS, w.log);
   assert.deepEqual(result.bulk, w.bulk);
   assert.equal(w.bulk.get(ADA)?.has(key(4)), true);
+});
+
+test('a role named __proto__ is a role like any other in the edits, never their prototype', () => {
+  const definition = { name: 'Odd', description: '', permissions: ['secret.use' as const], protected: [] };
+  const edits = applyOp(null, { kind: 'roles', id: 'instance' }, { op: 'role.define', table: 'roles', role: '__proto__', definition });
+  assert.ok(edits?.kind === 'roles' && Object.hasOwn(edits.roles, '__proto__'));
+  assert.deepEqual(Object.getPrototypeOf(edits.roles), Object.prototype);
+});
+
+test("every change to the policy carries the whole policy as its value, at the path the use's statement reads", () => {
+  const op = limitOp({ count: 7, windowMs: 90_000 });
+  assert.deepEqual(JSON.parse(JSON.stringify(op)), { op: 'bulk.limit', value: { kind: 'policy', bulk: { count: 7, windowMs: 90_000 } } });
+  const genesis = { op: 'genesis' as const, value: { kind: 'policy' as const, bulk: { count: 7, windowMs: 90_000 } } };
+  assert.deepEqual(applyOp(null, { kind: 'policy', id: 'instance' }, genesis), applyOp(null, { kind: 'policy', id: 'instance' }, op));
 });

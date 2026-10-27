@@ -191,10 +191,13 @@ export type GrantPlace = Pick<InputGrant, 'projectId' | 'environmentId' | 'envir
  * What a change does to its object, as logged and as the change path
  * applies it (PR 4's `change_input`). `genesis` writes a whole object as a
  * row has it: the cutover's, once per object, and each adoption of a late
- * 0.14 write (plan, PR 9).
+ * 0.14 write (plan, PR 9). Every change to the policy carries the whole
+ * policy as its `value`, genesis or `bulk.limit`, so a use's statement reads
+ * the cap from the newest one at one path (`value.bulk`, schema 0022's
+ * `use_credential`: the spec's `CapSealed`).
  */
 export type Op =
-  | { op: 'genesis'; input: Input }
+  | { op: 'genesis'; value: Input }
   | { op: 'member.add'; role: InstanceRole; scope: Scope }
   | { op: 'member.role'; role: InstanceRole; scope: Scope }
   | { op: 'member.remove' }
@@ -210,7 +213,7 @@ export type Op =
   | { op: 'environment.archive'; archived: boolean }
   | { op: 'environment.delete' }
   | { op: 'role.define'; table: 'roles' | 'instanceRoles'; role: string; definition: RoleDefinition | null }
-  | { op: 'bulk.limit'; count: number; windowMs: number };
+  | { op: 'bulk.limit'; value: PolicyInput };
 
 /** Every object, by its key: the rows a decision reads, as the log has them. */
 export type State = Map<string, Input>;
@@ -234,8 +237,8 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
   if ((ref.kind === 'roles' || ref.kind === 'policy') && ref.id !== ROLES_REF.id) return undefined;
   switch (op.op) {
     case 'genesis': {
-      const id = refOf(op.input);
-      return id.kind === ref.kind && id.id === ref.id ? op.input : undefined;
+      const id = refOf(op.value);
+      return id.kind === ref.kind && id.id === ref.id ? op.value : undefined;
     }
     case 'member.add':
       return created('principal') ? { kind: 'principal', principal: ref.id, status: 'active', role: op.role, scope: op.scope, grants: [] } : undefined;
@@ -291,16 +294,19 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
     case 'role.define': {
       const edits = of('roles') ?? (created('roles') ? noEdits() : null);
       if (edits === null) return undefined;
-      const table: Record<string, RoleDefinition> = { ...edits[op.table] };
+      // A table with no prototype: a role named `__proto__` is a role like another, never the object's prototype.
+      const table: Record<string, RoleDefinition> = Object.assign(Object.create(null) as Record<string, RoleDefinition>, edits[op.table]);
       const shipped: Readonly<Record<string, RoleDefinition>> = op.table === 'roles' ? ROLES : INSTANCE_ROLES;
       const same = op.definition !== null && Object.hasOwn(shipped, op.role) && canonical(normalDefinition(shipped[op.role]!)) === canonical(normalDefinition(op.definition));
       // No definition, or the one it ships with: no edit, so the release's own decides.
       if (op.definition === null || same) delete table[op.role];
       else table[op.role] = op.definition;
-      return { ...edits, [op.table]: table };
+      return { ...edits, [op.table]: { ...table } };
     }
     case 'bulk.limit':
-      return (created('policy') || of('policy') !== null) && allowedLimit(op) ? { kind: 'policy', bulk: { count: op.count, windowMs: op.windowMs } } : undefined;
+      return (created('policy') || of('policy') !== null) && op.value.kind === 'policy' && allowedLimit(op.value.bulk)
+        ? { kind: 'policy', bulk: { count: op.value.bulk.count, windowMs: op.value.bulk.windowMs } }
+        : undefined;
   }
 }
 
@@ -338,5 +344,10 @@ export function limitChange(policy: PolicyInput | null, configured: BulkLimit): 
   // One no change would apply (a window of a fraction of a millisecond) must stop the start, not leave the log policy-less.
   if (!allowedLimit(configured)) throw new Error(`bulkLimit must be a whole count of at least 1 and a whole number of milliseconds up to a day, got ${JSON.stringify(configured)}`);
   if (policy !== null && policy.bulk.count === configured.count && policy.bulk.windowMs === configured.windowMs) return null;
-  return { op: 'bulk.limit', count: configured.count, windowMs: configured.windowMs };
+  return limitOp(configured);
+}
+
+/** The change that sets the bulk cap: the whole policy, as its `value`. */
+export function limitOp(bulk: BulkLimit): Op {
+  return { op: 'bulk.limit', value: { kind: 'policy', bulk: { count: bulk.count, windowMs: bulk.windowMs } } };
 }

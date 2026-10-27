@@ -30,6 +30,16 @@ Every input a decision reads is one object of the log. Its row carries a
 | roles | one, `instance` | an Owner's edits of the roles, and the roles they made |
 | policy | one, `instance` | the bulk cap's count and window (R52) |
 
+A seal covers the **object**, never the row's other columns: bookkeeping
+the app updates outside any change (a credential's `last_used_at` and
+`last_used_ip`, a binding's) is no part of one, so 0.14 stamping it during
+the overlap never stales a credential. The change path and the use path
+build each object from its fields alone.
+
+Every change to the policy carries the **whole policy as its `value`**
+(`genesis` or `bulk.limit`): schema 0022's `use_credential` reads the cap
+from the newest one at `value.bulk.count` and `value.bulk.windowMs`.
+
 Two choices differ from 0.14's shapes:
 
 - **Protection moved onto the environment.** 0.14 kept the protected
