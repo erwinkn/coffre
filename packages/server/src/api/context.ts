@@ -5,6 +5,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import type { AppChanges } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
@@ -170,21 +171,30 @@ export class Refusal extends Error {
  *
  * A thrown Refusal rolls the work back and then commits its own entry: who
  * was turned away is half of what an audit log is for.
+ *
+ * With 0.15's log, `changes` are the work's changes to the objects its
+ * rows hold, sealed before it (`AppChanges`): committed last, after the
+ * entries, so the fence is held from there to the commit only; answered
+ * once sealed (R51).
  */
 export async function audited<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq' | 'policy' | 'recalled'> },
   work: (tx: Transaction, log: AuditEntry[]) => Promise<T>,
+  changes: AppChanges | null = null,
 ): Promise<T> {
   try {
-    return await ctx.db.transaction(async (tx) => {
+    const result = await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
       // Take the head before any application rows.
       await lockLogHead(tx);
       if (ctx.caller !== undefined) await policyStill({ caller: ctx.caller }, tx);
       const result = await work(tx, log);
       if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
+      await changes?.commit(tx);
       return result;
     });
+    await changes?.sealed();
+    return result;
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
     return refuse(ctx, error);

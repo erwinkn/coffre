@@ -6,7 +6,7 @@ import test from 'node:test';
 // Exercise the expression the real final job runs, including rejected states.
 const workflow = readFileSync(new URL('../.github/workflows/validate.yml', import.meta.url), 'utf8');
 const expression = workflow.match(/Require full validation[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
-const jobs = ['checks', 'tests', 'schema', 'formal', 'proofs', 'workers', 'node', 'consumer', 'compat', 'image'];
+const jobs = ['checks', 'tests', 'tests-015', 'schema', 'formal', 'proofs', 'workers', 'node', 'consumer', 'compat', 'image'];
 function needs(fast) {
     return {
         changes: { result: 'success', outputs: { version_only: String(fast) } },
@@ -61,8 +61,8 @@ test('missing or unknown detector output requires every normal job to pass', () 
 });
 
 // These job predicates use only the shared JS/GitHub boolean operators and
-// string comparisons. Evaluate the actual eleven expressions with known states:
-// the ten jobs Validate waits on, and the Formal model's plan beside them.
+// string comparisons. Evaluate the actual twelve expressions with known states:
+// the eleven jobs Validate waits on, and the Formal model's plan beside them.
 test('every heavy lane runs unless classification succeeds with a true output', () => {
     const predicates = [...workflow.matchAll(/    if: \$\{\{ (always\(\).*?) \}\}/g)].map((match) => match[1]);
     assert.equal(predicates.length, jobs.length + 1);

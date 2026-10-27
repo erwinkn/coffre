@@ -85,6 +85,14 @@
 (*                    not account for it (the anchor, a mirror or an       *)
 (*                    adoption), until 0.16 (not in the plan: this model's *)
 (*                    finding): one index probe of audit_log per use;      *)
+(*   AppHeadFirst     with AppObject: a 0.15 change to an object the app's  *)
+(*                    rows hold (a credential, a binding, an environment,  *)
+(*                    a secret), made in the app's own transaction, takes  *)
+(*                    0.14's head before the object's row, then the fence, *)
+(*                    as `audited()` and every 0.14 write of the app do    *)
+(*                    (plan PR 4b). RowFirst's order there waits for the   *)
+(*                    head holding the row, while a 0.14 write of the app  *)
+(*                    holds the head and waits for the row: a cycle;       *)
 (*   OldWriteMarksRow the cheaper alternative, without the probe: the      *)
 (*                    trigger marks the row with the 0.14 entry's number,  *)
 (*                    and a use is `stale` while the mark is past what the *)
@@ -113,6 +121,15 @@
 (* choice changes nothing a use sees; without it, covering access_seq      *)
 (* would still not refuse the put-back row.                                *)
 (*                                                                         *)
+(* The object's kind (AppObject). By default a member, which 0.14's vault  *)
+(* writes: its decisions lock the member's row before the head. With       *)
+(* AppObject, an object of the app's rows instead (plan PR 4b): 0.14's     *)
+(* writes of it are the app's, each in `audited()`, which takes the head,  *)
+(* then writes the row, then appends (the trigger: the fence); 0.14's uses *)
+(* read the row with no lock and check it again under the head            *)
+(* (credentialStill). The cutover seals it last, under the head and the    *)
+(* fence. Another member's writes (OtherWrites) are the vault's either way.*)
+(*                                                                         *)
 (* "Every 0.14 write ends up in the new log" is checked as an invariant at *)
 (* each tick (EveryOldWriteAdopted: what 0.14 had written when a tick ran, *)
 (* that tick adopted), which implies the eventual form under a fair tick.  *)
@@ -133,9 +150,11 @@ CONSTANTS
     MaxClears,       \* marks it clears (OldWriteMarksRow)
     MaxDrops,        \* 0.14 entries it deletes, or edits past their MAC
     OtherWrites,     \* 0.14 writes may be to another member: for the locks only
+    AppObject,       \* the object is one of the app's rows, not a member (plan PR 4b)
     CutoverHeadLock, CutoverFence, Marker, VerifyChain, VerifyRows,
     DualFence, ChangeHeadFirst, RowFirst, OldWritesFence,
-    Adopt, AdoptRepeats, AdoptVerifies, AdoptSealsEntry, AdoptAfterSeal, UsesSeeOldWrites, OldWriteMarksRow
+    Adopt, AdoptRepeats, AdoptVerifies, AdoptSealsEntry, AdoptAfterSeal, UsesSeeOldWrites, OldWriteMarksRow,
+    AppHeadFirst
 
 None == "none"
 
@@ -210,17 +229,25 @@ Release(p) ==
     /\ fx' = IF fx = p THEN None ELSE fx
     /\ fs' = fs \ {p}
 
-\* The orders locks are taken in. 0.14 takes the member's row first, then the head, then (the
-\* trigger) the fence. With RowFirst, the cutover (every member's row, in order) and a dual-fenced
-\* 0.15 change take the row first too; without, they update it last, under the head and fence.
-Rows == <<"obj", "other">>
+\* The orders locks are taken in. 0.14's vault takes the member's row first, then the head, then
+\* (the trigger) the fence; 0.14's app (AppObject's object) the head, then the row, then the
+\* fence. With RowFirst, the cutover (every member's row, in order) and a dual-fenced 0.15 change
+\* to a member take the row first too; without, they update it last, under the head and fence.
+\* The cutover seals an app's row last either way; a 0.15 change to one takes the head first with
+\* AppHeadFirst, else the row first, as for a member.
+Rows == IF AppObject THEN <<"other">> ELSE <<"obj", "other">>
+AppRows == IF AppObject THEN <<"obj">> ELSE <<>>
 CutoverLocks == (IF RowFirst THEN Rows ELSE <<>>) \o (IF CutoverHeadLock THEN <<"head">> ELSE <<>>)
                 \o (IF CutoverFence THEN <<"fence">> ELSE <<>>)
-SealLocks == IF RowFirst THEN <<>> ELSE Rows
+SealLocks == (IF RowFirst THEN <<>> ELSE Rows) \o AppRows
 ChangeLocks ==
     IF ~DualFence THEN <<"fence">>
+    ELSE IF AppObject THEN IF AppHeadFirst THEN <<"head", "obj", "fence">> ELSE <<"obj", "head", "fence">>
     ELSE (IF RowFirst THEN <<"obj">> ELSE <<>>) \o (IF ChangeHeadFirst THEN <<"head", "fence">> ELSE <<"fence", "head">>)
          \o (IF RowFirst THEN <<>> ELSE <<"obj">>)
+\* A 0.14 write's two locks before its append: the app's to its row, the head first.
+OldFirst(m) == IF AppObject /\ m = "obj" THEN "head" ELSE m
+OldSecond(m) == IF AppObject /\ m = "obj" THEN m ELSE "head"
 
 Entry(seq, kind, seals, content, cites) == [seq |-> seq, kind |-> kind, seals |-> seals, content |-> content, cites |-> cites]
 NoContent == [v |-> FALSE, aseq |-> 0]
@@ -255,12 +282,13 @@ Init ==
 -----------------------------------------------------------------------------
 (* 0.14, on old isolates. *)
 
-\* A use locks the member's row shared, then reads it and the object's fence.
+\* A use locks the member's row shared, then reads it and the object's fence. The app reads its own
+\* row with no lock (AppObject).
 OldUseRead(x) ==
     /\ o[x].pc = "idle"
     /\ o[x].n < MaxOldOps
-    /\ rx["obj"] = None
-    /\ rs' = rs \cup {x}
+    /\ ~AppObject => rx["obj"] = None
+    /\ rs' = IF AppObject THEN rs ELSE rs \cup {x}
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "read", !.fence = fence14, !.allow = row.v /\ Genuine14(row),
                                          !.seen = committed, !.truth = truth]]
     /\ UNCHANGED <<rx, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
@@ -279,23 +307,23 @@ OldUseCommit(x) ==
     /\ UNCHANGED <<rx, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered>>
 
-\* A write (a grant or a revoke) locks its member's row: the object's, or (OtherWrites) another's.
+\* A write (a grant or a revoke) to the object, or (OtherWrites) to another member, takes its first
+\* lock: the member's row; the head, for the app's write to its row (AppObject).
 OldWriteRow(x) ==
     /\ o[x].pc = "idle"
     /\ o[x].n < MaxOldOps
     /\ \E m \in IF OtherWrites THEN Members ELSE {"obj"} :
-          /\ Take(x, m)
+          /\ Take(x, OldFirst(m))
           /\ \E v \in BOOLEAN : o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "rowed", !.v = v, !.m = m]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered, decisions>>
 
-\* Then the head.
+\* Then its second: the head; the row, for the app's.
 OldWriteHead(x) ==
     /\ o[x].pc = "rowed"
-    /\ head = None
-    /\ head' = x
+    /\ Take(x, OldSecond(o[x].m))
     /\ o' = [o EXCEPT ![x].pc = "headed"]
-    /\ UNCHANGED <<rx, rs, oldLog, row, fence14, fx, fs, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
+    /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered, decisions>>
 
 \* Its append (an access entry: with the trigger, once the fence is free; with OldWriteMarksRow,
@@ -599,7 +627,8 @@ NothingAllowedAfterAnswer ==
 \* lock it holds. (Postgres would break one after deadlock_timeout, 1 s, with the fence held
 \* exclusive and every 0.15 use waiting.) What each waits for, holding something:
 Wants(p) ==
-    CASE p \in Olds /\ o[p].pc \in {"read", "rowed"} -> "head"
+    CASE p \in Olds /\ o[p].pc = "read" -> "head"
+      [] p \in Olds /\ o[p].pc = "rowed" -> OldSecond(o[p].m)
       [] p \in Olds /\ o[p].pc = "headed" /\ OldWritesFence -> "fence"
       [] p \in Vaults /\ vs[p].pc = "locking" -> CutoverLocks[vs[p].got + 1]
       [] p \in Vaults /\ vs[p].pc = "sealing" -> SealLocks[vs[p].got + 1]

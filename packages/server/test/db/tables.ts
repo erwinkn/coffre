@@ -34,4 +34,5 @@ export const {
   oauthClients,
   mcpConnections,
   mcpApprovals,
+  logChanges,
 } = schema;

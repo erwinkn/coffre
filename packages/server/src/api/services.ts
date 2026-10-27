@@ -34,9 +34,10 @@ import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
-import { memberOf, newestAccessSeq, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import { credentialsBy, liveCredentialsWhere, memberOf, newestAccessSeq, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
+import { AppChanges, COFFRE_ACTOR, credentialChange } from './changes.ts';
 import { audited, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
@@ -181,7 +182,7 @@ export type ScopeByPath = Record<string, Role>;
  * issued (`issuedGrant`), so that a role widened later widens no credential,
  * and, a service's, whether it reads the sensitive values there.
  */
-export function storedScope(scope: CredentialScope): string {
+export function storedScope(scope: CredentialScope, { reads = false }: { reads?: boolean } = {}): string {
   const key = (grant: CredentialScope[number]) => `${grant.projectId}/${grant.environmentId ?? ''}`;
   return JSON.stringify(
     [...scope]
@@ -194,6 +195,8 @@ export function storedScope(scope: CredentialScope): string {
           role: grant.role,
           permissions: { normal: [...permissions], protected: [...guarded] },
           ...(grant.sensitive === undefined ? {} : { sensitive: grant.sensitive }),
+          // A workload session's, with 0.15's log: the keys its binding lets it read, which its object holds (`sealedSessionScope`).
+          ...(!reads || grant.reads === undefined ? {} : { reads: grant.reads }),
         };
       }),
   );
@@ -504,15 +507,28 @@ export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vau
   const issuers = new Map<string, { caller: Caller; accessSeq: bigint | null }>();
   for (const by of new Set(rows.map((row) => row.createdBy))) issuers.set(by, await issuerNow({ db, vault }, { type: 'user', id: by }));
   const scopes = rows.map((row) => storedScope((readScope(row.scope) ?? held).map((grant) => ({ ...grant, sensitive: ownsProject(issuers.get(row.createdBy)!.caller, grant.projectId!) }))));
+  // With 0.15's log, a token's scope written is a change of it (`credential.scope`); a binding is no object of the log's.
+  const tokens = rows.flatMap((row, i) => (row.kind === 'token' ? [{ id: row.id, scope: scopes[i]! }] : []));
+  const changes = await AppChanges.prepare(vault, COFFRE_ACTOR, async () => {
+    const read = tokens.length === 0 ? [] : await liveCredentialsWhere(db, chainKey, credentialsBy.ids(tokens.map(({ id }) => id)));
+    return read.flatMap((row) => {
+      const token = tokens.find(({ id }) => id === row.id)!;
+      return row.scope === rows.find(({ id }) => id === row.id)!.scope ? [credentialChange(row, { ...row, scope: token.scope })] : [];
+    });
+  });
   return audited({ db, chainKey, caller: { policySeq, policy } }, async (tx, log) => {
     for (const { caller, accessSeq } of issuers.values()) await issuerStill(tx, caller, accessSeq);
     const done = new Map<string, { tokens: string[]; bindings: string[] }>();
+    const written: string[] = [];
     for (const [i, row] of rows.entries()) {
       const scope = scopes[i]!;
+      // With 0.15's log, a token none was prepared for (revoked since it was read) is left as it is.
+      if (changes !== null && row.kind === 'token' && !changes.has(row.id)) continue;
       const changed = row.kind === 'token'
         ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: row.scope }, { scope })
         : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: row.scope }, { scope });
       if (changed === 0) continue;
+      if (row.kind === 'token') written.push(row.id);
       const sealed = done.get(scope) ?? { tokens: [], bindings: [] };
       sealed[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
       done.set(scope, sealed);
@@ -526,6 +542,8 @@ export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vau
         metadata: { principalType: 'service', principalId: memberOf(access.principal).id, ...sealed, scope: JSON.parse(scope) as unknown },
       });
     }
+    // Two at once seal a row once: only the changes of the rows this one wrote.
+    changes?.only(written);
     return [...done.values()].reduce((sum, sealed) => sum + sealed.tokens.length + sealed.bindings.length, 0);
-  });
+  }, changes);
 }

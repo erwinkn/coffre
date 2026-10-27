@@ -1,10 +1,11 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
+import type { PreparedChange } from '@coffre/core/vault';
+import { and, asc, count, desc, eq, gt, gte, isNull, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { prepared } from './prepared.ts';
-import { clockMillis, engineOf, forUpdate } from './dialect.ts';
+import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
 /**
  * Appending to the audit log, the one table both the app and the vault
@@ -530,4 +531,91 @@ export async function newestAuthentic(page: (limit: number, before: bigint | und
     before = entries.at(-1)!.seq;
   }
   return 'unreached';
+}
+
+// --- 0.15's log: the app's changes -------------------------------------------
+
+/**
+ * The app's changes to the objects its rows hold, as the vault sealed them
+ * (`Vault.prepare`), each `app_change` (migration 0025), in its
+ * transaction, once its rows and 0.14 entries are written: in order, in one
+ * round trip. Each entry's number; 0 for a row of 0.14's, which logs nothing;
+ * null where a row's seal moved since the app read it, and nothing was done
+ * (ChangeCAS: read again). A row that is not its object's newest change's
+ * fails the call (`isStaleChange`), and its transaction with it.
+ *
+ * On SQLite, which has no functions, the same steps in the transaction,
+ * which holds the database's one write lock: the fence is implicit there
+ * (0.15's plan, "Postgres serves; SQLite is for tests").
+ */
+export async function appChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<(bigint | null)[]> {
+  if (calls.length === 0) return [];
+  const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'base64'));
+  if (engineOf(tx) === 'sqlite') {
+    const numbers: (bigint | null)[] = [];
+    for (const call of calls) numbers.push(await changeOnSqlite(tx, call, bytes));
+    return numbers;
+  }
+  const rows = sql.join(calls.map((c, i) => sql`(${i}::int, ${c.kind}::text, ${c.id}::text, ${c.requestId}::text, ${c.at}::bigint, ${c.actor}::text, ${c.payload}::text, ${bytes(c.sealFrom)}::bytea, ${bytes(c.seal)}::bytea, ${bytes(c.mac)}::bytea)`), sql`, `);
+  // A volatile function in the select list runs after the sort: each call in `ord`'s order, each from the seal the one before leaves.
+  const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`
+    SELECT c.ord, app_change(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.seal_from, c.seal, c.mac) AS number
+      FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, seal_from, seal, mac)
+     ORDER BY c.ord`);
+  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('app_change answered out of order');
+  return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
+}
+
+/** Whether `error` is `app_change`'s refusal of a row that is not its object's newest change's: Postgres's `data_corrupted`. */
+export function isStaleChange(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (cause instanceof StaleRow || (cause as { code?: unknown }).code === 'XX001') return true;
+  }
+  return false;
+}
+
+class StaleRow extends Error {}
+
+const APP_OPS: Record<PreparedChange['kind'], readonly string[]> = {
+  credential: ['credential.issue', 'credential.revoke', 'credential.renew', 'credential.scope'],
+};
+
+/** `app_change` on SQLite. */
+async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64: string | null) => Buffer | null): Promise<bigint | null> {
+  const { logChanges, logUses, credentials } = tablesOf(tx);
+  const [row] = await tx.select({ seal: credentials.seal }).from(credentials).where(eq(credentials.id, call.id));
+  const held = row?.seal ?? null;
+  const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, call.object)).orderBy(desc(logChanges.number)).limit(1);
+  if (call.requestId === null) {
+    if (held !== null || newest !== undefined) throw new StaleRow(`the ${call.kind} object's row is not its newest change's: stale`);
+    return 0n;
+  }
+  const seal = bytes(call.seal);
+  const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, call.requestId));
+  if (prior !== undefined) {
+    if (prior.object !== call.object || prior.payload !== call.payload || !sameBytes(prior.seal ?? null, seal)) {
+      throw Object.assign(new Error(`request ${call.requestId} names another change`), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
+    }
+    return BigInt(prior.number);
+  }
+  const payload = JSON.parse(call.payload ?? 'null') as { op?: unknown; ref?: { kind?: unknown; id?: unknown } } | null;
+  if (typeof payload?.op !== 'string' || !(APP_OPS[call.kind] ?? []).includes(payload.op)) throw new Error(`the app makes no change ${String(payload?.op)} to a ${call.kind}`);
+  if (payload.ref?.kind !== call.kind || payload.ref.id !== call.id) throw new Error(`a change names the object it is to: ${call.kind}, ${call.id}`);
+  // ChangeChecksSeal.
+  if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${call.kind} object's row is not its newest change's: stale`);
+  // ChangeCAS.
+  const from = bytes(call.sealFrom);
+  const done = changedRows(await tx.update(credentials).set({ seal }).where(and(eq(credentials.id, call.id), from === null ? isNull(credentials.seal) : eq(credentials.seal, from))));
+  if (done === 0) return null;
+  // One sequence for both tables, as `log_number` is on Postgres.
+  const [{ last }] = await tx.select({ last: sql<number | string | null>`max(n)` }).from(
+    sql`(SELECT max(${logChanges.number}) AS n FROM ${logChanges} UNION ALL SELECT max(${logUses.number}) FROM ${logUses})`,
+  );
+  const number = BigInt(last ?? 0) + 1n;
+  await tx.insert(logChanges).values({ number, at: call.at, requestId: call.requestId, object: call.object, actor: call.actor, payload: call.payload!, seal, mac: bytes(call.mac)! });
+  return number;
+}
+
+function sameBytes(a: Buffer | null, b: Buffer | null): boolean {
+  return a === null || b === null ? a === b : a.equals(b);
 }

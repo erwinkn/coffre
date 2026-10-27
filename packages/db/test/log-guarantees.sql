@@ -59,6 +59,20 @@ BEGIN
 END
 $$;
 
+-- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change): the app runs it,
+-- and no other function of the log; the vault and the backup never run it.
+DO $$
+BEGIN
+    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE')
+       OR has_function_privilege('coffre_app', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE')
+       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'FAIL: app_change is not the app''s alone';
+    END IF;
+    RAISE NOTICE 'PASS: the app logs its own changes through app_change, and runs no other function of the log';
+END
+$$;
+
 -- The hot path's login: the vault's group, its own settings, unable to log in until it is given a password.
 DO $$
 BEGIN

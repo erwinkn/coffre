@@ -1,6 +1,6 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
-import { isTombstone } from '@coffre/core/schemas';
+import { isTombstone, TOMBSTONE } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
@@ -991,13 +991,14 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
       const deleted = value.deleted === true;
       const holds = row !== undefined && sameBytes(row.seal ?? null, call.sealFrom) && value.kind === 'environment' && value.id === ref.id
         && row.projectId === value.projectId && row.parentId === (value.parentId ?? null) && row.owner === (value.owner ?? null)
-        && isTombstone(row.slug) === deleted && isTombstone(String(value.slug)) === deleted && (!deleted || row.slug === value.slug);
+        // A deleted row keeps its tombstone, and its object the slug before it (objects.ts): never written again (0025).
+        && isTombstone(row.slug) === deleted && !isTombstone(String(value.slug)) && (!deleted || row.slug.slice(0, row.slug.indexOf(TOMBSTONE)) === value.slug);
       if (!holds) {
         done = 0;
         break;
       }
       done = changedRows(await tx.update(environments).set({
-        slug: String(value.slug),
+        slug: deleted ? row.slug : String(value.slug),
         protected: value.protected === true,
         archivedAt: value.archived === true ? (row.archivedAt ?? new Date(call.at)) : null,
         seal: call.seal,

@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, secrets, serviceBindings } from './db/tables.ts';
 import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -587,7 +587,7 @@ test("a binding's sources hold a session to its addresses, at the exchange and o
 
 // --- renewal and logout -------------------------------------------------------
 
-test("renewal moves a session's expiry on, by its key; a late or a lost renewal revives nothing", async () => {
+test("renewal moves a session's expiry on, by its key; a late or a lost renewal revives nothing", { skip: LOG_014_ONLY }, async () => {
   await bindGithub();
   const held = await githubSession();
   const row = await sessionRow(held);

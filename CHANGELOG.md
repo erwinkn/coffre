@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **0.15's change path for the app's own writes, behind its switch:
+  nothing calls it yet.** `0025_app_change` adds `app_change`, which only
+  the app's login may run: with 0.15's log on, every write of the app's
+  that makes or ends a credential logs its change, sealed by the vault
+  before the transaction, beside its row in the same transaction. It also
+  makes `change_input` seal a deleted environment with its slug before
+  the tombstone. With the switch off, as every deployment has it, the
+  app's writes are as in 0.14.5, but for two things. A member's removal
+  now also revokes sessions whose sign-in account had already ended,
+  which were dead anyway. And the checkpointer shares one tick among the
+  changes waiting at once ([0.15-plan.md](docs/design/0.15-plan.md),
+  "As built: PR 4b").
+
 - **0.15's change path, behind its switch: nothing calls it yet.**
   `0023_change_path` replaces `change_input`, which nothing called, with
   one that takes every change the vault makes to members, grants, roles,

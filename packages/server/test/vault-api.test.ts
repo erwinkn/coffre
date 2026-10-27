@@ -23,6 +23,7 @@ import {
   testDeps,
   waitUntil,
   testVault,
+  START_OVER_014,
   type FixtureDeps,
 } from './api-fixture.ts';
 import { appLogKey } from '../src/db/audit.ts';
@@ -262,7 +263,7 @@ test('a removed member stays out despite a live session, until the vault admits 
   assert.equal((await reveal()).status, 200);
 });
 
-test('a grant forged in the database lists as stored until the vault meets it, which marks its member', async () => {
+test('a grant forged in the database lists as stored until the vault meets it, which marks its member', { skip: START_OVER_014 }, async () => {
   // Someone who owns the database gives the developer the whole project.
   const { projects, vaultGrants } = tablesOf(db.owner);
   const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));

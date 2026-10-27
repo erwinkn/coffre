@@ -172,6 +172,11 @@ export interface Vault {
      * lists and checks root admins here until it is. Gone in 0.7.
      */
     rootAdmins: [];
+    /**
+     * `'0.15'` when the vault keeps 0.15's log: the app then writes the
+     * changes to its rows through it (`prepare`). Absent before 0.15.
+     */
+    log?: '0.15';
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
@@ -202,7 +207,82 @@ export interface Vault {
    * hot path's login has none.
    */
   use?(input: UseInput): Promise<UseOutcome>;
+
+  /**
+   * 0.15's log (docs/design/0.15-plan.md, "As built: PR 4b"): the changes
+   * the app is about to write to objects its own rows hold (credentials,
+   * keys, environments), each sealed, as entries the app's transaction
+   * commits with its rows (`app_change`, migration 0025), before it asks.
+   * The vault reads nothing: it checks each row's columns as the app read
+   * them against their seal (`tampered` if the vault never made it), works
+   * out the changes that turn them into the columns the app will write, and
+   * seals what they leave. Whether each seal is still its object's newest
+   * is the transaction's to check, under the fence. Only with 0.15's log on
+   * (`about().log`); a vault older than 0.15 has none.
+   */
+  prepare?(input: PrepareInput): Promise<Outcome<Prepared>>;
+  /**
+   * Answers once the log's entry `number` is sealed in a signed checkpoint
+   * and, if a witness is configured, witnessed or past its 2 s (R51): what a
+   * change the app committed waits for before it answers. Only with 0.15's
+   * log on.
+   */
+  waitSealed?(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>>;
 }
+
+/**
+ * The columns of a row the app writes that a decision of 0.15's reads, as
+ * the vault's objects take them (packages/vault/src/objects.ts): times in
+ * ms since the epoch, uuids as text, JSON as stored.
+ */
+export type CredentialColumns = {
+  id: string;
+  principal: string;
+  kind: string;
+  /** Its scope as stored, JSON; null for a session's. */
+  scope: string | null;
+  revoked: boolean;
+  /** The earlier of its expiry and its hard end, if any, in whole ms: a stored time's sub-millisecond part dropped, never rounded. */
+  expiresAt: number | null;
+};
+
+/** One object's change, as the app will write it: its columns before (null: it makes the object), their seal, and after. */
+export type ObjectChange = {
+  kind: 'credential';
+  id: string;
+  /** As the app read the row, with its seal: null before the vault ever sealed it (0.14's, before the cutover). */
+  before: { columns: CredentialColumns; seal: string | null } | null;
+  after: CredentialColumns;
+};
+
+export type PrepareInput = {
+  /** Who makes the changes, as their entries name them: `user:…`, `token:…`, or the app's own (`coffre`). */
+  actor: string;
+  changes: ObjectChange[];
+};
+
+/**
+ * A change sealed, for the app's transaction to commit (`app_change`): its
+ * entry's fields, the seal it moves the row from and to, and its MAC, bytes
+ * in base64. A row the vault never sealed is the log's to leave alone until
+ * the cutover: its call (`requestId` null) only checks, under the fence,
+ * that the log has no change of its object either.
+ */
+export type PreparedChange = {
+  kind: ObjectChange['kind'];
+  id: string;
+  requestId: string | null;
+  at: number;
+  /** The object's key in the log (`log_object`). */
+  object: string;
+  actor: string;
+  payload: string | null;
+  sealFrom: string | null;
+  seal: string | null;
+  mac: string | null;
+};
+
+export type Prepared = { changes: PreparedChange[] };
 
 /**
  * The vault's entries that change what a member holds: what their row's

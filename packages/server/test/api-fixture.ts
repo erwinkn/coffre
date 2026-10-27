@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
@@ -94,11 +95,29 @@ export function waitUntil(promise: Promise<unknown>): void {
  * nobody has signed in yet, and the configuration names someone who never
  * comes.
  */
+/**
+ * Which log the suite's vaults keep (`VaultOptions.log`): 0.14's unless
+ * `COFFRE_TEST_LOG` says 0.15, which runs every server test with 0.15's
+ * log on too, the app's writes logged through the vault (`prepare`). Its
+ * changes answer once committed here: no checkpointer runs (`sealedNow`).
+ */
+export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
+
+/** For a test whose setup writes an input's row around the app (a session's end moved in the database), which 0.15's log refuses as not the vault's: run under 0.14's only. */
+export const LOG_014_ONLY = LOG === '0.15' ? "0.15's log refuses a row written around the app: this test's setup is 0.14's" : false;
+
+/** For a test of 0.14's start over of a tampered member, which 0.15's log does not take (the vault's tests' START_OVER): run under 0.14's only. */
+export const START_OVER_014 = LOG === '0.15' ? "0.15's log changes no tampered member until a reseal makes its row the log's again (plan PR 9), never 0.14's start over" : false;
+
+/** A checkpointer that seals everything at once: what a change waits on, in a test with no tree. */
+export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => ({}) as Awaited<ReturnType<NonNullable<VaultOptions['sealThrough']>>>;
+
 export function testVault(
   owners: readonly string[],
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
+  log: Pick<VaultOptions, 'log' | 'sealThrough'> = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -112,7 +131,7 @@ export function testVault(
         owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
         ...config,
       },
-      { clockOffset: () => offset, walks },
+      { clockOffset: () => offset, walks, ...log },
     );
     const [first, ...others] = owners.map((email) => `user:${email}`);
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
@@ -144,6 +163,8 @@ export function testVault(
     about: call('about'),
     keyChecks: call('keyChecks'),
     verifyLog: call('verifyLog'),
+    prepare: call('prepare'),
+    waitSealed: call('waitSealed'),
     kek,
     signingKey,
     advance: (ms: number) => void (offset += ms),
@@ -273,6 +294,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
     oauthClients,
     vaultGrants,
     vaultMembers,
+    logChanges,
+    logConfig,
   } = tablesOf(owner);
   await owner.delete(mcpApprovals);
   await owner.delete(mcpConnections);
@@ -287,6 +310,9 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // A reference names its vault entry: it goes before the log.
   await owner.delete(secretReferences);
   await emptyLog(owner);
+  // 0.15's log, which the change path writes (COFFRE_TEST_LOG=0.15), gone with the rows it is of.
+  await owner.delete(logChanges);
+  await owner.delete(logConfig);
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);
@@ -295,6 +321,33 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(secrets);
   await owner.delete(environments);
   await owner.delete(projects);
+}
+
+/**
+ * With 0.15's log on: every credential's row carries its object's newest
+ * change's seal, or neither has one (a row of 0.14's). A row sealed with no
+ * change of its own, or one whose change was logged and its seal not written,
+ * fails here. Not run at each reset: tests that plant rows around the app,
+ * to see them refused, leave such rows on purpose.
+ */
+export async function credentialsLogged(owner: Database): Promise<void> {
+  const { credentials, logChanges } = tablesOf(owner);
+  const newest = new Map<string, { number: bigint; seal: Buffer | null }>();
+  for (const change of await owner.select({ object: logChanges.object, number: logChanges.number, seal: logChanges.seal }).from(logChanges)) {
+    const number = BigInt(change.number);
+    if ((newest.get(change.object)?.number ?? -1n) < number) newest.set(change.object, { number, seal: change.seal ?? null });
+  }
+  const strays = (await owner.select({ id: credentials.id, kind: credentials.kind, seal: credentials.seal }).from(credentials)).filter(({ id, seal }) => {
+    const logged = newest.get(objectKey('credential', id))?.seal ?? null;
+    return seal == null || logged === null ? (seal ?? null) !== logged : !seal.equals(logged);
+  });
+  assert.deepEqual(strays, [], "every credential's row is its newest change's (0.15's log)");
+}
+
+/** An object's key in 0.15's log (sealed-inputs.md): the first 16 bytes of SHA-256 over its kind and id, as a uuid. */
+function objectKey(kind: string, id: string): string {
+  const hex = createHash('sha256').update(`coffre.object.v1\0${kind}\0${id}`).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /**

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { eq } from 'drizzle-orm';
 
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { vaultGrants, vaultMembers } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
@@ -37,7 +37,7 @@ async function deleteMember() {
   await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, MEMBER));
 }
 
-test('R3: removal recovers a member whose row was deleted around the vault', async () => {
+test('R3: removal recovers a member whose row was deleted around the vault', { skip: START_OVER_014 }, async () => {
   const { generation } = await deps.vault.access(MEMBER);
   await deleteMember();
   assert.equal((await deps.vault.access(MEMBER)).status, 'tampered');

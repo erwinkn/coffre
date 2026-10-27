@@ -1240,7 +1240,7 @@ export async function exchangeStill(
   binding: { id: string; principal: string; generation: number },
   since: Date,
   atMost: number,
-): Promise<{ stands: boolean; recent: number }> {
+): Promise<{ stands: boolean; recent: number; scope: string | null }> {
   const { serviceBindings, vaultMembers } = tablesOf(db);
   const recent = issuedSince(db, binding.principal, issuedBy(binding.id), since, atMost);
   const [row] = await db
@@ -1255,9 +1255,9 @@ export async function exchangeStill(
     .from(serviceBindings)
     .leftJoin(vaultMembers, eq(vaultMembers.principal, binding.principal))
     .where(eq(serviceBindings.id, binding.id));
-  if (row === undefined) return { stands: false, recent: 0 };
+  if (row === undefined) return { stands: false, recent: 0, scope: null };
   const member = row.status === 'active' && row.generation === binding.generation;
-  return { stands: member && bindingStands(chainKey, row, binding.principal, binding.generation), recent: row.recent };
+  return { stands: member && bindingStands(chainKey, row, binding.principal, binding.generation), recent: row.recent, scope: row.binding.scope };
 }
 
 /**
@@ -1393,21 +1393,22 @@ export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<N
   await insert(db, tablesOf(db).serviceBindings, { ...signed, authMac: authMac(chainKey, 'service_bindings', signed) });
 }
 
-/** Retire directory records from older memberships, including a sweep that rolled back. */
+/**
+ * Retire directory records from older memberships, including a sweep that
+ * rolled back: the credentials' ids it revoked (`priorCredentials`).
+ */
 export async function revokePriorMembership(
   db: Queryable,
   chainKey: Buffer,
   principal: { type: string; id: string },
   generation: number,
   revokedBy: string,
-): Promise<void> {
-  const { credentials, identities, mcpConnections } = tablesOf(db);
+): Promise<string[]> {
+  const { identities, mcpConnections } = tablesOf(db);
   const revokedAt = new Date();
-  const older = (table: typeof credentials | typeof identities | typeof mcpConnections) =>
+  const older = (table: typeof identities | typeof mcpConnections) =>
     and(eq(table.principal, principalOf(principal)), lt(table.generation, generation), isNull(table.revokedAt));
-  // Expired credentials are dead already, and a CI service leaves one behind each run.
   const tables = [
-    [credentials, and(older(credentials), gt(credentials.expiresAt, revokedAt))],
     [identities, older(identities)],
     [mcpConnections, and(older(mcpConnections), gt(mcpConnections.expiresAt, revokedAt))],
   ] as const;
@@ -1417,6 +1418,51 @@ export async function revokePriorMembership(
       await updateAuth(db, chainKey, table, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
     }
   }
+  return revokeCredentialsWhere(db, chainKey, priorCredentials(principal, generation, revokedAt), { revokedAt, revokedBy });
+}
+
+/** A member's credentials of a membership before `generation`, live at `at`: expired ones are dead already, and a CI service leaves one behind each run. */
+export function priorCredentials(principal: { type: string; id: string }, generation: number, at: Date): CredentialsWhere {
+  return (credentials) => and(eq(credentials.principal, principalOf(principal)), lt(credentials.generation, generation), gt(credentials.expiresAt, at));
+}
+
+// --- credentials revoked, and 0.15's log ------------------------------------
+
+export type CredentialRow = Tables['credentials']['$inferSelect'];
+
+/** Which credentials: a condition on the engine's own table. */
+export type CredentialsWhere = (credentials: Tables['credentials']) => SQL | undefined;
+
+/** One credential, by its id or its token's hash; a sign-in account's sessions. */
+export const credentialsBy = {
+  id: (id: string): CredentialsWhere => (credentials) => eq(credentials.id, id),
+  tokenHash: (tokenHash: Buffer): CredentialsWhere => (credentials) => eq(credentials.tokenHash, tokenHash),
+  identity: (identityId: string): CredentialsWhere => (credentials) => eq(credentials.identityId, identityId),
+  ids: (ids: readonly string[]): CredentialsWhere => (credentials) => inArray(credentials.id, [...ids]),
+};
+
+/**
+ * The live credentials `where` names: not revoked, and their MAC the app's
+ * (a row that fails it is dead, and never signed again, as `updateAuth`
+ * leaves it), with their seals. What a revoke of them changes: with 0.15's
+ * log, its changes are prepared from this read before the transaction, in
+ * which `revokeCredentialsWhere` reads them again (`AppChanges.expect`).
+ */
+export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere): Promise<CredentialRow[]> {
+  const { credentials } = tablesOf(db);
+  const rows = await db.select().from(credentials).where(and(where(credentials as Tables['credentials']), isNull(credentials.revokedAt)));
+  return rows.filter((row) => checkAuthRow(chainKey, 'credentials', row));
+}
+
+/** Revoke the live credentials `where` names, each a compare-and-set on its MAC, as `updateAuth` does: the ids it revoked. */
+export async function revokeCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere, by: { revokedAt: Date; revokedBy: string }): Promise<string[]> {
+  const { credentials } = tablesOf(db);
+  const revoked: string[] = [];
+  for (const row of await liveCredentialsWhere(db, chainKey, where)) {
+    const done = await update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) });
+    if (done > 0) revoked.push(row.id);
+  }
+  return revoked;
 }
 
 /**
@@ -1430,16 +1476,17 @@ export async function revokeLiveCredentials(
   chainKey: Buffer,
   live: { principal: string; createdBy?: string; at: Date },
   changes: { revokedAt: Date; revokedBy: string },
-): Promise<number> {
-  const { credentials } = tablesOf(db);
-  const rows = await db.select({ id: credentials.id }).from(credentials).where(and(
+): Promise<string[]> {
+  return revokeCredentialsWhere(db, chainKey, liveCredentialsOf(live), changes);
+}
+
+/** A member's credentials live at `at`, or only those `createdBy` issued (`revokeLiveCredentials`). */
+export function liveCredentialsOf(live: { principal: string; createdBy?: string; at: Date }): CredentialsWhere {
+  return (credentials) => and(
     eq(credentials.principal, live.principal),
-    isNull(credentials.revokedAt),
     gt(credentials.expiresAt, live.at),
     live.createdBy === undefined ? undefined : eq(credentials.createdBy, live.createdBy),
-  ));
-  if (rows.length === 0) return 0;
-  return updateAuth(db, chainKey, credentials, { id: rows.map((row) => row.id), revokedAt: null }, changes);
+  );
 }
 
 // --- MCP clients and connections -------------------------------------------

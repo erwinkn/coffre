@@ -30,10 +30,13 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 import { actorParts } from '../db/audit.ts';
 import {
   revokePriorMembership,
+  revokeCredentialsWhere,
   liveConnections,
   memberAccess as readMemberAccess,
   memberActivity,
+  liveCredentialsWhere,
   members as loadMembers,
+  priorCredentials,
   missingMembers,
   places,
   updateAuth,
@@ -43,6 +46,7 @@ import {
 } from '../db/queries.ts';
 import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf } from './caller.ts';
+import { AppChanges, retrying, revokes } from './changes.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
@@ -697,7 +701,7 @@ export async function putMember(
     if (input.access !== undefined) {
       const { changes, admitted } = await setAccess(ctx, member, input.access, true);
       // Housekeeping, as below: one brought back starts a membership of its own.
-      if (admitted !== undefined) await audited({ db: ctx.db, chainKey: ctx.chainKey }, (tx) => revokePriorMembership(tx, ctx.chainKey, member, admitted.generation, ctx.caller.principal.id));
+      if (admitted !== undefined) await endPriorMembership(ctx, member, admitted.generation);
       return { member: principal, instanceRole: 'member' as const, scope: EVERYWHERE, created: admitted?.created ?? false, changes };
     }
     const known = await places(ctx.db);
@@ -724,8 +728,24 @@ export async function putMember(
     if (!result.ok) throw vaultRefused(result.refusal);
     // Housekeeping: rows of an earlier membership are dead already, by their generation. It follows through on the
     // vault's decision, made under its head: no fence, which would leave the old rows standing (`audited`).
-    await audited({ db: ctx.db, chainKey: ctx.chainKey }, (tx) => revokePriorMembership(tx, ctx.chainKey, member, result.generation, ctx.caller.principal.id));
+    await endPriorMembership(ctx, member, result.generation);
     return { member: principal, instanceRole: result.role, scope: scopeView(result.scope, known), created: result.created };
+  });
+}
+
+/**
+ * Rows of a membership before `generation` revoked (`revokePriorMembership`),
+ * following through on the vault's decision, made under its head: no fence,
+ * which would leave the old rows standing (`audited`). With 0.15's log, each
+ * credential it ends is a change, prepared from the same read as it makes.
+ */
+async function endPriorMembership(ctx: ApiContext, member: MemberRef, generation: number): Promise<void> {
+  await retrying(async () => {
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))));
+    await audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
+      const ended = await revokePriorMembership(tx, ctx.chainKey, member, generation, ctx.caller.principal.id);
+      changes?.expectRevoked(ended);
+    }, changes);
   });
 }
 
@@ -783,6 +803,9 @@ export async function removeMember(
       throw vaultRefused(result.refusal);
     }
     const { generation } = result;
+    return retrying(async () => {
+    // The credentials it ends, each a change of 0.15's log: as read now, and again under the head, the same.
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))));
     // Following through on the vault's removal, made under its head: no fence (`audited`), the ways in end whatever came since.
     return audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
       const now = new Date();
@@ -794,9 +817,8 @@ export async function removeMember(
         member.type === 'user' ? (await liveConnections(tx, ctx.chainKey, principal, now)).filter((row) => row.generation < generation) : [];
       const revokedBy = ctx.caller.principal.id;
       const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
-      if (liveCredentials.length > 0) {
-        await updateAuth(tx, ctx.chainKey, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
-      }
+      const ended = await revokeCredentialsWhere(tx, ctx.chainKey, priorCredentials(member, generation, now), { revokedAt: now, revokedBy });
+      changes?.expectRevoked(ended);
       if (liveIdentities.length > 0) {
         await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
       }
@@ -812,6 +834,7 @@ export async function removeMember(
         // As the report counts them: a code never redeemed was no app yet.
         apps: liveApps.filter((row) => row.refreshHash !== null).length,
       };
+    }, changes);
     });
   });
   return { revoked, report: runsInstance(ctx.caller) ? await memberReport(ctx, member) : null };

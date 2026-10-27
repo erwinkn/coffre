@@ -26,6 +26,7 @@ import { logged } from './logged.ts';
 import { mcpEndpoint } from './mcp/endpoint.ts';
 import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
 import { pluginRoute } from './plugins.ts';
+import { ObjectMoved } from './api/changes.ts';
 import { watchOf, type CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
@@ -217,7 +218,12 @@ export async function keyReady(runtime: CoffreRuntime, { wait = false }: { wait?
   let state: KeyState;
   try {
     state = await keyStateNow(runtime.db, runtime);
-    if (state.kind === 'rotating') state = await rotateStep(runtime.db, runtime, { wait });
+    // With 0.15's log, a step that other starts' steps kept coming between, past its tries, leaves the rotation to them.
+    const read = state;
+    if (read.kind === 'rotating') state = await rotateStep(runtime.db, runtime, { wait, vault: runtime.vault }).catch((error: unknown) => {
+      if (error instanceof ObjectMoved) return read;
+      throw error;
+    });
     if (state.kind === 'sealing') {
       // A store that cannot be used holds the rotation back, and says so: the next step tries again.
       const sealed = await resealAnchor(runtime, state.from).then(() => true, (error: unknown) => {

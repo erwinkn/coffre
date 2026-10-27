@@ -548,7 +548,7 @@ test("a binding's rate is counted over its last minute, whatever the credentials
     // As the exchange counts it, with its member and binding, and as a workload's sign-in does, on its own.
     const counting = createDatabase(counted(pool, seen));
     const since = new Date(Date.now() - 60_000);
-    assert.deepEqual(await exchangeStill(counting, deps.chainKey, binding!, since, 60), { stands: true, recent: 1 });
+    assert.deepEqual(standsAndRecent(await exchangeStill(counting, deps.chainKey, binding!, since, 60)), { stands: true, recent: 1 });
     assert.equal(await exchangesSince(counting, MEMBER, `binding:${binding!.id}`, since, 60), 1);
     assert.equal(seen.length, 2);
     for (const statement of seen) {
@@ -746,13 +746,13 @@ test('the spend writes the credential and stamps the binding only when it spent 
 test("the re-check under the head stands only for the binding's own principal and a binding whose MAC is the app's", async () => {
   const since = new Date(Date.now() - 60_000);
   const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
-  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: true, recent: 0 });
+  assert.deepEqual(standsAndRecent(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60)), { stands: true, recent: 0 });
   // Another principal than the binding's: refused (a foreign key keeps a member row for every binding; the member's status and
   // generation are driven to refusals through the exchange itself, in the test above).
-  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' }, since, 60), { stands: false, recent: 0 });
+  assert.deepEqual(standsAndRecent(await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' }, since, 60)), { stands: false, recent: 0 });
   // The member's binding, its MAC not the app's.
   await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32) }).where(eq(serviceBindings.id, bound));
-  assert.deepEqual(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60), { stands: false, recent: 0 });
+  assert.deepEqual(standsAndRecent(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60)), { stands: false, recent: 0 });
 });
 
 test('one binding trusts a workflow on several events: a pull request into its branch, by its own run, and the push, but no other event', async () => {
@@ -1151,3 +1151,8 @@ test("/api/auth/oidc takes only a binding of today's five profiles with no polic
   const workload = await trade(token(rsa, { ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' }));
   assert.deepEqual([workload.status, workload.body.reason], [401, 'no_match']);
 });
+
+/** What `exchangeStill` answers of the binding's standing and rate, leaving out the scope it reads with them. */
+function standsAndRecent({ stands, recent }: { stands: boolean; recent: number }): { stands: boolean; recent: number } {
+  return { stands, recent };
+}
