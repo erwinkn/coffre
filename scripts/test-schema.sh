@@ -130,6 +130,16 @@ wait "$late" || true
 [[ "$(cat "$scratch/late.log")" == late && "$(owner_psql -At -c 'SELECT count(*) FROM log_uses WHERE request_id = 40')" == 0 ]] \
     || { cat "$scratch/late.log" >&2; echo 'a use that waited past its deadline wrote an entry' >&2; exit 1; }
 
+# Two calls for one day at once, as two checkpointers may: the second waits
+# for the first, finds the day it made, and answers its name too.
+vault_psql -At -c "SELECT make_day(date '2031-01-01'); SELECT pg_sleep(1) /* coffre-test-holder */" >"$scratch/day-1.log" 2>&1 &
+first=$!
+sleep 0.3
+vault_psql -At -c "SELECT make_day(date '2031-01-01')" >"$scratch/day-2.log" 2>&1 || { cat "$scratch/day-2.log" >&2; echo 'a day made at once failed' >&2; exit 1; }
+wait "$first" || { cat "$scratch/day-1.log" >&2; exit 1; }
+[[ "$(head -1 "$scratch/day-1.log")" == log_uses_20310101 && "$(cat "$scratch/day-2.log")" == log_uses_20310101 ]] \
+    || { cat "$scratch/day-1.log" "$scratch/day-2.log" >&2; echo 'two calls for one day disagree' >&2; exit 1; }
+
 # Managed hosts give the owner CREATEROLE, not superuser.
 ./scripts/test-schema-owner.sh
 

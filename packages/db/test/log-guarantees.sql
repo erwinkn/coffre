@@ -210,6 +210,15 @@ BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 9, t + 1, 258::smallint, NULL, tag, t + 2000,
         (SELECT number FROM log_uses), t, 6);
     IF r.covered IS NOT NULL OR r.number IS NULL THEN RAISE EXCEPTION 'FAIL: a cover with no entry covered'; END IF;
+    -- A cover is its own credential's and secret's: another secret's entry, its key's row fresh, covers nothing, in either form.
+    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 13, t + 1, 1::smallint, NULL, tag, t + 2000);
+    IF r.number IS NULL THEN RAISE EXCEPTION 'FAIL: the other secret''s use wrote no entry'; END IF;
+    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 14, t + 1, 258::smallint, NULL, tag, t + 2000,
+        r.number, t + 1, 13);
+    IF r.covered IS NOT NULL OR r.number IS NULL THEN RAISE EXCEPTION 'FAIL: one secret''s entry covered another''s use'; END IF;
+    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 15, t + 1, 258::smallint, NULL, tag, t + 2000,
+        (SELECT number FROM log_uses WHERE request_id = 13), t + 1, 13, r.newest, r.newest_mac);
+    IF r.covered IS NOT NULL OR r.number IS NULL OR r.c_last IS NOT NULL THEN RAISE EXCEPTION 'FAIL: one secret''s entry covered another''s use, from the cache'; END IF;
 
     -- The seal cache: the newest change named exactly skips the probes; a wrong MAC probes again.
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 10, t + 2, 258::smallint, NULL, tag, t + 2000,

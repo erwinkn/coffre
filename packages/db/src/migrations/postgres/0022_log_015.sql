@@ -567,6 +567,14 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'coffre_vault_hot may set or grant coffre_vault: have its grantor run REVOKE coffre_vault FROM coffre_vault_hot, then migrate again';
     END IF;
+    -- A setting for this database alone would override the role's at login: one of the three there is refused.
+    IF EXISTS (
+        SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
+         WHERE s.setrole = 'coffre_vault_hot'::regrole AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND split_part(setting, '=', 1) IN ('lock_timeout', 'statement_timeout', 'plan_cache_mode')
+    ) THEN
+        RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
+    END IF;
     -- Only what differs, each tried, and a refusal said with what to run: changing a role another made takes, on
     -- Postgres 16, CREATEROLE and its ADMIN, and granting the group its ADMIN (as setup's changeRole says it).
     SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
