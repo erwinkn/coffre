@@ -100,6 +100,18 @@ export type Replayed = {
   faults: string[];
 };
 
+/**
+ * A replay to walk on without touching this one: its maps, and each
+ * principal's bulk rows, copied; the objects and seals, which a replay
+ * replaces and never edits, shared.
+ */
+export function copyReplay(r: Replayed): Replayed {
+  return {
+    rows: new Map(r.rows), newest: new Map(r.newest), limit: r.limit,
+    bulk: new Map([...r.bulk].map(([principal, held]) => [principal, new Map(held)])), last: r.last, faults: [...r.faults],
+  };
+}
+
 export function emptyReplay(): Replayed {
   return { rows: new Map(), newest: new Map(), limit: null, bulk: new Map(), last: -1n, faults: [] };
 }

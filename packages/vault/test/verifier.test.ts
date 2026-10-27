@@ -68,8 +68,11 @@ async function instance(walks: VaultOptions['walks'] = {}) {
   const memory = variableMemory();
   const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
   // The signer's memory, where no database writer reaches: what each walk is held to.
-  const heldOutside = async () => (memory.record === null ? [] : [decodePair(memory.record)!]);
-  const control = { hold: false, before: null as null | ((number: bigint) => Promise<void>) };
+  const heldOutside = async () => {
+    await control.asked?.();
+    return memory.record === null ? [] : [decodePair(memory.record)!];
+  };
+  const control = { hold: false, before: null as null | ((number: bigint) => Promise<void>), asked: null as null | (() => Promise<void>) };
   const sealThrough: SealThrough = async (number, deadline) => {
     await control.before?.(number);
     if (control.hold) return {} as Awaited<ReturnType<SealThrough>>;
@@ -509,5 +512,30 @@ test('review r6: a broken verdict at the pair the replay was kept at keeps that 
     await run(db.owner, add);
   }
   await w.vault.checkpoint();
+  clean(await w.verify());
+});
+
+test('review r7: a stretch the job carried that lands in the signer\'s write window is walked again from the replay as handed on', async () => {
+  const w = await instance({ checkpoint: 2 });
+  await w.vault.checkpoint();
+  for (let i = 0; i < 3; i += 1) await w.key();
+  // On the job's second stretch, the newest pair's row is a moment away, as between the signer's memory and its write.
+  let asked = 0;
+  w.control.asked = async () => {
+    if (++asked !== 2) return;
+    const [newest] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
+    await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${BigInt(newest!.upto as string | number)}`);
+    const { logCheckpoints } = tablesOf(db.owner);
+    setTimeout(() => void db.owner.insert(logCheckpoints).values({
+      upto: BigInt(newest!.upto as string | number), at: Number(newest!.at), atFloor: Number(newest!.at_floor), changesSize: BigInt(newest!.changes_size as string | number),
+      changesRoot: Buffer.from(newest!.changes_root as Uint8Array), changesNote: newest!.changes_note as string, usesSize: BigInt(newest!.uses_size as string | number),
+      usesRoot: Buffer.from(newest!.uses_root as Uint8Array), usesNote: newest!.uses_note as string,
+    }).then(() => {}), 200);
+  };
+  const began = Date.now();
+  await w.vault.checkpoint();
+  w.control.asked = null;
+  assert.ok(asked >= 2 && Date.now() - began >= 700, 'the second stretch came back behind, and was walked again a tick later');
+  // Its verdict, kept, is the log's: no entry replayed twice.
   clean(await w.verify());
 });

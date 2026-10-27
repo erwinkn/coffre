@@ -11,7 +11,7 @@ import { FRESH_MS, logOrigin } from './checkpointer.ts';
 import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
 import { alike, refOf, sealKey, type Input, type SealKeys } from './inputs.ts';
 import { authentic, logMacKey } from './log-entry.ts';
-import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
+import { copyReplay, emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
 import { logStore } from './log-store.ts';
 import { bulkRows, heldObjects, keepReplay, keptReplay, keptUptos, now, requestsUnique, type KeptReplay } from './store.ts';
 
@@ -182,7 +182,8 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     let start = null as Awaited<ReturnType<typeof opened>>;
     let replaying = !page;
     if (options.carried !== undefined) {
-      start = { ...options.carried, found: null };
+      // A copy: a walk that comes back behind the signer is walked again from the replay as it was handed on (review r7).
+      start = { ...options.carried, replayed: copyReplay(options.carried.replayed), found: null };
     } else if (page) {
       start = await newestOpened('verdict');
       // No verdict kept yet: a walk that replays, as the job's.
