@@ -114,7 +114,7 @@ export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => (
 
 export function testVault(
   owners: readonly string[],
-  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> = {},
+  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
   log: Pick<VaultOptions, 'log' | 'sealThrough'> = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
@@ -165,6 +165,8 @@ export function testVault(
     verifyLog: call('verifyLog'),
     prepare: call('prepare'),
     waitSealed: call('waitSealed'),
+    // 0.15's use path, which the app does not call yet (plan PR 10): for tests that hold rows to their seals through it.
+    use: call('use'),
     kek,
     signingKey,
     advance: (ms: number) => void (offset += ms),

@@ -4,7 +4,7 @@ import { ownsProject, readsSensitive, useOnly, type Permission } from '@coffre/c
 import type { Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
-import { handsBack, type HolderRef, type SecretRef } from '@coffre/core/vault';
+import { handsBack, type HolderRef, type SecretColumns, type SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
@@ -19,6 +19,7 @@ import {
   referenceRows,
   resolvePath,
   secretHeads,
+  secretObjects,
   secretPlaces,
   plainVersions,
   sensitiveVersions,
@@ -29,6 +30,7 @@ import {
   type ParentRow,
   type ResolvedPath,
   type SecretPlaceRow,
+  type SecretRead,
   type SecretRow,
   type VersionRecipe,
   upsert,
@@ -37,6 +39,7 @@ import {
 } from '../db/queries.ts';
 import { can, lists, permissionsAt, placeOf, type Caller } from './caller.ts';
 import { protectedFor, unprotects } from './roles.ts';
+import { AppChanges, ObjectMoved, retrying, secretChange, versionColumns, writtenSecret } from './changes.ts';
 import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -533,6 +536,7 @@ function recipesOf(patch: Readonly<Record<string, SecretValue | null>>): Map<str
  */
 async function appendVersion(
   tx: Transaction,
+  id: string,
   secretId: string,
   version: number,
   envelope: Envelope,
@@ -541,7 +545,6 @@ async function appendVersion(
   plaintext: string | null,
   sensitive: boolean,
 ): Promise<void> {
-  const id = randomUUID();
   await insert(tx, secretVersions, { id, secretId, version, ...envelope, createdBy, ...recipeRow(recipe), plaintext, sensitive });
   await update(tx, secrets, { id: secretId }, { currentVersionId: id, currentVersion: version, updatedAt: new Date() });
 }
@@ -616,6 +619,25 @@ async function inheritedOf(db: Queryable, place: ResolvedPath): Promise<Awaited<
 /** A competing write invalidated the keys prepared outside the transaction. */
 class PrepareAgain extends Error {}
 
+/**
+ * Under the log's head: the key as `read` found it, archived or not, its
+ * object whole. Its seal alone cannot say so for a change prepared from no
+ * object (an unarchive), which moves the seal from none: a key unarchived,
+ * written and archived again meanwhile has none either, and the change
+ * would seal the version it read over the one written. Nor, when nothing
+ * was prepared, can anything: the key archived already, then unarchived
+ * meanwhile, would be archived with no change.
+ */
+async function stillAsRead(tx: Transaction, id: string, read: SecretRead | undefined): Promise<void> {
+  const now = (await secretObjects(tx, { ids: [id] })).get(id);
+  if (now === undefined || read === undefined || now.archived !== read.archived || JSON.stringify(now.columns) !== JSON.stringify(read.columns)) throw new ObjectMoved();
+}
+
+/** A key as `secretHeads` read it and as its object's read found it: archived or not, at the same version. */
+function sameHead(head: { archivedAt: Date | null; currentVersionId: string | null }, read: SecretRead | undefined): read is SecretRead {
+  return read !== undefined && read.archived === (head.archivedAt !== null) && (read.columns.version?.id ?? null) === head.currentVersionId;
+}
+
 async function optimistic<T>(ctx: ApiContext, work: () => Promise<T>): Promise<T> {
   return withRefusals(ctx, async () => {
     // Bound the work under sustained contention; an ordinary burst can retry.
@@ -623,7 +645,7 @@ async function optimistic<T>(ctx: ApiContext, work: () => Promise<T>): Promise<T
       try {
         return await work();
       } catch (error) {
-        if (!(error instanceof PrepareAgain)) throw error;
+        if (!(error instanceof PrepareAgain) && !(error instanceof ObjectMoved)) throw error;
       }
     }
     throw conflict('the secrets kept changing; try again');
@@ -720,9 +742,9 @@ export async function setSecrets(
       archived(key);
       const row = prepared.get(key);
       const secret = { id: row?.id ?? randomUUID(), key };
-      return { key, secret: { ...secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), sensitive: levelOf(key) === 'sensitive' }, value };
+      return { key, secret: { ...secretRef(place, environment, secret, (row?.currentVersion ?? 0) + 1), sensitive: levelOf(key) === 'sensitive' }, value, versionId: randomUUID() };
     });
-    const marked = await marking(ctx, place, environment, marks, prepared, levelNow, operationId);
+    const marked = (await marking(ctx, place, environment, marks, prepared, levelNow, operationId)).map((mark) => ({ ...mark, versionId: randomUUID() }));
     const references = (await referenceTargets(ctx, place, environment, refs, prepared, currently, operationId)).filter((item) => {
       archived(item.key);
       return !item.unchanged;
@@ -760,6 +782,39 @@ export async function setSecrets(
         throw vaultRefusal(ctx, ended.refusal, 'secret.write', { ...environment, operationId });
       }
     }
+
+    // With 0.15's log, each key's change, from its object as read to what this write leaves it: the rows it was
+    // prepared from are the transaction's, held below (`PrepareAgain`), and their seals by `app_change`. Refused, the
+    // write stores none of the references the vault just made: they are abandoned, as when its transaction fails.
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      const objects = await secretObjects(ctx.db, { ids: heads.map((row) => row.id) });
+      // The rows as `heads` read them, which the transaction holds them to: one archived, unarchived or written between
+      // the two reads is prepared again, or a change prepared from one state would be committed beside a write from the other.
+      if (heads.some((row) => !sameHead(row, objects.get(row.id)))) throw new PrepareAgain();
+      const at = (id: string) => ({ id, ...environment });
+      const after = new Map<string, SecretColumns | null>();
+      // Unarchived with nothing written: as it was (a reference written again unchanged).
+      for (const key of keysIn) {
+        const row = prepared.get(key);
+        if (row !== undefined && patch[key] !== null && row.archivedAt !== null && objects.has(row.id)) after.set(row.id, objects.get(row.id)!.columns);
+      }
+      items.forEach(({ key, secret, value, versionId }, i) => {
+        const level = levelOf(key);
+        after.set(secret.secretId, writtenSecret(at(secret.secretId), versionColumns(versionId, sealed.values[i]!, { sensitive: level === 'sensitive', plaintext: level === 'plain' ? value : null })));
+      });
+      marked.forEach(({ secret, to, versionId }, i) => {
+        after.set(secret.secretId, writtenSecret(at(secret.secretId), versionColumns(versionId, rewrapped.values[i]!, { sensitive: to === 'sensitive', plaintext: null })));
+      });
+      for (const { holder, source } of references) after.set(holder.secretId, { ...at(holder.secretId), source: source.id, version: null });
+      for (const key of archives) {
+        const row = prepared.get(key);
+        if (row !== undefined && row.archivedAt === null) after.set(row.id, null);
+      }
+      return [...after].map(([id, columns]) => secretChange(id, objects.get(id), columns));
+    }).catch(async (error: unknown) => {
+      await abandon(ctx, operationId, references, made.seqs);
+      throw error;
+    });
 
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
@@ -830,7 +885,7 @@ export async function setSecrets(
         log.push(allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }));
       }
       const versions = [
-        ...items.map(({ key, secret, value }, i) => {
+        ...items.map(({ key, secret, value, versionId }, i) => {
           const recipe = recipes.get(key) ?? null;
           const level = levelOf(key);
           log.push(allowed(ctx, 'secret.write', {
@@ -839,14 +894,14 @@ export async function setSecrets(
           }));
           keys[key] = { version: secret.version, sensitivity: level };
           return {
-            id: randomUUID(), secretId: secret.secretId, version: secret.version, ...sealed.values[i],
+            id: versionId, secretId: secret.secretId, version: secret.version, ...sealed.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: level === 'plain' ? value : null, sensitive: level === 'sensitive',
           };
         }),
         // The value as it is, marked: its ciphertext and how it was made, its key wrapped again as the new level. Made
         // looser, a sensitive value made a secret, it is its own entry, `secret.loosen`, which no reader of the log takes
         // for a write of a value its maker saw.
-        ...marked.map(({ key, secret, from, to, was, recipe }, i) => {
+        ...marked.map(({ key, secret, from, to, was, recipe, versionId }, i) => {
           const recipeDetail = recipe === null ? {} : { recipe: recipe.recipe };
           log.push(stricter(was, to)
             ? allowed(ctx, 'secret.loosen', {
@@ -859,7 +914,7 @@ export async function setSecrets(
             }));
           keys[key] = { version: secret.version, sensitivity: to };
           return {
-            id: randomUUID(), secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
+            id: versionId, secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: null, sensitive: to === 'sensitive',
           };
         }),
@@ -905,7 +960,7 @@ export async function setSecrets(
         log.push(allowed(ctx, 'secret.archive', { ...environment, secretId: secret.id, operationId, metadata: { key } }));
       }
       return { operationId, keys };
-    }).catch(async (error: unknown) => {
+    }, changes).catch(async (error: unknown) => {
       await abandon(ctx, operationId, references, made.seqs);
       throw error;
     });
@@ -1286,58 +1341,68 @@ export async function patchSecret(
   if (!renaming && !archiving && !moving) return { key: secret.key, archived, folder };
 
   const nextKey = patch.key!;
-  const result = await audited(ctx, async (tx, log) => {
-    // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
-    await checkEnvironment(tx, place, environment);
-    // A rename names the key it found: renamed meanwhile, the forks below would be searched for a name gone.
-    if (renaming) {
-      const [now] = await lock(tx, secrets, { id: secret.id });
-      if (now?.key !== secret.key) {
-        throw new Refusal(
-          conflict(`${secret.key} was renamed meanwhile${now === undefined ? '' : ` to ${now.key}`}: nothing changed`),
-          denied(ctx, 'secret.rename', 'renamed_meanwhile', { ...where, metadata: { key: secret.key, nextKey } }),
-        );
+  // With 0.15's log, an archive or unarchive is the key's change (a rename or a move is none: its object holds neither
+  // name nor folder), prepared from the key as read now, which the transaction must find it still.
+  const result = await retrying(async () => {
+    let read: SecretRead | undefined;
+    const changes = !archiving ? null : await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
+      return read === undefined ? [] : [secretChange(secret.id, read, archived ? null : read.columns)];
+    });
+    return audited(ctx, async (tx, log) => {
+      // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
+      await checkEnvironment(tx, place, environment);
+      if (changes !== null) await stillAsRead(tx, secret.id, read);
+      // A rename names the key it found: renamed meanwhile, the forks below would be searched for a name gone.
+      if (renaming) {
+        const [now] = await lock(tx, secrets, { id: secret.id });
+        if (now?.key !== secret.key) {
+          throw new Refusal(
+            conflict(`${secret.key} was renamed meanwhile${now === undefined ? '' : ` to ${now.key}`}: nothing changed`),
+            denied(ctx, 'secret.rename', 'renamed_meanwhile', { ...where, metadata: { key: secret.key, nextKey } }),
+          );
+        }
       }
-    }
-    if (archiving && archived) {
-      await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
-    }
-    // Unarchived, its value is live again: made so only by whoever could have read it (`madeLive`).
-    if (archiving && !archived) madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, secret.id), 'secret.unarchive', { metadata: { key: secret.key } });
-    if (renaming || archiving) {
-      try {
-        await update(tx, secrets, { id: secret.id }, {
-          ...(archiving ? { archivedAt: archived ? new Date() : null } : {}),
-          ...(renaming ? { key: nextKey, updatedAt: new Date() } : {}),
-        });
-      } catch (error) {
-        if (!renaming || !isUniqueViolation(error)) throw error;
-        throw new Refusal(
-          conflict(`a secret named "${nextKey}" already exists`),
-          denied(ctx, 'secret.rename', 'duplicate_key', { ...where, metadata: { key: secret.key, nextKey } }),
-        );
+      if (archiving && archived) {
+        await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: [secret.id] }, 'secret.archive', where);
       }
-    }
-    if (archiving) {
-      log.push(allowed(ctx, archived ? 'secret.archive' : 'secret.unarchive', {
-        ...where,
-        metadata: { key: secret.key },
-      }));
-    }
-    if (renaming) {
-      log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
-      await renameBelow(ctx, tx, log, place, secret.key, nextKey);
-    }
-    // Live under its key again, or under a new one: in a fork, no longer removed. The row as it is now, under the head, names the key.
-    if (!archived && (archiving || renaming)) {
-      const [now] = await lock(tx, secrets, { id: secret.id });
-      if (now !== undefined && now.archivedAt === null) await endRemovals(ctx, tx, log, place, environment, [now.key], null);
-    }
-    if (moving) {
-      await fileSecrets(tx, [{ secretId: secret.id, folder }]);
-      log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));
-    }
-    return { key: renaming ? nextKey : secret.key, archived, folder };
+      // Unarchived, its value is live again: made so only by whoever could have read it (`madeLive`).
+      if (archiving && !archived) madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, secret.id), 'secret.unarchive', { metadata: { key: secret.key } });
+      if (renaming || archiving) {
+        try {
+          await update(tx, secrets, { id: secret.id }, {
+            ...(archiving ? { archivedAt: archived ? new Date() : null } : {}),
+            ...(renaming ? { key: nextKey, updatedAt: new Date() } : {}),
+          });
+        } catch (error) {
+          if (!renaming || !isUniqueViolation(error)) throw error;
+          throw new Refusal(
+            conflict(`a secret named "${nextKey}" already exists`),
+            denied(ctx, 'secret.rename', 'duplicate_key', { ...where, metadata: { key: secret.key, nextKey } }),
+          );
+        }
+      }
+      if (archiving) {
+        log.push(allowed(ctx, archived ? 'secret.archive' : 'secret.unarchive', {
+          ...where,
+          metadata: { key: secret.key },
+        }));
+      }
+      if (renaming) {
+        log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
+        await renameBelow(ctx, tx, log, place, secret.key, nextKey);
+      }
+      // Live under its key again, or under a new one: in a fork, no longer removed. The row as it is now, under the head, names the key.
+      if (!archived && (archiving || renaming)) {
+        const [now] = await lock(tx, secrets, { id: secret.id });
+        if (now !== undefined && now.archivedAt === null) await endRemovals(ctx, tx, log, place, environment, [now.key], null);
+      }
+      if (moving) {
+        await fileSecrets(tx, [{ secretId: secret.id, folder }]);
+        log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));
+      }
+      return { key: renaming ? nextKey : secret.key, archived, folder };
+    }, changes);
   });
   return result;
 }
@@ -1435,33 +1500,43 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
   if (place.environment!.parentId === null) {
     throw conflict(`${here} inherits from no environment: ${inherit ? 'archive' : 'unarchive'} ${secret.key} instead`);
   }
-  return audited(ctx, async (tx, log) => {
-    await checkEnvironment(tx, place, environment);
-    const [row] = await lock(tx, secrets, { id: secret.id });
-    if (row === undefined) throw notFound('unknown secret');
-    const folder = (await secretFolderOf(tx, environment.environmentId)).get(secret.id) ?? null;
-    const inherited = await inheritedRows(tx, environment.environmentId);
-    const held = inherited?.held.get(row.key);
-    if (held === undefined) {
-      throw new Refusal(
-        conflict(`no environment ${here} inherits from holds ${row.key}: ${inherit ? 'archive' : 'unarchive'} it instead`),
-        denied(ctx, 'secret.update', 'not_inherited', { ...where, metadata: { key: row.key } }),
-      );
-    }
-    const result = { key: row.key, archived: inherit, folder, from: held.from.slug };
-    if ((row.archivedAt !== null) === inherit) return result;
-    if (inherit) {
-      await refuseIfRead(ctx, tx, here, { ...environment, secretIds: [row.id] }, 'secret.reset', where);
-      await update(tx, secrets, { id: row.id }, { archivedAt: new Date() });
-      log.push(allowed(ctx, 'secret.reset', { ...where, metadata: { key: row.key, from: held.from.slug } }));
-    } else {
-      // Its own value live again: made so only by whoever could have read it (`madeLive`).
-      madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, row.id), 'secret.unarchive', { metadata: { key: row.key } });
-      await update(tx, secrets, { id: row.id }, { archivedAt: null });
-      log.push(allowed(ctx, 'secret.unarchive', { ...where, metadata: { key: row.key } }));
-      await endRemovals(ctx, tx, log, place, environment, [row.key], null);
-    }
-    return result;
+  // With 0.15's log, the reset (archived) or override again (unarchived) is the key's change, prepared from it as read
+  // now, which the transaction must find it still.
+  return retrying(async () => {
+    let read: SecretRead | undefined;
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
+      return read === undefined ? [] : [secretChange(secret.id, read, inherit ? null : read.columns)];
+    });
+    return audited(ctx, async (tx, log) => {
+      await checkEnvironment(tx, place, environment);
+      const [row] = await lock(tx, secrets, { id: secret.id });
+      if (row === undefined) throw notFound('unknown secret');
+      if (changes !== null) await stillAsRead(tx, secret.id, read);
+      const folder = (await secretFolderOf(tx, environment.environmentId)).get(secret.id) ?? null;
+      const inherited = await inheritedRows(tx, environment.environmentId);
+      const held = inherited?.held.get(row.key);
+      if (held === undefined) {
+        throw new Refusal(
+          conflict(`no environment ${here} inherits from holds ${row.key}: ${inherit ? 'archive' : 'unarchive'} it instead`),
+          denied(ctx, 'secret.update', 'not_inherited', { ...where, metadata: { key: row.key } }),
+        );
+      }
+      const result = { key: row.key, archived: inherit, folder, from: held.from.slug };
+      if ((row.archivedAt !== null) === inherit) return result;
+      if (inherit) {
+        await refuseIfRead(ctx, tx, here, { ...environment, secretIds: [row.id] }, 'secret.reset', where);
+        await update(tx, secrets, { id: row.id }, { archivedAt: new Date() });
+        log.push(allowed(ctx, 'secret.reset', { ...where, metadata: { key: row.key, from: held.from.slug } }));
+      } else {
+        // Its own value live again: made so only by whoever could have read it (`madeLive`).
+        madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, row.id), 'secret.unarchive', { metadata: { key: row.key } });
+        await update(tx, secrets, { id: row.id }, { archivedAt: null });
+        log.push(allowed(ctx, 'secret.unarchive', { ...where, metadata: { key: row.key } }));
+        await endRemovals(ctx, tx, log, place, environment, [row.key], null);
+      }
+      return result;
+    }, changes);
   });
 }
 
@@ -1605,6 +1680,15 @@ export async function restoreVersion(
       });
       if (!ended.ok) throw vaultRefusal(ctx, ended.refusal, 'secret.restore', { ...where, operationId, metadata: { key: prepared.key, from: toVersion } });
     }
+    const versionId = randomUUID();
+    const plaintext = level === 'plain' ? target.plaintext : null;
+    // With 0.15's log, the key's change: the old value back as a new version of its own. Its row is held below.
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      const read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
+      // As `prepared` read it, which the transaction holds it to.
+      if (!sameHead(prepared, read)) throw new PrepareAgain();
+      return [secretChange(secret.id, read, writtenSecret(read.columns, versionColumns(versionId, rewrapped.values[0]!, { sensitive: level === 'sensitive', plaintext })))];
+    });
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
       const [current] = await lock(tx, secrets, { id: secret.id });
@@ -1618,13 +1702,13 @@ export async function restoreVersion(
       }
       // The old value comes back with how it was made, and plain if it was. A key pair's half comes
       // back with its pair's id, which pairs it again only beside the other half of the same pair.
-      await appendVersion(tx, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, level === 'plain' ? target.plaintext : null, level === 'sensitive');
+      await appendVersion(tx, versionId, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, plaintext, level === 'sensitive');
       log.push(allowed(ctx, 'secret.restore', {
         ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion, ...sensitivityDetail(level, was) },
       }));
       await endRemovals(ctx, tx, log, place, environment, [prepared.key], operationId);
       return { key: prepared.key, version };
-    });
+    }, changes);
   });
   return result;
 }

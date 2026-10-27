@@ -5,6 +5,7 @@ import { environments } from '@coffre/db/schema';
 
 import { environmentsCreatedAt, insert, liveEnvironment, liveKeysIn, MAX_PARENTS, parentsOf, personalConfig, places, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, lists, placeOf } from './caller.ts';
+import { AppChanges, environmentChange, madeEnvironment, madeProtection } from './changes.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
@@ -65,22 +66,24 @@ export async function makePersonal(ctx: ApiContext, place: ResolvedPath, action:
     if (above === null || above.length >= MAX_PARENTS) {
       throw new Refusal(conflict(`${path} already inherits from ${MAX_PARENTS} environments: it takes no personal config`), denied(ctx, action, 'too_deep', fields));
     }
+    const id = randomUUID();
+    const slug = `${of.slug.slice(0, 48)}-p-${randomBytes(4).toString('hex')}`;
+    const config = madeEnvironment(ctx.caller, { id, projectId: place.project.id, slug, owner, parentId: of.id });
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [environmentChange(undefined, config)]);
     const made = await audited(ctx, async (tx, log) => {
-      if (await personalConfig(tx, of.id, owner)) return false;
+      // One made meanwhile holds its place: that one is it, and this one is not made.
+      if (await personalConfig(tx, of.id, owner)) return (changes?.drop(), false);
       // Archived or deleted since it was checked, it takes no personal config.
       if (!(await liveEnvironment(tx, of.id))) throw notFound(`no live environment ${path}`);
-      const id = randomUUID();
-      const slug = `${of.slug.slice(0, 48)}-p-${randomBytes(4).toString('hex')}`;
       try {
-        await insert(tx, environments, { id, projectId: place.project.id, slug, name: slug, parentId: of.id, owner });
+        await insert(tx, environments, { id, projectId: place.project.id, slug, name: slug, parentId: of.id, owner, ...madeProtection(config, changes) });
       } catch (error) {
-        // One made meanwhile holds its place: that one is it.
-        if (isUniqueViolation(error)) return false;
+        if (isUniqueViolation(error)) return (changes?.drop(), false);
         throw error;
       }
       log.push(allowed(ctx, 'environment.create', { projectId: place.project.id, environmentId: id, metadata: { slug, personal: of.slug } }));
       return true;
-    });
+    }, changes);
     const mine = await resolvePath(ctx.db, { project: place.project.slug, environment: `${of.slug}@me` }, { owner });
     if (mine?.environment == null) throw notFound(`${formatPath({ project: place.project.slug, environment: `${of.slug}@me` })} went away as it was made`);
     return { place: mine, created: made };

@@ -247,12 +247,54 @@ export type CredentialColumns = {
 };
 
 /** One object's change, as the app will write it: its columns before (null: it makes the object), their seal, and after. */
-export type ObjectChange = {
-  kind: 'credential';
+export type ObjectChange =
+  | ChangeOf<'credential', CredentialColumns, CredentialColumns>
+  /** A key's: null after, archived or erased (no object). */
+  | ChangeOf<'secret', SecretColumns, SecretColumns | null>
+  | ChangeOf<'environment', EnvironmentColumns, EnvironmentColumns>;
+
+type ChangeOf<K extends string, Before, After> = {
+  kind: K;
   id: string;
-  /** As the app read the row, with its seal: null before the vault ever sealed it (0.14's, before the cutover). */
-  before: { columns: CredentialColumns; seal: string | null } | null;
-  after: CredentialColumns;
+  /**
+   * As the app read the row, with its seal: null for no object (no row, or
+   * a key archived); a null seal, a row the vault never sealed (0.14's,
+   * before the cutover).
+   */
+  before: { columns: Before; seal: string | null } | null;
+  after: After;
+};
+
+/** The version a key's value is: its ids, its nature and its wrapped data key. Never its ciphertext. */
+export type VersionColumns = {
+  id: string;
+  sensitive: boolean;
+  /** Whether the value is plain: kept as text, with no data key the vault opens. */
+  plain: boolean;
+  kekProvider: string;
+  kekId: string;
+  kekVersion: string;
+  /** The wrapped data key, base64. */
+  wrappedDek: string;
+};
+
+/**
+ * A live key's columns (`secrets`): where it is, its current version, or,
+ * for a reference, the source its newest `secret_references` row names
+ * while it has no version of its own (null for a key with a value).
+ */
+export type SecretColumns = { id: string; projectId: string; environmentId: string; source: string | null; version: VersionColumns | null };
+
+/** An environment's columns (`environments`). Its slug as stored: a deleted one's carries a tombstone, `dev~deleted-…`. */
+export type EnvironmentColumns = {
+  id: string;
+  projectId: string;
+  slug: string;
+  owner: string | null;
+  parentId: string | null;
+  /** Null until the cutover writes it (0022): not protected. */
+  protected: boolean | null;
+  archived: boolean;
 };
 
 export type PrepareInput = {

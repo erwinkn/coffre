@@ -1,5 +1,5 @@
-// What 0.15's change path adds to each of the app's writes that makes or ends a credential (docs/design/0.15-plan.md,
-// "As built: PR 4b"): each write, `--n` times in turn, with 0.14's log and with 0.15's, its change sealed by a Node
+// What 0.15's change path adds to each of the app's writes that makes or ends a credential, or writes an environment or
+// a key (docs/design/0.15-plan.md, "As built: PR 4b", both parts): each write, `--n` times in turn, with 0.14's log and with 0.15's, its change sealed by a Node
 // checkpointer over the same database (500 ms ticks, a change asking for its seal at once, no witness). Wall time of
 // the call, as the API's handler would see it, p50 / p90 / p99. Not part of the suite. On a migrated scratch
 // database, as `pnpm test` makes (COFFRE_TEST_DATABASE):
@@ -84,6 +84,24 @@ for (const log of ['0.14', '0.15'] as const) {
   await timed('device login collected (sign_in, cli)', async (i) => signin.pollDevice(devices[i]!, meta()));
   await timed('sign-out (sign_out)', async (i) => signin.signOut(sessions[i]!, meta()));
   await timed('member removed, its CLI session ended (member.remove)', async (i) => root.members.remove(`user:${people[i]}`));
+
+  // Environments and keys (part 2): one project, each write on its own environment or key.
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await timed('environment created (environment.create)', async (i) => root.environments.create(`market/e${i}`));
+  await timed('environment renamed (environment.update)', async (i) => root.environments.update(`market/e${i}`, { slug: `r${i}` }));
+  await timed('environment archived (environment.archive)', async (i) => root.environments.update(`market/r${i}`, { archived: true }));
+  await timed('environment restored (environment.restore)', async (i) => root.environments.update(`market/r${i}`, { archived: false }));
+  await timed('one key written (secret.write)', async (i) => root.secrets.set('market/dev', { [`K${i}`]: `value-${i}` }));
+  await timed('ten keys written at once (secret.write ×10)', async (i) => root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 10 }, (_, j) => [`T${i}_${j}`, `v${j}`]))));
+  await timed('key archived (secret.archive)', async (i) => root.secrets.update(`market/dev/K${i}`, { archived: true }));
+  await timed('key unarchived (secret.unarchive)', async (i) => root.secrets.update(`market/dev/K${i}`, { archived: false }));
+  await timed('version restored (secret.restore)', async (i) => root.secrets.restore(`market/dev/K${i}`, 1));
+  for (let i = 0; i < N; i += 1) {
+    await root.secrets.set(`market/r${i}`, { A: 'a', B: 'b' });
+    await root.environments.update(`market/r${i}`, { archived: true });
+  }
+  await timed('environment of two keys deleted (environment.delete)', async (i) => root.environments.delete(`market/r${i}`));
 
   await checkpointer?.stop();
   await pool.end();

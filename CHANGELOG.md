@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **0.15's change path for environments and keys, behind its switch:
+  nothing calls it yet.** With 0.15's log on, every write of the app's
+  that makes, renames, archives, restores or deletes an environment, or
+  writes, archives, restores or erases a key, logs its change beside its
+  rows, as part 1 does for credentials. A key's change holds its version's
+  id, nature and wrapped data key, never its ciphertext. A deletion then
+  also archives the keys it erases, and a project's deletion makes a
+  tombstone of each of its environments' slugs. With the switch off, as
+  every deployment has it, the app's writes are as before
+  ([0.15-plan.md](docs/design/0.15-plan.md), "As built: PR 4b, part 2").
+
 - **0.15's change path for the app's own writes, behind its switch:
   nothing calls it yet.** `0025_app_change` adds `app_change`, which only
   the app's login may run: with 0.15's log on, every write of the app's
