@@ -8,6 +8,7 @@ import type { Access } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 
 import { answer } from './start-fixture.ts';
+import { answering } from './db/postgres-pool.ts';
 import { CredentialUncheckable } from '../src/api/signin.ts';
 import { accessTokenForRequest, authenticateRequest, cloudflareSourceIp } from '../src/auth.ts';
 
@@ -39,12 +40,7 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
 
 /** A database that holds no `policy.change`: all a request reads of it before the vault says who called. */
 /** A database whose every query finds nothing: no policy has changed. */
-const noPolicyChanges = createDatabase({
-  query: (async () => ({ rows: [] })) as never,
-  connect: async () => {
-    throw new Error('no transaction here');
-  },
-});
+const noPolicyChanges = createDatabase(answering());
 
 const root: Principal = {
   type: 'user',

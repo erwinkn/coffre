@@ -1,13 +1,15 @@
 /**
  * Postgres from a workload, through coffre's tunnel (docs/design/workload-access.md,
- * section 9.1): a stream node-postgres takes as its socket, carried over the
- * tunnel's WebSocket and signed by the session. No listener, no password,
+ * section 9.1): a stream the app's driver takes as its socket, carried over
+ * the tunnel's WebSocket and signed by the session. No listener, no password,
  * and no database URL in the app: coffre logs in to the database.
  *
- *   import pg from 'pg';
+ *   import postgres from 'postgres';
  *   import { connect } from '@coffre/client/workload/postgres';
  *
- *   const pool = new pg.Pool({ stream: () => connect(coffre, 'db') });
+ *   const sql = postgres({ socket: () => connect(coffre, 'db') });
+ *
+ * node-postgres takes it as its stream: `new pg.Pool({ stream: () => connect(coffre, 'db') })`.
  *
  * The WebSocket is the runtime's own (`globalThis.WebSocket`: Node 22 and
  * later, Deno, Bun), which takes the upgrade's headers; on Node 20, pass the
@@ -59,7 +61,7 @@ const FRAME = 64 * 1024;
 const KEEPALIVE_MS = 30_000;
 
 /**
- * A stream to the database behind the tunnel `name`, which node-postgres
+ * A stream to the database behind the tunnel `name`, which the app's driver
  * connects, writes and ends as it would a socket.
  */
 export function connect(coffre: Workload, name: string, options: { WebSocket?: WebSocketClass } = {}): TunnelStream {
@@ -126,6 +128,21 @@ export class TunnelStream extends Duplex {
       },
       (error: unknown) => this.destroy(error as Error),
     );
+  }
+
+  /**
+   * As a socket's: `opening` until the WebSocket opens; then `open` while
+   * both ways are, `readOnly` once the app ended its side, `writeOnly`
+   * once coffre ended its own, and `closed` once neither is, or the stream
+   * was destroyed. A driver reads it to know whether to say goodbye and wait
+   * for the close: postgres.js ends only an open socket, and its `end()`
+   * waits for the `close` of any socket that is not closed.
+   */
+  get readyState(): 'opening' | 'open' | 'readOnly' | 'writeOnly' | 'closed' {
+    if (this.destroyed) return 'closed';
+    if (!this.#opened) return 'opening';
+    if (this.readable && this.writable) return 'open';
+    return this.readable ? 'readOnly' : this.writable ? 'writeOnly' : 'closed';
   }
 
   /** node-postgres connects its stream itself; this one is connecting already, and says so with `connect`. */

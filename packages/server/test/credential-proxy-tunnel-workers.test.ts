@@ -15,13 +15,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 import { WebSocket } from 'ws';
 
+
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { tunnelListener, WINDOW } from './tunnel-listener.ts';
+import { appClient, tunnelListener, WINDOW } from './tunnel-listener.ts';
 
 const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false;
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
@@ -76,14 +76,12 @@ async function listen(tunnel: string, handle = HANDLE): Promise<number> {
   return port;
 }
 
-const appClient = (port: number, handle = HANDLE) => new pg.Client({ connectionString: `postgres://app:${handle}@127.0.0.1:${port}/app` });
 
 test('queries through the object, over cloudflare:sockets and over a network binding to a private address', { skip, timeout: 60_000 }, async () => {
   for (const tunnel of ['db', 'replica']) {
-    const client = appClient(await listen(tunnel));
-    await client.connect();
+    const client = appClient(await listen(tunnel), HANDLE);
     try {
-      assert.deepEqual((await client.query('SELECT current_user AS who, $1::int + 1 AS two', [1])).rows, [{ who: 'coffre_runtime', two: 2 }], tunnel);
+      assert.deepEqual([...await client.unsafe('SELECT current_user AS who, $1::int + 1 AS two', [1])], [{ who: 'coffre_runtime', two: 2 }], tunnel);
     } finally {
       await client.end();
     }
@@ -92,16 +90,15 @@ test('queries through the object, over cloudflare:sockets and over a network bin
 
 test('a cancel request, on a connection of its own, reaches the session in the same object', { skip, timeout: 60_000 }, async () => {
   const port = await listen('db');
-  const client = appClient(port);
-  await client.connect();
+  const client = appClient(port, HANDLE);
   try {
-    const sleeping = client.query('SELECT pg_sleep(30)');
+    const sleeping = client.unsafe('SELECT pg_sleep(30)').execute();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const started = Date.now();
-    // pg sends it as psql does: a CancelRequest with the key it was given, on a new connection to the listener.
-    const canceller = appClient(port) as unknown as { cancel(client: pg.Client, query: unknown): void };
-    canceller.cancel(client, (client as unknown as { activeQuery: unknown }).activeQuery);
-    await assert.rejects(sleeping, (error: { code?: string }) => error.code === '57014');
+    // postgres.js sends it as psql does: a CancelRequest with the key it was given, on a new connection to the listener.
+    void sleeping.cancel();
+    // The database's own answer: postgres.js fails a query it has not sent yet with 57014 itself.
+    await assert.rejects(sleeping, (error: { code?: string; name?: string }) => error.code === '57014' && error.name === 'PostgresError');
     assert.ok(Date.now() - started < 5000);
   } finally {
     await client.end();
@@ -110,14 +107,10 @@ test('a cancel request, on a connection of its own, reaches the session in the s
 
 test("a revoked handle's session ends at the object's recheck", { skip, timeout: 60_000 }, async () => {
   const client = appClient(await listen('db', REVOKED), REVOKED);
-  // The driver says the connection dropped, then ends.
-  client.on('error', () => undefined);
-  const ended = new Promise((resolve) => client.once('end', resolve));
-  await client.connect();
   // Live, until the worker's stand-in refuses the handle, from its fourth use: its admission's, then a recheck each half second.
-  assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
+  assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   const started = Date.now();
-  await ended;
+  await client.ended;
   assert.ok(Date.now() - started < 5000);
 });
 

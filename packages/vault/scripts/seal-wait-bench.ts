@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createDatabase } from '@coffre/db';
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 
 import { fileMemory } from '../src/checkpointer-node.ts';
 import { openLogCheckpointer, TICK_MS } from '../src/log-checkpointer.ts';
@@ -29,14 +29,14 @@ const rate = Number(rateArg ?? 0);
 
 const seed = randomBytes(32);
 const key = logMacKey(seed);
-const owner = new pg.Pool({ connectionString: ownerUrl, max: 16 + concurrency });
-for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.query(`DELETE FROM ${table}`);
-await owner.query(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
+const owner = postgresClient(ownerUrl, { max: 16 + concurrency });
+for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.unsafe(`DELETE FROM ${table}`);
+await owner.unsafe(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-await owner.query('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
+await owner.unsafe('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
 
 const dir = mkdtempSync(join(tmpdir(), 'coffre-seal-wait-'));
-const vaultPool = new pg.Pool({ connectionString: vaultUrl, max: Number(process.env.BENCH_VAULT_POOL ?? 1) });
+const vaultPool = postgresClient(vaultUrl, { max: Number(process.env.BENCH_VAULT_POOL ?? 1) });
 const cp = await openLogCheckpointer({ store: logStore(createDatabase(vaultPool)), seed, memory: fileMemory(join(dir, 'memory')) });
 
 let running = true;
@@ -58,9 +58,10 @@ const load = (async () => {
     while (used < due) {
       used += 1;
       const row = { at: Date.now(), requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-      const p = owner.query(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
+      // Sent now: postgres.js sends a statement once it is awaited, or asked to.
+      const p = owner.unsafe(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
         INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) SELECT nextval('log_number'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
-      [row.at, String(row.requestId), row.credential, row.secret, row.purpose, entryMac(key, { tree: 'uses', row }), row.place]);
+      [row.at, String(row.requestId), row.credential, row.secret, row.purpose, entryMac(key, { tree: 'uses', row }), row.place]).execute();
       inflight.add(p);
       void p.finally(() => inflight.delete(p));
     }
@@ -70,22 +71,16 @@ const load = (async () => {
 })();
 
 async function change(): Promise<{ commitMs: number; sealMs: number }> {
-  const client = await owner.connect();
   const t0 = performance.now();
-  let number: bigint;
-  try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(1668244070, 0)');
+  const number = await owner.begin(async (tx) => {
+    await tx.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
     const row = { at: Date.now(), requestId: `c-${randomUUID()}`, object: randomUUID(), actor: 'bench', payload: '{"op":"credential.issue"}', seal: randomBytes(16) };
-    const { rows } = await client.query<{ number: string }>(
+    const [inserted] = await tx.unsafe(
       `INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, $4, $5, $6, $7) RETURNING number`,
       [row.at, row.requestId, row.object, row.actor, row.payload, row.seal, entryMac(key, { tree: 'changes', row })],
     );
-    await client.query('COMMIT');
-    number = BigInt(rows[0]!.number);
-  } finally {
-    client.release();
-  }
+    return BigInt(inserted!.number as string);
+  });
   const t1 = performance.now();
   await cp.sealThrough(number);
   return { commitMs: t1 - t0, sealMs: performance.now() - t1 };

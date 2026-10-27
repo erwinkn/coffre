@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
 import { createDatabase } from '@coffre/db';
+import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
-import pg from 'pg';
 
 import { openVault, prepareVault } from '../src/vault.ts';
 import { entryMac } from '../src/log-entry.ts';
@@ -25,14 +25,18 @@ before(async () => {
 after(() => db.close());
 
 /** The hot pool, each statement counted as it is sent. */
-function counting(): { pool: pg.Pool; statements: () => number } {
-  const pool = new pg.Pool({ connectionString: HOT_URL, max: 2 });
+function counting(): { pool: PostgresClient; statements: () => number } {
   let statements = 0;
-  const query = pool.query.bind(pool);
-  pool.query = ((...args: unknown[]) => {
-    statements += 1;
-    return (query as (...a: unknown[]) => unknown)(...args);
-  }) as typeof pool.query;
+  const pool = new Proxy(postgresClient(HOT_URL, { max: 2 }), {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        statements += 1;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
   return { pool, statements: () => statements };
 }
 
@@ -80,8 +84,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   // several runs: every run inserts its use, and an insert now and then splits an index page or extends the heap,
   // eight or so buffers more (50 and 51 where 41 and 42 are the rule, one run in 400), which no size of history
   // moves. The first run is the cold one, and it costs thousands.
-  const client = new pg.Client({ connectionString: HOT_URL });
-  await client.connect();
+  const client = postgresClient(HOT_URL, { max: 1 });
   const buffers = async (cached: boolean): Promise<number> => {
     let least = Infinity;
     for (let i = 0; i < 6; i += 1) {
@@ -89,9 +92,9 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       const at = Date.now();
       const requestId = newRequestId();
       const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
-      const { rows: [plan] } = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10)`,
-        [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null]);
-      const node = (plan as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10)`,
+        [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null] as never[]);
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
       least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
     }
     return least;

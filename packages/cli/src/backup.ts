@@ -16,9 +16,8 @@ import { chmodSync, closeSync, createReadStream, openSync, rmSync, statSync, wri
 import { basename } from 'node:path';
 import { parseArgs } from 'node:util';
 
-import { postgresConnection } from '@coffre/db/connect';
+import { postgresSession, type PostgresClient } from '@coffre/db/connect';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
-import pg from 'pg';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { Cancelled, listed, type Output, style } from './tty.ts';
@@ -86,17 +85,17 @@ const TABLES = `
   ORDER BY name`;
 
 /** What `client` reads of its database, in the transaction it has open. */
-export async function readFacts(client: pg.ClientBase): Promise<Facts> {
-  for (const statement of STABLE_TEXT) await client.query(statement);
-  const tables = await client.query<{ name: string; rows: string; digest: string }>(TABLES);
-  const ledger = await client.query<{ applied: number; last: string | null }>(
+export async function readFacts(client: PostgresClient): Promise<Facts> {
+  for (const statement of STABLE_TEXT) await client.unsafe(statement);
+  const tables = await client.unsafe<{ name: string; rows: string; digest: string }[]>(TABLES);
+  const [ledger] = await client.unsafe<{ applied: number; last: string | null }[]>(
     "SELECT count(*)::int AS applied, (array_agg(hash ORDER BY id DESC))[1] AS last FROM drizzle.__drizzle_migrations",
   );
-  const head = await client.query<{ next_seq: string; head: string }>("SELECT next_seq::text, encode(head_hash, 'hex') AS head FROM audit_chain_head");
+  const [head] = await client.unsafe<{ next_seq: string; head: string }[]>("SELECT next_seq::text, encode(head_hash, 'hex') AS head FROM audit_chain_head");
   return {
-    tables: Object.fromEntries(tables.rows.map((row) => [row.name, { rows: Number(row.rows), digest: row.digest }])),
-    migrations: ledger.rows[0]!,
-    log: head.rows[0] === undefined ? null : { nextSeq: head.rows[0].next_seq, head: head.rows[0].head },
+    tables: Object.fromEntries(tables.map((row) => [row.name, { rows: Number(row.rows), digest: row.digest }])),
+    migrations: { ...ledger! },
+    log: head === undefined ? null : { nextSeq: head.next_seq, head: head.head },
   };
 }
 
@@ -214,8 +213,8 @@ export async function backup(args: string[]): Promise<void> {
     const database = `${url.hostname}${decodeURIComponent(url.pathname)}`;
     const login = decodeURIComponent(url.username);
 
-    const client = new pg.Client({ ...postgresConnection(url.href), application_name: 'coffre backup' });
-    await client.connect();
+    // One session, whose snapshot pg_dump reads: lost, every statement after fails rather than reading outside it.
+    const client = postgresSession(url.href, { application_name: 'coffre backup' });
     let facts: Facts;
     let takenAt: string;
     try {
@@ -223,11 +222,11 @@ export async function backup(args: string[]): Promise<void> {
       // two would wait on this session while pg_dump waited on it, and the app's writes behind both: so this
       // session waits 30 seconds at most for a lock, and pg_dump as long, and the server ends this one if it
       // sits idle past 10 minutes, as it does once this process is gone.
-      await client.query("SET lock_timeout = '30s'");
-      await client.query("SET idle_in_transaction_session_timeout = '10min'");
-      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+      await client.unsafe("SET lock_timeout = '30s'");
+      await client.unsafe("SET idle_in_transaction_session_timeout = '10min'");
+      await client.unsafe('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY');
       // The transaction's start is the snapshot's moment: what the backup holds is the database as it was then.
-      const { id: snapshot, at } = (await client.query<{ id: string; at: Date }>('SELECT pg_export_snapshot() AS id, now() AS at')).rows[0]!;
+      const [{ id: snapshot, at }] = await client.unsafe<[{ id: string; at: Date }]>('SELECT pg_export_snapshot() AS id, now() AS at');
       takenAt = at.toISOString();
       facts = await readFacts(client).catch((error: unknown) => {
         // The one table this login may not read is one coffre's migrations did not make; pg_dump would stop at it too.
@@ -237,7 +236,7 @@ export async function backup(args: string[]): Promise<void> {
             'Grant it SELECT to coffre_backup, or move it out of this database',
         );
       });
-      const hidden = (await client.query<{ name: string }>(`${APPLIES} ${HIDDEN}`)).rows.map((row) => row.name);
+      const hidden = (await client.unsafe<{ name: string }[]>(`${APPLIES} ${HIDDEN}`)).map((row) => row.name);
       if (hidden.length > 0) {
         const log = hidden.includes('public.audit_log') ? `, ${counted(facts.tables['public.audit_log']?.rows ?? 0)} of the log's ${counted(facts.log?.nextSeq ?? 0)} entries among them` : '';
         throw new BackupError(
@@ -246,13 +245,13 @@ export async function backup(args: string[]): Promise<void> {
         );
       }
       // A statement a minute while pg_dump reads: the session is never idle that long, however long the dump takes.
-      const awake = setInterval(() => client.query('SELECT 1').catch(() => {}), 60_000);
+      const awake = setInterval(() => client.unsafe('SELECT 1').catch(() => {}), 60_000);
       try {
         await pgTool('pg_dump', [`--snapshot=${snapshot}`, '--enable-row-security', '--lock-wait-timeout=30s', '--format=custom', `--file=${file}`], url);
       } finally {
         clearInterval(awake);
       }
-      await client.query('COMMIT');
+      await client.unsafe('COMMIT');
     } finally {
       await client.end().catch(() => {});
     }

@@ -41,12 +41,12 @@ function heard(outcome: UseOutcome): UseOutcome {
   return outcome;
 }
 
-/** The log replayed (log-replay.ts) and each use's decision held to its live answer. */
+/** The log replayed (log-replay.ts) and each use's decision held to its live answer: read in number order, which concurrent appends need not leave the heap in. */
 async function replayAgrees(): Promise<number> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
-    sql`SELECT number, at, object, payload, seal FROM log_changes`);
+    sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);
   const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
-    sql`SELECT number, at, credential, secret, purpose, place FROM log_uses`);
+    sql`SELECT number, at, credential, secret, purpose, place FROM log_uses ORDER BY number`);
   const refs = new Map<string, Ref>();
   const entries: Logged[] = [
     ...changes.map((row) => {

@@ -1,7 +1,5 @@
-import pg from 'pg';
-
-import type { PoolLike } from './database.ts';
-import { postgresConnection } from './postgres.ts';
+import type { Client } from './database.ts';
+import { postgresClient, textTypes, type PostgresClient } from './postgres.ts';
 
 /** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
 export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdrive: { readonly connectionString: string } };
@@ -14,9 +12,12 @@ export function postgres(hyperdrive: { readonly connectionString: string }): Pos
   return { engine: 'postgres', hyperdrive };
 }
 
+/** A statement asked of the pool, sent at its turn once awaited or `execute`d, as postgres.js sends one. */
+type Statement = Promise<unknown> & { values(): Statement; execute(): Statement };
+
 /**
- * node-postgres for one call on Workers, through Hyperdrive: one client,
- * connected on the first query, which every query and transaction of the
+ * postgres.js for one call on Workers, through Hyperdrive: one connection,
+ * opened by the first query, which every query and transaction of the
  * call takes its turn on.
  *
  * Hyperdrive keeps the pool to the database; a Worker's connections belong
@@ -25,134 +26,111 @@ export function postgres(hyperdrive: { readonly connectionString: string }): Pos
  * once was now and then cancelled as hung, with nothing left pending, and
  * every connection costs a round trip before the query can be sent.
  *
- * The turns keep a transaction whole: queries go to the client in the order
- * they are asked, a transaction holds it from BEGIN until it is released,
- * and a query asked meanwhile waits until then, so nothing runs inside a
- * transaction it is not part of. So code inside a transaction must query
- * through the transaction: a query on the database there would wait for the
- * transaction to end, which waits for it. Neither the vault nor the server
- * does.
+ * The turns keep a transaction whole: statements go to the connection in
+ * the order they are asked, each once the one before it has answered; a
+ * transaction holds the connection from BEGIN until it ends, and a query
+ * asked meanwhile waits until then, so nothing runs inside a transaction it
+ * is not part of. So code inside a transaction must query through the
+ * transaction: a query on the database there would wait for the transaction
+ * to end, which waits for it. Neither the vault nor the server does.
  *
- * The class name must end in `Pool`: that is how Drizzle knows to check out
- * a client for each transaction.
+ * Closed by `end`, once what was asked has answered; asked again after, as
+ * a call's background work may, it opens a connection again.
  */
-export class HyperdrivePool implements Exclude<PoolLike, pg.Pool> {
+export class HyperdrivePool implements Client {
   readonly #connectionString: string;
-  /** The client, connecting or connected; null before the first query, and once it has failed. */
-  #client: Promise<pg.Client> | null = null;
-  /** Whether a transaction holds the client. */
-  #held = false;
-  /** What waits for its turn, in the order it asked. */
-  readonly #waiting: (() => void)[] = [];
-  /** Queries and transactions asked and not done: waiting for the client, their turn, or an answer. */
+  /** How long the connection may sit idle before it closes, or undefined: closed by `end` alone. */
+  readonly #closeIdleMs: number | undefined;
+  /** The client, made by the first statement; null before it, and once `end` closed it. */
+  #client: PostgresClient | null = null;
+  /** The end of the last turn asked: the next one starts once it has. */
+  #tail: Promise<unknown> = Promise.resolve();
+  /** Turns asked and not done: waiting, or under way. */
   #busy = 0;
-  /** What waits for the client to be idle: `end`. */
+  /** What waits for every turn to be done: `end`. */
   readonly #idle: (() => void)[] = [];
-  /** How long the client may sit idle before it closes, or null: closed by `end` alone. */
-  readonly #closeIdleMs: number | null;
-  #idleTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
    * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
-   * now and then: the client closes once it has been idle that long, and
-   * the next query connects again.
+   * now and then: the connection closes once it has been idle that long,
+   * and the next query connects again.
    */
   constructor(connectionString: string, options: { closeIdleMs?: number } = {}) {
     if (connectionString.trim().length === 0) {
       throw new Error('Hyperdrive returned an empty connection string');
     }
     this.#connectionString = connectionString;
-    this.#closeIdleMs = options.closeIdleMs ?? null;
+    this.#closeIdleMs = options.closeIdleMs;
   }
 
-  readonly query: pg.Pool['query'] = (async (...args: unknown[]) => {
-    this.#busy += 1;
-    clearTimeout(this.#idleTimer);
-    try {
-      const client = await this.#connected();
-      return await new Promise((resolve, reject) => {
-        // Sent at its turn, at once: pg answers its queries in the order they are sent.
-        this.#turn(() => (client.query as (...queryArgs: unknown[]) => Promise<unknown>)(...args).then(resolve, reject));
-      });
-    } finally {
-      this.#done();
-    }
-  }) as pg.Pool['query'];
-
-  /** The client, for a transaction: held from now until `release`. */
-  async connect(): Promise<Pick<pg.PoolClient, 'query'> & { release: () => void }> {
-    this.#busy += 1;
-    clearTimeout(this.#idleTimer);
-    let client: pg.Client;
-    try {
-      client = await this.#connected();
-    } catch (error) {
-      this.#done();
-      throw error;
-    }
-    await new Promise<void>((resolve) =>
-      this.#turn(() => {
-        this.#held = true;
-        resolve();
-      }),
-    );
-    let released = false;
-    return {
-      query: client.query.bind(client) as pg.PoolClient['query'],
-      release: () => {
-        if (released) return;
-        released = true;
-        this.#held = false;
-        this.#next();
-        this.#done();
+  readonly unsafe = ((...args: Parameters<PostgresClient['unsafe']>) => {
+    let values = false;
+    let answer: Promise<unknown> | undefined;
+    /** Its turn, asked once: the first `then`, `catch`, `finally` or `execute` asks it. */
+    const asked = () =>
+      (answer ??= this.#turn(() => {
+        const query = this.#connected().unsafe(...args);
+        return values ? query.values() : query;
+      }));
+    const statement = {
+      values: () => {
+        values = true;
+        return statement;
       },
-    };
-  }
+      execute: () => {
+        void asked().catch(() => {});
+        return statement;
+      },
+      then: (resolve?: (value: unknown) => unknown, reject?: (error: unknown) => unknown) => asked().then(resolve, reject),
+      catch: (reject: (error: unknown) => unknown) => asked().catch(reject),
+      finally: (done: () => void) => asked().finally(done),
+      [Symbol.toStringTag]: 'Statement',
+    } as Statement;
+    return statement;
+  }) as unknown as PostgresClient['unsafe'];
 
-  /** Close the client once nothing waits on it: what a Worker hands `waitUntil` when the call is done. */
+  /** A transaction: its turn lasts until it has committed or rolled back. */
+  readonly begin = ((...args: unknown[]) =>
+    this.#turn(() => (this.#connected().begin as (...beginArgs: unknown[]) => Promise<unknown>)(...args))) as PostgresClient['begin'];
+
+  /** Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. */
   async end(): Promise<void> {
-    clearTimeout(this.#idleTimer);
+    // A statement awaited just before reaches the pool a few promise steps later, through Drizzle's session: a task
+    // later, every one has taken its turn, and none opens a connection that this would leave open.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     while (this.#busy > 0) {
       await new Promise<void>((resolve) => this.#idle.push(resolve));
     }
     const client = this.#client;
     this.#client = null;
-    if (client === null) return;
-    await client.then((connected) => connected.end()).catch(() => {});
+    await client?.end().catch(() => {});
   }
 
-  /** Run `go` now if nothing holds the client or waits before it, otherwise at its turn. */
-  #turn(go: () => void): void {
-    if (!this.#held && this.#waiting.length === 0) go();
-    else this.#waiting.push(go);
+  /** `go` once every turn asked before it is done. */
+  #turn<T>(go: () => PromiseLike<T>): Promise<T> {
+    this.#busy += 1;
+    const answer = this.#tail.then(go);
+    this.#tail = answer.then(
+      () => this.#done(),
+      () => this.#done(),
+    );
+    return answer;
   }
 
-  /** Give the next turns: queries until one is a transaction, which holds the client. */
-  #next(): void {
-    while (!this.#held && this.#waiting.length > 0) this.#waiting.shift()!();
-  }
-
-  /** One query or transaction done: once none is left, what waits for the client to be idle goes on. */
+  /** One turn done: once none is left, what waits for the pool to be idle goes on. */
   #done(): void {
     this.#busy -= 1;
-    if (this.#busy > 0) return;
-    for (const resolve of this.#idle.splice(0)) resolve();
-    if (this.#closeIdleMs !== null && this.#client !== null) this.#idleTimer = setTimeout(() => void this.end(), this.#closeIdleMs);
+    if (this.#busy === 0) for (const resolve of this.#idle.splice(0)) resolve();
   }
 
-  /** The call's client, connecting it the first time. One that fails is dropped: the next query connects again. */
-  #connected(): Promise<pg.Client> {
-    if (this.#client !== null) return this.#client;
-    const client = new pg.Client(postgresConnection(this.#connectionString));
-    const connecting: Promise<pg.Client> = client.connect().then(() => client);
-    const drop = () => {
-      if (this.#client === connecting) this.#client = null;
-    };
-    // A connection lost between queries: pg fails what was waiting on it, and the next query connects again.
-    client.on('error', drop);
-    client.on('end', drop);
-    connecting.catch(drop);
-    this.#client = connecting;
-    return connecting;
+  /** The call's client, made the first time. postgres.js opens its connection again when one is lost. */
+  #connected(): PostgresClient {
+    this.#client ??= textTypes(postgresClient(this.#connectionString, {
+      max: 1,
+      idle_timeout: this.#closeIdleMs === undefined ? undefined : this.#closeIdleMs / 1000,
+      // No timer left to outlive the call: `end` closes the connection, or idling does.
+      max_lifetime: null,
+    }));
+    return this.#client;
   }
 }

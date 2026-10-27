@@ -1,7 +1,7 @@
 // How many connections each Hyperdrive config may open to the database,
 // out of what the database lets coffre's logins open: what `coffre setup`
 // reads as it connects, before it changes anything, and gives each config.
-import type pg from 'pg';
+import type { PostgresClient } from '@coffre/db/connect';
 
 /** Connections the two Hyperdrive configs leave free: for the administrator, `coffre migrate` and the host's own tools. */
 const HELD_BACK = 3;
@@ -62,11 +62,11 @@ export function tooFewConnections(connections: Connections): string {
 }
 
 /** What the database lets in, as the administrator reads it; `reserved_connections` is Postgres 16's, and none before. */
-export async function connectionsOf(client: pg.Client): Promise<Connections> {
-  const [row] = (await client.query<Connections>(
+export async function connectionsOf(client: PostgresClient): Promise<Connections> {
+  const [row] = await client.unsafe<Connections[]>(
     `SELECT current_setting('max_connections')::int AS max,
             current_setting('superuser_reserved_connections')::int
               + coalesce(current_setting('reserved_connections', true), '0')::int AS reserved`,
-  )).rows;
+  );
   return row!;
 }

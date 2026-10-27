@@ -12,7 +12,7 @@ try {
   const query = () => connection.db.execute(sql`SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()`);
   if (expected === undefined) {
     await migrateDatabase(url);
-    assert.deepEqual((await query()).rows, [{ ssl: true }]);
+    assert.deepEqual([...await query()], [{ ssl: true }]);
   } else {
     assert.ok(['DEPTH_ZERO_SELF_SIGNED_CERT', 'ERR_TLS_CERT_ALTNAME_INVALID'].includes(expected));
     const refused = (error: Error & { code?: string; cause?: { code: string } }) => {

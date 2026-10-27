@@ -1,18 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import pg from 'pg';
 import { restrictDatabase } from '@coffre/db/migrate';
-import { cloneDatabase, removeDatabases } from './test-databases.mjs';
+import { cloneDatabase, owners, removeDatabases } from './test-databases.mjs';
 
 function owner(t, databases = []) {
     const queries = [];
     const connected = [];
     const closed = [];
-    t.mock.method(pg.Client.prototype, 'connect', async function () { connected.push(this.database); });
-    t.mock.method(pg.Client.prototype, 'end', async function () { closed.push(this.database); });
-    t.mock.method(pg.Client.prototype, 'query', async (sql) => {
-        queries.push(sql);
-        return { rows: databases.map((datname) => ({ datname })) };
+    t.mock.method(owners, 'open', (database) => {
+        connected.push(database);
+        return {
+            unsafe: async (sql) => {
+                queries.push(sql);
+                return databases.map((datname) => ({ datname }));
+            },
+            end: async () => { closed.push(database); },
+        };
     });
     return { queries, connected, closed };
 }
@@ -20,7 +23,7 @@ function owner(t, databases = []) {
 test('a clone preserves schema grants and restricts its new database ACL', async (t) => {
     const { queries, connected, closed } = owner(t);
     const restriction = [];
-    await restrictDatabase({ query: async (sql) => { restriction.push(sql); } });
+    await restrictDatabase({ unsafe: async (sql) => { restriction.push(sql); } });
     assert.equal(restriction.length, 1);
     await cloneDatabase('coffre_template', 'coffre_worker');
     assert.deepEqual(queries, [

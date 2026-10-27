@@ -16,11 +16,11 @@ import * as gs from '@hegeldev/hegel/generators';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
 import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '@coffre/core/identity';
-import { createDatabase } from '@coffre/db';
+import { createDatabase, type Client } from '@coffre/db';
+import type { PostgresClient } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { localVault } from '@coffre/vault/node';
 import { desc, eq, gt, sql } from 'drizzle-orm';
-import type pg from 'pg';
 
 import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -41,7 +41,7 @@ import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connect
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditLog, credentials as credentialRows } from './db/tables.ts';
-import { testPostgresPool } from './db/postgres-pool.ts';
+import { testPostgresPool, watched } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -62,35 +62,23 @@ type Count = { statements: number; rows: number };
  * client for a transaction from a class named `…Pool`.
  */
 class CountingPool {
-  readonly #pool: pg.Pool;
+  readonly #pool: PostgresClient;
+  /** The pool as the database runs on it, counting. */
+  readonly client: Client;
   readonly count: Count = { statements: 0, rows: 0 };
   readonly held: Count = { statements: 0, rows: 0 };
   /** Each statement run while set, as it was sent: what `work` replays. */
   recorded: Statement[] | null = null;
 
-  constructor(pool: pg.Pool) {
+  constructor(pool: PostgresClient) {
     this.#pool = pool;
-  }
-
-  async #counted(query: pg.Pool['query'] | pg.PoolClient['query'], args: unknown[], held = false): Promise<unknown> {
-    const [first, values] = args as [string | { text: string; values?: unknown[] }, unknown[] | undefined];
-    this.recorded?.push(typeof first === 'string' ? { text: first, values: values ?? [] } : { text: first.text, values: first.values ?? values ?? [] });
-    const answered = await (query as (...queryArgs: unknown[]) => Promise<pg.QueryResult>)(...args);
-    for (const count of held ? [this.count, this.held] : [this.count]) {
-      count.statements += 1;
-      count.rows += answered.rows?.length ?? 0;
-    }
-    return answered;
-  }
-
-  query = ((...args: unknown[]) => this.#counted(this.#pool.query.bind(this.#pool), args)) as pg.Pool['query'];
-
-  async connect() {
-    const client = await this.#pool.connect();
-    return {
-      query: ((...args: unknown[]) => this.#counted(client.query.bind(client), args, true)) as pg.PoolClient['query'],
-      release: () => client.release(),
-    };
+    this.client = watched(pool, ({ text, values, rows, held }) => {
+      this.recorded?.push({ text, values });
+      for (const count of held ? [this.count, this.held] : [this.count]) {
+        count.statements += 1;
+        count.rows += rows;
+      }
+    });
   }
 
   end() {
@@ -104,19 +92,21 @@ class CountingPool {
    * failure fails the test.
    */
   async work(statement: Statement): Promise<{ pages: number; plan: string } | null> {
-    const client = await this.#pool.connect();
-    try {
-      await client.query('BEGIN');
-      const { rows: [row] } = await client.query({ text: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, values: statement.values });
-      const [{ Plan: plan }] = (row as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
-      return { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
-    } catch (error) {
-      if ((error as { code?: string }).code === '23505') return null;
-      throw error;
-    } finally {
-      await client.query('ROLLBACK');
-      client.release();
-    }
+    const rolledBack = new Error('rolled back');
+    let work: { pages: number; plan: string } | null = null;
+    await this.#pool.begin(async (tx) => {
+      try {
+        const [row] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, statement.values as never[]);
+        const [{ Plan: plan }] = (row as unknown as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
+        work = { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
+      } catch (error) {
+        if ((error as { code?: string }).code !== '23505') throw error;
+      }
+      throw rolledBack;
+    }).catch((error: unknown) => {
+      if (error !== rolledBack) throw error;
+    });
+    return work;
   }
 }
 
@@ -180,7 +170,7 @@ before(async () => {
   app = new CountingPool(testPostgresPool(TEST_RUNTIME_DATABASE_URL));
   vaultPool = new CountingPool(testPostgresPool(TEST_VAULT_DATABASE_URL));
   const opened = await localVault({
-    database: createDatabase(vaultPool),
+    database: createDatabase(vaultPool.client),
     kek: { id: 'test-kek-1', key: randomBytes(32).toString('base64') },
     owners: [ROOT],
   });
@@ -196,7 +186,7 @@ before(async () => {
     },
   });
   if (auth.mode !== 'signin') throw new Error('unreachable');
-  const base: FixtureDeps = { db: createDatabase(app), vault, chainKey: randomBytes(32), anchor: testAnchor() };
+  const base: FixtureDeps = { db: createDatabase(app.client), vault, chainKey: randomBytes(32), anchor: testAnchor() };
   beat = () => writeAuditHeartbeat(base.db, base.chainKey, vault, base.anchor, { warn: () => assert.fail('the beat warned') });
   signLog = () => vault.checkpoint();
   beatAnyway = () => writeAuditHeartbeat(base.db, base.chainKey, vault, base.anchor, { warn: () => undefined });
@@ -505,7 +495,7 @@ test("each hot request's statements read as many pages however long the log grow
     // `vault_releases` is off while they go in. On, it would move the same few rows on thousands of times in each
     // part's one transaction, which no read does: seconds a part, past the statement timeout on a loaded runner, and
     // a table and its index hundreds of pages past their rows, whose ratio then picks the bulk count's plan.
-    const releases = async () => (await db.owner.execute(sql`SELECT principal, key, released_at FROM vault_releases ORDER BY principal, key`)).rows;
+    const releases = async () => [...await db.owner.execute(sql`SELECT principal, key, released_at FROM vault_releases ORDER BY principal, key`)];
     const released = await releases();
     for (let left = count; left > 0; left -= 5000) {
       await db.owner.transaction(async (tx) => {
@@ -521,7 +511,7 @@ test("each hot request's statements read as many pages however long the log grow
     // count of every key ever released would read. A checkpoint, as each scheduled run asks, forgets them (T111).
     for (let left = count / 10; left > 0; left -= 5000) await db.owner.execute(keys(Math.min(5000, left)));
     // As many runs as it takes, each forgetting up to 10,000: the keys of every reader, a day and an hour old.
-    const old = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM vault_releases WHERE released_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 25 * 3600000`)).rows[0]!.n;
+    const old = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM vault_releases WHERE released_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 25 * 3600000`))[0]!.n;
     const runs = Math.ceil((await old()) / 10_000) + 1;
     for (let run = 0; run < runs; run++) assert.ok((await signLog()).ok);
     assert.equal(await old(), 0, 'the checkpoints forgot them all');

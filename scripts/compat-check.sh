@@ -76,7 +76,7 @@ finish() {
 trap finish EXIT
 
 "$root/scripts/ensure-postgres.sh"
-node "$root/scripts/ensure-database.mjs" coffre
+node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
 postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
@@ -123,7 +123,7 @@ url="\${DATABASE_URL:-}"
 for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
 if [ -z "\$url" ] && [ ! -t 0 ]; then url="\$(cat)"; fi
 $migrator "\$url"
-[ -z "$1" ] || node '$root/scripts/compat-migrate.mjs' --only "\$url" '$1'
+[ -z "$1" ] || node --conditions=coffre:source '$root/scripts/compat-migrate.mjs' --only "\$url" '$1'
 touch '$work/migrated'
 EOF
 }

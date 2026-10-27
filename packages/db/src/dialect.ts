@@ -11,7 +11,7 @@ import type { Queryable } from './database.ts';
  *                     Postgres                SQLite
  *   isolation         READ COMMITTED          one writer at a time
  *   lock a row        SELECT … FOR UPDATE     one writer at a time
- *   rows changed      rowCount                rowsAffected
+ *   rows changed      count                   rowsAffected
  *   duplicate key     SQLSTATE 23505          SQLITE_CONSTRAINT_UNIQUE
  *   clock             CURRENT_TIMESTAMP       strftime(…, 'now')
  *   clock, in ms      clock_timestamp()       unixepoch('subsec')
@@ -56,7 +56,7 @@ export function forUpdate<Query extends { for: (strength: 'update' | 'no key upd
  * are the query's own, unmapped.
  */
 export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  if (engineOf(db) === 'postgres') return (await (db as unknown as { execute(query: SQL): Promise<{ rows: Row[] }> }).execute(query)).rows;
+  if (engineOf(db) === 'postgres') return [...(await (db as unknown as { execute(query: SQL): Promise<Row[]> }).execute(query))];
   return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
 }
 
@@ -98,8 +98,8 @@ export function truth(condition: SQL): SQL<boolean> {
 
 /** How many rows an insert, update or delete touched. */
 export function changedRows(result: unknown): number {
-  const header = result as { rowCount?: number | null; rowsAffected?: number };
-  return header.rowCount ?? header.rowsAffected ?? 0;
+  const header = result as { count?: number | null; rowsAffected?: number };
+  return header.count ?? header.rowsAffected ?? 0;
 }
 
 const DUPLICATE_KEY = new Set(['23505', 'SQLITE_CONSTRAINT_UNIQUE', 'SQLITE_CONSTRAINT_PRIMARYKEY']);
@@ -114,16 +114,25 @@ export function isUniqueViolation(error: unknown): boolean {
   return false;
 }
 
-/** The network's codes for a server that is not there, and Postgres's for one that will not take the connection, or has none left (53300). */
-const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', '53300', '57P01', '57P02', '57P03']);
+/**
+ * The network's codes for a server that is not there, postgres.js's for a
+ * connection lost, cut short or never made, and Postgres's for one that will
+ * not take the connection, or has none left (53300).
+ */
+const UNREACHABLE = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE',
+  'CONNECTION_CLOSED', 'CONNECTION_DESTROYED', 'CONNECTION_ENDED', 'CONNECT_TIMEOUT',
+  '53300', '57P01', '57P02', '57P03',
+]);
 
-/** Hyperdrive's words for having no connection to give, beside pg's and Workers' for one lost. */
+/** Hyperdrive's words for having no connection to give, beside Workers' for one lost. */
 const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|open slot in the pool|acquire a connection from the pool|server connection attempt failed/i;
 
 /**
  * Whether a query failed because the database could not be reached or
  * dropped the connection: an outage, not an answer. Postgres's connection
- * exceptions are class 08; pg and Workers' sockets say so in words, and so
+ * exceptions are class 08; postgres.js says so in codes of its own, Workers'
+ * sockets in words, and so
  * does Hyperdrive when it has no connection to the database to give: every
  * one of its pool busy for 15 s ("Timed out while waiting for an open slot
  * in the pool", FATAL 58000; "Failed to acquire a connection from the

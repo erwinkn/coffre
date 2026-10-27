@@ -2,7 +2,7 @@
 // wire format and checks every proof with core's `verifyProof`
 // (workload-fake.ts): the exchange and what it waits out, renewal, a fresh
 // proof before `notAfter`, the nonce, every request signed as the server
-// recomputes it, OpenAI's SDK and node-postgres through it, and a key that
+// recomputes it, OpenAI's SDK and postgres.js through it, and a key that
 // never leaves memory.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,12 +15,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import OpenAI from 'openai';
-import pg from 'pg';
 import { WebSocket } from 'ws';
 
 import { generateProofKey } from '@coffre/client/dpop';
 import { CoffreError, enrollment, fromCoffre, kubernetes, oidc, workload, type Workload } from '@coffre/client/workload';
 import { connect } from '@coffre/client/workload/postgres';
+import { postgresClient } from '@coffre/db/connect';
 
 import { fakeCoffre, fakePostgres, type FakeOptions } from './workload-fake.ts';
 
@@ -36,6 +36,10 @@ async function signedIn(t: test.TestContext, options: FakeOptions = {}, proof = 
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** postgres.js through the tunnel `db`: coffre logs in to the database, so the URL names no password, and its host is never dialled. */
+const throughTunnel = (session: Workload, options: { max?: number; WebSocket?: typeof WebSocket } = {}) =>
+  postgresClient('postgres://app@tunnel/app', { max: options.max ?? 1, socket: () => connect(session, 'db', options.WebSocket === undefined ? {} : { WebSocket: options.WebSocket }) });
 
 test('a request is signed whole and forwarded as the app made it: only the headers the app set, the query and the body', async (t) => {
   const { coffre, session } = await signedIn(t);
@@ -357,18 +361,18 @@ test("OpenAI's SDK, given coffre's fetch and URL, holds no key: coffre gets its 
 });
 
 for (const paced of [true, false]) {
-  test(`node-postgres through the tunnel, its bytes ${paced ? 'paced by credit, as on Workers' : 'unpaced, as on Node'}, a result larger than the window included`, async (t) => {
+  test(`postgres.js through the tunnel, its bytes ${paced ? 'paced by credit, as on Workers' : 'unpaced, as on Node'}, a result larger than the window included`, async (t) => {
     const database = await fakePostgres();
     t.after(() => database.close());
     const { coffre, session } = await signedIn(t, { database, paced });
-    const pool = new pg.Pool({ stream: () => connect(session, 'db', { WebSocket }) });
-    assert.deepEqual((await pool.query('select one')).rows, [{ value: 'select one' }]);
-    const big = await pool.query('select 3000 1000');
-    assert.equal(big.rows.length, 3000);
-    assert.equal(big.rows[2999].value.length, 1000);
+    const pool = throughTunnel(session, { max: 10, WebSocket });
+    assert.deepEqual([...await pool.unsafe('select one')], [{ value: 'select one' }]);
+    const big = await pool.unsafe<{ value: string }[]>('select 3000 1000');
+    assert.equal(big.length, 3000);
+    assert.equal(big[2999]!.value.length, 1000);
     // A query larger than the window goes in frames, each within the credit left.
     const query = `select ${'q'.repeat(3 * 1024 * 1024)}`;
-    assert.equal((await pool.query(query)).rows[0].value.length, query.length);
+    assert.equal((await pool.unsafe<{ value: string }[]>(query))[0]!.value.length, query.length);
     assert.ok(coffre.log.includes('GET /use/market/prod/db upgrade'), coffre.log.join('\n'));
     await pool.end();
   });
@@ -378,9 +382,8 @@ test("the runtime's own WebSocket carries the tunnel where it has one", async (t
   const database = await fakePostgres();
   t.after(() => database.close());
   const { session } = await signedIn(t, { database });
-  const client = new pg.Client({ stream: () => connect(session, 'db') } as pg.ClientConfig);
-  await client.connect();
-  assert.deepEqual((await client.query('select two')).rows, [{ value: 'select two' }]);
+  const client = throughTunnel(session);
+  assert.deepEqual([...await client.unsafe('select two')], [{ value: 'select two' }]);
   await client.end();
 });
 
@@ -561,10 +564,11 @@ test("a tunnel refused before it opened makes the next one ask for the gate's ne
   t.after(() => database.close());
   const { coffre, session } = await signedIn(t, { database });
   coffre.gate.restart();
-  await assert.rejects(new pg.Client({ stream: () => connect(session, 'db') } as pg.ClientConfig).connect());
-  const client = new pg.Client({ stream: () => connect(session, 'db') } as pg.ClientConfig);
-  await client.connect();
-  assert.deepEqual((await client.query('select seven')).rows, [{ value: 'select seven' }]);
+  const refused = throughTunnel(session);
+  await assert.rejects(refused.unsafe('select 1'));
+  await refused.end();
+  const client = throughTunnel(session);
+  assert.deepEqual([...await client.unsafe('select seven')], [{ value: 'select seven' }]);
   await client.end();
   // The refused one, perhaps twice (undici's WebSocket tries its handshake again), then a renewal for the newest nonce, then the upgrade.
   assert.deepEqual(coffre.log.slice(-3), ['POST /api/auth/workload/renew use_dpop_nonce', 'POST /api/auth/workload/renew 200', 'GET /use/market/prod/db upgrade']);

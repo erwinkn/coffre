@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import type pg from 'pg';
 
 import { shownMember } from '@coffre/core/schemas';
 import type { Role } from '@coffre/core/access';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
-import { createDatabase, type Database } from '@coffre/db';
+import { createDatabase, type Client, type Database } from '@coffre/db';
+import type { PostgresClient } from '@coffre/db/connect';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
@@ -26,7 +26,7 @@ import { clientFor, contextFor, decisionInputs, holdSomething, openTestDatabase,
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
-import { testPostgresPool } from './db/postgres-pool.ts';
+import { testPostgresPool, watched } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -366,28 +366,9 @@ test('refusals say why, never what a binding expects, and a stranger never reach
 
 type Statement = { text: string; values: unknown[]; rows: number };
 
-/** `pool`, telling `seen` every statement it sends to the server, inside a transaction or not, and how many rows it answered. */
-function counted(pool: pg.Pool, seen: Statement[]): pg.Pool {
-  const watch = <T extends object>(target: T): T => new Proxy(target, {
-    get(on, key) {
-      const value: unknown = Reflect.get(on, key, on);
-      if (typeof value !== 'function') return value;
-      if (key === 'query') {
-        return async (query: string | { text: string; values?: unknown[] }, values?: unknown[]) => {
-          const statement = typeof query === 'string'
-            ? { text: query, values: values ?? [], rows: 0 }
-            : { text: query.text, values: query.values ?? values ?? [], rows: 0 };
-          seen.push(statement);
-          const result = (await value.call(on, query, values)) as { rowCount?: number | null };
-          statement.rows = result.rowCount ?? 0;
-          return result;
-        };
-      }
-      if (key === 'connect') return async () => watch(await value.call(on));
-      return value.bind(on);
-    },
-  });
-  return watch(pool);
+/** `pool`, telling `seen` every statement it sends to the server, inside a transaction or not, and how many rows it read or changed. */
+function counted(pool: PostgresClient, seen: Statement[]): Client {
+  return watched(pool, ({ text, values, count }) => void seen.push({ text, values, rows: count }));
 }
 
 test('a token no binding can take costs its admission and one indexed read: no other query, no transaction, no vault call, no fetch', postgresOnly('it counts the statements that reach the server'), async () => {
@@ -444,20 +425,36 @@ test('a token no binding can take costs its admission and one indexed read: no o
  * (developers.cloudflare.com/hyperdrive/concepts/query-caching). Its cache
  * here lasts the test, where Hyperdrive's lasts a minute by default.
  */
-function hyperdriveCached(pool: pg.Pool): pg.Pool {
-  const cache = new Map<string, unknown>();
+function hyperdriveCached(pool: PostgresClient): Client {
+  const cache = new Map<string, Promise<unknown>>();
   const UNCACHEABLE = /\b(now|current_timestamp|current_date|current_time|localtime|localtimestamp|clock_timestamp|statement_timestamp|txid_current|timeofday|random|lastval)\b/i;
   return new Proxy(pool, {
     get(on, key) {
       const value: unknown = Reflect.get(on, key, on);
       if (typeof value !== 'function') return value;
-      if (key !== 'query') return value.bind(on);
-      return async (query: string | { text: string; values?: unknown[] }, values?: unknown[]) => {
-        const text = typeof query === 'string' ? query : query.text;
-        if (!/^\s*select\b/i.test(text) || / for update\b/i.test(text) || UNCACHEABLE.test(text)) return value.call(on, query, values);
-        const keyed = JSON.stringify([text, typeof query === 'string' ? values : (query.values ?? values)]);
-        if (!cache.has(keyed)) cache.set(keyed, await value.call(on, query, values));
-        return cache.get(keyed);
+      // A transaction's statements, through `begin`, are never cached.
+      if (key !== 'unsafe') return value.bind(on);
+      return (text: string, values: unknown[] = []) => {
+        if (!/^\s*select\b/i.test(text) || / for update\b/i.test(text) || UNCACHEABLE.test(text)) return on.unsafe(text, values as never[]);
+        let arrays = false;
+        const statement = {
+          values: () => {
+            arrays = true;
+            return statement;
+          },
+          then: (resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) => {
+            const keyed = JSON.stringify([text, values, arrays], (_, v: unknown) => (typeof v === 'bigint' ? `${v}n` : v));
+            if (!cache.has(keyed)) {
+              const query = on.unsafe(text, values as never[]);
+              // What failed is asked again: Hyperdrive caches answers, not errors.
+              const answer = Promise.resolve(arrays ? query.values() : query);
+              cache.set(keyed, answer);
+              answer.catch(() => cache.delete(keyed));
+            }
+            return cache.get(keyed)!.then(resolve, reject);
+          },
+        };
+        return statement;
       };
     },
   });
@@ -507,14 +504,14 @@ type PlanNode = {
  * How `statement` ran, by EXPLAIN ANALYZE: every index it used, and how
  * many rows of `table` it visited, kept or filtered out, over every loop.
  */
-async function planOf(pool: pg.Pool, statement: Statement, table: string): Promise<{ indexes: string[]; visited: number }> {
-  const { rows: [explained] } = await pool.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.text}`, statement.values);
+async function planOf(pool: PostgresClient, statement: Statement, table: string): Promise<{ indexes: string[]; visited: number }> {
+  const [explained] = await pool.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.text}`, statement.values as never[]);
   const nodes: PlanNode[] = [];
   const walk = (node: PlanNode) => {
     nodes.push(node);
     node.Plans?.forEach(walk);
   };
-  walk((explained as { 'QUERY PLAN': { Plan: PlanNode }[] })['QUERY PLAN'][0]!.Plan);
+  walk((explained as unknown as { 'QUERY PLAN': { Plan: PlanNode }[] })['QUERY PLAN'][0]!.Plan);
   return {
     indexes: nodes.flatMap((node) => node['Index Name'] ?? []),
     visited: nodes

@@ -121,7 +121,7 @@ test('below its migrations, the app serves nothing but its health: the API and t
 /** Raw SQL as the owner, on either engine. */
 async function rows(query: SQL): Promise<Record<string, unknown>[]> {
   if (TEST_ENGINE === 'sqlite') return (db.owner as unknown as { all: (q: SQL) => Promise<Record<string, unknown>[]> }).all(query);
-  return (await (db.owner as unknown as { execute: (q: SQL) => Promise<{ rows: Record<string, unknown>[] }> }).execute(query)).rows;
+  return [...await (db.owner as unknown as { execute: (q: SQL) => Promise<Record<string, unknown>[]> }).execute(query)];
 }
 
 async function run(query: SQL): Promise<void> {

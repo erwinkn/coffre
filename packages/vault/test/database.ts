@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 
 import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
+import { openDatabase, postgresClient } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
-import pg from 'pg';
 
 import type { Sealed, SealThrough } from '../src/checkpointer.ts';
 import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
@@ -83,15 +82,15 @@ export type TestDatabase = { owner: Database; vault: Database; connect(connectio
 
 /**
  * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
- * up to `connections` at once (pg's 10 unless set).
+ * up to `connections` at once (10 unless set).
  */
 export async function openTestDatabase(): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
   const open = async (login: string, connections?: number): Promise<Database> => {
     if (ENGINE === 'postgres') {
-      const pool = new pg.Pool({ connectionString: login, ...(connections === undefined ? {} : { max: connections }) });
-      opened.push(() => pool.end());
-      return createDatabase(pool);
+      const client = postgresClient(login, { max: connections ?? 10 });
+      opened.push(() => client.end());
+      return createDatabase(client);
     }
     const file = process.env.COFFRE_TEST_DATABASE_URL;
     if (!file) throw new Error('COFFRE_TEST_DATABASE_URL is required on sqlite; see scripts/test-suite.sh');
@@ -157,7 +156,7 @@ export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) 
 
 /** Rows of a raw query, on either engine. */
 export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  if (ENGINE === 'postgres') return (await db.execute(query)).rows as Row[];
+  if (ENGINE === 'postgres') return [...await db.execute(query)] as Row[];
   return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
 }
 

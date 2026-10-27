@@ -11,7 +11,7 @@ import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { parentPort, workerData } from 'node:worker_threads';
 
 import { macData } from '@coffre/core/merkle';
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 
 import { farPostgres, percentile } from './far.ts';
 
@@ -25,9 +25,9 @@ const mac = (row: { at: number; requestId: bigint; credential: string; secret: s
   createHmac('sha256', macKey).update(macData('uses', [BigInt(row.at), row.requestId, row.credential, row.secret, row.purpose, null])).digest().subarray(0, 16);
 const far = await farPostgres(load.url, load.rtt);
 // Kept open, as Hyperdrive keeps its own: a new backend's first use plans its statement under the fence (~30 ms).
-const pool = new pg.Pool({ connectionString: far.url, max: load.pool, idleTimeoutMillis: 0 });
-// Every connection open before the first phase.
-await Promise.all(Array.from({ length: load.pool }, async () => (await pool.connect()).release()));
+const pool = postgresClient(far.url, { max: load.pool });
+// Every connection open before the first phase: as many statements at once as the pool has connections.
+await Promise.all(Array.from({ length: load.pool }, () => pool.unsafe('SELECT pg_sleep(0.05)')));
 
 type Phase = { phase: string; latencies: number[]; refused: Map<string, number>; sent: number };
 const phases: Phase[] = [];
@@ -38,7 +38,7 @@ const inflight = new Set<Promise<void>>();
 const use = async (phase: Phase, due: number) => {
   const row = { at: Date.now(), requestId: randomBytes(8).readBigUInt64BE() >> 1n, credential: load.credentials[Math.floor(Math.random() * load.credentials.length)]!, secret: load.secrets[Math.floor(Math.random() * load.secrets.length)]!, purpose: 4 };
   try {
-    const { rows } = await pool.query<{ use: { state: string | null } }>(
+    const rows = await pool.unsafe<{ use: { state: string | null } }[]>(
       'SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6) AS use',
       [row.credential, row.secret, row.requestId.toString(), String(row.at), mac(row), String(row.at + 3000)],
     );

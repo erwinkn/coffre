@@ -13,9 +13,9 @@ import { parseArgs } from 'node:util';
 
 import { defineSignin, github } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
+import { postgresClient } from '@coffre/db/connect';
 import { runCheckpointer } from '@coffre/vault/node';
 import { sql } from 'drizzle-orm';
-import pg from 'pg';
 
 import { SigninService } from '../../src/api/signin.ts';
 import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
@@ -43,7 +43,7 @@ for (const log of ['0.14', '0.15'] as const) {
   await db.owner.execute(sql`DELETE FROM log_tiles`);
   const kek = randomBytes(32);
   const dir = mkdtempSync(join(tmpdir(), 'coffre-writes-bench-'));
-  const pool = new pg.Pool({ connectionString: TEST_VAULT_DATABASE_URL, max: 4 });
+  const pool = postgresClient(TEST_VAULT_DATABASE_URL, { max: 4 });
   // The seed the vault signs with, from its KEK, as the vault derives it.
   const probe = testVault([ROOT], {}, { kek });
   const checkpointer = log === '0.15' ? await runCheckpointer({ database: createDatabase(pool), seed: probe.signingKey, memory: join(dir, 'memory') }) : null;

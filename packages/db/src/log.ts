@@ -163,9 +163,7 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
     if (held) holding.add(tx);
     return held;
   }
-  const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(
-    sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`,
-  );
+  const rows = await rowsOf(tx, sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`);
   if (rows.length > 0) holding.add(tx);
   return rows.length > 0;
 }
@@ -184,16 +182,14 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
  */
 export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promise<{ nextSeq: bigint; headHash: Buffer }> {
   if (engineOf(tx) === 'sqlite') return lockLogHead(tx);
-  const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: { next_seq: string; head_hash: Buffer }[] }> }).execute(sql`
+  const rows = await rowsOf<{ next_seq: string; head_hash: Buffer }>(tx, sql`
     SELECT next_seq, head_hash FROM audit_chain_head
     WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINE}, place) LIMIT 1)
     FOR UPDATE`);
   const [head] = rows;
   if (head === undefined) {
     // No place, or no head at all: the second, which no one may write past, said as lockLogHead says it.
-    const { rows: [found] } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: { found: boolean }[] }> }).execute(
-      sql`SELECT EXISTS (SELECT 1 FROM audit_chain_head WHERE only_row) AS found`,
-    );
+    const [found] = await rowsOf<{ found: boolean }>(tx, sql`SELECT EXISTS (SELECT 1 FROM audit_chain_head WHERE only_row) AS found`);
     if (found?.found !== true) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
     throw new HeadBusy();
   }

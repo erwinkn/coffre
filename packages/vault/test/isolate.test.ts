@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type Socket } from 'node:net';
 
 import { createDatabase } from '@coffre/db';
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 
 import { resolveVaultConfig } from '../src/config.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
@@ -35,15 +35,14 @@ async function neverAnswers() {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as { port: number };
-  const pool = new pg.Pool({ connectionString: `postgresql://nobody:nothing@127.0.0.1:${port}/coffre` });
-  pool.on('error', () => {});
+  const client = postgresClient(`postgresql://nobody:nothing@127.0.0.1:${port}/coffre`);
   return {
-    database: createDatabase(pool),
+    database: createDatabase(client),
     /** Hang up, so that the stuck call fails and the test can end. */
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await pool.end().catch(() => {});
+      await client.end({ timeout: 0 }).catch(() => {});
     },
   };
 }

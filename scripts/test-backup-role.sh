@@ -135,13 +135,12 @@ for logins in migration_owner:local-owner-only,migration_owner:local-owner-only 
     database="at_0018_${login%%:*}"
     url="postgresql://$maker@127.0.0.1:$port/$database"
     as_superuser -c "CREATE DATABASE $database OWNER ${maker%%:*}"
-    (cd packages/db && node --input-type=module -e '
-        const { default: pg } = await import("pg");
-        const { drizzle } = await import("drizzle-orm/node-postgres");
-        const { migrate } = await import("drizzle-orm/node-postgres/migrator");
-        const client = new pg.Client(process.argv[1]);
-        await client.connect();
-        await migrate(drizzle(client), { migrationsFolder: process.argv[2] });
+    (cd packages/db && node --conditions=coffre:source --input-type=module -e '
+        const { postgresClient } = await import("./src/postgres.ts");
+        const { createDatabase } = await import("./src/database.ts");
+        const { migrate } = await import("drizzle-orm/postgres-js/migrator");
+        const client = postgresClient(process.argv[1], { max: 1 });
+        await migrate(createDatabase(client), { migrationsFolder: process.argv[2] });
         await client.end();
     ' "$url" "$tree")
     as_superuser -d "$database" <<'SQL'

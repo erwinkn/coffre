@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import pg from 'pg';
 
+import { postgresClient } from '@coffre/db/connect';
 import { migrateDatabase } from '@coffre/db/migrate';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
@@ -89,22 +89,22 @@ test(
   'Drizzle migrations preserve the restricted runtime database identity',
   postgresOnly('the restricted runtime role and its grants exist only on Postgres'),
   async () => {
-    const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
-    const runtime = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
+    const owner = postgresClient(TEST_OWNER_DATABASE_URL);
+    const runtime = postgresClient(TEST_RUNTIME_DATABASE_URL);
     try {
-      const migrations = await owner.query<{ count: number }>(
+      const [migrations] = await owner.unsafe<[{ count: number }]>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, KNOWN_MIGRATIONS.postgres.length);
+      assert.equal(migrations.count, KNOWN_MIGRATIONS.postgres.length);
 
-      const identity = await runtime.query<{
+      const identity = await runtime.unsafe<{
         current_user: string;
         session_user: string;
         inherits_app: boolean;
         unsafe_attributes: boolean;
         memberships: string[];
         safe_membership: boolean;
-      }>(
+      }[]>(
         `SELECT current_user,
                 session_user,
                 pg_has_role(current_user, 'coffre_app', 'USAGE') AS inherits_app,
@@ -132,7 +132,7 @@ test(
           WHERE role.rolname = current_user`,
       );
 
-      assert.deepEqual(identity.rows, [{
+      assert.deepEqual([...identity], [{
         current_user: 'coffre_runtime',
         session_user: 'coffre_runtime',
         inherits_app: true,
@@ -141,7 +141,7 @@ test(
         safe_membership: true,
       }]);
 
-      const ownership = await owner.query<{ object_count: number }>(
+      const [ownership] = await owner.unsafe<[{ object_count: number }]>(
         `SELECT count(*)::int AS object_count
            FROM pg_shdepend dependency
            JOIN pg_roles role ON role.oid = dependency.refobjid
@@ -149,9 +149,9 @@ test(
             AND dependency.deptype = 'o'
             AND role.rolname = 'coffre_runtime'`,
       );
-      assert.equal(ownership.rows[0].object_count, 0);
+      assert.equal(ownership.object_count, 0);
 
-      const updateColumns = await owner.query<{ column_name: string; table_name: string }>(
+      const updateColumns = await owner.unsafe<{ column_name: string; table_name: string }[]>(
         `SELECT table_name, column_name
            FROM information_schema.column_privileges
           WHERE grantee = 'coffre_app'
@@ -160,7 +160,7 @@ test(
           ORDER BY table_name, column_name`,
       );
       assert.deepEqual(
-        updateColumns.rows.map((row) => `${row.table_name}.${row.column_name}`),
+        updateColumns.map((row) => `${row.table_name}.${row.column_name}`),
         EXPECTED_UPDATE_COLUMNS,
       );
     } finally {
@@ -174,33 +174,33 @@ test(
   'migrate reasserts database privileges even when no migrations are pending',
   postgresOnly('SQLite has no database privileges'),
   async () => {
-    const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
+    const owner = postgresClient(TEST_OWNER_DATABASE_URL);
     const revoke = `DO $$ BEGIN
       EXECUTE format(
         'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
         current_database()
       );
     END $$`;
-    const privileges = () => owner.query<{ role: string; create: boolean; temporary: boolean }>(
+    const privileges = async () => [...await owner.unsafe<{ role: string; create: boolean; temporary: boolean }[]>(
       `SELECT role,
               has_database_privilege(role, current_database(), 'CREATE') AS create,
               has_database_privilege(role, current_database(), 'TEMPORARY') AS temporary
          FROM unnest(ARRAY['coffre_app', 'coffre_backup', 'coffre_runtime', 'coffre_vault', 'coffre_vault_runtime']) AS role
         ORDER BY role`,
-    );
+    )];
     try {
       // A one-database dump leaves these privileges behind, including PUBLIC's defaults.
-      await owner.query(`DO $$ BEGIN
+      await owner.unsafe(`DO $$ BEGIN
         EXECUTE format(
           'GRANT CREATE, TEMPORARY ON DATABASE %I TO PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
           current_database()
         );
       END $$`);
-      assert.ok((await privileges()).rows.every((row) => row.create && row.temporary));
+      assert.ok((await privileges()).every((row) => row.create && row.temporary));
 
       for (let run = 0; run < 2; run++) {
         await migrateDatabase(TEST_OWNER_DATABASE_URL);
-        assert.deepEqual((await privileges()).rows, [
+        assert.deepEqual((await privileges()), [
           { role: 'coffre_app', create: false, temporary: false },
           { role: 'coffre_backup', create: false, temporary: false },
           { role: 'coffre_runtime', create: false, temporary: false },
@@ -209,7 +209,7 @@ test(
         ]);
       }
     } finally {
-      await owner.query(revoke);
+      await owner.unsafe(revoke);
       await owner.end();
     }
   },

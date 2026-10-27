@@ -1146,11 +1146,37 @@ still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
 kept for real races (the audit head, offboarding against sign-in, version counters), and each one says which race it guards.
 
 The database comes from its URL: `postgres://` or `postgresql://` opens
-node-postgres; `file:` or `libsql:` opens @libsql/client for SQLite
+postgres.js; `file:` or `libsql:` opens @libsql/client for SQLite
 (`packages/db/src/connect.ts`). The SQLite driver loads only when
 asked for. The Worker builds its Postgres database from the Hyperdrive pool
 with `createDatabase`: one connection for each request or vault call, which
 its queries take turns on and a transaction holds until it ends.
+
+postgres.js is coffre's own copy, in `packages/db/vendor/postgres`: its Node
+build and its Workers build, chosen by `@coffre/db`'s `#postgres` import, so a
+deployment installs no driver. It differs from upstream in seven places
+(`packages/db/vendor/postgres/README.md`): a statement's values go with the
+statement, as text the server types, as node-postgres sends them, where
+upstream first asks the server for their types, a round trip more for every
+statement with parameters (porsager/postgres#1225); a transaction's BEGIN
+always learns its connection, however many statements are queued before it;
+a query cut short by its connection's close no longer keeps `end()` waiting,
+a connection closed while it opens fails its query rather than being
+dialled again for ever, an ending client opens no connection again, and a
+`reserve()` that opens its connection gets it;
+and the pool takes the connection idle the shortest, as pg-pool does, so
+that a steady load keeps to a few warm backends rather than cycling through
+all of them.
+
+A postgres.js client dials a new connection for the next statement once its
+own has closed, which holds none of what the last one set. What keeps a
+session's state across statements, its own BEGIN, SETs or advisory locks
+(the migrator, `coffre backup` and `restore`, `coffre setup`'s probes),
+opens a `postgresSession` instead: once its connection has closed, every
+statement after fails (`SessionLost`). `postgresClient` (`packages/db/src/postgres.ts`)
+opens each client as coffre needs it: unnamed statements, no type lookup on
+connecting, arrays, dates and objects sent and arrays read as node-postgres
+does, and the URL read as node-postgres reads it, TLS included.
 
 Each query is written once, typed against the Postgres schema. Drizzle has no
 type shared by its dialects, so the SQLite database is cast to the Postgres

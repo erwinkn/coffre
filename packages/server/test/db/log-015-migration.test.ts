@@ -12,7 +12,7 @@ import { readGrants } from '@coffre/db/grants';
 import { migrateDatabase, migrationsFolder } from '@coffre/db/migrate';
 import { migrated } from '@coffre/db/schema-version';
 import { sql } from 'drizzle-orm';
-import pg from 'pg';
+import { postgresClient, quoteIdentifier } from '@coffre/db/connect';
 
 import { appendAudit } from '../../src/db/audit.ts';
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './connections.ts';
@@ -72,10 +72,9 @@ type Engine015 = { url: string; folder: string; open: () => Promise<Opened>; dro
 async function postgresDatabase(dir: string): Promise<Engine015> {
   const name = `${new URL(TEST_OWNER_DATABASE_URL).pathname.slice(1)}_0021_${randomBytes(4).toString('hex')}`;
   const at = (base: string) => Object.assign(new URL(base), { pathname: `/${name}` }).toString();
-  const admin = new pg.Client({ connectionString: TEST_OWNER_DATABASE_URL });
-  await admin.connect();
+  const admin = postgresClient(TEST_OWNER_DATABASE_URL, { max: 1 });
   try {
-    await admin.query(`CREATE DATABASE ${admin.escapeIdentifier(name)}`);
+    await admin.unsafe(`CREATE DATABASE ${quoteIdentifier(name)}`);
   } finally {
     await admin.end();
   }
@@ -83,15 +82,14 @@ async function postgresDatabase(dir: string): Promise<Engine015> {
     url: at(TEST_OWNER_DATABASE_URL),
     folder: before('postgres', dir),
     open: async () => {
-      const pools = [TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL].map((base) => new pg.Pool({ connectionString: at(base), max: 2 }));
+      const pools = [TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL].map((base) => postgresClient(at(base), { max: 2 }));
       const [owner, app, vault] = pools.map((pool) => createDatabase(pool)) as [Database, Database, Database];
       return { owner, app, vault, close: async () => void (await Promise.all(pools.map((pool) => pool.end()))) };
     },
     drop: async () => {
-      const client = new pg.Client({ connectionString: TEST_OWNER_DATABASE_URL });
-      await client.connect();
+      const client = postgresClient(TEST_OWNER_DATABASE_URL, { max: 1 });
       try {
-        await client.query(`DROP DATABASE IF EXISTS ${client.escapeIdentifier(name)} WITH (FORCE)`);
+        await client.unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(name)} WITH (FORCE)`);
       } finally {
         await client.end();
       }
@@ -115,7 +113,7 @@ function sqliteDatabase(dir: string): Engine015 {
 }
 
 // A Database is a Postgres one to TypeScript (portable.ts); on SQLite, raw SQL goes through libsql's run and all.
-type Raw = { execute(query: unknown): Promise<{ rows: Record<string, unknown>[] }>; run(query: unknown): Promise<unknown>; all(query: unknown): Promise<Record<string, unknown>[]> };
+type Raw = { execute(query: unknown): Promise<Record<string, unknown>[]>; run(query: unknown): Promise<unknown>; all(query: unknown): Promise<Record<string, unknown>[]> };
 
 async function exec(db: Database, text: string): Promise<void> {
   const raw = db as unknown as Raw;
@@ -126,7 +124,7 @@ async function exec(db: Database, text: string): Promise<void> {
 async function read(db: Database, table: string): Promise<Record<string, unknown>[]> {
   const raw = db as unknown as Raw;
   const query = sql.raw(`SELECT * FROM ${table} ORDER BY 1`);
-  const found = TEST_ENGINE === 'postgres' ? (await raw.execute(query)).rows : await raw.all(query);
+  const found = TEST_ENGINE === 'postgres' ? [...await raw.execute(query)] : await raw.all(query);
   const plain = (value: unknown) =>
     value instanceof Uint8Array ? Buffer.from(value).toString('hex')
       : value instanceof ArrayBuffer ? Buffer.from(value).toString('hex')

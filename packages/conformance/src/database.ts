@@ -3,8 +3,7 @@
 // what it wrote, and to break what it must notice.
 import { DatabaseSync } from 'node:sqlite';
 
-import pg from 'pg';
-import { postgresConnection } from '@coffre/db/connect';
+import { postgresSession } from '@coffre/db/connect';
 
 export type Sql = {
   readonly engine: 'postgres' | 'sqlite';
@@ -16,12 +15,14 @@ export type Sql = {
 };
 
 export async function postgres(url: string): Promise<Sql> {
-  const client = new pg.Client(postgresConnection(url));
-  await client.connect();
+  // One session, as a check's transaction needs: lost, its statements fail rather than run on a new connection, unheld.
+  const client = postgresSession(url);
+  // Connected now, as the harness expects a database it can reach.
+  await client.unsafe('SELECT 1');
   return {
     engine: 'postgres',
-    query: async <Row>(statement: string, params: unknown[] = []) => (await client.query(statement, params)).rows as Row[],
-    exec: async (statements) => void (await client.query(statements)),
+    query: async <Row>(statement: string, params: unknown[] = []) => [...await client.unsafe(statement, params as never[])] as Row[],
+    exec: async (statements) => void (await client.unsafe(statements)),
     close: () => client.end(),
   };
 }

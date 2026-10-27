@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments } from '@coffre/db/schema';
 
 import { environmentsCreatedAt, insert, liveEnvironment, liveKeysIn, MAX_PARENTS, parentsOf, personalConfig, places, resolvePath, type ResolvedPath } from '../db/queries.ts';
@@ -75,12 +74,8 @@ export async function makePersonal(ctx: ApiContext, place: ResolvedPath, action:
       if (await personalConfig(tx, of.id, owner)) return (changes?.drop(), false);
       // Archived or deleted since it was checked, it takes no personal config.
       if (!(await liveEnvironment(tx, of.id))) throw notFound(`no live environment ${path}`);
-      try {
-        await insert(tx, environments, { id, projectId: place.project.id, slug, name: slug, parentId: of.id, owner, ...madeProtection(config, changes) });
-      } catch (error) {
-        if (isUniqueViolation(error)) return (changes?.drop(), false);
-        throw error;
-      }
+      // Under the log's head, which `audited` takes first: two asking at once make one, the second finding it above.
+      await insert(tx, environments, { id, projectId: place.project.id, slug, name: slug, parentId: of.id, owner, ...madeProtection(config, changes) });
       log.push(allowed(ctx, 'environment.create', { projectId: place.project.id, environmentId: id, metadata: { slug, personal: of.slug } }));
       return true;
     }, changes);

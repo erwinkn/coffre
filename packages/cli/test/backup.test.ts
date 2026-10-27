@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { deriveLogKey, GENESIS_HASH, sealEntry, type LogFields, type LogKey } from '@coffre/core/audit';
 import { encrypt, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { derivedSigningKey, LocalKekProvider } from '@coffre/core/kek';
-import pg from 'pg';
+import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 
 import { manifestPath, type Manifest } from '../src/backup.ts';
 import { urlSecrets } from '../src/database-url.ts';
@@ -75,9 +75,8 @@ const keys = {
 const work = mkdtempSync(join(tmpdir(), 'coffre-backup-test-'));
 const made: string[] = [];
 
-async function asOwner<T>(database: string, run: (client: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: owner(database) });
-  await client.connect();
+async function asOwner<T>(database: string, run: (client: PostgresClient) => Promise<T>): Promise<T> {
+  const client = postgresClient(owner(database), { max: 1 });
   try {
     return await run(client);
   } finally {
@@ -88,7 +87,7 @@ async function asOwner<T>(database: string, run: (client: pg.Client) => Promise<
 /** A new database: empty, or a copy of this file's migrated clone. */
 async function database(kind: 'empty' | 'migrated'): Promise<string> {
   const name = `${clone}_${randomBytes(4).toString('hex')}`;
-  await asOwner('postgres', (client) => client.query(`CREATE DATABASE ${name}${kind === 'migrated' ? ` TEMPLATE ${clone}` : ''}`));
+  await asOwner('postgres', (client) => client.unsafe(`CREATE DATABASE ${name}${kind === 'migrated' ? ` TEMPLATE ${clone}` : ''}`));
   made.push(name);
   return name;
 }
@@ -126,9 +125,9 @@ async function seed(name: string, { log = ROTATED, edit }: { log?: Written[]; ed
     const project = randomUUID();
     const environment = randomUUID();
     const personal = randomUUID();
-    await client.query("INSERT INTO projects (id, slug, name) VALUES ($1, 'market', 'Market')", [project]);
-    await client.query("INSERT INTO environments (id, project_id, slug, name) VALUES ($1, $2, 'prod', 'Prod')", [environment, project]);
-    await client.query("INSERT INTO environments (id, project_id, slug, name, parent_id, owner) VALUES ($1, $2, 'prod~ada', 'Prod', $3, 'user:ada@acme.example')", [personal, project, environment]);
+    await client.unsafe("INSERT INTO projects (id, slug, name) VALUES ($1, 'market', 'Market')", [project]);
+    await client.unsafe("INSERT INTO environments (id, project_id, slug, name) VALUES ($1, $2, 'prod', 'Prod')", [environment, project]);
+    await client.unsafe("INSERT INTO environments (id, project_id, slug, name, parent_id, owner) VALUES ($1, $2, 'prod~ada', 'Prod', $3, 'user:ada@acme.example')", [personal, project, environment]);
     const current = new LocalKekProvider(kek, 'test-vault');
     const earlier = new LocalKekProvider(earlierKek, 'old-vault');
     const values: { key: string; environment: string; value: string; plain?: boolean; sensitive?: boolean; owner?: string; under?: LocalKekProvider }[] = [
@@ -140,13 +139,13 @@ async function seed(name: string, { log = ROTATED, edit }: { log?: Written[]; ed
     ];
     for (const value of values) {
       const secret = randomUUID();
-      await client.query('INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, $4)', [secret, project, value.environment, value.key]);
+      await client.unsafe('INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, $4)', [secret, project, value.environment, value.key]);
       const ids = { projectId: project, environmentId: value.environment, secretId: secret };
       const context: SecretContext = { ...ids, ...(value.owner === undefined ? {} : { owner: ownerKey(value.owner) }), ...(value.sensitive ? { sensitive: true as const } : {}) };
       const dek = randomBytes(32);
       const sealed = encrypt(Buffer.from(value.value), ids, dek);
       const wrapped = await (value.under ?? current).wrap(dek, context);
-      await client.query(
+      await client.unsafe(
         `INSERT INTO secret_versions (secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive)
          VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, 'user:admin@acme.example', $10, $11)`,
         [secret, sealed.envelopeVersion, sealed.ciphertext, sealed.iv, sealed.authTag, wrapped.bytes, wrapped.kekProvider, wrapped.kekId, wrapped.kekVersion, value.plain ? value.value : null, value.sensitive === true],
@@ -154,8 +153,8 @@ async function seed(name: string, { log = ROTATED, edit }: { log?: Written[]; ed
     }
     // A version deleted for good: its row stays, its value gone (`eraseVersions` in @coffre/server).
     const erased = randomUUID();
-    await client.query("INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, 'GONE')", [erased, project, environment]);
-    await client.query(
+    await client.unsafe("INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, 'GONE')", [erased, project, environment]);
+    await client.unsafe(
       `INSERT INTO secret_versions (secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by)
        VALUES ($1, 1, 1, '', $2, $3, '', 'local', 'test-vault', '1', 'user:admin@acme.example')`,
       [erased, Buffer.alloc(12), Buffer.alloc(16)],
@@ -165,14 +164,14 @@ async function seed(name: string, { log = ROTATED, edit }: { log?: Written[]; ed
       const fields = entry(BigInt(i), written);
       const { mac, hash } = sealEntry(written.key, prev, fields);
       if (edit?.seq === fields.seq) fields.action = edit.action;
-      await client.query(
+      await client.unsafe(
         `INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         [fields.seq.toString(), fields.author, fields.keyId, fields.occurredAt, fields.actor, fields.action, fields.decision, fields.subjectPrincipal, fields.metadata, prev, mac, hash],
       );
       prev = hash;
     }
-    await client.query('UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [log.length, prev]);
+    await client.unsafe('UPDATE audit_chain_head SET next_seq = $1, head_hash = $2', [log.length, prev]);
     return { versions: values.length + 1, entries: log.length };
   });
 }
@@ -230,7 +229,7 @@ after(async () => {
   rmSync(work, { recursive: true, force: true });
   if (postgres.skip) return;
   await asOwner('postgres', async (client) => {
-    for (const name of made) await client.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    for (const name of made) await client.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
   });
 });
 
@@ -254,7 +253,7 @@ test('backup dumps as the backup login, and its manifest says what the snapshot 
 
 test('backup refuses a login whose row-level security hides the log, and leaves no file', postgres, async () => {
   const reader = `coffre_test_reader_${randomBytes(4).toString('hex')}`;
-  await asOwner('postgres', (client) => client.query(`CREATE ROLE ${reader} LOGIN PASSWORD 'reader-only' IN ROLE pg_read_all_data`));
+  await asOwner('postgres', (client) => client.unsafe(`CREATE ROLE ${reader} LOGIN PASSWORD 'reader-only' IN ROLE pg_read_all_data`));
   try {
     const file = join(work, 'reader.dump');
     const { code, stderr } = await coffre(['backup', file], url(`${reader}:reader-only`, source));
@@ -263,7 +262,7 @@ test('backup refuses a login whose row-level security hides the log, and leaves 
     assert.throws(() => statSync(file), { code: 'ENOENT' });
     assert.throws(() => statSync(manifestPath(file)), { code: 'ENOENT' });
   } finally {
-    await asOwner('postgres', (client) => client.query(`DROP ROLE ${reader}`));
+    await asOwner('postgres', (client) => client.unsafe(`DROP ROLE ${reader}`));
   }
 });
 
@@ -271,7 +270,7 @@ test('backup refuses the backup login too, once a restrictive policy hides entri
   const name = await database('migrated');
   await seed(name);
   // Restrictive policies are ANDed with the permissive ones: coffre_backup's USING (true) no longer shows every row.
-  await asOwner(name, (client) => client.query("CREATE POLICY audit_log_hide ON audit_log AS RESTRICTIVE FOR SELECT TO coffre_backup USING (action <> 'key.rotate')"));
+  await asOwner(name, (client) => client.unsafe("CREATE POLICY audit_log_hide ON audit_log AS RESTRICTIVE FOR SELECT TO coffre_backup USING (action <> 'key.rotate')"));
   const { code, stderr } = await coffre(['backup', join(work, 'restricted.dump')], backupLogin(name));
   assert.equal(code, 1);
   assert.match(stderr, /row-level security hides rows of public\.audit_log from coffre_backup_login, and no policy shows it all of them: pg_dump would dump only those it sees, 7 of the log's 8 entries among them/);
@@ -287,8 +286,8 @@ test('restore brings the backup back into an empty database, then checks it whol
   assert.match(stderr, /Left to do before traffic/);
   for (const key of [kek, earlierKek, appKey]) assert.ok(!stderr.includes(key.toString('base64')));
   // The grants and row policies came back with it.
-  const policies = await asOwner(target, (client) => client.query("SELECT policyname FROM pg_policies WHERE tablename = 'audit_log' ORDER BY 1"));
-  assert.ok(policies.rows.some((row) => row.policyname === 'audit_log_backup_read'));
+  const policies = await asOwner(target, (client) => client.unsafe<{ policyname: string }[]>("SELECT policyname FROM pg_policies WHERE tablename = 'audit_log' ORDER BY 1"));
+  assert.ok(policies.some((row) => row.policyname === 'audit_log_backup_read'));
 
   const again = await coffre(['restore', dump], owner(target));
   assert.equal(again.code, 1);
@@ -301,8 +300,8 @@ test('verify backup checks without a key, and needs no role: no grant or policy 
   assert.equal(code, 0, stderr);
   assert.match(stderr, /✓ audit log {11}8 entries, every link and hash, from the first to the head, each key in its turn \(without keys: not who wrote them\)/);
   assert.match(stderr, new RegExp(`The copy stays in 127\\.0\\.0\\.1/${target}`));
-  const policies = await asOwner(target, (client) => client.query("SELECT count(*)::int AS n FROM pg_policies WHERE tablename = 'audit_log'"));
-  assert.equal(policies.rows[0].n, 0);
+  const [{ n }] = await asOwner(target, (client) => client.unsafe<[{ n: number }]>("SELECT count(*)::int AS n FROM pg_policies WHERE tablename = 'audit_log'"));
+  assert.equal(n, 0);
 });
 
 test('with the current keys alone, the earlier entries are linked only, and what the earlier vault key wrapped does not open', postgres, async () => {

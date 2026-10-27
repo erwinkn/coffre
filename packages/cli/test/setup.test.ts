@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
+import { postgresClient } from '@coffre/db/connect';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 import { cappedLimit, hyperdriveLimit, limitReason, tooFewConnections } from '../src/connections.ts';
@@ -342,19 +342,18 @@ test('when its install fails, setup says why in a sentence, and runs nothing of 
 /** coffre_backup_login's memberships in coffre_backup, one per grantor. */
 function membership(name: string) {
   return asSuperuser(name, async (client) =>
-    (await client.query<{ admin: boolean; inherit: boolean; set: boolean }>(
+    [...await client.unsafe<{ admin: boolean; inherit: boolean; set: boolean }[]>(
       `SELECT admin_option AS admin, inherit_option AS inherit, set_option AS set FROM pg_auth_members
         WHERE roleid = 'coffre_backup'::regrole AND member = 'coffre_backup_login'::regrole`,
-    )).rows,
+    )],
   );
 }
 
 /** The log's entries, by action, as `url`'s login sees them. */
 async function logEntries(url: string): Promise<string[]> {
-  const client = new pg.Client({ connectionString: url });
-  await client.connect();
+  const client = postgresClient(url, { max: 1 });
   try {
-    return (await client.query<{ action: string }>('SELECT action FROM audit_log ORDER BY seq')).rows.map(({ action }) => action);
+    return (await client.unsafe<{ action: string }[]>('SELECT action FROM audit_log ORDER BY seq')).map(({ action }) => action);
   } finally {
     await client.end();
   }
@@ -393,10 +392,10 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.ok(await connects(shown.app.DATABASE_URL!));
     assert.ok(await connects(shown.vault.DATABASE_URL!));
     const stored = await asSuperuser(`setup_${as}`, async (client) => ({
-      verifiers: (await client.query<{ rolpassword: string }>(
+      verifiers: (await client.unsafe<{ rolpassword: string }[]>(
         "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_backup_login') ORDER BY rolname",
-      )).rows.map((row) => row.rolpassword),
-      migrations: (await client.query('SELECT hash FROM drizzle.__drizzle_migrations')).rowCount,
+      )).map((row) => row.rolpassword),
+      migrations: (await client.unsafe('SELECT hash FROM drizzle.__drizzle_migrations')).count,
     }));
     assert.equal(stored.verifiers.length, 3);
     for (const verifier of stored.verifiers) assert.match(verifier, /^SCRAM-SHA-256\$4096:/);
@@ -420,10 +419,10 @@ for (const as of ['superuser', 'owner'] as const) {
     assertNoAdministrator(again, url);
     assert.deepEqual(
       await asSuperuser(`setup_${as}`, async (client) => ({
-        verifiers: (await client.query<{ rolpassword: string }>(
+        verifiers: (await client.unsafe<{ rolpassword: string }[]>(
           "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_backup_login') ORDER BY rolname",
-        )).rows.map((row) => row.rolpassword),
-        migrations: (await client.query('SELECT hash FROM drizzle.__drizzle_migrations')).rowCount,
+        )).map((row) => row.rolpassword),
+        migrations: (await client.unsafe('SELECT hash FROM drizzle.__drizzle_migrations')).count,
       })),
       stored,
     );
@@ -446,13 +445,13 @@ for (const as of ['superuser', 'owner'] as const) {
 test("a Workers deployment whose database can't hold both Hyperdrive configs: setup refuses before anything else, and every login keeps its password", { skip: SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh' }, async () => {
   // 15 connections, 3 of them for superusers: 4 for each config, short of Hyperdrive's 5.
   await emptyCluster(SMALL_CLUSTER);
-  await asSuperuser('postgres', (client) => client.query('CREATE DATABASE setup_small'), SMALL_CLUSTER);
+  await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_small'), SMALL_CLUSTER);
   const url = `${SMALL_CLUSTER}/setup_small`;
   const verifiers = () =>
     asSuperuser('postgres', async (client) =>
-      (await client.query<{ rolname: string; rolpassword: string }>(
+      [...await client.unsafe<{ rolname: string; rolpassword: string }[]>(
         "SELECT rolname, rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime') ORDER BY rolname",
-      )).rows, SMALL_CLUSTER);
+      )], SMALL_CLUSTER);
   try {
     // A fresh database: nothing made, nothing migrated, and the commands it would show never shown.
     const fresh = setup(['--json'], { stdin: `${url}\n`, workers: true });
@@ -485,9 +484,8 @@ test("a Workers deployment whose database can't hold both Hyperdrive configs: se
 test('a database that holds data gets new passwords but no keys: its keys are the ones it was set up with', needsCluster, async () => {
   const url = await database('setup_used', 'superuser');
   const first = json(setup(['--json'], { stdin: `${url}\n` }));
-  const vault = new pg.Client({ connectionString: first.vault.DATABASE_URL });
-  await vault.connect();
-  await vault.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+  const vault = postgresClient(first.vault.DATABASE_URL!, { max: 1 });
+  await vault.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
     VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`);
   await vault.end();
   const after = json(setup(['--reset-passwords', '--json'], { stdin: `${url}\n` }));
@@ -502,7 +500,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   const url = await database('setup_later', 'owner');
   const first = json(setup(['--json'], { stdin: `${url}\n` }));
   // As a deployment set up before has it: no backup login.
-  await asSuperuser('setup_later', (client) => client.query('DROP ROLE coffre_backup_login'));
+  await asSuperuser('setup_later', (client) => client.unsafe('DROP ROLE coffre_backup_login'));
   const made = setup(['--json'], { stdin: `${url}\n` });
   const shown = json(made);
   assert.match(made.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; created coffre_backup_login\n/);
@@ -514,7 +512,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   assert.deepEqual(await membership('setup_later'), [{ admin: false, inherit: true, set: false }]);
 
   // Made by setup, then unable to log in, as a Cloudflare run stopped before it showed the password leaves it: given one, unasked, the others kept.
-  await asSuperuser('setup_later', (client) => client.query('ALTER ROLE coffre_backup_login NOLOGIN'));
+  await asSuperuser('setup_later', (client) => client.unsafe('ALTER ROLE coffre_backup_login NOLOGIN'));
   const locked = setup(['--json'], { stdin: `${url}\n` });
   const unlocked = json(locked);
   assert.match(locked.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; set a new password for coffre_backup_login\n/);
@@ -524,8 +522,8 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
 
   // Made by hand, as Terraform does, with no group: kept as it is, its password included, and granted the group.
   await asSuperuser('setup_later', async (client) => {
-    await client.query('DROP ROLE coffre_backup_login');
-    await client.query("CREATE ROLE coffre_backup_login LOGIN PASSWORD 'by-hand-p4ss'");
+    await client.unsafe('DROP ROLE coffre_backup_login');
+    await client.unsafe("CREATE ROLE coffre_backup_login LOGIN PASSWORD 'by-hand-p4ss'");
   });
   const byHand = setup(['--json'], { stdin: `${url}\n` });
   assert.equal(json(byHand).logins.coffre_backup_login!.password, 'kept');
@@ -537,7 +535,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   assert.deepEqual(await membership('setup_later'), [{ admin: false, inherit: true, set: false }]);
 
   // One another role made, unable to log in: on Postgres 16, the owner may not change it without its ADMIN. Said so, before the others change.
-  await asSuperuser('setup_later', (client) => client.query('ALTER ROLE coffre_backup_login NOLOGIN'));
+  await asSuperuser('setup_later', (client) => client.unsafe('ALTER ROLE coffre_backup_login NOLOGIN'));
   const refused = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /✗ Make the three logins\n\s+setup_owner may not change coffre_backup_login, which another role made: have that role grant setup_owner ADMIN on coffre_backup_login, or drop coffre_backup_login, then run coffre setup again/);
@@ -548,7 +546,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
   const url = await database('setup_loose', 'superuser');
   json(setup(['--json'], { stdin: `${url}\n` }));
-  await asSuperuser('setup_loose', (client) => client.query('GRANT INSERT ON vault_members TO coffre_app'));
+  await asSuperuser('setup_loose', (client) => client.unsafe('GRANT INSERT ON vault_members TO coffre_app'));
   for (const args of [['--reset-passwords', '--json'], ['--json']]) {
     const run = setup(args, { stdin: `${url}\n` });
     assert.equal(run.status, 1);
@@ -567,7 +565,7 @@ test('a wrong password, or a login that cannot create roles, is refused without 
   assert.match(refused.stderr, /✗ Connect to 127\.0\.0\.1\/setup_wrong\n\s+password authentication failed/);
   assertNoAdministrator(refused, wrong.href);
 
-  await asSuperuser('postgres', (client) => client.query("CREATE ROLE setup_owner LOGIN PASSWORD 'owner-only-p4ss'"));
+  await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE setup_owner LOGIN PASSWORD 'owner-only-p4ss'"));
   const plain = new URL(url);
   plain.username = 'setup_owner';
   plain.password = 'owner-only-p4ss';

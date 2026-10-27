@@ -15,8 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createDatabase } from '@coffre/db';
+import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
-import pg from 'pg';
 
 import { fileMemory } from '../src/checkpointer-node.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
@@ -31,7 +31,7 @@ const seconds = Number(secondsArg ?? 60);
 if (process.env.BENCH_LOADER === '1') {
   // The loader: `rate` appends a second for `seconds`, over 16 connections.
   const key = logMacKey(Buffer.from(process.env.BENCH_SEED!, 'hex'));
-  const pool = new pg.Pool({ connectionString: ownerUrl, max: 16 });
+  const pool = postgresClient(ownerUrl, { max: 16 });
   const end = Date.now() + seconds * 1000;
   let sent = 0;
   const start = Date.now();
@@ -44,17 +44,18 @@ if (process.env.BENCH_LOADER === '1') {
       const p = sent % 100 === 0
         ? (() => {
           const row = { at, requestId: `c-${randomUUID()}`, object: randomUUID(), actor: 'vault', payload: '{"op":"genesis"}', seal: randomBytes(16) };
-          return pool.query(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
+          return pool.unsafe(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
             INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) SELECT nextval('log_number'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
           [row.at, row.requestId, row.object, row.actor, row.payload, row.seal, entryMac(key, { tree: 'changes', row })]);
         })()
         : (() => {
           const row = { at, requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-          return pool.query(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
+          return pool.unsafe(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
             INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) SELECT nextval('log_number'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
           [row.at, String(row.requestId), row.credential, row.secret, row.purpose, entryMac(key, { tree: 'uses', row }), row.place]);
         })();
-      inflight.add(p);
+      // Sent now: postgres.js sends a query only once it is executed or awaited.
+      inflight.add(p.execute());
       void p.finally(() => inflight.delete(p));
     }
     await new Promise((resolve) => setTimeout(resolve, 2));
@@ -66,16 +67,16 @@ if (process.env.BENCH_LOADER === '1') {
 }
 
 const seed = randomBytes(32);
-const owner = new pg.Pool({ connectionString: ownerUrl, max: 2 });
-for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.query(`DELETE FROM ${table}`);
-await owner.query(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
+const owner = postgresClient(ownerUrl, { max: 2 });
+for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.unsafe(`DELETE FROM ${table}`);
+await owner.unsafe(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-await owner.query('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
-await owner.query('CHECKPOINT');
+await owner.unsafe('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
+await owner.unsafe('CHECKPOINT');
 
 const dir = dirArg ?? mkdtempSync(join(tmpdir(), 'coffre-checkpoint-bench-'));
 const memoryFile = join(dir, `memory-${process.pid}`);
-const vaultPool = new pg.Pool({ connectionString: vaultUrl, max: 1 });
+const vaultPool = postgresClient(vaultUrl, { max: 1 });
 const database = createDatabase(vaultPool);
 const cp = await openLogCheckpointer({ store: logStore(database), seed, memory: fileMemory(memoryFile) });
 
@@ -98,7 +99,7 @@ while (Date.now() < stop) {
   await new Promise((resolve) => setTimeout(resolve, Math.max(0, 500 - (performance.now() - t0))));
 }
 const { sent } = await done;
-const [tiles] = (await owner.query(`SELECT count(*)::int AS n, pg_size_pretty(sum(pg_column_size(hashes))) AS bytes FROM log_tiles`)).rows;
+const [tiles] = await owner.unsafe<[{ n: number; bytes: string }]>(`SELECT count(*)::int AS n, pg_size_pretty(sum(pg_column_size(hashes))) AS bytes FROM log_tiles`);
 const q = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(p * xs.length))]!;
 const kept = samples.slice(Math.floor(samples.length / 10));
 const line = (name: string, xs: number[]) => `${name} p50 ${q(xs, 0.5).toFixed(2)} / p99 ${q(xs, 0.99).toFixed(2)} ms`;

@@ -82,7 +82,7 @@ test('the checkpointer\'s object seals on its alarm, a change sealed through it 
   const more = await log.use();
   const end = Date.now() + 10_000;
   for (;;) {
-    const [row] = (await db.owner.execute(`SELECT max(upto)::text AS upto FROM log_checkpoints` as never)).rows as { upto: string }[];
+    const [row] = (await db.owner.execute(`SELECT max(upto)::text AS upto FROM log_checkpoints` as never)) as unknown as { upto: string }[];
     if (BigInt(row!.upto) >= more) break;
     assert.ok(Date.now() < end, 'sealed by the alarm');
     await new Promise((resolve) => setTimeout(resolve, 100));

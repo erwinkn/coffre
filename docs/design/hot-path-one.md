@@ -430,6 +430,82 @@ workerd restarted each time (25 runs, per-thread CPU from schedstat).
   host does, as for any login (docs/deploy.md). The suite's
   `setup-test-database.sh` gives it one.
 
+### The driver: postgres.js at node-postgres's round trips (W221)
+
+Coffre swapped node-postgres for postgres.js (R56), its own copy in
+`packages/db/vendor/postgres`, with seven changes from upstream
+([its README](../../packages/db/vendor/postgres/README.md)). Unpatched, the
+swap was a regression in round trips and Node's Postgres CPU; the other five
+close a transaction leak under heavy pipelining, three ways a lost or ended
+connection left a client hanging or open, and a `reserve()` that never
+answered.
+
+- **Round trips.** Upstream postgres.js asks the server for an unnamed
+  statement's parameter types and waits for the answer before it sends the
+  values: Parse, Describe, Flush, a wait, then Bind, Execute, Sync. Drizzle
+  sends every statement that way (`unsafe`, which forces `prepare: false`).
+  - Measured through a proxy adding 5 ms each way: one parameterized
+    statement took 2 round trips (22.4 ms) against node-postgres's 1
+    (12.5 ms); BEGIN, two statements and COMMIT took 6 against 4.
+  - On Workers each call has a fresh connection, so nothing is ever prepared
+    there: every statement of a use, a reveal or a change would have paid it.
+  - Patched, the values go with the statement as text the server types, as
+    node-postgres sends them: 1 round trip (11.8 ms), and 4 for the
+    transaction.
+  - `postgresClient` sends arrays, dates and objects as node-postgres does,
+    as text, so nothing coffre sends waits for a description at all. In
+    workerd, over a whole vault call, not one Flush is sent
+    (`packages/vault/test/workers.test.ts`).
+- **Round trips per vault call, warm, in workerd** (statements / round trips):
+
+  | call | node-postgres (main) | postgres.js (patched) |
+  |---|---|---|
+  | access | 1 / 1 | 1 / 1 |
+  | unwrap, a reveal | 7 / 7 | 7 / 7 |
+  | unwrap, a use | 7 / 7 | 7 / 7 |
+  | wrap, a change | 6 / 6 | 6 / 6 |
+  | verifyLog | 12 / 12 | 12 / 11 |
+
+  The one fewer is two statements of a transaction sent together:
+  postgres.js pipelines what a transaction asks at once, where node-postgres
+  queued it. The app's requests keep their statement budgets
+  (`request-cost.test.ts`, unchanged in what it asserts), each a round trip;
+  0.15's use is one statement (`use-cost.test.ts`), so one round trip.
+- **Node's pool.** Upstream takes the connection idle the longest, so a
+  steady load cycles every connection of the pool. The copy takes the one
+  idle the shortest, as pg-pool does (`packages/db/test/pool.test.ts`).
+  `bench-use.ts`, W219's rig, JSON answer, medians of three interleaved
+  runs, Postgres CPU per use:
+
+  | pool, rate, form | node-postgres | postgres.js, upstream's pool | postgres.js, the copy's |
+  |---|---|---|---|
+  | 16, 500/s, cached | 1.31 / 1.22 ms | 1.42 ms (16 backends) | 1.25 ms (4–6 backends) |
+  | 16, 500/s, probing | 1.89 / 1.87 ms | 2.07 ms (16 backends) | 1.85 ms (6–10 backends) |
+  | 1, 200/s, cached | 1.33 ms | | 1.37 ms |
+  | 1, 200/s, probing | 1.93 ms | | 1.95 ms |
+
+  node-postgres has two values where it ran beside each variant, in two
+  series of runs. The spread between runs is about ±5%. Client CPU per use
+  is 0.17–0.27 ms with node-postgres and 0.20–0.30 ms with postgres.js;
+  buffers and server time are equal.
+- **Requests** (`pnpm bench:workers`, `pnpm bench:node`; three interleaved
+  runs each, medians, ms of CPU, warm): within ±10% on every path, the floor
+  (`/livez`, which does nothing) moving as much. The page that moved most,
+  an environment's, measured alone with 30 warm samples a run and four runs
+  each: Workers 66.6 ms on node-postgres against 62.4 ms on postgres.js;
+  Node's server 48.2 against 46.5. The app benches ran before the pool's
+  change, which concerns only Node's pools.
+- **Bundles** (`wrangler deploy --dry-run`, the Workers example):
+
+  | Worker | node-postgres | postgres.js |
+  |---|---|---|
+  | vault | 1367.9 KiB / 254.8 KiB gzip | 1260.7 / 238.6 |
+  | app | 4086.2 KiB / 963.0 KiB gzip | 4009.5 / 950.5 |
+
+- **Not measured:** a deployed Worker's cold start through Hyperdrive. The
+  local one cannot tell drivers apart (W219, above), and both drivers now
+  send the same round trips.
+
 ## In short (W208, round 1)
 
 - **A use is one call.** The Worker MACs the request, then calls

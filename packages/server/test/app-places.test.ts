@@ -352,7 +352,7 @@ async function until(condition: () => Promise<boolean>, what: string): Promise<v
 
 /** Sessions of the app waiting for a lock: here, on the log head's row, which every write takes first. */
 async function headWaiters(): Promise<number> {
-  const [row] = (await db.owner.execute(sql`SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)).rows as { n: string }[];
+  const [row] = (await db.owner.execute(sql`SELECT count(*) AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)) as unknown as { n: string }[];
   return Number(row?.n ?? 0);
 }
 

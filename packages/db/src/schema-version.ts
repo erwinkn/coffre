@@ -30,8 +30,8 @@ export async function migrated(db: Queryable): Promise<boolean> {
 
 async function hasLedger(db: Queryable): Promise<boolean> {
   if (engineOf(db) === 'postgres') {
-    const { rows } = await db.execute<{ present: boolean }>(sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present`);
-    return rows[0]?.present === true;
+    const [ledger] = await db.execute<{ present: boolean }>(sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present`);
+    return ledger?.present === true;
   }
   const rows = await (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<{ present: number }>(
     sql`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'`,

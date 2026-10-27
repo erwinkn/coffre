@@ -553,7 +553,7 @@ test("the per-request statement reads its rows through their indexes, however ma
     await tx.execute(sql.raw('SET LOCAL enable_seqscan = off'));
     return tx.execute(sql.raw(`EXPLAIN ${inlined}`));
   });
-  const lines = (plan as unknown as { rows: { 'QUERY PLAN': string }[] }).rows.map((row) => row['QUERY PLAN']).join('\n');
+  const lines = (plan as unknown as { 'QUERY PLAN': string }[]).map((row) => row['QUERY PLAN']).join('\n');
   // The session by its token's hash and its ancestors by their IDs, each a lookup: never a scan of every credential, which no prune ever shrinks.
   assert.doesNotMatch(lines, /Seq Scan on credentials/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_token_hash_key/, lines);
@@ -961,7 +961,7 @@ test('a Cloudflare binding unbound while its use waits for the head releases not
   await held;
   const using = seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
   // Until the use waits for the head, in this database (a row lock's wait names a transaction, not a database), then the unbind commits.
-  const waiting = async () => (await deps.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`)).rows[0]!.n;
+  const waiting = async () => (await deps.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`))[0]!.n;
   for (let tries = 0; (await waiting()) === 0; tries++) {
     assert.ok(tries < 200, 'the use never waited for the head');
     await sleep(10);

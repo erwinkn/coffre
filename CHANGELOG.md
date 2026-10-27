@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- **One Postgres driver: postgres.js, coffre's own copy.** node-postgres
+  (`pg`) is gone from every package. `@coffre/db` ships postgres.js 3.4.9
+  in `vendor/postgres`, its Node build and its Workers build, with seven
+  changes. A statement's values go with it, as node-postgres sends them,
+  where postgres.js first asked the server for their types, a round trip
+  more for every statement with parameters: so each statement is still one
+  round trip, on Workers through Hyperdrive and on Node, and a
+  transaction's options still go in its `BEGIN`. And Node's pool takes the
+  connection idle the shortest, as node-postgres's does: postgres.js cycled
+  through all of them, and Postgres spent ~8% more CPU per use at a pool
+  of 16. And a transaction queued behind as many statements as a
+  connection pipelines still learns its connection: postgres.js left that
+  connection inside a transaction no one would end. A client whose
+  connection was cut under a query closes: postgres.js waited for the
+  query for ever. A connection closed while it opens fails its query, an
+  outage, as node-postgres's did: postgres.js dialled again, for ever. A
+  client asked to end opens no connection again, for what was waiting nor
+  for a `reserve()` or a `listen()`. And a `reserve()` that opens its
+  connection gets it: without `fetch_types`, postgres.js never gave it. And what keeps a session across statements (`coffre
+  migrate`'s lock, `coffre backup`'s and `restore`'s snapshot, `coffre
+  setup`'s probes, each rolled back) stops at a lost connection, where a
+  postgres.js client would go on, on a new one, without it. Deployments install
+  nothing for it: the copy is part of `@coffre/db`. Connection URLs are
+  read as before, TLS included (`sslmode`, `sslrootcert=system`).
+  - **For code that imports `@coffre/db`, a plugin's for one:** a
+    hand-written statement (`db.execute(sql…)`) answers its rows as an
+    array, with `.count`, where it answered `{ rows, rowCount }`
+    (`rowsOf` and `changedRows` read either); `Database` is
+    `PgDatabase<QueryResult>`, not `NodePgDatabase`; a timestamp a
+    hand-written statement answers is Postgres's text, not a `Date`, as
+    Drizzle's columns already read it. `@coffre/db/connect`'s
+    `postgresConnection` is gone: `postgresClient(url)` opens a client, and
+    `postgresSession(url)` one that keeps a session's state or fails.
+  - A statement that fails inside a transaction fails the transaction, even
+    when the transaction's own code caught it: node-postgres let its COMMIT
+    roll back without a word.
+
+- **Client fix: a tunnel's stream has a `readyState`,** as a socket does
+  (`@coffre/client/workload/postgres`). postgres.js reads it to say
+  goodbye and wait for the close, so `sql.end()` on a tunnel hung; it
+  resolves now. The docs show postgres.js first (`socket: () =>
+  connect(coffre, 'db')`); node-postgres's `{ stream }` works as before.
+
 - **0.15's change path for environments and keys, behind its switch:
   nothing calls it yet.** With 0.15's log on, every write of the app's
   that makes, renames, archives, restores or deletes an environment, or

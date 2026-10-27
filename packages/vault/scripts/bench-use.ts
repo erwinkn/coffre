@@ -2,7 +2,10 @@
 // path on main"): `use_credential` called as the hot path's login at a fixed
 // rate, each form on its own, on an instance of realistic size with a log of
 // `--history` entries. It prints Postgres's CPU per use, from the container's
-// cgroup, and its buffers per use, from pg_stat_statements.
+// cgroup, and its buffers per use, from pg_stat_statements. It runs on
+// coffre's own driver (postgres.js, @coffre/db's copy): unnamed statements, as
+// the vault sends them. (Named statements, measured on node-postgres by W219,
+// are not what coffre sends: hot-path-one.md, "The cuts".)
 //
 //   node --conditions=coffre:source packages/vault/scripts/bench-use.ts --owner <url> --hot <url> --container <name> \
 //     [--seed] [--history 10000] [--form probing|cached|reference|mixed] [--rate 1000] [--seconds 20] [--pool 40]
@@ -15,8 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
-import pg from 'pg';
-import postgres from 'postgres';
+import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 
 import { objectKey, sealKey, sealOf, type Input, type Ref } from '../src/inputs.ts';
 import { rowOf } from '../src/use.postgres.ts';
@@ -27,31 +29,33 @@ const { values: args } = parseArgs({
     seed: { type: 'boolean', default: false }, history: { type: 'string', default: '0' },
     form: { type: 'string', default: 'mixed' }, rate: { type: 'string', default: '1000' }, seconds: { type: 'string', default: '20' },
     pool: { type: 'string', default: '40' }, pairs: { type: 'string', default: '1000' }, json: { type: 'boolean', default: false }, parse: { type: 'boolean', default: false },
-    named: { type: 'boolean', default: false }, driver: { type: 'string', default: 'pg' }, probing: { type: 'string', default: '0.27' }, function: { type: 'string', default: 'use_credential' },
+    probing: { type: 'string', default: '0.27' }, function: { type: 'string', default: 'use_credential' },
   },
 });
-const owner = new pg.Pool({ connectionString: args.owner!, max: 4 });
+const owner = postgresClient(args.owner!, { max: 4 });
 const SEAL = sealKey(Buffer.alloc(32, 9));
 const PROJECTS = 100;
 const MEMBERS = 1000;
 const KEYS_PER_ENVIRONMENT = 10;
 
-const q = async <T = Record<string, unknown>>(text: string, values: unknown[] = []) => (await owner.query(text, values)).rows as T[];
+const q = async <T = Record<string, unknown>>(text: string, values: unknown[] = []) => [...await owner.unsafe(text, values as never[])] as T[];
 
-async function change(ref: Ref, object: Input, client: pg.PoolClient): Promise<Buffer> {
+/** A transaction's statements, as `seed` sends them. */
+type Tx = { unsafe: (text: string, values?: unknown[]) => Promise<Record<string, unknown>[]> };
+
+async function change(ref: Ref, object: Input, client: Tx): Promise<Buffer> {
   const seal = sealOf(SEAL, ref, object);
-  await client.query(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, 'system:bench', $4, $5, $6)`,
+  await client.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, 'system:bench', $4, $5, $6)`,
     [Date.now(), randomUUID(), objectKey(ref), JSON.stringify({ op: 'genesis', value: object, ...(object.kind === 'principal' ? { old: '0' } : {}) }), seal, randomBytes(16)]);
   return seal;
 }
 
 /** The instance: 100 projects of three environments (dev, prod, a personal config of dev), 10 keys in each, 1,000 members each with a credential and grants on one project, references and their sources. */
 async function seed(): Promise<void> {
-  const client = await owner.connect();
-  try {
-    await client.query('BEGIN');
+  await owner.begin(async (tx) => {
+    const client = tx as unknown as Tx;
     const now = Date.now();
-    await client.query(`INSERT INTO log_config (name, value, seal) VALUES ('policy', $1, $2), ('roles', $3, $4)`, [
+    await client.unsafe(`INSERT INTO log_config (name, value, seal) VALUES ('policy', $1, $2), ('roles', $3, $4)`, [
       JSON.stringify({ kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } }), sealOf(SEAL, { kind: 'policy', id: 'instance' }, { kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } }),
       JSON.stringify({ kind: 'roles', roles: {}, instanceRoles: {} }), sealOf(SEAL, { kind: 'roles', id: 'instance' }, { kind: 'roles', roles: {}, instanceRoles: {} }),
     ]);
@@ -62,14 +66,14 @@ async function seed(): Promise<void> {
       const id = randomUUID();
       const [dev, prod, mine] = [randomUUID(), randomUUID(), randomUUID()];
       const person = `user:p${p}@acme.example`;
-      await client.query(`INSERT INTO projects (id, slug, name) VALUES ($1, $2, 'P')`, [id, `p-${p}`]);
-      await client.query(`INSERT INTO environments (id, project_id, slug, name, protected) VALUES ($1, $3, 'dev', 'D', false), ($2, $3, 'prod', 'P', false)`, [dev, prod, id]);
-      await client.query(`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
+      await client.unsafe(`INSERT INTO projects (id, slug, name) VALUES ($1, $2, 'P')`, [id, `p-${p}`]);
+      await client.unsafe(`INSERT INTO environments (id, project_id, slug, name, protected) VALUES ($1, $3, 'dev', 'D', false), ($2, $3, 'prod', 'P', false)`, [dev, prod, id]);
+      await client.unsafe(`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
         [person, now, Buffer.alloc(32)]);
-      await client.query(`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner) VALUES ($1, $2, 'dev-mine', 'Mine', false, $3, $4)`, [mine, id, dev, person]);
+      await client.unsafe(`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner) VALUES ($1, $2, 'dev-mine', 'Mine', false, $3, $4)`, [mine, id, dev, person]);
       for (const [env, slug, parent, own] of [[dev, 'dev', null, null], [prod, 'prod', null, null], [mine, 'dev-mine', dev, person]] as const) {
         const object: Input = { kind: 'environment', id: env, projectId: id, slug, owner: own, parentId: parent, protected: false, deleted: false, archived: false };
-        await client.query('UPDATE environments SET seal = $1 WHERE id = $2', [await change({ kind: 'environment', id: env }, object, client), env]);
+        await client.unsafe('UPDATE environments SET seal = $1 WHERE id = $2', [await change({ kind: 'environment', id: env }, object, client), env]);
       }
       projects.push({ id, dev, prod, mine, owner: person });
     }
@@ -79,10 +83,10 @@ async function seed(): Promise<void> {
         for (let k = 0; k < KEYS_PER_ENVIRONMENT; k += 1) {
           const id = randomUUID();
           const version = randomUUID();
-          await client.query(`INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, $4)`, [id, project.id, env, `K_${k}_${id.slice(0, 6)}`]);
-          await client.query(`INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, sensitive)
+          await client.unsafe(`INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, $4)`, [id, project.id, env, `K_${k}_${id.slice(0, 6)}`]);
+          await client.unsafe(`INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, sensitive)
             VALUES ($1, $2, 1, 1, $3, $4, $5, $6, 'local', 'bench', '1', 'system:bench', false)`, [version, id, randomBytes(48), randomBytes(12), randomBytes(16), randomBytes(60)]);
-          await client.query('UPDATE secrets SET current_version_id = $1, current_version = 1 WHERE id = $2', [version, id]);
+          await client.unsafe('UPDATE secrets SET current_version_id = $1, current_version = 1 WHERE id = $2', [version, id]);
           keys.push({ id, project: project.id, env });
         }
       }
@@ -92,56 +96,50 @@ async function seed(): Promise<void> {
       const sources = keys.filter((key) => key.env === project.mine).slice(0, 5);
       for (const source of sources) {
         const holder = randomUUID();
-        const [{ seq }] = (await client.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
-          VALUES ((SELECT coalesce(max(seq), 0) + 1 FROM audit_log), 'vault', 'vault:bench', $1, 'system:bench', 'reference.create', 'allow', '{}', $2, $2, $2) RETURNING seq`, [now, Buffer.alloc(32)])).rows as { seq: string }[];
-        await client.query(`INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, $4)`, [holder, project.id, project.prod, `REF_${holder.slice(0, 6)}`]);
-        await client.query(`INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
+        const [{ seq }] = (await client.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+          VALUES ((SELECT coalesce(max(seq), 0) + 1 FROM audit_log), 'vault', 'vault:bench', $1, 'system:bench', 'reference.create', 'allow', '{}', $2, $2, $2) RETURNING seq`, [now, Buffer.alloc(32)])) as { seq: string }[];
+        await client.unsafe(`INSERT INTO secrets (id, project_id, environment_id, key) VALUES ($1, $2, $3, $4)`, [holder, project.id, project.prod, `REF_${holder.slice(0, 6)}`]);
+        await client.unsafe(`INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
           VALUES ($1, $2, $3, $4, $2, $5, $6, $7, 'system:bench')`, [randomUUID(), project.id, project.prod, holder, project.mine, source.id, seq]);
         keys.push({ id: holder, project: project.id, env: `ref:${project.prod}` });
       }
     }
     for (const key of keys) {
-      const [row] = (await client.query(`SELECT s.project_id, s.environment_id, s.current_version_id, v.wrapped_dek,
+      const [row] = (await client.unsafe(`SELECT s.project_id, s.environment_id, s.current_version_id, v.wrapped_dek,
           (SELECT y.source_secret_id FROM secret_references y WHERE y.secret_id = s.id ORDER BY y.created_seq DESC LIMIT 1) AS source
-        FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id WHERE s.id = $1`, [key.id])).rows as { project_id: string; environment_id: string; current_version_id: string | null; wrapped_dek: Buffer | null; source: string | null }[];
+        FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id WHERE s.id = $1`, [key.id])) as { project_id: string; environment_id: string; current_version_id: string | null; wrapped_dek: Buffer | null; source: string | null }[];
       const object: Input = row!.current_version_id === null
         ? { kind: 'secret', id: key.id, projectId: row!.project_id, environmentId: row!.environment_id, version: '', nature: 'secret', key: null, source: row!.source }
         : { kind: 'secret', id: key.id, projectId: row!.project_id, environmentId: row!.environment_id, version: row!.current_version_id, nature: 'secret',
           key: { kekProvider: 'local', kekId: 'bench', kekVersion: '1', bytes: row!.wrapped_dek!.toString('base64') }, source: null };
-      await client.query('UPDATE secrets SET seal = $1 WHERE id = $2', [await change({ kind: 'secret', id: key.id }, object, client), key.id]);
+      await client.unsafe('UPDATE secrets SET seal = $1 WHERE id = $2', [await change({ kind: 'secret', id: key.id }, object, client), key.id]);
     }
     for (let m = 0; m < MEMBERS; m += 1) {
       const principal = `token:bench-${m}`;
       const project = projects[m % PROJECTS]!;
       const credential = randomUUID();
-      await client.query(`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
+      await client.unsafe(`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
         [principal, now, Buffer.alloc(32)]);
       const grants = [project.dev, project.prod].map((env) => ({ projectId: project.id, environmentId: env, environmentSlug: null, role: 'viewer', expiresAt: null }));
       for (const grant of grants) {
-        await client.query(`INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, 'system:bench')`, [principal, grant.environmentId, now]);
+        await client.unsafe(`INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, 'system:bench')`, [principal, grant.environmentId, now]);
       }
       const member: Input = { kind: 'principal', principal, status: 'active', role: 'member', scope: { projects: 'all', environments: 'all' }, grants };
-      await client.query('UPDATE vault_members SET seal = $1 WHERE principal = $2', [await change({ kind: 'principal', id: principal }, member, client), principal]);
+      await client.unsafe('UPDATE vault_members SET seal = $1 WHERE principal = $2', [await change({ kind: 'principal', id: principal }, member, client), principal]);
       const expiresAt = now + 30 * 86_400_000;
-      await client.query(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at) VALUES ($1, 'service', $2, $3, 'h', 0, $4, 'system:bench', $5)`,
+      await client.unsafe(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at) VALUES ($1, 'service', $2, $3, 'h', 0, $4, 'system:bench', $5)`,
         [credential, Buffer.alloc(32), randomBytes(32), principal, new Date(expiresAt)]);
       const object: Input = { kind: 'credential', id: credential, principal, caller: 'bearer', scope: null, expiresAt, revoked: false };
-      await client.query('UPDATE credentials SET seal = $1 WHERE id = $2', [await change({ kind: 'credential', id: credential }, object, client), credential]);
+      await client.unsafe('UPDATE credentials SET seal = $1 WHERE id = $2', [await change({ kind: 'credential', id: credential }, object, client), credential]);
     }
     // 0.14's log about the members: an access entry each, as a cutover finds them.
-    await client.query(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
+    await client.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
       SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:bench', $1, 'system:bench', 'access.grant', 'deny', 'token:bench-' || (g - 1), '{}', $2, $2, $2
         FROM generate_series(1, ${MEMBERS}) g`, [now, Buffer.alloc(32)]);
     const today = new Date().toISOString().slice(0, 10);
-    for (let d = -2; d <= 2; d += 1) await client.query(`SELECT make_day($1::date + $2::integer)`, [today, d]);
-    await client.query('UPDATE log_fence SET at_floor = $1', [now - 86_400_000 * 2]);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+    for (let d = -2; d <= 2; d += 1) await client.unsafe(`SELECT make_day($1::date + $2::integer)`, [today, d]);
+    await client.unsafe('UPDATE log_fence SET at_floor = $1', [now - 86_400_000 * 2]);
+  });
 }
 
 /** History that is not the bench's uses: as use-cost.test.ts grows it. */
@@ -188,9 +186,7 @@ async function run(): Promise<void> {
   const form = args.form!;
   // A steady state: a bounded set of (credential, key), each key's bulk row fresh, as hot keys' are (a row moves once a minute).
   const asked = (await pairs(form)).sort(() => Math.random() - 0.5).slice(0, Number(args.pairs));
-  const hot = new pg.Pool({ connectionString: args.hot!, max: Number(args.pool) });
-  // postgres.js (porsager/postgres): statements prepared and kept per connection, and no type lookup on connecting.
-  const js = args.driver === 'postgresjs' ? postgres(args.hot!, { max: Number(args.pool), prepare: true, fetch_types: false }) : null;
+  const hot = postgresClient(args.hot!, { max: Number(args.pool) });
   const [newest] = await q<{ number: string; mac: Buffer }>('SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1');
   const probingShare = form === 'probing' || form === 'reference' ? 1 : form === 'cached' ? 0 : Number(args.probing);
   const legacy = args.function === 'use_credential_0022';
@@ -200,17 +196,13 @@ async function run(): Promise<void> {
     : args.json
       ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11)::text AS r`
       : `SELECT * FROM ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11)`;
-  // A named statement: parsed and planned once per connection.
-  const name = args.named ? `bench_${args.function}_${args.json ? 'json' : 'row'}` : undefined;
   const call = async (pair: Pair, cached: boolean): Promise<{ rows: Record<string, unknown>[] }> => {
     const at = Date.now();
     const values = [
       pair.credential, pair.secret, (randomBytes(8).readBigUInt64BE() >> 1n).toString(), String(at), pair.place, randomBytes(16), String(at + 3000),
       cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? '900000' : null,
     ].slice(0, legacy ? 9 : 11);
-    const rows = js === null
-      ? (await hot.query({ text, values, ...(name === undefined ? {} : { name }) })).rows as Record<string, unknown>[]
-      : [...await js.unsafe(text, values as never[], { prepare: true })] as Record<string, unknown>[];
+    const rows = [...await hot.unsafe(text, values as never[])] as Record<string, unknown>[];
     return { rows: args.json ? [rowOf(rows[0]!.r as string) as unknown as Record<string, unknown>] : rows };
   };
   // Every connection's plans made, and every key's bulk row written, before the measured run.
@@ -250,29 +242,26 @@ async function run(): Promise<void> {
   const pct = (p: number) => latencies[Math.floor((latencies.length - 1) * p)]?.toFixed(2);
   const history = Number((await q<{ n: string }>('SELECT count(*) AS n FROM log_uses'))[0]!.n);
   console.log(JSON.stringify({
-    form, function: args.function, driver: args.driver, named: args.named, json: args.json, history, rate, served: Math.round(done / elapsed), failed,
+    form, function: args.function, driver: 'postgres.js', json: args.json, history, rate, served: Math.round(done / elapsed), failed,
     backends: Number(backends!.n), cpuMsPerUse: Number((usec / 1000 / done).toFixed(3)), clientMsPerUse: Number(((spent.user + spent.system) / 1000 / done).toFixed(3)), buffersPerUse: Number((Number(stats!.blocks) / Number(stats!.calls)).toFixed(1)),
     serverMsPerUse: Number((Number(stats!.ms) / Number(stats!.calls)).toFixed(3)), p50: pct(0.5), p99: pct(0.99),
   }));
   await hot.end();
-  await js?.end();
 }
 
 /**
- * The Worker's side of the answer: one probing use's row, parsed as node-postgres parses the typed row (each of its
- * fields by its type's parser) and as the JSON text is parsed (one JSON.parse, each whole number kept exact).
+ * The Worker's side of the answer: one probing use's JSON text, parsed as it
+ * is parsed (one JSON.parse, each whole number kept exact) and as the vault
+ * reads it (`rowOf`).
  */
 async function parse(): Promise<void> {
   const [pair] = await pairs('probing');
-  const raw = new pg.Pool({ connectionString: args.hot!, max: 1, types: { getTypeParser: () => (value: string) => value } as never });
+  const raw: PostgresClient = postgresClient(args.hot!, { max: 1 });
   const at = Date.now();
   const values = [pair!.credential, pair!.secret, (randomBytes(8).readBigUInt64BE() >> 1n).toString(), String(at), null, randomBytes(16), String(at + 3000)];
-  const typed = await raw.query(`SELECT * FROM use_credential_split($1, $2, $3, $4, 4::smallint, $5, $6, $7)`, values);
-  const json = await raw.query(`SELECT use_credential_final($1, $2, $3::bigint + 1, $4, 4::smallint, $5, $6, $7)::text AS r`, values);
+  const [json] = await raw.unsafe(`SELECT use_credential_final($1, $2, $3::bigint + 1, $4, 4::smallint, $5, $6, $7)::text AS r`, values as never[]);
   await raw.end();
-  const fields = typed.fields.map((field) => ({ name: field.name, parse: pg.types.getTypeParser(field.dataTypeID, 'text') }));
-  const row = typed.rows[0] as Record<string, string | null>;
-  const text = json.rows[0].r as string;
+  const text = json!.r as string;
   const time = (work: () => void) => {
     for (let i = 0; i < 5000; i += 1) work();
     const t0 = process.cpuUsage();
@@ -280,15 +269,11 @@ async function parse(): Promise<void> {
     const spent = process.cpuUsage(t0);
     return Number(((spent.user + spent.system) / 50_000).toFixed(2));
   };
-  const typedUs = time(() => {
-    const out: Record<string, unknown> = {};
-    for (const field of fields) { const value = row[field.name]; out[field.name] = value === null ? null : field.parse(value); }
-  });
   const reviverUs = time(() => JSON.parse(text, (_key, value: unknown, context?: { source?: string }) => (typeof value === 'number' && !Number.isSafeInteger(value) && context?.source !== undefined ? context.source : value)));
   const plainUs = time(() => JSON.parse(text));
   // What the vault does: a plain parse, its bigints as text, its bytes from hex (rowOf).
   const rowOfUs = time(() => rowOf(text));
-  console.log(JSON.stringify({ columns: fields.length, typedBytes: Object.values(row).reduce((n, v) => n + (v?.length ?? 0), 0), jsonBytes: text.length, typedParseUs: typedUs, jsonReviverUs: reviverUs, jsonPlainUs: plainUs, rowOfUs }));
+  console.log(JSON.stringify({ jsonBytes: text.length, jsonReviverUs: reviverUs, jsonPlainUs: plainUs, rowOfUs }));
 }
 
 if (args.parse) {

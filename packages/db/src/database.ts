@@ -6,37 +6,34 @@ import {
   getTableName,
   is,
   Table,
+  type Assume,
   type ExtractTablesWithRelations,
   type RelationalSchemaConfig,
 } from 'drizzle-orm';
-import { NodePgDatabase, NodePgDriver } from 'drizzle-orm/node-postgres';
-import { PgDialect } from 'drizzle-orm/pg-core';
-import type pg from 'pg';
+import { PgDatabase, PgDialect, type PgQueryResultHKT, type PgTransactionConfig } from 'drizzle-orm/pg-core';
+import { PostgresJsSession, PostgresJsTransaction } from 'drizzle-orm/postgres-js/session';
+import type postgres from '#postgres';
 
 import { trackCommits } from './commits.ts';
+import { textTypes, type PostgresClient } from './postgres.ts';
 import * as schema from './schema.ts';
 
 export { schema };
+export type { PostgresClient } from './postgres.ts';
+
+/** What a hand-written statement answers on Postgres: its rows, with `count` and `command`. */
+export interface QueryResult extends PgQueryResultHKT {
+  type: postgres.RowList<Assume<this['row'], postgres.Row>[]>;
+}
 
 /**
  * A database, typed as Postgres whichever it is; see portable.ts for why
  * that holds. connect.ts opens one of each from a URL.
  */
-export type Database = NodePgDatabase<typeof schema>;
+export type Database = PgDatabase<QueryResult, typeof schema>;
 export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Anything a read can run on: the database, or an open transaction. */
 export type Queryable = Database | Transaction;
-
-/**
- * What Drizzle needs from a connection pool. A `pg.Pool` fits, and so does the
- * per-invocation Hyperdrive pool, whose class name ends in `Pool` for the
- * same reason: that is how Drizzle knows to check out a client for a
- * transaction rather than run BEGIN on a shared connection.
- */
-export type PoolLike = pg.Pool | {
-  query: pg.Pool['query'];
-  connect: () => Promise<Pick<pg.PoolClient, 'query'> & { release: () => void }>;
-};
 
 /**
  * A query made on the database from inside one of its own transactions,
@@ -52,23 +49,33 @@ export class QueryOutsideTransaction extends Error {
   }
 }
 
-/** The transaction a flow of work runs inside, with the pool it holds, while it is open. */
-const inside = new AsyncLocalStorage<{ pool: PoolLike; open: boolean }>();
+/** The transaction a flow of work runs inside, with the client it holds, while it is open. */
+const inside = new AsyncLocalStorage<{ client: Client; open: boolean }>();
+
+/** What Drizzle asks of the client: a statement, or a transaction, which postgres.js runs on a connection it holds. */
+const ASKS = new Set<PropertyKey>(['unsafe', 'begin', 'reserve']);
 
 /**
- * `pool`, refusing a query or a transaction asked from inside a transaction
+ * `client`, refusing a query or a transaction asked from inside a transaction
  * it is already running. Work from any other flow, a concurrent request's,
  * or what the transaction left running once its work was done, goes on as before.
  */
-function guarded(pool: PoolLike): PoolLike {
-  return new Proxy(pool, {
+function guarded(client: Client): Client {
+  const refuse = (target: Client) => {
+    const open = inside.getStore();
+    if (open?.open === true && open.client === target) throw new QueryOutsideTransaction();
+  };
+  return new Proxy(client, {
+    // The client's tagged template, which Drizzle never calls, all the same.
+    apply(target, self, args: unknown[]) {
+      refuse(target);
+      return Reflect.apply(target as unknown as (...args: unknown[]) => unknown, self, args);
+    },
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
-      if (typeof value !== 'function') return value;
-      if (key !== 'query' && key !== 'connect') return value.bind(target);
+      if (typeof value !== 'function' || !ASKS.has(key)) return value;
       return (...args: unknown[]) => {
-        const open = inside.getStore();
-        if (open?.open === true && open.pool === target) throw new QueryOutsideTransaction();
+        refuse(target);
         return (value as (...args: unknown[]) => unknown).apply(target, args);
       };
     },
@@ -84,12 +91,13 @@ function brokenRule(error: unknown): QueryOutsideTransaction | undefined {
 }
 
 /**
- * What Drizzle makes of the schema, which `drizzle(pool, { schema })` works
+ * What Drizzle makes of the schema, which `drizzle(client, { schema })` works
  * out again from every table at each call: on Workers, a database is made
  * per call, and this was a fifth of a vault call's CPU. The schema never
  * changes, so it is worked out once per process or isolate, a settled value.
  */
-type Relational = RelationalSchemaConfig<ExtractTablesWithRelations<typeof schema>>;
+type Tables = ExtractTablesWithRelations<typeof schema>;
+type Relational = RelationalSchemaConfig<Tables>;
 let relational: Relational | undefined;
 
 function relationalSchema(): Relational {
@@ -101,17 +109,47 @@ function relationalSchema(): Relational {
   return relational;
 }
 
-export function createDatabase(pool: PoolLike): Database {
-  // What `drizzle(pool, { schema })` builds, but for the schema's config, made once.
+/**
+ * Drizzle's session for postgres.js, but for a transaction's options, which
+ * go in its BEGIN, as node-postgres's session sends them, rather than in a
+ * SET TRANSACTION of their own: a round trip less for a snapshot read.
+ */
+class Session extends PostgresJsSession<PostgresClient, typeof schema, Tables> {
+  override transaction<T>(work: (tx: PostgresJsTransaction<typeof schema, Tables>) => Promise<T>, config?: PgTransactionConfig): Promise<T> {
+    const { dialect, schema: tables, options } = this as unknown as { dialect: PgDialect; schema: Relational; options: object };
+    return this.client.begin(config === undefined ? '' : transactionOptions(config), (client) =>
+      work(new PostgresJsTransaction(dialect, new PostgresJsSession(client, dialect, tables, options), tables))) as Promise<T>;
+  }
+}
+
+/** What follows BEGIN for `config`, as Drizzle writes it for SET TRANSACTION. */
+function transactionOptions(config: PgTransactionConfig): string {
+  return [
+    config.isolationLevel === undefined ? null : `isolation level ${config.isolationLevel}`,
+    config.accessMode ?? null,
+    config.deferrable === undefined ? null : config.deferrable ? 'deferrable' : 'not deferrable',
+  ].filter((option) => option !== null).join(' ');
+}
+
+/**
+ * What a database runs on: a postgres.js client (`postgresClient`), or
+ * Workers' `HyperdrivePool`, which makes them. Drizzle asks it for
+ * statements (`unsafe`) and transactions (`begin`).
+ */
+export type Client = Pick<PostgresClient, 'unsafe' | 'begin'>;
+
+export function createDatabase(client: Client): Database {
+  // What `drizzle(client, { schema })` sets up, but for the schema's config, made once.
+  if ('options' in client) textTypes(client as PostgresClient);
   const dialect = new PgDialect();
   const config = relationalSchema();
-  const db: Database = new NodePgDatabase(dialect, new NodePgDriver(guarded(pool) as pg.Pool, dialect).createSession(config), config);
+  const db = new PgDatabase(dialect, new Session(guarded(client) as PostgresClient, dialect, config), config) as Database;
   // Each transaction's work runs knowing which one it is in, until that work is done. Not until
   // the COMMIT comes back: the transaction waits on nothing then, so what the work left running
   // may ask for a query, which waits for the transaction to end rather than for itself.
   const run = db.transaction.bind(db);
   db.transaction = (async (work, config) => {
-    const open = { pool, open: true };
+    const open = { client, open: true };
     try {
       return await run(
         (tx) =>
