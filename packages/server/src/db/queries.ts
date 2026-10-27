@@ -193,6 +193,8 @@ export async function resolvePath(
   // `dev@me`: dev first, then its personal config owned by whoever asks, and the key in that.
   const personalSlug = path.environment === undefined ? null : personalOf(path.environment);
   const slug = personalSlug ?? path.environment;
+  // A deleted project's environment by its slug as it was: `dev` or `dev~deleted`, the exact one first should both ever be there.
+  const either = tombstones && slug !== undefined && !isTombstone(slug);
   const [row] = await db
     .select({ project: projects, environment: environments, secret: secrets })
     .from(projects)
@@ -202,7 +204,7 @@ export async function resolvePath(
         ? none
         : and(
           eq(environments.projectId, projects.id),
-          tombstones && !isTombstone(slug) ? inArray(environments.slug, [slug, deletedWithProject(slug)]) : eq(environments.slug, slug),
+          either ? inArray(environments.slug, [slug, deletedWithProject(slug)]) : eq(environments.slug, slug),
           alive(environments.slug),
         ),
     )
@@ -211,6 +213,7 @@ export async function resolvePath(
       path.key === undefined || personalSlug !== null ? none : and(eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
     )
     .where(and(eq(projects.slug, path.project), alive(projects.slug)))
+    .orderBy(...(either ? [sql`CASE WHEN ${environments.slug} = ${slug} THEN 0 ELSE 1 END`] : []))
     .limit(1);
   if (row === undefined) return null;
   const { project } = row;
