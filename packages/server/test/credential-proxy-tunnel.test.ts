@@ -6,7 +6,7 @@
 // bytes. Queries, COPY both ways, LISTEN/NOTIFY, a cancel request, and a
 // handle revoked mid-session. Postgres only: the database tunnelled to is
 // the suite's own, as its restricted runtime login.
-import test, { after, before } from 'node:test';
+import test, { after, afterEach, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createHttp, type Server } from 'node:http';
 import { connect as tcp, createServer as createTcp, type AddressInfo, type Server as TcpServer, type Socket } from 'node:net';
@@ -17,13 +17,15 @@ import pg from 'pg';
 import { WebSocket } from 'ws';
 
 import { clientFor } from './api-fixture.ts';
+import { trackBackgroundTask } from './background-tasks.ts';
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { upgrade } from '../src/node-sockets.ts';
-import { checkPlugins, pluginSocket } from '../src/plugins.ts';
+import { checkPlugins, pluginSocket, type CoffrePlugin } from '../src/plugins.ts';
 import { credentialProxy, postgres, type Network } from '../src/plugins/credential-proxy.ts';
 import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
+import type { CoffreRuntime } from '../src/runtime.ts';
 import type { WorkersSocket } from '../src/workers-socket.ts';
 
 const postgresOnly = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false };
@@ -41,7 +43,7 @@ const carried: Socket[] = [];
 before(async () => {
   // coffre over HTTP, its upgrades to its plugins' sockets.
   coffre = createHttp((_, response) => response.writeHead(404).end());
-  coffre.on('upgrade', (request, socket, head) => void upgrade(runtime, request, socket, head));
+  coffre.on('upgrade', (request, socket, head) => void upgrade(tracked(runtime), request, socket, head));
   coffre.listen(0, '127.0.0.1');
   await once(coffre, 'listening');
   const at = `ws://127.0.0.1:${(coffre.address() as AddressInfo).port}`;
@@ -71,6 +73,43 @@ after(async () => {
   await new Promise<void>((resolve) => coffre.close(() => resolve()));
 });
 
+// Each case's sessions end on coffre's side before the next case: one left open would go on checking its handle.
+afterEach(async () => assert.equal(await sessionsEnded(), true, 'every session the case opened has ended'));
+
+/** Whether every connection to coffre has closed, its session ended, within five seconds. */
+async function sessionsEnded(): Promise<boolean> {
+  const open = () => new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count)));
+  for (let waited = 0; (await open()) > 0 && waited < 5000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+  return (await open()) === 0;
+}
+
+/**
+ * `runtime`, each use its plugins make the case's own work, which the next case's reset waits for: a tunnel's group
+ * checks its handle on timers of its own, and a check still under way as the case ends would write the log while the
+ * next case empties it, its TRUNCATE deadlocking with the check's append, or into that case's log.
+ */
+function tracked(runtime: CoffreRuntime): CoffreRuntime {
+  const plugins = runtime.plugins.map((plugin): CoffrePlugin => {
+    const socket = plugin.routes?.socket;
+    if (socket === undefined) return plugin;
+    return {
+      ...plugin,
+      routes: {
+        ...plugin.routes!,
+        socket: (request, context) => socket(request, {
+          ...context,
+          use: (caller, asked) => {
+            const using = context.use(caller, asked);
+            trackBackgroundTask(using);
+            return using;
+          },
+        }),
+      },
+    };
+  });
+  return { ...runtime, plugins };
+}
+
 useMcp(
   async () => {
     runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 0.2 })]);
@@ -83,6 +122,14 @@ useMcp(
     handle = (await (await route('/api/handles', { method: 'POST', headers: { authorization: `Bearer ${await sessionFor(DEV)}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: ['market/dev'] }) })).json() as { token: string }).token;
   },
 );
+
+/** The tunnel's first answer on `socket`: a socket it closes first fails the case, where waiting for data would hold it forever. */
+function answered(socket: Socket): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    socket.once('data', resolve);
+    socket.once('close', () => reject(new Error('the tunnel closed the connection before it answered')));
+  });
+}
 
 /** The app's client, on the listener, the handle its password: what `coffre run` puts in DATABASE_URL. */
 function appClient(password = handle): pg.Client {
@@ -108,7 +155,8 @@ test('queries through the tunnel run as the real login, and the session is logge
   } finally {
     await client.end();
   }
-  const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db');
+  // The session's own: the checks its group made while it was open, a fifth of a second apart here, are logged as theirs.
+  const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true);
   assert.equal(uses.length, 1);
   assert.equal(uses[0]!.metadata.tunnel, true);
   assert.deepEqual(uses[0]!.metadata.keys, ['DATABASE_URL']);
@@ -211,7 +259,7 @@ test('a handle revoked while a connection waits at the password prompt does not 
   const length = Buffer.alloc(4);
   length.writeInt32BE(startup.length + 4);
   socket.write(Buffer.concat([length, startup]));
-  await once(socket, 'data');
+  await answered(socket);
   await revoke();
   const answers: Buffer[] = [];
   socket.on('data', (chunk: Buffer) => answers.push(chunk));
@@ -228,7 +276,7 @@ test('a password message longer than a handle is refused before it is read', pos
   const length = Buffer.alloc(4);
   length.writeInt32BE(startup.length + 4);
   socket.write(Buffer.concat([length, startup]));
-  await once(socket, 'data');
+  await answered(socket);
   const head = Buffer.alloc(5);
   head.write('p', 0);
   head.writeInt32BE(0x7fffffff, 1);
@@ -344,7 +392,7 @@ test('a connection the app drops while the database has not answered leaves no s
     const length = Buffer.alloc(4);
     length.writeInt32BE(startup.length + 4);
     raw.write(Buffer.concat([length, startup]));
-    await once(raw, 'data');
+    await answered(raw);
     raw.write(message('p', cstring(handle)));
     for (let waited = 0; opened.length === 0 && waited < 2000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(opened.length, 1, 'the tunnel reached the database');
@@ -431,16 +479,21 @@ test('a check the vault never answers is a no, by its deadline: the sessions do 
   await client.connect();
   const ended = new Promise<number>((resolve) => client.once('end', () => resolve(Date.now())));
   const unwrap = deps.vault.unwrap;
-  deps.vault.unwrap = () => new Promise(() => undefined);
+  // Stalled until the case ends, then refused: a check still waiting is the case's, which the next case waits for.
+  const stalls: (() => void)[] = [];
+  deps.vault.unwrap = () => new Promise((_, reject) => stalls.push(() => reject(new Error('the case ended'))));
   const stalled = Date.now();
   try {
     assert.ok((await ended) - stalled < 600, 'within an interval and a deadline');
   } finally {
     deps.vault.unwrap = unwrap;
+    for (const stop of stalls) stop();
   }
 });
 
 test("a new group let in on a cached URL decides at once: a grant lost meanwhile ends it, not an interval later", postgresOnly, async () => {
+  // Checked every 5 seconds: an interval later is seconds on, which no load makes of at once.
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 5 })]);
   const first = appClient();
   await first.connect();
   await first.end();
@@ -454,7 +507,41 @@ test("a new group let in on a cached URL decides at once: a grant lost meanwhile
     () => new Promise<number>((resolve) => second.once('end', () => resolve(Date.now()))),
     () => Date.now(),
   );
-  assert.ok(outcome - started < 150, `${outcome - started} ms`);
+  assert.ok(outcome - started < 2500, `${outcome - started} ms`);
+});
+
+test("a check answered once its group's last session has gone arms nothing: a newer group is let in on the URL the cache holds", postgresOnly, async () => {
+  // Checked every 2 seconds, a check given as long: a group's bytes stop 4 seconds past its last good check.
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 2 })]);
+  const opened = async () => (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true).length;
+  const first = appClient();
+  await first.connect();
+  // The group's first check, held in the vault until its one session has gone, then answered yes.
+  const unwrap = deps.vault.unwrap;
+  let entered!: () => void;
+  const checking = new Promise<void>((resolve) => (entered = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  deps.vault.unwrap = async (...asked: Parameters<typeof unwrap>) => {
+    entered();
+    await released;
+    return unwrap.apply(deps.vault, asked);
+  };
+  try {
+    await checking;
+    await first.end();
+    assert.equal(await sessionsEnded(), true);
+  } finally {
+    deps.vault.unwrap = unwrap;
+    release();
+  }
+  // Past when the gone group's watchdog would have closed it, had the yes armed one, and dropped the URL from the cache.
+  await new Promise((resolve) => setTimeout(resolve, 4500));
+  const before = await opened();
+  const second = appClient();
+  await second.connect();
+  await second.end();
+  assert.equal(await opened(), before, 'let in on the URL the cache holds, opened no more');
 });
 
 test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', postgresOnly, async () => {
@@ -730,7 +817,7 @@ test("a dial through a network binding still under way when the app leaves is gi
   const length = Buffer.alloc(4);
   length.writeInt32BE(startup.length + 4);
   raw.write(Buffer.concat([length, startup]));
-  await once(raw, 'data');
+  await answered(raw);
   raw.write(message('p', cstring(handle)));
   await asked;
   raw.destroy();
