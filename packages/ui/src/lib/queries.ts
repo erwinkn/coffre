@@ -375,8 +375,10 @@ async function verifyChain(client: CoffreClient) {
   const [chain, trees] = await Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()]);
   if (chain.status === 'rejected') return chainUnknown(chain.reason);
   if (trees.status === 'fulfilled') return chainResult(chain.value, false, trees.value);
-  const unknown = chainUnknown(trees.reason);
-  return { ...chainResult(chain.value, false), ...(unknown.integrity === 'unknown' && chain.value.ok ? { treesFailed: `coffre could not check the sealed log: ${unknown.problem}` } : {}) };
+  // Whatever turned it away, a refusal included (access narrowed between the two, review r11): not checked, never "Verified".
+  const failed = chainUnknown(trees.reason);
+  const problem = failed.integrity === 'unknown' ? failed.problem : 'the request was refused (HTTP 403)';
+  return { ...chainResult(chain.value, false), ...(chain.value.ok ? { treesFailed: `coffre could not check the sealed log: ${problem}` } : {}) };
 }
 
 /** 0.15's log as its check found it (`audit.verifyTrees`): `kept` false where the instance keeps 0.14's alone. */

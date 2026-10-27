@@ -102,6 +102,19 @@ export type CheckpointStore = LogReader & {
  */
 export type Memory = { last(): Promise<string | null>; remember(record: string): Promise<void> };
 
+/**
+ * The pairs a memory's record holds outside the database, for the verifier
+ * (`VaultOptions.heldOutside`): none before the first, and a record that does
+ * not read as a pair refused, never read as none, which would drop the walk's
+ * anchor in silence (review r11).
+ */
+export function heldIn(record: string | null): PairNotes[] {
+  if (record === null) return [];
+  const notes = decodePair(record);
+  if (notes === null) throw new Error("the signer's memory does not read as a pair: the log is not checked against it");
+  return [notes];
+}
+
 /** Somewhere each signed pair goes that a database writer cannot reach: a witness, an archive (R40's plugin). */
 export type Witness = {
   name: string;

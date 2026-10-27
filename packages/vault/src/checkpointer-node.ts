@@ -1,10 +1,10 @@
 import { appendFile, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { decodePair, type PairNotes } from '@coffre/core/merkle';
+import type { PairNotes } from '@coffre/core/merkle';
 import type { Database } from '@coffre/db';
 
-import type { Alarm, Checkpointer, Memory, SealThrough, Witness } from './checkpointer.ts';
+import { heldIn, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 
@@ -127,9 +127,7 @@ export async function runCheckpointer(options: {
     checkpointer,
     sealThrough: (number, deadline) => checkpointer.sealThrough(number, deadline),
     async heldOutside() {
-      const record = await fileMemory(options.memory).last();
-      const notes = record === null ? null : decodePair(record);
-      return notes === null ? [] : [notes];
+      return heldIn(await fileMemory(options.memory).last());
     },
     async alarms(since = 0) {
       await appending;

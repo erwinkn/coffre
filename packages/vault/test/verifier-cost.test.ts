@@ -90,7 +90,11 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
         await uses(target - above, mac);
         above = target;
         const anchors = [decodePair(memory.record!)!];
-        const check = () => verifyTrees(vault, keys, { anchors });
+        const check = async () => {
+          const checked = await verifyTrees(vault, keys, { anchors });
+          assert.ok(!('busy' in checked), 'a page\'s check takes no slot');
+          return checked;
+        };
         // Warm, as an isolate serving pages is; then the median of nine.
         for (let i = 0; i < 10; i += 1) assert.deepEqual((await check()).problems, []);
         const before = statements();

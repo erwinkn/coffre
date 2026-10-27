@@ -43,7 +43,7 @@ export const TILE_RANGE = 2 ** 24;
  * a Worker's clock may run ahead of Postgres's, which `use_credential` holds a use to (it answers `ahead`, and writes
  * nothing, past it). `locate` reads a use's window through the uses' one index within it.
  */
-export const AT_SLACK_MS = 63_000;
+const AT_SLACK_MS = 63_000;
 
 type Options = {
   /** Leaves per range of the uses tree's leaf tiles (Postgres): `TILE_RANGE` unless set, smaller in tests. */

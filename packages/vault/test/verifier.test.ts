@@ -5,17 +5,17 @@
 // after its seal, numbers swapped inside the window.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import { decodePair, Edge, entryLeaf, macData, openPair, pairSigners, signPair } from '@coffre/core/merkle';
+import { decodePair, openPair } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
+import type { TreesBusy, TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { eq, sql } from 'drizzle-orm';
 
 import { genesisCall, type ChangeKeys } from '../src/changes.ts';
-import { logOrigin, type SealThrough } from '../src/checkpointer.ts';
+import type { SealThrough } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { noEdits, ROLES_REF, sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
@@ -26,7 +26,7 @@ import { credentialObject, environmentObject, secretObject } from '../src/object
 import * as store from '../src/store.ts';
 import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
-import { verifierKeys, verifyTrees } from '../src/verifier.ts';
+import { verifierKeys } from '../src/verifier.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
@@ -54,18 +54,24 @@ beforeEach(async () => {
 
 type Checked = Extract<TreeVerification, { kept: true }>;
 
+/** A check's verdict, which no test here finds refused as busy. */
+function checkedOf(answer: TreeVerification | TreesBusy): Checked {
+  assert.ok(!('busy' in answer) && answer.kept, JSON.stringify(answer));
+  return answer;
+}
+
 /**
  * A vault keeping 0.15's log, each change sealed by a checkpointer of its
  * own before it answers, unless `hold` keeps the next ones in the window
  * (sealed at the next `tick`). A member, Ada, with a grant on `dev`; Bo, a service account, granted by `grant`, her
  * credential and a key there, each sealed; `walks.whole` entries a whole walk.
  */
-async function instance(walks: VaultOptions['walks'] = {}, bulkLimit = { count: 1000, windowMs: 15 * 60_000 }) {
+async function instance(walks: VaultOptions['walks'] = {}) {
   const config: ResolvedVaultConfig = {
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')),
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
-    bulkLimit,
+    bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
   };
   const seed = config.signingKeys[0]!;
   const memory = variableMemory();
@@ -131,8 +137,7 @@ async function instance(walks: VaultOptions['walks'] = {}, bulkLimit = { count: 
   };
   /** A page's check, or (`whole`) the walk from the first entry. */
   const verify = async (input: { whole?: boolean } = {}): Promise<Checked> => {
-    const checked = await vault.verifyTrees!(input);
-    assert.ok(checked.kept);
+    const checked = checkedOf(await vault.verifyTrees!(input));
     assert.equal(checked.whole, input.whole === true);
     return checked;
   };
@@ -312,17 +317,6 @@ test('a change\'s entry deleted before its seal: the change fails, and its row c
   assert.deepEqual(checked.problems, [`the principal ${BO}: its rows carry another change's seal than the newest: put back, or written around the vault`]);
 });
 
-test('a use\'s entry deleted before its seal leaves its bulk row with no use the log has: the bulk audit names it', async () => {
-  const w = await instance();
-  const outcome = await w.use(await w.key());
-  assert.ok(outcome.ok);
-  await run(db.owner, sql`DELETE FROM log_uses WHERE number = ${BigInt(outcome.number)}`);
-  await w.cp.tick();
-  const checked = await w.whole();
-  assert.ok(!checked.ok);
-  assert.ok(checked.problems.some((p) => p.startsWith(`the bulk cap of ${ADA}: its row for `) && p.endsWith(', the log none')), checked.problems.join('\n'));
-});
-
 test('numbers swapped inside the window: two changes of one object, replayed out of order, fail their seals', async () => {
   // Grants at two places: each change's seal is over the member with the grants before it, so the order shows. Two
   // grants at one place would replay to the same objects either way; the row audit then names the row (its seal is
@@ -343,15 +337,13 @@ test('numbers swapped inside the window: two changes of one object, replayed out
   assert.ok(checked.problems.some((p) => p.startsWith(`${b!.number}: its seal is not the vault's over principal ${BO}`)), checked.problems.join('\n'));
 });
 
-test('a forged use is named at its entry by the whole walk, and the bulk row it moved with it', async () => {
+test('a forged use is named at its entry by the whole walk', async () => {
   const w = await instance();
   const outcome = await w.use();
   assert.ok(outcome.ok);
   await run(db.owner, sql`UPDATE log_uses SET mac = ${randomBytes(16)} WHERE number = ${BigInt(outcome.number)}`);
-  const checked = await w.whole();
-  // Not the vault's, so not replayed: the bulk row it moved is one the log does not.
-  assert.equal(checked.problems[0], `${outcome.number}: its MAC does not hold`);
-  assert.match(checked.problems[1]!, new RegExp(`^the bulk cap of ${ADA}: its row for .* says \\d+, the log none$`));
+  // The bulk row it moved is T138's to hold to the log.
+  assert.deepEqual((await w.whole()).problems, [`${outcome.number}: its MAC does not hold`]);
 });
 
 test('review r1: grants come back from the rows in any order, and a member revoked and granted again still verifies', async () => {
@@ -413,13 +405,13 @@ test('review r4: a check that lands between the signer remembering a pair and th
   }
 });
 
-test('a retention change in the log is the log\'s own: not replayed, and the uses below its cut not walked, nor their bulk rows held to the replay', async () => {
+test('a retention change in the log is the log\'s own: not replayed, and the uses below its cut not walked', async () => {
   const w = await instance();
   for (let i = 0; i < 3; i += 1) assert.ok((await w.use(await w.key())).ok);
   await w.cp.tick();
   // A retention change, sealed, as retention writes it (retention.ts), for a day ten days ago. Postgres's log_retention
   // holds its cut to the first pair past the day's end, the first of this log; SQLite's checks nothing, so it cuts at
-  // the newest, and the uses below it are dropped, their bulk rows left.
+  // the newest, and the uses below it are dropped.
   const store = logStore(db.vault);
   const day = dayOf(Date.now() - 10 * DAY_MS);
   const cut = (ENGINE === 'postgres' ? await store.cutAt(Date.parse(`${day}T00:00:00Z`) + DAY_MS) : await store.newest())!;
@@ -452,84 +444,7 @@ test('review r9: the whole walk\'s bound counts the entries above the newest pai
   const { sealed } = await w.whole();
   for (const secret of fresh) assert.ok((await w.use(secret)).ok);
   // Room for every sealed entry and two of the three above: stopped, not walked past its bound.
-  const short = await (await w.reopened({ whole: sealed + 2 })).verifyTrees!({ whole: true });
-  assert.ok(short.kept && !short.ok && short.tooLarge !== null && short.problems.length === 0, JSON.stringify(short));
-  const room = await (await w.reopened({ whole: sealed + 3 })).verifyTrees!({ whole: true });
-  assert.ok(room.kept);
-  clean(room);
-});
-
-test('review r9: after retention\'s cut, a principal\'s bulk rows wait until the replay knows its cap; one with no use since is held to them', { skip: ENGINE === 'postgres' ? "Postgres's log_retention cuts only at a day's end: SQLite's checks nothing" : false }, async () => {
-  // A cap of one key: the use before the cut fills it, and the live cap refuses the next key, which the replay,
-  // starting from nothing at the cut, admits.
-  const w = await instance({}, { count: 1, windowMs: 15 * 60_000 });
-  assert.ok((await w.use()).ok);
-  await w.cp.tick();
-  const store = logStore(db.vault);
-  const cut = (await store.newest())!;
-  const pair = (await openPair(cut.notes, (await verifierKeys([w.seed])).verifiers))!;
-  const at = Date.now();
-  const day = dayOf(at - 10 * DAY_MS);
-  // Its cut dated two minutes back, so that the next use lies past the cut's slack, as a day's end, hours back, leaves
-  // the morning's uses: a use cannot be stamped in the past to stand in for it.
-  const [requestId, payload] = [`retention:${day}`, retentionPayload(day, { upto: pair.upto, at: pair.at - 120_000, uses: { size: pair.uses.size, root: pair.uses.root } })];
-  const change = await store.appendRetention({ requestId, at, payload, mac: entryMac(w.keys.mac, { tree: 'changes', row: { at, requestId, object: RETENTION_OBJECT, actor: RETENTION_ACTOR, payload, seal: null } }) });
-  await w.cp.sealThrough(change);
-  await run(db.owner, sql`DELETE FROM log_uses WHERE number <= ${pair.upto}`);
-  const refused = await w.use(await w.key());
-  assert.ok(!refused.ok, JSON.stringify(refused));
-  clean(await w.whole());
-  // Bo has used nothing since the cut: a row of his past every use below it (63 s of slack) is the replay's to judge.
-  const { logBulk } = tablesOf(db.owner);
-  const planted = randomUUID();
-  await db.owner.insert(logBulk).values({ principal: BO, secret: planted, last: pair.at + 120_000 });
-  assert.deepEqual((await w.whole()).problems.map((p) => p.replace(/ says \d+,/, ' says …,')), [`the bulk cap of ${BO}: its row for ${planted} says …, the log none`]);
-});
-
-test('review r10: a window widened after prune_bulk went by under the shorter one: the principal\'s rows wait until its cap is known', async () => {
-  // A cap of one key in 15 minutes, a use, and the log as it would stand had it all happened two hours ago: every
-  // entry restamped and MAC'd again, both trees signed again over them, the bulk row as old.
-  const w = await instance({}, { count: 1, windowMs: 15 * 60_000 });
-  const other = await w.key();
-  assert.ok((await w.use()).ok);
-  await w.cp.tick();
-  const log = logStore(db.vault);
-  const upto = w.cp.pair.pair.upto;
-  const entries = await log.entries(0n, upto, { floor: 0 });
-  const shift = 2 * 3_600_000;
-  for (const entry of entries) {
-    const columns = [...entry.columns];
-    entry.at -= shift;
-    columns[0] = BigInt(entry.at);
-    const mac = createHmac('sha256', w.keys.mac).update(macData(entry.tree, columns.slice(0, -1))).digest().subarray(0, 16);
-    columns[columns.length - 1] = mac;
-    entry.columns = columns;
-    await run(db.owner, sql`UPDATE ${sql.raw(entry.tree === 'changes' ? 'log_changes' : 'log_uses')} SET at = ${entry.at}, mac = ${mac} WHERE number = ${entry.number}`);
-  }
-  await run(db.owner, sql`UPDATE log_bulk SET last = last - ${shift}`);
-  for (const table of ['log_tiles', 'log_checkpoints']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
-  const signers = await pairSigners(await logOrigin(w.seed), w.seed);
-  const edges = { changes: Edge.empty(), uses: Edge.empty() };
-  const heads = () => ({ changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } });
-  await log.write({ upto: 0n, notes: (await signPair(signers, 0n, 0, heads())).notes }, { changes: [], uses: [] });
-  const leaves = (tree: 'changes' | 'uses') => entries.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns));
-  const tiles = { changes: edges.changes.append(leaves('changes')), uses: edges.uses.append(leaves('uses')) };
-  const pair = await signPair(signers, upto, Date.now() - shift, heads(), Date.now() - shift - 3000);
-  await log.write({ upto, notes: pair.notes }, tiles);
-  const keys = await verifierKeys([w.seed]);
-  clean(await verifyTrees(db.vault, keys, { whole: true, anchors: [pair.notes] }));
-  // Upkeep prunes the row, as the 15-minute window lets it; then the vault starts with a window of a day, and logs it.
-  assert.equal(await log.pruneBulk(100), 1);
-  clean(await verifyTrees(db.vault, keys, { whole: true, anchors: [pair.notes] }));
-  const cp = await openLogCheckpointer({ store: log, seed: w.seed, memory: variableMemory() });
-  const widened = speaking(await openLocalVault(db.vault, { ...w.config, bulkLimit: { count: 1, windowMs: 86_400_000 } }, { log: '0.15', sealThrough: (n) => cp.sealThrough(n) }, async () => {}, hot));
-  const checked = await widened.verifyTrees!({ whole: true });
-  assert.ok(checked.kept);
-  clean(checked);
-  // The live cap, the old row pruned, admits another key; the replay, which still holds it, refuses: neither is judged.
-  const at = Date.now();
-  assert.ok((await widened.use({ credential: w.credential, secretId: other, place: null, purpose: 'run', requestId: newRequestId(), at, deadline: at + 3000 })).ok);
-  const after = await widened.verifyTrees!({ whole: true });
-  assert.ok(after.kept);
-  clean(after);
+  const short = checkedOf(await (await w.reopened({ whole: sealed + 2 })).verifyTrees!({ whole: true }));
+  assert.ok(!short.ok && short.tooLarge !== null && short.problems.length === 0, JSON.stringify(short));
+  clean(checkedOf(await (await w.reopened({ whole: sealed + 3 })).verifyTrees!({ whole: true })));
 });

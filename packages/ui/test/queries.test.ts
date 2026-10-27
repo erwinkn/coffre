@@ -6,6 +6,7 @@ import { dehydrate, hydrate, QueryObserver, type QueryClient } from '@tanstack/r
 
 import {
   affects,
+  chainResult,
   createQueryClient,
   FRESH_MS,
   keys,
@@ -216,6 +217,12 @@ test('the audit page loads its entries and its verification together, and a chec
   const failing = await load(intact, Promise.reject(new Error('connection refused')));
   assert.equal(failing.chain?.integrity, 'intact');
   assert.equal((failing.chain as { treesFailed: unknown }).treesFailed, 'coffre could not check the sealed log: the request never got an answer');
+  // Refused, as when access narrows between the two checks (review r11): not checked either, and no earlier walk's seal over it.
+  const refusedTrees = await load(intact, Promise.reject(new CoffreError(403, 'forbidden', 'forbidden')));
+  assert.equal(refusedTrees.chain?.integrity, 'intact');
+  assert.equal((refusedTrees.chain as { treesFailed: unknown }).treesFailed, 'coffre could not check the sealed log: the request was refused (HTTP 403)');
+  const walked = { ...chainResult(await intact(), true), trees: { checkpoint: null } } as ChainResult;
+  assert.equal(shownChain(refusedTrees.chain!, walked), refusedTrees.chain);
   assert.deepEqual(put.chain, { integrity: 'broken', through: 9, failedAtSeq: null, author: 'vault', reason: `the sealed log: ${problems[0]} (and 1 more)` });
 
   // A vault that cannot be reached, and a refusal: each the badge's verdict, the entries still there.

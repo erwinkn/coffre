@@ -62,9 +62,10 @@ export function AuditPage() {
     } catch (error) {
       verdict = chainUnknown(error);
     }
-    // A walk that could not run says nothing of the log: the verdict from the newest checkpoint stands.
+    // A walk that could not run, or was refused, says nothing of the log: the verdict from the newest checkpoint stands.
     if (verdict.integrity === 'unknown') setWalkFailed(verdict.problem);
-    else if (verdict.integrity !== 'owners-only') setWhole(verdict);
+    else if (verdict.integrity === 'owners-only') setWalkFailed('the request was refused (HTTP 403)');
+    else setWhole(verdict);
     setWalked(null);
   };
   const { decision, actorId } = search;

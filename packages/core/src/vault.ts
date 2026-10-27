@@ -244,13 +244,20 @@ export interface Vault {
    * the replay, all in this one call, batched, kept nowhere. With 0.14's
    * log alone, `kept` false; a vault older than 0.15 has none.
    */
-  verifyTrees?(input: TreeVerificationInput): Promise<TreeVerification>;
+  verifyTrees?(input: TreeVerificationInput): Promise<TreeVerification | TreesBusy>;
 }
 
 export type TreeVerificationInput = {
   /** The walk from the first entry, with the replay and the row audit, rather than a page's check. */
   whole?: boolean;
 };
+
+/**
+ * A whole walk not begun: as many as the instance runs at once already are
+ * (two), each holding a snapshot for seconds. The app answers 503, with
+ * `Retry-After`.
+ */
+export type TreesBusy = { busy: true; retryAfter: number };
 
 /**
  * 0.15's log as a check found it. `problems` names what does not hold, each

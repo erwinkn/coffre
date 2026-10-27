@@ -956,17 +956,27 @@ export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
   return found;
 }
 
-/** The bulk cap's rows, every principal's: `last` by key. */
-export async function bulkRows(db: Queryable): Promise<Map<string, Map<string, number>>> {
-  const { logBulk } = tablesOf(db);
-  const rows = await db.select({ principal: logBulk.principal, secret: logBulk.secret, last: logBulk.last }).from(logBulk);
-  const by = new Map<string, Map<string, number>>();
-  for (const { principal, secret, last } of rows) {
-    const held = by.get(principal) ?? new Map<string, number>();
-    held.set(secret, Number(last));
-    by.set(principal, held);
-  }
-  return by;
+/**
+ * Whole walks of 0.15's log an instance runs at once, at most (review r11):
+ * each holds a snapshot, and a call of the vault, for seconds. One more is
+ * refused at once (`TreesBusy`), never queued.
+ */
+export const WHOLE_WALKS = 2;
+
+/** The advisory lock of the whole walks' slots: one of its own, beside the fence's (1668244070). */
+const WALKS_LOCK = 1668244071;
+
+/**
+ * Whether a whole walk has a slot, for the rest of `tx`: on Postgres, the
+ * first of `WHOLE_WALKS` advisory locks free, tried and never waited on, so
+ * a walk holds no connection in a lock wait (R44) and lets go at its end.
+ * SQLite's transactions take their turns on its one file already.
+ */
+export async function walkSlot(tx: Queryable): Promise<boolean> {
+  if (engineOf(tx) === 'sqlite') return true;
+  const tries = Array.from({ length: WHOLE_WALKS }, (_, i) => sql`WHEN pg_try_advisory_xact_lock(${WALKS_LOCK}, ${i}) THEN true`);
+  const [row] = await rowsOf<{ got: boolean }>(tx, sql`SELECT CASE ${sql.join(tries, sql` `)} ELSE false END AS got`);
+  return row?.got === true;
 }
 
 /**

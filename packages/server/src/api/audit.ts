@@ -23,7 +23,7 @@ import {
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
-import { badRequest, forbidden, notFound } from './errors.ts';
+import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
 
@@ -538,6 +538,8 @@ export async function verifyAuditTrees(ctx: ApiContext, query: { whole?: '1' } =
   }
   if (ctx.vault.verifyTrees === undefined) return { kept: false };
   const verified = await ctx.vault.verifyTrees(query.whole === '1' ? { whole: true } : {});
+  // Whole walks under way to the bound: refused at once, to ask again (review r11).
+  if ('busy' in verified) throw new ApiError('unavailable', 'the whole log is being walked as many times as it may be at once: ask again shortly', undefined, String(verified.retryAfter));
   return verified.kept && verified.problems.length > 0 ? { ...verified, problems: await namedObjects(ctx, verified.problems) } : verified;
 }
 

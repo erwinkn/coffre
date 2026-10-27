@@ -103,6 +103,7 @@ import {
   type Wrapped,
   type Vault,
   type Via,
+  type TreesBusy,
   type TreeVerification,
   type TreeVerificationInput,
   type VerifyLogInput,
@@ -3074,13 +3075,15 @@ class VaultService implements Vault {
    * row, in this call, no further than `walks.whole` entries. With 0.14's
    * log alone, there is none to check.
    */
-  async verifyTrees(input: TreeVerificationInput = {}): Promise<TreeVerification> {
+  async verifyTrees(input: TreeVerificationInput = {}): Promise<TreeVerification | TreesBusy> {
     await this.#settled();
     if (this.#prepared.log015 === null) return { kept: false };
     const whole = input?.whole;
     if (whole !== undefined && typeof whole !== 'boolean') throw new Error('verifyTrees takes `whole`, true or false');
+    const walked = await this.#walkTrees({ whole: whole === true, limit: this.#prepared.options.walks.whole });
+    if ('busy' in walked) return walked;
     // What crosses to the app: the verdict, never the retry's signal.
-    const { behind: _behind, ...verdict } = await this.#walkTrees({ whole: whole === true, limit: this.#prepared.options.walks.whole });
+    const { behind: _behind, ...verdict } = walked;
     return verdict;
   }
 
@@ -3091,12 +3094,12 @@ class VaultService implements Vault {
    * is checked again a tick later (review r4). A rollback is still behind
    * then.
    */
-  async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Walked> {
+  async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Walked | TreesBusy> {
     const anchors = await this.#prepared.log015!.heldOutside();
     const keys = await this.#verifierKeys();
     const walk = () => verifyTrees(this.#db, keys, { ...options, anchors });
     const first = await walk();
-    if (!first.behind) return first;
+    if ('busy' in first || !first.behind) return first;
     await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
     return walk();
   }

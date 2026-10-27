@@ -6,7 +6,8 @@ import { test } from 'node:test';
 
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 
-import { Checkpointer, FRESH_MS, localWitness, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, FRESH_MS, heldIn, localWitness, type Witness } from '../src/checkpointer.ts';
+import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
 
 async function setup(seed = 1) {
@@ -812,4 +813,47 @@ test('a change waits for the witness, then answers unwitnessed at the deadline, 
   const after = asked;
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(asked, after);
+});
+
+test('review r11: a walk under `limit` reads no further than it, however many entries one window holds', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  // One window of 10,000 entries, as a writer who deleted the checkpoints between would leave a large log.
+  for (let i = 0; i < 10_000; i += 1) store.append('uses', `u-${i}`);
+  assert.ok((await cp.tick()).signed);
+  let checked = 0;
+  const count = () => (checked += 1, null);
+  const short = await verifyLog(store, { verifiers: k.verifiers, limit: 3, check: count });
+  assert.deepEqual([short.done, short.sealed, checked], [false, 0, 0], 'stopped at the pair before the window, none of it read');
+  // With room for the window, walked whole; and the entries above the newest pair count against it too.
+  const whole = await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 });
+  assert.ok(whole.ok && whole.done && whole.sealed === 10_000, JSON.stringify(whole));
+  for (let i = 0; i < 2; i += 1) store.append('uses', `v-${i}`);
+  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
+  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_003 })).done);
+});
+
+test('review r11: a signer\'s memory that does not read as a pair is refused, never held as none; none yet is none', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  assert.deepEqual(heldIn(null), []);
+  assert.deepEqual(heldIn(memory.record), [decodePair(memory.record!)]);
+  assert.throws(() => heldIn('{ damaged pair'), /the signer's memory does not read as a pair/);
+  // The Durable Object's answer, read from its storage: refused, so a walk is not checked against nothing.
+  const Object_ = checkpointerObject(() => {
+    throw new Error('the memory is read without the database');
+  });
+  const held = (record: string | null) => {
+    const object = new Object_({ storage: { get: async () => record ?? undefined } } as never, {} as never);
+    return durableHeldOutside({ idFromName: () => 'checkpointer', get: () => ({ fetch: (request: Request) => object.fetch(request) }) } as never)();
+  };
+  assert.deepEqual(await held(memory.record), [decodePair(memory.record!)]);
+  assert.deepEqual(await held(null), []);
+  await assert.rejects(held('{ damaged pair'), /the signer's memory does not read as a pair/);
+  // What it guards: a log rolled back to its start verifies without the anchor, never with it.
+  const remembered = decodePair(memory.record!)!;
+  store.rollBack(0n);
+  assert.ok((await verify(store, k)).ok);
+  assert.ok(!(await verify(store, k, { anchors: [remembered] })).ok);
 });

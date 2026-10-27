@@ -11,10 +11,10 @@ import { randomBytes } from 'node:crypto';
 import { tablesOf } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
-import { openVaultDatabase } from './db/engine.ts';
+import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 
 const db = await openTestDatabase();
 const scratch = mkdtempSync(join(tmpdir(), 'coffre-trees-'));
@@ -80,4 +80,37 @@ test("GET /audit/trees: 0.15's log verified, then a row changed around the app n
   // Someone who reads part of the log cannot check it whole.
   await root.members.add('user:ada@acme.example', {});
   await assert.rejects(clientFor(deps, 'ada@acme.example').audit.verifyTrees(), (error: { status?: number }) => error.status === 403);
+});
+
+test('review r11: whole walks two at once, a third refused at once with Retry-After; a page\'s check never', { skip: TEST_ENGINE === 'postgres' ? false : "the slots are Postgres's advisory locks: SQLite's walks take turns on its file" }, async () => {
+  const deps = await sealedInstance();
+  const root = clientFor(deps, 'root@acme.example');
+  await root.me();
+  // Two walks under way, as another session holding both slots stands for them, to the end of its transaction.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const holds = new Promise<void>((resolve) => (holding = resolve));
+  const walks = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244071, 0), pg_advisory_xact_lock(1668244071, 1)`);
+    holding();
+    await held;
+  });
+  await holds;
+  try {
+    const began = Date.now();
+    await assert.rejects(root.audit.verifyTrees({ whole: true }), (error: { status?: number; code?: string; retryAfter?: string }) => {
+      assert.deepEqual([error.status, error.code, error.retryAfter], [503, 'unavailable', '5']);
+      return true;
+    });
+    assert.ok(Date.now() - began < 2000, 'refused at once, never queued');
+    const page = await root.audit.verifyTrees();
+    assert.ok(page.kept && page.ok, JSON.stringify(page));
+  } finally {
+    release();
+    await walks;
+  }
+  // Their end lets the next one in.
+  const whole = await root.audit.verifyTrees({ whole: true });
+  assert.ok(whole.kept && whole.ok, JSON.stringify(whole));
 });

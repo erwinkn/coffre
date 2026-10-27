@@ -249,6 +249,10 @@ async function walk(
       previous = e.number > previous ? e.number : previous;
     }
   };
+  // Under `limit`, no read goes past it: what is left of it, and one entry more to tell a window that would.
+  const bound = opts.limit !== undefined && Number.isFinite(opts.limit) ? opts.limit : undefined;
+  const room = () => (bound === undefined ? undefined : Math.max(bound - verdict.sealed, 0) + 1);
+  const bounded = (limit: number | undefined) => ({ floor, ...(limit === undefined ? {} : { limit }) });
   for (let rows = await reader.pairs(start.pair.upto, PAGE); ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
     const stops: Stop[] = [];
     for (const row of rows) {
@@ -271,10 +275,19 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
-      // From the floor the pair at `cursor` signed, never its row's (review r9).
-      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, { floor })).filter((e) => !dropped(e));
+      // From the floor the pair at `cursor` signed, never its row's (review r9); and no further than the bound, which a
+      // window of millions of entries, its checkpoints between deleted, would pass in one read (review r11). Read so,
+      // the entries are whole through the last one read, and a window past it ends the walk at the pair before.
+      const limit = room();
+      const read = await reader.entries(cursor, stops.at(-1)!.pair.upto, bounded(limit));
+      const through = limit !== undefined && read.length >= limit ? read.at(-1)!.number : null;
+      const entries = read.filter((e) => !dropped(e));
       let at = 0;
       for (const stop of stops) {
+        if (through !== null && stop.pair.upto >= through) {
+          verdict.done = false;
+          return done(last.notes);
+        }
         const window: LogEntry[] = [];
         while (at < entries.length && entries[at]!.number <= stop.pair.upto) window.push(entries[at++]!);
         walkEntries(window);
@@ -308,7 +321,7 @@ async function walk(
           verdict.checkpoints += 1;
           last = stop;
           // A walk bounded by `limit` ends at a stored pair, short of the present: its caller says it stopped there.
-          if (opts.limit !== undefined && verdict.sealed >= opts.limit) {
+          if (bound !== undefined && verdict.sealed >= bound) {
             verdict.done = false;
             return done(last.notes);
           }
@@ -318,13 +331,13 @@ async function walk(
     if (final) break;
   }
   // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9).
-  // Under `limit`, the entries left in it, and one more to tell a walk that would pass it.
-  const left = opts.limit === undefined || !Number.isFinite(opts.limit) ? undefined : Math.max(opts.limit - verdict.sealed, 0);
-  const unsealed = (await reader.entries(cursor, MAX_NUMBER, { floor, ...(left === undefined ? {} : { limit: left + 1 }) })).filter((e) => !dropped(e));
-  if (left !== undefined && unsealed.length > left) {
+  const limit = room();
+  const read = await reader.entries(cursor, MAX_NUMBER, bounded(limit));
+  if (limit !== undefined && read.length >= limit) {
     verdict.done = false;
     return done(last.notes);
   }
+  const unsealed = read.filter((e) => !dropped(e));
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);

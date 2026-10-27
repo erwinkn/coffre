@@ -117,6 +117,18 @@ test('reads with a browser cookie need no origin: another site cannot see the an
   assert.equal(((await response.json()) as { principal: { id: string } }).principal.id, DEV);
 });
 
+test('review r11: the walk of the whole sealed log, asked with a browser cookie, must come from coffre itself', async () => {
+  const runtime = runtimeFor(own);
+  const walk = (headers: Record<string, string>) => fetchApi(new Request(`${ORIGIN}/api/audit/trees?whole=1`, { headers }), runtime);
+  const cookie = `${SESSION}=${ROOT}`;
+  for (const headers of [{ cookie, 'sec-fetch-site': 'cross-site' }, { cookie, origin: 'https://evil.test' }, { cookie }] as Record<string, string>[]) {
+    assert.deepEqual(await refusal(await walk(headers)), { status: 403, error: 'cross_origin' }, JSON.stringify(headers));
+  }
+  // From coffre's own page, or with a token in a header, as the CLI asks: answered.
+  assert.equal((await walk({ cookie, 'sec-fetch-site': 'same-origin' })).status, 200);
+  assert.equal((await walk({ authorization: `Bearer ${ROOT}`, 'sec-fetch-site': 'cross-site' })).status, 200);
+});
+
 test('tokens in headers are not checked for origin: the CLI and service tokens send none', async () => {
   const access = await fetchApi(createProject('market', { 'cf-access-jwt-assertion': ROOT }), runtimeFor(cloudflare));
   assert.equal(access.status, 200);
