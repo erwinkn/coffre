@@ -79,7 +79,11 @@ function drawChange(tc: hegel.TestCase): [Ref, Op] {
         owner: parentId !== null && tc.draw(gs.booleans()) ? pick(tc, PRINCIPALS.slice(0, 2)) : null, parentId, protected: tc.draw(gs.booleans()),
       }];
     }
-    case 11: return [{ kind: 'environment', id: pick(tc, ENVIRONMENTS) }, tc.draw(gs.booleans()) ? { op: 'environment.delete' } : { op: 'environment.protect', protected: tc.draw(gs.booleans()) }];
+    case 11: {
+      const ops: Op[] = [{ op: 'environment.delete' }, { op: 'environment.protect', protected: tc.draw(gs.booleans()) }, { op: 'environment.rename', slug: pick(tc, ['dev', 'prod', 'staging']) },
+        { op: 'environment.archive', archived: tc.draw(gs.booleans()) }];
+      return [{ kind: 'environment', id: pick(tc, ENVIRONMENTS) }, pick(tc, ops)];
+    }
     case 12: return [ROLES_REF, {
       op: 'role.define', table: 'roles', role: pick(tc, ROLE_NAMES.filter((name) => name !== 'owner')),
       definition: tc.draw(gs.booleans()) ? null : { name: 'Edited', description: '', permissions: ['secret.read', 'secret.use'], protected: tc.draw(gs.booleans()) ? ['secret.use'] : [] },

@@ -334,7 +334,8 @@ export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source'
  *    (HotPathOne's `StaleFirst`, `TamperVisible`).
  * 2. **The credential and the key:** missing, revoked or ended at the
  *    request's time; a key that is no more, a reference whose source is
- *    gone (`ended`), a reference to a reference, and a place it is read
+ *    gone (`ended`), a reference to a reference, a value with no wrapped
+ *    key (a plain one, which the vault never opens), and a place it is read
  *    through that 0.14's `throughOk` refuses (`bad_claim`): one but a live,
  *    unarchived environment of the key's project other than the key's own.
  *    Permission is decided at the key's own environment (a reference's
@@ -370,6 +371,8 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
   if (value === null) return 'ended';
   // A reference reads a key's own value: one to another reference is none the change path makes.
   if (value.source !== null && secret.source !== null) return 'bad_claim';
+  // A use opens a wrapped key: a plain value, which 0.14's vault never decides either, is the app's to hand back.
+  if (value.key === null) return 'bad_claim';
   const rows = new Map(ids.flatMap((id) => {
     const row = view.environments.get(id)!.row;
     return row === null ? [] : [[id, row] as const];

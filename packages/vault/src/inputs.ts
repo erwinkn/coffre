@@ -210,6 +210,7 @@ export type Op =
   | { op: 'secret.delete' }
   | { op: 'environment.create'; projectId: string; slug: string; owner: string | null; parentId: string | null; protected: boolean }
   | { op: 'environment.protect'; protected: boolean }
+  | { op: 'environment.rename'; slug: string }
   | { op: 'environment.archive'; archived: boolean }
   | { op: 'environment.delete' }
   | { op: 'role.define'; table: 'roles' | 'instanceRoles'; role: string; definition: RoleDefinition | null }
@@ -237,8 +238,12 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
   if ((ref.kind === 'roles' || ref.kind === 'policy') && ref.id !== ROLES_REF.id) return undefined;
   switch (op.op) {
     case 'genesis': {
+      // A whole object, held to what the ops that make one hold it to.
       const id = refOf(op.value);
-      return id.kind === ref.kind && id.id === ref.id ? op.value : undefined;
+      if (id.kind !== ref.kind || id.id !== ref.id) return undefined;
+      if (op.value.kind === 'policy' && !allowedLimit(op.value.bulk)) return undefined;
+      if (op.value.kind === 'credential' && !callerFits(op.value)) return undefined;
+      return op.value;
     }
     case 'member.add':
       return created('principal') ? { kind: 'principal', principal: ref.id, status: 'active', role: op.role, scope: op.scope, grants: [] } : undefined;
@@ -285,10 +290,12 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       return created('environment')
         ? { kind: 'environment', id: ref.id, projectId: op.projectId, slug: op.slug, owner: op.owner, parentId: op.parentId, protected: op.protected, deleted: false, archived: false }
         : undefined;
-    case 'environment.protect': case 'environment.archive': case 'environment.delete': {
+    case 'environment.protect': case 'environment.rename': case 'environment.archive': case 'environment.delete': {
       const environment = of('environment');
       if (environment === null || environment.deleted) return undefined;
       if (op.op === 'environment.protect') return { ...environment, protected: op.protected };
+      // A scoped role's filters read the slug: a rename is a change like any other (0.14's `environment.update`).
+      if (op.op === 'environment.rename') return { ...environment, slug: op.slug };
       return op.op === 'environment.archive' ? { ...environment, archived: op.archived } : { ...environment, deleted: true };
     }
     case 'role.define': {

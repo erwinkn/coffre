@@ -9,7 +9,7 @@ import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
 import { limitOp, applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
 import { purposeCode, purposeOf, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
 import type { UseCode } from '../src/decide.ts';
-import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World } from './world.ts';
+import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World, WRAPPED } from './world.ts';
 
 // The 0.15 decision on sealed inputs, and its replay (docs/design/sealed-inputs.md). Every
 // case holds the replay of the log to the live answer too.
@@ -372,4 +372,34 @@ test("every change to the policy carries the whole policy as its value, at the p
   assert.deepEqual(JSON.parse(JSON.stringify(op)), { op: 'bulk.limit', value: { kind: 'policy', bulk: { count: 7, windowMs: 90_000 } } });
   const genesis = { op: 'genesis' as const, value: { kind: 'policy' as const, bulk: { count: 7, windowMs: 90_000 } } };
   assert.deepEqual(applyOp(null, { kind: 'policy', id: 'instance' }, genesis), applyOp(null, { kind: 'policy', id: 'instance' }, op));
+});
+
+test('a rename reaches the log: a Developer scoped to staging loses the environment renamed prod, live and replayed alike', () => {
+  const w = market({ count: 100, windowMs: 60_000 });
+  const STAGING = '00000000-0000-4000-8000-0000000000d5';
+  const SCOPED = 'user:cy@acme.example';
+  w.change({ kind: 'environment', id: STAGING }, { op: 'environment.create', projectId: '00000000-0000-4000-8000-000000000001', slug: 'staging', owner: null, parentId: null, protected: false });
+  w.change({ kind: 'secret', id: key(20) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: STAGING, version: 'v', nature: 'secret', key: WRAPPED, source: null });
+  w.change({ kind: 'principal', id: SCOPED }, { op: 'member.add', role: 'developer', scope: { projects: 'all', environments: { only: ['staging'] } } });
+  w.change({ kind: 'credential', id: credential(5) }, { op: 'credential.issue', principal: SCOPED, caller: 'person', scope: null, expiresAt: null });
+  assert.deepEqual(liveAndReplayed(w, [ask(5, 20)]), [null]);
+  assert.equal(w.change({ kind: 'environment', id: STAGING }, { op: 'environment.rename', slug: 'prod' }), true);
+  assert.deepEqual(liveAndReplayed(w, [ask(5, 20)]), ['no_grant']);
+  w.change({ kind: 'environment', id: STAGING }, { op: 'environment.delete' });
+  assert.equal(w.change({ kind: 'environment', id: STAGING }, { op: 'environment.rename', slug: 'staging' }), false);
+});
+
+test('a plain value, or any with no wrapped key, is no use: the app hands it back, as 0.14\'s vault never decides one', () => {
+  const w = market({ count: 100, windowMs: 60_000 });
+  w.change({ kind: 'secret', id: key(21) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, version: 'p', nature: 'plain', key: null, source: null });
+  w.change({ kind: 'secret', id: key(22) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: FORK, version: 'r', nature: 'secret', key: null, source: key(21) });
+  assert.deepEqual(liveAndReplayed(w, [ask(1, 21), ask(1, 22)]), ['bad_claim', 'bad_claim']);
+});
+
+test('genesis is held to what the ops that make an object hold it to', () => {
+  assert.equal(applyOp(null, { kind: 'policy', id: 'instance' }, { op: 'genesis', value: { kind: 'policy', bulk: { count: 0, windowMs: 60_000 } } }), undefined);
+  const ci = { kind: 'credential', id: 'c', principal: CI, caller: 'person', scope: null, expiresAt: null, revoked: false } as const;
+  assert.equal(applyOp(null, { kind: 'credential', id: 'c' }, { op: 'genesis', value: ci }), undefined);
+  assert.deepEqual(applyOp(null, { kind: 'credential', id: 'c' }, { op: 'genesis', value: { ...ci, caller: 'bearer' } }), { ...ci, caller: 'bearer' });
+  assert.equal(applyOp(null, { kind: 'principal', id: BO }, { op: 'genesis', value: { kind: 'principal', principal: ADA, status: 'active', role: 'member', scope: EVERYWHERE, grants: [] } }), undefined);
 });

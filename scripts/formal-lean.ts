@@ -409,11 +409,12 @@ function environmentRow(id: string): EnvironmentInput {
     protected: chance(0.3), deleted: chance(0.06), archived: chance(0.08),
   };
 }
+const WRAPPED = { kekProvider: 'local', kekId: 'k1', kekVersion: '1', bytes: 'AAAA' };
 function secretRow(id: string): SecretInput {
   const environmentId = chance(0.2) ? 'market/dev@ada' : pick(ENVIRONMENTS);
   return {
     kind: 'secret', id, projectId: chance(0.95) ? projectOf(environmentId) : pick(PROJECTS), environmentId, version: 'v1',
-    nature: pick(['plain', 'secret', 'sensitive'] as const), key: null, source: chance(0.25) ? pick(KEYS) : null,
+    nature: pick(['plain', 'secret', 'sensitive'] as const), key: chance(0.9) ? WRAPPED : null, source: chance(0.25) ? pick(KEYS) : null,
   };
 }
 repeat(20000, () => {

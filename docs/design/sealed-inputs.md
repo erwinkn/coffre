@@ -26,7 +26,7 @@ Every input a decision reads is one object of the log. Its row carries a
 | principal | `user:ada@acme.example` | status, instance role and scope, every grant with its end |
 | credential | uuid | whose, what kind (person, bearer, workload), its scope, its end, revoked |
 | secret | the key's uuid | where it is, its current version, its nature, its wrapped data key, or a reference's source |
-| environment | uuid | project, slug, protected, a fork's parent, a personal config's owner, deleted, archived |
+| environment | uuid | project, slug (renamed by its own change: a scoped role's filters read it), protected, a fork's parent, a personal config's owner, deleted, archived |
 | roles | one, `instance` | an Owner's edits of the roles, and the roles they made |
 | policy | one, `instance` | the bulk cap's count and window (R52) |
 
@@ -101,8 +101,9 @@ schema 0022 stores a smallint, and PR 2 reports its size.)
    outright, and a row written with no change at all.
 2. **The credential and the key:** missing, revoked or ended at the
    request's time (`credential`); no such key (`missing`); a reference
-   whose source is gone (`ended`); a reference to a reference, or a place
-   0.14's `throughOk` refuses (`bad_claim`); no policy in the log
+   whose source is gone (`ended`); a reference to a reference, a value with
+   no wrapped key, or a place 0.14's `throughOk` refuses (`bad_claim`); no
+   policy in the log
    (`no_policy`). The place a key is read through **decides nothing**, as
    in 0.14: it must be a live, unarchived environment of the key's project
    other than the key's own, and the key is decided where it is held (a
@@ -223,6 +224,13 @@ the same.
 - **A project's deletion** reaches a decision as each of its environments'
   `deleted`: the decision reads no project object (schema 0022 has none).
   PR 4's change path writes one change per environment when a project goes.
+- **For PR 4:** every write to an input is one of `Op`'s changes, an
+  environment's rename (0.14's `environment.update`) included; a write with
+  no op of its own would leave its object's seal stale, or, worse, its old
+  content current.
+- **For PR 5:** a use opens a wrapped key. A plain value, which 0.14's
+  vault never decides either, is refused at the door (`bad_claim`): the
+  app hands it back without a use.
 - **For PR 4 and PR 5, from the spec (W211):** a change refused by its
   seal's compare-and-set reads the row again before it retries
   (`ChangeRereads`); the Worker answers 503 at the deadline even if its call

@@ -69,6 +69,8 @@ structure SecretIn where
   project : String
   env : String
   sensitive : Bool
+  /-- Whether it holds a wrapped key: a plain value or a reference holds none. -/
+  wrapped : Bool
   source : Option String
   deriving Repr, Inhabited
 
@@ -216,6 +218,7 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
       | none => .error "ended"
       | some x =>
         if x.source.isSome && s.source.isSome then .error "bad_claim" else
+        if !x.wrapped then .error "bad_claim" else
         -- The rows read, by the id each was read by.
         let rows : Table EnvIn := ids.filterMap fun id => ((v.envs.get? id).bind (·.row)).map (id, ·)
         -- Through a fork, as 0.14's `throughOk`: a live, unarchived environment of the key's project, not its own.
