@@ -34,6 +34,7 @@ export async function witnessPair(
     const held = state.pair;
     if (pair.upto < held.upto) return { state, answer: { ok: false, reason: `older than the pair held (up to ${held.upto})` } };
     if (pair.at < held.at) return { state, answer: { ok: false, reason: `signed at ${pair.at}, before the pair held (${held.at}): time runs back` } };
+    if (pair.floor < held.floor) return { state, answer: { ok: false, reason: `its floor of at (${pair.floor}) is below the pair held's (${held.floor})` } };
     // One place, one pair: the same `upto` with other heads is a second history, however consistent.
     if (pair.upto === held.upto && !samePair(pair, held)) return { state, answer: { ok: false, reason: `split view: a second pair up to ${pair.upto}` } };
     for (const tree of TREES) {

@@ -207,10 +207,16 @@ export class Checkpointer {
    */
   private pending: Pending | null = null;
   /**
-   * The floor of `at` the signer's last barrier set: signed into each pair,
-   * so a restart starts from the last signed one, which is no higher.
+   * The floor of `at` signed into the newest pair: windows are read from it.
+   * It moves only when a pair carrying a new floor is written.
    */
   private floor: number;
+  /**
+   * The floor this process's last barrier set, which the next barrier must
+   * find exactly; null until its first barrier (a restart cannot know what
+   * barriers whose pairs went unsigned raised it to).
+   */
+  private barrier: number | null = null;
 
   private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
@@ -278,7 +284,9 @@ export class Checkpointer {
       if (mine.pair.upto > newest.upto) {
         // The memory is ahead: seal again from the newest row up to the remembered pair, from the entries, and require
         // exactly that pair in both trees, at a time no earlier than the row's.
-        if (mine.pair.at < newest.at) throw new Error(`the database's newest pair (up to ${newest.upto}) was signed at ${newest.at}, after the later one the signer remembers (${mine.pair.at}): time runs back`);
+        if (mine.pair.at < newest.at || mine.pair.floor < newest.floor) {
+          throw new Error(`the database's newest pair (up to ${newest.upto}, at ${newest.at}, floor ${newest.floor}) is ahead in time or floor of the later one the signer remembers (at ${mine.pair.at}, floor ${mine.pair.floor}): time runs back`);
+        }
         const entries = await store.entries(newest.upto, mine.pair.upto);
         const tiles = appendWindow(edges, entries);
         const lost = TREES.filter((tree) => edges[tree].size !== mine.pair[tree].size || !edges[tree].root().equals(mine.pair[tree].root));
@@ -290,7 +298,9 @@ export class Checkpointer {
       } else {
         // The database is ahead, which RememberFirst rules out for this signer (a memory restored from a backup, say):
         // Time never comes down along one history either (what retention's freshness step rests on).
-        if (newest.at < mine.pair.at) throw new Error(`the database's newest pair (up to ${newest.upto}) was signed at ${newest.at}, before the one the signer remembers (${mine.pair.at})`);
+        if (newest.at < mine.pair.at || newest.floor < mine.pair.floor) {
+          throw new Error(`the database's newest pair (up to ${newest.upto}, at ${newest.at}, floor ${newest.floor}) is behind in time or floor the one the signer remembers (at ${mine.pair.at}, floor ${mine.pair.floor}): time runs back`);
+        }
         // accepted only if the remembered pair is a prefix of it, in both trees: by a consistency proof between the two
         // signed roots, never a head recomputed from tiles, which hold each subtree at several levels and could be
         // planted at one the newest head never reads.
@@ -340,10 +350,17 @@ export class Checkpointer {
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
     // The floor is an unsigned row (HotPathOne.tla's BarrierChecksFloor): a writer who lowered it would let a use in
-    // below it, which a window read from the floor the signer holds misses. Found lower than the signer set it: an
-    // alarm, and nothing signed. Higher is honest: a barrier whose pair a crash kept from being signed raised it.
-    if (floor.found === null || floor.found < this.floor) failures.push(`the floor of at is ${floor.found ?? 'gone'}, below the ${this.floor} the signer's barrier set: lowered by a writer`);
-    else this.floor = Math.max(this.floor, floor.set);
+    // below it, which a window read from the floor the signer holds misses. Found below the newest pair's floor, or
+    // below what this process's last barrier set: an alarm, and nothing signed. Found above what its last barrier set
+    // is a writer too, alerted; refusing it would gain nothing, since a raised floor only refuses uses below it. After
+    // a restart the first barrier may find it higher honestly: barriers whose pairs went unsigned raised it.
+    const expected = this.barrier ?? this.floor;
+    if (floor.found === null || floor.found < expected) {
+      failures.push(`the floor of at is ${floor.found ?? 'gone'}, below the ${expected} the signer's barrier set: lowered by a writer`);
+    } else if (this.barrier !== null && floor.found > this.barrier) {
+      this.options.alert(`the floor of at is ${floor.found}, above the ${this.barrier} the signer's last barrier set: raised by a writer`);
+    }
+    this.barrier = floor.set;
     // A running signer seals from the pair it holds and never takes the database's word for it; but the database's
     // newest row must still be that pair, note for note. Rows deleted or replaced since show here, within a tick;
     // nothing is signed over them.
@@ -384,7 +401,8 @@ export class Checkpointer {
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
-    const next = await signPair(this.signers, upto, at, heads, this.floor);
+    // The pair carries the floor this barrier left; the signer reads from it once the pair is written.
+    const next = await signPair(this.signers, upto, at, heads, floor.set);
     this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.
@@ -419,6 +437,7 @@ export class Checkpointer {
   private commit(p: Pending): void {
     this.edges = p.edges;
     this.head = p.next;
+    this.floor = p.next.pair.floor;
     this.pending = null;
     this.publish();
   }

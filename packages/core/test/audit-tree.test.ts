@@ -243,7 +243,7 @@ test('a signed checkpoint opens with its key and no other, and nothing but a che
   await assert.rejects(noteVerifier('name+00000000+AQ=='), /Ed25519/);
 });
 
-test('a pair is two notes at one upto and one at, each under its own origin and key', async () => {
+test('a pair is two notes at one upto, at and floor, each under its own origin and key', async () => {
   const signers = await pairSigners('coffre.example/audit', Buffer.alloc(32, 3));
   const verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
   assert.equal(signers.changes.name, 'coffre.example/audit/changes');
@@ -258,6 +258,8 @@ test('a pair is two notes at one upto and one at, each under its own origin and 
   assert.equal(await openPair({ changes: notes.changes, uses: later.notes.uses }, verifiers), null);
   const sameUpto = await signPair(signers, 10n, 1001, heads);
   assert.equal(await openPair({ changes: notes.changes, uses: sameUpto.notes.uses }, verifiers), null);
+  const otherFloor = await signPair(signers, 10n, 1000, heads, 5);
+  assert.equal(await openPair({ changes: notes.changes, uses: otherFloor.notes.uses }, verifiers), null, 'two floors');
   assert.equal(await openPair({ changes: notes.uses, uses: notes.changes }, verifiers), null);
 });
 

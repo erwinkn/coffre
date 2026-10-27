@@ -53,7 +53,11 @@ export class MemoryStore implements CheckpointStore {
   /** The floor of `at`, as the fence's row holds it: raised by each barrier, lowered only by a writer. */
   floor = 0;
 
-  async close(after: bigint, _from: number) {
+  /** The floors the signer asked windows to be read from, each tick's in turn. */
+  froms: number[] = [];
+
+  async close(after: bigint, from: number) {
+    this.froms.push(from);
     const upto = this.next - 1n;
     const found = this.floor;
     this.floor = Math.max(this.floor, Date.now() - 3000);

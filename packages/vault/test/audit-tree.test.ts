@@ -183,7 +183,7 @@ test('(j) another pair at the same place, signed by a signer without memory, is 
   // A forged pair at the newest row's place: the same upto, another uses head.
   const row = (await store.newest())!;
   const pair = (await openPair(row.notes, k.verifiers))!;
-  const forged = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 7) } });
+  const forged = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 7) } }, pair.floor);
   store.rows.set(row.upto, forged.notes);
   await assert.rejects(open(), /the newest checkpoint|not the pair the signer signed|tiles at its edge/);
   void memory;
@@ -342,7 +342,7 @@ test('review r1: a row replaced by another pair at the same place, under a runni
   const cp = await open();
   await traffic(store, cp, 3);
   const { pair } = cp.pair;
-  const fork = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 5) } });
+  const fork = await signPair(k.signers, pair.upto, pair.at + 1, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 5) } }, pair.floor);
   store.rows.set(pair.upto, fork.notes);
   const t = await cp.tick();
   assert.ok(!t.signed && /newest checkpoint is another pair/.test(t.failures.join()), t.failures.join());
@@ -379,7 +379,7 @@ test('review r1: a pair held outside below the start must be a prefix of it, eve
   const from = cp.pair.notes;
   const older = [...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-4)!;
   const pair = (await openPair(store.rows.get(older)!, k.verifiers))!;
-  const fork = await signPair(k.signers, older, pair.at, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 6) } });
+  const fork = await signPair(k.signers, older, pair.at, { changes: pair.changes, uses: { size: pair.uses.size, root: Buffer.alloc(32, 6) } }, pair.floor);
   store.rows.set(older, fork.notes);
   const v = await verify(store, k, { from, anchors: [fork.notes] });
   assert.ok(!v.ok && v.problems.some((p) => /not a prefix of the start/.test(p)), v.problems.join('\n'));
@@ -477,7 +477,7 @@ test('review r4: prove() refuses an index past the tree; open() re-syncs a memor
   await assert.rejects(cp.prove(store.log[3]!.number), /past the/);
   store.locate = locate;
   const { pair } = cp.pair;
-  const resigned = await signPair(k.signers, pair.upto, pair.at + 7, { changes: pair.changes, uses: pair.uses });
+  const resigned = await signPair(k.signers, pair.upto, pair.at + 7, { changes: pair.changes, uses: pair.uses }, pair.floor);
   memory.record = encodePair(resigned.notes);
   await open();
   assert.equal(memory.record, encodePair(cp.pair.notes));
@@ -522,10 +522,10 @@ test('time never runs back along one history: open() refuses a newer pair signed
   // The newest row re-signed with a time before the remembered pair's.
   const row = (await store.newest())!;
   const newest = (await openPair(row.notes, k.verifiers))!;
-  const back = await signPair(k.signers, newest.upto, pair.at - 1, { changes: newest.changes, uses: newest.uses });
+  const back = await signPair(k.signers, newest.upto, pair.at - 1, { changes: newest.changes, uses: newest.uses }, newest.floor);
   store.rows.set(newest.upto, back.notes);
   memory.record = remembered;
-  await assert.rejects(open(), /before the one the signer remembers/);
+  await assert.rejects(open(), /behind in time or floor/);
   const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
   const witness = localWitness('w', k.verifiers, self);
   const none = async () => ({ changes: [], uses: [] });
@@ -563,7 +563,7 @@ test('review r7: time never runs back at the memory-ahead start, nor in the veri
     };
     await assert.rejects(cp.tick(), /connection reset/);
     const p3 = cp.pair.pair;
-    const later = await signPair(k.signers, p3.upto, Date.now() + 3_600_000, { changes: p3.changes, uses: p3.uses });
+    const later = await signPair(k.signers, p3.upto, Date.now() + 3_600_000, { changes: p3.changes, uses: p3.uses }, p3.floor);
     store.rows.set(p3.upto, later.notes);
     await assert.rejects(open(), /time runs back/);
   }
@@ -573,7 +573,7 @@ test('review r7: time never runs back at the memory-ahead start, nor in the veri
     await traffic(store, cp, 5);
     const middle = [...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-3)!;
     const pair = (await openPair(store.rows.get(middle)!, k.verifiers))!;
-    store.rows.set(middle, (await signPair(k.signers, middle, pair.at + 3_600_000, { changes: pair.changes, uses: pair.uses })).notes);
+    store.rows.set(middle, (await signPair(k.signers, middle, pair.at + 3_600_000, { changes: pair.changes, uses: pair.uses }, pair.floor)).notes);
     const v = await verify(store, k);
     assert.ok(!v.ok && v.problems.some((p) => /time runs back/.test(p)), v.problems.join('\n'));
   }
@@ -584,7 +584,7 @@ test('review r8: a pair held outside with a row\'s heads but another time is rep
   const cp = await open();
   await traffic(store, cp, 4);
   const { pair } = cp.pair;
-  const resigned = await signPair(k.signers, pair.upto, pair.at + 3_600_000, { changes: pair.changes, uses: pair.uses });
+  const resigned = await signPair(k.signers, pair.upto, pair.at + 3_600_000, { changes: pair.changes, uses: pair.uses }, pair.floor);
   const v = await verify(store, k, { anchors: [resigned.notes] });
   assert.ok(!v.ok && v.problems.some((p) => /same heads signed at another time/.test(p)), v.problems.join('\n'));
 });
@@ -601,12 +601,51 @@ test('BarrierChecksFloor: a floor of at a writer lowered is refused at the next 
   const t = await cp.tick();
   assert.ok(!t.signed && /floor of at is .* below/.test(t.failures.join()), t.failures.join());
   assert.ok(alerts.some((a) => /lowered by a writer/.test(a)));
-  // Raised (a barrier whose pair a crash kept from being signed) is honest.
-  const { store: other, open: openOther } = await setup(2);
-  const cp2 = await openOther();
-  await traffic(other, cp2, 1);
-  other.floor += 5000;
-  await traffic(other, cp2, 1);
+});
+
+test('review r9, BarrierChecksFloor: a raised floor is alerted and adopted only with the pair that signs it; quiet ticks raise no alarm', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  for (let i = 0; i < 3; i += 1) assert.ok(!(await cp.tick()).signed, 'quiet');
+  await traffic(store, cp, 1);
+  assert.deepEqual(alerts, [], 'quiet ticks move the floor through the signer\'s own barriers');
+  const signed = cp.pair.pair.floor;
+  store.floor += 3_600_000;
+  store.log.push({ ...store.log.at(-1)!, number: store.next++, columns: [1n, 'f', '{}', Buffer.alloc(16)] });
+  assert.ok(!(await cp.tick()).signed);
+  assert.ok(alerts.some((a) => /raised by a writer/.test(a)), alerts.join('\n'));
+  store.log.pop();
+  store.append('uses', 'u');
+  assert.ok((await cp.tick()).signed);
+  assert.equal(store.froms.at(-1), signed, 'the window is still read from the floor the newest pair signed');
+  assert.equal(cp.pair.pair.floor, store.floor, 'the new pair carries the floor its barrier left');
+});
+
+test('review r9: a floor that runs back is refused by open(), witnesses and the verifier', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const remembered = memory.record!;
+  await traffic(store, cp, 1);
+  const row = (await store.newest())!;
+  const newest = (await openPair(row.notes, k.verifiers))!;
+  const lower = await signPair(k.signers, newest.upto, newest.at, { changes: newest.changes, uses: newest.uses }, 1);
+  store.rows.set(newest.upto, lower.notes);
+  memory.record = remembered;
+  await assert.rejects(open(), /behind in time or floor/);
+  const v = await verify(store, k);
+  assert.ok(!v.ok && v.problems.some((p) => /floor of at .* is below/.test(p)), v.problems.join('\n'));
+  const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
+  const witness = localWitness('w', k.verifiers, self);
+  const none = async () => ({ changes: [], uses: [] });
+  assert.ok((await witness.publish(decodePair(remembered)!, none, new AbortController().signal)).ok);
+  const held = (await openPair(decodePair(remembered)!, k.verifiers))!;
+  const answer = await witness.publish(lower.notes, async () => ({
+    changes: await proveConsistency(store, 'changes', held.changes.size, newest.changes.size),
+    uses: await proveConsistency(store, 'uses', held.uses.size, newest.uses.size),
+  }), new AbortController().signal);
+  assert.ok(!answer.ok && /floor of at/.test(answer.reason), JSON.stringify(answer));
 });
 
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.

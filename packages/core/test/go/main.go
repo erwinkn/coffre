@@ -168,7 +168,7 @@ type head struct {
 	origin   string
 	size     int64
 	root     tlog.Hash
-	upto, at string // at: its time and its floor, which a pair shares
+	upto, at, floor string
 }
 
 func open(raw string, verifiers note.Verifiers) head {
@@ -180,7 +180,7 @@ func open(raw string, verifiers note.Verifiers) head {
 	if len(n.Sigs) != 1 || n.Sigs[0].Name != lines[0] {
 		log.Fatalf("checkpoint for %s signed by %v", lines[0], n.Sigs)
 	}
-	return head{lines[0], must(strconv.ParseInt(lines[1], 10, 64)), must(tlog.ParseHash(lines[2])), lines[3][5:], lines[4][3:] + " " + lines[5][6:]}
+	return head{lines[0], must(strconv.ParseInt(lines[1], 10, 64)), must(tlog.ParseHash(lines[2])), lines[3][5:], lines[4][3:], lines[5][6:]}
 }
 
 func hashes(b []string) []tlog.Hash {
@@ -217,7 +217,7 @@ func check(path string) {
 	heads := map[string][]head{}
 	for i, p := range f.Pairs {
 		c, u := open(p["changes"], verifiers), open(p["uses"], verifiers)
-		if c.upto != u.upto || c.at != u.at || !strings.HasSuffix(c.origin, "/changes") || !strings.HasSuffix(u.origin, "/uses") {
+		if c.upto != u.upto || c.at != u.at || c.floor != u.floor || !strings.HasSuffix(c.origin, "/changes") || !strings.HasSuffix(u.origin, "/uses") {
 			log.Fatalf("pair %d is not one pair: %+v %+v", i, c, u)
 		}
 		// Swapped or crossed, a note fails: each key signs its own origin only.
@@ -227,7 +227,7 @@ func check(path string) {
 		heads["changes"] = append(heads["changes"], c)
 		heads["uses"] = append(heads["uses"], u)
 	}
-	fmt.Printf("pairs: %d, every note opened by note.Open under its own origin's key, every pair at one upto and at\n", len(f.Pairs))
+	fmt.Printf("pairs: %d, every note opened by note.Open under its own origin's key, every pair at one upto, at and floor\n", len(f.Pairs))
 
 	for _, name := range names {
 		t := f.Trees[name]

@@ -29,7 +29,7 @@ change waiting for its seal. 6b comes after plan PRs 2 (the schema) and 4
   retention class: `changes`, kept for good, and `uses`, dropped by day. Each
   is a standard log with its own origin and key, so Go's `tlog` or any C2SP
   witness reads either one alone.
-- **One pair.** A tick signs both heads with the same `upto` and `at`. The
+- **One pair.** A tick signs both heads with the same `upto`, `at` and `floor`. The
   signer remembers both in one record, before the database has either. One
   statement writes both, and opening, every tick and every witness check
   both as one value. No state anywhere holds one head without the other.
@@ -118,7 +118,8 @@ The rest of the vault sees `tick()` (the window in, a signed pair out),
 `sealThrough(number)` and `prove(number)`. The trees' shape, tiles and pair
 stay behind them. The database is behind `CheckpointStore`:
 
-- `close(after)`: the barrier (`close_one`), then the window and the newest
+- `close(after, from)`: the barrier (`close_one`), then the window (its uses
+  read from `from`, the newest pair's floor) and the newest
   row in the next statement, a snapshot taken after the barrier's lock: every
   number at or below `upto` has ended, so the entries above `after` up to it
   are final;
@@ -140,11 +141,15 @@ signed) and `floor F`. The floor is the lowest `at` a use may still be
 written with once that tick's barrier ran. Its row in the database is
 unsigned, so a writer could lower it and let in a late use below it, which a
 window read from the floor would miss (`HotPathOne.tla`'s
-BarrierChecksFloor). So the signer holds the floor its last barrier set,
-signed into each pair, and a barrier that finds it lower is refused and
-alerted. Found higher is honest: a crash can come after a barrier raised it
-and before the pair was signed. The verifier reports a floor that comes
-down between pairs.
+BarrierChecksFloor). So each pair signs the floor its barrier left, and the
+signer reads windows from the newest pair's floor, moving it only when a
+pair carrying a new one is written. Every barrier must find the floor where
+this process's last barrier left it. Found lower, the tick is refused and
+alerted. Found higher, it is alerted: a raised floor only refuses uses below
+it, so refusing the tick would gain nothing. After a restart the first
+barrier may find it higher honestly, since barriers whose pairs went
+unsigned (quiet ticks, a crash) raised it. Open, witnesses and the verifier
+refuse a floor that comes down between pairs, as they do for `at`.
 
 **The pair's `at` never comes down, and never runs far ahead.** Retention's
 freshness step (plan PR 7) rests on the first half. A replay of a dropped
@@ -253,7 +258,7 @@ shares no code with ours. Run on 2026-10-27:
 - **A split log.** The checkpointer sealed 70,003 uses and 420 changes, in
   141 pairs.
   - Every note opens with `note.Open` under its own origin's key, and every
-    pair shares `upto` and `at`. A uses note renamed to the changes origin
+    pair shares `upto`, `at` and `floor`. A uses note renamed to the changes origin
     fails.
   - `tlog.TileHashReader` gives the signed head from our tiles.
   - Go rebuilds every tile from the leaf hashes and gets ours byte for

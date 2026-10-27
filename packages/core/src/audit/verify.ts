@@ -113,7 +113,9 @@ async function walk(
     } else {
       const row = await reader.pair(anchor.upto);
       const pair = row === null ? null : await open(row);
-      if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time' : 'a second history'}`);
+      if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time or floor' : 'a second history'}`);
+      // Below the start, time and floor are no later than the start's.
+      if (anchor.at > start.pair.at || anchor.floor > start.pair.floor) problems.push(`the pair held outside up to ${anchor.upto}: its time or floor is past the start's: time runs back`);
       // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside.
       for (const tree of TREES) {
         const [from, to] = [anchor[tree], start.pair[tree]];
@@ -157,7 +159,7 @@ async function walk(
       const anchor = above.shift()!;
       const row = stops.find((s) => s.pair.upto === anchor.pair.upto);
       if (row !== undefined) {
-        if (!sameNotes(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: ${samePair(row.pair, anchor.pair) ? 'the same heads signed at another time' : 'a second history'}`);
+        if (!sameNotes(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: ${samePair(row.pair, anchor.pair) ? 'the same heads signed at another time or floor' : 'a second history'}`);
       } else if (final && anchor.pair.upto > newest) {
         problems.push(`the database ends up to ${newest}; a pair held outside seals up to ${anchor.pair.upto}: entries or checkpoints were deleted`);
       } else {
@@ -203,10 +205,10 @@ async function walk(
 
 /**
  * Whether a pair held outside is the row at its place: the same heads, and
- * the same time. Two notes for one place signed at two times take the
+ * the same time and floor. Two notes for one place signed at two times take the
  * signer's key twice; honest pairs held outside are copies of rows.
  */
-const sameNotes = (a: Pair, b: Pair) => samePair(a, b) && a.at === b.at;
+const sameNotes = (a: Pair, b: Pair) => samePair(a, b) && a.at === b.at && a.floor === b.floor;
 
 /** Both trees' edges at a pair, from their tiles; throws unless each gives its signed head. */
 export async function loadEdges(reader: Pick<LogReader, 'tiles'>, pair: Pair): Promise<Record<TreeName, Edge>> {
