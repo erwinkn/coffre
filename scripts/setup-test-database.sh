@@ -39,3 +39,15 @@ SQL
 
 DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database" \
     pnpm --filter @coffre/db run db:migrate --backup-login coffre_backup_login >/dev/null
+
+# 0.15's hot path's login, which 0022 makes unable to log in: the tests log in
+# as it, as a deployment's host gives it a password (docs/deploy.md).
+docker compose exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres <<'SQL' >/dev/null
+DO $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('coffre:local-roles', 0));
+    ALTER ROLE coffre_vault_hot LOGIN PASSWORD 'local-hot-only';
+END
+$$;
+SQL

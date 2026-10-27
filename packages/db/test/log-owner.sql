@@ -5,7 +5,7 @@
 -- the spec (formal/HotPathOne.tla, formal/Seal.tla) it holds.
 DO $$
 DECLARE
-    r use_view;
+    r use_row;
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 BEGIN
     UPDATE log_config SET value = '{"bulk":{"count":99,"windowMs":86400000}}' WHERE name = 'policy';

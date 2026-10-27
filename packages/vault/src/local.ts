@@ -23,12 +23,14 @@ export const METHODS = [
   'about',
   'keyChecks',
   'verifyLog',
+  'use',
 ] as const satisfies readonly (keyof Vault)[];
 
-export type LocalVault = Vault & { close(): Promise<void> };
+export type LocalVault = Vault & { use: NonNullable<Vault['use']>; close(): Promise<void> };
 
 /**
- * The vault in this process, over `db`. Every argument and result goes
+ * The vault in this process, over `db`, and `hot` for 0.15's uses (vault.ts,
+ * `openVault`). Every argument and result goes
  * through JSON on the way, as it would over RPC or a socket, so what works
  * here does not rely on sharing objects with the caller. `close` is
  * whatever lets go of the database, when the vault opened it.
@@ -38,15 +40,16 @@ export async function openLocalVault(
   config: ResolvedVaultConfig,
   options: VaultOptions = {},
   close: () => Promise<void> = async () => {},
+  hot?: Database,
 ): Promise<LocalVault> {
-  const vault = openVault(db, await prepareVault(config, options));
+  const vault = openVault(db, await prepareVault(config, options), hot);
   const local = Object.fromEntries(
     METHODS.map((name) => [
       name,
       async (...args: unknown[]) =>
         json(await (vault[name] as (...args: unknown[]) => Promise<unknown>)(...(json(args) as unknown[]))),
     ]),
-  ) as unknown as Vault;
+  ) as unknown as Omit<LocalVault, 'close'>;
   return Object.assign(local, { close });
 }
 

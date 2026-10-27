@@ -77,7 +77,7 @@ BEGIN
               FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0) THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot lacks the hot path''s settings';
     END IF;
-    IF NOT has_function_privilege('coffre_vault_hot', 'use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
+    IF NOT has_function_privilege('coffre_vault_hot', 'use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint)', 'EXECUTE')
        OR has_database_privilege('coffre_vault_hot', current_database(), 'CREATE') OR has_database_privilege('coffre_vault_hot', current_database(), 'TEMPORARY') THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;
@@ -124,7 +124,7 @@ $$;
 -- Before the policy is logged, a use does nothing.
 DO $$
 DECLARE
-    r use_view;
+    r use_row;
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 1, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000);
@@ -185,16 +185,16 @@ $$;
 -- A use: one entry, every input and its newest change's seal, the cap's row; its replay writes nothing more.
 DO $$
 DECLARE
-    r use_view;
+    r use_row;
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
     tag bytea := decode(repeat('ab', 16), 'hex');
 BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000);
-    IF r.state IS NOT NULL OR r.number IS NULL OR r.principal <> 'token:deploy' OR r.newest <> (SELECT max(number) FROM log_changes)
+    IF r.state IS NOT NULL OR r.number IS NULL OR r.c_principal <> 'token:deploy' OR r.newest <> (SELECT max(number) FROM log_changes)
        OR r.inputs <> r.newest OR r.c_seal IS DISTINCT FROM r.c_last OR r.m_seal IS DISTINCT FROM r.m_last OR r.s_seal IS DISTINCT FROM r.s_last
-       OR r.e_seal IS DISTINCT FROM r.e_last OR r.policy_seal IS DISTINCT FROM r.policy_last
+       OR r.e2_seal IS DISTINCT FROM r.e2_last OR r.p_seal IS DISTINCT FROM r.p_last OR r.r_seal IS DISTINCT FROM r.r_last
        OR r.cap_count <> 1 OR r.cap_window <> 86400000 OR r.s_version <> '55555555-5555-5555-5555-555555555551' OR r.v_wrapped_dek <> decode('d0', 'hex')
-       OR json_array_length(r.grants) <> 1 OR r.c_revoked OR r.c_kind <> 'service' OR r.in_set OR r.others <> 0 THEN
+       OR cardinality(r.g_role) <> 1 OR r.c_revoked OR r.c_kind <> 'service' OR r.in_set OR r.others <> 0 THEN
         RAISE EXCEPTION 'FAIL: the use read %', r;
     END IF;
     IF NOT EXISTS (
@@ -225,17 +225,17 @@ BEGIN
         r.number, t + 1, 13);
     IF r.covered IS NOT NULL OR r.number IS NULL THEN RAISE EXCEPTION 'FAIL: one secret''s entry covered another''s use'; END IF;
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 15, t + 1, 258::smallint, NULL, tag, t + 2000,
-        (SELECT number FROM log_uses WHERE request_id = 13), t + 1, 13, r.newest, r.newest_mac);
+        (SELECT number FROM log_uses WHERE request_id = 13), t + 1, 13, r.newest, r.newest_mac, r.cap_count, r.cap_window);
     IF r.covered IS NOT NULL OR r.number IS NULL OR r.c_last IS NOT NULL THEN RAISE EXCEPTION 'FAIL: one secret''s entry covered another''s use, from the cache'; END IF;
 
     -- The seal cache: the newest change named exactly skips the probes; a wrong MAC probes again.
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 10, t + 2, 258::smallint, NULL, tag, t + 2000,
-        NULL, NULL, NULL, r.newest, r.newest_mac);
+        NULL, NULL, NULL, r.newest, r.newest_mac, r.cap_count, r.cap_window);
     IF r.state IS NOT NULL OR r.number IS NULL OR r.c_last IS NOT NULL OR r.inputs IS NOT NULL OR r.c_seal IS NULL THEN
         RAISE EXCEPTION 'FAIL: the cached form read %', r;
     END IF;
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 11, t + 2, 258::smallint, NULL, tag, t + 2000,
-        NULL, NULL, NULL, r.newest, decode(repeat('00', 16), 'hex'));
+        NULL, NULL, NULL, r.newest, decode(repeat('00', 16), 'hex'), r.cap_count, r.cap_window);
     IF r.state IS NOT NULL OR r.c_last IS NULL OR r.inputs IS NULL THEN
         RAISE EXCEPTION 'FAIL: a stale cache was trusted';
     END IF;
@@ -253,7 +253,7 @@ $$;
 -- The deadline, the floor and the barrier.
 DO $$
 DECLARE
-    r use_view;
+    r use_row;
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
     barrier record;
     pruned integer;

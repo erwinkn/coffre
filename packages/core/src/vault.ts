@@ -194,6 +194,14 @@ export interface Vault {
    * (`readsWholeLog`).
    */
   verifyLog(input: VerifyLogInput): Promise<LogVerification>;
+  /**
+   * 0.15's use (docs/design/0.15-plan.md, PR 5): one key read on one
+   * credential, logged as its request and decided on what one statement
+   * read, the value's data key handed back once its entry has committed.
+   * Behind the 0.15 switch, which nothing turns on yet: a vault without the
+   * hot path's login has none.
+   */
+  use?(input: UseInput): Promise<UseOutcome>;
 }
 
 /**
@@ -691,3 +699,62 @@ export type VerifyLogInput = {
 export type LogVerification =
   | { ok: true; entries: number; pending?: number; through?: number }
   | { ok: false; failedAtSeq: number | null; reason: string; fault?: AccessFault };
+
+// --- 0.15's use -------------------------------------------------------------
+
+/** A use as the app asks for it: on which credential, which key, through which place, why, and when. */
+export type UseInput = {
+  credential: string;
+  secretId: string;
+  /** The fork an inherited value is read in (`UnwrapInput`'s `through`); null for the key's own environment. */
+  place: string | null;
+  purpose: Purpose;
+  keepsSensitive?: boolean;
+  /**
+   * The request's id, a whole number below 2^63 as text, unique within its
+   * millisecond, and its time, ms since the epoch: a retry of a request
+   * whose answer was lost passes both unchanged, and finds the entry the
+   * first one wrote (`replayed`).
+   */
+  requestId: string;
+  at: number;
+  /** When it must have answered: at most 3 s after `at` (R53). */
+  deadline: number;
+};
+
+/** Why a use is refused: the rules' codes, and those of sealed inputs. */
+export type UseCode =
+  | RefusalCode
+  /** An input's row is not its object's newest change's: put back from before one, deleted, or written around the log. */
+  | 'stale'
+  /** The credential is not one, was revoked, or had ended at the request's time. */
+  | 'credential'
+  /** No such key. */
+  | 'missing'
+  /** The log holds no policy, so no cap: never served, as the vault writes one before its first use. */
+  | 'no_policy';
+
+/** Why a use was not decided at all: the app answers 503, with `Retry-After`. */
+export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured';
+
+/** A value a use opened: its data key, base64, and the version it decrypts, with what its ciphertext is bound to. */
+export type UsedValue = {
+  key: string;
+  versionId: string;
+  context: { projectId: string; environmentId: string; secretId: string; owner?: string; sensitive?: true };
+  envelope: { version: number; ciphertext: string; iv: string; authTag: string };
+};
+
+/**
+ * A use's answer. Allowed: the value, and the entry it was logged as (or,
+ * a repeat, rode on: `covered`). Refused: why, logged as the request it
+ * was. Busy: nothing was decided, ask again in `retryAfter` seconds:
+ * `late` (past its deadline, or below the floor), `overloaded` (refused at
+ * admission), `replayed` (a retry of a call that wrote: the first one's
+ * entry stands, its value never left), `ahead` (its time past the
+ * database's clock), `unconfigured` (no policy logged yet).
+ */
+export type UseOutcome =
+  | { ok: true; number: string; covered: boolean; value: UsedValue }
+  | { ok: false; code: UseCode; number: string | null }
+  | { ok: false; busy: UseBusy; retryAfter: number };
