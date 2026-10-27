@@ -55,19 +55,32 @@ owner_psql() { docker compose exec -T postgres psql -X -q -v ON_ERROR_STOP=1 -U 
 vault_psql() { docker compose exec -T -e PGPASSWORD=local-vault-only postgres psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d "$database" "$@"; }
 scratch="$(mktemp -d)"
 holders=()
-let_go() {
-    owner_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+holder_backends="FROM pg_stat_activity WHERE datname = current_database() AND query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()"
+stop_holders() {
+    owner_psql -c "SELECT pg_terminate_backend(pid, 10000) $holder_backends" >/dev/null 2>&1 || true
     for holder in "${holders[@]}"; do wait "$holder" 2>/dev/null || true; done
     holders=()
 }
-trap 'let_go; rm -rf "$scratch"' EXIT
+trap 'stop_holders; rm -rf "$scratch"' EXIT
+# Between checks, each holder's backend gone, its locks with it: psql exits
+# before its backend has, and a termination that times out says so in a
+# warning alone.
+let_go() {
+    stop_holders
+    [[ "$(owner_psql -At -c "SELECT count(*) $holder_backends")" == 0 ]] || { echo 'a holder outlived its check' >&2; exit 1; }
+}
+# locks <class> <key or ''> <granted>: this database's advisory locks of that
+# class (and key: the fence and the issue lock are one class), granted or
+# waited for. Another run may share the server.
+locks() {
+    owner_psql -At -c "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.classid = $1 ${2:+AND l.objid = $2} AND l.granted = $3"
+}
 held() {
     for attempt in $(seq 100); do
-        # This database's: another run may share the server.
-        [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.classid = $1 AND l.granted")" == 1 ]] && return 0
+        [[ "$(locks "$1" "${2:-}" true)" == 1 ]] && return 0
         sleep 0.1
     done
-    echo "the lock $1 was never held" >&2
+    echo "the lock $1${2:+, $2} was never held" >&2
     exit 1
 }
 
@@ -77,9 +90,9 @@ held() {
 # waits, a read's does not.
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
-held 1668244070
+held 1668244070 0
 entry() {
-    echo "BEGIN; SET LOCAL lock_timeout = '1s';
+    echo "BEGIN; SET LOCAL lock_timeout = '${3:-1s}';
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
     VALUES (900, '$1', 'fixture', 0, 'system:fixture', '$2', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'));
     ROLLBACK;"
@@ -96,12 +109,20 @@ let_go
 
 # IssueBeforeFence (0026): the trigger takes the issue lock before the fence.
 # With the issue lock held exclusive, as the barrier holds it, a revoke's entry
-# waits there; a token.exchange's takes neither lock.
+# waits there, holding no fence meanwhile; a token.exchange's takes neither lock.
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 1), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
-held 1668244070
+held 1668244070 1
 entry app token.exchange | owner_psql >/dev/null || { echo "0.14's token.exchange waited on the issue lock" >&2; exit 1; }
-if entry app token.revoke | owner_psql >/dev/null 2>"$scratch/fenced" || ! grep -q 'lock timeout' "$scratch/fenced"; then
+entry app token.revoke 5s | owner_psql >/dev/null 2>"$scratch/fenced" &
+revoke=$!
+for attempt in $(seq 100); do
+    [[ "$(locks 1668244070 1 false)" == 1 ]] && break
+    ((attempt < 100)) || { echo "0.14's token.revoke did not wait on the issue lock" >&2; exit 1; }
+    sleep 0.1
+done
+[[ "$(locks 1668244070 0 true)" == 0 ]] || { echo "0.14's token.revoke held the fence while it waited for the issue lock" >&2; exit 1; }
+if wait "$revoke" || ! grep -q 'lock timeout' "$scratch/fenced"; then
     cat "$scratch/fenced" >&2; echo "0.14's token.revoke did not wait on the issue lock" >&2; exit 1
 fi
 let_go
