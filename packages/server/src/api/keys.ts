@@ -111,9 +111,10 @@ export async function openValues(
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   if (asking.credential != null && (await uses015(vault))) {
     const opened = await useValues(vault, { credential: asking.credential, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed);
-    // Each value going back was decided by a use, on the rows as they are: that vouches for a kept answer about the
-    // caller, as 0.14's check of its revision does. Not with a plain value beside, which no use decided.
-    if (recalled !== undefined && sealed.length === items.length) recalled.vouched();
+    // A use decides on the rows as they are, but only where its key is held: it vouches for a kept answer about the
+    // caller when every value going back is a use's, each read where it is held. Not with a plain value beside, which
+    // no use decided, nor one inherited in a fork, where the use checks no permission of the caller's: the app asks.
+    if (recalled !== undefined && sealed.length === items.length && sealed.every((item) => item.through === undefined)) recalled.vouched();
     let next = 0;
     return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), used: true };
   }
@@ -192,6 +193,9 @@ export async function useValues(
           deadline: at + USE_DEADLINE_MS,
         });
         if (!outcome.ok) throw refusedUse(outcome);
+        // Another version than the app read: what the rest of the answer says (its version, nature, what it left out)
+        // would not be of this value. Asked again, the request reads both anew.
+        if (outcome.value.versionId !== item.secretVersionId) throw changed();
         values[i] = openedValue(outcome.value);
       } catch (error) {
         failed ??= { error };
@@ -221,19 +225,22 @@ function openedValue(value: UsedValue): string {
   }
 }
 
+/** A key this read names, written or removed while it ran: 409, to ask again. */
+const changed = () => new ApiError('conflict', 'a key this read names was changed while it ran: try again', 'changed');
+
 /**
  * A use refused, as the API answers it: the rules' refusals as 0.14's
  * (`vaultRefused`); a credential ended, 401; a key gone since the app read
  * it, 409, to be asked again; no cap logged yet, or a use not decided
- * (busy), 503.
+ * (busy), 503 with the vault's `Retry-After`.
  */
 function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError {
-  if ('busy' in outcome) return new ApiError('unavailable', UNAVAILABLE);
+  if ('busy' in outcome) return new ApiError('unavailable', UNAVAILABLE, undefined, String(outcome.retryAfter));
   switch (outcome.code) {
     case 'credential':
       return new ApiError('unauthenticated', useRefusalMessage('credential'));
     case 'missing':
-      return new ApiError('conflict', 'a key this read names was removed while it ran: try again', 'changed');
+      return changed();
     case 'no_policy':
       return new ApiError('unavailable', UNAVAILABLE);
     default:

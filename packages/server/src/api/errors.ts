@@ -60,12 +60,15 @@ export class ApiError extends Error {
   readonly code: ErrorCode;
   /** Why, as a code: the vault's own for `vault_refused` and `bulk_limit`, and the app's for a logged refusal, which its entry names too. */
   readonly reason: string | undefined;
+  /** For a 503, when to ask again, in seconds (`Retry-After`), when it is not `UNAVAILABLE_RETRY_AFTER`: a busy use's, the vault's own. */
+  readonly retryAfter: string | undefined;
 
-  constructor(code: ErrorCode, message: string, reason?: string) {
+  constructor(code: ErrorCode, message: string, reason?: string, retryAfter?: string) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.reason = reason;
+    this.retryAfter = retryAfter;
   }
 
   get status(): number {

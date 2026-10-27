@@ -274,6 +274,31 @@ test('0.15: past its uses in flight, the isolate refuses a read at once, 503 wit
   const { token } = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const refused = await send(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/dev/API_KEY' }) }));
   assert.equal(refused.status, 503, await refused.clone().text());
-  assert.ok(refused.headers.get('retry-after') !== null);
+  assert.equal(refused.headers.get('retry-after'), '1', "the vault's own: an isolate's calls in flight free up in a moment");
   assert.deepEqual(await usesLogged(), []);
+});
+
+test("0.15: a read through a fork vouches for no kept answer: its uses check where the values are held, and the app asks", async () => {
+  await instance('0.15');
+  await root.access.set(CI, { market: null, 'market/dev': 'viewer', 'market/feature': 'viewer' });
+  const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
+  assert.equal((await ci.secrets.reveal('market/feature/API_KEY')).values.API_KEY, API_KEY);
+  // Its grant on the fork gone, its parent's kept: each use is allowed where the value is held, and the kept answer,
+  // which still holds the fork, is asked again rather than vouched for. As 0.14 refuses it, `access_changed`.
+  await root.access.set(CI, { 'market/feature': null });
+  await assert.rejects(ci.secrets.reveal('market/feature/API_KEY'), (error: { status: number }) => error.status === 403);
+  assert.equal((await ci.secrets.reveal('market/dev/API_KEY')).values.API_KEY, API_KEY, 'its parent it still reads');
+});
+
+test('0.15: a value written between the app\'s read and its use answers 409, to ask again: the answer is never of two versions', async () => {
+  await instance('0.15');
+  const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
+  const use = deps.vault.use!;
+  deps.vault.use = async (input) => {
+    deps.vault.use = use;
+    await root.secrets.set('market/dev', { API_KEY: 'rotated' });
+    return use(input);
+  };
+  await assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), (error: { status: number; reason?: string }) => error.status === 409 && error.reason === 'changed');
+  assert.equal((await ci.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'rotated', 'asked again, the new one');
 });
