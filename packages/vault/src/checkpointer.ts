@@ -264,7 +264,8 @@ export class Checkpointer {
       if (mine.pair.upto === newest.upto) throw new Error(`the database's checkpoint at ${newest.upto} is not the pair the signer signed`);
       if (mine.pair.upto > newest.upto) {
         // The memory is ahead: seal again from the newest row up to the remembered pair, from the entries, and require
-        // exactly that pair in both trees.
+        // exactly that pair in both trees, at a time no earlier than the row's.
+        if (mine.pair.at < newest.at) throw new Error(`the database's newest pair (up to ${newest.upto}) was signed at ${newest.at}, after the later one the signer remembers (${mine.pair.at}): time runs back`);
         const entries = await store.entries(newest.upto, mine.pair.upto);
         const tiles = appendWindow(edges, entries);
         const lost = TREES.filter((tree) => edges[tree].size !== mine.pair[tree].size || !edges[tree].root().equals(mine.pair[tree].root));

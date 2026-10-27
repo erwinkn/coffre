@@ -130,8 +130,11 @@ async function walk(
   let edges = loaded;
 
   // The walk: a page of rows at a time, with the outside pairs that fall among them, entries read once per page.
+  // `last` is the newest row walked, `cursor` how far entries have gone into the trees (an outside pair can be past it).
   let last = start;
+  let cursor = start.pair.upto;
   let previous = start.pair.upto;
+  let time = start.pair.at;
   const walkEntries = (entries: readonly LogEntry[]) => {
     for (const e of entries) {
       if (e.number <= previous) problems.push(`${e.number}: numbered at or below the entry before (${previous}): two entries with one number, or out of order`);
@@ -162,7 +165,7 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
-      const entries = await reader.entries(last.pair.upto, stops.at(-1)!.pair.upto);
+      const entries = await reader.entries(cursor, stops.at(-1)!.pair.upto);
       let at = 0;
       for (const stop of stops) {
         const window: LogEntry[] = [];
@@ -170,6 +173,11 @@ async function walk(
         walkEntries(window);
         for (const tree of TREES) edges[tree].append(window.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns)));
         verdict.sealed += window.length;
+        // Time never runs back along one history: retention's freshness step rests on it. Equal is honest (a window of
+        // gaps keeps the time).
+        if (stop.pair.at < time) problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: signed at ${stop.pair.at}, before the pair before it (${time}): time runs back`);
+        time = Math.max(time, stop.pair.at);
+        cursor = stop.pair.upto;
         const wrong = TREES.filter((tree) => edges[tree].size !== stop.pair[tree].size || !edges[tree].root().equals(stop.pair[tree].root));
         if (wrong.length > 0) {
           problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: the ${wrong.join(' and ')} head${wrong.length > 1 ? 's' : ''} differ from the entries: entries deleted, added, changed or moved, or a second history`);
@@ -184,7 +192,7 @@ async function walk(
     }
     if (final) break;
   }
-  const unsealed = await reader.entries(last.pair.upto, MAX_NUMBER);
+  const unsealed = await reader.entries(cursor, MAX_NUMBER);
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
   return done(last.notes);

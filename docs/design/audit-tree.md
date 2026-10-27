@@ -136,7 +136,8 @@ deleted or replaced under a running signer shows within a tick.
 **The pair's `at` never comes down, and never runs far ahead.** Retention's
 freshness step (plan PR 7) rests on the first half. A replay of a dropped
 use must never become fresh again when a clock steps back, so `open()` and
-witnesses refuse a newer pair signed earlier than the one they hold. The
+witnesses refuse a newer pair signed earlier than the one they hold, and
+the verifier reports one. The
 second half is Fable's review. One tick on a signer clock an hour ahead
 would sign a time that makes every honest entry read as a replay for that
 hour. So a tick signs the signer's clock, held to at most 10 minutes past
@@ -181,8 +182,10 @@ answered for another, makes `prove` throw instead of returning a proof that
 fails later.
 
 **Notes are read as strictly as Go's `note.Open`.** That means canonical
-base64, at most 100 signature lines, and no control characters. A line
-that names the log's key and does not verify spoils the whole note. So a
+base64, at most 100 signature lines, and no control characters. The first
+line by the log's key decides: if it does not verify, the whole note is
+spoiled, whatever follows; later lines by that key are ignored, as Go
+does. So a
 tree's note the database holds opens here only if Go's `note.Open`, given
 that tree's key, would open it too. (Given both trees' keys at once, Go
 also refuses a bad line by the other key; each note here is opened with its

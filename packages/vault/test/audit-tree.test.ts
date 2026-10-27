@@ -550,6 +550,35 @@ test('a window of gaps alone keeps the time last signed', async () => {
   assert.ok(t.signed && cp.pair.pair.at === at);
 });
 
+test('review r7: time never runs back at the memory-ahead start, nor in the verifier\'s walk', async () => {
+  {
+    // The signer remembers P4 (a write that failed); the database's P3 was re-signed later, by another signer's clock.
+    const { k, store, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 3);
+    store.append('uses', 'x');
+    store.beforeWrite = () => {
+      store.beforeWrite = null;
+      throw new Error('connection reset');
+    };
+    await assert.rejects(cp.tick(), /connection reset/);
+    const p3 = cp.pair.pair;
+    const later = await signPair(k.signers, p3.upto, Date.now() + 3_600_000, { changes: p3.changes, uses: p3.uses });
+    store.rows.set(p3.upto, later.notes);
+    await assert.rejects(open(), /time runs back/);
+  }
+  {
+    const { k, store, open } = await setup();
+    const cp = await open();
+    await traffic(store, cp, 5);
+    const middle = [...store.rows.keys()].sort((a, b) => (a < b ? -1 : 1)).at(-3)!;
+    const pair = (await openPair(store.rows.get(middle)!, k.verifiers))!;
+    store.rows.set(middle, (await signPair(k.signers, middle, pair.at + 3_600_000, { changes: pair.changes, uses: pair.uses })).notes);
+    const v = await verify(store, k);
+    assert.ok(!v.ok && v.problems.some((p) => /time runs back/.test(p)), v.problems.join('\n'));
+  }
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {
