@@ -64,7 +64,7 @@
 (* [upto, leaves] names one leaf sequence, and one note is a prefix of     *)
 (* another exactly when `Prefix` says so (a consistency proof).            *)
 (*                                                                         *)
-(* The protections, each a constant (scripts/formal-seal.sh shows each     *)
+(* The protections, each a constant (scripts/formal.sh shows each          *)
 (* necessary):                                                             *)
 (*   NumberUnderLock   the append takes its number after the shared lock;  *)
 (*   CloseLocks        the tick reads the sequence under the exclusive     *)

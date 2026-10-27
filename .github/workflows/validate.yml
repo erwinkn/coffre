@@ -81,7 +81,7 @@ jobs:
 
   # The Formal model is three jobs. The plan hashes everything TLC's answer
   # depends on (scripts/formal-key.sh) and looks for a green run of that
-  # hash; three shards run TLC when there is none; `Formal model` is the one
+  # hash; nine shards run TLC when there is none; `Formal model` is the one
   # job Validate asks about. docs/formal.md, "In CI".
   formal-plan:
     needs: changes

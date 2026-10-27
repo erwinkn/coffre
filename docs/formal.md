@@ -1351,7 +1351,7 @@ every pull request that is not a version-only bump:
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints
-  what a run would run, without TLC; a test holds the three to a partition
+  what a run would run, without TLC; a test holds the nine to a partition
   of it. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
   default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g
