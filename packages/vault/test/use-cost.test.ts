@@ -75,12 +75,15 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   }
   await pool.end();
 
-  // Each form's buffers, as the hot login runs it again on a connection of its own, its plans made.
+  // Each form's buffers, as the hot login runs it again on a connection of its own, its plans made. The least of
+  // several runs: every run inserts its use, and an insert now and then splits an index page or extends the heap,
+  // eight or so buffers more (50 and 51 where 41 and 42 are the rule, one run in 400), which no size of history
+  // moves. The first run is the cold one, and it costs thousands.
   const client = new pg.Client({ connectionString: HOT_URL });
   await client.connect();
   const buffers = async (cached: boolean): Promise<number> => {
-    let last = 0;
-    for (let i = 0; i < 3; i += 1) {
+    let least = Infinity;
+    for (let i = 0; i < 6; i += 1) {
       const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);
       const at = Date.now();
       const requestId = newRequestId();
@@ -88,9 +91,9 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       const { rows: [plan] } = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10)`,
         [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null]);
       const node = (plan as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
-      last = node['Shared Hit Blocks'] + node['Shared Read Blocks'];
+      least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
     }
-    return last;
+    return least;
   };
   const at = async (size: number) => ({ size, probing: await buffers(false), cached: await buffers(true) });
   await grow(10_000);

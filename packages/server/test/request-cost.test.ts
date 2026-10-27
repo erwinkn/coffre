@@ -154,6 +154,8 @@ let verify: () => Promise<void>;
 let coldVerify: () => Promise<void>;
 /** The same, at a proxy that remembers nothing: what each request costs once its cache has lapsed, on a warm isolate. */
 let coldWorkload: () => Promise<void>;
+/** The proxy that keeps what it is asked, made new: its entries are as old as the request that fills them. */
+let renewProxy: () => void;
 /** The same through a Cloudflare service binding, its caller the binding's `props`. */
 let bound: () => Promise<void>;
 /** The scheduled beat, and `/readyz`'s check, on the counted connections. */
@@ -296,13 +298,20 @@ before(async () => {
   // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
   const credentials = { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } };
   const verifiers = { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) };
-  const proxied = {
+  // The proxy's cache keeps an answer 60 s and asks the vault again in the last 15: that one request costs 4 statements
+  // and 7 of the vault's, not 1. A Cloudflare call's answer is kept 60 s whatever `cacheSeconds` says (a binding has no
+  // session to outlast it), so a request warmed at second 44 of an entry's life and measured at 45, as a loaded runner
+  // does after a long test, was that request. Each `warm` renews the proxy: its entries are then as old as the gap
+  // between the warm-up and the measurement.
+  const proxy = () => ({
     ...runtime,
     waitUntil: (promise: Promise<unknown>) => void background.push(promise),
     auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10, total: 10 }) } }).resolve(ORIGIN),
     gates: () => gate,
     plugins: checkPlugins([credentialProxy({ credentials, verifiers })]),
-  } satisfies CoffreRuntime;
+  }) satisfies CoffreRuntime;
+  let proxied = proxy();
+  renewProxy = () => void (proxied = proxy());
   const forgetful = {
     ...proxied,
     plugins: checkPlugins([credentialProxy({ cacheSeconds: 0, credentials, verifiers })]),
@@ -316,7 +325,7 @@ before(async () => {
     if (answered?.status !== 204) throw new Error(`the proxy's workload was refused: ${await answered?.text()}`);
     await Promise.all(background.splice(0));
   };
-  workload = through(proxied);
+  workload = () => through(proxied)();
   const verifying = (at: CoffreRuntime) => async () => {
     const url = `${ORIGIN}/use`;
     const message = Buffer.from('{"event_name":"signature_request.done"}');
@@ -327,7 +336,7 @@ before(async () => {
     if (answered?.status !== 200 || (await answered.json() as { valid?: boolean }).valid !== true) throw new Error('the verify was refused');
     await Promise.all(background.splice(0));
   };
-  verify = verifying(proxied);
+  verify = () => verifying(proxied)();
   coldVerify = verifying(forgetful);
   coldWorkload = through(forgetful);
   await insertBinding(deps.db, deps.chainKey, {
@@ -354,6 +363,7 @@ after(async () => {
  */
 async function warm(): Promise<void> {
   if (ciEnds - Date.now() < 120_000) await buyCi();
+  renewProxy();
   for (const { request } of Object.values(requests)) await request();
 }
 
