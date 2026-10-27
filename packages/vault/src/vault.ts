@@ -125,7 +125,7 @@ import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
-import { use, UseCache, useKey, useLimits, type UseLimits } from './use.ts';
+import { use, UseCache, useLimits, type UseLimits } from './use.ts';
 
 export type VaultOptions = {
   /**
@@ -209,8 +209,6 @@ export type PreparedVault = {
    * then everyone the deployment names made an Owner (`#declare`).
    */
   converted: boolean;
-  /** What MACs 0.15's uses (use.ts); its seals are `log015`'s. */
-  useKey: Buffer;
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -244,7 +242,7 @@ async function keysOf(seeds: readonly Uint8Array[]) {
   const signers = await Promise.all(seeds.map((seed) => signer(seed)));
   const logKeys = seeds.map((seed) => vaultLogKey(seed));
   const rowKeys = seeds.map((seed) => rowKey(seed));
-  return { signer: signers[0], signers, logKey: logKeys[0], logKeys, rowKey: rowKeys[0], rowKeys, useKey: useKey(seeds[0]) };
+  return { signer: signers[0], signers, logKey: logKeys[0], logKeys, rowKey: rowKeys[0], rowKeys };
 }
 
 /** A pool's connections, unless its transport says (pg's default). */
@@ -612,10 +610,10 @@ class VaultService implements Vault {
   /** 0.15's use (use.ts), on the hot path's login. */
   async use(input: UseInput): Promise<UseOutcome> {
     // Behind the switch: a vault keeping 0.14's log alone has no 0.15 objects to decide on.
-    const { log015, useKey: key, uses: cache } = this.#prepared;
+    const { log015, uses: cache } = this.#prepared;
     if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
     if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
-    return use({ db: this.#hot, sealKeys: log015.seals, useKey: key, keks: this.#config.keks, cache }, input);
+    return use({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache }, input);
   }
 
   async #now(db: Queryable): Promise<number> {

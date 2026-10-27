@@ -11,7 +11,8 @@ import { sql } from 'drizzle-orm';
 import pg from 'pg';
 
 import { openVault, prepareVault } from '../src/vault.ts';
-import { newRequestId, useMac } from '../src/use.ts';
+import { entryMac } from '../src/log-entry.ts';
+import { newRequestId } from '../src/use.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, LOG_015, useDatabases, world } from './use-world.ts';
 
@@ -84,7 +85,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);
       const at = Date.now();
       const requestId = newRequestId();
-      const mac = useMac(randomBytes(32), { at, requestId, credential: w.credentialId, secretId: id, purpose: 4, place: null });
+      const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
       const { rows: [plan] } = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10)`,
         [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null]);
       const node = (plan as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;

@@ -241,8 +241,13 @@ allowed on objects that the change path has sealed.
      `connections`: the pg pool's `max` on Node, a setting on Workers.
    - T112 measures the right number on Workers.
 2. **The call.**
-   - The isolate MACs the request (`useMac`: 16 bytes under a key of its own,
-     `coffre.vault.uses.v1`).
+   - The isolate MACs the request as the checkpointer checks it: `entryMac`
+     over the uses tree and the row's columns, under the log's one MAC key
+     (`logMacKey`, the change path's too), cut to 16 bytes. 5a had a key of
+     its own, `coffre.vault.uses.v1`, and a layout of its own, which no
+     tick could check (T128): every real use would have stopped the
+     checkpointer. The cost is the same: 5.0–5.4 µs a use either way, the
+     HMAC's setup most of it (W227's microbench, 200,000 MACs a run, in #384).
    - It makes one call of `use_credential` as `coffre_vault_hot`, which has
      timeouts of its own (lock 1 s, statement 2 s) and generic plans. On Workers
      this goes through a Hyperdrive config of its own, `hotDatabase`.

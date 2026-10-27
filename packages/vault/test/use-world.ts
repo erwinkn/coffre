@@ -11,6 +11,7 @@ import { sql } from 'drizzle-orm';
 
 import { resolveVaultConfig } from '../src/config.ts';
 import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
+import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId } from '../src/use.ts';
 import { ENGINE, rows, run, type TestDatabase } from './database.ts';
@@ -22,6 +23,8 @@ export const CONFIG = resolveVaultConfig({
   owners: ['root@acme.example'],
 });
 export const SEAL = sealKey(SIGNING_KEY);
+/** The log's MAC key, as the change path, the use path and the checkpointer derive it. */
+export const MAC = logMacKey(SIGNING_KEY);
 export const ROOT = 'user:root@acme.example';
 export const DAY = 86_400_000;
 /** The fence's advisory lock (schema 0022): what a change takes exclusive. */
@@ -83,9 +86,9 @@ export async function change(ref: Ref, op: Op, after: Input | null, write: (tx: 
     if (ENGINE === 'postgres') await run(tx, FENCE);
     await write(tx, seal);
     const n = await nextNumber(tx);
-    const payload = JSON.stringify({ ...op, ...(old === undefined ? {} : { old: old.toString() }) });
+    const row = { at: Date.now(), requestId: randomUUID(), object: objectKey(ref), actor: ROOT, payload: JSON.stringify({ ...op, ...(old === undefined ? {} : { old: old.toString() }) }), seal };
     await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-      VALUES (${n}, ${Date.now()}, ${randomUUID()}, ${objectKey(ref)}, ${ROOT}, ${payload}, ${seal}, ${randomBytes(16)})`);
+      VALUES (${n}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${entryMac(MAC, { tree: 'changes', row })})`);
     return n;
   });
 }
