@@ -591,11 +591,11 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- `change_input` as 0025 made it, but for a key's change, the end of its reference, and an environment's project's archival, held to the project's row.
+-- `change_input` as 0025 made it, but for a key's change, the end of its reference, and an environment's project's archival, held to the project's row; and no JIT (see use_credential's).
 CREATE OR REPLACE FUNCTION change_input(
     p_kind text, p_id text, p_request text, p_at bigint, p_actor text, p_payload text, p_value text, p_seal_from bytea, p_seal bytea, p_mac bytea
 ) RETURNS bigint
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
 DECLARE
     op jsonb := p_payload::jsonb;
     v jsonb := p_value::jsonb;
@@ -760,11 +760,11 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- `app_change` as 0026 made it, but for `project.archive`: a project archived or restored, a change of each of its environments.
+-- `app_change` as 0026 made it, but for `project.archive`: a project archived or restored, a change of each of its environments; and no JIT.
 CREATE OR REPLACE FUNCTION app_change(
     p_kind text, p_id text, p_request text, p_at bigint, p_actor text, p_payload text, p_seal_from bytea, p_seal bytea, p_mac bytea
 ) RETURNS bigint
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
 DECLARE
     op jsonb := p_payload::jsonb;
     change text := op ->> 'op';
@@ -834,7 +834,7 @@ $$;
 --> statement-breakpoint
 -- A reference's end that changes no object (EndInRow): its row's end alone, written in the vault's decision beside 0.14's `reference.end`, for a reference no live holder stands on (its holder archived, holding a value, or standing on a newer reference), and for a standing one whose holder 0.14's log alone holds (no seal, no change: before the cutover), whose change logs nothing. Without it, a holder archived when its reference was broken would read that reference live again once unarchived (an unarchive seals the holder's object from its rows), and the cutover's genesis would seal an unlogged holder's broken reference live. Never a standing reference of a logged holder, whose end is a change of the holder (`change_input`): refused, loudly, so that its decision fails rather than commit 0.14's entry beside a reference 0.15 still serves. The holder's row is locked first, so that no write unarchives or writes it between the check and the end; the vault's decision holds 0.14's head besides. It takes no fence: no use reads a row it writes as an object's.
 CREATE FUNCTION end_reference(p_reference uuid, p_at bigint) RETURNS boolean
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
 DECLARE
     done integer;
 BEGIN
@@ -861,7 +861,7 @@ REVOKE ALL ON FUNCTION end_reference(uuid, bigint) FROM PUBLIC;
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION end_reference(uuid, bigint) TO coffre_vault;
 --> statement-breakpoint
--- No JIT for any function that runs as its owner, as for use_credential above: each plans its statements once a session and keeps them, and an estimate that grows with its tables past jit_above_cost would compile them at every call. Every such function says so itself (use.test.ts holds them all to it).
+-- No JIT for any function that runs as its owner, those of earlier migrations here (this migration's own say it in their definitions, as every new one must): each plans its statements once a session and keeps them, and an estimate that grows with its tables past jit_above_cost would compile them at every call. use.test.ts holds every such function to it.
 ALTER FUNCTION prune_consumed_tokens(integer) SET jit = off;
 --> statement-breakpoint
 ALTER FUNCTION vault_releases_keep() SET jit = off;
@@ -878,10 +878,6 @@ ALTER FUNCTION write_checkpoint(bigint, bigint, bigint, bigint, bytea, text, big
 --> statement-breakpoint
 ALTER FUNCTION prune_bulk(integer) SET jit = off;
 --> statement-breakpoint
-ALTER FUNCTION change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea) SET jit = off;
---> statement-breakpoint
-ALTER FUNCTION app_change(text, text, text, bigint, text, text, bytea, bytea, bytea) SET jit = off;
---> statement-breakpoint
 ALTER FUNCTION log_retention(text, bigint, text, bytea) SET jit = off;
 --> statement-breakpoint
 ALTER FUNCTION log_cut() SET jit = off;
@@ -889,5 +885,3 @@ ALTER FUNCTION log_cut() SET jit = off;
 ALTER FUNCTION drop_day(date) SET jit = off;
 --> statement-breakpoint
 ALTER FUNCTION drop_tiles(bigint) SET jit = off;
---> statement-breakpoint
-ALTER FUNCTION end_reference(uuid, bigint) SET jit = off;

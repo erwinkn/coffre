@@ -20,13 +20,15 @@ export function logWriter(owner: Database, macKey: Buffer) {
   /** The entry `insert` makes, given its number's SQL: one transaction, a file's turn on SQLite, the fence on Postgres. */
   const append = async (insert: (number: SQL) => SQL): Promise<bigint> => {
     if (ENGINE === 'sqlite') {
-      // On SQLite, after every number taken, the store's own included (a retention change, say).
-      const [row] = await rows<{ n: string }>(owner, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS TEXT) AS n`);
-      if (BigInt(row!.n) >= sqliteNext) sqliteNext = BigInt(row!.n) + 1n;
-      const number = sqliteNext++;
-      // Each write a transaction, so that it waits its turn in the file's queue (connect.ts) behind the checkpointer's.
-      await owner.transaction((tx) => run(tx, insert(sql`${number}`)));
-      return number;
+      // Each write a transaction, so that it waits its turn in the file's queue (connect.ts) behind the checkpointer's;
+      // numbered in it, after every number taken, the store's own included (a retention change, say).
+      return owner.transaction(async (tx) => {
+        const [row] = await rows<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS TEXT) AS n`);
+        if (BigInt(row!.n) >= sqliteNext) sqliteNext = BigInt(row!.n) + 1n;
+        const number = sqliteNext++;
+        await run(tx, insert(sql`${number}`));
+        return number;
+      });
     }
     return owner.transaction(async (tx) => {
       await run(tx, sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`);
