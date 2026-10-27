@@ -283,10 +283,9 @@ function postgresStore(db: Database, range: number): LogStore {
         const [row] = await rowsOf<{ done: string }>(db, sql`SELECT drop_tiles(${below}::bigint) AS done`);
         const [what, name] = row!.done.split(' ') as [string, string];
         if (what === 'done') return deleted + Number(name);
-        if (what === 'detached') {
-          made.delete(Number(name.slice('log_tiles_uses_'.length)));
-          deleted += 1;
-        }
+        // Forgotten whichever step this call took: a DETACH whose answer was lost shows next as the range dropped.
+        made.delete(Number(name.slice('log_tiles_uses_'.length)));
+        if (what === 'detached') deleted += 1;
       }
       throw new Error('the tiles below the cut were not all dropped in 10,000 steps');
     },

@@ -159,7 +159,7 @@ async function walk(
     const next = below[i + 1] ?? start.pair;
     if (next.at < a.at || next.floor < a.floor) problems.push(`the pair held outside up to ${a.upto}: its time or floor is past the next pair's (up to ${next.upto}): time runs back`);
     // Two pairs held for one place must be one signing.
-    if (next.upto === a.upto && (next.at !== a.at || next.floor !== a.floor)) problems.push(`two pairs held outside up to ${a.upto}, signed at two times or floors`);
+    if (next.upto === a.upto && (next.at !== a.at || next.floor !== a.floor || next.prev !== a.prev)) problems.push(`two pairs held outside up to ${a.upto}, signed at two times, floors or prevs`);
   }
 
   // Pairs held outside. Those at or below the start are not walked (verified before), but each must still be the row
@@ -296,7 +296,7 @@ async function walk(
  * the same time and floor. Two notes for one place signed at two times take the
  * signer's key twice; honest pairs held outside are copies of rows.
  */
-const sameNotes = (a: Pair, b: Pair) => samePair(a, b) && a.at === b.at && a.floor === b.floor;
+const sameNotes = (a: Pair, b: Pair) => samePair(a, b) && a.at === b.at && a.floor === b.floor && a.prev === b.prev;
 
 /** Both trees' edges at a pair, from their tiles; throws unless each gives its signed head. */
 export async function loadEdges(reader: Pick<LogReader, 'tiles'>, pair: Pair): Promise<Record<TreeName, Edge>> {

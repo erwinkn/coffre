@@ -1300,7 +1300,12 @@ attacker step.
 TLC found the second while the retention model was being written: the first
 draft held `NoUndetectedReplay` for any replay with one entry kept.
 
-The model drops the day and its tiles in one step. The code splits it: a
+The model has one retention run, and drops the day and its tiles in one
+step. Two paths of the code are therefore checked by `retention.test.ts`
+alone: a day an older run left, which a newer sealed cut covers (no second
+change, no consistency proof from tiles that may be gone), and the tiles
+below the newest cut dropped while an older day still waits. The code
+splits the drop too: a
 day is detached in one run and dropped by the next, and the tiles go once
 the cut's sealing is fresh. A crash, or a lock timeout, between those steps
 leaves a day detached or tiles half gone below a sealed cut, which the
