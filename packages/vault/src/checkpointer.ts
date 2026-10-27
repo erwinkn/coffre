@@ -60,9 +60,11 @@ import {
 /** What the checkpointer needs of the database. Postgres and SQLite implement it; so do the tests. */
 export type CheckpointStore = LogReader & {
   /**
-   * The barrier and the window, as one statement: `upto`, such that every
-   * number at or below it has ended; the entries in (after, upto], by number;
-   * and the newest pair, as `newest()` reads it.
+   * The barrier, then the window: `upto`, such that every number at or below
+   * it has ended; the entries in (after, upto], by number; and the newest
+   * pair, as `newest()` reads it. The window is read after the barrier's lock
+   * is let go, in a snapshot of its own (`close_one`, then one read): a
+   * snapshot from before the lock would miss what committed while it waited.
    */
   close(after: bigint): Promise<{ upto: bigint; newest: StoredPair | null; entries: LogEntry[] }>;
   /**

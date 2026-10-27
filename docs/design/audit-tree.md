@@ -118,9 +118,10 @@ The rest of the vault sees `tick()` (the window in, a signed pair out),
 `sealThrough(number)` and `prove(number)`. The trees' shape, tiles and pair
 stay behind them. The database is behind `CheckpointStore`:
 
-- `close(after)`: the barrier and the window, one statement (`close_one`):
-  every number at or below `upto` has ended, the entries above `after`, and
-  the newest row;
+- `close(after)`: the barrier (`close_one`), then the window and the newest
+  row in the next statement, a snapshot taken after the barrier's lock: every
+  number at or below `upto` has ended, so the entries above `after` up to it
+  are final;
 - `write(row, tiles)`: the pair and both trees' tiles, one statement;
 - `newest()`, `entries()`, `tiles()`, `pairs()`, `pair()` and `locate()`:
   the reads.
