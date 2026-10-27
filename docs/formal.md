@@ -1158,7 +1158,7 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | changes take the fence exclusive and answer once committed | `TotalOrder`, `NothingAllowedAfterAnswer` |
 | a value leaves only after its entry commits, durably | `DurableBeforeRelease`, `NothingAllowedAfterAnswer` |
 | the barrier under the fence exclusive; the floor of `at` | `CheckpointsHold` |
-| the barrier checks the floor is the one it last wrote (BarrierChecksFloor), against a writer who lowers it | `CheckpointsHold` |
+| the barrier checks the floor is the one it last wrote (BarrierChecksFloor), against a writer who lowers it. The model shows the barrier signing nothing past a lowered floor; the alarm PR 6 raises is not modelled | `CheckpointsHold` |
 | each input sealed (`Unsealed={"credential"}` …) | `ReplaySound`: allowed live, refused by the replay |
 | seals checked before what the rows say (StaleFirst) | `TamperVisible` |
 | the seal cache valid only while the newest change is the one it was read at (CacheChecked, CacheSameChange) | `ReplaySound`, `RepeatsAreTheirCover`, after a restore |
@@ -1241,6 +1241,11 @@ one `upto` by each tick, as one pair.
 - **The witness without the signer's memory** (SealPlugin). A crash between
   writing a pair and publishing it leaves deletions and split views
   undetected.
+- **The unwitnessed answer.** `WaitForSeal` models a change that answers only
+  once sealed and witnessed. R51 lets a change answer unwitnessed after 2 s,
+  recorded and alerted. An answered change can then be deleted before it is
+  published, and stay undetected: the same window as SealPlugin's.
+  `AnsweredChangeKept` does not cover it.
 
 **What TLC found against W212's rules.**
 - The tick's check must read each tree's newest row: one "newest row" query
