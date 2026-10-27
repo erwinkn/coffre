@@ -231,8 +231,10 @@ the same.
 - **For PR 5:** a use opens a wrapped key. A plain value, which 0.14's
   vault never decides either, is refused at the door (`bad_claim`): the
   app hands it back without a use.
-- **For PR 4 and PR 5, from the spec (W211):** a change refused by its
-  seal's compare-and-set reads the row again before it retries
+- **For PR 4 and PR 5, from the spec (W211):** a change writes only over
+  a row whose seal is its object's newest change's (`ChangeChecksSeal`,
+  else `stale`), and only from the seal it read (`ChangeCAS`); one refused
+  by that compare-and-set reads the row again before it retries
   (`ChangeRereads`); the Worker answers 503 at the deadline even if its call
   never returns, and a value whose call returns late never leaves
   (`WorkerGivesUp`). Neither is in this pure code.
