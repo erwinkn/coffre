@@ -9,16 +9,22 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { decrypt } from '@coffre/core/envelope';
+import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import type { UseOutcome } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
+import { logOrigin } from '../src/checkpointer.ts';
 import { objectKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
-import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
+import { openLogCheckpointer } from '../src/log-checkpointer.ts';
+import { authentic } from '../src/log-entry.ts';
+import { purposeCode, purposeOf, replay, type Logged } from '../src/log-replay.ts';
+import { logStore } from '../src/log-store.ts';
+import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, isolate, MAC, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -98,6 +104,40 @@ test('a use is one entry, its value opened from what the statement read, and the
   assert.equal(plain.toString(), 'postgres://prod');
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 1);
   assert.equal(await replayAgrees(), 1);
+});
+
+test("the checkpointer seals real uses: each entry's MAC is the log's, over the uses tree (KindInMac); a column changed under one is refused", async () => {
+  for (const table of ['log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  const w = await world();
+  const id = await w.key();
+  const fork = await environment(w, 'fork');
+  // Two uses, each from an isolate of its own (a repeat would ride the first's cover): one with no place, one through a fork.
+  const plain = heard(await (await isolate()).use(ask(w, id)));
+  const through = heard(await (await isolate()).use(ask(w, id, { place: fork })));
+  assert.ok(plain.ok && through.ok, JSON.stringify([plain, through]));
+  // The checkpointer as a host opens it: its MAC key from the vault's signing seed, as the use path's.
+  const alarms: string[] = [];
+  const store = logStore(db.vault);
+  const cp = await openLogCheckpointer({ store, seed: SIGNING_KEY, memory: variableMemory(), record: (alarm) => void alarms.push(alarm.message) });
+  const tick = await cp.tick();
+  assert.ok(tick.signed, tick.failures.join('; '));
+  for (const number of [plain.number, through.number]) {
+    const p = (await cp.prove(BigInt(number)))!;
+    assert.equal(p.tree, 'uses');
+    assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root), number);
+  }
+  assert.equal(cp.pair.pair.uses.size, 2);
+  const signers = await pairSigners(await logOrigin(SIGNING_KEY), SIGNING_KEY);
+  const verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
+  const v = await verifyLog(store, { verifiers, check: (e) => (authentic(MAC)(e) ? null : 'its MAC does not hold') });
+  assert.ok(v.ok && v.sealed === Number(cp.pair.pair.changes.size) + 2, v.problems.join('\n'));
+  // A third use, its purpose changed by a writer before its tick: the MAC covers it, and the tick refuses.
+  const third = heard(await (await isolate()).use(ask(w, id, { purpose: 'reveal' })));
+  assert.ok(third.ok, JSON.stringify(third));
+  await run(db.owner, sql`UPDATE log_uses SET purpose = ${purposeCode({ purpose: 'run', keepsSensitive: false })} WHERE number = ${third.number}`);
+  const refused = await cp.tick();
+  assert.ok(!refused.signed && /MAC does not hold/.test(refused.failures.join()), refused.failures.join());
+  assert.ok(alarms.some((alarm) => /MAC does not hold/.test(alarm)), alarms.join());
 });
 
 test('a use the rules refuse is logged as its request all the same, and refused by the replay too', async () => {

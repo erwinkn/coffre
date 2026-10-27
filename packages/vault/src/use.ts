@@ -1,4 +1,4 @@
-import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
@@ -10,6 +10,7 @@ import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
 import { checkSeals, decideChecked, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
 import type { EnvironmentInput, Input, InputGrant, PolicyInput, RolesInput, SealKeys } from './inputs.ts';
+import { entryMac } from './log-entry.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode } from './log-replay.ts';
 import { callUse as callPostgres } from './use.postgres.ts';
@@ -44,30 +45,6 @@ export type { UseInput, UseOutcome, UsedValue };
 /** A use's request id: 63 random bits, unique within its millisecond (hot-path-one.md, "Row size"). */
 export function newRequestId(): string {
   return (randomBytes(8).readBigUInt64BE() >> 1n).toString();
-}
-
-/** The key use entries are MACed under, derived from the vault's signing key. */
-export function useKey(signingKey: Uint8Array): Buffer {
-  return Buffer.from(hkdfSync('sha256', signingKey, new Uint8Array(0), 'coffre.vault.uses.v1', 32));
-}
-
-/** A use entry's fields, everything but its number, which it takes under the fence (hot-path-one.md, "What changes for integrity"). */
-export type UseEntry = { at: number; requestId: string; credential: string; secretId: string; purpose: number; place: string | null };
-
-/** A use entry's MAC: HMAC-SHA256 over its fields in 66 fixed bytes, cut to 16 (R53). */
-export function useMac(key: Buffer, entry: UseEntry): Buffer {
-  const bytes = Buffer.alloc(66);
-  bytes.writeBigInt64BE(BigInt(entry.at), 0);
-  bytes.writeBigInt64BE(BigInt(entry.requestId), 8);
-  uuid(entry.credential).copy(bytes, 16);
-  uuid(entry.secretId).copy(bytes, 32);
-  bytes.writeUInt16BE(entry.purpose, 48);
-  if (entry.place !== null) uuid(entry.place).copy(bytes, 50);
-  return createHmac('sha256', key).update('coffre.use.v1\0').update(Uint8Array.of(entry.place === null ? 0 : 1)).update(bytes).digest().subarray(0, 16);
-}
-
-function uuid(id: string): Buffer {
-  return Buffer.from(id.replaceAll('-', ''), 'hex');
 }
 
 /** What the vault holds per isolate for its uses (`UseCache`): only settled values. */
@@ -152,8 +129,13 @@ type Slot<N extends string> = {
 
 const SLOTS = ['e1', 'e2', 'e3', 'e4'] as const;
 
-/** What a use needs of its vault: its database, the keys it seals and MACs with, its key registry, and its isolate's cache. */
-export type UsePath = { db: Queryable; sealKeys: SealKeys; useKey: Buffer; keks: KekRegistry; cache: UseCache };
+/**
+ * What a use needs of its vault: its database, the keys it checks seals
+ * with, the log's MAC key (`logMacKey`, the change path's and the
+ * checkpointer's: one key, the tree under the MAC, KindInMac), its key
+ * registry, and its isolate's cache.
+ */
+export type UsePath = { db: Queryable; sealKeys: SealKeys; macKey: Buffer; keks: KekRegistry; cache: UseCache };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REQUEST_ID = /^(0|[1-9][0-9]{0,18})$/;
@@ -193,7 +175,7 @@ export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
   const cover = held !== undefined && input.at < held.until && input.at >= held.at && (known?.inputs == null || BigInt(held.number) > BigInt(known.inputs)) ? held : undefined;
   const call: UseCall = {
     credential: input.credential, secretId: input.secretId, requestId: input.requestId, at: input.at, purpose, place: input.place,
-    mac: useMac(path.useKey, { at: input.at, requestId: input.requestId, credential: input.credential, secretId: input.secretId, purpose, place: input.place }),
+    mac: entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId, purpose, place: input.place } }),
     deadline: input.deadline,
     ...(cover === undefined ? {} : { cover }),
     ...(known === undefined ? {} : { known }),
