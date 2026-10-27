@@ -13,7 +13,7 @@ import { alike, refOf, sealKey, type Input, type SealKeys } from './inputs.ts';
 import { authentic, logMacKey } from './log-entry.ts';
 import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
 import { logStore } from './log-store.ts';
-import { bulkRows, heldObjects, keepReplay, keptReplay, now, requestsUnique, type KeptReplay } from './store.ts';
+import { bulkRows, heldObjects, keepReplay, keptReplay, keptUptos, now, requestsUnique, type KeptReplay } from './store.ts';
 
 /**
  * 0.15's verifier (docs/design/0.15-plan.md, PR 8): what holds 0.15's log
@@ -102,6 +102,8 @@ type Audited = { at: number; problems: string[] };
 
 export async function verifyTrees(db: Database, keys: VerifierKeys, options: VerifyOptions): Promise<Extract<TreeVerification, { kept: true }>> {
   const problems: string[] = [];
+  /** Kept replays a check passed over, not the vault's. */
+  const passedOver: bigint[] = [];
   const result = (walk: Partial<Extract<TreeVerification, { kept: true }>>) => ({
     kept: true as const, ok: problems.length === 0, problems, from: null, checkpoint: null, checkpoints: 0, sealed: 0, unsealed: 0, done: false, next: null, audited: null, ...walk,
   });
@@ -110,17 +112,27 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   const walked = await db.transaction(async (tx) => {
     const store = logStore(tx as unknown as Database);
     let start: { notes: PairNotes; upto: bigint; replayed: Replayed; audited: Audited | null } | null = null;
-    if (options.from !== 'start') {
-      const upto = options.from === undefined ? undefined : parseUpto(options.from);
+    // A kept replay and the pair it is at, if it is the vault's over that pair.
+    const resume = async (kept: KeptReplay) => {
+      const pair = await store.pair(kept.upto);
+      const read = pair === null ? null : opened(keys, kept, pair.notes);
+      return pair === null || read === null ? null : { notes: pair.notes, upto: kept.upto, ...read };
+    };
+    if (options.from === undefined) {
+      // The newest the vault kept, newest first: one that is not the vault's is named and passed over, never gone on
+      // from, and never left to stop every check after (review r3); the next replay kept forgets it.
+      for (const upto of await keptUptos(tx)) {
+        start = await resume((await keptReplay(tx, upto))!);
+        if (start !== null) break;
+        passedOver.push(upto);
+      }
+    } else if (options.from !== 'start') {
+      const upto = parseUpto(options.from);
       if (upto === null) return { refused: `not a pair to go on from: ${options.from}` };
       const kept = await keptReplay(tx, upto);
-      if (kept === null && upto !== undefined) return { refused: `no replay is kept at ${upto}: walk again from the first entry` };
-      if (kept !== null) {
-        const pair = await store.pair(kept.upto);
-        const read = pair === null ? null : opened(keys, kept, pair.notes);
-        if (pair === null || read === null) return { refused: `the replay kept at ${kept.upto} is not the vault's over the checkpoint there: walk again from the first entry` };
-        start = { notes: pair.notes, upto: kept.upto, ...read };
-      }
+      if (kept === null) return { refused: `no replay is kept at ${upto}: walk again from the first entry` };
+      start = await resume(kept);
+      if (start === null) return { refused: `the replay kept at ${upto} is not the vault's over the checkpoint there: walk again from the first entry` };
     }
     const replayed = start?.replayed ?? emptyReplay();
     const newest = await store.newest();
@@ -162,8 +174,9 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   const after = head !== null && (head.upto > (start?.upto ?? -1n) || (fresh && head.upto === start?.upto));
   if (problems.length === 0 && after && (options.keep === true || !verdict.done || verdict.sealed >= KEEP_AFTER)) {
     const state = JSON.stringify({ ...walked.state, audited });
-    await keepReplay(db, { upto: head.upto, at, state, mac: replayMac(keys.replays[0]!, head.upto, verdict.head!, state) }, REPLAYS_KEPT_MS);
+    await keepReplay(db, { upto: head.upto, at, state, mac: replayMac(keys.replays[0]!, head.upto, verdict.head!, state) }, REPLAYS_KEPT_MS, passedOver);
   }
+  problems.unshift(...passedOver.map((upto) => `the replay kept at ${upto} is not the vault's over the checkpoint there: passed over`));
   if (verdict.done) problems.push(...(audited?.problems ?? []));
   return result({
     from: start === null ? null : start.upto.toString(),

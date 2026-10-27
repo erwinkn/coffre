@@ -177,6 +177,13 @@ export function createClient(options: ClientOptions) {
     return (await send(method, path, input)) as RouteOutput<K>;
   }
 
+  /** 0.15's log checked; a server older than 0.15 has no such route, and keeps 0.14's log alone (`kept` false). */
+  const verifyTrees = (query: RouteInput<'GET /audit/trees'> = {}): Promise<RouteOutput<'GET /audit/trees'>> =>
+    call('GET /audit/trees', {}, query).catch((error: unknown) => {
+      if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
+      throw error;
+    });
+
   return {
     call,
 
@@ -483,7 +490,7 @@ export function createClient(options: ClientOptions) {
        * or, with `from`, a stretch of the walk from the first entry. `kept`
        * false where the instance keeps 0.14's log alone.
        */
-      verifyTrees: (query: RouteInput<'GET /audit/trees'> = {}) => call('GET /audit/trees', {}, query),
+      verifyTrees,
       /**
        * 0.15's log walked from the first entry, a stretch a request: the first
        * that finds something wrong, or the last. A server older than 0.15 has
@@ -491,10 +498,7 @@ export function createClient(options: ClientOptions) {
        */
       verifyTreesWhole: async (onStretch: (verdict: RouteOutput<'GET /audit/trees'>) => void = () => {}): Promise<RouteOutput<'GET /audit/trees'>> => {
         for (let from = 'start'; ;) {
-          const verdict: RouteOutput<'GET /audit/trees'> = await call('GET /audit/trees', {}, { from }).catch((error: unknown) => {
-            if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
-            throw error;
-          });
+          const verdict = await verifyTrees({ from });
           onStretch(verdict);
           if (!verdict.kept || !verdict.ok || verdict.next === null) return verdict;
           from = verdict.next;

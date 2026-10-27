@@ -290,17 +290,28 @@ test('numbers swapped inside the window: two changes of one object, replayed out
   assert.ok(checked.problems.some((p) => p.startsWith(`${b!.number}: its seal is not the vault's over principal ${BO}`)), checked.problems.join('\n'));
 });
 
-test('a kept replay the vault did not write is refused, never gone on from', async () => {
+test('a kept replay the vault did not write is named and passed over, never gone on from, and the job\'s next replay forgets it', async () => {
   const w = await instance();
   await w.vault.checkpoint();
   const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays`);
-  // A writer clears Bo's grants from the replay, hoping the check goes on without them.
+  // A writer edits the replay, hoping the check goes on from it, and plants one at a pair to come, hoping to stop every
+  // check after (review r3).
   await run(db.owner, sql`UPDATE log_replays SET state = replace(state, '"developer"', '"viewer"')`);
+  await run(db.owner, sql`INSERT INTO log_replays (upto, at, state, mac) VALUES (900000000, 0, '{}', ${randomBytes(32)})`);
+  const named = (upto: string | number) => `the replay kept at ${upto} is not the vault's over the checkpoint there: passed over`;
   const checked = await w.verify();
-  assert.ok(!checked.ok);
-  assert.deepEqual(checked.problems, [`the replay kept at ${kept!.upto} is not the vault's over the checkpoint there: walk again from the first entry`]);
-  // The walk from the first entry does not read it.
+  assert.deepEqual(checked.problems, [named(900000000), named(kept!.upto)]);
+  assert.equal(checked.from, null, 'from the first entry, the only start left');
+  assert.ok(checked.done);
+  // Asked for by its pair, it is refused; the walk from the first entry does not read it.
+  assert.match((await w.verify(String(kept!.upto))).problems.join(), /is not the vault's over the checkpoint there: walk again/);
   clean(await w.verify('start'));
+  // The job keeps a replay of its own, and forgets the two: the checks after go on from it, as before.
+  await w.vault.checkpoint();
+  const after = await w.verify();
+  clean(after);
+  assert.notEqual(after.from, null);
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_replays WHERE upto = 900000000`)).length, 0);
 });
 
 test('a forged use is named at its entry, and so are the indexes that keep requests unique, gone', async () => {

@@ -966,17 +966,24 @@ export async function keptReplay(db: Queryable, upto?: bigint): Promise<KeptRepl
   return row === undefined ? null : { upto: BigInt(row.upto), at: Number(row.at), state: row.state, mac: Buffer.from(row.mac) };
 }
 
+/** The pairs replays are kept at, newest first. */
+export async function keptUptos(db: Queryable): Promise<bigint[]> {
+  const { logReplays } = tablesOf(db);
+  return (await db.select({ upto: logReplays.upto }).from(logReplays).orderBy(desc(logReplays.upto))).map((row) => BigInt(row.upto));
+}
+
 /**
  * Keep a replay at its pair, in place of one kept there before (a fresh
  * audit of the rows on a quiet log), and forget those older than it kept
  * for longer than `keptMs`: a walk's next stretch goes on from the one
- * before within seconds. The vault's login deletes and inserts, never
+ * before within seconds; and forget those at `forged`, which the walk found
+ * were not the vault's. The vault's login deletes and inserts, never
  * updates: a kept replay is never edited in place.
  */
-export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number): Promise<void> {
+export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number, forged: readonly bigint[] = []): Promise<void> {
   const { logReplays } = tablesOf(db);
   await db.transaction(async (tx) => {
-    await tx.delete(logReplays).where(eq(logReplays.upto, replay.upto));
+    await tx.delete(logReplays).where(inArray(logReplays.upto, [replay.upto, ...forged]));
     await tx.insert(logReplays).values(replay).onConflictDoNothing();
     await tx.delete(logReplays).where(and(lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs)));
   });
