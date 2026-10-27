@@ -254,12 +254,17 @@ DECLARE
     barrier record;
     pruned integer;
     before bigint;
+    last bigint;
 BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a deadline past deadline_max was taken'; END IF;
     -- A use from a clock running ahead: a proof would not find it from its window.
-    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 23, t + 120000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 122000);
-    IF r.state IS DISTINCT FROM 'ahead' OR EXISTS (SELECT 1 FROM log_uses WHERE request_id = 23) THEN RAISE EXCEPTION 'FAIL: a use stamped ahead of the database was written'; END IF;
+    last := (SELECT b.last FROM log_bulk b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441');
+    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 23, t + 61000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 63000);
+    IF r.state IS DISTINCT FROM 'ahead' OR r.number IS NOT NULL OR r.covered IS NOT NULL OR EXISTS (SELECT 1 FROM log_uses WHERE request_id = 23)
+       OR (SELECT b.last FROM log_bulk b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441') IS DISTINCT FROM last THEN
+        RAISE EXCEPTION 'FAIL: a use stamped ahead of the database wrote something';
+    END IF;
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 21, t - 2000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t - 1);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a use past its deadline was taken'; END IF;
     before := (SELECT at_floor FROM log_fence);

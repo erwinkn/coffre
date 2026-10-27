@@ -218,7 +218,8 @@ BEGIN
     IF p_deadline IS NULL OR p_deadline > p_at + public.deadline_max() THEN r.state := 'late'; RETURN r; END IF;
     -- A use stamped more than a minute past the database's clock: its Worker's clock is ahead. Written, it would lie
     -- beyond where a proof looks for it from its window (the uses have no index by number), and the honest uses
-    -- after it would read as changed. The clock only moves on, so checked here it holds to the end.
+    -- after it would read as changed. Checked here, at no cost, and again in the statement that writes, in case the
+    -- database's clock stepped back meanwhile (ClockBack).
     IF p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN r.state := 'ahead'; RETURN r; END IF;
     PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     LOOP
@@ -266,6 +267,7 @@ BEGIN
             v AS MATERIALIZED (
                 SELECT i.*,
                     CASE WHEN i.at_floor IS NULL OR p_at < i.at_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
+                         WHEN p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN 'ahead'
                          WHEN i.cap_count IS NULL OR i.cap_window IS NULL THEN 'unconfigured'
                          WHEN i.p IS NOT NULL AND NOT locked AND coalesce(i.bulk_last <= p_at - i.cap_refresh, true) THEN 'lock' END AS state,
                     greatest(lc.number, lm.number, ls.number, le.number, i.policy_number) AS inputs,
@@ -324,6 +326,7 @@ BEGIN
                 SELECT n.newest, n.newest_mac, coalesce(n.cached, false) AS cached,
                     CASE WHEN NOT coalesce(n.cached, false) THEN 'reprobe'
                          WHEN f.at_floor IS NULL OR p_at < f.at_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
+                         WHEN p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN 'ahead'
                          WHEN cap.count IS NULL OR cap.window_ms IS NULL THEN 'unconfigured'
                          WHEN c.principal IS NOT NULL AND NOT locked AND coalesce(b.last <= p_at - cap.refresh, true) THEN 'lock' END AS state,
                     c.principal AS p, c.kind AS c_kind, c.generation AS c_generation, c.scope AS c_scope, c.places AS c_places, c.constraints AS c_constraints,
