@@ -263,10 +263,13 @@ func check(path string) {
 		}
 
 		// Every head of the tree, a prefix of the newest: Go's ProveTree and ours agree, and CheckTree accepts.
+		checked := 0
 		for _, h := range hs {
+			// Genesis and the newest head have nothing to prove.
 			if h.size == 0 || h.size == top.size {
 				continue
 			}
+			checked++
 			p := must(tlog.ProveTree(top.size, h.size, reader))
 			if err := tlog.CheckTree(p, top.size, top.root, h.size, h.root); err != nil {
 				log.Fatalf("%s: CheckTree %d to %d: %v", name, h.size, top.size, err)
@@ -300,8 +303,8 @@ func check(path string) {
 				}
 			}
 		}
-		fmt.Printf("%s: %d leaves, %d heads; tiles byte-equal to Go's (%d), TreeHash from TileHashReader matches; %d inclusion and %d consistency proofs equal to Go's, %d heads CheckTree'd\n",
-			name, top.size, len(hs), len(stored), len(t.Records), len(t.Consistency), len(hs))
+		fmt.Printf("%s: %d leaves, %d heads; tiles byte-equal to Go's (%d), TreeHash from TileHashReader matches; %d inclusion and %d consistency proofs equal to Go's; %d heads CheckTree'd (every head but the empty ones and the newest)\n",
+			name, top.size, len(hs), len(stored), len(t.Records), len(t.Consistency), checked)
 
 		// Retention cuts: only the tiles that reach past the cut stay. Go's TileHashReader, which checks each tile it
 		// loads against the signed head, must still prove every sampled leaf above the cut and every size above it.

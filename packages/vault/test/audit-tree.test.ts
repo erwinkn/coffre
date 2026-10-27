@@ -251,6 +251,26 @@ test('a memory restored from before the newest rows is accepted when it is a pre
   await assert.rejects(open(), /does not extend the one the signer remembers/);
 });
 
+test('review r3: a memory behind the database is checked by a consistency proof, not a head recomputed from planted tiles', async () => {
+  // The signer remembers 256 uses. A rollback and a signer without memory make a fork of 65,792 uses whose first 256
+  // differ; the writer plants the remembered root at tile 1/0, which the fork's own head never reads (it reads 2/0).
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  for (let i = 0; i < 256; i += 1) store.append('uses', `real-${i}`);
+  assert.ok((await cp.tick()).signed);
+  const remembered = memory.record!;
+  const mine = (await openPair(decodePair(remembered)!, k.verifiers))!;
+  store.rollBack(0n);
+  const forked = await open({ memory: variableMemory() });
+  for (let i = 0; i < 65_792; i += 1) store.append('uses', `fork-${i}`);
+  assert.ok((await forked.tick()).signed);
+  const tile = Buffer.from(store.tileStore.uses.get('1/0')!);
+  mine.uses.root.copy(tile, 0);
+  store.tileStore.uses.set('1/0', tile);
+  memory.record = remembered;
+  await assert.rejects(open(), /does not extend the one the signer remembers/);
+});
+
 test('a signer with no memory on an existing log starts from the database, says so, and remembers it', async () => {
   const { store, open, alerts } = await setup();
   const cp = await open();

@@ -192,7 +192,8 @@ W209's attack table (#365).
 | forges an entry, replays an old one, or duplicates a number | the tick | refuses to sign; a change waiting on it fails with the alarm |
 | stores notes of two ticks as one row or memory record | `open()`, the verifier | "not a pair" |
 | moves an entry from one tree to the other | the verifier | both heads differ |
-| restores the memory from a backup | `open()` | accepted if a prefix in both trees, else refused |
+| restores the memory from a backup | `open()` | accepted if a prefix in both trees, by a consistency proof between the signed roots, else refused |
+| plants a remembered root in a tile the newest head never reads | `open()` | the consistency proof binds both roots, so planted tiles cannot pass |
 
 **What it does not catch, as designed:** an entry deleted or reordered
 before its tick, a window of about 500 ms (R51: uses do not wait, changes
@@ -220,7 +221,8 @@ shares no code with ours. Run on 2026-10-27:
     byte, with nothing more and nothing less (3 changes tiles, 277 uses
     tiles).
   - 102 inclusion and 277 consistency proofs per tree equal Go's
-    `ProveRecord` and `ProveTree`, and every head passes `CheckTree`. A
+    `ProveRecord` and `ProveTree`, and every head but the empty ones and
+    the newest (which have nothing to prove) passes `CheckTree`. A
     proof with one byte flipped fails.
 - **Cuts.** Uses-tree cuts at 40,000, 65,536, 65,537 and 70,002 keep only
   the tiles `keptAbove` keeps, from 121 down to 3 of 277. Go's
@@ -267,11 +269,13 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 - **For dropping:** 47.5 B a use, 25% of a use's storage, and 17% of the
   log's WAL.
 - **Against dropping:**
-  - **Every reader of level 0 would rebuild it from use rows.** That means
-    `open()`'s edge, every tick's consistency proofs for witnesses, the
-    tile API that Go and C2SP clients read, and the verifier's start. The
-    use table has no index on number (W211), so each rebuild reads a
-    window by `at`, which ties the tree to the hot path's barrier.
+  - **Every level-0 read would rebuild tiles from use rows.** All readers
+    go through the store's `tiles()`, so the rebuild has one home there.
+    But it runs on every tick's consistency proofs for witnesses, on
+    `open()`, on the tile API that Go and C2SP clients read, and on the
+    verifier's start. Each costs 0.68 ms instead of 0.18. The use table
+    has no index on number (W211), so each rebuild reads a window by `at`,
+    which ties the store's tree reads to the hot path's barrier.
   - **Retention would get a new step.** The tile holding each cut would
     have to be written out before its day's uses are dropped.
   - **The saving does not grow without limit.** Level-0 tiles go with

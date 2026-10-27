@@ -34,9 +34,12 @@ export function parseCheckpoint(text: string): Checkpoint {
   const [origin, size, root, upto, at, end] = lines;
   const hash = Buffer.from(root ?? '', 'base64');
   const ok = lines.length === 6 && end === '' && origin !== undefined && /^[^\s+]+$/.test(origin)
-    && /^(0|[1-9]\d{0,14})$/.test(size ?? '') && hash.length === HASH_SIZE && hash.toString('base64') === root
-    && /^upto (0|[1-9]\d{0,18})$/.test(upto ?? '') && /^at (0|[1-9]\d{0,14})$/.test(at ?? '');
-  if (!ok || BigInt(upto!.slice(5)) > MAX_NUMBER) throw new Error('not a checkpoint');
+    && /^(0|[1-9]\d{0,15})$/.test(size ?? '') && hash.length === HASH_SIZE && hash.toString('base64') === root
+    && /^upto (0|[1-9]\d{0,18})$/.test(upto ?? '') && /^at (0|[1-9]\d{0,15})$/.test(at ?? '');
+  // Sizes and times are exact numbers up to 2^53, as the tree's arithmetic; numbers are Postgres bigints.
+  if (!ok || BigInt(upto!.slice(5)) > MAX_NUMBER || !Number.isSafeInteger(Number(size)) || !Number.isSafeInteger(Number(at!.slice(3)))) {
+    throw new Error('not a checkpoint');
+  }
   return { origin: origin!, size: Number(size), root: hash, upto: BigInt(upto!.slice(5)), at: Number(at!.slice(3)) };
 }
 

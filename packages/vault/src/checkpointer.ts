@@ -15,8 +15,8 @@ import {
   signPair,
   tileMap,
   tilesFor,
-  treeHash,
   TREES,
+  verifyConsistency,
   verifyInclusion,
   witnessPair,
   type Hash,
@@ -108,7 +108,11 @@ export const FRESH_MS = 10 * 60_000;
 export const WITNESS_DEADLINE_MS = 2000;
 
 export type Tick = {
-  /** Whether a pair landed in the database this tick: a new one, or a pending one finished. */
+  /**
+   * Whether a pair landed in the database this tick: a new one, or a pending
+   * one finished. A tick can finish a pending pair and then refuse its own
+   * window: `failures` says so.
+   */
   signed: boolean;
   upto: bigint;
   sizes: Record<TreeName, number>;
@@ -126,7 +130,11 @@ export type Sealed = {
   /** null when no witness is set up, so nothing reads "witnessed" there. */
   witnessed: boolean | null;
   failures: string[];
-  /** The pair as each witness that took it in time cosigned it. */
+  /**
+   * Each witness's cosignature of the newest pair it took in time: a pair
+   * covering the change, which may be later than `pair` if a tick landed
+   * meanwhile. Each note says its own place.
+   */
   cosigned: PairNotes[];
   /** The change's entry, proved in the pair: what the admin's client checks and can keep. */
   proof: InclusionProof;
@@ -262,11 +270,13 @@ export class Checkpointer {
         head = mine;
       } else {
         // The database is ahead, which RememberFirst rules out for this signer (a memory restored from a backup, say):
-        // accepted only if the remembered pair is a prefix of it, in both trees.
+        // accepted only if the remembered pair is a prefix of it, in both trees: by a consistency proof between the two
+        // signed roots, never a head recomputed from tiles, which hold each subtree at several levels and could be
+        // planted at one the newest head never reads.
         for (const tree of TREES) {
           const { size, root } = mine.pair[tree];
-          const prefix = size <= newest[tree].size
-            && treeHash(nodesFrom(tileMap(await store.tiles(tree, tilesFor((n) => treeHash(n, size))))), size).equals(root);
+          const proof = size > newest[tree].size ? null : await proveConsistency(store, tree, size, newest[tree].size).catch(() => null);
+          const prefix = proof !== null && verifyConsistency(size, newest[tree].size, root, newest[tree].root, proof);
           if (!prefix) throw new Error(`the database's ${tree} head (${newest[tree].size} up to ${newest.upto}) does not extend the one the signer remembers (${size} up to ${mine.pair.upto})`);
         }
         await options.memory.remember(encodePair(row.notes));
