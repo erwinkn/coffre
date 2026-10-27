@@ -257,6 +257,9 @@ DECLARE
 BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a deadline past deadline_max was taken'; END IF;
+    -- A use from a clock running ahead: a proof would not find it from its window.
+    r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 23, t + 120000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 122000);
+    IF r.state IS DISTINCT FROM 'ahead' OR EXISTS (SELECT 1 FROM log_uses WHERE request_id = 23) THEN RAISE EXCEPTION 'FAIL: a use stamped ahead of the database was written'; END IF;
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 21, t - 2000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t - 1);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a use past its deadline was taken'; END IF;
     before := (SELECT at_floor FROM log_fence);
@@ -275,7 +278,7 @@ BEGIN
     IF pruned <> 1 OR EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:gone') THEN RAISE EXCEPTION 'FAIL: prune_bulk kept a key no window counts'; END IF;
     pruned := prune_bulk(100);
     IF pruned <> 0 OR NOT EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:deploy') THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
-    RAISE NOTICE 'PASS: late uses write nothing (DeadlineChecked, FloorChecked), the barrier raises the floor, and pruning keeps what a window counts';
+    RAISE NOTICE 'PASS: late uses, and uses stamped ahead, write nothing (DeadlineChecked, FloorChecked), the barrier raises the floor, and pruning keeps what a window counts';
 END
 $$;
 

@@ -182,7 +182,7 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- What a use reads, as use_credential returns it. `state` is null when it did its work; otherwise it did nothing, and the rest is to be ignored: 'late' (past its deadline, or below the floor), 'unconfigured' (no policy), 'reprobe' and 'lock' never leave the function. `inputs` is the newest change of any of its inputs; each `*_seal` is a row's, each `*_last` its object's newest change's (null in the cached form, where the isolate holds them).
+-- What a use reads, as use_credential returns it. `state` is null when it did its work; otherwise it did nothing, and the rest is to be ignored: 'late' (past its deadline, or below the floor), 'ahead' (stamped more than a minute past the database's clock), 'unconfigured' (no policy), 'reprobe' and 'lock' never leave the function. `inputs` is the newest change of any of its inputs; each `*_seal` is a row's, each `*_last` its object's newest change's (null in the cached form, where the isolate holds them).
 CREATE TYPE use_view AS (
     state text, number bigint, covered bigint, principal text, newest bigint, newest_mac bytea, inputs bigint,
     c_kind text, c_generation integer, c_scope text, c_places text, c_constraints text, c_revoked boolean, c_expires bigint, c_not_after bigint, c_seal bytea, c_last bytea,
@@ -216,6 +216,10 @@ DECLARE
     probe boolean := p_known IS NULL;
 BEGIN
     IF p_deadline IS NULL OR p_deadline > p_at + public.deadline_max() THEN r.state := 'late'; RETURN r; END IF;
+    -- A use stamped more than a minute past the database's clock: its Worker's clock is ahead. Written, it would lie
+    -- beyond where a proof looks for it from its window (the uses have no index by number), and the honest uses
+    -- after it would read as changed. The clock only moves on, so checked here it holds to the end.
+    IF p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN r.state := 'ahead'; RETURN r; END IF;
     PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     LOOP
         IF probe THEN
