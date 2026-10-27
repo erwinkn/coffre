@@ -922,7 +922,7 @@ Crash ==
     /\ ishared' = {}
     /\ bar' = 0
     /\ UNCHANGED <<nextSeq, answered, released, cp, lastUpto, lastFloor, signed, floor, cover, repeats, tamper, tampers,
-                   cache, restores, bulk, pnow, backs, issueVars>>
+                   cache, restores, bulk, pnow, backs>>
 
 -----------------------------------------------------------------------------
 (* Attacks and accidents. *)

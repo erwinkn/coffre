@@ -349,20 +349,26 @@ export async function credentialsLogged(owner: Database): Promise<void> {
 /**
  * Every row a 0.15 use decides on (sealed-inputs.md: members and their
  * grants, credentials, keys with their versions and references,
- * environments and their projects, the policy and the roles), table by
- * table, but the credentials `except` names: what a write that only issues
- * a credential must leave as it was, since it takes no fence (migration
- * 0026; Migration015.tla's ExchangeOnlyIssues).
+ * environments and their projects, the policy and the roles), and 0.14's
+ * bindings but their last use, table by table, but the credentials
+ * `except` names: what a write that only issues a credential must leave as
+ * it was, since it takes no fence (migration 0026; Migration015.tla's
+ * ExchangeOnlyIssues).
  */
 export async function decisionInputs(owner: Database, except: readonly string[] = []): Promise<Record<string, string[]>> {
   const tables = tablesOf(owner);
   const inputs = { vaultMembers: tables.vaultMembers, vaultGrants: tables.vaultGrants, credentials: tables.credentials, secrets: tables.secrets,
-    secretVersions: tables.secretVersions, secretReferences: tables.secretReferences, environments: tables.environments, projects: tables.projects, logConfig: tables.logConfig };
+    secretVersions: tables.secretVersions, secretReferences: tables.secretReferences, environments: tables.environments, projects: tables.projects, logConfig: tables.logConfig,
+    serviceBindings: tables.serviceBindings };
   const text = (row: object) => JSON.stringify(row, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
   const read: Record<string, string[]> = {};
   for (const [name, table] of Object.entries(inputs)) {
     const rows = (await owner.select().from(table as typeof tables.projects)) as Record<string, unknown>[];
-    read[name] = rows.filter((row) => name !== 'credentials' || !except.includes(row.id as string)).map(text).sort();
+    read[name] = rows
+      .filter((row) => name !== 'credentials' || !except.includes(row.id as string))
+      // A binding's last use is stamped by every exchange: no decision reads it.
+      .map((row) => text(name === 'serviceBindings' ? { ...row, lastUsedAt: null } : row))
+      .sort();
   }
   return read;
 }

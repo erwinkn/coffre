@@ -365,6 +365,28 @@ test('an issue of a row its transaction did not write takes the fence, as any ch
   }
 });
 
+test('an issue of a row a savepoint inserted takes the fence: its xmin is the savepoint\'s, not the transaction\'s', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+  const w = await world();
+  const row = token();
+  const [c] = await prepare(w, row);
+  const issuing = new pg.Client({ connectionString: OWNER_URL });
+  await issuing.connect();
+  try {
+    await issuing.query('BEGIN');
+    await issuing.query('SAVEPOINT s');
+    await issuing.query(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at, scope)
+      VALUES ($1, $2, $3, $4, 'x', 0, $5, $6, $7, $8)`, [row.id, row.kind, randomBytes(32), randomBytes(32), row.principal, ROOT, row.expiresAt, row.scope]);
+    await issuing.query('RELEASE SAVEPOINT s');
+    await issuing.query('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
+      c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
+    ]);
+    assert.deepEqual(await advisoryHeld(issuing), ['0 ExclusiveLock', '1 ShareLock']);
+    await issuing.query('COMMIT');
+  } finally {
+    await issuing.end();
+  }
+});
+
 test('0.14\'s trigger: an entry that changes access takes the issue lock, then the fence; a token.exchange, neither (IssueBeforeFence, ExchangeOnlyIssues)', postgresOnly('SQLite has no trigger'), async () => {
   const key = deriveLogKey('app', randomBytes(32));
   const held = (action: string) => db.owner.transaction(async (tx: Transaction) => {
