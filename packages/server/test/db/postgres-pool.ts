@@ -93,7 +93,8 @@ export function watched<C extends Client>(client: C, heard: (sent: Sent) => void
             const work = args.pop() as (tx: object) => unknown;
             const options = typeof args[0] === 'string' ? args[0] : '';
             let asked = false;
-            const begun = key === 'begin'
+            // A client with the hook hears its BEGIN as sent: none is inferred.
+            const begun = hooked ? undefined : key === 'begin'
               ? () => {
                 if (asked) return;
                 asked = true;

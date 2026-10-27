@@ -26,14 +26,12 @@ export type Waiting = Query | Reservation;
 const isReservation = (waiting: Waiting): waiting is Reservation => 'reserve' in waiting;
 
 /**
- * A connection held for one caller, a transaction (until Postgres says it is
- * idle again, out of the transaction) or a `reserve()` (until released): the
- * pool sends it nothing else. `next` sends the caller's next statement.
+ * A connection held for one caller, a transaction or a `reserve()`, until it
+ * gives it back (`release`): the pool sends it nothing else. `next` sends the
+ * caller's next statement.
  */
 export interface Reserved {
   next(): void;
-  /** Held until `release()`, not until the transaction ends. */
-  untilReleased: boolean;
 }
 
 export interface Connection {
@@ -50,6 +48,8 @@ export interface Connection {
   execute(query: Query): boolean;
   /** Close it once what it was sent has answered. */
   end(): Promise<void>;
+  /** Given back by what held it: closed if it was asked to end meanwhile, or the pool's again. */
+  release(): void;
   /** Close it now, failing what it was sent. */
   terminate(): void;
 }
@@ -121,6 +121,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     terminate,
     execute,
     end,
+    release,
     id,
   };
 
@@ -153,18 +154,26 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       return false;
     }
 
+    let message: Buffer;
     try {
-      if (query) sent.push(q);
-      else query = q;
-
       build(q);
-      // Nothing follows a statement that carries its transaction's BEGIN until Postgres has said whether it took.
-      return write(toBuffer(q)) && !q.describeFirst && q.begin === null && sent.length < max_pipeline;
+      message = toBuffer(q);
     } catch (e) {
-      if (sent.length === 0) write(Sync);
-      errored(e);
+      // Coffre: a statement the client cannot write fails alone, and nothing of it is sent. On an idle connection it is
+      // answered all the same, a lone Sync's ReadyForQuery, which goes on as any answer does; behind one answering, it
+      // is dropped. Upstream failed the statement already answering there, and left this one waiting for an answer,
+      // its transaction with it.
+      queryError(q, e);
+      if (query === null) {
+        query = q;
+        write(Sync);
+      }
       return true;
     }
+    if (query) sent.push(q);
+    else query = q;
+    // Nothing follows a statement that carries its transaction's BEGIN until Postgres has said whether it took.
+    return write(message) && !q.describeFirst && q.begin === null && sent.length < max_pipeline;
   }
 
   function toBuffer(q: Query): Buffer {
@@ -360,6 +369,15 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     return (ending = new Promise((resolve) => (ended = resolve)));
   }
 
+  // Coffre: a held connection asked to end meanwhile (its lifetime, the client's end) closes once given back; upstream
+  // closed a transaction's once Postgres said it was idle, and gave a reserve()'s back to the pool, its end() still
+  // waiting, which a later end() waited on for ever.
+  function release(): void {
+    connection.reserved = null;
+    if (ending) terminate();
+    else onopen(connection);
+  }
+
   function terminate(): void {
     terminated = true;
     if (query || initial || sent.length) error(Errors.connection('CONNECTION_DESTROYED', options));
@@ -507,16 +525,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (query) return; // Consider opening if able and sent.length < 50
 
     if (connection.reserved) {
-      // I: idle, out of the transaction that held it.
-      if (!connection.reserved.untilReleased && x[5] === 73) {
-        if (ending) terminate();
-        else {
-          connection.reserved = null;
-          onopen(connection);
-        }
-      } else {
-        connection.reserved.next();
-      }
+      connection.reserved.next();
     } else if (ending) {
       terminate();
     } else {

@@ -37,7 +37,7 @@ wrote them with its tagged template.
 
 ## Changes from upstream
 
-Eight, each marked `Coffre:` in the code:
+Nine, each marked `Coffre:` in the code:
 
 - **One round trip per statement** (`typedByServer`, in `connection.ts`).
   Upstream asks the server for an unnamed statement's parameter types (Parse,
@@ -67,7 +67,11 @@ Eight, each marked `Coffre:` in the code:
   left running asks once it has ended (`TRANSACTION_ENDED`), or once its
   connection closed (the close's error), is not sent either: it would run
   on the pool's connection, outside it, or open a transaction there no one
-  ends; nor is a ROLLBACK for a connection gone. Through Hyperdrive, the
+  ends; nor is a ROLLBACK for a connection gone. A statement that failed
+  unwaited fails the transaction, whose COMMIT Postgres answers with
+  ROLLBACK rather than an error, which upstream took for success. A held
+  connection asked to end meanwhile, its `max_lifetime` say, closes once
+  given back (`release`, in `connection.ts`). Through Hyperdrive, the
   first statement reaches the pooler with its BEGIN, in one batch: the
   pooler keeps the connection for the transaction from the ReadyForQuery
   after it, which says so (`T`), and coffre's Hyperdrive configurations
@@ -130,3 +134,9 @@ Eight, each marked `Coffre:` in the code:
   the hashes are promises, which can settle after the close) writes nothing
   and fails nothing: upstream went on with the connection opened again, or
   failed on its null socket.
+- **A statement the client cannot write fails alone** (`execute`, in
+  `connection.ts`): too many parameters, a value it cannot serialize.
+  Nothing of it is sent; on an idle connection, a lone Sync answers it, so
+  the connection goes on as after any answer. Upstream failed the statement
+  already answering instead, and left this one waiting, its transaction and
+  connection with it, for ever.

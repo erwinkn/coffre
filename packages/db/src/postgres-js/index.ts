@@ -189,16 +189,15 @@ export default function postgres(given: Options): Sql {
 
   /** `c`, held, given back to the pool. */
   function giveBack(c: Connection): void {
-    c.reserved = null;
     // Coffre: given back once the client is ending, the connection ends, which end() waits for; upstream gave it back.
     if (ending) c.terminate();
-    else onopen(c);
+    else c.release();
   }
 
   async function reserve(): Promise<ReservedSql> {
     const queue = new Queue<Query>();
     const c = await hold();
-    c.reserved = { next: () => (queue.length ? c.execute(queue.shift()!) : move(c, reserved)), untilReleased: true };
+    c.reserved = { next: () => (queue.length ? c.execute(queue.shift()!) : move(c, reserved)) };
 
     return {
       unsafe: unsafeOn(onReserved),
@@ -242,7 +241,6 @@ export default function postgres(given: Options): Sql {
         move(c, reserved);
         while (queries.length) if (!c.execute(queries.shift()!)) return void move(c, full);
       },
-      untilReleased: true,
     };
     c.reserved = mine;
     try {
@@ -286,7 +284,14 @@ export default function postgres(given: Options): Sql {
         throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
       }
 
-      if (!name && first !== null) await own('commit');
+      if (!name && first !== null) {
+        // Coffre: a statement that failed unwaited fails the transaction, whose COMMIT Postgres answers with ROLLBACK,
+        // not an error; and a COMMIT refused as its BEGIN failed fails with the BEGIN's error. Upstream resolved.
+        await own('commit').catch((e: unknown) => {
+          throw uncaughtError ?? e;
+        });
+        if (uncaughtError) throw uncaughtError;
+      }
 
       return result;
 

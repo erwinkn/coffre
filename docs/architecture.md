@@ -1159,16 +1159,19 @@ rest out: COPY, LISTEN/NOTIFY, cursors, named prepared statements, the
 tagged template, reading URLs and the environment. One tree runs on Node and
 on Workers: its sockets, TLS and hashes are behind `@coffre/db`'s
 `#postgres/platform` import, Node's own modules or `cloudflare:sockets` and
-WebCrypto, chosen where the package runs. It differs from upstream in eight
+WebCrypto, chosen where the package runs. It differs from upstream in nine
 places (`packages/db/src/postgres-js/README.md`): a statement's values go with the
 statement, as text the server types, as node-postgres sends them, where
 upstream first asks the server for their types, a round trip more for every
 statement with parameters (porsager/postgres#1225); a transaction's BEGIN
-always learns its connection, however many statements are queued before it;
+goes with its first statement, under one Sync, a round trip less, and
+nothing of a transaction is sent once its BEGIN failed, its connection
+closed or it ended, so none of it runs outside it;
 a query cut short by its connection's close no longer keeps `end()` waiting,
 a connection closed while it opens fails its query rather than being
-dialled again for ever, an ending client opens no connection again, and a
-`reserve()` that opens its connection gets it;
+dialled again for ever, an ending client opens no connection again, a
+`reserve()` that opens its connection gets it, and a statement the client
+cannot write fails alone;
 the pool takes the connection idle the shortest, as pg-pool does, so
 that a steady load keeps to a few warm backends rather than cycling through
 all of them; and a sign-in the client cannot work out fails its connection

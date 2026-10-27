@@ -433,14 +433,15 @@ workerd restarted each time (25 runs, per-thread CPU from schedstat).
 ### The driver: postgres.js at node-postgres's round trips (W221)
 
 Coffre swapped node-postgres for postgres.js (R56): its own copy, now
-TypeScript in `packages/db/src/postgres-js`, with eight changes from
+TypeScript in `packages/db/src/postgres-js`, with nine changes from
 upstream ([its README](../../packages/db/src/postgres-js/README.md)).
 Unpatched, the swap was a regression in round trips and Node's Postgres CPU;
 a third sends a transaction's BEGIN with its first statement, a round trip
-less per transaction; the other five close the ways a
+less per transaction; the other six close the ways a
 lost or ended connection left a client hanging, open or answering wrong, an
-opening that failed with nothing to catch it, and a `reserve()` that never
-answered.
+opening that failed with nothing to catch it, a `reserve()` that never
+answered, and a statement the client could not write, which failed the one
+before it and hung.
 
 - **Round trips.** Upstream postgres.js asks the server for an unnamed
   statement's parameter types and waits for the answer before it sends the

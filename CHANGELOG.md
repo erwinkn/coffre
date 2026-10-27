@@ -26,7 +26,7 @@
   it (no COPY, LISTEN/NOTIFY, cursors or tagged template). Deployments
   install nothing for it. Connection URLs are read as before, TLS included
   (`sslmode`, `sslrootcert=system`); a URL names its user. It differs from
-  upstream in eight places:
+  upstream in nine places:
   - a statement's values go with it, as node-postgres sends them: upstream
     asked the server for their types first, a round trip more for every
     statement with parameters, so each statement is still one round trip,
@@ -55,6 +55,11 @@
   - a `reserve()` that opens its connection gets it: without `fetch_types`,
     upstream never gave it, nor, after a connection closed, to the
     `reserve()` or transaction that opened it again;
+  - a statement the client cannot write (too many parameters) fails alone,
+    where upstream failed the one before it and hung, its transaction with
+    it; and a transaction one of whose statements failed unwaited fails,
+    where upstream reported its COMMIT, which Postgres answered with
+    ROLLBACK, as a success;
   - an opening that cannot be finished (TLS with a key it cannot read, a
     sign-in's hash or a server's SCRAM message, a sign-in the client has
     not, such as GSSAPI, a `socket` factory that throws) fails the query

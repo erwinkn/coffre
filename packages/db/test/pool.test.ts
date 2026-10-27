@@ -507,3 +507,64 @@ test('a transaction begins as asked: its mode, a savepoint first, a statement de
     await client.end();
   }
 });
+
+test('a held connection whose lifetime ends meanwhile closes once given back, and the client ends', { skip, timeout: 10_000 }, async () => {
+  for (const hold of ['transaction', 'reserve'] as const) {
+    const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_lifetime: 0.2, onnotice: () => {} });
+    if (hold === 'transaction') {
+      await client.begin((tx) => tx.unsafe('select pg_sleep(0.4)'));
+    } else {
+      const reserved = await client.reserve();
+      await reserved.unsafe('select pg_sleep(0.4)');
+      reserved.release();
+    }
+    assert.equal(await Promise.race([client.end().then(() => 'ended'), new Promise((resolve) => setTimeout(resolve, 3000, 'waiting'))]), 'ended', hold);
+  }
+});
+
+test('a transaction fails as its statements did, waited for or not, and keeps none of them', { skip }, async () => {
+  const { client } = sending('coffre-tx-failed');
+  try {
+    await client.unsafe('create temporary table failed (n int)');
+    // One that fails unwaited: Postgres answers the COMMIT with ROLLBACK, which upstream took for success.
+    await assert.rejects(client.begin((tx) => {
+      tx.unsafe('insert into failed values ($1)', [1]).execute();
+      tx.unsafe('select 1/0').execute();
+      return 'ok';
+    }), { code: '22012' });
+    // A BEGIN that fails, its statement unwaited: the BEGIN's error, not the refused COMMIT's.
+    await assert.rejects(client.begin('isolation level bogus', (tx) => {
+      tx.unsafe('insert into failed values ($1)', [2]).execute();
+      return 'ok';
+    }), { code: '42601' });
+    // One the client cannot write, behind one answering: it fails alone, and the transaction with it.
+    await assert.rejects(client.begin((tx) => [
+      tx.unsafe('select pg_sleep(0.05)'),
+      tx.unsafe('select $1', Array(65534).fill(1)),
+      tx.unsafe('insert into failed values ($1)', [3]),
+    ]), { code: 'MAX_PARAMETERS_EXCEEDED' });
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from failed')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test('one connection: the pool\'s statements around a transaction stay out of it, and what waits behind its BEGIN is all of it', { skip }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 2, onnotice: () => {} });
+  try {
+    await client.unsafe('create temporary table around (n int)');
+    const before = client.unsafe('insert into around values ($1)', [1]);
+    // Six at once behind the BEGIN, two pipelined at a time, then rolled back.
+    const rolledBack = client.begin(async (tx) => {
+      await Promise.all([10, 11, 12, 13, 14, 15].map((n) => tx.unsafe('insert into around values ($1)', [n])));
+      throw new Error('roll back');
+    }).then(() => 'committed', (e: Error) => e.message);
+    const after = client.unsafe('insert into around values ($1)', [2]);
+    await before;
+    assert.equal(await rolledBack, 'roll back');
+    await after;
+    assert.deepEqual([...await client.unsafe('select n from around order by n')], [{ n: 1 }, { n: 2 }]);
+  } finally {
+    await client.end();
+  }
+});
