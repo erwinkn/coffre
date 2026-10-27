@@ -858,6 +858,12 @@ export type LogVerification =
 /** The longest a use may take from its time to its answer, held in Postgres too (R53): no use is decided later than this after its `at`. */
 export const USE_DEADLINE_MS = 3000;
 
+/** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
+export function newUseRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return (new DataView(bytes.buffer).getBigUint64(0) >> 1n).toString();
+}
+
 /** A use as the app asks for it: on which credential, which key, through which place, why, and when. */
 export type UseInput = {
   credential: string;

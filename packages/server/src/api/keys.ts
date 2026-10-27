@@ -1,5 +1,6 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
 import {
+  newUseRequestId,
   USE_DEADLINE_MS,
   USE_METADATA_LENGTH,
   useRefusalMessage,
@@ -193,7 +194,7 @@ export async function useValues(
           place: item.through ?? null,
           purpose: asked.purpose,
           ...(asked.keepsSensitive ? { keepsSensitive: true } : {}),
-          requestId: useRequestId(),
+          requestId: newUseRequestId(),
           at,
           deadline: at + USE_DEADLINE_MS,
         });
@@ -210,12 +211,6 @@ export async function useValues(
   await Promise.all(Array.from({ length: Math.min(USES_AT_ONCE, items.length) }, turn));
   if (failed !== null) throw (failed as { error: unknown }).error;
   return values;
-}
-
-/** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
-function useRequestId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return (new DataView(bytes.buffer).getBigUint64(0) >> 1n).toString();
 }
 
 /** The value a use opened, decrypted with its key and bound to what the vault read: a reference's source's ids. */
