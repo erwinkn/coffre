@@ -495,7 +495,7 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- The checkpointer's barrier: under the fence exclusive, no use or change is in flight, so every number handed out so far is final (committed, or a gap for good). It answers the last one, which the next checkpoint closes up to: no lag, and no number check in the uses. It raises the floor of `at` to its clock less deadline_max(), never lowers it; the uses after it are held to it. It also answers the floor it found: the one the last barrier set, which the checkpointer holds against the floor of its last signed checkpoint and alarms on any other (W211's spec: a writer who lowers the floor puts uses where no checkpoint reads).
+-- The checkpointer's barrier: under the fence exclusive, no use or change is in flight, so every number handed out so far is final (committed, or a gap for good). It answers the last one, which the next checkpoint closes up to: no lag, and no number check in the uses. It raises the floor of `at` to its clock less deadline_max(), never lowers it; the uses after it are held to it. It also answers the floor it found: the one the last barrier set, which the checkpointer holds against the floor of its last signed checkpoint (BarrierChecksFloor: a writer who lowers the floor puts uses where no checkpoint reads). On any other, the checkpointer closes and signs nothing, before it reads the window, and alarms.
 CREATE FUNCTION close_one() RETURNS TABLE (upto bigint, at_floor bigint, floor_found bigint)
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
