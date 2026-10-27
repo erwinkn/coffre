@@ -66,13 +66,13 @@ CREATE TABLE `log_uses` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `log_uses_request_idx` ON `log_uses` (`at`,`request_id`);--> statement-breakpoint
-CREATE TABLE `vault_config` (
+CREATE TABLE `log_config` (
 	`name` text PRIMARY KEY NOT NULL,
 	`value` text NOT NULL,
 	`seal` blob,
-	CONSTRAINT "vault_config_name_check" CHECK("vault_config"."name" IN ('policy', 'roles')),
-	CONSTRAINT "vault_config_value_check" CHECK(json_valid("vault_config"."value")),
-	CONSTRAINT "vault_config_seal_check" CHECK("vault_config"."seal" IS NULL OR octet_length("vault_config"."seal") = 16)
+	CONSTRAINT "log_config_name_check" CHECK("log_config"."name" IN ('policy', 'roles')),
+	CONSTRAINT "log_config_value_check" CHECK(json_valid("log_config"."value")),
+	CONSTRAINT "log_config_seal_check" CHECK("log_config"."seal" IS NULL OR octet_length("log_config"."seal") = 16)
 );
 --> statement-breakpoint
 ALTER TABLE `credentials` ADD COLUMN `seal` blob CONSTRAINT "credentials_seal_check" CHECK("seal" IS NULL OR octet_length("seal") = 16);--> statement-breakpoint

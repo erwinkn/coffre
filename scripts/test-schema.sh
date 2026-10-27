@@ -44,34 +44,89 @@ docker compose exec -T \
         -U coffre_vault_runtime -d "$database" \
     < packages/db/test/log-guarantees.sql
 
-# 0.14's writes take the 0.15 fence, its reads never: with the fence held, a
-# revoke's entry waits, a read's does not.
+docker compose exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U coffre_owner -d "$database" \
+    < packages/db/test/log-owner.sql
+
+# The fence across sessions. Each holder sleeps far longer than its checks
+# take, and goes when the script does, however it ends.
 owner_psql() { docker compose exec -T postgres psql -X -q -v ON_ERROR_STOP=1 -U coffre_owner -d "$database" "$@"; }
-owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(20)' >/dev/null 2>&1 &
-holder=$!
-for attempt in $(seq 100); do
-    [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND granted")" == 1 ]] && break
-    if ((attempt == 100)); then echo 'the fence was never held' >&2; exit 1; fi
-    sleep 0.1
-done
-fenced="$(mktemp)"
-trap 'rm -f "$fenced"' EXIT
+vault_psql() { docker compose exec -T -e PGPASSWORD=local-vault-only postgres psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d "$database" "$@"; }
+scratch="$(mktemp -d)"
+holders=()
+let_go() {
+    owner_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    for holder in "${holders[@]}"; do wait "$holder" 2>/dev/null || true; done
+    holders=()
+}
+trap 'let_go; rm -rf "$scratch"' EXIT
+held() {
+    for attempt in $(seq 100); do
+        [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = $1 AND granted")" == 1 ]] && return 0
+        sleep 0.1
+    done
+    echo "the lock $1 was never held" >&2
+    exit 1
+}
+
+# 0.14's writes take the 0.15 fence, its reads never: with the fence held, a
+# revoke's entry waits, a read's does not (W211's list, Migration015.tla).
+owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
+holders+=($!)
+held 1668244070
 entry() {
     echo "BEGIN; SET LOCAL lock_timeout = '1s';
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
     VALUES (900, '$1', 'fixture', 0, 'system:fixture', '$2', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'));
     ROLLBACK;"
 }
-for read in 'vault secret.read' 'app credential.use' 'app token.exchange'; do
+for read in 'vault secret.read' 'app credential.use' 'app sign_in' 'app secret.version'; do
     entry ${read} | owner_psql >/dev/null || { echo "0.14's ${read#* } waited on the 0.15 fence" >&2; exit 1; }
 done
-for write in 'vault access.revoke' 'app token.revoke' 'vault secret.write'; do
-    if entry ${write} | owner_psql >/dev/null 2>"$fenced" || ! grep -q 'lock timeout' "$fenced"; then
-        cat "$fenced" >&2; echo "0.14's ${write#* } did not wait on the 0.15 fence" >&2; exit 1
+for write in 'vault access.revoke' 'app token.revoke' 'vault secret.write' 'app token.exchange' 'app sign_out'; do
+    if entry ${write} | owner_psql >/dev/null 2>"$scratch/fenced" || ! grep -q 'lock timeout' "$scratch/fenced"; then
+        cat "$scratch/fenced" >&2; echo "0.14's ${write#* } did not wait on the 0.15 fence" >&2; exit 1
     fi
 done
-owner_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep(20)%' AND pid <> pg_backend_pid()" >/dev/null
-wait "$holder" || true
+let_go
+
+# A 0.15 change takes its locks in 0.14's order: with 0.14's vault holding a
+# member's queue and row, then taking the head and the fence (its revoke's
+# entry), a change to that member waits for it and passes, rather than
+# holding the fence and deadlocking on the row.
+owner_psql >"$scratch/old.log" 2>&1 <<'SQL' &
+BEGIN;
+SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM vault_members WHERE principal = 'token:deploy' FOR NO KEY UPDATE;
+SELECT pg_sleep(2) /* coffre-test-holder */;
+SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE;
+INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+VALUES (901, 'vault', 'fixture', 0, 'system:fixture', 'access.revoke', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'));
+ROLLBACK;
+SQL
+old=$!
+held 1668245101
+vault_psql -At >"$scratch/change.log" 2>&1 <<'SQL' || { cat "$scratch/change.log" >&2; echo 'a 0.15 change did not pass a 0.14 write in flight' >&2; exit 1; }
+SET lock_timeout = '10s';
+SELECT change_input('principal', 'token:deploy', 'reseal-under-0.14', 1, 'system:test', '{"op":"genesis"}',
+    decode(repeat('5e', 16), 'hex'), decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
+SQL
+wait "$old" || { cat "$scratch/old.log" >&2; echo "0.14's write failed beside a 0.15 change" >&2; exit 1; }
+[[ "$(cat "$scratch/change.log")" == t ]] || { cat "$scratch/change.log" >&2; exit 1; }
+
+# A use that waits for its principal's lock past its deadline writes nothing.
+owner_psql -c "SELECT pg_advisory_lock(1668244066, hashtext('token:deploy')), pg_sleep(300) /* coffre-test-holder */" >/dev/null 2>&1 &
+holders+=($!)
+held 1668244066
+vault_psql -At >"$scratch/late.log" 2>&1 <<'SQL' &
+SELECT (use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 40, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 1500)).state
+  FROM (SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS t) now;
+SQL
+late=$!
+sleep 2.5
+let_go
+wait "$late" || true
+[[ "$(cat "$scratch/late.log")" == late && "$(owner_psql -At -c 'SELECT count(*) FROM log_uses WHERE request_id = 40')" == 0 ]] \
+    || { cat "$scratch/late.log" >&2; echo 'a use that waited past its deadline wrote an entry' >&2; exit 1; }
 
 # Managed hosts give the owner CREATEROLE, not superuser.
 ./scripts/test-schema-owner.sh

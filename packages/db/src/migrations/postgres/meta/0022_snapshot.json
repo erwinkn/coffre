@@ -3455,8 +3455,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.vault_config": {
-      "name": "vault_config",
+    "public.log_config": {
+      "name": "log_config",
       "schema": "",
       "columns": {
         "name": {
@@ -3484,17 +3484,17 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "vault_config_name_check": {
-          "name": "vault_config_name_check",
-          "value": "\"vault_config\".\"name\" IN ('policy', 'roles')"
+        "log_config_name_check": {
+          "name": "log_config_name_check",
+          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
         },
-        "vault_config_value_check": {
-          "name": "vault_config_value_check",
-          "value": "\"vault_config\".\"value\"::jsonb IS NOT NULL"
+        "log_config_value_check": {
+          "name": "log_config_value_check",
+          "value": "\"log_config\".\"value\"::jsonb IS NOT NULL"
         },
-        "vault_config_seal_check": {
-          "name": "vault_config_seal_check",
-          "value": "\"vault_config\".\"seal\" IS NULL OR octet_length(\"vault_config\".\"seal\") = 16"
+        "log_config_seal_check": {
+          "name": "log_config_seal_check",
+          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       },
       "isRLSEnabled": false

@@ -980,17 +980,17 @@ export const deviceAuthorizations = pgTable(
  * the role tables. JSON, as the vault writes it. Written only through
  * `change_input`.
  */
-export const vaultConfig = pgTable(
-  'vault_config',
+export const logConfig = pgTable(
+  'log_config',
   {
     name: text().primaryKey(),
     value: text().notNull(),
     seal: bytea(),
   },
   (table) => [
-    check('vault_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
-    check('vault_config_value_check', sql`${table.value}::jsonb IS NOT NULL`),
-    check('vault_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+    check('log_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
+    check('log_config_value_check', sql`${table.value}::jsonb IS NOT NULL`),
+    check('log_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
   ],
 );
 

@@ -875,17 +875,17 @@ export const deviceAuthorizations = sqliteTable(
 );
 
 /** 0.15's configuration objects (schema.ts). */
-export const vaultConfig = sqliteTable(
-  'vault_config',
+export const logConfig = sqliteTable(
+  'log_config',
   {
     name: text().primaryKey(),
     value: text().notNull(),
     seal: bytes('seal'),
   },
   (table) => [
-    check('vault_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
-    check('vault_config_value_check', sql`json_valid(${table.value})`),
-    check('vault_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+    check('log_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
+    check('log_config_value_check', sql`json_valid(${table.value})`),
+    check('log_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
   ],
 );
 

@@ -3091,8 +3091,8 @@
         }
       }
     },
-    "vault_config": {
-      "name": "vault_config",
+    "log_config": {
+      "name": "log_config",
       "columns": {
         "name": {
           "name": "name",
@@ -3121,17 +3121,17 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
-        "vault_config_name_check": {
-          "name": "vault_config_name_check",
-          "value": "\"vault_config\".\"name\" IN ('policy', 'roles')"
+        "log_config_name_check": {
+          "name": "log_config_name_check",
+          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
         },
-        "vault_config_value_check": {
-          "name": "vault_config_value_check",
-          "value": "json_valid(\"vault_config\".\"value\")"
+        "log_config_value_check": {
+          "name": "log_config_value_check",
+          "value": "json_valid(\"log_config\".\"value\")"
         },
-        "vault_config_seal_check": {
-          "name": "vault_config_seal_check",
-          "value": "\"vault_config\".\"seal\" IS NULL OR octet_length(\"vault_config\".\"seal\") = 16"
+        "log_config_seal_check": {
+          "name": "log_config_seal_check",
+          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       }
     },

@@ -6,7 +6,7 @@
 DELETE FROM log_bulk;
 DELETE FROM log_changes;
 TRUNCATE log_uses;
-DELETE FROM vault_config;
+DELETE FROM log_config;
 UPDATE log_fence SET at_floor = (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 3000;
 DELETE FROM credentials;
 DELETE FROM service_bindings;
@@ -41,3 +41,6 @@ SELECT ('55555555-5555-5555-5555-55555555555' || n)::uuid, ('44444444-4444-4444-
   FROM generate_series(1, 2) AS n;
 
 UPDATE secrets SET current_version_id = ('55555555-5555-5555-5555-55555555555' || right(id::text, 1))::uuid, current_version = 1;
+
+-- A key no window counts any more: prune_bulk's.
+INSERT INTO log_bulk (principal, secret, last) VALUES ('token:gone', '77777777-7777-7777-7777-777777777777', 0);

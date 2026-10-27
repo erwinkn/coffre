@@ -57,6 +57,7 @@ guarantees() {
     docker exec -i -e PGPASSWORD=local-vault-only "$container" \
         psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d "$database" \
         < packages/db/test/log-guarantees.sql
+    psql_owner -d "$database" < packages/db/test/log-owner.sql
 }
 
 # The first migration creates the groups; the next must harden existing groups.

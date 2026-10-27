@@ -1,11 +1,11 @@
 -- 0.15's log (docs/design/hot-path-one.md, docs/design/0.15-plan.md, PR 2): its tables, the seals on the decision inputs, the functions every use and change will be, and a login of its own for the hot path. It only adds, and nothing calls any of it yet: 0.14's code serves on it as before. The vault login reads the new tables and writes them only through the functions, which run as their owner, so that every number is taken under the fence's lock whatever the vault's code does (and 0.14's conformance holds: the vault writes no table but its own).
-CREATE TABLE "vault_config" (
+CREATE TABLE "log_config" (
 	"name" text PRIMARY KEY NOT NULL,
 	"value" text NOT NULL,
 	"seal" "bytea",
-	CONSTRAINT "vault_config_name_check" CHECK ("vault_config"."name" IN ('policy', 'roles')),
-	CONSTRAINT "vault_config_value_check" CHECK ("vault_config"."value"::jsonb IS NOT NULL),
-	CONSTRAINT "vault_config_seal_check" CHECK ("vault_config"."seal" IS NULL OR octet_length("vault_config"."seal") = 16)
+	CONSTRAINT "log_config_name_check" CHECK ("log_config"."name" IN ('policy', 'roles')),
+	CONSTRAINT "log_config_value_check" CHECK ("log_config"."value"::jsonb IS NOT NULL),
+	CONSTRAINT "log_config_seal_check" CHECK ("log_config"."seal" IS NULL OR octet_length("log_config"."seal") = 16)
 );
 --> statement-breakpoint
 -- CACHE 1 (the default) matters: numbers rise in the order they are taken, across sessions, and the barrier reads the last one taken. A cache per session would hand a later call a smaller number.
@@ -123,7 +123,17 @@ DECLARE
     name text := 'log_uses_' || to_char(p_day, 'YYYYMMDD');
     lo bigint := (p_day - date '1970-01-01')::bigint * 86400000;
 BEGIN
-    IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN RETURN name; END IF;
+    -- A day made already, by its bound: a table of that name that is not that day is no day.
+    IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+             WHERE i.inhparent = 'public.log_uses'::regclass AND c.oid = to_regclass('public.' || quote_ident(name))
+               AND pg_get_expr(c.relpartbound, c.oid) = format('FOR VALUES FROM (%L) TO (%L)', lo, lo + 86400000)
+        ) THEN
+            RAISE EXCEPTION '% exists, and is not the uses of %', name, p_day;
+        END IF;
+        RETURN name;
+    END IF;
     EXECUTE format('CREATE TABLE public.%I (LIKE public.log_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
     EXECUTE format('CREATE UNIQUE INDEX ON public.%I (at, request_id)', name);
     -- pg_dump reads each partition as a table of its own.
@@ -140,7 +150,16 @@ DECLARE
     name text := 'log_tiles_uses_' || p_from;
 BEGIN
     IF p_from < 0 OR p_to <= p_from THEN RAISE EXCEPTION 'no leaves in [%, %)', p_from, p_to; END IF;
-    IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN RETURN name; END IF;
+    IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+             WHERE i.inhparent = 'public.log_tiles_uses'::regclass AND c.oid = to_regclass('public.' || quote_ident(name))
+               AND pg_get_expr(c.relpartbound, c.oid) = format('FOR VALUES FROM (%L) TO (%L)', p_from, p_to)
+        ) THEN
+            RAISE EXCEPTION '% exists, and does not hold the tiles of [%, %)', name, p_from, p_to;
+        END IF;
+        RETURN name;
+    END IF;
     EXECUTE format('CREATE TABLE public.%I (LIKE public.log_tiles_uses INCLUDING DEFAULTS INCLUDING CONSTRAINTS)', name);
     EXECUTE format('ALTER TABLE public.%I ADD PRIMARY KEY (tree, level, leaf)', name);
     EXECUTE format('GRANT SELECT ON public.%I TO coffre_backup', name);
@@ -165,7 +184,7 @@ CREATE TYPE use_view AS (
 --
 -- The deadline: a call that comes after it, or with a deadline more than deadline_max() after its `at`, or an `at` below the floor (or no floor row), writes nothing and answers 'late'; one that runs past it, waiting for its principal's lock say, rolls back (57014). A replay of a call that wrote fails on (at, request_id), 23505: deciding again on today's state could allow, after a revocation, a use the log has before it. (Not ON CONFLICT: its speculative insertion doubles a use's buffers and WAL, measured.)
 --
--- The bulk cap (R28, R52), its count and window the policy object's: a key is in the principal's set at t if its log_bulk row's `last` > t - window - refresh, with refresh a minute or a tenth of the window. A key in the set passes; one not in it passes if fewer than count others are (counted over a deadline more: uses are decided in number order, not by `at`), and enters. A row older than t - refresh moves on to t. Every request counts, allowed or refused for any reason but the cap. Both writes are made under the principal's own lock: a use that may write takes it and reads again, so the writes come in number order and the replay decides each the same.
+-- The bulk cap (R28, R52), its count and window the policy object's newest change's, read in the statement's own snapshot (CapSealed, CapFromPolicy): a policy row put back cannot move the cap, and a use before the policy is logged, or with a policy that names no count or window, answers 'unconfigured' and writes nothing. The cap's row moves for every request it admits, whatever the seals say: the Worker refuses a stale use after (HotPathOneStaleBulk), and the replay counts it the same. A key is in the principal's set at t if its log_bulk row's `last` > t - window - refresh, with refresh a minute or a tenth of the window. A key in the set passes; one not in it passes if fewer than count others are (counted over a deadline more: uses are decided in number order, not by `at`), and enters. A row older than t - refresh moves on to t. Every request counts, allowed or refused for any reason but the cap. Both writes are made under the principal's own lock: a use that may write takes it and reads again, so the writes come in number order and the replay decides each the same.
 --
 -- Covers (p_cover, with its entry's at and request id): a repeat of an allowed use this isolate wrote, of the same credential and secret, with no change to any input numbered after it and the key's bulk row fresh, writes nothing; the Worker decides on what was read. The cover's entry must still be in the log.
 --
@@ -193,7 +212,7 @@ BEGIN
             -- The rows, and each input's object key, computed once: a key in a probe's own condition is computed again for every row the probe reads.
             i AS MATERIALIZED (
                 SELECT n.newest, n.newest_mac, coalesce(n.cached, false) AS cached,
-                    f.at_floor, pol.name AS policy, cap.count AS cap_count, cap.window_ms AS cap_window, cap.refresh AS cap_refresh, b.last AS bulk_last,
+                    f.at_floor, cap.count AS cap_count, cap.window_ms AS cap_window, cap.refresh AS cap_refresh, b.last AS bulk_last,
                     c.principal AS p, c.kind AS c_kind, c.generation AS c_generation, c.scope AS c_scope, c.places AS c_places, c.constraints AS c_constraints,
                     c.revoked_at IS NOT NULL AS c_revoked, (extract(epoch FROM c.expires_at) * 1000)::bigint AS c_expires,
                     (extract(epoch FROM c.not_after) * 1000)::bigint AS c_not_after, c.seal AS c_seal,
@@ -202,7 +221,7 @@ BEGIN
                     sv.envelope_version, sv.ciphertext, sv.iv, sv.auth_tag, sv.wrapped_dek, sv.kek_provider, sv.kek_id, sv.kek_version, sv.sensitive,
                     e.project_id AS e_project, e.parent_id AS e_parent, e.owner AS e_owner, e.archived_at IS NOT NULL AS e_archived, strpos(e.slug, '~') > 0 AS e_deleted,
                     e.protected AS e_protected, e.seal AS e_seal,
-                    pol.seal AS policy_seal,
+                    pol.seal AS policy_seal, lpol.number AS policy_number, lpol.seal AS policy_last,
                     public.log_object('credential', p_credential::text) AS k_credential,
                     public.log_object('principal', c.principal) AS k_member,
                     public.log_object('secret', p_secret::text) AS k_secret,
@@ -210,9 +229,13 @@ BEGIN
                   FROM (SELECT 1) one
                   LEFT JOIN n ON true
                   LEFT JOIN public.log_fence f ON f.only_row
-                  LEFT JOIN public.vault_config pol ON pol.name = 'policy'
+                  LEFT JOIN public.log_config pol ON pol.name = 'policy'
+                  -- The cap as the policy's newest change says it, not as its row does (CapSealed): every policy change logs the whole policy as its `value`.
                   LEFT JOIN LATERAL (
-                      SELECT (pol.value::jsonb #>> '{bulk,count}')::integer AS count, (pol.value::jsonb #>> '{bulk,windowMs}')::bigint AS window_ms
+                      SELECT x.number, x.seal, x.payload FROM public.log_changes x WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1
+                  ) lpol ON true
+                  LEFT JOIN LATERAL (
+                      SELECT (lpol.payload::jsonb #>> '{value,bulk,count}')::integer AS count, (lpol.payload::jsonb #>> '{value,bulk,windowMs}')::bigint AS window_ms
                   ) cap0 ON true
                   LEFT JOIN LATERAL (SELECT cap0.count, cap0.window_ms, least(60000, cap0.window_ms / 10) AS refresh) cap ON true
                   LEFT JOIN public.credentials c ON c.id = p_credential
@@ -225,13 +248,13 @@ BEGIN
             v AS MATERIALIZED (
                 SELECT i.*,
                     CASE WHEN i.at_floor IS NULL OR p_at < i.at_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
-                         WHEN i.policy IS NULL THEN 'unconfigured'
+                         WHEN i.cap_count IS NULL OR i.cap_window IS NULL THEN 'unconfigured'
                          WHEN i.p IS NOT NULL AND NOT locked AND coalesce(i.bulk_last <= p_at - i.cap_refresh, true) THEN 'lock' END AS state,
-                    greatest(lc.number, lm.number, ls.number, le.number, lpol.number) AS inputs,
-                    lc.seal AS c_last, lm.seal AS m_last, ls.seal AS s_last, le.seal AS e_last, lpol.seal AS policy_last,
+                    greatest(lc.number, lm.number, ls.number, le.number, i.policy_number) AS inputs,
+                    lc.seal AS c_last, lm.seal AS m_last, ls.seal AS s_last, le.seal AS e_last,
                     p_cover IS NOT NULL AND i.bulk_last > p_at - i.cap_refresh
                         AND EXISTS (SELECT 1 FROM public.log_uses u WHERE u.at = p_cover_at AND u.request_id = p_cover_request AND u.number = p_cover)
-                        AND p_cover > coalesce(greatest(lc.number, lm.number, ls.number, le.number, lpol.number), 0) AS is_covered,
+                        AND p_cover > coalesce(greatest(lc.number, lm.number, ls.number, le.number, i.policy_number), 0) AS is_covered,
                     coalesce(i.bulk_last > p_at - i.cap_window - i.cap_refresh, false) AS is_in,
                     coalesce(i.bulk_last <= p_at - i.cap_refresh, true) AS stale,
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
@@ -249,7 +272,6 @@ BEGIN
                   LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_member ORDER BY x.number DESC LIMIT 1) lm ON true
                   LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_secret ORDER BY x.number DESC LIMIT 1) ls ON true
                   LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = i.k_environment ORDER BY x.number DESC LIMIT 1) le ON true
-                  LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1) lpol ON true
             ),
             w AS (
                 INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place)
@@ -284,7 +306,7 @@ BEGIN
                 SELECT n.newest, n.newest_mac, coalesce(n.cached, false) AS cached,
                     CASE WHEN NOT coalesce(n.cached, false) THEN 'reprobe'
                          WHEN f.at_floor IS NULL OR p_at < f.at_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
-                         WHEN pol.name IS NULL THEN 'unconfigured'
+                         WHEN cap.count IS NULL OR cap.window_ms IS NULL THEN 'unconfigured'
                          WHEN c.principal IS NOT NULL AND NOT locked AND coalesce(b.last <= p_at - cap.refresh, true) THEN 'lock' END AS state,
                     c.principal AS p, c.kind AS c_kind, c.generation AS c_generation, c.scope AS c_scope, c.places AS c_places, c.constraints AS c_constraints,
                     c.revoked_at IS NOT NULL AS c_revoked, (extract(epoch FROM c.expires_at) * 1000)::bigint AS c_expires,
@@ -311,9 +333,13 @@ BEGIN
                   FROM (SELECT 1) one
                   LEFT JOIN n ON true
                   LEFT JOIN public.log_fence f ON f.only_row
-                  LEFT JOIN public.vault_config pol ON pol.name = 'policy'
+                  LEFT JOIN public.log_config pol ON pol.name = 'policy'
+                  -- The cap as the policy's newest change says it, not as its row does (CapSealed): every policy change logs the whole policy as its `value`.
                   LEFT JOIN LATERAL (
-                      SELECT (pol.value::jsonb #>> '{bulk,count}')::integer AS count, (pol.value::jsonb #>> '{bulk,windowMs}')::bigint AS window_ms
+                      SELECT x.number, x.seal, x.payload FROM public.log_changes x WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1
+                  ) lpol ON true
+                  LEFT JOIN LATERAL (
+                      SELECT (lpol.payload::jsonb #>> '{value,bulk,count}')::integer AS count, (lpol.payload::jsonb #>> '{value,bulk,windowMs}')::bigint AS window_ms
                   ) cap0 ON true
                   LEFT JOIN LATERAL (SELECT cap0.count, cap0.window_ms, least(60000, cap0.window_ms / 10) AS refresh) cap ON true
                   LEFT JOIN public.credentials c ON c.id = p_credential
@@ -374,6 +400,14 @@ DECLARE
     n bigint;
     done integer;
 BEGIN
+    -- Its locks in the order 0.14's writers take theirs, so that none waits on the other in a circle until 0.16: a
+    -- member's queue (MEMBER_QUEUE, 0x636f666d) and row first (0.14's vault locks them before the head, lockMembers), then 0.14's head (its app
+    -- takes it before its rows), then the fence (0.14's appends take it after the head, audit_log_fence). The head
+    -- held, no 0.14 write lands between this change and its entry (ChangeHeadFirst).
+    IF p_kind = 'principal' THEN
+        PERFORM pg_advisory_xact_lock(1668245101, hashtext(m.principal)) FROM public.vault_members m WHERE m.principal = p_id FOR NO KEY UPDATE;
+    END IF;
+    PERFORM 1 FROM public.audit_chain_head WHERE only_row FOR UPDATE;
     PERFORM pg_advisory_xact_lock(1668244070, 0);
     SELECT c.number INTO n FROM public.log_changes c WHERE c.request_id = p_request;
     IF FOUND THEN
@@ -406,7 +440,7 @@ BEGIN
             IF p_id <> 'instance' OR p_seal_from IS NOT NULL OR op -> 'value' IS NULL THEN
                 RAISE EXCEPTION 'the % object is one, made once from its value', p_kind USING ERRCODE = 'invalid_parameter_value';
             END IF;
-            INSERT INTO public.vault_config (name, value, seal) VALUES (p_kind, (op -> 'value')::text, p_seal) ON CONFLICT (name) DO NOTHING;
+            INSERT INTO public.log_config (name, value, seal) VALUES (p_kind, (op -> 'value')::text, p_seal) ON CONFLICT (name) DO NOTHING;
         ELSE
             RAISE EXCEPTION 'no object kind %', p_kind USING ERRCODE = 'invalid_parameter_value';
     END CASE;
@@ -430,12 +464,15 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- The bulk cap's rows that count for nothing any more, at most p_limit a call: older than the policy's window, its refresh and the deadline, by the database's clock, less an hour for the clock stepping back (as prune_vault_releases). No caller chooses the bound, so the vault's login, which deletes no row itself, cannot forget a key the window counts; the replay keeps them, which changes none of its decisions. A row a use holds is left to the next call.
+-- The bulk cap's rows that count for nothing any more, at most p_limit a call: older than the policy's window (its newest change's, as a use reads it), its refresh and the deadline, by the database's clock, less an hour for the clock stepping back (as prune_vault_releases). No caller chooses the bound, so the vault's login, which deletes no row itself, cannot forget a key the window counts; the replay keeps them, which changes none of its decisions. A row a use holds is left to the next call.
 CREATE FUNCTION prune_bulk(p_limit integer) RETURNS integer
     LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '3s' AS $$
     WITH bound AS (
         SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint - w.window_ms - least(60000, w.window_ms / 10) - public.deadline_max() - 3600000 AS before
-          FROM (SELECT (value::jsonb #>> '{bulk,windowMs}')::bigint AS window_ms FROM public.vault_config WHERE name = 'policy') w
+          FROM (
+              SELECT (x.payload::jsonb #>> '{value,bulk,windowMs}')::bigint AS window_ms FROM public.log_changes x
+               WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1
+          ) w
          WHERE w.window_ms IS NOT NULL
     ),
     pruned AS (
@@ -447,7 +484,7 @@ CREATE FUNCTION prune_bulk(p_limit integer) RETURNS integer
     SELECT count(*)::integer FROM pruned;
 $$;
 --> statement-breakpoint
--- OldWritesFence (plan, PR 9: "old uses in flight"): until 0.16 removes 0.14's path, 0.14 still writes decision inputs, with an entry in audit_log, in the transaction that writes them. Each such entry takes the 0.15 fence exclusive, as a 0.15 change does, so that no 0.15 use is in flight across it: one that read before it commits first, and one after reads what it wrote (refused stale until the vault adopts it). It runs after 0.14's append took the log's head, so 0.14's order is head then fence, the order a 0.15 change that fences 0.14 too takes them (the reverse deadlocks). Every allowed entry fences but those that change no input: reads, uses, sign-ins (a credential nobody holds yet) and the log's own bookkeeping. So 0.14's uses never wait on it, and an action this list does not name fences rather than slips past. Nothing takes the fence before 0.15 runs: until then it costs an uncontended lock per change.
+-- OldWritesFence (plan, PR 9: "old uses in flight"): until 0.16 removes 0.14's path, 0.14 still writes decision inputs, with an entry in audit_log, in the transaction that writes them. Each such entry takes the 0.15 fence exclusive, as a 0.15 change does, so that no 0.15 use is in flight across it: one that read before it commits first, and one after reads what it wrote (refused stale until the vault adopts it). It runs after 0.14's append took the log's head, so 0.14's order is head then fence, the order a 0.15 change that fences 0.14 too takes them (the reverse deadlocks). Every allowed entry fences but those that change no input, the list W211's spec (Migration015.tla, OldWritesFence) names: reads and uses, sign-ins (a credential nobody holds yet; a sign-out revokes one, and fences), and the log's own bookkeeping and alarms. So 0.14's uses never wait on it, and an action this list does not name fences rather than slips past. A refused entry changes nothing. Nothing takes the fence before 0.15 runs: until then it costs an uncontended lock per change.
 CREATE FUNCTION log_fence_old_write() RETURNS trigger
     LANGUAGE plpgsql AS $$
 BEGIN
@@ -461,9 +498,10 @@ REVOKE ALL ON FUNCTION log_fence_old_write() FROM PUBLIC;
 --> statement-breakpoint
 CREATE TRIGGER audit_log_fence AFTER INSERT ON audit_log FOR EACH ROW
     WHEN (NEW.decision = 'allow' AND NEW.action NOT IN (
-        'secret.read', 'secret.use', 'secret.list', 'secret.history', 'credential.use', 'token.use', 'personal.list', 'missing.list',
-        'mcp.read', 'mcp.view', 'audit.read', 'sign_in', 'token.exchange', 'device.approve',
-        'audit.checkpoint', 'audit.heartbeat', 'audit.finding', 'audit.finding_cleared', 'key.check', 'key.intent', 'vault.tampered', 'workload.alert'
+        'credential.use', 'token.use', 'secret.read', 'secret.use', 'secret.list', 'secret.history', 'secret.version', 'missing.list', 'personal.list',
+        'roles.list', 'roles.preview', 'mcp.read', 'mcp.view', 'audit.read',
+        'sign_in', 'device.approve', 'device.deny',
+        'audit.heartbeat', 'audit.checkpoint', 'audit.finding', 'audit.finding_cleared', 'key.check', 'key.intent', 'workload.alert', 'vault.tampered'
     ))
     EXECUTE FUNCTION log_fence_old_write();
 --> statement-breakpoint
@@ -472,9 +510,9 @@ REVOKE ALL ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_credentia
 GRANT EXECUTE ON FUNCTION make_day(date), make_tiles(bigint, bigint), use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea), change_input(text, text, text, bigint, text, text, bytea, bytea, bytea), close_one(), prune_bulk(integer) TO coffre_vault;
 --> statement-breakpoint
 -- The vault reads all of it; the backup reads every table, partitions included (pg_dump reads each), and the sequence. The app reads none: it never decides.
-GRANT SELECT ON vault_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles TO coffre_vault;
+GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles TO coffre_vault;
 --> statement-breakpoint
-GRANT SELECT ON vault_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles, log_tiles_changes, log_tiles_uses TO coffre_backup;
+GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_checkpoints, log_tiles, log_tiles_changes, log_tiles_uses TO coffre_backup;
 --> statement-breakpoint
 GRANT SELECT ON SEQUENCE log_number TO coffre_backup;
 --> statement-breakpoint
@@ -494,12 +532,17 @@ BEGIN
             NULL;
         END;
     END IF;
-    -- As the baseline holds the runtime logins: nothing a login must never have, and no object it owns.
+    -- As 0019 holds coffre_backup: the superuser-only attributes refused (managed owners cannot ALTER them, even
+    -- off), the others turned off, only when they must be (altering a role takes CREATEROLE too). Whether it logs in is
+    -- left as found: a role made here cannot, one a host made for 0.15 may.
     IF EXISTS (
         SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot'
-        AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+        AND (rolsuper OR rolreplication OR rolbypassrls)
     ) THEN
-        RAISE EXCEPTION 'coffre_vault_hot has unsafe role attributes';
+        RAISE EXCEPTION 'coffre_vault_hot has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
+        ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
     END IF;
     IF EXISTS (
         SELECT 1 FROM pg_shdepend

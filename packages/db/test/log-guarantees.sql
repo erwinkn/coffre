@@ -19,7 +19,7 @@ BEGIN
         $q$INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac) VALUES (1, 1, 1, gen_random_uuid(), gen_random_uuid(), 0, decode(repeat('00', 16), 'hex'))$q$,
         $q$INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac) VALUES (1, 1, 'x', gen_random_uuid(), 'system:x', '{}', decode(repeat('00', 16), 'hex'))$q$,
         $q$INSERT INTO log_bulk VALUES ('token:deploy', gen_random_uuid(), 1)$q$,
-        $q$INSERT INTO vault_config VALUES ('policy', '{}', NULL)$q$,
+        $q$INSERT INTO log_config VALUES ('policy', '{}', NULL)$q$,
         $q$UPDATE log_fence SET at_floor = 0$q$,
         $q$DELETE FROM log_bulk$q$,
         $q$TRUNCATE log_changes$q$,
@@ -35,7 +35,7 @@ BEGIN
         END;
     END LOOP;
     PERFORM count(*) FROM log_uses;
-    PERFORM count(*) FROM log_changes, log_bulk, log_fence, log_checkpoints, log_tiles, vault_config;
+    PERFORM count(*) FROM log_changes, log_bulk, log_fence, log_checkpoints, log_tiles, log_config;
     RAISE NOTICE 'PASS: coffre_vault reads the log and writes it only through its functions';
 END
 $$;
@@ -43,7 +43,7 @@ $$;
 -- The app reads none of it, and nobody but the vault runs the functions.
 DO $$
 BEGIN
-    IF has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'vault_config', 'SELECT')
+    IF has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
        OR has_function_privilege('coffre_app', 'close_one()', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'change_input(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';
@@ -239,6 +239,7 @@ DECLARE
     r use_view;
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
     barrier record;
+    pruned integer;
 BEGIN
     r := use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001);
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a deadline past deadline_max was taken'; END IF;
@@ -253,7 +254,11 @@ BEGIN
     IF r.state <> 'late' OR EXISTS (SELECT 1 FROM log_uses WHERE request_id IN (20, 21, 22)) THEN
         RAISE EXCEPTION 'FAIL: a use below the floor was written';
     END IF;
-    IF prune_bulk(100) <> 0 THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
+    -- Each its own statement: one statement's snapshot would not see the rows its call deleted.
+    pruned := prune_bulk(100);
+    IF pruned <> 1 OR EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:gone') THEN RAISE EXCEPTION 'FAIL: prune_bulk kept a key no window counts'; END IF;
+    pruned := prune_bulk(100);
+    IF pruned <> 0 OR NOT EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:deploy') THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
     RAISE NOTICE 'PASS: late uses write nothing, the barrier raises the floor, and pruning keeps what a window counts';
 END
 $$;

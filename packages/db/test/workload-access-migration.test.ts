@@ -73,7 +73,8 @@ test(`${TAG} keeps every credential and index on SQLite, and takes a workload's 
   const after = await openDatabase(url);
   try {
     const rows = await all(after.db, 'SELECT * FROM credentials ORDER BY id');
-    const added = ['jkt', 'not_after', 'ancestors', 'constraints', 'enrollment_id', 'approved_at', 'approved_by'];
+    // This migration's, and 0.15's seal (0018_log_015), which the tree after it adds.
+    const added = ['jkt', 'not_after', 'ancestors', 'constraints', 'enrollment_id', 'approved_at', 'approved_by', 'seal'];
     assert.deepEqual(rows.map((row) => Object.fromEntries(Object.entries(row).filter(([name]) => !added.includes(name)))), rowsBefore);
     for (const row of rows) for (const name of added) assert.equal(row[name], null, `${row.id as string}.${name}`);
 
