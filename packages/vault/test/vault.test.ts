@@ -35,8 +35,10 @@ import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
 import {
+  CONVERSION,
   emptyDatabase,
   ENGINE,
+  log014Only,
   newEnvironment,
   newProject,
   openTestDatabase,
@@ -49,6 +51,7 @@ import {
   type TestDatabase,
   openLocalVault,
   type LocalVault,
+  START_OVER,
 } from './database.ts';
 
 /** Every vault here signs, and MACs its entries, with this; a vault started afresh needs it too. */
@@ -1615,7 +1618,7 @@ test('a service account admitted with its first grant is one decision: a grant r
   assert.equal((await w.vault.checkpoint()).ok, true, 'every row seals over what the log says');
 });
 
-test('a service account whose row was deleted is refused, under forged entries about it too, and never comes back from nothing', async () => {
+test('a service account whose row was deleted is refused, under forged entries about it too, and never comes back from nothing', log014Only(START_OVER), async () => {
   const w = await world();
   const { vaultMembers } = tablesOf(db.owner);
   const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
@@ -1759,7 +1762,7 @@ async function everyProjectGrant(principal: string, slug: string | null, role: s
   await reseal(principal);
 }
 
-test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding no more than before, and the log replays it', async () => {
+test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding no more than before, and the log replays it', log014Only(CONVERSION), async () => {
   const w = await world();
   const SERVICE = 'token:ci';
   const CAROL = 'user:carol@acme.example';
@@ -1819,7 +1822,7 @@ test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding n
   assert.equal((await vaultLog(w)).length, entries);
 });
 
-test('the conversion takes no read away: viewer on every project beside auditor on a project reads its environments still', async () => {
+test('the conversion takes no read away: viewer on every project beside auditor on a project reads its environments still', log014Only(CONVERSION), async () => {
   const w = await world();
   const EVE = 'user:eve@acme.example';
   await member(w, EVE, [[null, 'auditor']]);
@@ -1847,7 +1850,7 @@ test('the conversion takes no read away: viewer on every project beside auditor 
   assert.equal((await upgraded.verifyLog({})).ok, true);
 });
 
-test('migrate marks a member whose row the vault found tampered with, whose grants it leaves as they are', async () => {
+test('migrate marks a member whose row the vault found tampered with, whose grants it leaves as they are', log014Only(CONVERSION), async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   await member(w, ADA, []);
@@ -1861,7 +1864,7 @@ test('migrate marks a member whose row the vault found tampered with, whose gran
   assert.deepEqual((await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`)).map((grant) => grant.principal), [BOB]);
 });
 
-test('a genuine row put back after a tamper report is left as migrate says, until a change to what they hold settles it', async () => {
+test('a genuine row put back after a tamper report is left as migrate says, until a change to what they hold settles it', log014Only(CONVERSION), async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   await member(w, BOB, []);
@@ -1904,7 +1907,7 @@ test('tamper reports forged in the vault\'s name above its own leave the one it 
   assert.equal((await tamperings(w)).filter(([, fault]) => fault === 'forged_entry').length, 33);
 });
 
-test('tamper reports forged in the vault\'s name before a change to what a member holds leave the conversion to run, as migrate says', async () => {
+test('tamper reports forged in the vault\'s name before a change to what a member holds leave the conversion to run, as migrate says', log014Only(CONVERSION), async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   await member(w, 'token:legacy', []);
@@ -1920,7 +1923,7 @@ test('tamper reports forged in the vault\'s name before a change to what a membe
 // Forged after the grant, they are what the vault would leave the grant for, were they its own: migrate cannot tell.
 for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
   const within = forged < 32 * 32;
-  test(`after ${forged} tamper report${forged === 1 ? '' : 's'} forged in the vault's name, ${within ? 'migrate lists the conversion of a grant on every project, which the vault makes' : 'more than it reads past, the vault leaves a grant on every project, as migrate warns'}`, async () => {
+  test(`after ${forged} tamper report${forged === 1 ? '' : 's'} forged in the vault's name, ${within ? 'migrate lists the conversion of a grant on every project, which the vault makes' : 'more than it reads past, the vault leaves a grant on every project, as migrate warns'}`, log014Only(CONVERSION), async () => {
     const w = await world();
     const { vaultGrants } = tablesOf(db.owner);
     await member(w, 'token:legacy', []);
@@ -2340,7 +2343,7 @@ async function tamperings(w: World) {
 }
 
 for (const edit of ['forged', 'edited', 'deleted'] as const) {
-  test(`a grant ${edit} in the database leaves its member refused as tampered, until an owner starts them over`, async () => {
+  test(`a grant ${edit} in the database leaves its member refused as tampered, until an owner starts them over`, log014Only(START_OVER), async () => {
     const w = await world();
     const { vaultGrants } = tablesOf(db.owner);
     await member(w, ADA, [[w.dev, 'viewer']]);
@@ -2446,7 +2449,7 @@ test('a grant written around the vault while it decides about its member is refu
   assert.ok(!(await w.vault.access(ADA)).grants.some((grant) => grant.environmentId === w.prod));
 });
 
-test('a grant written around the vault while it removes a member goes with the removal', postgresOnly('SQLite lets no write in beside a decision'), async () => {
+test('a grant written around the vault while it removes a member goes with the removal', log014Only(START_OVER, postgresOnly('SQLite lets no write in beside a decision')), async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
