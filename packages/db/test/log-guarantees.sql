@@ -59,6 +59,21 @@ BEGIN
 END
 $$;
 
+-- Retention's functions (0027): the vault's alone, each holding it to what a sealed retention change cuts.
+DO $$
+DECLARE
+    f text;
+BEGIN
+    FOREACH f IN ARRAY ARRAY['log_retention(text, bigint, text, bytea)', 'log_cut()', 'drop_day(date)', 'drop_tiles(bigint)'] LOOP
+        IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'PASS: retention''s functions are the vault''s alone';
+END
+$$;
+
 -- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change): the app runs it,
 -- and no other function of the log; the vault and the backup never run it.
 DO $$

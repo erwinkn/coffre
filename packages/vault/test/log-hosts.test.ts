@@ -18,7 +18,7 @@ import { checkpointerAlarms, checkpointerObject, durableSealThrough, startCheckp
 import { logMacKey } from '../src/log-entry.ts';
 import { durableWitness, r2Archive, witnessObject } from '../src/witness-workers.ts';
 import { authentic, keys, MemoryStore, sealThroughDouble, variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { sql } from 'drizzle-orm';
 import { logWriter } from './log-entries.ts';
 
@@ -276,4 +276,35 @@ test('Fable review: a witness whose held pair no longer opens refuses, rather th
   const damaged = await send(new (make(k))(state, {}), first.notes);
   assert.equal(damaged.status, 500);
   assert.match(((await damaged.json()) as { reason: string }).reason, /name a new witness/);
+});
+
+test('T119: a reset over a seal in flight: the seal fails rather than sign beside the next checkpointer, and the next seal opens one', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+  const state = objectState();
+  const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, seed, closeIdleMs: 50 }));
+  const object = new Checkpointer_(state, {});
+  const namespace = namespaceOf(object);
+  await startCheckpointer(namespace);
+  for (let i = 0; i < 300; i += 1) await log.use();
+  await object.alarm();
+  // The partial leaf tile changed by a writer: every write that grows it fails, the alarm's tick's and the seal's.
+  const [edge] = await rows<{ leaf: string; hashes: Buffer }>(db.owner, sql`SELECT leaf::text AS leaf, hashes FROM log_tiles WHERE tree = 'uses' AND level = 0 ORDER BY leaf DESC LIMIT 1`);
+  await run(db.owner, sql`UPDATE log_tiles SET hashes = ${randomBytes(edge!.hashes.length)} WHERE tree = 'uses' AND level = 0 AND leaf = ${BigInt(edge!.leaf)}`);
+  await log.use();
+  const change = await log.change();
+  // The alarm's tick fails and resets the object while the seal waits on a tick of the same checkpointer: whichever runs
+  // first, the seal fails (its write refused, or its checkpointer closed under it), and none signs after the reset.
+  const alarming = object.alarm();
+  const sealing = durableSealThrough(namespace)(change);
+  await assert.rejects(sealing, /the checkpointer failed: (Failed query: SELECT write_checkpoint|this checkpointer was closed)/);
+  await alarming;
+  const [rowsBefore] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_checkpoints`);
+  // The tile put back: the next seal opens a checkpointer, which finishes the pair the old one remembered, and seals.
+  await run(db.owner, sql`UPDATE log_tiles SET hashes = ${edge!.hashes} WHERE tree = 'uses' AND level = 0 AND leaf = ${BigInt(edge!.leaf)}`);
+  const sealed = await durableSealThrough(namespace)(change);
+  assert.equal(sealed.proof.number, change);
+  const [rowsAfter] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_checkpoints`);
+  assert.ok(Number(rowsAfter!.n) > Number(rowsBefore!.n));
+  assert.equal(state.data.get('pair'), encodePair(sealed.notes), 'one signer: its memory is the pair that sealed the change');
+  const alarms = await checkpointerAlarms(namespace);
+  assert.equal(alarms.filter((a) => /a checkpoint failed/.test(a.message)).length, 1, JSON.stringify(alarms));
 });

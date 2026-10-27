@@ -1,8 +1,8 @@
-import { entryLeaf, type LeafValue } from './leaf.ts';
+import { entryLeaf, leafData, type LeafValue } from './leaf.ts';
 import { MAX_NUMBER } from './note.ts';
 import { openPair, samePair, TREES, type Pair, type PairNotes, type PairVerifiers, type TreeName } from './pair.ts';
 import { Edge, edgeOf, nodesFrom, tileMap, tilesFor, type Tile, type TileKey } from './tiles.ts';
-import { consistencyProof, EMPTY_ROOT, verifyConsistency } from './tree.ts';
+import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verifyInclusion, type Hash } from './tree.ts';
 
 /**
  * The two trees, verified from what the database holds and the pairs held
@@ -19,6 +19,17 @@ import { consistencyProof, EMPTY_ROOT, verifyConsistency } from './tree.ts';
  * MAC, its request ID) is the caller's to check, through `check`. The cost is
  * the entries since the start: a caller that keeps the `head` it verified
  * walks only what came after (R25).
+ *
+ * Retention (plan PR 7, formal/Seal.tla) drops days of uses, and the uses
+ * tree's tiles, below a cut that a retention change names; changes are kept
+ * for good. With `cut`, which says whether a change is one and its cut, the
+ * walk takes the newest retention change (the reader's `retention`), requires
+ * it sealed in the changes tree, never merely held (CutSealed), and walks the
+ * changes tree from the start but the uses tree from that cut: from the cut's
+ * uses head, which the kept tiles at its edge must give, through the
+ * checkpoint at the cut, which must hold that head. A use at or below the cut
+ * is not walked: a straggler (one of the next day's, numbered below it) can go
+ * unseen until its own day does.
  */
 export type LogEntry = { tree: TreeName; number: bigint; at: number; columns: readonly LeafValue[] };
 
@@ -33,7 +44,12 @@ export type LogReader = {
   /** The entries numbered in (after, upto], by number, both trees. */
   entries(after: bigint, upto: bigint): Promise<LogEntry[]>;
   tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]>;
+  /** The newest retention change, if any, and its leaf index in the changes tree (plan PR 7). */
+  retention?(): Promise<{ entry: LogEntry; index: number } | null>;
 };
+
+/** Where retention cut the uses tree: the pair at `upto`, signed at `at`, whose uses head every later one extends. */
+export type Cut = { upto: bigint; at: number; uses: { size: number; root: Hash } };
 
 export type Verdict = {
   ok: boolean;
@@ -50,10 +66,16 @@ type Stop = { pair: Pair; notes: PairNotes; row: boolean };
 
 const PAGE = 100;
 
-export async function verifyLog(
-  reader: LogReader,
-  opts: { verifiers: PairVerifiers; from?: PairNotes; anchors?: readonly PairNotes[]; check?: (entry: LogEntry) => string | null },
-): Promise<Verdict> {
+type Options = {
+  verifiers: PairVerifiers;
+  from?: PairNotes;
+  anchors?: readonly PairNotes[];
+  check?: (entry: LogEntry) => string | null;
+  /** Whether a change is a retention change, and the cut it names; null for any other entry. */
+  cut?: (entry: LogEntry) => Cut | null;
+};
+
+export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
   const problems: string[] = [];
   const verdict = { checkpoints: 0, sealed: 0, unsealed: 0 };
   const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
@@ -68,7 +90,7 @@ export async function verifyLog(
 
 async function walk(
   reader: LogReader,
-  opts: { verifiers: PairVerifiers; from?: PairNotes; anchors?: readonly PairNotes[]; check?: (entry: LogEntry) => string | null },
+  opts: Options,
   problems: string[],
   verdict: { checkpoints: number; sealed: number; unsealed: number },
   done: (head: PairNotes | null) => Verdict,
@@ -97,8 +119,37 @@ async function walk(
     if (!genesis) return (problems.push('no genesis checkpoint to start from: checkpoints were deleted or replaced'), done(null));
     start = { pair: pair!, notes: row!.notes, row: true };
   }
+  // The newest retention change: sealed in the changes tree, below the start by a proof from its tiles, above it on the
+  // walk (Seal.tla's CutSealed); its cut names where the uses tree is walked from, when that is past the start.
+  const retained = opts.cut === undefined || reader.retention === undefined ? null : await reader.retention();
+  const cut = retained === null ? null : opts.cut!(retained.entry);
+  if (retained !== null) {
+    const { entry, index } = retained;
+    if (cut === null) return (problems.push(`${entry.number}: the newest retention change names no cut`), done(null));
+    if (cut.upto >= entry.number) return (problems.push(`${entry.number}: a retention change at or below its own cut (${cut.upto})`), done(null));
+    if (entry.number <= start.pair.upto) {
+      const size = start.pair.changes.size;
+      const proof = Number.isSafeInteger(index) && index >= 0 && index < size
+        ? inclusionProof(nodesFrom(tileMap(await reader.tiles('changes', tilesFor((n) => inclusionProof(n, index, size))))), index, size)
+        : null;
+      if (proof === null || !verifyInclusion(entryLeaf('changes', entry.number, entry.columns), index, size, proof, start.pair.changes.root)) {
+        return (problems.push(`${entry.number}: the retention change cutting the uses at ${cut.upto} is not in the changes tree the walk starts from`), done(null));
+      }
+    }
+  }
+  // Past the start, the uses tree starts at the cut: its edge from the kept tiles, held to the cut's head.
+  const ahead = cut !== null && cut.upto > start.pair.upto ? cut : null;
+  const dropped = (e: { tree: TreeName; number: bigint }) => ahead !== null && e.tree === 'uses' && e.number <= ahead.upto;
   // Tiles that do not give their signed head are a problem to report, and the walk goes on where it can.
-  const reload = (pair: Pair) => loadEdges(reader, pair).catch((error: Error) => (problems.push(error.message), null));
+  const load = async (pair: Pair) => {
+    const edges = {} as Record<TreeName, Edge>;
+    for (const tree of TREES) {
+      const head = tree === 'uses' && ahead !== null && pair.upto < ahead.upto ? ahead.uses : pair[tree];
+      edges[tree] = await loadEdge(reader, tree, head.size, head.root, pair.upto);
+    }
+    return edges;
+  };
+  const reload = (pair: Pair) => load(pair).catch((error: Error) => (problems.push(error.message), null));
 
   // Pairs held outside below the start, in order, then the start: their times and floors never come down.
   const below = (await Promise.all((opts.anchors ?? []).map((notes) => openPair(notes, opts.verifiers))))
@@ -125,8 +176,10 @@ async function walk(
       const row = await reader.pair(anchor.upto);
       const pair = row === null ? null : await open(row);
       if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time or floor' : 'a second history'}`);
-      // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside.
+      // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside. Below a cut, the
+      // uses tree's tiles are gone: its consistency is proved from the cut on only.
       for (const tree of TREES) {
+        if (tree === 'uses' && cut !== null && anchor.uses.size < cut.uses.size) continue;
         const [from, to] = [anchor[tree], start.pair[tree]];
         const proof = from.size > to.size ? null : await proveConsistency(reader, tree, from.size, to.size).catch(() => null);
         if (proof === null || !verifyConsistency(from.size, to.size, from.root, to.root, proof)) {
@@ -147,8 +200,16 @@ async function walk(
   let previous = start.pair.upto;
   let time = start.pair.at;
   let floor = start.pair.floor;
+  // Whether the walk met the retention change it starts the uses tree from, and the checkpoint at its cut.
+  let retainedMet = retained === null || retained.entry.number <= start.pair.upto;
+  let cutMet = ahead === null;
   const walkEntries = (entries: readonly LogEntry[]) => {
     for (const e of entries) {
+      if (e.tree === 'changes' && retained !== null && e.number >= retained.entry.number && opts.cut!(e) !== null) {
+        if (e.number > retained.entry.number) problems.push(`${e.number}: a retention change newer than the newest the database names (${retained.entry.number})`);
+        else if (!sameEntry(e, retained.entry)) problems.push(`${e.number}: not the retention change the database names at its number`);
+        else retainedMet = true;
+      }
       if (e.number <= previous) problems.push(`${e.number}: numbered at or below the entry before (${previous}): two entries with one number, or out of order`);
       if (!TREES.includes(e.tree)) problems.push(`${e.number}: in no tree (${String(e.tree)})`);
       const problem = opts.check?.(e) ?? null;
@@ -177,7 +238,7 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
-      const entries = await reader.entries(cursor, stops.at(-1)!.pair.upto);
+      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto)).filter((e) => !dropped(e));
       let at = 0;
       for (const stop of stops) {
         const window: LogEntry[] = [];
@@ -192,7 +253,18 @@ async function walk(
         time = Math.max(time, stop.pair.at);
         floor = Math.max(floor, stop.pair.floor);
         cursor = stop.pair.upto;
-        const wrong = TREES.filter((tree) => edges[tree].size !== stop.pair[tree].size || !edges[tree].root().equals(stop.pair[tree].root));
+        // Below the cut the uses tree is not walked; the checkpoint at the cut must hold the cut's uses head itself.
+        const walked = TREES.filter((tree) => tree === 'changes' || ahead === null || stop.pair.upto >= ahead.upto);
+        if (ahead !== null && stop.pair.upto === ahead.upto) {
+          if (stop.pair.uses.size !== ahead.uses.size || !stop.pair.uses.root.equals(ahead.uses.root)) {
+            problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: not the uses head the retention change cuts at`);
+          } else if (stop.row) cutMet = true;
+        }
+        if (ahead !== null && stop.pair.upto > ahead.upto && !cutMet) {
+          problems.push(`no checkpoint at the retention cut (${ahead.upto}): checkpoints were deleted or replaced`);
+          cutMet = true;
+        }
+        const wrong = walked.filter((tree) => edges[tree].size !== stop.pair[tree].size || !edges[tree].root().equals(stop.pair[tree].root));
         if (wrong.length > 0) {
           problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: the ${wrong.join(' and ')} head${wrong.length > 1 ? 's' : ''} differ from the entries: entries deleted, added, changed or moved, or a second history`);
           // Carry on from the signed row, so one problem is reported once.
@@ -206,9 +278,14 @@ async function walk(
     }
     if (final) break;
   }
-  const unsealed = await reader.entries(cursor, MAX_NUMBER);
+  const unsealed = (await reader.entries(cursor, MAX_NUMBER)).filter((e) => !dropped(e));
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
+  if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);
+  // Above the start, the retention change must be on the walk and sealed: in a window a checkpoint verified.
+  if (!retainedMet || (retained !== null && retained.entry.number > last.pair.upto)) {
+    problems.push(`${retained!.entry.number}: the retention change cutting the uses at ${cut!.upto} is not sealed in the changes tree`);
+  }
   return done(last.notes);
 }
 
@@ -222,13 +299,19 @@ const sameNotes = (a: Pair, b: Pair) => samePair(a, b) && a.at === b.at && a.flo
 /** Both trees' edges at a pair, from their tiles; throws unless each gives its signed head. */
 export async function loadEdges(reader: Pick<LogReader, 'tiles'>, pair: Pair): Promise<Record<TreeName, Edge>> {
   const edges = {} as Record<TreeName, Edge>;
-  for (const tree of TREES) {
-    const { size, root } = pair[tree];
-    edges[tree] = Edge.load(size, tileMap(await reader.tiles(tree, edgeOf(size).filter((e) => e.width > 0))));
-    if (!edges[tree].root().equals(root)) throw new Error(`checkpoint ${pair.upto}: the ${tree} tiles at its edge do not give its signed head`);
-  }
+  for (const tree of TREES) edges[tree] = await loadEdge(reader, tree, pair[tree].size, pair[tree].root, pair.upto);
   return edges;
 }
+
+/** One tree's edge at `size`, from its tiles; throws unless it gives `root`, the head signed up to `upto`. */
+async function loadEdge(reader: Pick<LogReader, 'tiles'>, tree: TreeName, size: number, root: Hash, upto: bigint): Promise<Edge> {
+  const edge = Edge.load(size, tileMap(await reader.tiles(tree, edgeOf(size).filter((e) => e.width > 0))));
+  if (!edge.root().equals(root)) throw new Error(`checkpoint ${upto}: the ${tree} tiles at its edge do not give its signed head`);
+  return edge;
+}
+
+/** Whether two entries are one, whole: the same leaf. */
+const sameEntry = (a: LogEntry, b: LogEntry) => leafData(a.tree, a.number, a.columns).equals(leafData(b.tree, b.number, b.columns));
 
 /** A consistency proof between two sizes of one tree, from its tiles. */
 export async function proveConsistency(reader: Pick<LogReader, 'tiles'>, tree: TreeName, from: number, to: number) {

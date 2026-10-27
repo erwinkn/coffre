@@ -1258,6 +1258,49 @@ one `upto` by each tick, as one pair.
   published, and stay undetected: the same window as SealPlugin's.
   `AnsweredChangeKept` does not cover it.
 
+**Retention (plan PR 7, W229; `SealRetention`, `SealRetentionCrash`).** A
+day of uses is dropped below a cut that a sealed retention change names; the
+changes tree is never cut. The model adds a clock that each barrier moves on a
+step or not, an `at` on every entry and note, one retention run (choose a cut
+on the signer's history, append the change, drop the day's partition and the
+uses tree's tiles below the cut), and two attacker moves: a retention change
+made up, and a dropped use put back. The verifier walks the changes tree from
+genesis and the uses tree from the newest honoured cut.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the signer seals nothing stamped `Fresh` before its pair (FreshChecked: `FRESH_MS`) | `DroppedNeverResealed`: a dropped use put back is sealed again |
+| the day goes only once the retention change is sealed (DropAfterSeal) | `NoFalseAlarm`: the verifier, walking the uses from genesis, finds them gone |
+| ... and once the pair that sealed it is `Fresh` past the cut (FreshBeforeDrop) | `DroppedNeverResealed` |
+| the verifier honours only a sealed retention change (CutSealed) | `KeptNotLost`: a change made up names a later cut, and a sealed use below it is deleted unseen |
+| a cut drops uses alone (CutUsesOnly) | `ChangesUntouched`, `NoFalseAlarm` |
+| the tiles holding the cut are kept, one per level (KeepCutTiles) | `NoFalseAlarm`: the uses tree has no start |
+
+`KeptNotLost` is `SealedDeletionDetected` less what retention drops: every
+change, and every use above the cut. `NoUndetectedReplay` holds for replays
+whose entries are both kept. The protections of `Seal.cfg` stay on, and
+`SealRetentionCrash` checks the same across a signer crash.
+
+`EXPECTED`, with every protection on: below a cut only changes are kept.
+- `BelowCutKept`: a straggler (a use of the next day numbered below the cut,
+  stamped at its barrier's instant or after) can be deleted unseen once the
+  cut is announced, until its own day goes. The plan accepts this: about half
+  a tick of uses at each midnight (W209 measured 275 at 1,000/s).
+- `ReplayAcrossCutSeen`: the same straggler copied above the cut, before the
+  drop, and its original deleted. The copy reads as a use made once, at
+  another place. It keeps its stamp, so once the signer's pair is `Fresh`
+  past it (by the time a day is dropped, weeks) the signer refuses it; before
+  the cut is announced the original is walked, and the two are seen.
+
+TLC found the second while the retention model was being written: the first
+draft held `NoUndetectedReplay` for any replay with one entry kept.
+
+The code reads each window from the floor of `at` (HotPathOne's
+`BarrierChecksFloor`), so a dropped use put back is not even read; `FRESH_MS`
+is the second line. In the model the time an entry carries is its commit's;
+the deadline that lets an honest entry be stamped before the barrier that
+closed the window below it is HotPathOneClock's.
+
 **What TLC found against W212's rules.**
 - The tick's check must read each tree's newest row: one "newest row" query
   across both is unsafe.

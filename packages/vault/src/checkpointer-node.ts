@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import type { Database } from '@coffre/db';
 
 import type { Alarm, Checkpointer, Memory, SealThrough, Witness } from './checkpointer.ts';
-import { openLogCheckpointer, reasonOf, TICK_MS } from './log-checkpointer.ts';
+import { openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 
 /**
@@ -51,8 +51,10 @@ export type RunningCheckpointer = {
 
 /**
  * Opens the checkpointer over `database` (the vault's login) and ticks it
- * every `intervalMs`, a tick after the last one ends. Each alarm is
- * appended to `<memory>.alarms`, one JSON line each.
+ * every `intervalMs`, a tick after the last one ends, each followed by the
+ * log's upkeep (days made ahead, retention past `retainDays`, the bulk
+ * cap's rows pruned). Each alarm is appended to `<memory>.alarms`, one JSON
+ * line each.
  */
 export async function runCheckpointer(options: {
   database: Database;
@@ -62,11 +64,14 @@ export async function runCheckpointer(options: {
   witnesses?: readonly Witness[];
   intervalMs?: number;
   tileRange?: number;
+  /** Full days of uses kept before today's; null keeps every day (retention.ts). */
+  retainDays?: number | null;
 }): Promise<RunningCheckpointer> {
   const alarmsPath = `${options.memory}.alarms`;
   let appending: Promise<void> = Promise.resolve();
+  const store = logStore(options.database, { tileRange: options.tileRange });
   const checkpointer = await openLogCheckpointer({
-    store: logStore(options.database, { tileRange: options.tileRange }),
+    store,
     seed: options.seed,
     memory: fileMemory(options.memory),
     witnesses: options.witnesses,
@@ -84,6 +89,14 @@ export async function runCheckpointer(options: {
     }).catch((error: Error) => console.warn(`coffre audit: an alarm could not be kept: ${error.message}`));
     return appending;
   }
+  const keep = upkeep(checkpointer, store, {
+    keepDays: options.retainDays ?? null,
+    seed: options.seed,
+    alert: (message) => {
+      console.warn(`coffre audit: ${message}`);
+      void record({ at: Date.now(), message });
+    },
+  });
   const interval = options.intervalMs ?? TICK_MS;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -97,7 +110,7 @@ export async function runCheckpointer(options: {
       failed = message;
       console.warn(`coffre audit: ${message}`);
       return record({ at: Date.now(), message });
-    }).finally(() => {
+    }).then(keep).finally(() => {
       if (!stopped) timer = setTimeout(loop, interval);
     });
   };

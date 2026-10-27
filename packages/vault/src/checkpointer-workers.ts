@@ -16,7 +16,7 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import type { Alarm, Checkpointer, InclusionProof, Memory, SealThrough, Sealed, Tick, Witness } from './checkpointer.ts';
-import { openLogCheckpointer, reasonOf, TICK_MS } from './log-checkpointer.ts';
+import { openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 
 /** The part of a Durable Object's state the checkpointer uses. */
@@ -47,6 +47,8 @@ export type CheckpointerSettings = {
   witnesses?: readonly Witness[];
   /** How long its connection may sit idle before it closes; the next query opens it again. Ticking, it never is. */
   closeIdleMs?: number;
+  /** Full days of uses kept before today's; null keeps every day (retention.ts). */
+  retainDays?: number | null;
 };
 
 /**
@@ -78,6 +80,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     readonly #env: Env;
     #checkpointer: Checkpointer | null = null;
     #pool: HyperdrivePool | null = null;
+    /** The log's upkeep after each tick (log-checkpointer.ts), with the checkpointer it was opened with. */
+    #upkeep: (() => Promise<void>) | null = null;
     /** The last ticks, newest last, with their wall time in the object: `status`. */
     readonly #ticks: (Tick & { wallMs: number; at: number })[] = [];
 
@@ -100,12 +104,22 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         try {
           const s = await settings(this.#env);
           pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
-          this.#checkpointer = await openLogCheckpointer({
-            store: logStore(createDatabase(pool)),
+          const store = logStore(createDatabase(pool));
+          const checkpointer = await openLogCheckpointer({
+            store,
             seed: s.seed,
             memory: durableMemory(this.#state.storage),
             witnesses: s.witnesses,
             record: (alarm) => this.#record(alarm),
+          });
+          this.#checkpointer = checkpointer;
+          this.#upkeep = upkeep(checkpointer, store, {
+            keepDays: s.retainDays ?? null,
+            seed: s.seed,
+            alert: (message) => {
+              console.warn(`coffre audit: ${message}`);
+              void this.#record({ at: Date.now(), message }).catch(() => {});
+            },
           });
         } catch (error) {
           await pool?.end().catch(() => {});
@@ -136,6 +150,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         const [old, pool] = [this.#checkpointer, this.#pool];
         this.#checkpointer = null;
         this.#pool = null;
+        this.#upkeep = null;
         await old?.close();
         await pool?.end().catch(() => {});
       });
@@ -157,6 +172,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
+        await this.#upkeep?.();
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
         await this.#failure(`a checkpoint failed: ${reasonOf(error)}`);

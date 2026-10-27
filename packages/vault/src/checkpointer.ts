@@ -244,9 +244,13 @@ export class Checkpointer {
   /** The failures the last refused tick alerted: a refusal that stands is alerted once, not every tick. */
   private refused: string | null = null;
 
-  private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
+  /** The log's public keys, which open its pairs. */
+  readonly verifiers: PairVerifiers;
+
+  private constructor(store: CheckpointStore, signers: PairSigners, verifiers: PairVerifiers, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
     this.signers = signers;
+    this.verifiers = verifiers;
     // Each default by itself: an option passed as undefined takes it too.
     this.options = {
       memory: options.memory,
@@ -264,6 +268,11 @@ export class Checkpointer {
   /** The newest pair the signer signed and the database holds. */
   get pair(): { pair: Pair; notes: PairNotes } {
     return this.head;
+  }
+
+  /** How much older than its pair an entry the signer seals may be (`FRESH_MS`): retention drops a day two of these past its cut. */
+  get freshMs(): number {
+    return this.options.freshMs;
   }
 
   /**
@@ -299,7 +308,7 @@ export class Checkpointer {
       const genesis = mine ?? (await signPair(signers, 0n, 0, { changes: empty, uses: empty }));
       await options.memory.remember(encodePair(genesis.notes));
       await store.write({ upto: 0n, notes: genesis.notes }, { changes: [], uses: [] });
-      return new Checkpointer(store, signers, options, { changes: Edge.empty(), uses: Edge.empty() }, genesis);
+      return new Checkpointer(store, signers, verifiers, options, { changes: Edge.empty(), uses: Edge.empty() }, genesis);
     }
     const newest = await openPair(row.notes, verifiers);
     if (newest === null || newest.upto !== row.upto) throw new Error(`the newest checkpoint (${row.upto}) is not a pair signed by this log`);
@@ -353,7 +362,7 @@ export class Checkpointer {
       }
       await options.memory.remember(encodePair(row.notes));
     }
-    return new Checkpointer(store, signers, options, edges, head);
+    return new Checkpointer(store, signers, verifiers, options, edges, head);
   }
 
   /**
