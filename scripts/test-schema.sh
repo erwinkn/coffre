@@ -56,18 +56,21 @@ vault_psql() { docker compose exec -T -e PGPASSWORD=local-vault-only postgres ps
 scratch="$(mktemp -d)"
 holders=()
 let_go() {
-    owner_psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    # Each holder's backend gone, its locks with it, before the next check: psql exits before its backend has.
+    owner_psql -c "SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE datname = current_database() AND query LIKE '%coffre-test-holder%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 || true
     for holder in "${holders[@]}"; do wait "$holder" 2>/dev/null || true; done
     holders=()
 }
 trap 'let_go; rm -rf "$scratch"' EXIT
+# held <class> [<key>]: the advisory lock granted, by its two keys where the
+# check knows both (the fence and the issue lock are one class).
 held() {
     for attempt in $(seq 100); do
         # This database's: another run may share the server.
-        [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.classid = $1 AND l.granted")" == 1 ]] && return 0
+        [[ "$(owner_psql -At -c "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.classid = $1 ${2:+AND l.objid = $2} AND l.granted")" == 1 ]] && return 0
         sleep 0.1
     done
-    echo "the lock $1 was never held" >&2
+    echo "the lock $1${2:+, $2} was never held" >&2
     exit 1
 }
 
@@ -77,7 +80,7 @@ held() {
 # waits, a read's does not.
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 0), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
-held 1668244070
+held 1668244070 0
 entry() {
     echo "BEGIN; SET LOCAL lock_timeout = '1s';
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
@@ -99,7 +102,7 @@ let_go
 # waits there; a token.exchange's takes neither lock.
 owner_psql -c 'SELECT pg_advisory_lock(1668244070, 1), pg_sleep(300) /* coffre-test-holder */' >/dev/null 2>&1 &
 holders+=($!)
-held 1668244070
+held 1668244070 1
 entry app token.exchange | owner_psql >/dev/null || { echo "0.14's token.exchange waited on the issue lock" >&2; exit 1; }
 if entry app token.revoke | owner_psql >/dev/null 2>"$scratch/fenced" || ! grep -q 'lock timeout' "$scratch/fenced"; then
     cat "$scratch/fenced" >&2; echo "0.14's token.revoke did not wait on the issue lock" >&2; exit 1
