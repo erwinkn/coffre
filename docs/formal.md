@@ -1158,11 +1158,13 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | changes take the fence exclusive and answer once committed | `TotalOrder`, `NothingAllowedAfterAnswer` |
 | a value leaves only after its entry commits, durably | `DurableBeforeRelease`, `NothingAllowedAfterAnswer` |
 | the barrier under the fence exclusive; the floor of `at` | `CheckpointsHold` |
+| the barrier checks the floor is the one it last wrote (BarrierChecksFloor), against a writer who lowers it | `CheckpointsHold` |
 | each input sealed (`Unsealed={"credential"}` …) | `ReplaySound`: allowed live, refused by the replay |
 | seals checked before what the rows say (StaleFirst) | `TamperVisible` |
 | the seal cache valid only while the newest change is the one it was read at (CacheChecked, CacheSameChange) | `ReplaySound`, `RepeatsAreTheirCover`, after a restore |
 | covers see a change to any input; and need their entry (CoverExists) | `RepeatsAreTheirCover`, `DurableBeforeRelease` |
 | a change's CAS on its object's seal (ChangeCAS) | `EachChangeFlips` |
+| a change refuses a base row that is not its object's newest change (ChangeChecksSeal): a CAS alone passes a row a writer put back, and the change would re-seal the rollback | `EachChangeFlips`, `ReplaySound` |
 | the deadline checked in Postgres; the Worker's answer at it | `NoLateWork`, `ReleaseByDeadline` |
 | new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
 | the cap's count and window from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed); HotPathOnePolicyWindow flips the window alone | `BulkReplayAgrees` |
@@ -1192,7 +1194,10 @@ bounded):
 - One principal and one isolate (covers and the seal cache are each checked
   against the log, so more isolates add no new interleaving), and two or
   three uses.
-- A writer that forges no seal.
+- A writer that forges no seal. The rows that are not decision inputs
+  (`bulk`, the floor) are unsigned. A writer who lowers the floor is caught
+  by the barrier's check. One who resets the cap's rows is seen only by the
+  replay: no invariant holds the live `bulk` rows against a writer.
 - The tree reduced to sets of numbers (Seal.tla checks the tree).
 - **Request ids:** each use is a distinct request. A retry that repeats its
   request id, the unique `(at, request id)` index, and "a retry never
@@ -1264,6 +1269,7 @@ The cutover from 0.14 (the plan's PR 9).
 | 0.15 changes also advance 0.14's fence (DualFence) | `NothingAllowedAfterAnswer` |
 | a trigger takes the 0.15 fence for each 0.14 access change (OldWritesFence) | `NothingAllowedAfterAnswer` |
 | 0.14's head before the 0.15 fence (ChangeHeadFirst) | `NoWaitCycle` |
+| the object's member row before 0.14's head (RowFirst): 0.14 takes rows before its head, so the order is row, head, fence | `NoWaitCycle` |
 | adoption, at every tick | `EveryOldWriteAdopted` |
 | adoption verifies the entry and seals what it wrote | `NewLogFollowsOld`, `AllowedOnlyWhenGranted` |
 | adoption only after the newest seal's 0.14 entry (AdoptAfterSeal) | `NewChangesStand` |
@@ -1295,7 +1301,7 @@ shortest one.
 
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
-tests do; skipped, seconds. With 0.15's models the suite is 233 TLC runs in
+tests do; skipped, seconds. With 0.15's models the suite is 239 TLC runs in
 nine shards; the six new ones are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
@@ -1303,7 +1309,7 @@ shards 10.9 (5.8 and 5.5 here).
 
 | shard | wall time here, 4 workers | CPU time | on CI |
 |---|---|---|---|
-| hotpath | 4.7 min | 23 min | about 10 min (estimated) |
+| hotpath | 5.4 min | 25 min | about 11 min (estimated) |
 | hotpath-policy | 5.3 min | 24 min | about 11 min (estimated) |
 | hotpath-bulk | 5.8 min | 31 min | 10.9 min (measured) |
 | hotpath-skew | 5.4 min | 29 min | 11.0 min (measured) |

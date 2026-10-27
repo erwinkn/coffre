@@ -156,6 +156,12 @@ REMOVALS=(
   "HotPathOneSeals CacheChecked ReplaySound"
   "HotPathOneRestore CacheSameChange ReplaySound"
   "HotPathOneCAS ChangeCAS EachChangeFlips"
+  # A change on a row a writer put back: without the check of the base row against the newest change, it re-seals the rollback.
+  "HotPathOneSeals ChangeChecksSeal EachChangeFlips"
+  "HotPathOneRestore ChangeChecksSeal EachChangeFlips"
+  "HotPathOneRestore ChangeChecksSeal ReplaySound"
+  # A writer who lowers the floor of `at`: without the barrier's check, a use lands where no checkpoint reads.
+  "HotPathOneFloor BarrierChecksFloor CheckpointsHold"
   "HotPathOneRestoreCovers CoverExists RepeatsAreTheirCover"
   "HotPathOneRestoreCovers CoverExists DurableBeforeRelease"
   "HotPathOneClock FloorChecked CheckpointsHold"
@@ -199,12 +205,13 @@ REMOVALS=(
   "SealCore PairChecked+PairVerified SealedDeletionDetected"
   "Seal KindInMac KindKept"
   # 0.15's cutover from 0.14 (Migration015.tla; docs/design/0.15-plan.md, PR 9).
-  "Migration015 CutoverHeadLock+CutoverFence OneCutover"
-  "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence NewLogFollowsOld"
+  "Migration015 CutoverHeadLock+CutoverFence+RowFirst OneCutover"
+  "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence+RowFirst NewLogFollowsOld"
   "Migration015 Marker OneCutover"
   "Migration015 DualFence NothingAllowedAfterAnswer"
   "Migration015 OldWritesFence NothingAllowedAfterAnswer"
   "Migration015 ChangeHeadFirst NoWaitCycle"
+  "Migration015 RowFirst NoWaitCycle"
   "Migration015 Adopt EveryOldWriteAdopted"
   "Migration015 AdoptRepeats EveryOldWriteAdopted"
   "Migration015Tamper VerifyChain AnchorHolds"

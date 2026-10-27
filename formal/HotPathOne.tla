@@ -162,11 +162,27 @@
 (*                         one it read (`WHERE seal = p_seal_from`);       *)
 (*   ChangeRereads         ... and else reads it again (not the same read, *)
 (*                         retried);                                       *)
+(*   ChangeChecksSeal      ... and only if the row is the one its object's *)
+(*                         newest change wrote (its seal is that change's: *)
+(*                         change_input probes the newest change as a use  *)
+(*                         does), else it reads again: a row put back      *)
+(*                         carries a valid older seal, so the check on     *)
+(*                         what was read passes, and the change would      *)
+(*                         apply its payload to the rolled-back row and    *)
+(*                         seal the result;                                *)
 (*   DeadlineChecked       a call that decides past its deadline writes    *)
-(*                         nothing: checked after its last lock wait, in   *)
-(*                         the statement that decides;                     *)
+(*                         nothing: checked with clock_timestamp() after   *)
+(*                         its last lock wait, in the statement that       *)
+(*                         decides (now() is the transaction's start,      *)
+(*                         before any lock wait, and passes a late use);   *)
 (*   FloorChecked          a use whose `at` is below the floor writes      *)
 (*                         nothing;                                        *)
+(*   BarrierChecksFloor    the floor is an unsigned row: the barrier       *)
+(*                         finds it at the value it last wrote, which the  *)
+(*                         signer remembers, or raises the alarm and signs *)
+(*                         nothing (a floor a writer lowered would let a   *)
+(*                         use in below it, which the next checkpoint's    *)
+(*                         `at` scan misses);                              *)
 (*   WorkerHonoursDeadline the Worker answers 503 at the deadline, and a   *)
 (*                         value whose call returns later never leaves;    *)
 (*   PrincipalLocks        a key that enters the cap's set, or is moved    *)
@@ -188,9 +204,22 @@
 (*                         back: the SQL cannot check a MAC, and the cap's *)
 (*                         row moves whatever the Worker then decides.     *)
 (*                                                                         *)
+(* What it abstracts. A row's seal is its content, and a writer can only  *)
+(* put back what the vault once sealed. A change flips its input; the      *)
+(* replay applies the changes' operations (each a flip) in number order,   *)
+(* and a change's entry records the value it sealed, so a change applied   *)
+(* to a row put back shows as an entry that is not the flip of the one     *)
+(* before it (EachChangeFlips), and as uses the replay refuses. The bulk   *)
+(* rows and the floor of `at` are unsigned: a writer can reset the live    *)
+(* cap (a key let in again early), which only the replay shows (no         *)
+(* invariant here holds the live rows to a writer), and can lower the      *)
+(* floor (TamperFloor), which the barrier checks (BarrierChecksFloor).     *)
+(*                                                                         *)
 (* Liveness (UseAnswered, ChangeAnswered): under weak fairness of the      *)
 (* protocol's steps, with crashes, aborts, holds, tampering and restores   *)
-(* bounded and not fair. Left to the benchmarks instead: how long any of   *)
+(* bounded and not fair. A change that keeps finding its row put back      *)
+(* never answers (it fails closed, ChangeChecksSeal): HotPathOneLive has   *)
+(* no writer. Left to the benchmarks instead: how long any of   *)
 (* it takes (latencies, the 503's speed, a change's wait for the uses in   *)
 (* flight, sealing within a tick), and that an unending stream of uses     *)
 (* never starves a change (Postgres queues an exclusive lock request ahead *)
@@ -212,6 +241,7 @@ CONSTANTS
     MaxTampers,      \* rows a database writer puts back in a behaviour
     MaxRestores,     \* restores from a backup in a behaviour
     Holds,           \* Hyperdrive may hold a call and never run it
+    FloorTampers,    \* the writer's tampering (MaxTampers) may lower the floor of `at` instead of a row
     Failures,        \* a call may fail before its commit, or its Worker die after it
     Keys,            \* the keys one principal asks for; {}: no bulk cap
     MaxTime,         \* Postgres's clock runs 0..MaxTime
@@ -223,7 +253,7 @@ CONSTANTS
     UseLocks, StatementSnapshot, UseNumberUnderLock, ChangeLocks, ChangeNumberUnderLock,
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
-    ChangeCAS, ChangeRereads, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
+    ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
     PrincipalLocks, RefreshOnUse, CoverFresh, Slack, DeadlineSlack, CapFromPolicy, CapSealed
 
 None == "none"
@@ -304,6 +334,10 @@ KeysOr == IF Keys = {} THEN {None} ELSE Keys
 \* The cap a policy value stands for, (count, window); the one in force as of the log L.
 PolicyOf(v) == IF v THEN [n |-> BulkCount, w |-> BulkWindow] ELSE [n |-> BulkCountAlt, w |-> BulkWindowAlt]
 PolicyIn(L) == IF "policy" \in Inputs THEN PolicyOf(NewestIn(L, "policy")) ELSE PolicyOf(TRUE)
+\* An input as the replay has it from the log L: its changes' operations applied in turn, each a
+\* flip, from the first value (whatever values their entries sealed).
+ReplayValue(L, i) == Cardinality({e \in ChangesIn(L) : e.input = i}) % 2 = 0
+ReplayPolicyIn(L) == IF "policy" \in Inputs THEN PolicyOf(ReplayValue(L, "policy")) ELSE PolicyOf(TRUE)
 CountIn(L) == PolicyIn(L).n
 WindowIn(L) == PolicyIn(L).w
 Margin == IF Slack THEN Refresh ELSE 0
@@ -330,14 +364,14 @@ RECURSIVE ReplayFrom(_, _, _, _)
 ReplayFrom(es, L, decided, G) ==
     IF es = {} THEN [rows |-> L, decided |-> decided]
     ELSE LET e == CHOOSE e \in es : \A d \in es : e.seq <= d.seq
-             r == Rule(L, e.key, e.at, PolicyIn({d \in G : d.seq < e.seq}))
+             r == Rule(L, e.key, e.at, ReplayPolicyIn({d \in G : d.seq < e.seq}))
          IN ReplayFrom(es \ {e}, IF r.write = NoTime THEN L ELSE [L EXCEPT ![e.key] = Max(@, r.write)],
                        decided \cup {<<e.seq, r.admitted>>}, G)
 BulkReplay(G) == ReplayFrom({e \in UsesIn(G) : e.key /= None}, [k \in Keys |-> NoTime], {}, G)
 
 \* What the log says of a use entry: every input as the changes numbered below it left it, and
 \* the cap's decision as the replay makes it.
-InputsAllowed(seq) == \A i \in Inputs \ {"policy"} : NewestIn({d \in log : d.seq < seq}, i)
+InputsAllowed(seq) == \A i \in Inputs \ {"policy"} : ReplayValue({d \in log : d.seq < seq}, i)
 ReplayAllows(e) == InputsAllowed(e.seq) /\ (e.key = None \/ <<e.seq, TRUE>> \in BulkReplay(log).decided)
 
 \* Entries: a use's is its request (number, key, at, deadline) with ghosts: the changes it saw, its
@@ -635,13 +669,15 @@ ChangeLock(h) ==
     /\ UNCHANGED <<log, nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs>>
 
-\* Its statement: if the row is no longer the one it read (ChangeCAS), nothing is written, the lock
-\* goes and the vault reads again (without ChangeRereads, it tries the same read again). Else the
-\* write (the flip of what it read) and its entry's number. Without LockToCommit the lock goes
-\* here; without CommitBeforeAnswer it answers here.
+\* Its statement: if the row is no longer the one it read (ChangeCAS), or not the one its object's
+\* newest change wrote (ChangeChecksSeal), nothing is written, the lock goes and the vault reads
+\* again (without ChangeRereads, it tries the same read again). Else the write (the flip of what it
+\* read) and its entry's number. Without LockToCommit the lock goes here; without CommitBeforeAnswer
+\* it answers here.
 ChangeRun(h) ==
     /\ c[h].pc = "locked"
-    /\ IF ChangeCAS /\ Rows[c[h].input] /= c[h].read
+    /\ IF \/ ChangeCAS /\ Rows[c[h].input] /= c[h].read
+          \/ ChangeChecksSeal /\ Rows[c[h].input] /= NewestIn(log, c[h].input)
        THEN /\ c' = [c EXCEPT ![h].pc = IF ChangeRereads THEN "refused" ELSE "started"]
             /\ holder' = IF holder = h THEN None ELSE holder
             /\ UNCHANGED <<nextSeq, answered>>
@@ -684,11 +720,13 @@ ChangeAnswer(h) ==
 
 \* The barrier, under the lock exclusive for one statement: the floor raised to its clock less D,
 \* never lowered; every number handed out so far closed. No lag: with every number taken under
-\* the lock, none is still in flight.
+\* the lock, none is still in flight. With BarrierChecksFloor, a floor not at the value the signer
+\* last wrote is an alarm, and nothing more is closed or signed.
 CheckpointClose ==
     /\ ~cp.open
     /\ Cardinality(signed) < MaxCheckpoints
     /\ CheckpointLocks => LockFree
+    /\ BarrierChecksFloor => floor = lastFloor
     /\ floor' = Max(floor, pnow - D)
     /\ cp' = [open |-> TRUE, from |-> lastUpto, upto |-> nextSeq - 1, readFloor |-> lastFloor, floor |-> Max(floor, pnow - D)]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, lastUpto, lastFloor, signed, crashes,
@@ -747,6 +785,15 @@ Tamper ==
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, cache, restores, bulk, pnow, backs>>
 
+\* The writer lowers the floor of `at`, an unsigned row.
+TamperFloor ==
+    /\ FloorTampers
+    /\ tampers < MaxTampers
+    /\ floor' = floor - 1
+    /\ tampers' = tampers + 1
+    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, crashes,
+                   cover, repeats, tamper, cache, restores, bulk, pnow, backs>>
+
 \* A restore from a backup, while no call is in flight: the log back to an earlier point, the rows
 \* (the bulk rows as that log made them) and the sequence with it. What changes had answered is now
 \* what the restored log holds; the ghosts of what happened before it go with the history.
@@ -782,7 +829,7 @@ Next ==
     \/ \E x \in Uses : UseStart(x) \/ UseHold(x) \/ UseResume(x) \/ UseStep(x) \/ UseFail(x) \/ UseCrash(x)
     \/ \E h \in Changers : ChangeStep(h) \/ ChangeAbort(h)
     \/ CheckpointClose \/ CheckpointSign
-    \/ Flush \/ Crash \/ Tamper \/ Restore
+    \/ Flush \/ Crash \/ Tamper \/ TamperFloor \/ Restore
 
 Spec == Init /\ [][Next]_vars
 

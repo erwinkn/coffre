@@ -164,7 +164,7 @@ jobs:
       matrix:
         # scripts/formal.sh shard_of; the longest, Tampering, is 7 to 11 minutes. 4g, not the script's 1g: Tampering
         # took 11 on a 4-core, 16 GB runner at 1g and 7 at 4g or 8g, and 11 to 12 at 12g, or at 8g with 2 or 8 workers.
-        # The hotpath* and seal* shards: 0.15's models (HotPathOne in four; Seal and Migration015 in two), each about 10 minutes here.
+        # The hotpath* and seal* shards: 0.15's models (HotPathOne in four; Seal and Migration015 in two), each about 10 minutes on CI.
         shard: [tampering, large, rest, hotpath, hotpath-policy, hotpath-bulk, hotpath-skew, seal, seal-plugin]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
