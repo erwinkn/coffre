@@ -1300,8 +1300,11 @@ shortest one.
   `scripts/formal.sh` by SHA-256 and checked before every use.
 - **Not 1.8.0:** that tag is a prerelease, rebuilt nightly, which no pin
   would hold.
-- **Java:** TLC needs Java 11 or newer. CI's `ubuntu-24.04` runners carry
-  Java 17, so the job installs nothing else.
+- **Java:** TLC needs Java 11 or newer. CI pins an exact Temurin build with
+  `actions/setup-java` (17.0.9+9, in `validate.yml`'s plan and shard jobs
+  alike): the key hashes the JVM, and GitHub's `ubuntu-24.04` image rolls out
+  over days, so two jobs of one run could land on images with other Java
+  builds and disagree (seen on #379). Bump the version in both places.
 - **Other tools considered:**
   - Apalache checks symbolically, by trace length, and is much larger.
   - Quint's simulator samples traces rather than covering every one, and
@@ -1334,8 +1337,8 @@ every pull request that is not a version-only bump:
   [`scripts/formal-key.sh`](../scripts/formal-key.sh): `formal/*.tla` and
   `formal/*.cfg` (all `formal.sh` copies; the Lean proofs are
   `formal-lean`'s), `formal.sh` itself, which pins TLC's jar by checksum,
-  `formal-trace.mjs`, the workflow, and the runner's Java (vendor and exact
-  build). A full green run saves that key, with its run id, in Actions' cache,
+  `formal-trace.mjs`, the workflow, and the job's Java (vendor and exact
+  build, pinned by the workflow). A full green run saves that key, with its run id, in Actions' cache,
   only after every shard has held. The next run of a key that has one logs
   "TLC skipped" with the key and the run that held, and finishes in
   seconds. The plan reads the repository's whole cache list, not a restore,
