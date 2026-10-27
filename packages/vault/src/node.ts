@@ -31,7 +31,10 @@ export * from './index.ts';
 export type { LocalVault, VaultOptions };
 /** 0.15's checkpointer on Node (docs/design/audit-tree.md): unused until 0.15's log is switched on (plan PR 10). */
 export { fileMemory, runCheckpointer, type RunningCheckpointer } from './checkpointer-node.ts';
-/** 0.15's log replayed as stored (plan PR 8's verifier, whole): what each use decides on the log, which every live answer must be (R53). */
+/**
+ * 0.15's log replayed as stored: what each use decides on the log, which every live answer must be (R53). For the
+ * suites only: it reads the whole log into memory, every use ever made. Plan PR 8's verifier walks it a stretch at a time.
+ */
 export { replayStored } from './log-replay.ts';
 
 export type NodeVaultConfig = VaultConfig & {

@@ -92,7 +92,7 @@ export class CoffreError extends Error {
   readonly code: string;
   /** The vault's own code when it refused: `no_grant`, `removed`, `bulk_limit`, ... */
   readonly reason: string | undefined;
-  /** For a 503 that says, when to ask again, in seconds (`Retry-After`): a busy 0.15 use's, in process. */
+  /** When to ask again, in seconds, when the answer says (`Retry-After`): a 503's, a 429's. */
   readonly retryAfter: string | undefined;
 
   constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string) {
@@ -160,6 +160,7 @@ export function createClient(options: ClientOptions) {
         typeof error?.error === 'string' ? error.error : 'http_error',
         typeof error?.message === 'string' ? error.message : `request failed with status ${response.status}`,
         typeof error?.reason === 'string' ? error.reason : undefined,
+        response.headers.get('retry-after') ?? undefined,
       );
     }
     return payload;

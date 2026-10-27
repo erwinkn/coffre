@@ -92,8 +92,11 @@ export async function openValues(
   asking: Asking & {
     purpose: Purpose;
     keepsSensitive?: boolean;
-    /** The id of the credential's row the request came in on: with 0.15's uses on, each value is opened by a use on it (`useValues`). */
-    credential?: string | null;
+    /**
+     * The id of the credentials row the request came in on: with 0.15's uses on, each value is opened by a use on it
+     * (`useValues`). Not `credentialId`, which names the request's provenance in the vault's entries, and is no row's.
+     */
+    credentialRow?: string | null;
   },
   items: OpenItem[],
   /** The caller's, decided on a kept answer of the vault's: the vault checks it, and says so by naming it back. */
@@ -109,8 +112,9 @@ export async function openValues(
 ): Promise<Keyed<string> & { used?: true }> {
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
-  if (asking.credential != null && (await uses015(vault))) {
-    const opened = await useValues(vault, { credential: asking.credential, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed);
+  const { credentialRow, ...asked } = asking;
+  if (credentialRow != null && (await uses015(vault))) {
+    const opened = await useValues(vault, { credential: credentialRow, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed);
     // A use decides on the rows as they are, but only where its key is held: it vouches for a kept answer about the
     // caller when every value going back is a use's, each read where it is held. Not with a plain value beside, which
     // no use decided, nor one inherited in a fork, where the use checks no permission of the caller's: the app asks.
@@ -120,7 +124,7 @@ export async function openValues(
   }
   const checks = recalled !== undefined && !recalled.confirmed ? recalled.revision : undefined;
   const result = await vault.unwrap({
-    ...asking,
+    ...asked,
     ...(checks === undefined ? {} : { accessRevision: checks }),
     items: sealed.map(({ secretVersionId, via, through }) => ({
       secretVersionId,
