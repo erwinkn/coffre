@@ -323,7 +323,10 @@ export class Checkpointer {
       await options.memory.remember(encodePair(row.notes));
     } else if (encodePair(mine.notes) !== encodePair(row.notes)) {
       // The same heads signed twice, at two times (a pending pair re-signed by an earlier version, say): the memory
-      // takes the row's notes, so that it and the head are one record again.
+      // takes the row's notes, so that it and the head are one record again; never a time or floor that runs back.
+      if (newest.at < mine.pair.at || newest.floor < mine.pair.floor) {
+        throw new Error(`the database's pair up to ${newest.upto} is the one the signer remembers, signed again earlier or at a lower floor (at ${newest.at}, floor ${newest.floor}; remembered at ${mine.pair.at}, floor ${mine.pair.floor}): time runs back`);
+      }
       await options.memory.remember(encodePair(row.notes));
     }
     return new Checkpointer(store, signers, options, edges, head);
@@ -590,13 +593,20 @@ export class Checkpointer {
 /** An in-process witness: what the witness's Durable Object does, without the network. */
 export function localWitness(name: string, log: PairVerifiers, self: NoteSigner): Witness & { held(): WitnessState } {
   let state: WitnessState = null;
+  // One publication at a time, as the Durable Object's input gate gives it: a try the pump gave up on, landing late,
+  // must not put back an older pair over a newer one.
+  let queue: Promise<unknown> = Promise.resolve();
   return {
     name,
     held: () => state,
-    async publish(notes, proofs) {
-      const r = await witnessPair(state, notes, await proofs(state === null ? { changes: 0, uses: 0 } : sizes(state.pair)), log, self);
-      state = r.state;
-      return r.answer;
+    publish(notes, proofs) {
+      const run = queue.then(async () => {
+        const r = await witnessPair(state, notes, await proofs(state === null ? { changes: 0, uses: 0 } : sizes(state.pair)), log, self);
+        state = r.state;
+        return r.answer;
+      });
+      queue = run.catch(() => {});
+      return run;
     },
   };
 }

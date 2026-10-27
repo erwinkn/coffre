@@ -107,6 +107,8 @@ async function walk(
   for (const [i, a] of below.entries()) {
     const next = below[i + 1] ?? start.pair;
     if (next.at < a.at || next.floor < a.floor) problems.push(`the pair held outside up to ${a.upto}: its time or floor is past the next pair's (up to ${next.upto}): time runs back`);
+    // Two pairs held for one place must be one signing.
+    if (next.upto === a.upto && (next.at !== a.at || next.floor !== a.floor)) problems.push(`two pairs held outside up to ${a.upto}, signed at two times or floors`);
   }
 
   // Pairs held outside. Those at or below the start are not walked (verified before), but each must still be the row

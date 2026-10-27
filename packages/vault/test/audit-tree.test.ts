@@ -203,7 +203,9 @@ test('(m) the newest row deleted under a running signer is caught at the next ti
 test('nothing is sealed over a forged entry, a replay older than the signer\'s pair, or an entry out of its window', async () => {
   const cases: [string, (store: MemoryStore, k: Keys, cp: Checkpointer) => void, RegExp][] = [
     ['forged', (store) => store.log.push({ ...store.log.at(-1)!, number: store.next++, columns: [1n, 'f', '{}', Buffer.alloc(16)] }), /MAC does not hold/],
-    ['replay', (store, k, cp) => store.log.push(entry(k.macKey, 'uses', store.next++, 'old', '{}', cp.pair.pair.at - FRESH_MS - 1)), /a replay/],
+    // A change, read by number: a use that old lies below the floor, where the window does not read (FloorChecked keeps
+    // such a use out; one slipped in shows to the verifier, as an entry its pair does not hold).
+    ['replay', (store, k, cp) => store.log.push(entry(k.macKey, 'changes', store.next++, 'old', '{}', cp.pair.pair.at - FRESH_MS - 1)), /a replay/],
     ['renumbered', (store) => store.log.push({ ...store.log[store.log.length - 1 - 0]!, number: store.append('uses', 'twin') }), /outside the window/],
   ];
   for (const [name, tamper, error] of cases) {
@@ -477,10 +479,42 @@ test('review r4: prove() refuses an index past the tree; open() re-syncs a memor
   await assert.rejects(cp.prove(store.log[3]!.number), /past the/);
   store.locate = locate;
   const { pair } = cp.pair;
-  const resigned = await signPair(k.signers, pair.upto, pair.at + 7, { changes: pair.changes, uses: pair.uses }, pair.floor);
-  memory.record = encodePair(resigned.notes);
+  // The memory holds the same heads signed earlier: it takes the row's notes. Signed later, or at a higher floor, than
+  // the row: time would run back, refused (review r11).
+  const earlier = await signPair(k.signers, pair.upto, pair.at - 7, { changes: pair.changes, uses: pair.uses }, pair.floor);
+  memory.record = encodePair(earlier.notes);
   await open();
   assert.equal(memory.record, encodePair(cp.pair.notes));
+  for (const [at, floor] of [[pair.at + 7, pair.floor], [pair.at, pair.floor + 7]]) {
+    memory.record = encodePair((await signPair(k.signers, pair.upto, at!, { changes: pair.changes, uses: pair.uses }, floor)).notes);
+    await assert.rejects(open(), /time runs back/);
+  }
+});
+
+test('review r11: two pairs held outside for one place, below the start, must be one signing', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  const notes: PairNotes[] = [];
+  for (let i = 0; i < 5; i += 1) {
+    await traffic(store, cp, 1);
+    notes.push(cp.pair.notes);
+  }
+  const p3 = (await openPair(notes[2]!, k.verifiers))!;
+  const again = await signPair(k.signers, p3.upto, p3.at + 1, { changes: p3.changes, uses: p3.uses }, p3.floor);
+  store.rows.delete(p3.upto);
+  const v = await verify(store, k, { from: notes[4]!, anchors: [notes[2]!, again.notes] });
+  assert.ok(!v.ok && v.problems.some((p) => /two pairs held outside up to/.test(p)), v.problems.join('\n'));
+});
+
+test('review r11: a use below the floor the signer holds is not in its window, and a lowered floor refuses the tick that would miss it', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const signed = cp.pair.pair.floor;
+  store.floor = signed - 60_000;
+  const late = store.append('uses', 'late', '{}', signed - 30_000);
+  assert.ok(!(await cp.tick()).signed);
+  assert.ok(!(await store.close(cp.pair.pair.upto, signed)).entries.some((e) => e.number === late), 'read from the signed floor, the late use is missed');
 });
 
 test('Fable review: a tick on a signer clock an hour ahead signs at most one bound past its entries, and sealing goes on once the clock heals', async () => {

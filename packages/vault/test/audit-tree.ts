@@ -61,7 +61,9 @@ export class MemoryStore implements CheckpointStore {
     const upto = this.next - 1n;
     const found = this.floor;
     this.floor = Math.max(this.floor, Date.now() - 3000);
-    return { upto, newest: await this.newest(), entries: this.between(after, upto), floor: { found, set: this.floor } };
+    // Changes by number; uses by `at` from the floor the signer holds, as 6b's store reads them through their index.
+    const entries = this.between(after, upto).filter((e) => e.tree === 'changes' || e.at >= from);
+    return { upto, newest: await this.newest(), entries, floor: { found, set: this.floor } };
   }
 
   async newest(): Promise<StoredPair | null> {
