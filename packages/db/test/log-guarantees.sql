@@ -47,6 +47,34 @@ BEGIN
 END
 $$;
 
+-- The verifier (0027, plan PR 8): the vault keeps its replays, which it may add and forget but never rewrite, and
+-- reads the columns the credentials', bindings' and references' objects are made of, never a token's hash or MAC.
+DO $$
+DECLARE
+    attempt text;
+BEGIN
+    INSERT INTO log_replays VALUES (9223372036854775806, 0, '{}', decode(repeat('00', 32), 'hex'));
+    DELETE FROM log_replays WHERE upto = 9223372036854775806;
+    PERFORM count(*) FROM (SELECT id, principal, kind, scope, revoked_at, expires_at, not_after, seal FROM credentials) c;
+    PERFORM count(*) FROM (SELECT id, seal FROM service_bindings) b;
+    PERFORM count(*) FROM (SELECT secret_id, source_secret_id, created_seq FROM secret_references) r;
+    FOREACH attempt IN ARRAY ARRAY[
+        $q$UPDATE log_replays SET state = '{}'$q$,
+        $q$SELECT token_hash FROM credentials$q$,
+        $q$SELECT auth_mac FROM credentials$q$,
+        $q$SELECT * FROM service_bindings$q$,
+        $q$SELECT * FROM secret_references$q$
+    ] LOOP
+        BEGIN
+            EXECUTE attempt;
+            RAISE EXCEPTION 'FAIL: coffre_vault ran %', attempt;
+        EXCEPTION WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_vault keeps its replays and reads the objects'' columns, no more';
+END
+$$;
+
 -- The app reads none of it, and nobody but the vault runs the functions.
 DO $$
 BEGIN

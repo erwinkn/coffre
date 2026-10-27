@@ -2832,8 +2832,14 @@ class VaultService implements Vault {
    * checkpoints reach the newest heartbeat.
    */
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
-    await this.#settled();
+    const checkpointed = await this.#checkpoint014();
+    // Then 0.15's replay walked on and kept, its verdict the page's check's to say.
     if (this.#prepared.log015 !== null) await this.#replayOn();
+    return checkpointed;
+  }
+
+  async #checkpoint014(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
+    await this.#settled();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
     // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
     const { wrongKek, logKeys } = this.#prepared;

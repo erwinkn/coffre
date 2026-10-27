@@ -429,15 +429,22 @@ functions.
   on both sides: from the floor of the pair it starts after, to the slack
   past the floor of the pair that seals where it ends (review r3). Only a
   read past the newest pair, the head, is open-ended.
-- **`locate` finds an old use** through the uses' one index. It reads
-  between its window's floor and the sealing barrier's floor plus
-  `deadline_max()` and 60 s (63 s in all), then counts the window's uses
-  before it.
+- **`locate` finds an old use** through the uses' one index. Without its
+  time, it reads between its window's floor and the sealing barrier's floor
+  plus `deadline_max()` and 60 s (63 s in all); a caller that knows the
+  use's `at` (`prove(number, at)`) finds it in one probe. Its index is where
+  its leaf sits among the window's leaves, in the uses tree's level-0 tiles
+  (a tick's worth: two or three tiles at 1,000/s). A use whose leaf is not
+  there was changed since its tick, and `locate` says so.
   - **The bound is a rule, not an assumption** (review r2): `use_credential`
     answers `ahead` and writes nothing for an `at` more than 60 s past
     Postgres's clock (#372).
-  - **The cost** is about a minute of index entries per proof of a use at
-    1,000/s (unmeasured, PR note). Changes are found by their key.
+  - **The cost, measured** (plan PR 8, T119; 1M uses at 1,000/s, a pair
+    every 500 uses, hot cache): counting the window's uses before it by
+    `at`, as PR 6 did, read about 63,500 index entries twice, 9.6 ms and
+    1,397 buffers a proof. Now: 3.7 ms and 303 buffers without the use's
+    time (one pass), 0.4 ms and 17 buffers with it, plus the tiles.
+    Changes are found, and counted, by their key.
 - **Leaf tiles go in ranges of 2^24 leaves** (`TILE_RANGE`, about 4.7 hours
   at 1,000 uses a second, 512 MB of tiles). `make_tiles` makes each range,
   and the next one, before a tile lands in it. Retention (PR 7) drops whole
@@ -535,8 +542,9 @@ on Node, `durableSealThrough(…)` on Workers. `sealThroughDouble` in
 - **PR 7, retention:** days and tile ranges made ahead and dropped (with
   `make_day`, `make_tiles`), the freshness step, and the cut named in the
   uses tree's coordinates.
-- **PR 8, the verifier's surfaces:** MACs and request IDs through
-  `verifyLog`'s `check`, starting from a retention cut, and the UI and CLI.
+- **PR 8, the verifier's surfaces:** built (`packages/vault/src/verifier.ts`;
+  0.15-plan.md, "As built: PR 8"), but for the start from a retention cut,
+  which PR 7 brings.
 
 ## The spec, and where the code holds it
 
@@ -557,7 +565,7 @@ the code holds it and the tests that break it.
 | MacChecked | `tick` refuses an entry whose MAC fails | "nothing is sealed over a forged entry…" |
 | WaitForSeal | `sealThrough`: sealed, proved, then witnessed or 2 s | "a change answers once sealed…", "review r1: a change whose entry…" |
 | Witness | `witnessPair`, the pumps | (c), "a change waits for the witness…" |
-| RequestIdChecked | `verifyLog`'s `check` | PR 8 |
+| RequestIdChecked | the verifier's `check` (verifier.ts): each request once in a walk, and the unique indexes that refuse a copy across stretches still there | verifier.test.ts, "a forged use is named…" |
 | PairVerified | `verifyLog`: a row whose notes do not open as one pair is a problem | "the pair is one value…" |
 | invariants KindKept, PairConsistent, AnsweredChangeKept | the rows above together | as above |
 
