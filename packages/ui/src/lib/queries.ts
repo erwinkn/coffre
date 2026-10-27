@@ -371,12 +371,12 @@ export const queries = {
  * checked as a chain, so for them it is a fact about the page, not a fault.
  */
 async function verifyChain(client: CoffreClient) {
-  try {
-    const [chain, trees] = await Promise.all([client.audit.verify(), client.audit.verifyTrees()]);
-    return chainResult(chain, false, trees);
-  } catch (error) {
-    return chainUnknown(error);
-  }
+  // Each settled apart: a check of 0.15's log that could not run says so beside 0.14's verdict, never in its place.
+  const [chain, trees] = await Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()]);
+  if (chain.status === 'rejected') return chainUnknown(chain.reason);
+  if (trees.status === 'fulfilled') return chainResult(chain.value, false, trees.value);
+  const unknown = chainUnknown(trees.reason);
+  return { ...chainResult(chain.value, false), ...(unknown.integrity === 'unknown' && chain.value.ok ? { treesFailed: unknown.problem } : {}) };
 }
 
 /** 0.15's log as its check found it (`audit.verifyTrees`): `kept` false where the instance keeps 0.14's alone. */
@@ -411,6 +411,8 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
         remaining: result.remaining ?? 0,
         checkpoint: result.checkpoint,
         pending: result.pending ?? 0,
+        /** Why the check of 0.15's log could not run, when it could not: the chain's verdict stands, the sealed log's is not known. */
+        treesFailed: null as string | null,
         /** 0.15's log, where it is kept: the newest pair its check reached, whether it reached the present, and when its rows were last audited. */
         trees: trees.kept ? { checkpoint: trees.checkpoint, done: trees.done, audited: trees.audited } : null,
       }

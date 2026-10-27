@@ -534,7 +534,15 @@ export class Checkpointer {
     const head = this.head;
     // From the changes tree (KindInMac): the MAC does not cover the number, so a writer could delete the change and
     // renumber a use into its place before the tick; that use is sealed, and provable, but in the uses tree.
-    const proof = await this.proveAt(number, head);
+    // A proof the database answers wrongly for (an entry changed since its tick, `locate`'s refusal) is the same alarm.
+    let proof: InclusionProof | null;
+    try {
+      proof = await this.proveAt(number, head);
+    } catch (error) {
+      const message = `change ${number} cannot be proved in the signed changes tree: ${(error as Error).message}`;
+      this.options.alert(message);
+      throw new Error(message);
+    }
     if (proof === null || proof.tree !== 'changes') {
       const message = `change ${number} is not in the signed changes tree: its entry was lost before its seal${proof === null ? '' : ', and a use holds its number'}`;
       this.options.alert(message);

@@ -119,6 +119,7 @@ import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, objectKey, POLICY_REF, ROLES_REF, sealKey, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
+import { TICK_MS } from './log-checkpointer.ts';
 import { logMacKey } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -129,7 +130,7 @@ import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
-import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
+import { verifierKeys, verifyTrees, type VerifierKeys, type VerifyOptions } from './verifier.ts';
 
 export type VaultOptions = {
   /**
@@ -3098,21 +3099,43 @@ class VaultService implements Vault {
     if (from !== undefined && (typeof from !== 'string' || !/^(start|0|[1-9][0-9]{0,18})$/.test(from) || (from !== 'start' && BigInt(from) > MAX_NUMBER))) {
       throw new Error("verifyTrees goes on from `start` or a pair's number, in decimal");
     }
-    const anchors = await this.#prepared.log015.heldOutside();
-    return verifyTrees(this.#db, await this.#verifierKeys(), { ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify, anchors });
+    return this.#walkTrees({ ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify });
   }
 
   /**
-   * A walk of 0.15's log on from the newest replay kept, keeping where it
-   * ends: the checkpoint job's, so that a page's check reads a beat's
-   * worth. What it finds, the page's check finds again; this never fails
-   * the checkpoint of 0.14's log it runs before.
+   * One walk of 0.15's log, held to the pairs held outside. The signer
+   * remembers a pair before the database has it (RememberFirst), so a walk
+   * that lands in between finds the database one pair behind: that, and
+   * only that, is walked again a tick later (review r4). A rollback is
+   * still behind then.
+   */
+  async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Extract<TreeVerification, { kept: true }>> {
+    const anchors = await this.#prepared.log015!.heldOutside();
+    const keys = await this.#verifierKeys();
+    const walked = await verifyTrees(this.#db, keys, { ...options, anchors });
+    if (walked.ok || !walked.problems.some((problem) => BEHIND_ANCHOR.test(problem))) return walked;
+    await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
+    return verifyTrees(this.#db, keys, { ...options, anchors });
+  }
+
+  /**
+   * 0.15's log walked on from the newest replay kept, a stretch at a time,
+   * each kept, to the present, where every row is audited: the checkpoint
+   * job's, so that a page's check reads a beat's worth and says what the
+   * last audit found. No longer than `REPLAY_ON_MS` a run: a log growing
+   * faster than that walks is caught up over the runs after, and the page
+   * says how old its audit is (review r4). What it finds, the page's check
+   * finds again; this never fails the checkpoint of 0.14's log it runs after.
    */
   async #replayOn(): Promise<void> {
     try {
-      const anchors = await this.#prepared.log015!.heldOutside();
-      const walked = await verifyTrees(this.#db, await this.#verifierKeys(), { limit: this.#prepared.options.walks.checkpoint, keep: true, anchors });
+      const began = Date.now();
+      let walked = await this.#walkTrees({ limit: this.#prepared.options.walks.checkpoint, keep: true });
+      while (walked.ok && !walked.done && walked.next !== null && Date.now() - began < REPLAY_ON_MS) {
+        walked = await this.#walkTrees({ from: walked.next, limit: this.#prepared.options.walks.checkpoint, keep: true });
+      }
       if (!walked.ok) console.warn(`coffre audit: 0.15's log does not verify: ${walked.problems.slice(0, 3).join('; ')}`);
+      else if (!walked.done) console.warn(`coffre audit: 0.15's log is walked through ${walked.next}, short of the present: the next runs go on`);
     } catch (error) {
       console.warn(`coffre audit: 0.15's log was not checked: ${(error as Error).message}`);
     }
@@ -3380,6 +3403,12 @@ export type Walks = { checkpoint: number; scrub: number; verify: number };
  * and 55 cold, beside two reads: 100 entries keep it near 6 ms a beat.
  */
 const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
+
+/** How long the checkpoint job walks 0.15's log a run, a stretch of `walks.checkpoint` at a time (`#replayOn`). */
+const REPLAY_ON_MS = 10_000;
+
+/** core's `verifyLog`, finding the database behind a pair held outside. */
+const BEHIND_ANCHOR = /^the database ends up to \d+; a pair held outside seals up to \d+: /;
 
 /** The digest of the members and grants a checkpoint keeps whole, beside the digest it says they have. */
 function keptDigest({ members, grants, newest }: AccessTally): string {

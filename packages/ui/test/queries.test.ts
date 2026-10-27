@@ -192,7 +192,7 @@ test('the audit page loads its entries and its verification together, and a chec
         },
         verifyTrees: async () => {
           calls.push('GET /audit/trees');
-          return trees;
+          return await trees;
         },
       },
     } as unknown as CoffreClient;
@@ -212,6 +212,10 @@ test('the audit page loads its entries and its verification together, and a chec
   assert.deepEqual((sealed.chain as { trees: unknown }).trees, { checkpoint: trees.checkpoint, done: true, audited: trees.audited });
   const problems = ['the principal token:ci: its rows carry another change\'s seal than the newest: put back, or written around the vault', 'one more'];
   const put = await load(intact, { ...trees, ok: false, problems });
+  // A check of the sealed log that cannot run says so beside the chain's verdict, which stands.
+  const failing = await load(intact, Promise.reject(new Error('connection refused')));
+  assert.equal(failing.chain?.integrity, 'intact');
+  assert.equal((failing.chain as { treesFailed: unknown }).treesFailed, 'the request never got an answer');
   assert.deepEqual(put.chain, { integrity: 'broken', through: 9, failedAtSeq: null, author: 'vault', reason: `the sealed log: ${problems[0]} (and 1 more)` });
 
   // A vault that cannot be reached, and a refusal: each the badge's verdict, the entries still there.

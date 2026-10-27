@@ -406,3 +406,39 @@ test('review r1: an object whose rows are gone is named from the replay; a pair 
   assert.deepEqual((await w.verify()).problems, [`the credential ${w.credential}: the log holds it, its rows do not`]);
   await assert.rejects(w.vault.verifyTrees!({ from: '9223372036854775808' }), /goes on from `start` or a pair's number/);
 });
+
+test('review r4: a walk that lands between the signer remembering a pair and the database holding it is walked again, not called a deletion', async () => {
+  const w = await instance();
+  assert.ok((await w.grant(BO, 'viewer')).ok);
+  // The newest pair's row, gone for a moment: the signer remembers it, the database has it a tick later.
+  const [newest] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
+  await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${BigInt(newest!.upto as string | number)}`);
+  const { logCheckpoints } = tablesOf(db.owner);
+  let restored: Promise<unknown> = Promise.resolve();
+  const back = setTimeout(() => restored = db.owner.insert(logCheckpoints).values({
+    upto: BigInt(newest!.upto as string | number), at: Number(newest!.at), atFloor: Number(newest!.at_floor), changesSize: BigInt(newest!.changes_size as string | number),
+    changesRoot: Buffer.from(newest!.changes_root as Uint8Array), changesNote: newest!.changes_note as string, usesSize: BigInt(newest!.uses_size as string | number),
+    usesRoot: Buffer.from(newest!.uses_root as Uint8Array), usesNote: newest!.uses_note as string,
+  }).then(() => {}), 200);
+  try {
+    const checked = await w.verify();
+    await restored;
+    clean(checked);
+  } finally {
+    clearTimeout(back);
+  }
+});
+
+test('review r4: the checkpoint job walks on, stretch after stretch, to the present, where it audits every row', async () => {
+  const w = await instance({ checkpoint: 2 });
+  for (let i = 0; i < 4; i += 1) {
+    await w.use();
+    await w.use();
+    await w.cp.tick();
+  }
+  await w.vault.checkpoint();
+  const checked = await w.verify();
+  clean(checked);
+  assert.equal(checked.sealed, 0, 'the job reached the present: nothing left for the page');
+  assert.ok(checked.audited !== null);
+});

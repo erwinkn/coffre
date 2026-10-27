@@ -491,8 +491,10 @@ function ChainStatus({
   const sealed = trees?.checkpoint == null ? null : `its checkpoint of ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
   const replayed = trees === null
     ? ''
-    : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row the one the log makes${trees.audited === null || chain.whole ? '' : ` when last checked, at ${absolute(new Date(trees.audited).toISOString(), false)} UTC; all of them are, every five minutes`}.`;
+    : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row the one the log makes${trees.audited === null || chain.whole ? '' : ` when last checked, at ${absolute(new Date(trees.audited).toISOString(), false)} UTC`}.`;
   const behind = trees !== null && !trees.done;
+  // Not known whether it holds: no seal over it, as over a log verified in part.
+  const unchecked = chain.treesFailed !== null;
   return (
     <div className="chain">
       {chain.pending > 0 && (
@@ -533,13 +535,21 @@ function ChainStatus({
           </button>
         </Toggletip>
       )}
+      {unchecked && (
+        <Toggletip align="end" label={`coffre could not check the sealed log: ${chain.treesFailed}. The rest of the log's verdict stands.`}>
+          <button type="button" className="chain-flag chain-flag-warn">
+            <AlertTriangle size={14} />
+            Sealed log not checked
+          </button>
+        </Toggletip>
+      )}
       {!chain.whole && chain.remaining === 0 && !behind && (
         <button type="button" className="btn btn-sm" onClick={onWalk}>
           Verify whole log
         </button>
       )}
       {/* No seal over a log verified only in part: what is left could be anything. */}
-      {chain.remaining === 0 && !behind && (
+      {chain.remaining === 0 && !behind && !unchecked && (
         <Toggletip align="end" label={`${verified}${replayed}`}>
           <button type="button" className="chain-seal">
             <ShieldCheck size={14} />

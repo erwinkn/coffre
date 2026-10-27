@@ -360,6 +360,19 @@ test('review r1: a change whose entry was deleted before its tick is refused, no
   assert.ok(alerts.some((a) => /lost before its seal/.test(a)));
 });
 
+test('PR 8 review r4: a change whose proof the database answers wrongly for is refused and alarmed, as one lost before its seal', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  const number = store.append('changes', 'revoke');
+  // As `locate` refuses a use changed since its tick that holds the change's number.
+  store.locate = async () => {
+    throw new Error("use 9 is in none of its window's leaves: the database changed it since its tick");
+  };
+  await assert.rejects(cp.sealThrough(number), /cannot be proved in the signed changes tree: use 9 is in none/);
+  assert.ok(alerts.some((a) => /cannot be proved in the signed changes tree/.test(a)));
+});
+
 test('review r1: prove() refuses an answer for another entry than the one asked', async () => {
   const { store, open } = await setup();
   const cp = await open();
