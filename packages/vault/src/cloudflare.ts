@@ -33,6 +33,8 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
+import type { Witness } from './checkpointer.ts';
+import { checkpointerObject } from './checkpointer-workers.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -40,8 +42,12 @@ export type { Vault, VaultConfig };
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 export * from './index.ts';
 
-/** What the vault Worker's `vault(env => …)` returns. */
-export type WorkersVaultConfig = VaultConfig & { database: PostgresDatabase };
+/**
+ * What the vault Worker's `vault(env => …)` returns. `witnesses` are 0.15's
+ * (docs/design/audit-tree.md, R40: a deployment opts in), unused until its
+ * log is switched on (plan PR 10).
+ */
+export type WorkersVaultConfig = VaultConfig & { database: PostgresDatabase; witnesses?: readonly Witness[] };
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
 let configure: ((env: never) => WorkersVaultConfig) | null = null;
@@ -113,3 +119,20 @@ export function vault<Env>(configure_: (env: Env) => WorkersVaultConfig): typeof
   configure = configure_ as (env: never) => WorkersVaultConfig;
   return VaultEntrypoint;
 }
+
+/**
+ * 0.15's checkpointer, the Durable Object class a deployment binds beside
+ * the vault, configured by the same `vault(env => …)`: its Hyperdrive, its
+ * signing key, its witnesses. `export const CoffreCheckpointer = checkpointer()`.
+ * Unused until 0.15's log is switched on (plan PR 10).
+ */
+export function checkpointer() {
+  return checkpointerObject((env: object) => {
+    if (configure === null) throw new Error('the vault Worker must export default vault(…)');
+    const config = configure(env as never);
+    return { hyperdrive: config.database.hyperdrive, seed: resolveVaultConfig(config).signingKeys[0]!, witnesses: config.witnesses };
+  });
+}
+
+export { checkpointerAlarms, checkpointerStatus, durableSealThrough, startCheckpointer } from './checkpointer-workers.ts';
+export { durableWitness, r2Archive, witnessObject as witness, type WitnessSettings } from './witness-workers.ts';

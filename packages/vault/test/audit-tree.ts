@@ -13,7 +13,7 @@ import {
   type TreeName,
 } from '@coffre/core/merkle';
 
-import type { CheckpointStore, Memory } from '../src/checkpointer.ts';
+import type { CheckpointStore, Memory, Sealed, SealThrough } from '../src/checkpointer.ts';
 
 /**
  * The checkpointer's database, in memory, with a writer's powers for the
@@ -165,4 +165,21 @@ export type Keys = { macKey: Buffer; signers: PairSigners; verifiers: PairVerifi
 export async function keys(seed = 1): Promise<Keys> {
   const signers = await pairSigners('coffre.test/audit', Buffer.alloc(32, seed));
   return { macKey: Buffer.alloc(32, seed + 100), signers, verifiers: await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey }) };
+}
+
+/**
+ * A stand-in for the checkpointer, for the change path's tests (plan PR 4):
+ * each change it is asked to seal is recorded, and answered as `answer`
+ * says: a `Sealed` (witnessed, unwitnessed, or with no witness), or an
+ * error, as a change refused because its entry was lost.
+ */
+export function sealThroughDouble(answer: (number: bigint) => Sealed | Error | Promise<Sealed | Error>): SealThrough & { asked: bigint[] } {
+  const asked: bigint[] = [];
+  const seal = async (number: bigint) => {
+    asked.push(number);
+    const a = await answer(number);
+    if (a instanceof Error) throw a;
+    return a;
+  };
+  return Object.assign(seal, { asked });
 }

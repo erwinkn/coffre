@@ -16,7 +16,8 @@ import { verifyConsistency, type Hash } from './tree.ts';
  */
 export type WitnessState = { pair: Pair; notes: PairNotes } | null;
 
-export type WitnessAnswer = { ok: true; cosigned: PairNotes } | { ok: false; reason: string };
+/** `cosigned`: the pair as the witness cosigned it; none from an archive, which stores what it is sent and checks nothing. */
+export type WitnessAnswer = { ok: true; cosigned?: PairNotes } | { ok: false; reason: string };
 
 /** Consistency proofs from the sizes the witness holds to the new pair's, one per tree. */
 export type PairProofs = Record<TreeName, readonly Hash[]>;

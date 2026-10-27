@@ -1,0 +1,213 @@
+// The 0.15 checkpointer on Workers (docs/design/audit-tree.md): one Durable
+// Object for the instance, which seals the log on its alarm every 500 ms
+// and keeps the signer's memory in its own storage. A write to that storage
+// is held by the object's output gate until it is durable, so no message
+// leaves it, the database write included, before the pair it signed is
+// remembered (RememberFirst). It holds one connection to the database
+// through the vault's Hyperdrive for as long as it lives: its ticks run one
+// at a time, and a Durable Object may keep a connection across requests.
+//
+// The deployment binds it, exports it (`export const CoffreCheckpointer =
+// checkpointer()`, beside `vault(…)`), and starts it once; nothing does yet:
+// 0.15's log is switched on in plan PR 10. Asked with `fetch`, as the
+// anchor and the gates are.
+import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
+import { createDatabase } from '@coffre/db';
+import { HyperdrivePool } from '@coffre/db/hyperdrive';
+
+import type { Alarm, Checkpointer, InclusionProof, Memory, SealThrough, Sealed, Tick, Witness } from './checkpointer.ts';
+import { openLogCheckpointer, TICK_MS } from './log-checkpointer.ts';
+import { logStore } from './log-store.ts';
+
+/** The part of a Durable Object's state the checkpointer uses. */
+export type ObjectState = {
+  storage: {
+    get<T>(key: string): Promise<T | undefined>;
+    put<T>(key: string, value: T): Promise<void>;
+    delete(keys: string[]): Promise<number>;
+    list<T>(options: { prefix: string; start?: string; end?: string; limit?: number }): Promise<Map<string, T>>;
+    getAlarm(): Promise<number | null>;
+    setAlarm(scheduledTime: number): Promise<void>;
+  };
+  blockConcurrencyWhile<T>(work: () => Promise<T>): Promise<T>;
+};
+
+/** A Durable Object binding: `env.CHECKPOINTER`, `env.WITNESS`. */
+export type ObjectNamespace = {
+  idFromName(name: string): unknown;
+  get(id: unknown): { fetch(request: Request): Promise<Response> };
+};
+
+export type CheckpointerSettings = {
+  /** The vault's Hyperdrive, its own login. */
+  hyperdrive: { readonly connectionString: string };
+  /** The vault's signing seed. */
+  seed: Uint8Array;
+  witnesses?: readonly Witness[];
+  /** How long its connection may sit idle before it closes; the next query opens it again. Ticking, it never is. */
+  closeIdleMs?: number;
+};
+
+/** The signer's memory in the object's storage: one key, the pair's record. */
+export function durableMemory(storage: ObjectState['storage']): Memory {
+  return {
+    last: async () => (await storage.get<string>('pair')) ?? null,
+    remember: (record) => storage.put('pair', record),
+  };
+}
+
+/** How long alarms are kept. */
+const ALARMS_KEPT_MS = 30 * 86_400_000;
+const alarmKey = (at: number, n: number) => `alarm:${String(at).padStart(16, '0')}:${n}`;
+
+/** The Durable Object class the deployment binds, configured from `env` as the vault is. */
+export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSettings | Promise<CheckpointerSettings>) {
+  return class CoffreCheckpointer {
+    readonly #state: ObjectState;
+    readonly #env: Env;
+    #checkpointer: Checkpointer | null = null;
+    #pool: HyperdrivePool | null = null;
+    #recorded = 0;
+    /** The last ticks, newest last, with their wall time in the object: `status`. */
+    readonly #ticks: (Tick & { wallMs: number; at: number })[] = [];
+
+    constructor(state: ObjectState, env: Env) {
+      this.#state = state;
+      this.#env = env;
+    }
+
+    /** The checkpointer, opened once, every other request held meanwhile, so that two never open it side by side. */
+    async #open(): Promise<Checkpointer> {
+      if (this.#checkpointer !== null) return this.#checkpointer;
+      return this.#state.blockConcurrencyWhile(async () => {
+        if (this.#checkpointer !== null) return this.#checkpointer;
+        const s = await settings(this.#env);
+        const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
+        try {
+          this.#checkpointer = await openLogCheckpointer({
+            store: logStore(createDatabase(pool)),
+            seed: s.seed,
+            memory: durableMemory(this.#state.storage),
+            witnesses: s.witnesses,
+            record: (alarm) => this.#record(alarm),
+          });
+        } catch (error) {
+          await pool.end().catch(() => {});
+          throw error;
+        }
+        this.#pool = pool;
+        return this.#checkpointer;
+      });
+    }
+
+    /** After a failure the database or the memory may stand elsewhere: the next request opens again, under `open()`'s rules. */
+    async #reset(): Promise<void> {
+      this.#checkpointer = null;
+      const pool = this.#pool;
+      this.#pool = null;
+      await pool?.end().catch(() => {});
+    }
+
+    async #record(alarm: Alarm): Promise<void> {
+      const storage = this.#state.storage;
+      await storage.put(alarmKey(alarm.at, this.#recorded++), alarm.message);
+      const old = await storage.list<string>({ prefix: 'alarm:', end: alarmKey(alarm.at - ALARMS_KEPT_MS, 0), limit: 128 });
+      if (old.size > 0) await storage.delete([...old.keys()]);
+    }
+
+    async alarm(): Promise<void> {
+      try {
+        const t0 = performance.now();
+        const t = await (await this.#open()).tick();
+        this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
+        if (this.#ticks.length > 64) this.#ticks.shift();
+      } catch (error) {
+        console.warn(`coffre audit: a checkpoint failed: ${(error as Error).message}`);
+        await this.#reset();
+      } finally {
+        await this.#state.storage.setAlarm(Date.now() + TICK_MS);
+      }
+    }
+
+    async fetch(request: Request): Promise<Response> {
+      const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' };
+      try {
+        if (call.op === 'start') {
+          await this.#open();
+          if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
+          return Response.json({ ok: true });
+        }
+        if (call.op === 'seal') return Response.json(sealedToJson(await (await this.#open()).sealThrough(BigInt(call.number), call.deadline)));
+        if (call.op === 'status') {
+          const head = this.#checkpointer?.pair.pair;
+          return Response.json({
+            upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
+            ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
+          });
+        }
+        if (call.op === 'alarms') {
+          const since = call.since ?? 0;
+          const found = await this.#state.storage.list<string>({ prefix: 'alarm:', start: alarmKey(since, 0) });
+          return Response.json([...found].map(([key, message]) => ({ at: Number(key.split(':')[1]), message })));
+        }
+        return new Response('unknown op', { status: 400 });
+      } catch (error) {
+        return Response.json({ error: (error as Error).message }, { status: 500 });
+      }
+    }
+  };
+}
+
+/** Asks the checkpointer's object, as `durableSealThrough(env.CHECKPOINTER)` and `startCheckpointer(env.CHECKPOINTER)` do. */
+async function ask<T>(namespace: ObjectNamespace, name: string, call: object): Promise<T> {
+  if (typeof namespace?.idFromName !== 'function') throw new Error('there is no CHECKPOINTER binding: bind the CoffreCheckpointer Durable Object to the vault');
+  const response = await namespace.get(namespace.idFromName(name)).fetch(new Request('https://checkpointer/', { method: 'POST', body: JSON.stringify(call) }));
+  const body = (await response.json()) as T & { error?: string };
+  if (!response.ok) throw new Error(`the checkpointer failed: ${body.error ?? response.status}`);
+  return body;
+}
+
+/** The change path's seam on Workers (plan PR 4): seal through the checkpointer's object. */
+export function durableSealThrough(namespace: ObjectNamespace, name = 'checkpointer'): SealThrough {
+  return async (number, deadline) => sealedFromJson(await ask<SealedJson>(namespace, name, { op: 'seal', number: String(number), deadline }));
+}
+
+/** Starts the object's ticks, once; again is harmless. */
+export async function startCheckpointer(namespace: ObjectNamespace, name = 'checkpointer'): Promise<void> {
+  await ask(namespace, name, { op: 'start' });
+}
+
+/** The object's head and its last ticks, each with its barrier, write and wall time. */
+export function checkpointerStatus(namespace: ObjectNamespace, name = 'checkpointer'): Promise<{ upto: string | null; sizes: Record<'changes' | 'uses', number> | null; ticks: (Omit<Tick, 'upto'> & { upto: string; wallMs: number; at: number })[] }> {
+  return ask(namespace, name, { op: 'status' });
+}
+
+/** The alarms the object kept since `since` (ms). */
+export function checkpointerAlarms(namespace: ObjectNamespace, since = 0, name = 'checkpointer'): Promise<Alarm[]> {
+  return ask<Alarm[]>(namespace, name, { op: 'alarms', since });
+}
+
+type SealedJson = {
+  notes: PairNotes; witnessed: boolean | null; failures: string[]; cosigned: PairNotes[];
+  proof: { number: string; tree: InclusionProof['tree']; index: number; size: number; leaf: string; proof: string[]; notes: PairNotes };
+};
+
+function sealedToJson(s: Sealed): SealedJson {
+  const p = s.proof;
+  return {
+    notes: s.notes, witnessed: s.witnessed, failures: s.failures, cosigned: s.cosigned,
+    proof: { number: String(p.number), tree: p.tree, index: p.index, size: p.size, leaf: p.leaf.toString('base64'), proof: p.proof.map((h) => h.toString('base64')), notes: p.notes },
+  };
+}
+
+/** The answer as the object sent it. Its notes are the vault's own, signed in the object: read, not verified again. */
+function sealedFromJson(j: SealedJson): Sealed {
+  const read = (note: string) => parseCheckpoint(splitNote(note).text);
+  const [changes, uses] = [read(j.notes.changes), read(j.notes.uses)];
+  return {
+    pair: { upto: changes.upto, at: changes.at, floor: changes.floor, changes, uses },
+    notes: j.notes, witnessed: j.witnessed, failures: j.failures, cosigned: j.cosigned,
+    proof: { ...j.proof, number: BigInt(j.proof.number), leaf: Buffer.from(j.proof.leaf, 'base64'), proof: j.proof.proof.map((h) => Buffer.from(h, 'base64')) },
+  };
+}
+

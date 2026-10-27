@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   decodePair,
   Edge,
@@ -9,6 +11,7 @@ import {
   loadEdges,
   nodesFrom,
   openPair,
+  pairSigners,
   pairVerifiers,
   proveConsistency,
   samePair,
@@ -152,6 +155,23 @@ export type Sealed = {
   proof: InclusionProof;
 };
 
+/**
+ * The change path's seam (plan PR 4): a change, once committed, asks for its
+ * seal and answers with what this gives it (R51). The Node checkpointer's
+ * `sealThrough` is one; on Workers, `durableSealThrough` asks the
+ * checkpointer's Durable Object.
+ */
+export type SealThrough = (number: bigint, deadline?: number) => Promise<Sealed>;
+
+/** An alarm the checkpointer raised, as its host keeps it for whoever watches (R40's plugin, PR 8's surfaces). */
+export type Alarm = { at: number; message: string };
+
+/** The log's origin for a signing seed: one per key, `coffre.log/<the first 8 bytes of SHA-256 of the seed's changes key, hex>`. */
+export async function logOrigin(seed: Uint8Array): Promise<string> {
+  const { changes } = await pairSigners('coffre.log', seed);
+  return `coffre.log/${createHash('sha256').update(changes.publicKey).digest('hex').slice(0, 16)}`;
+}
+
 export type InclusionProof = {
   number: bigint;
   tree: TreeName;
@@ -219,6 +239,8 @@ export class Checkpointer {
   private barrier: number | null = null;
   /** Set once a barrier finds the floor elsewhere: every tick refuses until the checkpointer is reopened. */
   private floorAlarm: string | null = null;
+  /** The failures the last refused tick alerted: a refusal that stands is alerted once, not every tick. */
+  private refused: string | null = null;
 
   private constructor(store: CheckpointStore, signers: PairSigners, options: Options, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
     this.store = store;
@@ -395,9 +417,12 @@ export class Checkpointer {
       signed: signed || finished, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
     });
     if (failures.length > 0) {
-      for (const f of failures) this.options.alert(`audit checkpoint refused: ${f}`);
+      const said = failures.join('\n');
+      if (said !== this.refused) for (const f of failures) this.options.alert(`audit checkpoint refused: ${f}`);
+      this.refused = said;
       return result(false);
     }
+    this.refused = null;
     if (upto === pair.upto) {
       // Nothing new. A quiet log: hand the newest pair again to any witness that failed to take it.
       for (const w of this.options.witnesses) if (this.pump(w).acked < pair.upto) this.kick(w);
@@ -557,7 +582,7 @@ export class Checkpointer {
       const a = await attempt((signal) => w.publish(notes, proofs, signal), WITNESS_DEADLINE_MS);
       if (a.ok && pair.upto > p.acked) {
         p.acked = pair.upto;
-        p.cosigned = a.cosigned;
+        p.cosigned = a.cosigned ?? null;
       }
       p.failure = a.ok ? null : a.reason;
       p.waiters = p.waiters.filter((x) => {
