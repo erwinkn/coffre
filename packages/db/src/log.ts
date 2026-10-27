@@ -566,7 +566,6 @@ export async function newestAuthentic(page: (limit: number, before: bigint | und
  */
 export async function appChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<(bigint | null)[]> {
   if (calls.length === 0) return [];
-  const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'base64'));
   if (engineOf(tx) === 'sqlite') {
     const numbers: (bigint | null)[] = [];
     for (const call of calls) numbers.push(await changeOnSqlite(tx, call, bytes));
@@ -575,9 +574,10 @@ export async function appChanges(tx: Transaction, calls: readonly PreparedChange
   return callChanges(tx, calls, sql``);
 }
 
+const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'base64'));
+
 /** `app_change`, once per call, in order, in one statement: after `before`, a `WITH` of the caller's. */
 async function callChanges(tx: Transaction, calls: readonly PreparedChange[], before: SQL): Promise<(bigint | null)[]> {
-  const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'base64'));
   const rows = sql.join(calls.map((c, i) => sql`(${i}::int, ${c.kind}::text, ${c.id}::text, ${c.requestId}::text, ${c.at}::bigint, ${c.actor}::text, ${c.payload}::text, ${bytes(c.sealFrom)}::bytea, ${bytes(c.seal)}::bytea, ${bytes(c.mac)}::bytea)`), sql`, `);
   // A volatile function in the select list runs after the sort: each call in `ord`'s order, each from the seal the one before leaves.
   const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`${before}

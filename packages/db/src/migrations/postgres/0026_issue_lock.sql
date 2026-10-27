@@ -13,7 +13,8 @@ DECLARE
     done integer;
     held bytea;
     -- An issue of a credential this very transaction wrote (its row's xmin is ours: not a savepoint's, nor a row another committed).
-    fresh boolean := change = 'credential.issue' AND p_kind = 'credential'
+    -- Never null: a 0.14 row's call carries no payload, so no op, and takes the fence.
+    fresh boolean := coalesce(change = 'credential.issue', false) AND p_kind = 'credential'
         AND EXISTS (SELECT 1 FROM public.credentials c WHERE c.id = p_id::uuid AND c.xmin = pg_current_xact_id()::xid);
 BEGIN
     PERFORM 1 FROM public.audit_chain_head WHERE only_row FOR UPDATE;

@@ -147,7 +147,8 @@
 (*     account's earlier sessions (its trigger: the fence) and then issues *)
 (*     holds the fence and waits for the issue lock, which the barrier     *)
 (*     holds, waiting for the fence: a cycle. The vault's own changes      *)
-(*     (NewChangers) never issue, and take no issue lock;                  *)
+(*     (NewChangers) never issue: `change_input` takes no issue lock, but  *)
+(*     their 0.14 entry's trigger does, before the fence;                  *)
 (*   - BarrierIssueFirst: the barrier takes the issue lock before the      *)
 (*     fence. Without, it holds the fence and waits for an issue that      *)
 (*     waits for the fence: a cycle (and every use waits meanwhile).       *)
@@ -281,10 +282,12 @@ AppRows == IF AppObject THEN <<"obj">> ELSE <<>>
 CutoverLocks == (IF RowFirst THEN Rows ELSE <<>>) \o (IF CutoverHeadLock THEN <<"head">> ELSE <<>>)
                 \o (IF CutoverFence THEN <<"fence">> ELSE <<>>)
 SealLocks == (IF RowFirst THEN <<>> ELSE Rows) \o AppRows
+\* With DualFence, its 0.14 entry's trigger takes the issue lock, shared, before the fence (0026), after
+\* the head the append holds.
 ChangeLocks ==
     IF ~DualFence THEN <<"fence">>
-    ELSE IF AppObject THEN IF AppHeadFirst THEN <<"head", "obj", "fence">> ELSE <<"obj", "head", "fence">>
-    ELSE (IF RowFirst THEN <<"obj">> ELSE <<>>) \o (IF ChangeHeadFirst THEN <<"head", "fence">> ELSE <<"fence", "head">>)
+    ELSE IF AppObject THEN IF AppHeadFirst THEN <<"head", "obj", "issue", "fence">> ELSE <<"obj", "head", "issue", "fence">>
+    ELSE (IF RowFirst THEN <<"obj">> ELSE <<>>) \o (IF ChangeHeadFirst THEN <<"head", "issue", "fence">> ELSE <<"fence", "head", "issue">>)
          \o (IF RowFirst THEN <<>> ELSE <<"obj">>)
 \* A 0.15 sign-in's locks: 0.14's head (`audited()`), then `app_change`'s issue lock, shared. One
 \* that also revokes the account's earlier sessions (Mixed): its append's trigger, for the revokes'

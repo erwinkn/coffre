@@ -1171,7 +1171,7 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | the deadline checked in Postgres; the Worker's answer at it | `NoLateWork`, `ReleaseByDeadline` |
 | new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
 | the cap's count and window from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed); HotPathOnePolicyWindow flips the window alone | `BulkReplayAgrees` |
-| an issue takes the issue lock, not the fence shared (IssueOwnLock); the barrier takes the issue lock before the fence (BarrierIssueFirst). With either off, a use waits on a sign-in, directly, or behind a barrier that holds the fence while it waits for an issue (HotPathOneIssue) | `UsesNeverWaitOnIssues` (R58) |
+| an issue takes the issue lock, not the fence shared (IssueOwnLock); the barrier takes the issue lock before the fence (BarrierIssueFirst). With either off, a use waits on a sign-in, directly, or behind a barrier that holds the fence while it waits for an issue (HotPathOneIssue). IssueOwnLock's break is by definition (an issuer holding the fence): the harm, a barrier and then every use queued behind issuers, is Postgres's lock queue, which the model leaves out and the bench measures | `UsesNeverWaitOnIssues` (R58) |
 | the barrier waits for the issues in flight on the issue lock, exclusive (BarrierWaitsIssues); an issue's number taken under that lock (IssueNumberUnderLock) | `CheckpointsHold`: a checkpoint closed over an issue that commits after it |
 | a credential named by a use only once its issue has committed (NamedAfterIssue: its token is handed out after) | `ReplayAgrees`: a use numbered after the issue that did not see it, refused live and allowed by the replay |
 
@@ -1302,8 +1302,9 @@ The cutover from 0.14 (the plan's PR 9).
 | 0.14's `token.exchange`, which the trigger no longer fences, writes no decision input (ExchangeOnlyIssues; the suites hold the code to it: `decisionInputs`) | `ExchangeChangesNoInput`, `NothingAllowedAfterAnswer` |
 
 `BarrierAvoidsHead` holds in Migration015Issue: the barrier never holds 0.14's
-head or waits for it. The vault's own changes (`change_input`) never issue,
-take no issue lock, and are in no cycle with the barrier.
+head or waits for it. The vault's own changes never issue: `change_input`
+takes no issue lock, but the trigger of the 0.14 entry each appends first
+takes it before the fence, and they are in no cycle with the barrier.
 
 **Not modelled:** 0.14 uses after the cutover. They stay in 0.14's own chain,
 which the cutover anchors.

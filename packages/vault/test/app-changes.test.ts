@@ -387,6 +387,26 @@ test('an issue of a row a savepoint inserted takes the fence: its xmin is the sa
   }
 });
 
+test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its transaction wrote', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+  await world();
+  const row = token();
+  const { credentials } = tablesOf(db.owner);
+  // A row of 0.14's, unsealed, committed: the app revokes it, in a transaction that writes it, then calls app_change.
+  await db.owner.insert(credentials).values({ ...row, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
+  const app = new pg.Client({ connectionString: OWNER_URL });
+  await app.connect();
+  try {
+    await app.query('BEGIN');
+    await app.query('UPDATE credentials SET revoked_at = now() WHERE id = $1', [row.id]);
+    const { rows: [called] } = await app.query<{ number: string }>('SELECT app_change($1, $2, NULL, $3, $4, NULL, NULL, NULL, NULL) AS number', ['credential', row.id, Date.now(), ROOT]);
+    assert.equal(called!.number, '0', 'it logs nothing');
+    assert.deepEqual(await advisoryHeld(app), ['0 ExclusiveLock', '1 ShareLock']);
+    await app.query('ROLLBACK');
+  } finally {
+    await app.end();
+  }
+});
+
 test('0.14\'s trigger: an entry that changes access takes the issue lock, then the fence; a token.exchange, neither (IssueBeforeFence, ExchangeOnlyIssues)', postgresOnly('SQLite has no trigger'), async () => {
   const key = deriveLogKey('app', randomBytes(32));
   const held = (action: string) => db.owner.transaction(async (tx: Transaction) => {

@@ -721,7 +721,9 @@ class VaultService implements Vault {
           d.changes?.cite(memberRef(principal), resealed.accessSeq);
         }
         // Last: the fence, which they take exclusive (0.14's append took it already, OldWritesFence), is held from
-        // here to the commit, so as few round trips as can be.
+        // here to the commit, so as few round trips as can be. The append comes first, and its trigger took the issue
+        // lock before the fence (0026): a change taking the fence before the issue lock would wait in a circle with the
+        // barrier, which takes them in that order (Migration015.tla, IssueBeforeFence).
         const numbers = d.changes === null ? [] : await d.changes.commit(tx, at, written);
         return { result, numbers };
       });
