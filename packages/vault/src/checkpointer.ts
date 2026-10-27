@@ -287,6 +287,10 @@ export class Checkpointer {
       // for the newest pair: said where an operator sees it, and remembered before anything is signed on top of it.
       options.alert?.(`the audit signer remembers no pair; it starts from the database's, up to ${newest.upto}`);
       await options.memory.remember(encodePair(row.notes));
+    } else if (encodePair(mine.notes) !== encodePair(row.notes)) {
+      // The same heads signed twice, at two times (a pending pair re-signed by an earlier version, say): the memory
+      // takes the row's notes, so that it and the head are one record again.
+      await options.memory.remember(encodePair(row.notes));
     }
     return new Checkpointer(store, signers, options, edges, head);
   }
@@ -436,8 +440,10 @@ export class Checkpointer {
     if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
       throw new Error(`the database answered for another entry than ${number}`);
     }
+    // An entry numbered at or below the pair's place is in its tree by construction: an index past the tree is the
+    // database's answer, not the tree's.
     const size = pair[entry.tree].size;
-    if (index >= size) return null;
+    if (index >= size) throw new Error(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
     const nodes = nodesFrom(tileMap(await this.store.tiles(entry.tree, tilesFor((n) => inclusionProof(n, index, size)))));
     const proof = inclusionProof(nodes, index, size);
     if (!verifyInclusion(entryLeaf(entry.tree, entry.number, entry.columns), index, size, proof, pair[entry.tree].root)) {
@@ -466,13 +472,31 @@ export class Checkpointer {
 
   private async drain(w: Witness, p: Pump): Promise<void> {
     p.busy = true;
+    try {
+      await this.publishAll(w, p);
+    } finally {
+      p.busy = false;
+    }
+    // Someone still waits on this witness after a failed try: try again shortly, with the newest pair.
+    if (p.waiters.length > 0 && p.failure !== null) {
+      const retry = setTimeout(() => {
+        if (!p.busy && p.waiters.length > 0) {
+          p.next = this.head;
+          void this.drain(w, p);
+        }
+      }, 100);
+      (retry as { unref?: () => void }).unref?.();
+    }
+  }
+
+  private async publishAll(w: Witness, p: Pump): Promise<void> {
     while (p.next !== null) {
       const { notes, pair } = p.next;
       p.next = null;
       // A witness that holds more leaves than this pair has seen another history: no proof, and it refuses.
       const prove = (tree: TreeName, from: number) => (from > pair[tree].size ? [] : proveConsistency(this.store, tree, from, pair[tree].size));
       const proofs = async (from: Record<TreeName, number>) => ({ changes: await prove('changes', from.changes), uses: await prove('uses', from.uses) });
-      const a: WitnessAnswer = await w.publish(notes, proofs).catch((e: Error) => ({ ok: false as const, reason: `unreachable: ${e.message}` }));
+      const a = await attempt(() => w.publish(notes, proofs), WITNESS_DEADLINE_MS);
       if (a.ok && pair.upto > p.acked) {
         p.acked = pair.upto;
         p.held = sizes(pair);
@@ -484,17 +508,6 @@ export class Checkpointer {
         x.done();
         return false;
       });
-    }
-    p.busy = false;
-    // Someone still waits on this witness after a failed try: try again shortly, with the newest pair.
-    if (p.waiters.length > 0 && p.failure !== null) {
-      const retry = setTimeout(() => {
-        if (!p.busy && p.waiters.length > 0) {
-          p.next = this.head;
-          void this.drain(w, p);
-        }
-      }, 100);
-      (retry as { unref?: () => void }).unref?.();
     }
   }
 
@@ -535,6 +548,25 @@ export function localWitness(name: string, log: PairVerifiers, self: NoteSigner)
       return r.answer;
     },
   };
+}
+
+/**
+ * One publication, bounded: a witness that never answers, or throws before it
+ * returns a promise, is a failed try, so its pump moves on to the next pair
+ * instead of waiting on it for the life of the process.
+ */
+async function attempt(publish: () => Promise<WitnessAnswer>, ms: number): Promise<WitnessAnswer> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<WitnessAnswer>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: `no answer within ${ms} ms` }), ms);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(publish), expired]);
+  } catch (error) {
+    return { ok: false, reason: `unreachable: ${(error as Error).message}` };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Whether a row is exactly this pair: the same place and the same two notes, byte for byte. */

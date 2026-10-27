@@ -130,8 +130,8 @@ export function verifyInclusion(leaf: Hash, m: number, n: number, proof: readonl
 /** RFC 9162 2.1.4.2: whether `proof` shows the tree of m leaves (head `first`) a prefix of the tree of n (head `second`). */
 export function verifyConsistency(m: number, n: number, first: Hash, second: Hash, proof: readonly Hash[]): boolean {
   if (!Number.isSafeInteger(m) || !Number.isSafeInteger(n) || m < 0 || m > n) return false;
+  if (m === 0) return proof.length === 0 && first.equals(EMPTY_ROOT) && (n > 0 || second.equals(EMPTY_ROOT));
   if (m === n) return proof.length === 0 && first.equals(second);
-  if (m === 0) return proof.length === 0 && first.equals(EMPTY_ROOT);
   const path = isPowerOfTwo(m) ? [first, ...proof] : [...proof];
   if (path.length === 0) return false;
   let fn = m - 1;

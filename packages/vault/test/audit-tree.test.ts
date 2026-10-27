@@ -414,6 +414,59 @@ test('review r2: a remembered genesis with every row gone is written back as it 
   assert.deepEqual(store.rows.get(0n), decodePair(genesis!));
 });
 
+test('review r4: a witness that hangs once, or throws before it returns, does not stop its pump', async () => {
+  const { k, store, open } = await setup();
+  const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
+  const honest = localWitness('honest', k.verifiers, self);
+  let calls = 0;
+  const hangsOnce: Witness = {
+    name: 'hangs-once',
+    publish(notes, proofs) {
+      calls += 1;
+      return calls === 1 ? new Promise(() => {}) : honest.publish(notes, proofs);
+    },
+  };
+  const cp = await open({ witnesses: [hangsOnce] });
+  assert.equal((await cp.sealThrough(store.append('changes', 'c1'), 500)).witnessed, false);
+  const s = await cp.sealThrough(store.append('changes', 'c2'), 3000);
+  assert.equal(s.witnessed, true, s.failures.join());
+  assert.ok(calls >= 2);
+
+  let thrown = 0;
+  const throwsAtOnce: Witness = {
+    name: 'throws',
+    publish() {
+      thrown += 1;
+      throw new Error('bad config');
+    },
+  };
+  const t = await open({ witnesses: [throwsAtOnce] });
+  const answer = await t.sealThrough(store.append('changes', 'c3'), 300);
+  assert.equal(answer.witnessed, false);
+  assert.match(answer.failures.join(), /bad config/);
+  const before = thrown;
+  await t.sealThrough(store.append('changes', 'c4'), 300);
+  assert.ok(thrown > before, 'asked again for the next change');
+});
+
+test('review r4: prove() refuses an index past the tree; open() re-syncs a memory holding the same heads signed at another time', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const locate = store.locate.bind(store);
+  store.locate = async (number) => {
+    const found = await locate(number);
+    return found && { ...found, index: 10_000 };
+  };
+  await assert.rejects(cp.prove(store.log[3]!.number), /past the/);
+  store.locate = locate;
+  const { pair } = cp.pair;
+  const resigned = await signPair(k.signers, pair.upto, pair.at + 7, { changes: pair.changes, uses: pair.uses });
+  memory.record = encodePair(resigned.notes);
+  await open();
+  assert.equal(memory.record, encodePair(cp.pair.notes));
+});
+
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {

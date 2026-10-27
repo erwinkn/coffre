@@ -149,7 +149,9 @@ deleted before its tick leaves a gap the pair calls final. So the change is
 proved in the pair, and its answer carries that proof; if the entry is not
 there, the change is refused and alerted. Then it waits for every witness
 to hold a pair that covers it, for at most 2 s. Each witness has a pump that always sends the
-newest pair, one at a time. A witness that refuses is asked again every
+newest pair, one at a time, each try bounded by 2 s, so a witness that
+never answers fails its try instead of stopping its pump. A witness that
+refuses is asked again every
 100 ms until the deadline, and never after it. A silent witness lets the
 change answer `witnessed: false`, alerted. With no witness, `witnessed` is
 `null`. 6b records unwitnessed answers where the plugin's alerts read them.
@@ -162,8 +164,10 @@ fails later.
 **Notes are read as strictly as Go's `note.Open`.** That means canonical
 base64, at most 100 signature lines, and no control characters. A line
 that names the log's key and does not verify spoils the whole note. So a
-row the database holds opens here only if every Go reader and C2SP witness
-would open it too.
+tree's note the database holds opens here only if Go's `note.Open`, given
+that tree's key, would open it too. (Given both trees' keys at once, Go
+also refuses a bad line by the other key; each note here is opened with its
+own key alone.)
 
 **Witnesses** (R40's plugin) implement `Witness.publish(notes, proofs)`.
 `localWitness` runs `witnessPair` in process, as the witness's Durable Object
@@ -262,7 +266,7 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 | the uses tree on disk, per use | 57 B (41 B compacted, W212) | 9.6 B |
 | the uses tree's WAL, a tick of 495 uses | 31.3 KB | 5.0 KB |
 | the log's WAL a tick (rows at 244 B a use, plus the tree) | 152 KB | 126 KB |
-| a proof's leaf level | one tile: 0.18 ms p50, 0.29 ms p99 | 256 uses read back: 0.68 ms p50, 1.0 ms p99 (by the window's `at` range; a number index would add 22.5 B and 149 B of WAL a use) |
+| a proof's leaf level (8 KB tiles) | one tile: 0.17 ms p50, 0.43 ms p99 | 256 uses read back: 0.57 ms p50, 0.82 ms p99 (by the window's `at` range; a number index would add 22.5 B and 149 B of WAL a use) |
 
 **The call: keep them.**
 
@@ -273,7 +277,7 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
     go through the store's `tiles()`, so the rebuild has one home there.
     But it runs on every tick's consistency proofs for witnesses, on
     `open()`, on the tile API that Go and C2SP clients read, and on the
-    verifier's start. Each costs 0.68 ms instead of 0.18. The use table
+    verifier's start. Each costs 0.57 ms instead of 0.17. The use table
     has no index on number (W211), so each rebuild reads a window by `at`,
     which ties the store's tree reads to the hot path's barrier.
   - **Retention would get a new step.** The tile holding each cut would

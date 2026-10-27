@@ -187,5 +187,7 @@ export function parseTilePath(path: string): (TileKey & { width: number }) | nul
   // A partial tile holds 1 to 255 hashes; a full one has no `.p` part.
   const width = m[3] === undefined ? WIDTH : Number(m[3]);
   if (width < 1 || (m[3] !== undefined && width >= WIDTH)) return null;
-  return { level: Number(m[1]), index: Number(m[2]!.replaceAll('x', '').replaceAll('/', '')), width };
+  const tile = { level: Number(m[1]), index: Number(m[2]!.replaceAll('x', '').replaceAll('/', '')), width };
+  // Canonical only, as Go writes them: no leading zeros in the level, no padded groups, so one tile has one path.
+  return Number.isSafeInteger(tile.index) && tilePath(tile, width) === path ? tile : null;
 }

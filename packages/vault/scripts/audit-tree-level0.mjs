@@ -71,7 +71,7 @@ for (const level0 of [true, false]) {
 // A proof's leaf level: one tile, or the 256 uses it stands for, found by number (index) or by `at` (no number index).
 await q('DROP TABLE tiles');
 await q('CREATE TABLE tiles (level smallint NOT NULL, idx bigint NOT NULL, hashes bytea NOT NULL, PRIMARY KEY (level, idx))');
-await q(`INSERT INTO tiles SELECT 0, g, decode(repeat(md5(g::text), 128), 'hex') || decode(repeat(md5(g::text), 128), 'hex') FROM generate_series(0, $1) g`, [Math.floor(N / 256)]);
+await q(`INSERT INTO tiles SELECT 0, g, decode(repeat(md5(g::text), 256), 'hex') || decode(repeat(md5(g::text), 256), 'hex') FROM generate_series(0, $1) g`, [Math.floor(N / 256)]);
 await q('VACUUM ANALYZE tiles');
 await q('VACUUM ANALYZE uses');
 const time = async (name, sql, args) => {

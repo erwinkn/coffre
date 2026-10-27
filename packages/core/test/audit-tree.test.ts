@@ -115,6 +115,7 @@ test('inclusion and consistency proofs verify, and fail when anything is off', (
   assert.ok(!verifyInclusion(all[0]!, -1, 5, [], EMPTY_ROOT));
   assert.ok(!verifyConsistency(5, 3, EMPTY_ROOT, EMPTY_ROOT, []));
   assert.ok(verifyConsistency(0, 5, EMPTY_ROOT, root5(), []) && !verifyConsistency(0, 5, all[0]!, root5(), []), 'the empty tree has one head');
+  assert.ok(!verifyConsistency(0, 0, all[0]!, all[0]!, []) && verifyConsistency(0, 0, EMPTY_ROOT, EMPTY_ROOT, []), 'nor at size 0');
 });
 
 test('a proof reads about one tile per 8 levels', () => {
@@ -199,7 +200,7 @@ test("tile paths are Go's", () => {
   assert.equal(tilePath({ level: 2, index: 5 }, 17), 'tile/8/2/005.p/17');
   assert.deepEqual(parseTilePath('tile/8/0/x001/x234/067'), { level: 0, index: 1234067, width: 256 });
   assert.deepEqual(parseTilePath('tile/8/2/005.p/17'), { level: 2, index: 5, width: 17 });
-  for (const bad of ['tile/8/0/005.p/0', 'tile/8/0/005.p/256', 'tile/4/0/005', 'tile/8/0/5', 'tile/8/0/x5/005']) assert.equal(parseTilePath(bad), null, bad);
+  for (const bad of ['tile/8/0/005.p/0', 'tile/8/0/005.p/256', 'tile/4/0/005', 'tile/8/0/5', 'tile/8/0/x5/005', 'tile/8/08/005', 'tile/8/0/x000/005', 'tile/8/0/005.p/017']) assert.equal(parseTilePath(bad), null, bad);
 });
 
 test('a signed checkpoint opens with its key and no other, and nothing but a checkpoint parses', async () => {
