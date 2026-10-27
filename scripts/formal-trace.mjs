@@ -74,7 +74,9 @@ function parse(text) {
 
 /** The trace's states, each its action and the variables it printed. */
 function states(output) {
-  const start = output.indexOf('The behavior up to this point is:');
+  // An invariant's counterexample, or a temporal property's (headed otherwise).
+  const heads = ['The behavior up to this point is:', 'The following behavior constitutes a counter-example:'];
+  const start = Math.max(...heads.map((head) => output.indexOf(head)));
   if (start === -1) return [];
   const found = [];
   let current = null;
@@ -179,7 +181,7 @@ function describe(op) {
 }
 
 const output = readFileSync(0, 'utf8');
-const violated = /Error: (Invariant \w+ is violated|Deadlock reached)/.exec(output);
+const violated = /Error: (Invariant \w+ is violated|Deadlock reached|Temporal properties were violated)/.exec(output);
 const trace = states(output);
 if (trace.length === 0) {
   console.log('no counterexample in the output');

@@ -7,11 +7,19 @@
 # a line. A scenario's configuration names the module of its scenarios on
 # its second line (`\* model MCCredentials`); MC.tla's, Coffre.tla's, by default.
 #
+# A protection is a BOOLEAN constant, turned from TRUE to FALSE; or, written
+# `Name=Value` (no spaces), a constant set to that value, as `Unsealed={"credential"}`
+# leaves one input of HotPathOne unsealed. The invariant may be a temporal
+# property the scenario lists under PROPERTIES: then it is checked alone, and
+# TLC must report it violated. Last, EXPECTED: what a design leaves open, which
+# TLC must find broken with every protection on (the window it documents).
+#
 #   scripts/formal.sh                 every scenario
 #   scripts/formal.sh Deletion        one, and its runs without a protection
 #   scripts/formal.sh Deletion Locks  several
 #   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
-#                                     large or rest
+#                                     large, rest, hotpath, hotpath-bulk,
+#                                     hotpath-skew or seal
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
 #   scripts/formal.sh --heap 4g       TLC's JVM heap (default 1g)
 #   scripts/formal.sh --list          what would run, not running TLC
@@ -117,15 +125,122 @@ REMOVALS=(
   "AppKeyRotation WalkCutoff NothingForgedAccepted"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
+  # 0.15's hot path (HotPathOne.tla; W208, W211; the plan's PRs 3 to 5): one call per use, every input sealed.
+  "HotPathOne UseLocks TotalOrder"
+  "HotPathOne UseLocks NothingAllowedAfterAnswer"
+  "HotPathOne StatementSnapshot TotalOrder"
+  "HotPathOne StatementSnapshot ReplayAgrees"
+  "HotPathOne StatementSnapshot NothingAllowedAfterAnswer"
+  "HotPathOne UseNumberUnderLock TotalOrder"
+  "HotPathOne UseNumberUnderLock CheckpointsHold"
+  "HotPathOne ChangeLocks TotalOrder"
+  "HotPathOne ChangeLocks NothingAllowedAfterAnswer"
+  "HotPathOne ChangeNumberUnderLock TotalOrder"
+  "HotPathOne LockToCommit TotalOrder"
+  "HotPathOne LockToCommit NothingAllowedAfterAnswer"
+  "HotPathOne CommitBeforeAnswer NothingAllowedAfterAnswer"
+  "HotPathOne ReleaseAfterCommit DurableBeforeRelease"
+  "HotPathOne SyncCommit DurableBeforeRelease"
+  "HotPathOne SyncCommit NothingAllowedAfterAnswer"
+  "HotPathOne CheckpointLocks CheckpointsHold"
+  "HotPathOneCovers CoverChecksChanges RepeatsAreTheirCover"
+  "HotPathOneCovers CoverChecksAllInputs RepeatsAreTheirCover"
+  "HotPathOneCovers UseLocks RepeatsAreTheirCover"
+  "HotPathOneCovers CacheChecked RepeatsAreTheirCover"
+  "HotPathOneSeals Unsealed={\"member\"} ReplaySound"
+  "HotPathOneSeals Unsealed={\"credential\"} ReplaySound"
+  "HotPathOneSeals Unsealed={\"secret\"} ReplaySound"
+  "HotPathOneSeals Unsealed={\"environment\"} ReplaySound"
+  "HotPathOneSeals StaleFirst TamperVisible"
+  "HotPathOneSeals CacheChecked ReplaySound"
+  "HotPathOneRestore CacheSameChange ReplaySound"
+  "HotPathOneCAS ChangeCAS EachChangeFlips"
+  "HotPathOneRestoreCovers CoverExists RepeatsAreTheirCover"
+  "HotPathOneRestoreCovers CoverExists DurableBeforeRelease"
+  "HotPathOneClock FloorChecked CheckpointsHold"
+  "HotPathOneClock DeadlineChecked NoLateWork"
+  "HotPathOneClock WorkerHonoursDeadline ReleaseByDeadline"
+  "HotPathOneBulk PrincipalLocks BulkCapHolds"
+  "HotPathOneBulk PrincipalLocks BulkReplayAgrees"
+  "HotPathOneBulk RefreshOnUse BulkCapHolds"
+  "HotPathOneBulk CoverFresh BulkCapHolds"
+  "HotPathOneBulk DeadlineSlack BulkCapHolds"
+  "HotPathOneBulkSlack Slack BulkCapHolds"
+  "HotPathOnePolicy CapFromPolicy BulkReplayAgrees"
+  "HotPathOnePolicy CapSealed BulkReplayAgrees"
+  # Liveness, under weak fairness (HotPathOneLive's PROPERTIES).
+  "HotPathOneLive WorkerHonoursDeadline UseAnswered"
+  "HotPathOneLive ChangeRereads ChangeAnswered"
+  # 0.15's sealing into Merkle checkpoints, two trees as one pair (Seal.tla; W209, W212; the plan's PR 6).
+  "Seal NumberUnderLock Complete"
+  "Seal CloseLocks Complete"
+  "Seal RememberFirst SealedDeletionDetected"
+  "Seal RememberFirst SplitViewDetected"
+  "Seal MacChecked NoForgerySealed"
+  "Seal RequestIdChecked NoUndetectedReplay"
+  "Seal WaitForSeal AnsweredChangeKept"
+  # The witness alone does not stand in for the signer's memory (SealPlugin's expected failures, below).
+  "Seal SignerMemory SealedDeletionDetected"
+  # Core, R40 without the plugin: the signer's memory is what holds.
+  "SealCore SignerMemory SealedDeletionDetected"
+  "SealCore SignerMemory SplitViewDetected"
+  "SealCore SignerMemory AnsweredChangeKept"
+  # A newest row deleted with nothing new to seal: seen at the next tick only if the signer checks the row.
+  "SealCore RowChecked SealedDeletionDetected"
+  # The plugin alone: the witness is what holds an answered change.
+  "SealPlugin Witness AnsweredChangeKept"
+  # The two heads, changes' and uses', as one pair (W212).
+  "Seal PairWrittenTogether PairConsistent"
+  "Seal PairWrittenTogether NoFalseAlarm"
+  "Seal PairRemembered PairConsistent"
+  "SealCore PairChecked+PairVerified SealedDeletionDetected"
+  "Seal KindInMac KindKept"
+  # 0.15's cutover from 0.14 (Migration015.tla; docs/design/0.15-plan.md, PR 9).
+  "Migration015 CutoverHeadLock+CutoverFence OneCutover"
+  "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence NewLogFollowsOld"
+  "Migration015 Marker OneCutover"
+  "Migration015 DualFence NothingAllowedAfterAnswer"
+  "Migration015 OldWritesFence NothingAllowedAfterAnswer"
+  "Migration015 ChangeHeadFirst NoWaitCycle"
+  "Migration015 Adopt EveryOldWriteAdopted"
+  "Migration015 AdoptRepeats EveryOldWriteAdopted"
+  "Migration015Tamper VerifyChain AnchorHolds"
+  "Migration015Tamper VerifyRows AllowedOnlyWhenGranted"
+  "Migration015Tamper AdoptVerifies NewLogFollowsOld"
+  "Migration015Tamper AdoptSealsEntry AllowedOnlyWhenGranted"
+  "Migration015Tamper UsesSeeOldWrites AllowedOnlyWhenGranted"
+  "Migration015Drops AdoptAfterSeal NewChangesStand"
+  # The marker PR 5 did not take (the plan's PR 5): it holds only while the writer leaves it alone.
+  "Migration015Marker OldWriteMarksRow AllowedOnlyWhenGranted"
+)
+
+# What a design does not protect, with every protection of the scenario on: TLC must find it broken.
+EXPECTED=(
+  # Deleting or moving an entry before it is sealed: the ~1-tick window R51 accepts for uses (Seal.tla).
+  "Seal UnsealedDeletionDetected"
+  "Seal UnsealedReorderDetected"
+  # The witness without the signer's memory: a crash between writing a head and publishing it.
+  "SealPlugin SealedDeletionDetected"
+  "SealPlugin SplitViewDetected"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
 # `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
-# `rest`, every other scenario, about 260. A scenario in no case below is in `rest`.
+# `rest`, every other scenario, about 260. 0.15's models (HotPathOne, Seal,
+# Migration015) have four of their own, by user CPU on a shared host (CI's
+# 4 cores take about a quarter of it, Tampering's 31 minutes of CPU running
+# in its 7 to 11): hotpath (34 minutes of CPU), hotpath-bulk (the bulk cap's
+# main scenario), hotpath-skew (its slack and clock-skew scenarios; the two
+# together took 62) and seal (Seal and Migration015, 50). A scenario in no case below is in `rest`.
+SHARDS="tampering large rest hotpath hotpath-bulk hotpath-skew seal"
 shard_of() {
   case "$1" in
     Tampering) echo tampering ;;
     Overtaking|Walking|Sharing|Rows|Mixed) echo large ;;
+    HotPathOneBulkSkew|HotPathOneBulkSlack) echo hotpath-skew ;;
+    HotPathOneBulk) echo hotpath-bulk ;;
+    HotPathOne*) echo hotpath ;;
+    Seal*|Migration015*) echo seal ;;
     *) echo rest ;;
   esac
 }
@@ -145,7 +260,7 @@ while [ $# -gt 0 ]; do
       heap="$2"; shift 2 ;;
     --list) list=1; shift ;;
     --shard)
-      case "$2" in tampering|large|rest) shard="$2" ;; *) echo "no shard $2 (tampering, large or rest)" >&2; exit 2 ;; esac
+      case " $SHARDS " in *" $2 "*) shard="$2" ;; *) echo "no shard $2 ($SHARDS)" >&2; exit 2 ;; esac
       shift 2 ;;
     *) only="$only$1 "; shift ;;
   esac
@@ -164,7 +279,7 @@ trap 'rm -rf "$work"' EXIT
 cp "$root"/formal/*.tla "$root"/formal/*.cfg "$work"/
 
 # The module of a configuration's scenarios.
-model() { sed -n '2s/^\\\* model \([A-Za-z]*\)$/\1/p' "$work/$1"; }
+model() { sed -n '2s/^\\\* model \([A-Za-z0-9]*\)$/\1/p' "$work/$1"; }
 
 tlc() {
   local module
@@ -206,6 +321,19 @@ for scenario in "${scenarios[@]}"; do
   fi
 done
 
+# The scenario's copy with its invariants replaced by one, or, for a property it lists, that property alone.
+only_check() {
+  if sed -n '/^PROPERTIES/,$p' "$work/without.cfg" | grep -q "^    $1$"; then
+    sed -i -e '/^INVARIANTS/,/^\(PROPERTIES\|CHECK_DEADLOCK\)/{/^INVARIANTS/d;/^    /d}' -e '/^PROPERTIES/,${/^    /d}' \
+      -e "s/^PROPERTIES/PROPERTIES\n    $1/" "$work/without.cfg"
+    broken="^Error: Temporal properties were violated"
+  else
+    sed -i -e '/^INVARIANTS/,/^\(PROPERTIES\|CHECK_DEADLOCK\)/{/^    /d}' -e '/^PROPERTIES/,${/^PROPERTIES/d;/^    /d}' \
+      -e "s/^INVARIANTS/INVARIANTS\n    $1/" "$work/without.cfg"
+    broken="^Error: Invariant $1 is violated"
+  fi
+}
+
 for removal in "${REMOVALS[@]}"; do
   read -r scenario protection invariant <<<"$removal"
   wanted "$scenario" || continue
@@ -214,18 +342,44 @@ for removal in "${REMOVALS[@]}"; do
   cp "$work/$scenario.cfg" "$work/without.cfg"
   missing=""
   for off in ${protection//+/ }; do
-    sed -i -e "s/^\(    $off\) = TRUE/\1 = FALSE/" "$work/without.cfg"
-    grep -q "^    $off = FALSE" "$work/without.cfg" || missing="$off"
+    if [[ "$off" == *=* ]]; then
+      name="${off%%=*}"
+      value="${off#*=}"
+      grep -q "^    $name = " "$work/without.cfg" || { missing="$name"; continue; }
+      escaped="$(printf '%s' "$value" | sed -e 's/[\/&]/\\&/g')"
+      sed -i -e "s/^\(    $name\) = .*/\1 = $escaped/" "$work/without.cfg"
+    else
+      sed -i -e "s/^\(    $off\) = TRUE/\1 = FALSE/" "$work/without.cfg"
+      grep -q "^    $off = FALSE" "$work/without.cfg" || missing="$off"
+    fi
   done
   [ -z "$missing" ] || { echo "FAIL  $scenario has no $missing"; failed=1; continue; }
-  sed -i -e '/^INVARIANTS/,/^CHECK_DEADLOCK/{/^    /d}' -e "s/^INVARIANTS/INVARIANTS\n    $invariant/" "$work/without.cfg"
+  only_check "$invariant"
   started=$SECONDS
   tlc without.cfg
-  if grep -q "^Error: Invariant $invariant is violated" "$work/out.txt"; then
+  if grep -q "$broken" "$work/out.txt"; then
     echo "ok    $scenario without ${protection//+/ and } breaks $invariant ($((SECONDS - started))s):"
     node "$root/scripts/formal-trace.mjs" <"$work/out.txt" | tail -n +2 | sed 's/^/        /'
   else
     echo "FAIL  $scenario without ${protection//+/ and } should break $invariant"
+    cat "$work/out.txt"
+    failed=1
+  fi
+done
+
+for gap in ${EXPECTED[@]+"${EXPECTED[@]}"}; do
+  read -r scenario invariant <<<"$gap"
+  wanted "$scenario" || continue
+  [ -z "$list" ] || { echo "open     $scenario $invariant"; continue; }
+  cp "$work/$scenario.cfg" "$work/without.cfg"
+  only_check "$invariant"
+  started=$SECONDS
+  tlc without.cfg
+  if grep -q "$broken" "$work/out.txt"; then
+    echo "ok    $scenario, every protection on, breaks $invariant as expected ($((SECONDS - started))s):"
+    node "$root/scripts/formal-trace.mjs" <"$work/out.txt" | tail -n +2 | sed 's/^/        /'
+  else
+    echo "FAIL  $scenario should break $invariant (the window it documents)"
     cat "$work/out.txt"
     failed=1
   fi

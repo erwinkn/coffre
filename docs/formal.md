@@ -10,7 +10,7 @@ written as a TLA+ specification, and TLC checks it over every interleaving
 of a few concurrent requests:
 
 ```sh
-pnpm formal                  # every scenario, about five minutes
+pnpm formal                  # every scenario: about an hour on one machine, CI shards it
 scripts/formal.sh Deletion   # one, with its runs without a protection
 ```
 
@@ -39,6 +39,13 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - Four more hold the workload-access design before it is built
   ([below](#workload-access)): `formal/Workload.tla` and the three
   `formal/Workload*.tla` beside it.
+- Three hold 0.15's rewrite of the vault and the audit log, the spec its
+  code follows ([below](#015-the-hot-path-sealing-and-the-cutover)):
+  - [`formal/HotPathOne.tla`](../formal/HotPathOne.tla): uses, changes,
+    sealed inputs, covers, the deadline and the bulk cap;
+  - [`formal/Seal.tla`](../formal/Seal.tla): sealing into two Merkle trees;
+  - [`formal/Migration015.tla`](../formal/Migration015.tla): the cutover
+    from 0.14.
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -1102,6 +1109,164 @@ anchor, outside the database, is sealed again by compare-and-set before
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
 | `AppKeyRotation` | Two starts under the new key step a rotation of two rows at once, while an instance under the old key writes a row, and someone who holds it writes rows and an entry under it | 146 thousand |
 
+## 0.15: the hot path, sealing and the cutover
+
+0.15 rewrites the vault, its access decisions and the audit log (R35). Under
+R45 the spec comes first: these three models are written before the code,
+which follows them PR by PR ([0.15-plan.md](design/0.15-plan.md)). The design and
+its measurements are in [hot-path-one.md](design/hot-path-one.md) and
+[merkle-checkpoints.md](design/merkle-checkpoints.md).
+
+Three things in `scripts/formal.sh` came with them:
+
+- **A removal may set a constant to a value.** A token `Name=Value` (no
+  spaces) sets the constant to that value instead of turning a protection
+  from TRUE to FALSE. `Unsealed={"credential"}`, for example, leaves one of
+  HotPathOne's inputs unsealed.
+- **A removal may break a temporal property** that the scenario lists under
+  `PROPERTIES`. That property is then checked alone, and TLC must report it
+  violated.
+- **`EXPECTED` lists what a design leaves open.** TLC must find each of these
+  broken with every protection on: the window the design documents.
+
+### HotPathOne.tla
+
+W208's one call per use, with W211's round 2 and review r1, in one module
+(the plan's PRs 3 to 5).
+
+**The protocol.**
+- **A use** takes the fence shared, then, in one statement, reads its inputs
+  and each input's newest change, and inserts its entry, numbered under the
+  lock.
+- **A change** takes the fence exclusive. It writes only if its object's row
+  is still what it read (a CAS); refused, it reads again.
+- **The model also covers:**
+  - per-isolate covers and the seal cache;
+  - Postgres crashes and restores;
+  - a database writer who puts back earlier, validly sealed rows;
+  - the checkpointer's barrier and the floor of `at`;
+  - the deadline, with Hyperdrive holding calls;
+  - the bulk cap, its count from a sealed policy input.
+
+Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
+(normally `{}`) names inputs left unsealed, so a removal can unseal one.
+
+| protection | turned off, TLC finds |
+|---|---|
+| uses take the fence shared; their reads are a statement after the lock (never a bare CTE) | `TotalOrder`, `ReplayAgrees`, `NothingAllowedAfterAnswer` |
+| numbers taken under the lock; the lock goes with the commit | `TotalOrder`, `CheckpointsHold`, `NothingAllowedAfterAnswer` |
+| changes take the fence exclusive and answer once committed | `TotalOrder`, `NothingAllowedAfterAnswer` |
+| a value leaves only after its entry commits, durably | `DurableBeforeRelease`, `NothingAllowedAfterAnswer` |
+| the barrier under the fence exclusive; the floor of `at` | `CheckpointsHold` |
+| each input sealed (`Unsealed={"credential"}` …) | `ReplaySound`: allowed live, refused by the replay |
+| seals checked before what the rows say (StaleFirst) | `TamperVisible` |
+| the seal cache valid only while the newest change is the one it was read at (CacheChecked, CacheSameChange) | `ReplaySound`, `RepeatsAreTheirCover`, after a restore |
+| covers see a change to any input; and need their entry (CoverExists) | `RepeatsAreTheirCover`, `DurableBeforeRelease` |
+| a change's CAS on its object's seal (ChangeCAS) | `EachChangeFlips` |
+| the deadline checked in Postgres; the Worker's answer at it | `NoLateWork`, `ReleaseByDeadline` |
+| new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
+| the cap's count from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed) | `BulkReplayAgrees` |
+
+**HotPathOneStaleBulk** checks the two halves together: a use refused
+`stale` still moves the cap's row exactly as the replay does, and a repeat
+after a change is logged again and counted.
+
+**Liveness** (`HotPathOneLive`, `FairSpec`: weak fairness on every protocol
+step and on the clock; failures, crashes, tampering and restores are
+bounded):
+- `UseAnswered`: every use that arrives is answered (a value, a refusal or
+  a 503). Without the Worker's answer at its deadline, a call Hyperdrive
+  holds is never answered.
+- `ChangeAnswered`: every change that starts is answered. Without re-reading
+  after a refused CAS, it retries the same stale read forever.
+
+**Left to benches, not TLC:**
+- latencies;
+- how fast a 503 comes;
+- a change's wait for the uses in flight;
+- sealing within a tick;
+- that an endless stream of uses never starves a change. Postgres queues
+  an exclusive lock ahead of later shared ones; the model does not.
+
+**What it abstracts.**
+- One principal and one isolate (covers and the seal cache are each checked
+  against the log, so more isolates add no new interleaving), and two or
+  three uses.
+- A writer that forges no seal.
+- The tree reduced to sets of numbers (Seal.tla checks the tree).
+
+### Seal.tla
+
+W209's sealing of the log into Merkle checkpoints, with W212's shape: two
+growing trees, changes (kept for good) and uses (dropped by day), signed at
+one `upto` by each tick, as one pair.
+
+**The parties.**
+- **Appends** take their number under the fence's shared lock.
+- **The checkpointer** takes the lock exclusively to close a window, seals it
+  into both trees, remembers the pair outside the database (the signer's
+  memory), writes both rows, and queues the pair for a witness.
+- **A crash** can fall between any two steps.
+- **An attacker** with write access to the database and no key can delete,
+  forge, replay, swap or move entries (a change into the uses partition),
+  and delete one tree's row or a whole pair.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the number taken under the lock; the window closed under it exclusively | `Complete` |
+| the signer remembers a pair before writing it (RememberFirst) | `SealedDeletionDetected`, `SplitViewDetected` |
+| the signer's memory, outside the database | `SealedDeletionDetected`, `SplitViewDetected`, `AnsweredChangeKept` |
+| each tick checks the database's newest rows against its memory (RowChecked) | `SealedDeletionDetected` |
+| MACs checked before sealing; request IDs checked by the verifier | `NoForgerySealed`, `NoUndetectedReplay` |
+| a change answers only once sealed and, with one, witnessed (WaitForSeal) | `AnsweredChangeKept` |
+| both rows in one statement (PairWrittenTogether) | `PairConsistent`, `NoFalseAlarm` |
+| both notes remembered in one record (PairRemembered) | `PairConsistent` |
+| each tree's newest row checked, at each tick or by the verifier (PairChecked + PairVerified) | `SealedDeletionDetected` |
+| the kind under the entry's MAC (KindInMac) | `KindKept`: a moved change is sealed into the uses tree |
+
+`EXPECTED`:
+- **The window R51 accepts.** Deleting or reordering an entry before it is
+  sealed is not detected.
+- **The witness without the signer's memory** (SealPlugin). A crash between
+  writing a pair and publishing it leaves deletions and split views
+  undetected.
+
+**What TLC found against W212's rules.**
+- The tick's check must read each tree's newest row: one "newest row" query
+  across both is unsafe.
+- `open()` need not refuse rows at different `upto`s. It checks each tree
+  against the one remembered pair, and can repair a half-written pair.
+
+### Migration015.tla
+
+The cutover from 0.14 (the plan's PR 9).
+
+**The model.** One object (a member and its grants) with:
+- 0.14's row (its MAC and `access_seq`) and chain;
+- an old isolate still serving 0.14 uses and writes after the deploy;
+- two 0.15 vault starts, at once or one after the other;
+- a 0.15 use, a 0.15 change, and checkpointer ticks;
+- in its Tamper and Drops scenarios, a writer who puts rows back, forges a
+  0.14 entry, drops 0.14's newest entry, or clears a marker.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the cutover under the 0.15 fence (and 0.14's head) | `OneCutover` |
+| the cutover marker | `OneCutover` |
+| the cutover checks each row as 0.14's `#integrity` does (VerifyRows) | `NewLogFollowsOld`, `AllowedOnlyWhenGranted` |
+| 0.14's chain verified up to the anchor | `AnchorHolds` |
+| 0.15 changes also advance 0.14's fence (DualFence) | `NothingAllowedAfterAnswer` |
+| a trigger takes the 0.15 fence for each 0.14 access change (OldWritesFence) | `NothingAllowedAfterAnswer` |
+| 0.14's head before the 0.15 fence (ChangeHeadFirst) | `NoWaitCycle` |
+| adoption, at every tick | `EveryOldWriteAdopted` |
+| adoption verifies the entry and seals what it wrote | `NewLogFollowsOld`, `AllowedOnlyWhenGranted` |
+| adoption only after the newest seal's 0.14 entry (AdoptAfterSeal) | `NewChangesStand` |
+| a 0.15 use reads the object's newest 0.14 access entry (UsesSeeOldWrites) | `AllowedOnlyWhenGranted` |
+| a row marker in place of that read (Migration015Marker) | `AllowedOnlyWhenGranted`, and it fails as soon as the writer clears it |
+
+**Not modelled:** 0.14 uses after the cutover. They stay in 0.14's own chain,
+which the cutover anchors.
+
 ## TLC
 
 [TLC](https://github.com/tlaplus/tlaplus) is the TLA+ tools' explicit-state
@@ -1123,7 +1288,16 @@ shortest one.
 ### In CI
 
 Run in order, the 125 TLC runs took 22 minutes, twice the tests. As three shards
-they take about 11 (Tampering's), as long as the tests do; skipped, seconds. Two things
+they take about 11 (Tampering's), as long as the tests do; skipped, seconds.
+0.15's models added four shards. W211 timed them on a shared host with 4
+workers. A 4-core runner takes about a quarter of the CPU time, as
+Tampering's 31 CPU minutes ran in its 7 to 11:
+
+| shard | wall time, 4 workers here | CPU time | estimated on a runner |
+|---|---|---|---|
+| hotpath | 7.5 min | 34 min | about 9 to 12 min |
+| hotpath-bulk and hotpath-skew | 11.4 min, before the split | 62 min, together | about 8 to 11 min each |
+| seal | 10.4 min | 50 min | about 13 to 18 min | Two things
 cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
 
@@ -1149,11 +1323,18 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is three jobs in parallel.** `scripts/formal.sh --shard
-  tampering|large|rest` runs the scenarios of one (`shard_of`), each with its
-  runs without a protection, balanced by what they took: Tampering's 7 to 11
-  minutes (17.5 million states) alone, Overtaking, Walking, Sharing, Rows and
-  Mixed together, and the rest. A new scenario is in `rest`. `--list` prints
+- **A run is seven jobs in parallel.** `scripts/formal.sh --shard
+  tampering|large|rest|hotpath|hotpath-bulk|hotpath-skew|seal` runs the scenarios of one
+  (`shard_of`), each with its runs without a protection, balanced by what
+  they took:
+  - Tampering's 7 to 11 minutes (17.5 million states) alone;
+  - Overtaking, Walking, Sharing, Rows and Mixed together;
+  - 0.15's models in four: `hotpath`, `hotpath-bulk` (the bulk cap's main
+    scenario), `hotpath-skew` (its slack and clock-skew scenarios), and
+    `seal` (Seal and Migration015);
+  - the rest.
+
+  A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints
   what a run would run, without TLC; a test holds the three to a partition
   of it. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
