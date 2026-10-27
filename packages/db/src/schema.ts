@@ -1115,6 +1115,8 @@ export const logCheckpoints = pgTable(
   (table) => [
     check('log_checkpoints_changes_root_check', sql`octet_length(${table.changesRoot}) = 32`),
     check('log_checkpoints_uses_root_check', sql`octet_length(${table.usesRoot}) = 32`),
+    // A day's retention cut, the first checkpoint whose floor is past the day's end (migration 0027).
+    index('log_checkpoints_floor_idx').on(table.atFloor, table.upto),
   ],
 );
 
@@ -1140,34 +1142,6 @@ export const logTiles = pgTable(
     check('log_tiles_level_check', sql`${table.level} BETWEEN 0 AND 7`),
     check('log_tiles_leaf_check', sql`${table.leaf} >= 0 AND ${table.leaf} % (256::numeric ^ (${table.level} + 1)) = 0`),
     check('log_tiles_hashes_check', sql`octet_length(${table.hashes}) BETWEEN 32 AND 8192 AND octet_length(${table.hashes}) % 32 = 0`),
-  ],
-);
-
-/**
- * The verifier's replay of 0.15's log (plan PR 8, `packages/vault/src/verifier.ts`),
- * kept at a signed pair, `upto`: the objects, their newest seals and the bulk
- * rows as the log makes them there, as JSON (`state`, and its SHA-256), so
- * that the next walk goes on from it; and, once a walk reached the present,
- * what it found there (`verdict`), which a page's check says without
- * reading the state (R25). Under the vault's MAC over the pair's notes, the
- * state's hash and the verdict. Only the vault writes it; a row it did not
- * write fails its MAC, and one deleted costs a longer walk.
- */
-export const logReplays = pgTable(
-  'log_replays',
-  {
-    upto: bigint({ mode: 'bigint' }).primaryKey(),
-    at: bigint({ mode: 'number' }).notNull(),
-    // Null for a walk that found the log broken: its verdict is kept, its replay never gone on from.
-    state: text(),
-    stateHash: bytea('state_hash'),
-    // Null for a stretch short of the present.
-    verdict: text(),
-    mac: bytea().notNull(),
-  },
-  (table) => [
-    check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`),
-    check('log_replays_state_check', sql`(${table.state} IS NULL) = (${table.stateHash} IS NULL) AND (${table.stateHash} IS NULL OR octet_length(${table.stateHash}) = 32)`),
   ],
 );
 

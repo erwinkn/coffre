@@ -1725,15 +1725,16 @@ export type Api = {
   };
   "GET /audit/trees": {
     input: {
-      from?: string;
+      whole?: "1";
     };
     output: {
       kept: false;
     } | {
       kept: true;
+      whole: boolean;
       ok: boolean;
       problems: string[];
-      from: string | null;
+      tooLarge: string | null;
       checkpoint: null | {
         upto: string;
         at: number;
@@ -1741,10 +1742,6 @@ export type Api = {
       checkpoints: number;
       sealed: number;
       unsealed: number;
-      done: boolean;
-      next: string | null;
-      audited: number | null;
-      stale: boolean;
     };
   };
 };

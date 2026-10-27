@@ -1,13 +1,14 @@
-// 0.15's verifier (docs/design/0.15-plan.md, PR 8; verifier.ts): the trees, every entry's MAC and request, the replay
-// and the row audit, over a vault that keeps 0.15's log under a real checkpointer, on both engines. Changes are the
-// vault's own (admit, setAccess) and the cutover's genesis; uses go through the use path. Each tampering case is one the
-// plan names: a row put back, an entry deleted before and after its seal, numbers swapped inside the window.
+// 0.15's verifier (docs/design/0.15-plan.md, PR 8; verifier.ts): a page's check from the newest pair, and the whole
+// walk, the trees, every entry's MAC and request, the replay and the row audit, over a vault that keeps 0.15's log
+// under a real checkpointer, on both engines. Changes are the vault's own (admit, setAccess) and the cutover's genesis;
+// uses go through the use path. Each tampering case is one the plan names: a row put back, an entry deleted before and
+// after its seal, numbers swapped inside the window.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import { decodePair } from '@coffre/core/merkle';
+import { decodePair, openPair } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
@@ -18,12 +19,14 @@ import type { SealThrough } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { noEdits, ROLES_REF, sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
-import { entryMac, logMacKey } from '../src/log-entry.ts';
+import { entryMac, logMacKey, RETENTION_ACTOR, RETENTION_OBJECT, retentionPayload } from '../src/log-entry.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
 import { credentialObject, environmentObject, secretObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
+import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
+import { verifierKeys } from '../src/verifier.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
@@ -41,7 +44,7 @@ before(async () => {
 after(() => db.close());
 beforeEach(async () => {
   await emptyDatabase(db.owner);
-  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles', 'log_replays']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}`);
   if (ENGINE === 'postgres') {
     const today = new Date().toISOString().slice(0, 10);
@@ -55,7 +58,7 @@ type Checked = Extract<TreeVerification, { kept: true }>;
  * A vault keeping 0.15's log, each change sealed by a checkpointer of its
  * own before it answers, unless `hold` keeps the next ones in the window
  * (sealed at the next `tick`). A member, Ada, with a grant on `dev`; Bo, a service account, granted by `grant`, her
- * credential and a key there, each sealed; `walks.verify` entries a walk.
+ * credential and a key there, each sealed; `walks.whole` entries a whole walk.
  */
 async function instance(walks: VaultOptions['walks'] = {}) {
   const config: ResolvedVaultConfig = {
@@ -78,8 +81,7 @@ async function instance(walks: VaultOptions['walks'] = {}) {
     if (control.hold) return {} as Awaited<ReturnType<SealThrough>>;
     return cp.sealThrough(number, deadline);
   };
-  const clock = { offset: 0 };
-  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside, walks, clockOffset: () => clock.offset }, async () => {}, hot));
+  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside, walks }, async () => {}, hot));
   const keys: ChangeKeys = { seals: [sealKey(seed)], mac: logMacKey(seed) };
   const where = await places(db.owner);
   const genesis = async (ref: Ref, input: Input) => {
@@ -127,112 +129,125 @@ async function instance(walks: VaultOptions['walks'] = {}) {
     const at = Date.now();
     return vault.use({ credential, secretId, place: null, purpose: 'run', requestId: newRequestId(), at, deadline: at + 3000 });
   };
-  const verify = async (from?: string): Promise<Checked> => {
-    const checked = await vault.verifyTrees!(from === undefined ? {} : { from });
+  /** A page's check, or (`whole`) the walk from the first entry. */
+  const verify = async (input: { whole?: boolean } = {}): Promise<Checked> => {
+    const checked = await vault.verifyTrees!(input);
     assert.ok(checked.kept);
+    assert.equal(checked.whole, input.whole === true);
     return checked;
   };
+  const whole = () => verify({ whole: true });
   const grant = (principal: string, role: string | null, environmentId = where.dev) =>
     vault.setAccess({ actor: ROOT, principal, ...(role === null ? {} : { admit: true }), changes: [{ projectId: where.project, environmentId, role, expiresAt: null }] });
-  /** The checkpoint job's run, then a page's check: what the job's replay and audit found. */
-  const audited = async () => {
-    await vault.checkpoint();
-    return verify();
-  };
-  return { vault, cp, control, clock, config, seed, keys, ...where, credential, secret, key, use, verify, audited, grant, genesis };
+  return { vault, cp, control, config, seed, keys, ...where, credential, secret, key, use, verify, whole, grant, genesis };
 }
 
-/** A walk that found nothing, and reached the present. */
+/** A check that found nothing, and reached the present. */
 function clean(checked: Checked): void {
   assert.deepEqual(checked.problems, []);
-  assert.ok(checked.ok && checked.done, JSON.stringify(checked));
+  assert.ok(checked.ok && checked.tooLarge === null, JSON.stringify(checked));
 }
 
-test('a log the vault wrote verifies: both trees, every entry, the replay, every row; with 0.14\'s alone there is none', async () => {
+/** The newest pair's row, taken out, and a function to put it back as it was: the signer's write a moment away. */
+async function newestRow() {
+  const [newest] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
+  await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${BigInt(newest!.upto as string | number)}`);
+  const { logCheckpoints } = tablesOf(db.owner);
+  return () => db.owner.insert(logCheckpoints).values({
+    upto: BigInt(newest!.upto as string | number), at: Number(newest!.at), atFloor: Number(newest!.at_floor), changesSize: BigInt(newest!.changes_size as string | number),
+    changesRoot: Buffer.from(newest!.changes_root as Uint8Array), changesNote: newest!.changes_note as string, usesSize: BigInt(newest!.uses_size as string | number),
+    usesRoot: Buffer.from(newest!.uses_root as Uint8Array), usesNote: newest!.uses_note as string,
+  }).then(() => {});
+}
+
+test('a log the vault wrote verifies, walked whole and on a page\'s check; with 0.14\'s alone there is none', async () => {
   const w = await instance();
   for (let i = 0; i < 3; i += 1) assert.ok((await w.use()).ok);
   assert.ok((await w.grant(BO, 'viewer')).ok);
   await w.cp.tick();
   // One use above the newest pair: walked unsealed, and the rows already hold what it moved.
   assert.ok((await w.use(await w.key())).ok);
-  const checked = await w.verify();
+  const checked = await w.whole();
   clean(checked);
-  assert.equal(checked.from, null);
   assert.equal(checked.unsealed, 1);
   assert.ok(checked.sealed >= 9, `${checked.sealed} sealed`);
   assert.equal(checked.checkpoint?.upto, w.cp.pair.pair.upto.toString());
+  clean(await w.verify());
 
   const old = await openLocalVault(db.vault, w.config, {}, async () => {}, hot);
   assert.deepEqual(await old.verifyTrees!({}), { kept: false });
+  assert.deepEqual(await old.verifyTrees!({ whole: true }), { kept: false });
 });
 
-test('R25: a page\'s check goes on from the newest verdict, reading the entries since, and no replay; the checkpoint job keeps it moving', async () => {
+test('R25: a page\'s check reads the newest pair and the entries since, whatever the log holds below it, and no row', async () => {
   const w = await instance();
-  for (let i = 0; i < 4; i += 1) await w.use();
-  // No verdict yet: the first check replays from the first entry, as the job does, and keeps one.
-  const first = await w.verify();
-  clean(first);
-  assert.equal(first.from, null);
-  const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays WHERE verdict IS NOT NULL`);
-  assert.ok(kept !== undefined, 'kept');
-  await w.use();
+  // Each a key of its own: a repeat use within its cover writes no entry (R53).
+  for (let i = 0; i < 4; i += 1) await w.use(await w.key());
+  const fresh = [await w.key(), await w.key(), await w.key()];
   await w.cp.tick();
-  const checked = await w.verify();
-  clean(checked);
-  assert.equal(checked.from, String(kept.upto));
-  assert.equal(checked.sealed, 1, 'only the use since');
-  assert.equal(checked.audited, first.audited, "the verdict it went on from: the page replays nothing, and reads no row");
+  for (const secret of fresh) assert.ok((await w.use(secret)).ok);
+  const page = await w.verify();
+  clean(page);
+  assert.deepEqual([page.checkpoints, page.sealed, page.unsealed], [0, 0, 3], 'only the entries above the newest pair');
+  assert.equal(page.checkpoint?.upto, w.cp.pair.pair.upto.toString());
+  // A row written around the vault is the whole walk's to find: the page reads none.
+  const { credentials } = tablesOf(db.owner);
+  await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, w.credential));
+  clean(await w.verify());
+  assert.deepEqual((await w.whole()).problems, [`the credential ${w.credential}: its rows are not the object the log makes`]);
 });
 
-test('review r5: a page\'s check never reads the replay kept, whatever its size: one edited under its hash is the job\'s to pass over', async () => {
+test('a page\'s check names a forged entry above the newest pair, a forged newest pair, and the indexes that keep requests unique, gone', async () => {
   const w = await instance();
-  clean(await w.audited());
-  await run(db.owner, sql`UPDATE log_replays SET state = replace(state, '"developer"', '"viewer"')`);
-  // The page reads the verdict and the hash it is MAC'd with, never the replay: nothing to say.
+  const outcome = await w.use();
+  assert.ok(outcome.ok);
+  await run(db.owner, sql`UPDATE log_uses SET mac = ${randomBytes(16)} WHERE number = ${BigInt(outcome.number)}`);
+  assert.deepEqual((await w.verify()).problems, [`${outcome.number}: its MAC does not hold`]);
+  await run(db.owner, sql`DELETE FROM log_uses WHERE number = ${BigInt(outcome.number)}`);
+  // The newest pair's notes, swapped for another's: not signed by the log at that place.
+  const [newest, older] = await rows<{ upto: string | number; changes_note: string }>(db.owner, sql`SELECT upto, changes_note FROM log_checkpoints ORDER BY upto DESC LIMIT 2`);
+  await run(db.owner, sql`UPDATE log_checkpoints SET changes_note = ${older!.changes_note} WHERE upto = ${BigInt(newest!.upto)}`);
+  assert.ok(!(await w.verify()).ok);
+  await run(db.owner, sql`UPDATE log_checkpoints SET changes_note = ${newest!.changes_note} WHERE upto = ${BigInt(newest!.upto)}`);
   clean(await w.verify());
-  // The job reads the replay to go on from it: not the one its hash says, passed over, and the job replays from the first entry.
-  await w.vault.checkpoint();
-  const [kept] = await rows<{ n: string | number }>(db.owner, sql`SELECT count(*) AS n FROM log_replays WHERE state LIKE '%"viewer"%'`);
-  assert.equal(Number(kept!.n), 0, 'forgotten by the replay the job kept');
+  // A copy of an entry passes a walk's own check when far enough apart, and a page's below its start; the database
+  // refuses it while its index stands: gone, or one of its name over other columns (review r2).
+  const [drop, add] = ENGINE === 'postgres'
+    ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
+    : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
+  const gone = 'the indexes that keep each request to one entry are gone: a copy of an entry would pass';
+  await run(db.owner, drop);
+  try {
+    assert.ok((await w.verify()).problems.includes(gone));
+    assert.ok((await w.whole()).problems.includes(gone));
+    await run(db.owner, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (number)`);
+    assert.ok((await w.verify()).problems.includes(gone), 'a decoy over the number');
+    await run(db.owner, sql`DROP INDEX log_changes_request_id_key`);
+  } finally {
+    await run(db.owner, add);
+  }
   clean(await w.verify());
 });
 
-test('review r5: a verdict older than three runs of the job is out of date: the seal is withheld, the log not called broken', async () => {
-  const w = await instance();
-  clean(await w.audited());
-  w.clock.offset = 16 * 60_000;
-  // Not known to hold, nor known not to: out of date, not broken (review r6).
-  const stale = await w.verify();
-  assert.ok(stale.ok && stale.stale, JSON.stringify(stale));
-  // The job's next run brings a fresh one.
-  await w.vault.checkpoint();
-  w.clock.offset = 0;
+test('a whole walk past what its vault walks in one call stops at a pair and says where to walk it; what it found on the way stands', async () => {
+  const w = await instance({ whole: 3 });
+  assert.ok((await w.use()).ok);
+  // A pair each, past the three entries a call walks.
+  for (let i = 0; i < 4; i += 1) assert.ok((await w.use(await w.key())).ok);
+  await w.cp.tick();
+  const short = await w.whole();
+  assert.ok(!short.ok);
+  assert.deepEqual(short.problems, []);
+  assert.match(short.tooLarge ?? '', /^0\.15's log holds more than this vault walks in one call: the walk stopped after \d+ entries, at the checkpoint up to \d+, short of the present\. .*walk the log whole on Node/);
+  assert.ok(short.sealed >= 3 && short.checkpoint !== null && BigInt(short.checkpoint.upto) < w.cp.pair.pair.upto);
+  // A page's check is never bounded so: it reads a tick's worth.
   clean(await w.verify());
-});
-
-test('a walk from the first entry goes a stretch at a time, each ending at a pair, and the last reaches the present', async () => {
-  const w = await instance({ verify: 3 });
-  for (let i = 0; i < 4; i += 1) {
-    await w.use();
-    await w.use();
-    await w.cp.tick();
-  }
-  const stretches: Checked[] = [];
-  for (let from: string | null = 'start'; from !== null; ) {
-    const checked = await w.verify(from);
-    assert.deepEqual(checked.problems, []);
-    stretches.push(checked);
-    from = checked.next;
-    assert.ok(stretches.length < 50, 'it ends');
-  }
-  assert.ok(stretches.length > 2, `${stretches.length} stretches`);
-  assert.ok(stretches.at(-1)!.done);
-  assert.ok(stretches.slice(0, -1).every((s) => !s.done && s.next !== null));
-  // Each stretch starts where the one before ended.
-  for (const [i, s] of stretches.slice(1).entries()) assert.equal(s.from, stretches[i]!.next);
-  // A stretch named by a pair whose replay nobody kept is refused, not walked from nothing.
-  const lost = await w.verify('1');
-  assert.ok(!lost.ok && /no replay the vault kept is at 1/.test(lost.problems.join()));
+  // The log's first entry forged: found before the walk stops.
+  const [first] = await rows<{ number: string | number }>(db.owner, sql`SELECT number FROM log_changes ORDER BY number LIMIT 1`);
+  await run(db.owner, sql`UPDATE log_changes SET mac = ${randomBytes(16)} WHERE number = ${BigInt(first!.number)}`);
+  const found = await w.whole();
+  assert.ok(!found.ok && found.tooLarge !== null);
+  assert.ok(found.problems.includes(`${first!.number}: its MAC does not hold`), found.problems.join('\n'));
 });
 
 test('a row put back from before a revoke is named: its seal is an older change\'s', async () => {
@@ -241,7 +256,7 @@ test('a row put back from before a revoke is named: its seal is an older change\
   const [before] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${BO}`);
   const grants = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM vault_grants WHERE principal = ${BO}`);
   assert.ok((await w.grant(BO, null)).ok);
-  clean(await w.verify());
+  clean(await w.whole());
   // The writer puts the member's row and grant back as they were before the revoke: sealed by the vault, once.
   await run(db.owner, sql`UPDATE vault_members SET seal = ${before!.seal} WHERE principal = ${BO}`);
   const { vaultGrants } = tablesOf(db.owner);
@@ -249,8 +264,8 @@ test('a row put back from before a revoke is named: its seal is an older change\
     principal: g.principal as string, projectId: g.project_id as string | null, environmentId: g.environment_id as string | null, environmentSlug: g.environment_slug as string | null,
     role: g.role as string, expiresAt: g.expires_at === null ? null : Number(g.expires_at), grantedAt: Number(g.granted_at), grantedBy: g.granted_by as string,
   })));
-  // The job's audit finds it; every use of it is refused `stale` meanwhile.
-  const checked = await w.audited();
+  // The whole walk's audit finds it; every use of it is refused `stale` meanwhile.
+  const checked = await w.whole();
   assert.ok(!checked.ok);
   assert.deepEqual(checked.problems, [`the principal ${BO}: its rows carry another change's seal than the newest: put back, or written around the vault`]);
 });
@@ -261,7 +276,7 @@ test('a row written with no change, and a key\'s seal replaced, are named', asyn
   await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, w.credential));
   const other = await w.key();
   await run(db.owner, sql`UPDATE secrets SET seal = ${randomBytes(16)} WHERE id = ${other}`);
-  const checked = await w.verify();
+  const checked = await w.whole();
   assert.deepEqual(checked.problems.sort(), [
     `the credential ${w.credential}: its rows are not the object the log makes`,
     `the secret ${other}: its rows carry another change's seal than the newest: put back, or written around the vault`,
@@ -274,7 +289,7 @@ test('an entry deleted after its seal: the next pair\'s heads are not the entrie
   assert.ok((await w.grant(BO, 'viewer')).ok);
   const [first] = await rows<{ number: string | number }>(db.owner, sql`SELECT number FROM log_uses ORDER BY number LIMIT 1`);
   await run(db.owner, sql`DELETE FROM log_uses WHERE number = ${BigInt(first!.number)}`);
-  const checked = await w.verify();
+  const checked = await w.whole();
   assert.ok(!checked.ok);
   assert.ok(checked.problems.some((p) => /the uses head differ from the entries: entries deleted/.test(p)), checked.problems.join('\n'));
 });
@@ -289,7 +304,7 @@ test('a change\'s entry deleted before its seal: the change fails, and its row c
   }));
   w.control.before = null;
   await w.cp.tick();
-  const checked = await w.verify();
+  const checked = await w.whole();
   assert.ok(!checked.ok);
   // Its row carries the deleted entry's seal; the log's newest change of Bo is the admission before it.
   assert.deepEqual(checked.problems, [`the principal ${BO}: its rows carry another change's seal than the newest: put back, or written around the vault`]);
@@ -301,7 +316,7 @@ test('a use\'s entry deleted before its seal leaves its bulk row with no use the
   assert.ok(outcome.ok);
   await run(db.owner, sql`DELETE FROM log_uses WHERE number = ${BigInt(outcome.number)}`);
   await w.cp.tick();
-  const checked = await w.verify();
+  const checked = await w.whole();
   assert.ok(!checked.ok);
   assert.ok(checked.problems.some((p) => p.startsWith(`the bulk cap of ${ADA}: its row for `) && p.endsWith(', the log none')), checked.problems.join('\n'));
 });
@@ -321,56 +336,20 @@ test('numbers swapped inside the window: two changes of one object, replayed out
   await run(db.owner, sql`UPDATE log_changes SET number = ${BigInt(a!.number)} WHERE number = ${BigInt(b!.number)}`);
   await run(db.owner, sql`UPDATE log_changes SET number = ${BigInt(b!.number)} WHERE number = -1`);
   assert.ok((await w.cp.tick()).signed, 'sealed as they stand: each MAC holds, the number is not under it');
-  const checked = await w.verify();
+  const checked = await w.whole();
   assert.ok(!checked.ok);
   assert.ok(checked.problems.some((p) => p.startsWith(`${b!.number}: its seal is not the vault's over principal ${BO}`)), checked.problems.join('\n'));
 });
 
-test('a kept verdict the vault did not write is named and passed over, never said, and the next one kept forgets it', async () => {
-  const w = await instance();
-  clean(await w.audited());
-  const [kept] = await rows<{ upto: string | number }>(db.owner, sql`SELECT upto FROM log_replays WHERE verdict IS NOT NULL`);
-  // A writer edits the verdict, and plants one at a pair to come, hoping to stop every check after (review r3).
-  await run(db.owner, sql`UPDATE log_replays SET verdict = '{"at":0,"problems":[]}'`);
-  await run(db.owner, sql`INSERT INTO log_replays (upto, at, verdict, mac) VALUES (900000000, 0, '{"at":0,"problems":[]}', ${randomBytes(32)})`);
-  const named = (upto: string | number) => `the replay kept at ${upto} is not the vault's over the checkpoint there: passed over`;
-  const checked = await w.verify();
-  assert.deepEqual(checked.problems, [named(900000000), named(kept!.upto)]);
-  // With no verdict of the vault's left, the check replayed from the first entry, and kept one: the checks after go on from it.
-  assert.equal(checked.from, null);
-  const after = await w.verify();
-  clean(after);
-  assert.notEqual(after.from, null);
-  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_replays WHERE upto = 900000000`)).length, 0);
-  // Asked for as a stretch's start, a pair with no replay of the vault's is refused.
-  assert.match((await w.verify('900000000')).problems.join(), /no replay the vault kept is at 900000000/);
-});
-
-test('a forged use is named at its entry, and so are the indexes that keep requests unique, gone', async () => {
+test('a forged use is named at its entry by the whole walk, and the bulk row it moved with it', async () => {
   const w = await instance();
   const outcome = await w.use();
   assert.ok(outcome.ok);
   await run(db.owner, sql`UPDATE log_uses SET mac = ${randomBytes(16)} WHERE number = ${BigInt(outcome.number)}`);
-  const checked = await w.verify();
+  const checked = await w.whole();
   // Not the vault's, so not replayed: the bulk row it moved is one the log does not.
   assert.equal(checked.problems[0], `${outcome.number}: its MAC does not hold`);
   assert.match(checked.problems[1]!, new RegExp(`^the bulk cap of ${ADA}: its row for .* says \\d+, the log none$`));
-  // A copy of an entry passes the walk's own check across two stretches; the database refuses it, while its index stands:
-  // gone, or one of its name over other columns (review r2).
-  const [drop, add] = ENGINE === 'postgres'
-    ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
-    : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
-  const gone = 'the indexes that keep each request to one entry are gone: a copy of an entry would pass';
-  await run(db.owner, drop);
-  try {
-    assert.ok((await w.verify()).problems.includes(gone));
-    await run(db.owner, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (number)`);
-    assert.ok((await w.verify()).problems.includes(gone), 'a decoy over the number');
-    await run(db.owner, sql`DROP INDEX log_changes_request_id_key`);
-  } finally {
-    await run(db.owner, add);
-  }
-  assert.ok(!(await w.verify()).problems.includes(gone));
 });
 
 test('review r1: grants come back from the rows in any order, and a member revoked and granted again still verifies', async () => {
@@ -380,44 +359,17 @@ test('review r1: grants come back from the rows in any order, and a member revok
   assert.ok((await w.grant(BO, null)).ok);
   // The grant lands in the slot the revoke freed, ahead of the one it kept: the replay has them the other way round.
   assert.ok((await w.grant(BO, 'developer')).ok);
-  clean(await w.verify());
-});
-
-test('review r2: a page\'s check says what the checkpoint job\'s audit of every row found, and when; on a quiet log too, until it is put right', async () => {
-  const w = await instance();
-  await w.vault.checkpoint();
-  const kept = await w.verify();
-  clean(kept);
-  assert.notEqual(kept.from, null, 'from the replay the job kept');
-  assert.ok(kept.audited !== null);
-  // A writer changes a credential, and nothing is sealed after: no new pair to keep a replay at.
-  const { credentials } = tablesOf(db.owner);
-  const [{ expiresAt }] = await db.owner.select({ expiresAt: credentials.expiresAt }).from(credentials).where(eq(credentials.id, w.credential));
-  await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, w.credential));
-  // A page's check reads no row: it says the last audit's verdict, and when that was.
-  assert.equal((await w.verify()).audited, kept.audited);
-  // The job's audit reads them all, and keeps what it found in place of the replay it kept at the same pair.
-  await w.vault.checkpoint();
-  const named = `the credential ${w.credential}: its rows are not the object the log makes`;
-  const after = await w.verify();
-  assert.deepEqual(after.problems, [named]);
-  assert.ok(after.audited! > kept.audited!);
-  assert.deepEqual((await w.verify()).problems, [named], 'every check after');
-  // Put back as it was, the job's next audit clears it, on the same quiet log.
-  await db.owner.update(credentials).set({ expiresAt }).where(eq(credentials.id, w.credential));
-  await w.vault.checkpoint();
-  clean(await w.verify());
+  clean(await w.whole());
 });
 
 test('review r2: a roles row that reads as no object is named, not thrown on', async () => {
   const w = await instance();
   await run(db.owner, sql`UPDATE log_config SET value = '"not an object"' WHERE name = 'roles'`);
-  assert.deepEqual((await w.verify('start')).problems, ['the roles instance: its rows do not read as an object']);
+  assert.deepEqual((await w.whole()).problems, ['the roles instance: its rows do not read as an object']);
 });
 
-test('review r1: a database rolled back whole to an earlier pair, its kept replays with it, is named against the signer\'s memory', async () => {
+test('review r1: a database rolled back whole to an earlier pair is named against the signer\'s memory, on a page\'s check too', async () => {
   const w = await instance();
-  await w.vault.checkpoint();
   const [earlier] = await rows<{ upto: string | number }>(db.owner, sql`SELECT max(upto) AS upto FROM log_checkpoints`);
   assert.ok((await w.grant(BO, 'viewer')).ok);
   const signed = w.cp.pair.pair.upto;
@@ -426,116 +378,56 @@ test('review r1: a database rolled back whole to an earlier pair, its kept repla
   await run(db.owner, sql`DELETE FROM log_changes WHERE number > ${BigInt(earlier!.upto)}`);
   await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${BO}`);
   await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${BO}`);
-  const checked = await w.verify();
-  assert.ok(!checked.ok);
-  assert.ok(checked.problems.includes(`the database ends up to ${earlier!.upto}; a pair held outside seals up to ${signed}: entries or checkpoints were deleted`), checked.problems.join('\n'));
+  const named = `the database ends up to ${earlier!.upto}; a pair held outside seals up to ${signed}: entries or checkpoints were deleted`;
+  for (const checked of [await w.verify(), await w.whole()]) {
+    assert.ok(!checked.ok);
+    assert.ok(checked.problems.includes(named), checked.problems.join('\n'));
+  }
 });
 
-test('review r1: an object whose rows are gone is named from the replay; a pair past the log\'s numbers is refused', async () => {
+test('review r1: an object whose rows are gone is named from the replay; a check asked for in another shape is refused', async () => {
   const w = await instance();
   const { credentials } = tablesOf(db.owner);
   await db.owner.delete(credentials).where(eq(credentials.id, w.credential));
-  assert.deepEqual((await w.verify()).problems, [`the credential ${w.credential}: the log holds it, its rows do not`]);
-  await assert.rejects(w.vault.verifyTrees!({ from: '9223372036854775808' }), /goes on from `start` or a pair's number/);
+  assert.deepEqual((await w.whole()).problems, [`the credential ${w.credential}: the log holds it, its rows do not`]);
+  await assert.rejects(w.vault.verifyTrees!({ whole: 'yes' } as never), /verifyTrees takes `whole`/);
 });
 
-test('review r4: a walk that lands between the signer remembering a pair and the database holding it is walked again, not called a deletion', async () => {
+test('review r4: a check that lands between the signer remembering a pair and the database holding it is checked again, not called a deletion', async () => {
   const w = await instance();
-  assert.ok((await w.grant(BO, 'viewer')).ok);
-  // The newest pair's row, gone for a moment: the signer remembers it, the database has it a tick later.
-  const [newest] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
-  await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${BigInt(newest!.upto as string | number)}`);
-  const { logCheckpoints } = tablesOf(db.owner);
-  let restored: Promise<unknown> = Promise.resolve();
-  const back = setTimeout(() => restored = db.owner.insert(logCheckpoints).values({
-    upto: BigInt(newest!.upto as string | number), at: Number(newest!.at), atFloor: Number(newest!.at_floor), changesSize: BigInt(newest!.changes_size as string | number),
-    changesRoot: Buffer.from(newest!.changes_root as Uint8Array), changesNote: newest!.changes_note as string, usesSize: BigInt(newest!.uses_size as string | number),
-    usesRoot: Buffer.from(newest!.uses_root as Uint8Array), usesNote: newest!.uses_note as string,
-  }).then(() => {}), 200);
-  try {
-    const checked = await w.verify();
-    await restored;
-    clean(checked);
-  } finally {
-    clearTimeout(back);
+  for (const [role, input] of [['viewer', {}], ['developer', { whole: true }]] as const) {
+    assert.ok((await w.grant(BO, role)).ok);
+    // The newest pair's row, gone for a moment: the signer remembers it, the database has it a tick later.
+    const putBack = await newestRow();
+    let restored: Promise<unknown> = Promise.resolve();
+    const back = setTimeout(() => restored = putBack(), 200);
+    try {
+      const checked = await w.verify(input);
+      await restored;
+      clean(checked);
+    } finally {
+      clearTimeout(back);
+    }
   }
 });
 
-test('review r4: the checkpoint job walks on, stretch after stretch, to the present, where it audits every row', async () => {
-  const w = await instance({ checkpoint: 2 });
-  for (let i = 0; i < 4; i += 1) {
-    await w.use();
-    await w.use();
-    await w.cp.tick();
-  }
-  await w.vault.checkpoint();
-  const checked = await w.verify();
-  clean(checked);
-  assert.equal(checked.sealed, 0, 'the job reached the present: nothing left for the page');
-  assert.ok(checked.audited !== null);
-});
-
-test('review r6: the job carries its replay from stretch to stretch in memory and keeps it once; a whole walk holds one stretch at a time', async () => {
-  const w = await instance({ checkpoint: 2, verify: 2 });
-  for (let i = 0; i < 5; i += 1) {
-    await w.use();
-    await w.use();
-    await w.cp.tick();
-  }
-  const kept = async () => rows<{ upto: string | number; state: boolean; verdict: boolean }>(db.owner, sql`SELECT upto, state_hash IS NOT NULL AS state, verdict IS NOT NULL AS verdict FROM log_replays ORDER BY upto`);
-  await w.vault.checkpoint();
-  // Several stretches, one row: the verdict at the present, with its replay.
-  assert.deepEqual((await kept()).map((r) => [Boolean(r.state), Boolean(r.verdict)]), [[true, true]]);
-  // A whole walk: each stretch forgets the one before; the job's row stays.
-  for (let from: string | null = 'start'; from !== null; ) {
-    const stretch = await w.verify(from);
-    assert.deepEqual(stretch.problems, []);
-    assert.ok((await kept()).length <= 2, `${(await kept()).length} rows kept`);
-    from = stretch.next;
-  }
-  assert.equal((await kept()).length, 1, 'the whole walk ends at the job\'s pair, as its verdict');
-});
-
-test('review r6: a broken verdict at the pair the replay was kept at keeps that replay to go on from', async () => {
+test('a retention change in the log is the log\'s own: not replayed, and the uses below its cut not walked, nor their bulk rows held to the replay', async () => {
   const w = await instance();
-  clean(await w.audited());
-  const [drop, add] = ENGINE === 'postgres'
-    ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
-    : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
-  await run(db.owner, drop);
-  try {
-    // A quiet log: the job's verdict says the index is gone, beside the replay it went on from, still the vault's.
-    await w.vault.checkpoint();
-    const [row] = await rows<{ state: boolean; verdict: string }>(db.owner, sql`SELECT state_hash IS NOT NULL AS state, verdict FROM log_replays WHERE verdict IS NOT NULL`);
-    assert.ok(Boolean(row!.state) && /the indexes that keep each request/.test(row!.verdict));
-  } finally {
-    await run(db.owner, add);
-  }
-  await w.vault.checkpoint();
-  clean(await w.verify());
-});
-
-test('review r7: a stretch the job carried that lands in the signer\'s write window is walked again from the replay as handed on', async () => {
-  const w = await instance({ checkpoint: 2 });
-  await w.vault.checkpoint();
-  for (let i = 0; i < 3; i += 1) await w.key();
-  // On the job's second stretch, the newest pair's row is a moment away, as between the signer's memory and its write.
-  let asked = 0;
-  w.control.asked = async () => {
-    if (++asked !== 2) return;
-    const [newest] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
-    await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${BigInt(newest!.upto as string | number)}`);
-    const { logCheckpoints } = tablesOf(db.owner);
-    setTimeout(() => void db.owner.insert(logCheckpoints).values({
-      upto: BigInt(newest!.upto as string | number), at: Number(newest!.at), atFloor: Number(newest!.at_floor), changesSize: BigInt(newest!.changes_size as string | number),
-      changesRoot: Buffer.from(newest!.changes_root as Uint8Array), changesNote: newest!.changes_note as string, usesSize: BigInt(newest!.uses_size as string | number),
-      usesRoot: Buffer.from(newest!.uses_root as Uint8Array), usesNote: newest!.uses_note as string,
-    }).then(() => {}), 200);
-  };
-  const began = Date.now();
-  await w.vault.checkpoint();
-  w.control.asked = null;
-  assert.ok(asked >= 2 && Date.now() - began >= 700, 'the second stretch came back behind, and was walked again a tick later');
-  // Its verdict, kept, is the log's: no entry replayed twice.
+  for (let i = 0; i < 3; i += 1) assert.ok((await w.use(await w.key())).ok);
+  await w.cp.tick();
+  // A retention change, sealed, as retention writes it (retention.ts), for a day ten days ago. Postgres's log_retention
+  // holds its cut to the first pair past the day's end, the first of this log; SQLite's checks nothing, so it cuts at
+  // the newest, and the uses below it are dropped, their bulk rows left.
+  const store = logStore(db.vault);
+  const day = dayOf(Date.now() - 10 * DAY_MS);
+  const cut = (ENGINE === 'postgres' ? await store.cutAt(Date.parse(`${day}T00:00:00Z`) + DAY_MS) : await store.newest())!;
+  const pair = (await openPair(cut.notes, (await verifierKeys([w.seed])).verifiers))!;
+  const at = Date.now();
+  const requestId = `retention:${day}`;
+  const payload = retentionPayload(day, { upto: pair.upto, at: pair.at, uses: { size: pair.uses.size, root: pair.uses.root } });
+  const change = await store.appendRetention({ requestId, at, payload, mac: entryMac(w.keys.mac, { tree: 'changes', row: { at, requestId, object: RETENTION_OBJECT, actor: RETENTION_ACTOR, payload, seal: null } }) });
+  await w.cp.sealThrough(change);
+  await run(db.owner, sql`DELETE FROM log_uses WHERE number <= ${pair.upto}`);
+  clean(await w.whole());
   clean(await w.verify());
 });

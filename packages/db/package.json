@@ -14,8 +14,7 @@
   },
   "files": [
     "dist",
-    "src",
-    "vendor"
+    "src"
   ],
   "exports": {
     ".": {
@@ -76,10 +75,14 @@
     "./package.json": "./package.json"
   },
   "imports": {
-    "#postgres": {
-      "types": "./vendor/postgres/types/index.d.ts",
-      "workerd": "./vendor/postgres/cf/src/index.js",
-      "default": "./vendor/postgres/src/index.js"
+    "#postgres/platform": {
+      "coffre:source": {
+        "workerd": "./src/postgres-js/platform.workerd.ts",
+        "default": "./src/postgres-js/platform.node.ts"
+      },
+      "types": "./dist/postgres-platform-node.d.ts",
+      "workerd": "./dist/postgres-platform-workerd.js",
+      "default": "./dist/postgres-platform-node.js"
     }
   },
   "scripts": {

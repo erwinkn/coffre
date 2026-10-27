@@ -485,25 +485,13 @@ export function createClient(options: ClientOptions) {
         }
       },
       /**
-       * Whether 0.15's log holds (the vault's `verifyTrees`): its trees, every
-       * entry, the replay and the rows, from the replay the vault last kept;
-       * or, with `from`, a stretch of the walk from the first entry. `kept`
-       * false where the instance keeps 0.14's log alone.
+       * Whether 0.15's log holds (the vault's `verifyTrees`): a page's check,
+       * the newest signed checkpoint and every entry since; or, with `whole`,
+       * the walk from the first entry, its trees, every entry, the replay and
+       * every row, in one request. `kept` false where the instance keeps
+       * 0.14's log alone.
        */
-      verifyTrees,
-      /**
-       * 0.15's log walked from the first entry, a stretch a request: the first
-       * that finds something wrong, or the last. A server older than 0.15 has
-       * no such route: it keeps 0.14's log alone (`kept` false).
-       */
-      verifyTreesWhole: async (onStretch: (verdict: RouteOutput<'GET /audit/trees'>) => void = () => {}): Promise<RouteOutput<'GET /audit/trees'>> => {
-        for (let from = 'start'; ;) {
-          const verdict = await verifyTrees({ from });
-          onStretch(verdict);
-          if (!verdict.kept || !verdict.ok || verdict.next === null) return verdict;
-          from = verdict.next;
-        }
-      },
+      verifyTrees: (options: { whole?: boolean } = {}) => verifyTrees(options.whole === true ? { whole: '1' } : {}),
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
       /**

@@ -2062,14 +2062,14 @@ async function verifyLog(): Promise<void> {
 
 /**
  * 0.15's log, after 0.14's: both trees, every entry, the replay and every
- * row, walked from the first entry a stretch a request. Nothing to say where
- * the instance keeps 0.14's log alone.
+ * row, walked from the first entry in one request. Nothing to say where the
+ * instance keeps 0.14's log alone; a log larger than its vault walks in one
+ * call (on Workers) is not verified, and says where to walk it instead.
  */
 async function verifyTrees(shown: boolean): Promise<void> {
+  if (shown) process.stderr.write("verifying 0.15's log from the first entry…");
   // A server older than 0.15 has no such route: its 404 comes back to the client, which says so (`kept` false).
-  const result = await client(target(), undefined, [404]).audit.verifyTreesWhole((stretch) => {
-    if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rverified 0.15's log through entry ${stretch.next}…`);
-  });
+  const result = await client(target(), undefined, [404]).audit.verifyTrees({ whole: true });
   if (shown) process.stderr.write('\r\x1b[K');
   if (!result.kept) return;
   if (result.ok) {
@@ -2077,8 +2077,13 @@ async function verifyTrees(shown: boolean): Promise<void> {
     process.stdout.write(`0.15 log OK: verified from the first entry, its trees, every entry and the replay; every row is the log's\n${signed}\n`);
     return;
   }
-  process.stderr.write(`0.15 log BROKEN:\n${result.problems.map((problem) => `  ${problem}\n`).join('')}`);
-  process.exit(2);
+  if (result.problems.length > 0) {
+    process.stderr.write(`0.15 log BROKEN:\n${result.problems.map((problem) => `  ${problem}\n`).join('')}`);
+    process.exit(2);
+  }
+  // Not verified to its end, nothing found on the way: not known broken, as 0.14's log not verified to its end.
+  process.stderr.write(`0.15 log not verified to its end: ${result.tooLarge}\n`);
+  process.exit(3);
 }
 
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */

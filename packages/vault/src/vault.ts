@@ -41,7 +41,7 @@ import {
   type ServiceAccount,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { MAX_NUMBER, type PairNotes } from '@coffre/core/merkle';
+import type { PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -130,7 +130,7 @@ import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
-import { keepCarried, verifierKeys, verifyTrees, type VerifierKeys, type VerifyOptions, type Walked } from './verifier.ts';
+import { verifierKeys, verifyTrees, type VerifierKeys, type VerifyOptions, type Walked } from './verifier.ts';
 
 export type VaultOptions = {
   /**
@@ -2842,13 +2842,6 @@ class VaultService implements Vault {
    * checkpoints reach the newest heartbeat.
    */
   async checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
-    const checkpointed = await this.#checkpoint014();
-    // Then 0.15's replay walked on and kept, its verdict the page's check's to say.
-    if (this.#prepared.log015 !== null) await this.#replayOn();
-    return checkpointed;
-  }
-
-  async #checkpoint014(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>> {
     await this.#settled();
     // A KEK found wrong turns readiness red: the checkpoint is refused. It does no key work of its
     // own, so it writes nothing more and never waits on a key service; a check under way, or none yet, is no verdict.
@@ -3088,61 +3081,36 @@ class VaultService implements Vault {
   }
 
   /**
-   * 0.15's log checked (verifier.ts) from the newest replay kept, `from`
-   * another, or the first entry: no more than one walk (`walks.verify`).
-   * With 0.14's log alone, there is none to check.
+   * 0.15's log checked (verifier.ts): a page's check from the newest pair,
+   * or, with `whole`, the walk from the first entry, its replay and every
+   * row, in this call, no further than `walks.whole` entries. With 0.14's
+   * log alone, there is none to check.
    */
   async verifyTrees(input: TreeVerificationInput = {}): Promise<TreeVerification> {
     await this.#settled();
     if (this.#prepared.log015 === null) return { kept: false };
-    const from = input?.from;
-    if (from !== undefined && (typeof from !== 'string' || !/^(start|0|[1-9][0-9]{0,18})$/.test(from) || (from !== 'start' && BigInt(from) > MAX_NUMBER))) {
-      throw new Error("verifyTrees goes on from `start` or a pair's number, in decimal");
-    }
-    // What crosses to the app: the verdict, never the replay a stretch carries, nor the retry's signal.
-    const { behind: _behind, carry: _carry, ...verdict } = await this.#walkTrees({ ...(from === undefined ? {} : { from }), limit: this.#prepared.options.walks.verify });
+    const whole = input?.whole;
+    if (whole !== undefined && typeof whole !== 'boolean') throw new Error('verifyTrees takes `whole`, true or false');
+    // What crosses to the app: the verdict, never the retry's signal.
+    const { behind: _behind, ...verdict } = await this.#walkTrees({ whole: whole === true, limit: this.#prepared.options.walks.whole });
     return verdict;
   }
 
   /**
-   * One walk of 0.15's log, held to the pairs held outside. The signer
-   * remembers a pair before the database has it (RememberFirst), so a walk
-   * that lands in between finds the database behind (`Verdict.behind`):
-   * that walk is walked again a tick later (review r4). A rollback is
-   * still behind then.
+   * One check of 0.15's log, held to the pairs held outside. The signer
+   * remembers a pair before the database has it (RememberFirst), so a check
+   * that lands in between finds the database behind (`Verdict.behind`): it
+   * is checked again a tick later (review r4). A rollback is still behind
+   * then.
    */
   async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Walked> {
     const anchors = await this.#prepared.log015!.heldOutside();
     const keys = await this.#verifierKeys();
-    const walk = () => verifyTrees(this.#db, keys, { ...options, anchors, clockOffset: this.#prepared.options.clockOffset() });
+    const walk = () => verifyTrees(this.#db, keys, { ...options, anchors });
     const first = await walk();
     if (!first.behind) return first;
     await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
     return walk();
-  }
-
-  /**
-   * 0.15's log walked on from the newest replay kept, a stretch at a time,
-   * each kept, to the present, where every row is audited: the checkpoint
-   * job's, so that a page's check reads a beat's worth and says what the
-   * last audit found. No longer than `REPLAY_ON_MS` a run: a log growing
-   * faster than that walks is caught up over the runs after, and the page
-   * says how old its audit is (review r4). What it finds, the page's check
-   * finds again; this never fails the checkpoint of 0.14's log it runs after.
-   */
-  async #replayOn(): Promise<void> {
-    try {
-      const began = Date.now();
-      const limit = this.#prepared.options.walks.checkpoint;
-      // Stretch after stretch, the replay carried on in memory, never read back between them (review r6).
-      let walked = await this.#walkTrees({ limit, replay: true, carrying: true });
-      while (walked.carry !== null && Date.now() - began < REPLAY_ON_MS) walked = await this.#walkTrees({ limit, replay: true, carried: walked.carry });
-      if (walked.carry !== null) await keepCarried(this.#db, await this.#verifierKeys(), walked.carry, await store.now(this.#db));
-      if (!walked.ok) console.warn(`coffre audit: 0.15's log does not verify: ${walked.problems.slice(0, 3).join('; ')}`);
-      else if (!walked.done) console.warn(`coffre audit: 0.15's log is replayed through ${walked.carry?.upto ?? walked.next}, short of the present: the next runs go on`);
-    } catch (error) {
-      console.warn(`coffre audit: 0.15's log was not checked: ${(error as Error).message}`);
-    }
   }
 
   async #verifierKeys(): Promise<VerifierKeys> {
@@ -3396,8 +3364,13 @@ type Scrubbed = { ok: true; next: Lap | null } | Broken;
 
 const FIRST_ENTRY: Resumed = { ok: true, entry: null, at: START, tally: EMPTY_TALLY, digest: accessDigest(EMPTY_TALLY.access), carrier: null, scrub: null };
 
-/** How far one call walks the log, in entries: a checkpoint's walk from the last, its rehash of the past, and a verification's own walk. */
-export type Walks = { checkpoint: number; scrub: number; verify: number };
+/**
+ * How far one call walks the log, in entries: a checkpoint's walk from the
+ * last, its rehash of the past, and a verification's own walk; and the
+ * whole walk of 0.15's log (`verifyTrees`), sealed entries a call, which
+ * Node leaves unbounded and a Worker bounds by its CPU time (cloudflare.ts).
+ */
+export type Walks = { checkpoint: number; scrub: number; verify: number; whole: number };
 
 /**
  * A walk rehashes, MACs and replays some 40 µs of CPU an entry, and 95
@@ -3406,10 +3379,7 @@ export type Walks = { checkpoint: number; scrub: number; verify: number };
  * a thousand a day. The rehash of the past is a hash an entry, 14 µs warm
  * and 55 cold, beside two reads: 100 entries keep it near 6 ms a beat.
  */
-const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
-
-/** How long the checkpoint job walks 0.15's log a run, a stretch of `walks.checkpoint` at a time (`#replayOn`). */
-const REPLAY_ON_MS = 10_000;
+const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000, whole: Infinity };
 
 
 /** The digest of the members and grants a checkpoint keeps whole, beside the digest it says they have. */

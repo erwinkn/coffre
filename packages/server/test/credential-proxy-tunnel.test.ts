@@ -180,17 +180,17 @@ test('a password that is not the handle is refused, before any login to the data
 });
 
 test('LISTEN and NOTIFY across two tunnelled connections', postgresOnly, async () => {
-  const listening = appClientOf();
+  // As a driver listens: LISTEN on a session of its own, the notification coming on it unasked.
+  const listening = await rawSession();
   const notifying = appClientOf();
   try {
-    let hear!: (payload: string) => void;
-    const heard = new Promise<string>((resolve) => (hear = resolve));
-    // postgres.js listens on a connection of its own, which it opens here, through the tunnel all the same.
-    await listening.listen('coffre_tunnel', hear);
+    await listening.query('LISTEN coffre_tunnel');
     await notifying.unsafe("SELECT pg_notify('coffre_tunnel', 'through the tunnel')");
-    assert.equal(await heard, 'through the tunnel');
+    // A NotificationResponse: the notifying backend's pid, then the channel and the payload, each ended by a NUL.
+    const { body } = await listening.until('A');
+    assert.deepEqual(body.subarray(4).toString().split('\0'), ['coffre_tunnel', 'through the tunnel', '']);
   } finally {
-    await listening.end();
+    listening.close();
     await notifying.end();
   }
 });

@@ -16,8 +16,9 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import type { Alarm, Checkpointer, InclusionProof, Memory, SealThrough, Sealed, Tick, Witness } from './checkpointer.ts';
-import { openLogCheckpointer, reasonOf, TICK_MS } from './log-checkpointer.ts';
+import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
+import { dayOf } from './retention.ts';
 
 /** The part of a Durable Object's state the checkpointer uses. */
 export type ObjectState = {
@@ -47,6 +48,8 @@ export type CheckpointerSettings = {
   witnesses?: readonly Witness[];
   /** How long its connection may sit idle before it closes; the next query opens it again. Ticking, it never is. */
   closeIdleMs?: number;
+  /** Full days of uses kept before today's; null keeps every day (retention.ts). */
+  retainDays?: number | null;
 };
 
 /**
@@ -78,6 +81,12 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     readonly #env: Env;
     #checkpointer: Checkpointer | null = null;
     #pool: HyperdrivePool | null = null;
+    /** The log's upkeep after each tick (log-checkpointer.ts), with the checkpointer it was opened with. */
+    #upkeep: (() => Promise<void>) | null = null;
+    /** The day the next days of uses were last made for without the checkpointer (`#makeDays`), when it last tried, and its failure. */
+    #daysFor: string | null = null;
+    #daysTried = -Infinity;
+    #daysFailed: string | null = null;
     /** The last ticks, newest last, with their wall time in the object: `status`. */
     readonly #ticks: (Tick & { wallMs: number; at: number })[] = [];
 
@@ -100,12 +109,22 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         try {
           const s = await settings(this.#env);
           pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
-          this.#checkpointer = await openLogCheckpointer({
-            store: logStore(createDatabase(pool)),
+          const store = logStore(createDatabase(pool));
+          const checkpointer = await openLogCheckpointer({
+            store,
             seed: s.seed,
             memory: durableMemory(this.#state.storage),
             witnesses: s.witnesses,
             record: (alarm) => this.#record(alarm),
+          });
+          this.#checkpointer = checkpointer;
+          this.#upkeep = upkeep(checkpointer, store, {
+            keepDays: s.retainDays ?? null,
+            seed: s.seed,
+            alert: (message) => {
+              console.warn(`coffre audit: ${message}`);
+              void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
+            },
           });
         } catch (error) {
           await pool?.end().catch(() => {});
@@ -136,6 +155,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         const [old, pool] = [this.#checkpointer, this.#pool];
         this.#checkpointer = null;
         this.#pool = null;
+        this.#upkeep = null;
         await old?.close();
         await pool?.end().catch(() => {});
       });
@@ -148,19 +168,51 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
       if (old.size > 0) await storage.delete([...old.keys()]);
     }
 
+    /**
+     * The next days of uses, made once a day when the checkpointer cannot open or tick, over a connection of their own:
+     * a use needs its day's partition whatever the audit's state, and making one needs no signer.
+     */
+    async #makeDays(): Promise<void> {
+      const now = Date.now();
+      const today = dayOf(now);
+      // Once a day when it works; when it fails, an hour later (DAYS_AHEAD days of slack), alarmed once while it stands
+      // apart from the checkpointer's own failures, so that neither hides the other.
+      if (this.#daysFor === today || now - this.#daysTried < RETAIN_EVERY_MS) return;
+      this.#daysTried = now;
+      let pool: HyperdrivePool | null = null;
+      try {
+        const s = await settings(this.#env);
+        pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: 1000 });
+        await logStore(createDatabase(pool)).makeDays(daysAround(now));
+        this.#daysFor = today;
+        this.#daysFailed = null;
+      } catch (error) {
+        const message = `the next days of uses were not made: ${reasonOf(error)}`;
+        if (message !== this.#daysFailed) {
+          console.warn(`coffre audit: ${message}`);
+          await this.#record({ at: now, message }).catch((e: Error) => console.warn(`coffre audit: the alarm could not be kept: ${e.message}`));
+        }
+        this.#daysFailed = message;
+      } finally {
+        await pool?.end().catch(() => {});
+      }
+    }
+
     async alarm(): Promise<void> {
       try {
         const checkpointer = await this.#open();
-        if (checkpointer === null) return;
+        if (checkpointer === null) return await this.#makeDays();
         const t0 = performance.now();
         const t = await checkpointer.tick();
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
+        await this.#upkeep?.();
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
         await this.#failure(`a checkpoint failed: ${reasonOf(error)}`);
         await this.#reset();
+        await this.#makeDays();
       } finally {
         await this.#state.storage.setAlarm(Date.now() + TICK_MS);
       }
@@ -272,7 +324,7 @@ function sealedFromJson(j: SealedJson): Sealed {
   const read = (note: string) => parseCheckpoint(splitNote(note).text);
   const [changes, uses] = [read(j.notes.changes), read(j.notes.uses)];
   return {
-    pair: { upto: changes.upto, at: changes.at, floor: changes.floor, changes, uses },
+    pair: { upto: changes.upto, at: changes.at, floor: changes.floor, prev: changes.prev, changes, uses },
     notes: j.notes, witnessed: j.witnessed, failures: j.failures, cosigned: j.cosigned,
     proof: { ...j.proof, number: BigInt(j.proof.number), leaf: Buffer.from(j.proof.leaf, 'base64'), proof: j.proof.proof.map((h) => Buffer.from(h, 'base64')) },
   };

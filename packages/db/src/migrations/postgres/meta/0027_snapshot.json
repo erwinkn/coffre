@@ -1,5 +1,5 @@
 {
-  "id": "522f4d76-1518-456a-af49-8e0e661314dc",
+  "id": "43b8d6b7-66c5-47fb-870a-820f9daa5974",
   "prevId": "bb769243-ea6e-413f-8d50-3641ae6374b4",
   "version": "7",
   "dialect": "postgresql",
@@ -1974,7 +1974,29 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "log_checkpoints_floor_idx": {
+          "name": "log_checkpoints_floor_idx",
+          "columns": [
+            {
+              "expression": "at_floor",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "upto",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -1987,50 +2009,6 @@
         "log_checkpoints_uses_root_check": {
           "name": "log_checkpoints_uses_root_check",
           "value": "octet_length(\"log_checkpoints\".\"uses_root\") = 32"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.log_config": {
-      "name": "log_config",
-      "schema": "",
-      "columns": {
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "value": {
-          "name": "value",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "seal": {
-          "name": "seal",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "log_config_name_check": {
-          "name": "log_config_name_check",
-          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
-        },
-        "log_config_value_check": {
-          "name": "log_config_value_check",
-          "value": "\"log_config\".\"value\"::jsonb IS NOT NULL"
-        },
-        "log_config_seal_check": {
-          "name": "log_config_seal_check",
-          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       },
       "isRLSEnabled": false
@@ -2062,64 +2040,6 @@
         "log_fence_only_row_check": {
           "name": "log_fence_only_row_check",
           "value": "\"log_fence\".\"only_row\""
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.log_replays": {
-      "name": "log_replays",
-      "schema": "",
-      "columns": {
-        "upto": {
-          "name": "upto",
-          "type": "bigint",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "at": {
-          "name": "at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "state_hash": {
-          "name": "state_hash",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "verdict": {
-          "name": "verdict",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "mac": {
-          "name": "mac",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "log_replays_mac_check": {
-          "name": "log_replays_mac_check",
-          "value": "octet_length(\"log_replays\".\"mac\") = 32"
-        },
-        "log_replays_state_check": {
-          "name": "log_replays_state_check",
-          "value": "(\"log_replays\".\"state\" IS NULL) = (\"log_replays\".\"state_hash\" IS NULL) AND (\"log_replays\".\"state_hash\" IS NULL OR octet_length(\"log_replays\".\"state_hash\") = 32)"
         }
       },
       "isRLSEnabled": false
@@ -3553,6 +3473,50 @@
         "service_bindings_claims_check": {
           "name": "service_bindings_claims_check",
           "value": "\"service_bindings\".\"claims\"::jsonb IS NOT NULL"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.log_config": {
+      "name": "log_config",
+      "schema": "",
+      "columns": {
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seal": {
+          "name": "seal",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "log_config_name_check": {
+          "name": "log_config_name_check",
+          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
+        },
+        "log_config_value_check": {
+          "name": "log_config_value_check",
+          "value": "\"log_config\".\"value\"::jsonb IS NOT NULL"
+        },
+        "log_config_seal_check": {
+          "name": "log_config_seal_check",
+          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       },
       "isRLSEnabled": false

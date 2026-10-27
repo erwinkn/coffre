@@ -129,7 +129,12 @@ export function refOf(input: Input): Ref {
  * the others uuids. Anyone computes it: SQL with `sha256()`.
  */
 export function objectKey(ref: Ref): string {
-  const hex = createHash('sha256').update(`coffre.object.v1\0${ref.kind}\0${ref.id}`).digest('hex');
+  return logObject(ref.kind, ref.id);
+}
+
+/** `objectKey` for any kind, the log's own included (`log_object` in SQL): a retention change's is ('log', 'retention'). */
+export function logObject(kind: string, id: string): string {
+  const hex = createHash('sha256').update(`coffre.object.v1\0${kind}\0${id}`).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 

@@ -966,22 +966,7 @@ export const logCheckpoints = sqliteTable(
   (table) => [
     check('log_checkpoints_changes_root_check', sql`octet_length(${table.changesRoot}) = 32`),
     check('log_checkpoints_uses_root_check', sql`octet_length(${table.usesRoot}) = 32`),
-  ],
-);
-
-export const logReplays = sqliteTable(
-  'log_replays',
-  {
-    upto: int64('upto').primaryKey(),
-    at: integer({ mode: 'number' }).notNull(),
-    state: text(),
-    stateHash: bytes('state_hash'),
-    verdict: text(),
-    mac: bytes('mac').notNull(),
-  },
-  (table) => [
-    check('log_replays_mac_check', sql`octet_length(${table.mac}) = 32`),
-    check('log_replays_state_check', sql`(${table.state} IS NULL) = (${table.stateHash} IS NULL) AND (${table.stateHash} IS NULL OR octet_length(${table.stateHash}) = 32)`),
+    index('log_checkpoints_floor_idx').on(table.atFloor, table.upto),
   ],
 );
 

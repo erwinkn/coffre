@@ -22,8 +22,8 @@ const running: RunningCheckpointer[] = [];
 beforeEach(async () => {
   for (const checkpointer of running.splice(0)) await checkpointer.stop();
   await resetDatabase(db.owner);
-  const { logUses, logBulk, logCheckpoints, logTiles, logReplays } = tablesOf(db.owner);
-  for (const table of [logUses, logBulk, logCheckpoints, logTiles, logReplays]) await db.owner.delete(table);
+  const { logUses, logBulk, logCheckpoints, logTiles } = tablesOf(db.owner);
+  for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
 });
 after(async () => {
   for (const checkpointer of running.splice(0)) await checkpointer.stop();
@@ -60,19 +60,19 @@ test("GET /audit/trees: 0.15's log verified, then a row changed around the app n
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/prod');
 
+  // A page's check: the newest checkpoint, which sealed each change before it answered, and nothing above it.
   const checked = await root.audit.verifyTrees();
-  assert.ok(checked.kept && checked.ok && checked.done, JSON.stringify(checked));
-  assert.ok(checked.sealed > 0);
-  // The whole walk, from the first entry: the same verdict.
-  const whole = await root.audit.verifyTreesWhole();
-  assert.ok(whole.kept && whole.ok && whole.done && whole.from === null, JSON.stringify(whole));
+  assert.ok(checked.kept && checked.ok && !checked.whole && checked.checkpoint !== null, JSON.stringify(checked));
+  // The whole walk, from the first entry, in one request: the same verdict.
+  const whole = await root.audit.verifyTrees({ whole: true });
+  assert.ok(whole.kept && whole.ok && whole.whole && whole.tooLarge === null && whole.sealed > 0, JSON.stringify(whole));
 
   // The database's writer renames `prod` out from under its seal: a slug-scoped role decides on it.
   const { environments } = tablesOf(db.owner);
   await db.owner.update(environments).set({ slug: 'staging' }).where(eq(environments.slug, 'prod'));
-  // A page's check says the last replay's verdict; the walk from the first entry, as the checkpoint job's, replays and
-  // holds every row.
-  const broken = await root.audit.verifyTreesWhole();
+  // A page's check reads no row; the whole walk replays the log and holds every row to it.
+  assert.ok((await root.audit.verifyTrees()).kept);
+  const broken = await root.audit.verifyTrees({ whole: true });
   assert.ok(broken.kept && !broken.ok);
   // Named by its path, as 0.14's faults are, not by its id.
   assert.ok(broken.problems.includes('the environment market/staging: its rows are not the object the log makes'), broken.problems.join('\n'));

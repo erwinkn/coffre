@@ -5,7 +5,7 @@ import { defineConfig } from 'tsdown';
 // Postgres driver and the migrator, which scripts/copy-migrations.ts puts
 // the migrations beside. It refuses SQLite before reaching its driver, which
 // stays out. The Postgres driver is @coffre/db's own copy of postgres.js,
-// its Node build. jsonc-parser's `main` is
+// on its Node platform (`#postgres/platform`'s default). jsonc-parser's `main` is
 // a UMD build that requires its parts at run time, which a bundle cannot
 // follow: its ES modules are bundled instead. libsodium, which seals the
 // GitHub secrets setup sets, is bundled too, at the lockfile's version,

@@ -194,8 +194,15 @@
     {
       "idx": 27,
       "version": "7",
-      "when": 1793129118559,
-      "tag": "0027_replay_015",
+      "when": 1793120000000,
+      "tag": "0027_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1793130000000,
+      "tag": "0028_verifier_015",
       "breakpoints": true
     }
   ]

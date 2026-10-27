@@ -229,24 +229,24 @@ export interface Vault {
    */
   waitSealed?(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>>;
   /**
-   * Check 0.15's log (docs/design/0.15-plan.md, PR 8): both trees from a
-   * signed pair, every entry by its MAC and request, the log replayed on
-   * from the replay the vault kept there (the newest, unless `from` names
-   * another pair, or `start`, the first), and, once a walk reaches the
-   * present, every input row and bulk row held to the replay. No more than
-   * one walk a call: `next` says where the next stretch goes on. With 0.14's
+   * Check 0.15's log (docs/design/0.15-plan.md, PR 8). A page's check, by
+   * default: the newest signed pair, held to the pairs held outside, and
+   * every entry after it by its MAC and request, a tick's worth (R25). With
+   * `whole`, the walk someone asks for: both trees from the first entry,
+   * every entry, the log replayed and every input row and bulk row held to
+   * the replay, all in this one call, batched, kept nowhere. With 0.14's
    * log alone, `kept` false; a vault older than 0.15 has none.
    */
   verifyTrees?(input: TreeVerificationInput): Promise<TreeVerification>;
 }
 
 export type TreeVerificationInput = {
-  /** The pair to go on from, by the number it seals up to, `start` for the first, or the newest replay kept when absent. */
-  from?: string;
+  /** The walk from the first entry, with the replay and the row audit, rather than a page's check. */
+  whole?: boolean;
 };
 
 /**
- * 0.15's log as a walk found it. `problems` names what does not hold, each
+ * 0.15's log as a check found it. `problems` names what does not hold, each
  * at its entry where it has one: a checkpoint whose heads the entries do
  * not give, an entry whose MAC fails, a replay fault, a row not the
  * replay's. Numbers are decimal text: the log's are 64-bit.
@@ -255,32 +255,22 @@ export type TreeVerification =
   | { kept: false }
   | {
       kept: true;
+      /** Whether this is the walk from the first entry, replay and rows included, or a page's check from the newest pair. */
+      whole: boolean;
       ok: boolean;
       problems: string[];
-      /** The pair the walk went on from, by its `upto`; null for the first. */
-      from: string | null;
-      /** The newest pair it walked, and when it was signed (ms); null before the first. */
+      /**
+       * Why a whole walk was not walked, said plainly, with what to do
+       * instead: the log holds more than this vault walks in one call (a
+       * Worker's CPU time). `ok` is false, and nothing is known broken.
+       */
+      tooLarge: string | null;
+      /** The newest pair checked, and when it was signed (ms); null before the first. */
       checkpoint: { upto: string; at: number } | null;
-      /** Pairs walked, entries sealed under them, and entries above the newest. */
+      /** Pairs walked past the start, entries sealed under them, and entries above the newest. */
       checkpoints: number;
       sealed: number;
       unsealed: number;
-      /** Whether it reached the present; else where the next stretch goes on. */
-      done: boolean;
-      next: string | null;
-      /**
-       * When every input row and bulk row was last held to the replay (ms):
-       * by this walk, or, for a check from a kept replay, by the checkpoint
-       * job's last; what it found is among `problems`. Null short of the
-       * present.
-       */
-      audited: number | null;
-      /**
-       * Whether that audit is out of date: older than three runs of the
-       * checkpoint job. Not known to hold, nor known not to: the seal is
-       * withheld, the log not called broken.
-       */
-      stale: boolean;
     };
 
 /**

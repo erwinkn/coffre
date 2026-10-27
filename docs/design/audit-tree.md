@@ -543,8 +543,9 @@ on Node, `durableSealThrough(…)` on Workers. `sealThroughDouble` in
   `make_day`, `make_tiles`), the freshness step, and the cut named in the
   uses tree's coordinates.
 - **PR 8, the verifier's surfaces:** built (`packages/vault/src/verifier.ts`;
-  0.15-plan.md, "As built: PR 8"), but for the start from a retention cut,
-  which PR 7 brings.
+  0.15-plan.md, "As built: PR 8"): a page's check from the newest pair,
+  and the whole walk, which walks the uses tree from the newest retention
+  cut.
 
 ## The spec, and where the code holds it
 
@@ -565,7 +566,7 @@ the code holds it and the tests that break it.
 | MacChecked | `tick` refuses an entry whose MAC fails | "nothing is sealed over a forged entry…" |
 | WaitForSeal | `sealThrough`: sealed, proved, then witnessed or 2 s | "a change answers once sealed…", "review r1: a change whose entry…" |
 | Witness | `witnessPair`, the pumps | (c), "a change waits for the witness…" |
-| RequestIdChecked | the verifier's `check` (verifier.ts): each request once in a walk, and the unique indexes that refuse a copy across stretches still there | verifier.test.ts, "a forged use is named…" |
+| RequestIdChecked | the verifier's `check` (verifier.ts): each request once in a walk, and the unique indexes that refuse a copy further apart still there | verifier.test.ts, "a page's check names a forged entry…" |
 | PairVerified | `verifyLog`: a row whose notes do not open as one pair is a problem | "the pair is one value…" |
 | invariants KindKept, PairConsistent, AnsweredChangeKept | the rows above together | as above |
 

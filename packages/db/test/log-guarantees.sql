@@ -47,21 +47,16 @@ BEGIN
 END
 $$;
 
--- The verifier (0027, plan PR 8): the vault keeps its replays through keep_replay, never writing them itself, and
--- reads the columns the credentials', bindings' and references' objects are made of, never a token's hash or MAC.
+-- The verifier (0028, plan PR 8) reads the columns the credentials', bindings' and references' objects are made of,
+-- never a token's hash or MAC.
 DO $$
 DECLARE
     attempt text;
 BEGIN
-    PERFORM keep_replay(9223372036854775806, 0, NULL, NULL, '{}', decode(repeat('00', 32), 'hex'), '{9223372036854775806}', '{}');
-    PERFORM keep_replay(9223372036854775805, 0, NULL, NULL, '{}', decode(repeat('00', 32), 'hex'), '{9223372036854775806,9223372036854775805}', '{}');
     PERFORM count(*) FROM (SELECT id, principal, kind, scope, revoked_at, expires_at, not_after, seal FROM credentials) c;
     PERFORM count(*) FROM (SELECT id, seal FROM service_bindings) b;
     PERFORM count(*) FROM (SELECT secret_id, source_secret_id, created_seq FROM secret_references) r;
     FOREACH attempt IN ARRAY ARRAY[
-        $q$UPDATE log_replays SET state = '{}'$q$,
-        $q$INSERT INTO log_replays (upto, at, verdict, mac) VALUES (1, 0, '{}', decode(repeat('00', 32), 'hex'))$q$,
-        $q$DELETE FROM log_replays$q$,
         $q$SELECT token_hash FROM credentials$q$,
         $q$SELECT auth_mac FROM credentials$q$,
         $q$SELECT * FROM service_bindings$q$,
@@ -73,7 +68,7 @@ BEGIN
         EXCEPTION WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    RAISE NOTICE 'PASS: coffre_vault keeps its replays and reads the objects'' columns, no more';
+    RAISE NOTICE 'PASS: coffre_vault reads the objects'' columns, no more';
 END
 $$;
 
@@ -86,6 +81,21 @@ BEGIN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';
     END IF;
     RAISE NOTICE 'PASS: only the vault reaches the 0.15 log';
+END
+$$;
+
+-- Retention's functions (0027): the vault's alone, each holding it to what a sealed retention change cuts.
+DO $$
+DECLARE
+    f text;
+BEGIN
+    FOREACH f IN ARRAY ARRAY['log_retention(text, bigint, text, bytea)', 'log_cut()', 'drop_day(date)', 'drop_tiles(bigint)'] LOOP
+        IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'PASS: retention''s functions are the vault''s alone';
 END
 $$;
 

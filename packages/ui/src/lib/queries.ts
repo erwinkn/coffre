@@ -374,16 +374,9 @@ async function verifyChain(client: CoffreClient) {
   // Each settled apart: a check of 0.15's log that could not run says so beside 0.14's verdict, never in its place.
   const [chain, trees] = await Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()]);
   if (chain.status === 'rejected') return chainUnknown(chain.reason);
-  if (trees.status === 'fulfilled') {
-    const result = chainResult(chain.value, false, trees.value);
-    // A verdict out of date is not known to hold: not checked, rather than broken.
-    const verdict = trees.value;
-    return verdict.kept && verdict.ok && verdict.stale && verdict.audited !== null && result.integrity === 'intact'
-      ? { ...result, treesFailed: `its last verdict, from ${new Date(verdict.audited).toISOString()}, is out of date: the checkpoint job has not reached the present since` }
-      : result;
-  }
+  if (trees.status === 'fulfilled') return chainResult(chain.value, false, trees.value);
   const unknown = chainUnknown(trees.reason);
-  return { ...chainResult(chain.value, false), ...(unknown.integrity === 'unknown' && chain.value.ok ? { treesFailed: unknown.problem } : {}) };
+  return { ...chainResult(chain.value, false), ...(unknown.integrity === 'unknown' && chain.value.ok ? { treesFailed: `coffre could not check the sealed log: ${unknown.problem}` } : {}) };
 }
 
 /** 0.15's log as its check found it (`audit.verifyTrees`): `kept` false where the instance keeps 0.14's alone. */
@@ -393,18 +386,17 @@ export type TreesResult = Awaited<ReturnType<CoffreClient['audit']['verifyTrees'
  * A verdict as the page shows it: `whole` when it comes from the walk
  * from the first entry, which someone asked for, not from the newest
  * checkpoint's. Where the instance keeps 0.15's log too, its check
- * (`trees`) is part of it: what it finds breaks the log as 0.14's would, and
- * a check that has not reached the present leaves it partly checked.
+ * (`trees`) is part of it: what it finds breaks the log as 0.14's would.
  */
 export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: TreesResult = { kept: false }) {
-  if (result.ok && trees.kept && !trees.ok) {
+  if (result.ok && trees.kept && trees.problems.length > 0) {
     const more = trees.problems.length - 1;
     return {
       integrity: 'broken' as const,
       through: result.through,
       failedAtSeq: null,
       author: 'vault' as const,
-      reason: `the sealed log: ${trees.problems[0] ?? 'it does not verify'}${more > 0 ? ` (and ${more} more)` : ''}`,
+      reason: `the sealed log: ${trees.problems[0]}${more > 0 ? ` (and ${more} more)` : ''}`,
     };
   }
   return result.ok
@@ -420,8 +412,8 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
         pending: result.pending ?? 0,
         /** Why the check of 0.15's log could not run, when it could not: the chain's verdict stands, the sealed log's is not known. */
         treesFailed: null as string | null,
-        /** 0.15's log, where it is kept: the newest pair its check reached, whether it reached the present, and when its rows were last audited. */
-        trees: trees.kept ? { checkpoint: trees.checkpoint, done: trees.done, audited: trees.audited } : null,
+        /** 0.15's log, where it is kept: the newest pair its check reached. */
+        trees: trees.kept ? { checkpoint: trees.checkpoint } : null,
       }
     : {
         integrity: 'broken' as const,

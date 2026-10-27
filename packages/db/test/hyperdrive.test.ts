@@ -14,7 +14,6 @@ import { sql } from 'drizzle-orm';
 import { openDatabase } from '../src/connect.ts';
 import { createDatabase, QueryOutsideTransaction } from '../src/database.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
-import type postgres from '#postgres';
 
 import { postgresClient } from '../src/postgres.ts';
 
@@ -253,7 +252,7 @@ test("with closeIdleMs, what outlives a call closes its connection once idle, an
  * comes back: the same value, in one round trip. postgres.js asks the server
  * for a statement's types before it sends its values, a round trip more,
  * unless every value goes as text the server types, as node-postgres sends
- * them; coffre's copy asks only for an array or an object (vendor/postgres).
+ * them; coffre's copy asks only for an array or an object (src/postgres-js).
  */
 const KINDS: { kind: string; query: ReturnType<typeof sql>; back: unknown; trips?: number }[] = [
   { kind: 'text', query: sql`select ${'héllo, "wörld"'}::text as v`, back: 'héllo, "wörld"' },
@@ -346,17 +345,14 @@ test('an array or a date sent as a parameter goes as node-postgres sends one: as
     // In a transaction, and a savepoint in it, the same.
     const [inside] = await client.begin(async (tx) => tx.savepoint(async (sp) => sp.unsafe('select $1::bytea[] as bytes', [[Buffer.from([7])]])));
     assert.deepEqual(inside!.bytes, [Buffer.from([7])]);
-    // The tagged template's values too, which postgres.js would bind as their first element's type.
-    // Not in PostgresClient's type, but a transaction's client has it: the template's values are converted all the same.
-    const viaTemplate = async (sql: postgres.Sql) => {
-      const [row] = await sql`select ${[1, 2] as never}::int[] as ints, ${[true, false] as never}::bool[] as bools, ${[Buffer.from([1]), Buffer.from([2])] as never}::bytea[] as bytes, ${['x', 'y'] as never}::text[] as texts`;
-      return { ...row };
-    };
-    const asTemplate = { ints: [1, 2], bools: [true, false], bytes: [Buffer.from([1]), Buffer.from([2])], texts: ['x', 'y'] };
+    // Arrays the driver would bind as their first element's type, a boolean's included, in a savepoint too.
     let trips = proxy.trips;
-    assert.deepEqual(await viaTemplate(client as unknown as postgres.Sql), asTemplate);
+    const firsts = [[1, 2], [true, false], [Buffer.from([1]), Buffer.from([2])], ['x', 'y']] as never[];
+    const typed = 'select $1::int[] as ints, $2::bool[] as bools, $3::bytea[] as bytes, $4::text[] as texts';
+    const back = { ints: [1, 2], bools: [true, false], bytes: [Buffer.from([1]), Buffer.from([2])], texts: ['x', 'y'] };
+    assert.deepEqual({ ...(await client.unsafe(typed, firsts))[0] }, back);
     assert.equal(proxy.trips - trips, 1);
-    assert.deepEqual(await client.begin(async (tx) => tx.savepoint(async (sp) => viaTemplate(sp as unknown as postgres.Sql))), asTemplate);
+    assert.deepEqual({ ...(await client.begin(async (tx) => tx.savepoint(async (sp) => sp.unsafe(typed, firsts))))[0] }, back);
     // Bytes of any view, and undefined, as node-postgres sends them.
     trips = proxy.trips;
     const view = new Uint8Array([9, 8, 7, 6]);

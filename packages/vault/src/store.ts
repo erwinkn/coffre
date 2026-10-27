@@ -2,7 +2,7 @@ import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { isTombstone, TOMBSTONE } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
-import { prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
+import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns, withinBytes } from '@coffre/db/log';
@@ -888,7 +888,7 @@ export type Held = { ref: Ref; row: Input | null; seal: Buffer | null; sealOnly?
  * ones too; credentials, their end the earlier of expiry and hard end;
  * keys, archived ones with no object, a reference with its newest
  * reference's source; environments; the roles and the policy. Every row:
- * the checkpoint job's audit, never a page's (verifier.ts). A row a writer
+ * a whole walk's audit, never a page's (verifier.ts). A row a writer
  * made that reads as no object is held as unreadable, never thrown on.
  */
 export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
@@ -953,71 +953,6 @@ export async function bulkRows(db: Queryable): Promise<Map<string, Map<string, n
     by.set(principal, held);
   }
   return by;
-}
-
-/**
- * A row the verifier kept at a pair (`log_replays`): the replay there and
- * its hash, null for a walk that found the log broken; what a walk that
- * reached the present found (`verdict`), null for a stretch short of it.
- */
-export type KeptReplay = { upto: bigint; at: number; state: string | null; stateHash: Buffer | null; verdict: string | null; mac: Buffer };
-
-/** The pairs kept rows are at, newest first: those with a replay to go on from, or with a verdict. */
-export async function keptUptos(db: Queryable, holding: 'state' | 'verdict'): Promise<bigint[]> {
-  const { logReplays } = tablesOf(db);
-  const column = holding === 'state' ? logReplays.stateHash : logReplays.verdict;
-  return (await db.select({ upto: logReplays.upto }).from(logReplays).where(isNotNull(column)).orderBy(desc(logReplays.upto))).map((row) => BigInt(row.upto));
-}
-
-/** The row kept at `upto`; its replay itself only when `withState`, the page's check never reading it. */
-export async function keptReplay(db: Queryable, upto: bigint, withState: boolean): Promise<KeptReplay | null> {
-  const { logReplays } = tablesOf(db);
-  const [row] = await db.select({
-    upto: logReplays.upto, at: logReplays.at, stateHash: logReplays.stateHash, verdict: logReplays.verdict, mac: logReplays.mac,
-    state: withState ? logReplays.state : sql<null>`NULL`,
-  }).from(logReplays).where(eq(logReplays.upto, upto));
-  if (row === undefined) return null;
-  return { upto: BigInt(row.upto), at: Number(row.at), state: row.state ?? null, stateHash: row.stateHash == null ? null : Buffer.from(row.stateHash), verdict: row.verdict ?? null, mac: Buffer.from(row.mac) };
-}
-
-/**
- * Keep a row at its pair:
- * - **With a verdict** (a walk that reached the present), it replaces the
- *   one kept there before, a fresh audit on a quiet log. Only such walks
- *   write verdicts (the checkpoint job's, a whole walk's last stretch), so
- *   it is never an older one.
- * - **A stretch's,** with no verdict, never replaces anything.
- *
- * Then it forgets, but never the newest verdict or the newest replay:
- * - those at `forged`, which the walk found were not the vault's;
- * - those at `done`, a stretch's the walk went on from: a whole walk holds
- *   one at a time (review r6);
- * - those older than it and kept for longer than `keptMs`: each a full
- *   copy of the replay.
- *
- * On Postgres, migration 0027's `keep_replay`, within bounded lock waits:
- * a row a writer holds locked fails the keep rather than hanging the job.
- * A kept row is never edited in place.
- */
-export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number, forged: readonly bigint[] = [], done: readonly bigint[] = []): Promise<void> {
-  if (engineOf(db) === 'postgres') {
-    // Migration 0027's keep_replay, which does the same as below, as the table's owner: the vault's login writes none
-    // of 0.15's log itself. Its bound is its own, `keptMs`'s ten minutes.
-    await rowsOf(db, sql`SELECT keep_replay(${replay.upto}::bigint, ${replay.at}::bigint, ${replay.state}::text, ${replay.stateHash}::bytea, ${replay.verdict}::text,
-      ${replay.mac}::bytea, ${sql.param(forged.map(String))}::bigint[], ${sql.param(done.map(String))}::bigint[])`);
-    return;
-  }
-  const { logReplays } = tablesOf(db);
-  await db.transaction(async (tx) => {
-    await tx.delete(logReplays).where(inArray(logReplays.upto, replay.verdict === null ? [...forged] : [replay.upto, ...forged]));
-    await tx.insert(logReplays).values(replay).onConflictDoNothing();
-    const newest = (column: string) => sql`coalesce((SELECT max(k.upto) FROM log_replays k WHERE ${sql.raw(`k.${column}`)} IS NOT NULL), -1)`;
-    const kept = and(sql`${logReplays.upto} <> ${replay.upto}`, sql`${logReplays.upto} <> ${newest('verdict')}`, sql`${logReplays.upto} <> ${newest('state_hash')}`);
-    await tx.delete(logReplays).where(and(kept, or(
-      done.length === 0 ? sql`false` : inArray(logReplays.upto, [...done]),
-      and(lt(logReplays.upto, replay.upto), lt(logReplays.at, replay.at - keptMs)),
-    )));
-  });
 }
 
 /**

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "caf3f054-7f35-4e4f-ad83-8e1698ea18cd",
+  "id": "d0bf125e-7dbb-4e57-bc60-11ffbebf2fe4",
   "prevId": "14afe218-058f-4b29-85c1-c0685ec425ef",
   "tables": {
     "audit_chain_head": {
@@ -1700,7 +1700,16 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "log_checkpoints_floor_idx": {
+          "name": "log_checkpoints_floor_idx",
+          "columns": [
+            "at_floor",
+            "upto"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -1712,50 +1721,6 @@
         "log_checkpoints_uses_root_check": {
           "name": "log_checkpoints_uses_root_check",
           "value": "octet_length(\"log_checkpoints\".\"uses_root\") = 32"
-        }
-      }
-    },
-    "log_config": {
-      "name": "log_config",
-      "columns": {
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "value": {
-          "name": "value",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "seal": {
-          "name": "seal",
-          "type": "blob",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "log_config_name_check": {
-          "name": "log_config_name_check",
-          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
-        },
-        "log_config_value_check": {
-          "name": "log_config_value_check",
-          "value": "json_valid(\"log_config\".\"value\")"
-        },
-        "log_config_seal_check": {
-          "name": "log_config_seal_check",
-          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       }
     },
@@ -1786,67 +1751,6 @@
         "log_fence_only_row_check": {
           "name": "log_fence_only_row_check",
           "value": "\"log_fence\".\"only_row\""
-        }
-      }
-    },
-    "log_replays": {
-      "name": "log_replays",
-      "columns": {
-        "upto": {
-          "name": "upto",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "at": {
-          "name": "at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "state_hash": {
-          "name": "state_hash",
-          "type": "blob",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "verdict": {
-          "name": "verdict",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "mac": {
-          "name": "mac",
-          "type": "blob",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "log_replays_mac_check": {
-          "name": "log_replays_mac_check",
-          "value": "octet_length(\"log_replays\".\"mac\") = 32"
-        },
-        "log_replays_state_check": {
-          "name": "log_replays_state_check",
-          "value": "(\"log_replays\".\"state\" IS NULL) = (\"log_replays\".\"state_hash\" IS NULL) AND (\"log_replays\".\"state_hash\" IS NULL OR octet_length(\"log_replays\".\"state_hash\") = 32)"
         }
       }
     },
@@ -3193,6 +3097,50 @@
         "service_bindings_claims_check": {
           "name": "service_bindings_claims_check",
           "value": "json_valid(\"service_bindings\".\"claims\")"
+        }
+      }
+    },
+    "log_config": {
+      "name": "log_config",
+      "columns": {
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "seal": {
+          "name": "seal",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "log_config_name_check": {
+          "name": "log_config_name_check",
+          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
+        },
+        "log_config_value_check": {
+          "name": "log_config_value_check",
+          "value": "json_valid(\"log_config\".\"value\")"
+        },
+        "log_config_seal_check": {
+          "name": "log_config_seal_check",
+          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       }
     },

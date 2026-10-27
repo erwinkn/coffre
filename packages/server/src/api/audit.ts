@@ -526,20 +526,18 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
 
 /**
  * 0.15's log checked by the vault (`verifyTrees`, docs/design/0.15-plan.md
- * PR 8): both trees from a signed pair, every entry by its MAC and request,
- * the log replayed on from the replay the vault last kept, which the
- * checkpoint job keeps moving, so a check reads a beat's worth; once a walk
- * reaches the present, every input row and bulk row held to the replay.
- * With `from`, a stretch of the walk from the first entry (`start`), then
- * each `next`. With 0.14's log alone, `kept` false. For whoever reads the
- * whole log (`readsWholeLog`), as `verifyAudit`.
+ * PR 8): a page's check, the newest signed checkpoint and every entry since,
+ * by its MAC and request; with `whole`, the walk from the first entry, both
+ * trees, the replay and every input row and bulk row held to it, in this one
+ * request. With 0.14's log alone, `kept` false. For whoever reads the whole
+ * log (`readsWholeLog`), as `verifyAudit`.
  */
-export async function verifyAuditTrees(ctx: ApiContext, query: { from?: string } = {}): Promise<TreeVerification> {
+export async function verifyAuditTrees(ctx: ApiContext, query: { whole?: '1' } = {}): Promise<TreeVerification> {
   if (!readsWholeLog(ctx.caller)) {
     throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
   }
   if (ctx.vault.verifyTrees === undefined) return { kept: false };
-  const verified = await ctx.vault.verifyTrees(query.from === undefined ? {} : { from: query.from });
+  const verified = await ctx.vault.verifyTrees(query.whole === '1' ? { whole: true } : {});
   return verified.kept && verified.problems.length > 0 ? { ...verified, problems: await namedObjects(ctx, verified.problems) } : verified;
 }
 

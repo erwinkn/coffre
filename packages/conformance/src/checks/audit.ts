@@ -77,8 +77,8 @@ export async function verification(deployment: Deployment, { admin }: People): P
   });
   // 0.15's log, where the deployment keeps it (plan PR 8): its trees, every entry and the replay from the first entry,
   // and every input row and bulk row the replay's. A deployment of 0.14's log alone has none (`kept` false).
-  const trees = await admin.api.audit.verifyTreesWhole();
-  expect(!trees.kept || (trees.ok && trees.done), "0.15's log does not verify from its first entry", trees);
+  const trees = await admin.api.audit.verifyTrees({ whole: true });
+  expect(!trees.kept || trees.ok, "0.15's log does not verify from its first entry", trees);
   const page = await admin.browser.fetch('/audit');
   const html = await page.text();
   expect(page.status === 200 && html.includes('chain-seal') && !html.includes('Verifying'), 'the audit page was not sent with its verification result', { status: page.status });

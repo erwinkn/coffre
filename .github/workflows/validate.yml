@@ -100,7 +100,7 @@ jobs:
 
   # The Formal model is three jobs. The plan hashes everything TLC's answer
   # depends on (scripts/formal-key.sh) and looks for a green run of that
-  # hash; nine shards run TLC when there is none; `Formal model` is the one
+  # hash; ten shards run TLC when there is none; `Formal model` is the one
   # job Validate asks about. docs/formal.md, "In CI".
   formal-plan:
     needs: changes
@@ -191,8 +191,8 @@ jobs:
       matrix:
         # scripts/formal.sh shard_of; the longest, Tampering, is 7 to 11 minutes. 4g, not the script's 1g: Tampering
         # took 11 on a 4-core, 16 GB runner at 1g and 7 at 4g or 8g, and 11 to 12 at 12g, or at 8g with 2 or 8 workers.
-        # The hotpath* and seal* shards: 0.15's models (HotPathOne in four; Seal and Migration015 in two), each about 10 minutes on CI.
-        shard: [tampering, large, rest, hotpath, hotpath-policy, hotpath-bulk, hotpath-skew, seal, seal-plugin]
+        # The hotpath* and seal* shards: 0.15's models (HotPathOne in four; Seal and Migration015 in three), each about 10 minutes on CI.
+        shard: [tampering, large, rest, hotpath, hotpath-policy, hotpath-bulk, hotpath-skew, seal, seal-plugin, seal-retention]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:

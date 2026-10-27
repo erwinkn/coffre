@@ -1,21 +1,20 @@
 // Node's pool: which connection a statement takes. postgres.js took the one
 // idle the longest, so a steady load cycled every connection of the pool,
 // each backend's caches cold, and Postgres spent ~8% more CPU per use at a
-// pool of 16 than node-postgres, which takes the one idle the shortest. The
-// copy in vendor/postgres takes that one too.
+// pool of 16 than node-postgres, which takes the one idle the shortest.
+// Coffre's own, in src/postgres-js, takes that one too.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer, type AddressInfo } from 'node:net';
-
-import postgres from '#postgres';
 
 import { sql } from 'drizzle-orm';
 
 import { createDatabase } from '../src/database.ts';
 import { isUnavailable } from '../src/dialect.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
-import { postgresClient, postgresSession, SessionLost } from '../src/postgres.ts';
+import postgres from '../src/postgres-js/index.ts';
+import { postgresClient, postgresOptions, postgresSession, SessionLost } from '../src/postgres.ts';
 
 const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
@@ -36,8 +35,7 @@ test('a statement takes the connection idle the shortest: one after another, the
 
 test("a transaction's BEGIN queued behind as many statements as a connection pipelines still learns its connection, and ends its transaction", { skip }, async () => {
   // Two at most in flight on the connection: the BEGIN goes behind two.
-  // max_pipeline, which postgres.js's types leave out.
-  const client = postgres(DATABASE, { max: 1, max_pipeline: 2, prepare: false, fetch_types: false, onnotice: () => {} } as postgres.Options<{}>);
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 2, onnotice: () => {} });
   try {
     await client.unsafe('select 1');
     const before = [client.unsafe('select pg_sleep(0.05)').execute(), client.unsafe('select 1').execute()];
@@ -162,7 +160,7 @@ test("a URL's bounds reach the server as the connection starts, as node-postgres
 test('a client ending when its connection is cut opens no other for what waited: those fail, and the client closes', { skip, timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   // One connection, one statement on it at a time: the second waits on the connection, the third for one.
-  const client = postgres(DATABASE, { max: 1, max_pipeline: 1, prepare: false, fetch_types: false, onnotice: () => {}, connection: { application_name: 'coffre-ending-test' } } as postgres.Options<{}>);
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 1, onnotice: () => {}, connection: { application_name: 'coffre-ending-test' } });
   try {
     const asked = ['select pg_sleep(5)', 'select 2', 'select 3'].map((text) => client.unsafe(text).execute().then(() => 'answered', (error: { code?: string }) => error.code));
     for (let tries = 0; ; tries += 1) {
@@ -187,7 +185,7 @@ test('a client ending when its connection is cut opens no other for what waited:
   }
 });
 
-test('an ending client reserves no connection and listens on none; one reserved before, released after, ends with it', { skip, timeout: 10_000 }, async () => {
+test('an ending client reserves no connection; one reserved before, released after, ends with it', { skip, timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const backends = async () => ((await owner.unsafe("select count(*)::int as n from pg_stat_activity where application_name = 'coffre-reserve-test'")) as unknown as [{ n: number }])[0].n;
   try {
@@ -197,7 +195,6 @@ test('an ending client reserves no connection and listens on none; one reserved 
     const closing = client.end();
     await new Promise((resolve) => setImmediate(resolve));
     await assert.rejects(client.reserve(), { code: 'CONNECTION_ENDED' });
-    await assert.rejects(client.listen('coffre_reserve_test', () => {}), { code: 'CONNECTION_ENDED' });
     await closing;
     // Reserved before the end: the end waits for its release, then the connection closes.
     const other = postgresClient(DATABASE, { max: 2, application_name: 'coffre-reserve-test' });
@@ -213,5 +210,116 @@ test('an ending client reserves no connection and listens on none; one reserved 
     assert.equal(await backends(), 0);
   } finally {
     await owner.end();
+  }
+});
+
+test("a connection cut while it answers leaves nothing of that answer to the next query: its error, its rows", { skip, timeout: 15_000 }, async () => {
+  const owner = postgresClient(DATABASE, { max: 1 });
+  const client = postgresClient(DATABASE, { max: 1, application_name: 'coffre-cut-test' });
+  try {
+    // Two rows answered, then a wait, during which the backend is ended.
+    const cut = client.unsafe('select n, pg_sleep(case when n = 3 then 5 else 0 end) from generate_series(1, 3) n').execute().then(() => null, (error: unknown) => error);
+    for (let tries = 0; ; tries += 1) {
+      const [{ n }] = (await owner.unsafe("select count(*)::int as n from pg_stat_activity where application_name = 'coffre-cut-test' and wait_event = 'PgSleep'")) as unknown as [{ n: number }];
+      if (n > 0) break;
+      assert.ok(tries < 200, 'the statement never waited');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await owner.unsafe("select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'coffre-cut-test'");
+    assert.ok(await cut);
+    // Upstream failed the first with the dead connection's error, and answered the second after two holes.
+    assert.deepEqual([...await client.unsafe('select 7 as seven')], [{ seven: 7 }]);
+    assert.deepEqual([...await client.unsafe('select 8 as eight')], [{ eight: 8 }]);
+  } finally {
+    await client.end();
+    await owner.end();
+  }
+});
+
+/** A server on 127.0.0.1 that answers each connection's first message with `answer`, and what follows with `then`; its URL. */
+async function fakeServer(answer: (socket: import('node:net').Socket) => void, then?: (socket: import('node:net').Socket, data: Buffer) => void) {
+  const server = createServer((socket) => {
+    socket.on('error', () => {});
+    socket.once('data', () => {
+      answer(socket);
+      if (then) socket.on('data', (data: Buffer) => then(socket, data));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return { url: `postgresql://u:p@127.0.0.1:${(server.address() as AddressInfo).port}/coffre`, close: async () => { server.close(); await once(server, 'close'); } };
+}
+
+/** A message from the server: its type, a length, the body. */
+const message = (type: string, ...parts: Buffer[]) => {
+  const body = Buffer.concat(parts);
+  const header = Buffer.alloc(5);
+  header.write(type, 0);
+  header.writeInt32BE(body.length + 4, 1);
+  return Buffer.concat([header, body]);
+};
+const int32 = (n: number) => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
+
+/** Whether `work` left a promise rejected with no one to catch it. */
+async function leavesNothingUnhandled(work: () => Promise<void>): Promise<unknown[]> {
+  const unhandled: unknown[] = [];
+  const hear = (reason: unknown) => void unhandled.push(reason);
+  process.on('unhandledRejection', hear);
+  try {
+    await work();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    process.off('unhandledRejection', hear);
+  }
+  return unhandled;
+}
+
+test('an opening the client cannot finish fails its query and closes, with nothing left unhandled: a TLS key it cannot read, a SCRAM message it cannot, a sign-in it has not, a socket it cannot make', { timeout: 10_000 }, async () => {
+  // TLS: the server says yes to it, and the client's own key is no key.
+  const tls = await fakeServer((socket) => socket.write('S'));
+  // SCRAM: the server asks for it, then answers the client's first message without its salt.
+  const scram = await fakeServer(
+    (socket) => socket.write(message('R', int32(10), Buffer.from('SCRAM-SHA-256\0\0'))),
+    (socket) => socket.write(message('R', int32(11), Buffer.from('r=nonce,i=4096'))),
+  );
+  // GSSAPI, which the client has not.
+  const gss = await fakeServer((socket) => socket.write(message('R', int32(7))));
+  try {
+    const unhandled = await leavesNothingUnhandled(async () => {
+      // Each fails the query that opened it, closes, and opens again for the next, which fails as well; then the client ends.
+      const keyless = postgres({ ...postgresOptions(tls.url), ssl: { key: 'not a key', cert: 'not a cert' }, max: 1, connect_timeout: 5 });
+      await assert.rejects(keyless.unsafe('select 1'), { code: 'ERR_OSSL_PEM_NO_START_LINE' });
+      await assert.rejects(keyless.unsafe('select 1'), { code: 'ERR_OSSL_PEM_NO_START_LINE' });
+      await keyless.end();
+      const saltless = postgres({ ...postgresOptions(scram.url), max: 1, connect_timeout: 5 });
+      await assert.rejects(saltless.unsafe('select 1'));
+      await assert.rejects(saltless.unsafe('select 1'));
+      await saltless.end();
+      const kerberos = postgres({ ...postgresOptions(gss.url), max: 1, connect_timeout: 0 });
+      await assert.rejects(kerberos.unsafe('select 1'), { code: 'AUTH_TYPE_NOT_SUPPORTED' });
+      await assert.rejects(kerberos.unsafe('select 1'), { code: 'AUTH_TYPE_NOT_SUPPORTED' });
+      await kerberos.end();
+      const socketless = postgres({ ...postgresOptions(DATABASE), socket: () => Promise.reject(new Error('no socket')), max: 1 });
+      await assert.rejects(socketless.unsafe('select 1'), { message: 'no socket' });
+      await assert.rejects(socketless.unsafe('select 1'), { message: 'no socket' });
+      await socketless.end();
+    });
+    assert.deepEqual(unhandled, []);
+  } finally {
+    await tls.close();
+    await scram.close();
+    await gss.close();
+  }
+});
+
+test('a COPY reaching the client fails, and leaves the connection to the next statement', { skip }, async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  try {
+    await assert.rejects(client.unsafe('copy (select 1) to stdout'), { code: 'COPY_NOT_SUPPORTED' });
+    await client.unsafe('create temporary table copied (n int)');
+    await assert.rejects(client.unsafe('copy copied from stdin'));
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from copied')], [{ n: 0 }]);
+  } finally {
+    await client.end();
   }
 });

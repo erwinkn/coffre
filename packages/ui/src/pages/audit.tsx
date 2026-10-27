@@ -45,7 +45,7 @@ export function AuditPage() {
   const [whole, setWhole] = useState<ChainResult | null>(null);
   const chain = shownChain(verification.data, whole);
   // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
-  const [walked, setWalked] = useState<{ through: number | null; trees?: string } | null>(null);
+  const [walked, setWalked] = useState<{ through: number | null; trees?: true } | null>(null);
   const [walkFailed, setWalkFailed] = useState<string | null>(null);
   const walkWhole = async () => {
     setWalked({ through: null });
@@ -54,9 +54,11 @@ export function AuditPage() {
     let verdict: ChainResult;
     try {
       const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
-      // 0.15's log after 0.14's, where the instance keeps it: a stretch a request too.
-      const trees = chain.ok ? await client.audit.verifyTreesWhole((stretch) => setWalked({ through: chain.through, trees: stretch.kept ? (stretch.next ?? undefined) : undefined })) : undefined;
-      verdict = chainResult(chain, true, trees);
+      // 0.15's log after 0.14's, where the instance keeps it: one request, which walks it whole.
+      if (chain.ok) setWalked({ through: chain.through, trees: true });
+      const trees = chain.ok ? await client.audit.verifyTrees({ whole: true }) : undefined;
+      // Larger than its vault walks in one call, and nothing found as far as it went: not walked, and where to walk it.
+      verdict = trees?.kept === true && trees.tooLarge !== null && trees.problems.length === 0 ? { integrity: 'unknown' as const, problem: trees.tooLarge } : chainResult(chain, true, trees);
     } catch (error) {
       verdict = chainUnknown(error);
     }
@@ -417,7 +419,7 @@ function ChainStatus({
   onWalk,
 }: {
   chain: ChainResult;
-  walked: { through: number | null; trees?: string } | null;
+  walked: { through: number | null; trees?: true } | null;
   walkFailed: string | null;
   /** The check on load is being asked again. */
   retrying: boolean;
@@ -428,8 +430,8 @@ function ChainStatus({
     return (
       <span className="chain-note" role="status">
         <Spinner size={14} />
-        {walked.trees !== undefined
-          ? `Replayed through ${Number(walked.trees).toLocaleString('en')}…`
+        {walked.trees === true
+          ? 'Replaying the sealed log…'
           : walked.through === null
             ? 'Verifying from the first entry…'
             : `Verified through ${walked.through.toLocaleString('en')}…`}
@@ -485,14 +487,16 @@ function ChainStatus({
     : signed === null
       ? 'Audit log verified by the app and vault keys, not signed yet.'
       : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
-  // 0.15's log, where it is kept: its two trees, every entry and the replay, and every row held to the replay.
+  // 0.15's log, where it is kept: on a visit, its newest checkpoint and every entry since; walked whole, its two trees,
+  // every entry and the replay, and every row held to the replay.
   const trees = chain.trees;
   // Its own numbers are not the entries' above: it is named by when its newest checkpoint was signed.
   const sealed = trees?.checkpoint == null ? null : `its checkpoint of ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
   const replayed = trees === null
     ? ''
-    : ` The sealed log${chain.whole ? ', from its first entry,' : ''}: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row the one the log makes${trees.audited === null || chain.whole ? '' : ` when last checked, at ${absolute(new Date(trees.audited).toISOString(), false)} UTC`}.`;
-  const behind = trees !== null && !trees.done;
+    : chain.whole
+      ? ` The sealed log, from its first entry: its trees, every entry and its replay verified${sealed === null ? ', nothing sealed yet' : ` through ${sealed}`}, and every access row the one the log makes.`
+      : ` The sealed log: ${sealed === null ? 'nothing sealed yet' : sealed}, and every entry since, verified; its replay, and every access row, by Verify whole log.`;
   // Not known whether it holds: no seal over it, as over a log verified in part.
   const unchecked = chain.treesFailed !== null;
   return (
@@ -525,31 +529,21 @@ function ChainStatus({
           </button>
         </Toggletip>
       )}
-      {behind && (
-        <Toggletip
-          align="end"
-          label={`The sealed log is verified${sealed === null ? '' : ` through ${sealed}`}. A check goes no further than one stretch past the newest verdict, which the checkpoint job is catching up with.`}
-        >
-          <button type="button" className="chain-note" role="status">
-            Newer sealed entries to verify
-          </button>
-        </Toggletip>
-      )}
       {unchecked && (
-        <Toggletip align="end" label={`coffre could not check the sealed log: ${chain.treesFailed}. The rest of the log's verdict stands.`}>
+        <Toggletip align="end" label={`${chain.treesFailed}. The rest of the log's verdict stands.`}>
           <button type="button" className="chain-flag chain-flag-warn">
             <AlertTriangle size={14} />
             Sealed log not checked
           </button>
         </Toggletip>
       )}
-      {!chain.whole && chain.remaining === 0 && !behind && (
+      {!chain.whole && chain.remaining === 0 && (
         <button type="button" className="btn btn-sm" onClick={onWalk}>
           Verify whole log
         </button>
       )}
       {/* No seal over a log verified only in part: what is left could be anything. */}
-      {chain.remaining === 0 && !behind && !unchecked && (
+      {chain.remaining === 0 && !unchecked && (
         <Toggletip align="end" label={`${verified}${replayed}`}>
           <button type="button" className="chain-seal">
             <ShieldCheck size={14} />

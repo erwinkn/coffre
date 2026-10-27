@@ -2,24 +2,18 @@ import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { checkServerIdentity, type ConnectionOptions } from 'node:tls';
 
-import postgres from '#postgres';
-
-type Options = postgres.Options<never>;
+import postgres, { type Options, type Sql } from './postgres-js/index.ts';
 
 /**
- * A postgres.js client, as coffre uses one: statements (`unsafe`),
- * transactions (`begin`), `listen`, and closing it. Not its tagged
- * template's helpers (`sql(rows)`, `sql.array`, `sql.json`), which would
- * send an array nested in them as postgres.js does, as its first element's
- * type, where `unsafe` and the template's own values send it as
- * node-postgres does (`asPgSends`).
+ * A client of coffre's postgres.js (`./postgres-js`): statements (`unsafe`),
+ * transactions (`begin`), a connection held (`reserve`), and closing it.
  */
-export type PostgresClient = Pick<postgres.Sql, 'unsafe' | 'begin' | 'reserve' | 'listen' | 'notify' | 'end' | 'options'>;
+export type PostgresClient = Sql;
 
 /** What a client may be opened with beside its URL. */
 export type ClientOptions = Pick<Options, 'max' | 'idle_timeout' | 'connect_timeout' | 'max_lifetime' | 'onnotice' | 'debug' | 'onclose'> & {
-  /** The stream to speak Postgres on, made for each connection, rather than a TCP socket: a tunnel's (postgres.js's own option). */
-  socket?: () => unknown;
+  /** The stream to speak Postgres on, made for each connection, rather than a TCP socket: a tunnel's. */
+  socket?: Options['socket'];
   /** Postgres's `application_name` for the connection. */
   application_name?: string;
   /** Run-time parameters sent when the connection starts, `statement_timeout` and the like. */
@@ -27,43 +21,25 @@ export type ClientOptions = Pick<Options, 'max' | 'idle_timeout' | 'connect_time
 };
 
 /**
- * A postgres.js client for `url`, as coffre opens every one:
+ * A client for `url`, as coffre opens every one: the driver's defaults (10
+ * connections, every statement unnamed, as node-postgres sends them), but
  *
- * - every statement unnamed, as node-postgres sends them: a call on Workers
- *   has a fresh connection, where a named statement would be prepared again,
- *   and each one costs a round trip to describe;
- * - no `fetch_types`, which reads the array types from `pg_type` at each
- *   new connection: a round trip more per call on Workers;
  * - notices dropped rather than logged;
  * - no connection closed for its age (`max_lifetime`), as node-postgres
- *   closed none: a backup's session holds its snapshot while pg_dump reads;
- * - every option given, none read from the environment, but the two
- *   postgres.js reads whatever it is given: `PGAPPNAME` when the URL names no
- *   application, as node-postgres read it, and `PGTARGETSESSIONATTRS`.
+ *   closed none: a backup's session holds its snapshot while pg_dump reads.
  *
- * Without `fetch_types`, postgres.js knows no array type, and would answer
- * one as its text: Postgres's own are taken as known instead (`ARRAYS`).
- * Arrays and dates go as node-postgres sends them (`asPgSends`).
+ * The driver reads no array type from `pg_type` (postgres.js's
+ * `fetch_types`, a round trip more per connection), and would answer one as
+ * its text: Postgres's own are taken as known instead (`ARRAYS`). Arrays and
+ * dates go as node-postgres sends them (`asPgSends`).
  */
 export function postgresClient(url: string, options: ClientOptions = {}): PostgresClient {
   const { application_name, connection, ...rest } = options;
   const target = postgresOptions(url);
   return asPgSends(arrayTypes(postgres({
-    // Every option given, at postgres.js's own value where coffre has none: one not given, postgres.js reads from the
-    // environment (PGMAX, PGDEBUG, PGIDLE_TIMEOUT…), and the packages read no environment variable of their own. The
-    // URL's own (its TLS, its sslnegotiation) come after, and the caller's last.
-    max: 10,
-    idle_timeout: 0,
-    connect_timeout: 30,
-    max_pipeline: 100,
-    backoff: (retries: number) => (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 20),
-    keep_alive: 60,
-    debug: false,
-    sslnegotiation: null,
-    fetch_types: false,
-    prepare: false,
     onnotice: () => {},
     max_lifetime: null,
+    // The URL's own (its TLS, its sslnegotiation) come after, and the caller's last.
     ...target,
     ...rest,
     connection: {
@@ -71,8 +47,7 @@ export function postgresClient(url: string, options: ClientOptions = {}): Postgr
       ...(application_name === undefined ? {} : { application_name }),
       ...connection,
     },
-    // max_pipeline, keep_alive, backoff and sslnegotiation are postgres.js's options, which its types leave out.
-  } as Options)));
+  })));
 }
 
 /** A statement asked of a session that lost its connection, and with it its transaction, its locks and its settings. */
@@ -84,7 +59,7 @@ export class SessionLost extends Error {
 }
 
 /** What is asked of a session: each fails once it is lost. */
-const ASKED = new Set<PropertyKey>(['unsafe', 'begin', 'reserve', 'listen', 'notify']);
+const ASKED = new Set<PropertyKey>(['unsafe', 'begin', 'reserve']);
 
 /**
  * One connection to `url`, kept as a session, as node-postgres's Client
@@ -98,7 +73,7 @@ const ASKED = new Set<PropertyKey>(['unsafe', 'begin', 'reserve', 'listen', 'not
  */
 export function postgresSession(url: string, options: Omit<ClientOptions, 'max'> = {}): PostgresClient {
   let lost = false;
-  // `onclose`, if given, hears the session's own connection close: not a LISTEN's, nor a cancel's.
+  // `onclose`, if given, hears the session's connection close.
   const client = postgresClient(url, { ...options, max: 1, onclose: (id) => ((lost = true), options.onclose?.(id)) });
   /** A statement refused: rejected, and still a statement, whose `values()` and `execute()` Drizzle and callers ask for. */
   const refused = () => {
@@ -107,9 +82,6 @@ export function postgresSession(url: string, options: Omit<ClientOptions, 'max'>
     return Object.assign(answer, { values: () => answer, execute: () => answer });
   };
   return new Proxy(client, {
-    apply(target, self, args: unknown[]) {
-      return lost ? refused() : Reflect.apply(target as unknown as (...args: unknown[]) => unknown, self, args);
-    },
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (typeof value !== 'function' || !ASKED.has(key)) return value;
@@ -122,20 +94,14 @@ export function postgresSession(url: string, options: Omit<ClientOptions, 'max'>
  * `client`, sending a statement's values as node-postgres sends them: an
  * array as Postgres's text for one (`{"a","b"}`, bytes as `\\x…`), a date
  * as its ISO text and a plain object as its JSON, each for the server to
- * type, with the statement, in one round trip; `undefined` as NULL. The
- * tagged template's values (`sql\`…${value}\``) as `unsafe`'s, and its
- * transactions' and savepoints' alike. postgres.js would type an array by
- * its first element, the element's type rather than the array's, and so
- * bind `[1, 2]` as one integer and mistype a `bytea[]`; and it would ask
- * the server first how to send an array of text.
+ * type, with the statement, in one round trip; `undefined` as NULL. Its
+ * transactions', savepoints' and reserved connections' alike. The driver
+ * would type an array by its first element, the element's type rather than
+ * the array's, and so bind `[1, 2]` as one integer and mistype a `bytea[]`;
+ * and it would ask the server first how to send an array of text.
  */
 function asPgSends<T extends object>(client: T): T {
   return new Proxy(client, {
-    apply(target, self, args: unknown[]) {
-      // A tagged template: its values, after its strings. A call of the helper (`sql('name')`, `sql([…])`) is not.
-      const tagged = Array.isArray((args[0] as { raw?: unknown } | undefined)?.raw);
-      return Reflect.apply(target as (...args: unknown[]) => unknown, self, tagged ? [args[0], ...args.slice(1).map(sent)] : args);
-    },
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key === 'unsafe') {
@@ -157,8 +123,7 @@ function asPgSends<T extends object>(client: T): T {
 /**
  * A value as node-postgres sends it: an array, a date or a plain object (as
  * its JSON) as text, bytes of any view as bytes, `undefined` as NULL. What
- * else there is, postgres.js's own helpers (`sql.json(…)`, a fragment) among
- * them, goes as it is.
+ * else there is goes as it is.
  */
 function sent(value: unknown): unknown {
   if (value === undefined) return null;
@@ -212,7 +177,7 @@ const ARRAYS = [
 
 /** `client`, which reads Postgres's arrays as node-postgres reads them, each element by its type's parser. */
 function arrayTypes(client: PostgresClient): PostgresClient {
-  const parsers = client.options.parsers as Record<number, ((text: string) => unknown) | undefined>;
+  const parsers = client.options.parsers;
   for (const [element, array] of ARRAYS) {
     const parse = parsers[element];
     parsers[array] = (text: string) => arrayOf(text, parse);
@@ -281,14 +246,14 @@ export function textTypes(client: PostgresClient): PostgresClient {
 
 /**
  * The connection `url` names, as node-postgres and its pg-connection-string
- * read one: what postgres.js reads from a URL differs. It sends every
- * query parameter it does not know to the server as a setting, which
- * refuses the connection over one it does not know either (`sslrootcert`,
- * `uselibpqcompat`); its `sslmode=require` skips the certificate check,
- * where coffre's URLs, as pg reads them, verify; and it checks an IP
- * address against `localhost`.
+ * read one. The driver reads no URL: it is given the parts. (Upstream
+ * postgres.js read URLs otherwise: it sent every query parameter it did not
+ * know to the server as a setting, which refused the connection over one it
+ * did not know either, `sslrootcert` or `uselibpqcompat`; its
+ * `sslmode=require` skipped the certificate check, where coffre's URLs, as
+ * pg reads them, verify; and it checked an IP address against `localhost`.)
  *
- * So the URL is read here, postgres.js is given the parts, and TLS is:
+ * TLS is:
  *
  *   no sslmode, sslmode=disable               none
  *   sslmode=prefer, require, verify-ca,       the certificate chain and the host verified
@@ -329,13 +294,15 @@ export function postgresOptions(url: string): Partial<Options> & { connection: R
     throw new Error('invalid Postgres URL');
   }
   const { query, host, port, user, pass, database } = read;
+  // libpq would take the operating system's user; coffre reads nothing of where it runs, so the URL names one.
+  if (user === '') throw new Error('a Postgres URL names its user: postgresql://<user>@<host>/<database>');
   if (host.includes(',')) throw new Error('a Postgres URL names one host: several, as libpq takes them, are not supported');
   // node-postgres cancelled a statement past it, from the client: refused rather than ignored, the server's bound named.
   if (query.has('query_timeout')) throw new Error("a Postgres URL's query_timeout is not supported: statement_timeout bounds a statement in the server");
-  // libpq's bound on opening a connection, in seconds, as postgres.js takes it: 0 for none.
+  // libpq's bound on opening a connection, in seconds, as the driver takes it: 0 for none.
   const connectTimeout = query.get('connect_timeout');
   if (connectTimeout !== undefined && !/^\d+$/.test(connectTimeout)) throw new Error('invalid Postgres URL');
-  // What libpq refuses, or postgres.js cannot do, is refused rather than read as something else.
+  // What libpq refuses, or the driver cannot do, is refused rather than read as something else.
   const mode = query.get('sslmode');
   if (mode !== undefined && !['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full', 'no-verify'].includes(mode)) {
     throw new Error(`a Postgres URL's sslmode is one of libpq's, not ${mode}`);
@@ -395,7 +362,7 @@ function tlsFor(query: Map<string, string>, host: string, direct: boolean): fals
   return {
     ...tls,
     rejectUnauthorized: true,
-    // postgres.js names an IP address to TLS as nothing, which Node checks as localhost: the URL's host is checked instead.
+    // The driver names an IP address to TLS as nothing, which Node checks as localhost: the URL's host is checked instead.
     checkServerIdentity: verify === 'chain' ? () => undefined : (_hostname, certificate) => checkServerIdentity(host, certificate),
     ...(isIP(host) === 0 ? { servername: host } : {}),
   };

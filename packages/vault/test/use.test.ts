@@ -41,7 +41,11 @@ function heard(outcome: UseOutcome): UseOutcome {
   return outcome;
 }
 
-/** The log replayed (log-replay.ts) and each use's decision held to its live answer: read in number order, which concurrent appends need not leave the heap in. */
+/**
+ * The log replayed (log-replay.ts) and each use's decision held to its live answer, read in number order: `refOf`
+ * knows an object from its genesis, and the heap need not hold the rows so (a VACUUM frees the slots of the rows a
+ * test deleted, and the next insert takes the first, ahead of rows written before it).
+ */
 async function replayAgrees(): Promise<number> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);

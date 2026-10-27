@@ -227,10 +227,12 @@ async function verification(api: CoffreClient): Promise<string> {
   expect(verified.ok, 'the audit log does not verify', verified);
   // A server older than 0.10.1 says nothing of what it left, and walked it all.
   expect((verified.remaining ?? 0) === 0, 'the audit log is not verified to its end: the checkpoints are catching up', verified);
-  // 0.15's log, where the instance keeps it: its trees, entries, replay and rows.
-  const trees = await api.audit.verifyTreesWhole();
-  expect(!trees.kept || trees.ok, "0.15's log does not verify", trees);
-  return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}${trees.kept ? "; 0.15's log too, every row the replay's" : ''}`;
+  // 0.15's log, where the instance keeps it: its trees, entries, replay and rows; or, larger than its vault walks in a
+  // call, nothing found as far as it went, and where to walk it whole.
+  const trees = await api.audit.verifyTrees({ whole: true });
+  expect(!trees.kept || trees.ok || (trees.problems.length === 0 && trees.tooLarge !== null), "0.15's log does not verify", trees);
+  const sealed = !trees.kept ? '' : trees.ok ? "; 0.15's log too, every row the replay's" : `; 0.15's log not walked to its end: ${trees.tooLarge}`;
+  return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}${sealed}`;
 }
 
 /** Revoke what the run issued, and say what stays: the session among it. */
