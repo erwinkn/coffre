@@ -269,6 +269,8 @@ export type Readable = {
   /** How its value was made, when a client generated it; a reference's is its source's business, and has none here. */
   recipe?: VersionRecipe | null;
   via?: Via;
+  /** A reference's own key, where it is held: what a use names (keys.ts, `OpenItem`). */
+  holder?: string;
   /** Where a reference's source is, as grants match it. */
   source?: Place;
   through?: string;
@@ -421,6 +423,7 @@ async function valuesIn(
       // A plain source's value is plain here too: a reference takes its nature from its source.
       plaintext: opened.plaintext,
       via: { reference: reference.row.id, seq: Number(reference.row.createdSeq) },
+      holder: row.id,
       source: placeOfRow(source),
     });
   }

@@ -14,7 +14,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials } from './db/tables.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -171,9 +171,22 @@ test('a token weighs its person as they are at each request: narrowed, it narrow
 
 /**
  * Run `meanwhile` once, as the vault is next asked for values: after the
- * request's credential was checked, before the vault releases anything.
+ * request's credential was checked, before the app answers. 0.14's unwrap
+ * decides on the member, not the credential: before it. 0.15's use decides
+ * on the credential too: once it has, so that only the app's check after
+ * the release stands between the value and the caller (Revoking015).
  */
 function beforeNextRelease(meanwhile: () => Promise<unknown>): void {
+  if (LOG === '0.15') {
+    const use = deps.vault.use!;
+    deps.vault.use = async (...args) => {
+      deps.vault.use = use;
+      const used = await use(...args);
+      await meanwhile();
+      return used;
+    };
+    return;
+  }
   const unwrap = deps.vault.unwrap;
   deps.vault.unwrap = async (...args) => {
     deps.vault.unwrap = unwrap;
@@ -247,13 +260,18 @@ test('every entry made with a personal token names its person and the token, the
     .where(and(eq(auditLog.actor, ADA)))
     .orderBy(asc(auditLog.seq));
   const made = written.filter((row) => JSON.parse(row.metadata).credentialId === issued.id).map((row) => `${row.author} ${row.action}`);
-  for (const action of ['app secret.write', 'vault key.wrap', 'vault secret.read']) assert.ok(made.includes(action), action);
+  // The read, under 0.15's log, is a use, its credential the token's: no entry here.
+  for (const action of ['app secret.write', 'vault key.wrap', ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
+  if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
   const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
   assert.deepEqual([create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], ['personal', 'cursor-agent', issued.id, null]);
-  const read = entries.find((entry) => entry.action === 'secret.read')!;
-  assert.deepEqual([read.actorId, read.token], ['ada@acme.example', { id: issued.id, label: 'cursor-agent' }]);
+  // The audit page reads 0.15's uses from plan PR 8: until then, the read it shows is 0.14's entry.
+  if (LOG === '0.14') {
+    const read = entries.find((entry) => entry.action === 'secret.read')!;
+    assert.deepEqual([read.actorId, read.token], ['ada@acme.example', { id: issued.id, label: 'cursor-agent' }]);
+  }
   const write = entries.find((entry) => entry.action === 'secret.write')!;
   assert.deepEqual(write.token, { id: issued.id, label: 'cursor-agent' });
 });

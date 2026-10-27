@@ -62,6 +62,9 @@ REMOVALS=(
   "Revoking CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials NoReleaseAfterEnd"
   "Revoking KeptAnswerChecked NoReadOnStaleAnswer"
+  # 0.15's reads (PR 5b): the use decides on the rows as they are, and the app's unlocked check stays needed.
+  "Revoking015 CredentialFenceUnlocked NoReleaseAfterEnd"
+  "Revoking015 RevokeIssuedCredentials NoReleaseAfterEnd"
   "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"
   "Proxying CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials+BindingCheckedAtUse UnboundStayUnusable"

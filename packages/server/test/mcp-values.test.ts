@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
-import { clientFor } from './api-fixture.ts';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { auditLog, mcpApprovals } from './db/tables.ts';
 import { ALPHABETS, randomValue } from '../src/mcp/changes.ts';
 import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, ROOT, route, useMcp } from './mcp-fixture.ts';
@@ -65,11 +65,16 @@ test('show_secret_value shows the value to the person on the page, with Read, an
   assert.match(reported.body.result!.content[0]!.text!, /shown to the person/);
   assert.equal(JSON.stringify([asked.body, reported.body]).includes(VALUE), false, 'never to the client');
   assert.equal(JSON.stringify(await db.owner.select().from(mcpApprovals)).includes(VALUE), false);
-  // The reveal is the person's, logged by the vault under the connection; nothing else is read with Read.
-  const reveal = (await entries('secret.read')).find((entry) => entry.decision === 'allow')!;
-  const [row] = await db.owner.select().from(mcpApprovals);
-  assert.equal(reveal.actor, `user:${DEV}`);
-  assert.equal(reveal.metadata.credentialId, row!.connectionId);
+  // The reveal is the person's, logged by the vault under the connection; nothing else is read with Read. Under 0.15's
+  // log, one use on the session the person approved it in: its row is slim (R53), and names no connection.
+  if (LOG === '0.14') {
+    const reveal = (await entries('secret.read')).find((entry) => entry.decision === 'allow')!;
+    const [row] = await db.owner.select().from(mcpApprovals);
+    assert.equal(reveal.actor, `user:${DEV}`);
+    assert.equal(reveal.metadata.credentialId, row!.connectionId);
+  } else {
+    assert.deepEqual((await usesLogged(db.owner)).map((use) => use.purpose), [0]);
+  }
   assert.equal((await callRaw(token, 'reveal_secret_values', { path: 'market/prod' })).status, 403);
 });
 

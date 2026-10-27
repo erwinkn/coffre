@@ -15,9 +15,10 @@ import type { AddressInfo } from 'node:net';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { credential } from '@coffre/client/credential';
+import { replayStored } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
 
-import { clientFor, contextFor } from './api-fixture.ts';
+import { clientFor, contextFor, LOG, usesLogged } from './api-fixture.ts';
 import { callRaw, connect, db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { credentials, environments } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
@@ -276,10 +277,16 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   assert.equal(JSON.stringify(one.body).includes(KEY), false);
   assert.match(JSON.stringify(one.body), /sensitive/);
 
-  // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this.
+  // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this. Through MCP,
+  // which comes in on no credential, as 0.14's read under either log.
   const refused = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author === 'vault');
-  assert.ok(refused.length >= 4);
+  assert.ok(refused.length >= (LOG === '0.14' ? 4 : 1));
   assert.ok(refused.every((entry) => entry.code === 'sensitive'));
+  if (LOG === '0.15') {
+    // On a credential, 0.15's uses: each logged as its request, and refused, as the replay of the log says.
+    const refusedUses = [...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null);
+    assert.ok(refusedUses.length >= 3 && refusedUses.every((code) => code === 'sensitive'), JSON.stringify(refusedUses));
+  }
 
   // A service account's reads are values, as in CI.
   const ci = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'ci', { label: 'ci', expiresInDays: 1 })).token;
@@ -368,6 +375,11 @@ test("Schumann's own client, its base URL the proxy's stable URL and its key fro
 
   // One opening of the credential's keys for the minute, however many calls: the vault's read, and the proxy's entry naming it.
   await schumann.get('/companies');
+  if (LOG === '0.15') {
+    // 0.15's record: one use, its row slim (R53), naming neither the credential nor the host.
+    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
+    return;
+  }
   const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'schumann');
   assert.equal(uses.length, 1);
   assert.deepEqual(uses[0]!.metadata.keys, ['SCHUMANN_API_KEY']);
@@ -449,12 +461,15 @@ test("a credential with an egress leaves through it, never the global fetch, as 
     assert.equal(global.mock.callCount(), 1);
     assert.equal(received.length, 1);
 
-    // The log says which credentials' openings went out through their egress, and nothing of the binding.
-    const uses = (await entries('credential.use')).filter((entry) => entry.metadata.plan !== true);
-    assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.host, entry.metadata.egress]), [
-      ['schumann', new URL(upstreamUrl).host, true],
-      ['maps', new URL(upstreamUrl).host, undefined],
-    ]);
+    // The log says which credentials' openings went out through their egress, and nothing of the binding: 0.14's
+    // `credential.use`. 0.15's use row is slim (R53), and says neither.
+    if (LOG === '0.14') {
+      const uses = (await entries('credential.use')).filter((entry) => entry.metadata.plan !== true);
+      assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.host, entry.metadata.egress]), [
+        ['schumann', new URL(upstreamUrl).host, true],
+        ['maps', new URL(upstreamUrl).host, undefined],
+      ]);
+    }
   } finally {
     global.mock.restore();
   }
@@ -664,7 +679,8 @@ test("the stable URL, /use/<credential>, is the handle's environment's: a fork's
   assert.equal(((await root.json()) as { path: string }).path, '/v1', 'the credential itself is its upstream');
   // One opening for the environment, whichever URL names it.
   assert.equal((await route('/use/market/dev/schumann/companies', { headers: { 'x-api-key': handle } })).status, 200);
-  assert.equal((await entries('credential.use')).filter((entry) => entry.metadata.credential === 'schumann').length, 1);
+  if (LOG === '0.14') assert.equal((await entries('credential.use')).filter((entry) => entry.metadata.credential === 'schumann').length, 1);
+  else assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
   // A redirect under the upstream stays on the proxy, at the environment's URL, which nothing else can mean.
   assert.equal((await stable('/redirect-inside')).headers.get('location'), `${ORIGIN}/use/market/dev/schumann/companies?page=2`);
 
@@ -806,7 +822,9 @@ test('the plan: placeholders for what the proxy covers, and as they are the valu
   assert.deepEqual(mine.left, ['DATABASE_URL', 'U_PASS']);
 
   // Each value given is logged as the vault's read to expose, one entry per environment it opens in.
-  const exposed = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose');
+  const exposed = LOG === '0.14'
+    ? (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose')
+    : (await usesLogged(db.owner)).filter((use) => use.purpose === 5);
   assert.equal(exposed.length, 4);
 });
 

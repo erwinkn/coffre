@@ -15,7 +15,8 @@ import type { AddressInfo } from 'node:net';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
-import { clientFor, testVault } from './api-fixture.ts';
+import { replayStored } from '@coffre/vault/node';
+import { clientFor, LOG, testVault } from './api-fixture.ts';
 import { withTriggersLifted } from './db/engine.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { secretVersions } from './db/tables.ts';
@@ -151,10 +152,16 @@ test('a person reads every value of an environment but its sensitive ones, which
       message: 'a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it',
     });
   }
-  // The vault refused each read of one, and logged it, by the person and the version.
-  const refused = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'deny');
-  assert.deepEqual(refused.map((entry) => [entry.actor, entry.code]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
-  assert.ok(refused.every((entry) => entry.secretVersionId !== null));
+  // The vault refused each read of one, and logged it, by the person and the version. Under 0.15's log, as a use, the
+  // request, which the replay of the log refuses as live did.
+  if (LOG === '0.14') {
+    const refused = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'deny');
+    assert.deepEqual(refused.map((entry) => [entry.actor, entry.code]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
+    assert.ok(refused.every((entry) => entry.secretVersionId !== null));
+  } else {
+    const codes = [...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null);
+    assert.deepEqual(codes, ['sensitive', 'sensitive', 'sensitive']);
+  }
 
   const read = await ci.secrets.reveal('market/dev');
   assert.deepEqual(read.values, { API_KEY, DB_PASSWORD, REGION: 'eu-west-3', WEBHOOK });

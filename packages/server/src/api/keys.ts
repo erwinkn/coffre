@@ -1,9 +1,24 @@
 import { decrypt, encrypt, freshDek, type Envelope } from '@coffre/core/envelope';
-import { USE_METADATA_LENGTH, type Purpose, type Refusal, type SecretRef, type Through, type UseRecord, type Vault, type Via, type WrappedKey } from '@coffre/core/vault';
+import {
+  USE_DEADLINE_MS,
+  USE_METADATA_LENGTH,
+  useRefusalMessage,
+  type Purpose,
+  type Refusal,
+  type SecretRef,
+  type Through,
+  type UsedValue,
+  type UseOutcome,
+  type UseRecord,
+  type Vault,
+  type Via,
+  type WrappedKey,
+} from '@coffre/core/vault';
 
 import { AccessChanged, type Recalled } from '../accesses.ts';
 import type { AuditEntry } from '../db/audit.ts';
-import { ApiError } from './errors.ts';
+import { uses015 } from './changes.ts';
+import { ApiError, UNAVAILABLE, vaultRefused } from './errors.ts';
 
 /**
  * The app's half of envelope encryption. It encrypts and decrypts values
@@ -74,19 +89,34 @@ function boundAsAsked(items: readonly { secret: SecretRef }[], result: { sensiti
  */
 export async function openValues(
   vault: Vault,
-  asking: Asking & { purpose: Purpose; keepsSensitive?: boolean },
-  items: { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string }[],
+  asking: Asking & {
+    purpose: Purpose;
+    keepsSensitive?: boolean;
+    /** The id of the credential's row the request came in on: with 0.15's uses on, each value is opened by a use on it (`useValues`). */
+    credential?: string | null;
+  },
+  items: OpenItem[],
   /** The caller's, decided on a kept answer of the vault's: the vault checks it, and says so by naming it back. */
   recalled?: Recalled,
   /**
    * The credential proxy's `credential.use` entry, for the vault to append
    * beside its reads (`UnwrapInput.use`): `used` says it did, and the app
    * appends nothing then. Plain values only ask no vault, and log no use.
+   * With 0.15's uses, nothing appends it, however long: each use's entry is
+   * the record, and `used` says so too.
    */
   use?: UseRecord,
 ): Promise<Keyed<string> & { used?: true }> {
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
+  if (asking.credential != null && (await uses015(vault))) {
+    const opened = await useValues(vault, { credential: asking.credential, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed);
+    // Each value going back was decided by a use, on the rows as they are: that vouches for a kept answer about the
+    // caller, as 0.14's check of its revision does. Not with a plain value beside, which no use decided.
+    if (recalled !== undefined && sealed.length === items.length) recalled.vouched();
+    let next = 0;
+    return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), used: true };
+  }
   const checks = recalled !== undefined && !recalled.confirmed ? recalled.revision : undefined;
   const result = await vault.unwrap({
     ...asking,
@@ -113,6 +143,102 @@ export async function openValues(
   let next = 0;
   // A vault older than 0.14.5 names nothing back: it appended no use, and the app does.
   return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), ...(use !== undefined && result.used === true ? { used: true as const } : {}) };
+}
+
+/**
+ * A value to open: its version, as the app read it, and what it is bound
+ * to; `holder`, for a reference, the key that holds it, which a use names
+ * (the vault finds the source itself, as it reads it then).
+ */
+export type OpenItem = { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string; holder?: string };
+
+/** How many uses one request has in flight at once: a whole environment's read takes turns, and leaves the isolate's admission room for others (R44). */
+export const USES_AT_ONCE = 4;
+
+/**
+ * 0.15's read (docs/design/0.15-plan.md, PR 5b): one use per value, each
+ * `use_credential` call logged as its request and decided on the rows as
+ * the call reads them (R53). What it opens is the vault's: the version it
+ * read and its envelope, which the app's earlier read may be older than.
+ * All or nothing: the first refusal refuses the request, and no value of
+ * it goes back. A use the vault could not decide (late, over its isolate's
+ * calls in flight) answers 503 with `Retry-After` (R44).
+ *
+ *   Ada's `coffre run` of 9 keys      9 uses, 4 at a time     9 entries, the values
+ *   her grant revoked after the 4th   the 5th refused         403, nothing handed back
+ */
+export async function useValues(
+  vault: Vault,
+  asked: { credential: string; purpose: Purpose; keepsSensitive: boolean },
+  items: readonly OpenItem[],
+): Promise<string[]> {
+  const values: string[] = [];
+  let failed: { error: unknown } | null = null;
+  let next = 0;
+  const turn = async () => {
+    while (failed === null && next < items.length) {
+      const i = next++;
+      const item = items[i]!;
+      const at = Date.now();
+      try {
+        const outcome = await vault.use!({
+          credential: asked.credential,
+          secretId: item.holder ?? item.secret.secretId,
+          place: item.through ?? null,
+          purpose: asked.purpose,
+          ...(asked.keepsSensitive ? { keepsSensitive: true } : {}),
+          requestId: useRequestId(),
+          at,
+          deadline: at + USE_DEADLINE_MS,
+        });
+        if (!outcome.ok) throw refusedUse(outcome);
+        values[i] = openedValue(outcome.value);
+      } catch (error) {
+        failed ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(USES_AT_ONCE, items.length) }, turn));
+  if (failed !== null) throw (failed as { error: unknown }).error;
+  return values;
+}
+
+/** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
+function useRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return (new DataView(bytes.buffer).getBigUint64(0) >> 1n).toString();
+}
+
+/** The value a use opened, decrypted with its key and bound to what the vault read: a reference's source's ids. */
+function openedValue(value: UsedValue): string {
+  const dek = Buffer.from(value.key, 'base64');
+  try {
+    const { envelope } = value;
+    const sealed = { envelopeVersion: envelope.version, ciphertext: Buffer.from(envelope.ciphertext, 'base64'), iv: Buffer.from(envelope.iv, 'base64'), authTag: Buffer.from(envelope.authTag, 'base64') };
+    return decrypt(sealed, value.context, dek).toString('utf8');
+  } finally {
+    dek.fill(0);
+  }
+}
+
+/**
+ * A use refused, as the API answers it: the rules' refusals as 0.14's
+ * (`vaultRefused`); a credential ended, 401; a key gone since the app read
+ * it, 409, to be asked again; no cap logged yet, or a use not decided
+ * (busy), 503.
+ */
+function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError {
+  if ('busy' in outcome) return new ApiError('unavailable', UNAVAILABLE);
+  switch (outcome.code) {
+    case 'credential':
+      return new ApiError('unauthenticated', useRefusalMessage('credential'));
+    case 'missing':
+      return new ApiError('conflict', 'a key this read names was removed while it ran: try again', 'changed');
+    case 'no_policy':
+      return new ApiError('unavailable', UNAVAILABLE);
+    default:
+      return vaultRefused({ code: outcome.code, message: useRefusalMessage(outcome.code) });
+  }
 }
 
 /**

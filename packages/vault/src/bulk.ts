@@ -1,4 +1,8 @@
+import { USE_DEADLINE_MS } from '@coffre/core/vault';
+
 import type { BulkLimit } from './config.ts';
+
+export { USE_DEADLINE_MS };
 
 /**
  * The bulk cap of 0.15 (R28, R52, docs/design/sealed-inputs.md): at most
@@ -21,9 +25,6 @@ import type { BulkLimit } from './config.ts';
  * the vault decides. A key stays counted up to `refresh` past its window,
  * never less.
  */
-
-/** The longest a use may take from its time to its answer, held in Postgres too (R53): no use is decided later than this after its `at`. */
-export const USE_DEADLINE_MS = 3000;
 
 /** How stale a key's row may get before a use moves it on: a minute, or a tenth of a shorter window. */
 export function refreshMs(limit: BulkLimit): number {

@@ -14,8 +14,8 @@ import type { AddressInfo } from 'node:net';
 import { DfnsApiClient } from '@dfns/sdk';
 import { extractTokenScope } from '@dfns/sdk/utils/authToken.js';
 
-import { clientFor } from './api-fixture.ts';
-import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { clientFor, keyIds, LOG, watchUses } from './api-fixture.ts';
+import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { basic, credentialProxy, header, jwt, prefix, query, sigv4, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
@@ -112,6 +112,7 @@ async function planFor(handle: string): Promise<{ env: Record<string, string>; l
 
 test("DFNS's own SDK, its token a JWT placeholder, reads its organization from it and reaches the fake DFNS with the real token", async () => {
   const { token: handle, expiresAt } = await handleFor();
+  const watched = LOG === '0.15' ? watchUses(deps.vault) : null;
   const { env } = await planFor(handle);
   const [head, payload, last] = env.DFNS_AUTH_TOKEN!.split('.');
   assert.deepEqual(JSON.parse(Buffer.from(head!, 'base64url').toString()), { alg: 'none', typ: 'JWT' });
@@ -137,6 +138,14 @@ test("DFNS's own SDK, its token a JWT placeholder, reads its organization from i
   await assert.rejects(new DfnsApiClient({ baseUrl: coffreUrl, authToken: handle }).wallets.listWallets(), /could not be properly parsed/);
 
   // The plan opened the real token for its claims, as a use of the credential, logged; the request opened it again.
+  if (watched !== null) {
+    watched.stop();
+    // 0.15: the token used for each placeholder that copies its claims (dfns's, and q's), then for the request, the
+    // repeats riding the first's cover. Its row is slim (R53), naming no credential, claim or host.
+    const token = await keyIds(db.owner, 'DFNS_AUTH_TOKEN');
+    assert.equal(watched.asked.filter((use) => token.includes(use.secretId) && use.purpose === 'use').length, 3);
+    return;
+  }
   const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'dfns');
   assert.deepEqual(uses.map((entry) => entry.metadata.placeholder ?? entry.metadata.host), [{ claims: [APP_METADATA] }, new URL(dfnsUrl).host]);
 });

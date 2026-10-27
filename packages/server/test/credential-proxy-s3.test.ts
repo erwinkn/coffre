@@ -15,8 +15,8 @@ import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } fr
 import { SignatureV4 } from '@smithy/signature-v4';
 import { contentDigest } from '@coffre/client/dpop';
 
-import { clientFor } from './api-fixture.ts';
-import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, sigv4 } from '../src/plugins/credential-proxy.ts';
@@ -184,9 +184,12 @@ test('put, get and list through the proxy: the SDK signs with the handle, S3 see
   assert.equal(seen.length, 4);
   assert.ok(seen.every((request) => request.verified), JSON.stringify(seen));
   assert.ok(seen.every((request) => !request.authorization.includes(handle)), 'the handle never reaches S3');
-  // One opening of the pair for the minute.
-  const uses = await entries('credential.use');
-  assert.deepEqual(uses.filter((entry) => entry.metadata.credential === 's3').map((entry) => entry.metadata.keys), [['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']]);
+  // One opening of the pair for the minute: 0.14's one `credential.use` naming both keys, 0.15's a use of each.
+  if (LOG === '0.15') assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 2);
+  else {
+    const uses = await entries('credential.use');
+    assert.deepEqual(uses.filter((entry) => entry.metadata.credential === 's3').map((entry) => entry.metadata.keys), [['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']]);
+  }
 });
 
 test("aws-chunked uploads and presigned URLs are refused, before anything reaches S3", async () => {
@@ -279,8 +282,11 @@ test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the
   assert.equal(presigned.searchParams.get('X-Amz-Expires'), '300');
   assert.equal(url.includes(SECRET) || url.includes(handle), false, 'neither the secret nor the handle');
   assert.ok(Math.abs(Date.parse(expiresAt) - Date.now() - 300_000) < 5000);
-  const [use] = (await entries('credential.use')).filter((entry) => entry.metadata.presign !== undefined);
-  assert.deepEqual(use!.metadata.presign, { method: 'GET', path: '/uploads/kyc/a%20b.pdf', expiresIn: 300 });
+  // What it presigned, in 0.14's `credential.use`: 0.15's use row is slim (R53), and says nothing of it.
+  if (LOG === '0.14') {
+    const [use] = (await entries('credential.use')).filter((entry) => entry.metadata.presign !== undefined);
+    assert.deepEqual(use!.metadata.presign, { method: 'GET', path: '/uploads/kyc/a%20b.pdf', expiresIn: 300 });
+  }
 
   // What it does not sign: an upload, a long life, a path outside, a credential that does not sign, or without the handle.
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', method: 'PUT' })).status, 400);

@@ -35,15 +35,27 @@ import { ApiError, vaultRefused } from './errors.ts';
 /** The actor of the app's own changes, made for no one's request: a key rotation's revokes, an unknown token signed out. */
 export const COFFRE_ACTOR = 'coffre';
 
-/** Whether the vault keeps 0.15's log, as it says (`about().log`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, boolean>();
+/** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
+const keeping = new WeakMap<Vault, { log: boolean; uses: boolean }>();
 
-export async function keeps015(vault: Vault): Promise<boolean> {
+async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean }> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
-  const keeps = (await vault.about()).log === '0.15' && vault.prepare !== undefined && vault.waitSealed !== undefined;
-  keeping.set(vault, keeps);
-  return keeps;
+  const about = await vault.about();
+  const log = about.log === '0.15' && vault.prepare !== undefined && vault.waitSealed !== undefined;
+  const kept = { log, uses: log && about.uses === true && vault.use !== undefined };
+  keeping.set(vault, kept);
+  return kept;
+}
+
+/** Whether the vault keeps 0.15's log: the app's writes are its changes. */
+export async function keeps015(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).log;
+}
+
+/** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */
+export async function uses015(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).uses;
 }
 
 /**

@@ -177,6 +177,12 @@ export interface Vault {
      * changes to its rows through it (`prepare`). Absent before 0.15.
      */
     log?: '0.15';
+    /**
+     * `true` when the vault also answers 0.15's uses (`use`): its log is
+     * 0.15's and it has the hot path's login. The app then opens each value
+     * through a use (docs/design/0.15-plan.md, PR 5b). Absent otherwise.
+     */
+    uses?: true;
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
@@ -203,8 +209,9 @@ export interface Vault {
    * 0.15's use (docs/design/0.15-plan.md, PR 5): one key read on one
    * credential, logged as its request and decided on what one statement
    * read, the value's data key handed back once its entry has committed.
-   * Behind the 0.15 switch, which nothing turns on yet: a vault without the
-   * hot path's login has none.
+   * Behind the 0.15 switch: the app opens each value through it when the
+   * vault says so (`about().uses`). A vault without the hot path's login
+   * has none.
    */
   use?(input: UseInput): Promise<UseOutcome>;
 
@@ -422,6 +429,30 @@ export type RefusalCode =
   | 'tampered';
 
 export type Outcome<T> = ({ ok: true } & T) | { ok: false; refusal: Refusal };
+
+/** What each refusal says, as the vault answers it and the app shows it. */
+export const REFUSAL_MESSAGES: Record<RefusalCode, string> = {
+  removed: 'this member was removed',
+  not_a_member: 'not a member',
+  no_grant: 'no grant covers this',
+  expired: 'the grant that covered this has expired',
+  bulk_limit: 'too many secrets read in too short a time',
+  bad_claim: 'the key does not belong to this secret',
+  deleted: 'this project or environment was deleted',
+  ended: 'the reference read through was ended',
+  personal: "a personal config's values are its owner's alone",
+  sensitive: "a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it",
+  not_owner_issued: 'a service account reads a sensitive value only on a token or trust binding an Owner of its project issued',
+  use_only: "a workload uses this value through coffre and never holds it: list it in its binding's reads, where the value is held, if it must",
+  not_allowed: 'not allowed to change this',
+  last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
+  invalid: 'not something the rules allow',
+  policy_changed: "the instance's roles or protected environments changed while this was asked: try again",
+  access_changed: 'what this member holds changed since the read was decided: try again',
+  log_broken: 'the vault log does not hold from the last checkpoint',
+  wrong_kek: "this vault's key does not open the data it holds",
+  tampered: "this member's record failed the vault's integrity check",
+};
 
 /**
  * A proposed version the app will store. The ids bind its key, and `path`
@@ -824,6 +855,9 @@ export type LogVerification =
 
 // --- 0.15's use -------------------------------------------------------------
 
+/** The longest a use may take from its time to its answer, held in Postgres too (R53): no use is decided later than this after its `at`. */
+export const USE_DEADLINE_MS = 3000;
+
 /** A use as the app asks for it: on which credential, which key, through which place, why, and when. */
 export type UseInput = {
   credential: string;
@@ -855,6 +889,22 @@ export type UseCode =
   | 'missing'
   /** The log holds no policy, so no cap: never served, as the vault writes one before its first use. */
   | 'no_policy';
+
+/** What a use's refusal says: the rules' as `REFUSAL_MESSAGES`, and those of sealed inputs. */
+export function useRefusalMessage(code: UseCode): string {
+  switch (code) {
+    case 'stale':
+      return 'what this read decides on is not as the vault last sealed it: it was put back, or written around coffre';
+    case 'credential':
+      return 'that credential is unknown, expired or revoked';
+    case 'missing':
+      return 'no such key';
+    case 'no_policy':
+      return "the vault's log holds no bulk cap yet";
+    default:
+      return REFUSAL_MESSAGES[code];
+  }
+}
 
 /** Why a use was not decided at all: the app answers 503, with `Retry-After`. */
 export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured';

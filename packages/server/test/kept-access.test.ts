@@ -4,7 +4,10 @@
 // Whatever changed since, it answers as a request that asked would have:
 // a grant revoked or given, the reader removed, a vault too old to check.
 // And it logs only what that request would have: never a read or a refusal
-// made on an answer that was no longer the vault's.
+// made on an answer that was no longer the vault's. Under 0.15's log the one
+// call is a use, which decides on the rows as they are, and logs its request
+// (R53): a use refused on a stale answer is refused on its merits, and the
+// request starts over, asking, as after 0.14's refused unwrap.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -18,13 +21,15 @@ import { Accesses } from '../src/accesses.ts';
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const READER = 'reader@acme.example';
 const SERVICE = 'token:ci';
+/** The one call that opens a value: 0.14's unwrap, or 0.15's use. */
+const OPENS = LOG === '0.15' ? 'use' : 'unwrap';
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -131,7 +136,7 @@ test('a read on a kept answer makes one vault call, which checks it', async () =
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
-  assert.deepEqual(calls, ['unwrap']);
+  assert.deepEqual(calls, [OPENS]);
 });
 
 test('a grant revoked since: the vault refuses the kept answer, reading and logging no read, and the read is refused as the reader is now', async () => {
@@ -141,8 +146,9 @@ test('a grant revoked since: the vault refuses the kept answer, reading and logg
   const since = await newestSeq();
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), '403 missing_secret_read');
-  // The unwrap on the kept answer, refused; then the reader asked for, and refused by the app.
-  assert.deepEqual(calls, ['unwrap', 'access']);
+  // The unwrap on the kept answer, refused; then the reader asked for, and refused by the app. 0.15's use is refused
+  // on its merits, its refusal checked against the reader as they are (an `access` that differs), and asked again.
+  assert.deepEqual(calls, LOG === '0.15' ? ['use', 'access', 'access'] : ['unwrap', 'access']);
   assert.deepEqual(await entries(since, 'secret.read'), ['deny']);
 });
 
@@ -154,8 +160,10 @@ test('a grant given since: the refusal the kept answer would make is checked fir
   calls = [];
   assert.equal(await reveal(reader, 'market/prod/API_KEY'), 'fake-prod-key');
   // Refused on the kept answer, which the vault no longer gives: nothing logged; asked again, it reads.
-  assert.deepEqual(calls, ['access', 'access', 'unwrap']);
-  assert.deepEqual(await entries(since, 'secret.read'), ['allow']);
+  assert.deepEqual(calls, ['access', 'access', OPENS]);
+  // The read, logged: the vault's `secret.read` under 0.14's log, a use under 0.15's (`usesLogged`).
+  assert.deepEqual(await entries(since, 'secret.read'), LOG === '0.15' ? [] : ['allow']);
+  if (LOG === '0.15') assert.equal((await usesLogged(db.owner)).length, 2, 'the first read and this one');
 });
 
 test('removed since: the credential is refused, and nothing read', async () => {
@@ -179,7 +187,7 @@ test('admitted again, on a new credential: an answer kept from before is no answ
   const after = await readerSession();
   calls = [];
   assert.equal(await reveal(after, 'market/dev/API_KEY'), 'fake-dev-key');
-  assert.deepEqual(calls, ['access', 'unwrap']);
+  assert.deepEqual(calls, ['access', OPENS]);
   assert.equal(await reveal(before, 'market/dev/API_KEY'), '401');
 });
 
@@ -192,7 +200,7 @@ test('a read of plain values alone, which opens nothing, asks before it answers'
   assert.deepEqual(calls, ['access']);
 });
 
-test('a vault older than 0.14.1 checks nothing it is not told: the app asks before it answers', async () => {
+test('a vault older than 0.14.1 checks nothing it is not told: the app asks before it answers', { skip: LOG === '0.15' ? 'a vault older than 0.14.1 answers no 0.15 use: what it lacks is of 0.14\'s unwrap' : false }, async () => {
   const reader = await readerSession();
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   unchecked = true;
