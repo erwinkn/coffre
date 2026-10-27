@@ -47,19 +47,21 @@ BEGIN
 END
 $$;
 
--- The verifier (0027, plan PR 8): the vault keeps its replays, which it may add and forget but never rewrite, and
+-- The verifier (0027, plan PR 8): the vault keeps its replays through keep_replay, never writing them itself, and
 -- reads the columns the credentials', bindings' and references' objects are made of, never a token's hash or MAC.
 DO $$
 DECLARE
     attempt text;
 BEGIN
-    INSERT INTO log_replays (upto, at, verdict, mac) VALUES (9223372036854775806, 0, '{}', decode(repeat('00', 32), 'hex'));
-    DELETE FROM log_replays WHERE upto = 9223372036854775806;
+    PERFORM keep_replay(9223372036854775806, 0, NULL, NULL, '{}', decode(repeat('00', 32), 'hex'), '{9223372036854775806}', '{}');
+    PERFORM keep_replay(9223372036854775805, 0, NULL, NULL, '{}', decode(repeat('00', 32), 'hex'), '{9223372036854775806,9223372036854775805}', '{}');
     PERFORM count(*) FROM (SELECT id, principal, kind, scope, revoked_at, expires_at, not_after, seal FROM credentials) c;
     PERFORM count(*) FROM (SELECT id, seal FROM service_bindings) b;
     PERFORM count(*) FROM (SELECT secret_id, source_secret_id, created_seq FROM secret_references) r;
     FOREACH attempt IN ARRAY ARRAY[
         $q$UPDATE log_replays SET state = '{}'$q$,
+        $q$INSERT INTO log_replays (upto, at, verdict, mac) VALUES (1, 0, '{}', decode(repeat('00', 32), 'hex'))$q$,
+        $q$DELETE FROM log_replays$q$,
         $q$SELECT token_hash FROM credentials$q$,
         $q$SELECT auth_mac FROM credentials$q$,
         $q$SELECT * FROM service_bindings$q$,

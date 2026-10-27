@@ -995,14 +995,20 @@ export async function keptReplay(db: Queryable, upto: bigint, withState: boolean
  * - those older than it and kept for longer than `keptMs`: each a full
  *   copy of the replay.
  *
- * Within bounded lock waits: a row a writer holds locked fails the keep
- * rather than hanging the job. The vault's login deletes and inserts, never
- * updates: a kept row is never edited in place.
+ * On Postgres, migration 0027's `keep_replay`, within bounded lock waits:
+ * a row a writer holds locked fails the keep rather than hanging the job.
+ * A kept row is never edited in place.
  */
 export async function keepReplay(db: Database, replay: KeptReplay, keptMs: number, forged: readonly bigint[] = [], done: readonly bigint[] = []): Promise<void> {
+  if (engineOf(db) === 'postgres') {
+    // Migration 0027's keep_replay, which does the same as below, as the table's owner: the vault's login writes none
+    // of 0.15's log itself. Its bound is its own, `keptMs`'s ten minutes.
+    await rowsOf(db, sql`SELECT keep_replay(${replay.upto}::bigint, ${replay.at}::bigint, ${replay.state}::text, ${replay.stateHash}::bytea, ${replay.verdict}::text,
+      ${replay.mac}::bytea, ${sql.param(forged.map(String))}::bigint[], ${sql.param(done.map(String))}::bigint[])`);
+    return;
+  }
   const { logReplays } = tablesOf(db);
   await db.transaction(async (tx) => {
-    await boundLockWaits(tx, 5000, true);
     await tx.delete(logReplays).where(inArray(logReplays.upto, replay.verdict === null ? [...forged] : [replay.upto, ...forged]));
     await tx.insert(logReplays).values(replay).onConflictDoNothing();
     const newest = (column: string) => sql`coalesce((SELECT max(k.upto) FROM log_replays k WHERE ${sql.raw(`k.${column}`)} IS NOT NULL), -1)`;
