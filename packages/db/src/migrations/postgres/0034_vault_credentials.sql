@@ -14,7 +14,7 @@ CREATE FUNCTION sign_in(
     p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text,
     p_scope text, p_places text, p_expires bigint, p_not_after bigint, p_jkt text
 ) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '1s' AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '1s' AS $$
 DECLARE
     n bigint;
     held record;
@@ -98,7 +98,7 @@ CREATE FUNCTION revoke_credential(
     p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal_from bytea, p_seal bytea,
     p_id uuid, p_mac_from bytea, p_auth_mac bytea, p_revoked_at bigint, p_revoked_by text
 ) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '1s' AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '1s' AS $$
 DECLARE
     n bigint;
     held record;

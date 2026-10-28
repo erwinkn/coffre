@@ -10,7 +10,6 @@ import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } fr
 
 import { github, signin, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
-import { eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -18,8 +17,7 @@ import { vaultKv } from '../src/plugins/vault-kv.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, signInsLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -122,10 +120,6 @@ async function vault(method: string, path: string, init: { token?: string; body?
 
 const login = (jwt: string, role = SERVICE, mount = 'kubernetes', method = 'PUT') => vault(method, `auth/${mount}/login`, { body: { role, jwt } });
 
-async function entries(action: string) {
-  return db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(auditLog.seq);
-}
-
 test("ESO's Kubernetes auth: a login, a read with its token, then lookup-self and revoke-self, which ends it", async () => {
   const signedIn = await login(projected());
   assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body));
@@ -147,9 +141,8 @@ test("ESO's Kubernetes auth: a login, a read with its token, then lookup-self an
   assert.equal((await vault('PUT', 'auth/token/revoke-self', { token: auth.client_token })).status, 204);
   assert.equal((await vault('GET', 'secret/data/market/prod', { token: auth.client_token })).status, 403);
 
-  // The exchange's own audit: the run it came from, as `coffre login --service` leaves it.
-  const [exchanged] = await entries('token.exchange');
-  assert.equal(exchanged!.decision, 'allow');
+  // The exchange's own record: the run it came from, as `coffre login --service` leaves it; with 0.15's log, its change (D147).
+  const [exchanged] = await signInsLogged(db.owner);
   assert.equal(exchanged!.actor, `token:${SERVICE}`);
 });
 
