@@ -17,7 +17,14 @@ port="${COFFRE_POSTGRES_PORT:-55432}"
 # Its own subnet for this project's network, when the one Docker picks is a
 # route the host sends elsewhere (see route_guard).
 if [[ -n "${COFFRE_POSTGRES_SUBNET:-}" ]]; then
-    export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:docker-compose.subnet.yml"
+    # Naming the files turns off compose's own discovery of an override file,
+    # so name that one too, and join with compose's own separator.
+    files="${COMPOSE_FILE:-}"
+    if [[ -z "$files" ]]; then
+        files=docker-compose.yml
+        [[ ! -f docker-compose.override.yml ]] || files="$files${COMPOSE_PATH_SEPARATOR:-:}docker-compose.override.yml"
+    fi
+    export COMPOSE_FILE="$files${COMPOSE_PATH_SEPARATOR:-:}docker-compose.subnet.yml"
 fi
 
 # Over TCP, not the socket: on a fresh volume the image first runs a
@@ -63,33 +70,41 @@ warn_stale_image() {
 started=0
 route_guard() {
     command -v ip >/dev/null || return 0
-    local container address network bridge dev option
-    container="$(docker compose ps -q postgres 2>/dev/null)" || return 0
-    [[ -n "$container" ]] || return 0
+    local container addresses address network bridge dev option
+    # Past this point a failed lookup refuses: an unchecked route is no pass.
+    if ! container="$(docker compose ps -q postgres 2>/dev/null)" || [[ -z "$container" ]] ||
+        ! addresses="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.NetworkID}}{{"\n"}}{{end}}' "$container" 2>/dev/null)"; then
+        refuse_route "Could not inspect the Postgres container of project $COMPOSE_PROJECT_NAME, so where the host routes its address is unknown." no
+    fi
     while read -r address network; do
         [[ -n "$address" && -n "$network" ]] || continue
         bridge="br-${network:0:12}"
         dev="$(ip -o route get "$address" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')" || dev=''
-        [[ -n "$dev" && "$dev" != "$bridge" ]] || continue
+        [[ "$dev" != "$bridge" ]] || continue
         # A network can name its bridge (a custom compose driver option).
         option="$(docker network inspect --format '{{index .Options "com.docker.network.bridge.name"}}' "$network" 2>/dev/null)" || option=''
         if [[ -n "$option" ]]; then
             bridge="$option"
             [[ "$dev" != "$bridge" ]] || continue
         fi
+        # No such bridge on this host: Docker Desktop, rootless, a remote daemon.
         ip link show "$bridge" >/dev/null 2>&1 || continue
-        printf 'Postgres container %s is at %s, but this host routes %s through %s, not its bridge %s: connections to 127.0.0.1:%s would reach another machine, not this container (Cloudflare WARP does this to some hosts of 192.168.0.0/20, Docker'"'"'s first default subnet).\n' \
-            "$COMPOSE_PROJECT_NAME" "$address" "$address" "$dev" "$bridge" "$port" >&2
-        if ((started)); then
-            docker compose down >/dev/null 2>&1 || true
-            printf 'This script started it, so it is removed again (its data volume is kept).\n' >&2
-        else
-            printf 'It was already running, so it is left alone. Remove it yourself: COMPOSE_PROJECT_NAME=%s docker compose down\n' "$COMPOSE_PROJECT_NAME" >&2
-        fi
-        printf 'Give the project a subnet that no VPN or route claims, then run this again:\n  COFFRE_POSTGRES_SUBNET=10.<n>.0.0/24 in front of this command (one no other Docker network uses: docker network ls), or\n  "default-address-pools" in /etc/docker/daemon.json for every project (Docker restarts).\n' >&2
-        exit 1
-    done < <(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.NetworkID}}{{"\n"}}{{end}}' "$container" 2>/dev/null || true)
+        refuse_route "Postgres container $COMPOSE_PROJECT_NAME is at $address, but this host routes $address through ${dev:-no device}, not its bridge $bridge: connections to 127.0.0.1:$port would reach another machine, not this container (Cloudflare WARP does this to some hosts of 192.168.0.0/20, Docker's first default subnet)."
+    done <<<"$addresses"
     return 0
+}
+
+refuse_route() {
+    printf '%s\n' "$1" >&2
+    if ((started)); then
+        docker compose down >/dev/null 2>&1 || true
+        printf 'This script started it, so it is removed again (its data volume is kept).\n' >&2
+    else
+        printf 'It was already running, so it is left alone. Remove it yourself: COMPOSE_PROJECT_NAME=%s docker compose down\n' "$COMPOSE_PROJECT_NAME" >&2
+    fi
+    [[ "${2:-}" != no ]] || exit 1
+    printf 'Give the project a subnet that no VPN or route claims, then run this again:\n  COFFRE_POSTGRES_SUBNET=10.<n>.0.0/24 in front of this command (one no other Docker network uses: docker network ls), or\n  "default-address-pools" in /etc/docker/daemon.json for every project (Docker restarts).\n' >&2
+    exit 1
 }
 
 ready_and_done() {
@@ -159,8 +174,10 @@ while ((SECONDS < deadline)); do
             fi
             last_error="$output"
         else
-            # Ours: refuse a bad route at once, not after a wait for readiness.
-            started=1
+            # Refuse a bad route at once, not after a wait for readiness. Only
+            # a container compose says it started is this script's to remove:
+            # another caller may have started it since `running` looked.
+            if [[ "$output" == *' Started'* ]]; then started=1; fi
             route_guard
         fi
     fi
