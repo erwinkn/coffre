@@ -595,9 +595,9 @@ async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
  * each, but for the reads asked together, which go under one Sync
  * (`groupReads`); each vault call is a connection of its own.
  *
- * The environment page: the session, with the newest policy change; the
- * vault's `access`, and beside the next its `settings` (who sets up
- * service accounts, for `me`); the places the caller reaches, each
+ * The environment page: the session, with the newest policy change and
+ * the instance's settings (who sets up service accounts, for `me`); the
+ * vault's `access`; the places the caller reaches, each
  * project's team keys with them, and the keys and dismissals of the
  * projects with a fork, which the project list resolves; then, at once,
  * the environment's secrets, the project's references, and the keys and
@@ -615,44 +615,44 @@ async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
  * budget's; the per-statement pages test, which grows the log, measures the page without that report.
  */
 const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost; history?: () => Promise<unknown> }> = {
-  "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 2, vaultCalls: 2 } },
-  "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 2, vaultCalls: 2 } },
-  "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
-  "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 1, vaultCalls: 1 } },
+  "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 1, vaultCalls: 1 } },
+  "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
+  "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   // Every other page, as Owner and viewer (`visits`); the sign-in page signed out too, which reads nothing. Not the
   // audit page's: its check reads what was written since the newest checkpoint (R25), which its own test holds.
-  "/projects, owner": { request: () => visit('owner', '/projects'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/projects, viewer": { request: () => visit('viewer', '/projects'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/projects/market/users, owner": { request: () => visit('owner', '/projects/market/users'), budget: { app: 14, trips: 4, vault: 2, vaultCalls: 3 } },
-  "/projects/market/users, viewer": { request: () => visit('viewer', '/projects/market/users'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/projects/market/service-accounts, owner": { request: () => visit('owner', '/projects/market/service-accounts'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
-  "/projects/market/service-accounts, viewer": { request: () => visit('viewer', '/projects/market/service-accounts'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/projects/market/settings, owner": { request: () => visit('owner', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
-  "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
-  "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 2, vaultCalls: 2 } },
-  "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 3, vaultCalls: 4 } },
-  "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 5, vaultCalls: 6 } },
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 3, vaultCalls: 4 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
-  "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 5, vaultCalls: 5 } },
-  "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 4, vaultCalls: 5 } },
-  "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 2, vaultCalls: 2 } },
-  "/account, owner": { request: () => visit('owner', '/account'), budget: { app: 7, trips: 3, vault: 2, vaultCalls: 2 } },
-  "/account, viewer": { request: () => visit('viewer', '/account'), budget: { app: 7, trips: 3, vault: 2, vaultCalls: 2 } },
-  "/account/sessions, owner": { request: () => visit('owner', '/account/sessions'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 2 } },
-  "/account/sessions, viewer": { request: () => visit('viewer', '/account/sessions'), budget: { app: 11, trips: 3, vault: 2, vaultCalls: 2 } },
-  "/login, owner": { request: () => visit('owner', '/login'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/login, viewer": { request: () => visit('viewer', '/login'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/unregistered, owner": { request: () => visit('owner', '/unregistered'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/unregistered, viewer": { request: () => visit('viewer', '/unregistered'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/auth/device, owner": { request: () => visit('owner', '/auth/device'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/auth/device, viewer": { request: () => visit('viewer', '/auth/device'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/approvals/00000000-0000-4000-8000-000000000000, owner": { request: () => visit('owner', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/approvals/00000000-0000-4000-8000-000000000000, viewer": { request: () => visit('viewer', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/oauth/authorize, owner": { request: () => visit('owner', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/oauth/authorize, viewer": { request: () => visit('viewer', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/projects, owner": { request: () => visit('owner', '/projects'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/projects, viewer": { request: () => visit('viewer', '/projects'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/projects/market/users, owner": { request: () => visit('owner', '/projects/market/users'), budget: { app: 14, trips: 4, vault: 1, vaultCalls: 2 } },
+  "/projects/market/users, viewer": { request: () => visit('viewer', '/projects/market/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/projects/market/service-accounts, owner": { request: () => visit('owner', '/projects/market/service-accounts'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
+  "/projects/market/service-accounts, viewer": { request: () => visit('viewer', '/projects/market/service-accounts'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/projects/market/settings, owner": { request: () => visit('owner', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
+  "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
+  "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 2, vaultCalls: 3 } },
+  "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 4, vaultCalls: 5 } },
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
+  "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 3, vaultCalls: 4 } },
+  "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
+  "/account, owner": { request: () => visit('owner', '/account'), budget: { app: 7, trips: 3, vault: 1, vaultCalls: 1 } },
+  "/account, viewer": { request: () => visit('viewer', '/account'), budget: { app: 7, trips: 3, vault: 1, vaultCalls: 1 } },
+  "/account/sessions, owner": { request: () => visit('owner', '/account/sessions'), budget: { app: 10, trips: 3, vault: 1, vaultCalls: 1 } },
+  "/account/sessions, viewer": { request: () => visit('viewer', '/account/sessions'), budget: { app: 11, trips: 3, vault: 1, vaultCalls: 1 } },
+  "/login, owner": { request: () => visit('owner', '/login'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/login, viewer": { request: () => visit('viewer', '/login'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/unregistered, owner": { request: () => visit('owner', '/unregistered'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/unregistered, viewer": { request: () => visit('viewer', '/unregistered'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/auth/device, owner": { request: () => visit('owner', '/auth/device'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/auth/device, viewer": { request: () => visit('viewer', '/auth/device'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/approvals/00000000-0000-4000-8000-000000000000, owner": { request: () => visit('owner', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/approvals/00000000-0000-4000-8000-000000000000, viewer": { request: () => visit('viewer', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/oauth/authorize, owner": { request: () => visit('owner', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
+  "/oauth/authorize, viewer": { request: () => visit('viewer', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/login, signed out": { request: () => visit(null, '/login'), budget: { app: 0, trips: 0, vault: 0, vaultCalls: 0 } },
 };
 
@@ -676,7 +676,7 @@ test("a page's read that fails fails the reads sent with it, once, and each of i
     const spent = await pageCost(async () => (outcomes = await environmentCalls('viewer')));
     assert.deepEqual(outcomes.map((outcome) => outcome.status === 'rejected' ? (outcome.reason as { status?: number }).status : 'answered'), [500, 500, 500]);
     // The page's reads, each once, but the references' ends, which their list, failed, never asks.
-    assert.deepEqual(spent, { app: 8, trips: 3, vault: 2, vaultCalls: 2 }, 'each read sent once');
+    assert.deepEqual(spent, { app: 8, trips: 3, vault: 1, vaultCalls: 1 }, 'each read sent once');
   } finally {
     await db.owner.execute(sql`GRANT SELECT ON secret_references TO coffre_app`);
   }
