@@ -99,13 +99,19 @@ export async function openTestDatabase(): Promise<TestDatabase> {
     opened.push(close);
     return db;
   };
+  const owner = await open(OWNER_URL);
   return {
-    owner: await open(OWNER_URL),
+    owner,
     vault: await open(VAULT_URL),
     connect: (connections) => open(VAULT_URL, connections),
     hot: (connections) => open(HOT_URL, connections),
     close: async () => {
-      await Promise.all(opened.map((close) => close()));
+      // A connection whose transaction a test left open is one no client's end lets go of (`endLeftOpen`).
+      try {
+        if (ENGINE === 'postgres') await endLeftOpen(owner);
+      } finally {
+        await Promise.all(opened.map((close) => close()));
+      }
     },
   };
 }
@@ -203,29 +209,26 @@ export async function locksHere(owner: Database, where: SQL): Promise<number> {
   return row!.n;
 }
 
-/** How long a transaction in the test's database may stay open, as a reset sees it, before the reset ends it. */
+/** How long a reset, or the file's `close`, waits for the transactions open in the test's database to end. */
 const LEFT_OPEN_MS = 10_000;
 
 /**
- * On Postgres, every other transaction in the test's database ended. One a
- * test left open, as a holder of the log's head it never let go of, having
- * failed first, would keep its locks for good: the reset would wait on them,
- * and so would the file's last `close`, until CI's limit (T153). One open
- * for over `LEFT_OPEN_MS` is ended, and the reset fails, naming what it ran
- * last; the next test starts clean.
+ * On Postgres, every other transaction in the test's database ended, before
+ * a reset and before the file closes its connections. One a test left open,
+ * as a holder of the log's head it never let go of, having failed first,
+ * would keep its locks and its connection for good: the reset would wait on
+ * them, and the file's `close` on its connection, until CI's limit (T153).
+ * Those still open after `LEFT_OPEN_MS` are ended, and the call fails,
+ * naming what each ran last; the next test starts clean.
  */
 async function endLeftOpen(owner: Database): Promise<void> {
-  for (;;) {
-    const open = await rows<{ pid: number; usename: string; query: string; stale: boolean }>(owner, sql`SELECT pid, usename, query,
-      xact_start < statement_timestamp() - make_interval(secs => ${LEFT_OPEN_MS / 1000}) AS stale
-      FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid() AND xact_start IS NOT NULL`);
+  for (const until = Date.now() + LEFT_OPEN_MS; ; await sleep(50)) {
+    const open = await rows<{ pid: number; usename: string; query: string }>(owner, sql`SELECT pid, usename, query FROM pg_stat_activity
+      WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid() AND xact_start IS NOT NULL`);
     if (open.length === 0) return;
-    const stale = open.filter(({ stale }) => stale);
-    if (stale.length > 0) {
-      await run(owner, sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid IN (${sql.join(stale.map(({ pid }) => sql`${pid}`), sql`, `)})`);
-      throw new Error(`a test left ${stale.length} transaction(s) open for over ${LEFT_OPEN_MS} ms, now ended: ${stale.map(({ usename, query }) => `${usename}: ${query.trim()}`).join('; ')}`);
-    }
-    await sleep(50);
+    if (Date.now() < until) continue;
+    await run(owner, sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid IN (${sql.join(open.map(({ pid }) => sql`${pid}`), sql`, `)})`);
+    throw new Error(`a test left ${open.length} transaction(s) open for over ${LEFT_OPEN_MS} ms, now ended: ${open.map(({ usename, query }) => `${usename}: ${query.trim()}`).join('; ')}`);
   }
 }
 
