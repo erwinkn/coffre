@@ -324,10 +324,11 @@ export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source'
  *    (HotPathOne's `StaleFirst`, `TamperVisible`).
  * 2. **The credential and the key:** missing, revoked or ended at the
  *    request's time; a key that is no more, a reference whose source is
- *    gone (`ended`), a reference to a reference, a value with no wrapped
+ *    gone or that has ended (`ended`), a reference to a reference, a value with no wrapped
  *    key (a plain one, which the vault never opens), and a place it is read
  *    through that 0.14's `throughOk` refuses (`bad_claim`): one but a live,
- *    unarchived environment of the key's project other than the key's own.
+ *    unarchived environment of an unarchived project, the key's, other than
+ *    the key's own.
  *    Permission is decided at the key's own environment (a reference's
  *    holder's), whatever it is read through.
  * 3. **0.14's rules, unchanged:** `keyRefusals`, then `useOnlyRefusals`,
@@ -359,6 +360,8 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
   if (secret === null) return 'missing';
   const value = secret.source === null ? secret : view.source!.row;
   if (value === null) return 'ended';
+  // A reference whose end its row says (`ended_at`): no version of its own, no source. 0.14's `reference.end`.
+  if (secret.source === null && secret.version === '') return 'ended';
   // A reference reads a key's own value: one to another reference is none the change path makes.
   if (value.source !== null && secret.source !== null) return 'bad_claim';
   // A use opens a wrapped key: a plain value, which 0.14's vault never decides either, is the app's to hand back.
@@ -367,18 +370,19 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
     const row = view.environments.get(id)!.row;
     return row === null ? [] : [[id, row] as const];
   }));
-  // Read through a fork (0.14's `throughOk`): a live, unarchived environment of the key's project, not its own. It
+  // Read through a fork (0.14's `throughOk`): a live, unarchived environment of the key's project, unarchived too, not its own. It
   // decides nothing: the key is decided where it is held.
   if (request.place !== null) {
     const fork = rows.get(request.place);
-    if (request.place === secret.environmentId || fork === undefined || fork.projectId !== secret.projectId || fork.deleted || fork.archived) return 'bad_claim';
+    if (request.place === secret.environmentId || fork === undefined || fork.projectId !== secret.projectId || fork.deleted || fork.archived || fork.projectArchived) return 'bad_claim';
   }
   const policy = view.policy.row;
   if (policy === null) return 'no_policy';
   const reader = readerOf(view.principal!.row, credential, view.roles.row ?? noEdits(), rows.values(), request.at);
   const at: SecretPlace = { projectId: secret.projectId, environmentId: secret.environmentId };
   const place: SecretPlace = { projectId: value.projectId, environmentId: value.environmentId };
-  const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived }]) => [id, { projectId, slug, owner, parentId, deleted, archived }]));
+  // As 0.14's snapshot has them: archived, the environment or its project.
+  const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived, projectArchived }]) => [id, { projectId, slug, owner, parentId, deleted, archived: archived || projectArchived }]));
   const permission: Permission = request.purpose === 'use' ? 'secret.use' : 'secret.read';
   const byPlace = keyRefusals(reader, { principal: credential.principal, permission, secrets: [place], at: [at], environments: environmentRows, needs: [null] });
   const listed = useOnlyRefusals(byPlace, reader, { action: 'secret.read', purpose: request.purpose, secrets: [{ ...place, secretId: value.id }] });

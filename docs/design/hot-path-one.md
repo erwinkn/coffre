@@ -412,9 +412,9 @@ workerd restarted each time (25 runs, per-thread CPU from schedstat).
     ends a removed member's credentials by bumping it; in 0.15 the change
     path must revoke them (`credential.revoke`).
 - **A reference is the holder's newest `secret_references` row** while the
-  holder has no version of its own (`objects.ts`). Ending one is a `reference.end`
-  entry in 0.14; PR 4's change path must leave the row saying so, or the
-  object stale.
+  holder has no version of its own and that row has not ended (`objects.ts`).
+  Its end (`ended_at`, 0029) is written by `change_input` in the vault's
+  `reference.end` decision (the plan's "use_credential correctness").
 - **The principal's newest change names the 0.14 entry it accounts for** in its
   payload, `old`. PR 4a's changes write it: the 0.14 access entry that the same
   decision appended. The cutover's genesis and each adoption will write it too

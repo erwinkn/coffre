@@ -7,24 +7,34 @@ import { entryMac } from '../src/log-entry.ts';
 import { ENGINE, rows, run } from './database.ts';
 
 /**
- * 0.15's entries as the change and use paths will write them (plans PR 4
- * and 5), for the checkpointer's tests: numbered from the sequence on
- * Postgres, after every number taken on SQLite; MAC'd over their tree and
- * every column but the number (log-entry.ts).
+ * 0.15's entries as the change and use paths write them (plans PR 4 and
+ * 5), for the checkpointer's tests: numbered from the sequence on Postgres,
+ * in the insert and under the fence shared, as `use_credential` and
+ * `change_input` number theirs (a number taken before the fence could land
+ * after a barrier that counted it, past the pair that closed over it);
+ * after every number taken on SQLite. MAC'd over their tree and every
+ * column but the number (log-entry.ts).
  */
 export function logWriter(owner: Database, macKey: Buffer) {
   let sqliteNext = 1n;
-  // On SQLite each write is a transaction, so that it waits its turn in the file's queue (connect.ts) behind the checkpointer's.
-  const write = (query: SQL) => (ENGINE === 'sqlite' ? owner.transaction((tx) => run(tx, query)) : run(owner, query));
-  const next = async (): Promise<bigint> => {
-    // On SQLite, after every number taken, the store's own included (a retention change, say).
+  /** The entry `insert` makes, given its number's SQL: one transaction, a file's turn on SQLite, the fence on Postgres. */
+  const append = async (insert: (number: SQL) => SQL): Promise<bigint> => {
     if (ENGINE === 'sqlite') {
-      const [row] = await rows<{ n: string }>(owner, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS TEXT) AS n`);
-      if (BigInt(row!.n) >= sqliteNext) sqliteNext = BigInt(row!.n) + 1n;
-      return sqliteNext++;
+      // Each write a transaction, so that it waits its turn in the file's queue (connect.ts) behind the checkpointer's;
+      // numbered in it, after every number taken, the store's own included (a retention change, say).
+      return owner.transaction(async (tx) => {
+        const [row] = await rows<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS TEXT) AS n`);
+        if (BigInt(row!.n) >= sqliteNext) sqliteNext = BigInt(row!.n) + 1n;
+        const number = sqliteNext++;
+        await run(tx, insert(sql`${number}`));
+        return number;
+      });
     }
-    const [row] = await rows<{ n: string }>(owner, sql`SELECT nextval('log_number')::text AS n`);
-    return BigInt(row!.n);
+    return owner.transaction(async (tx) => {
+      await run(tx, sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`);
+      const [row] = await rows<{ n: string }>(tx, sql`${insert(sql`nextval('log_number')`)} RETURNING number::text AS n`);
+      return BigInt(row!.n);
+    });
   };
   return {
     /** Every entry, pair and tile gone, the floor at now less the deadline, as a new log. */
@@ -40,20 +50,16 @@ export function logWriter(owner: Database, macKey: Buffer) {
       await run(owner, sql`SELECT make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
     },
     async change(payload = '{"op":"genesis"}', at = Date.now(), object: string = randomUUID()): Promise<bigint> {
-      const number = await next();
       const row = { at, requestId: `c-${randomUUID()}`, object, actor: 'vault', payload, seal: randomBytes(16) };
       const mac = entryMac(macKey, { tree: 'changes', row });
-      await write(sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      return append((number) => sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
         VALUES (${number}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${mac})`);
-      return number;
     },
     async use(at = Date.now(), forged = false): Promise<bigint> {
-      const number = await next();
       const row = { at, requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
       const mac = forged ? randomBytes(16) : entryMac(macKey, { tree: 'uses', row });
-      await write(sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
+      return append((number) => sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
         VALUES (${number}, ${row.at}, ${row.requestId}, ${row.credential}, ${row.secret}, ${row.purpose}, ${mac}, ${row.place})`);
-      return number;
     },
   };
 }

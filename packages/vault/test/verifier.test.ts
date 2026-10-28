@@ -98,7 +98,7 @@ async function instance(walks: VaultOptions['walks'] = {}) {
   // The instance's roles and its dev environment, as the cutover seals them.
   assert.equal((await vault.access(ROOT)).role, 'owner');
   await genesis(ROLES_REF, noEdits());
-  await genesis({ kind: 'environment', id: where.dev }, environmentObject({ id: where.dev, projectId: where.project, slug: 'dev', owner: null, parentId: null, protected: false, archived: false }));
+  await genesis({ kind: 'environment', id: where.dev }, environmentObject({ id: where.dev, projectId: where.project, slug: 'dev', owner: null, parentId: null, protected: false, archived: false, projectArchived: false }));
   assert.ok((await vault.admit({ actor: ROOT, principal: ADA })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: where.project, environmentId: where.dev, role: 'developer', expiresAt: null }] })).ok);
 
@@ -123,8 +123,8 @@ async function instance(walks: VaultOptions['walks'] = {}) {
     });
     await run(db.owner, sql`UPDATE secrets SET current_version_id = ${version}, current_version = 1 WHERE id = ${ref.secretId}`);
     await genesis({ kind: 'secret', id: ref.secretId }, secretObject({
-      id: ref.secretId, projectId: where.project, environmentId: where.dev, source: null,
-      version: { id: version, sensitive: false, plain: false, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: Buffer.from(wrapped.bytes).toString('base64') },
+      id: ref.secretId, projectId: where.project, environmentId: where.dev, source: null, reference: null,
+      version: { id: version, sensitive: false, plaintext: null, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: Buffer.from(wrapped.bytes).toString('base64') },
     }));
     return ref.secretId;
   };

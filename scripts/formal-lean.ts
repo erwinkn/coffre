@@ -402,19 +402,31 @@ function principalRow(principal: string): PrincipalInput {
 }
 function environmentRow(id: string): EnvironmentInput {
   const personal = id.endsWith('@ada');
+  const deleted = chance(0.06);
   return {
     kind: 'environment', id, projectId: chance(0.95) ? projectOf(id) : pick([...PROJECTS, ...INHERITED]), slug: slugOf(id) ?? 'none',
     owner: personal ? (chance(0.8) ? 'user:ada' : null) : chance(0.05) ? pick(PEOPLE) : null,
     parentId: personal || id.endsWith('fork') ? (chance(0.9) ? `${projectOf(id)}/dev` : pick(ENVIRONMENTS)) : null,
-    protected: chance(0.3), deleted: chance(0.06), archived: chance(0.08),
+    protected: chance(0.3), deleted, archived: chance(0.08),
+    // As `environmentObject` makes it: a deleted one holds no project's archival.
+    projectArchived: !deleted && chance(0.06),
   };
 }
 const WRAPPED = { kekProvider: 'local', kekId: 'k1', kekVersion: '1', bytes: 'AAAA' };
 function secretRow(id: string): SecretInput {
+  // A reference whose end its row says, now and then, as `secretObject` makes one: no version, no key, no source.
+  if (chance(0.06)) {
+    const environmentId = pick(ENVIRONMENTS);
+    return { kind: 'secret', id, projectId: projectOf(environmentId), environmentId, version: '', nature: 'secret', key: null, digest: null, source: null, reference: null };
+  }
   const environmentId = chance(0.2) ? 'market/dev@ada' : pick(ENVIRONMENTS);
+  const nature = pick(['plain', 'secret', 'sensitive'] as const);
+  // Now and then a plain value as `secretObject` makes one: its text's digest, no key; otherwise any key, for the rules.
+  const plain = nature === 'plain' && chance(0.5);
   return {
-    kind: 'secret', id, projectId: chance(0.95) ? projectOf(environmentId) : pick(PROJECTS), environmentId, version: 'v1',
-    nature: pick(['plain', 'secret', 'sensitive'] as const), key: chance(0.9) ? WRAPPED : null, source: chance(0.25) ? pick(KEYS) : null,
+    kind: 'secret', id, projectId: chance(0.95) ? projectOf(environmentId) : pick(PROJECTS), environmentId,
+    version: 'v1', nature, key: plain ? null : chance(0.9) ? WRAPPED : null, digest: plain ? 'AAAA' : null, source: null, reference: null,
+    ...(chance(0.25) ? { source: pick(KEYS), reference: 'r' } : {}),
   };
 }
 repeat(20000, () => {
@@ -425,7 +437,7 @@ repeat(20000, () => {
   const credential = checkedOf(owner
     ? { kind: 'credential' as const, id: 'c1', principal: 'user:ada', caller: 'person' as const, scope: null, expiresAt: null, revoked: false }
     : maybeNull(0.05, credentialRow));
-  const secret = checkedOf(owner ? { ...secretRow(pick(KEYS)), environmentId: pick(['market/dev', 'ops/prod', 'market/fork']), source: null } : maybeNull(0.08, () => secretRow(pick(KEYS))));
+  const secret = checkedOf(owner ? { ...secretRow(pick(KEYS)), environmentId: pick(['market/dev', 'ops/prod', 'market/fork']), source: null, reference: null } : maybeNull(0.08, () => secretRow(pick(KEYS))));
   const given = policy();
   const view: CheckedView = {
     credential,

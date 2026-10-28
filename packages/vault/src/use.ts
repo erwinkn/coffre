@@ -112,16 +112,16 @@ export type UseRow = {
   g_project: (string | null)[] | null; g_environment: (string | null)[] | null; g_slug: (string | null)[] | null; g_role: string[] | null; g_expires: (string | null)[] | null;
   r_value: string | null; r_seal: Buffer | null; r_last: Buffer | null;
   p_value: string | null; p_seal: Buffer | null; p_last: Buffer | null; cap_count: number | null; cap_window: string | null;
-  s_project: string | null; s_environment: string | null; s_version: string | null; s_source: string | null; s_seal: Buffer | null; s_last: Buffer | null;
-  x_project: string | null; x_environment: string | null; x_version: string | null; x_source: string | null; x_seal: Buffer | null; x_last: Buffer | null;
+  s_project: string | null; s_environment: string | null; s_version: string | null; s_source: string | null; s_reference: string | null; s_seal: Buffer | null; s_last: Buffer | null;
+  x_project: string | null; x_environment: string | null; x_version: string | null; x_source: string | null; x_reference: string | null; x_seal: Buffer | null; x_last: Buffer | null;
   v_envelope: number | null; v_ciphertext: Buffer | null; v_iv: Buffer | null; v_auth_tag: Buffer | null; v_wrapped_dek: Buffer | null;
-  v_kek_provider: string | null; v_kek_id: string | null; v_kek_version: string | null; v_sensitive: boolean | null; v_plain: boolean | null;
+  v_kek_provider: string | null; v_kek_id: string | null; v_kek_version: string | null; v_sensitive: boolean | null; v_plain: boolean | null; v_plaintext: string | null;
   in_set: boolean | null; others: number | null;
 } & Slot<'e1'> & Slot<'e2'> & Slot<'e3'> & Slot<'e4'>;
 
 type Slot<N extends string> = {
   [K in `${N}_id` | `${N}_project` | `${N}_slug` | `${N}_owner` | `${N}_parent`]: string | null;
-} & { [K in `${N}_protected` | `${N}_archived`]: boolean | null } & { [K in `${N}_seal` | `${N}_last`]: Buffer | null };
+} & { [K in `${N}_protected` | `${N}_archived` | `${N}_project_archived`]: boolean | null } & { [K in `${N}_seal` | `${N}_last`]: Buffer | null };
 
 const SLOTS = ['e1', 'e2', 'e3', 'e4'] as const;
 
@@ -272,16 +272,17 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
   const principal = row.c_principal === null ? null : read(row.m_status === null ? null : principalObject({
     principal: row.c_principal, status: row.m_status, ...memberStanding({ owner: row.m_owner === true, role: row.m_role, scope: row.m_scope }),
   }, grantsOf(row)), row.m_seal, last.m);
+  // A plain value's text, which its object's digest binds.
   const version = row.v_wrapped_dek === null ? null : {
-    sensitive: row.v_sensitive === true, plain: row.v_plain === true, kekProvider: row.v_kek_provider!, kekId: row.v_kek_id!, kekVersion: row.v_kek_version!,
-    wrappedDek: row.v_wrapped_dek.toString('base64'),
+    sensitive: row.v_sensitive === true, plaintext: row.v_plaintext,
+    kekProvider: row.v_kek_provider!, kekId: row.v_kek_id!, kekVersion: row.v_kek_version!, wrappedDek: row.v_wrapped_dek.toString('base64'),
   };
   const secret = read(row.s_environment === null ? null : secretObject({
-    id: request.secretId, projectId: row.s_project!, environmentId: row.s_environment, source: row.s_source,
+    id: request.secretId, projectId: row.s_project!, environmentId: row.s_environment, source: row.s_source, reference: row.s_reference,
     version: row.s_source === null && version !== null ? { id: row.s_version!, ...version } : null,
   }), row.s_seal, last.s);
   const source = row.s_source === null ? null : read(row.x_environment === null ? null : secretObject({
-    id: row.s_source, projectId: row.x_project!, environmentId: row.x_environment, source: row.x_source,
+    id: row.s_source, projectId: row.x_project!, environmentId: row.x_environment, source: row.x_source, reference: row.x_reference,
     version: row.x_source === null && version !== null ? { id: row.x_version!, ...version } : null,
   }), row.x_seal, last.x);
   const environments = new Map<string, Read<EnvironmentInput>>();
@@ -291,7 +292,7 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
     const project = row[`${slot}_project`];
     environments.set(id, read(project === null ? null : environmentObject({
       id, projectId: project, slug: row[`${slot}_slug`]!, owner: row[`${slot}_owner`], parentId: row[`${slot}_parent`],
-      protected: row[`${slot}_protected`], archived: row[`${slot}_archived`] === true,
+      protected: row[`${slot}_protected`], archived: row[`${slot}_archived`] === true, projectArchived: row[`${slot}_project_archived`] === true,
     }), row[`${slot}_seal`], last[slot]));
   }
   const view: UseView = {

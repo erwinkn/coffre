@@ -1347,6 +1347,52 @@ closed the window below it is HotPathOneClock's.
 - `open()` need not refuse rows at different `upto`s. It checks each tree
   against the one remembered pair, and can repair a half-written pair.
 
+### SealedObjects.tla
+
+Which rows and columns make an object (W226; the plan's "use_credential
+correctness"). HotPathOne checks the seals of abstract inputs; this checks
+that each input's object holds every part a use depends on, so that what a
+use reads is what 0.14 decides on and what the log says.
+
+**The model.** One use reads a key through a fork of its project. The key
+is a reference whose source is a plain value. The rows: the reference's
+row id and its end, the holder's archival, the fork's own archival and its
+project's, the value's text. Honest
+code ends the reference (0.14's `reference.end`), archives and restores the
+fork and the project, and writes the value; each change it makes reads its
+object's row under its seal first, and seals what it leaves. A database
+writer with no key sets any column. A use refuses unless every object is
+its seal's; otherwise it decides, and serves the text it read.
+
+| protection | turned off, TLC finds |
+|---|---|
+| a reference's end in its row, which the holder's object reads (EndInRow) | `AllowedAsOld`: a use through a reference 0.14 holds ended |
+| ... written in the vault's decision beside 0.14's entry (EndWithEntry) | `AllowedAsOld`: between the vault's answer and the app's write |
+| an environment's object holds its project's archival (ProjectInObject) | `AllowedAsOld`: a use through a fork of an archived project |
+| ... apart from its own (ArchivedApart) | `AllowedAsOld`: the fork's own archival cleared by a writer while its project is archived, then sealed in by the project's restore |
+| a plain value's object holds its text's digest (DigestInSeal) | `AllowedAsOld`, `UnrefusedReadsHonest`: an edited text read under a valid seal |
+| the holder's object holds the id of the reference row it reads through, and an end decides on that object, checked against its seal (ReferenceInObject) | `AllowedAsOld`: the genuine row renamed, the end skips the holder, renamed back |
+| whether the holder has an object is its log's, not its row's `archived_at` (LivenessFromLog) | `AllowedAsOld`: a live holder marked archived, the end takes the no-object path, the marks cleared |
+
+That the replay decides each use as live did is not this model's: a use not
+refused here reads its seals' objects, so the two agree by construction.
+HotPathOne's `ReplaySound` holds it for the fence and the seals, and the
+suites' `replayAgrees` for these objects (`packages/vault/test/app-places.test.ts`).
+
+**What it does not cover.** Each change here is one step on one object: a
+project's archive is the fork's change alone. That the app changes *every*
+live environment of the project, one made meanwhile included (the set read
+again under 0.14's head), is an app-level guard of the kind of PR 4b's
+`expectRevoked` and `Erasure.hold`, held by
+`packages/server/test/app-places.test.ts` (an environment made while its
+project is archived), not by this model. Nor does it model a holder
+archived when its reference ends: the vault then writes the row's end alone
+(`end_reference`), tested in `packages/vault/test/app-places.test.ts`. Nor
+an environment made or deleted: a new one is made in a live project only
+(each maker checks under the head), and a deleted one holds no project's
+archival (`environmentObject`, `environment.delete`), both held by the same
+tests and by the replay's `applyOp`.
+
 ### Migration015.tla
 
 The cutover from 0.14 (the plan's PR 9).
@@ -1417,7 +1463,7 @@ shortest one.
 
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
-tests do; skipped, seconds. With 0.15's models the suite is 266 TLC runs in
+tests do; skipped, seconds. With 0.15's models the suite is 275 TLC runs in
 ten shards; the seven new ones are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk

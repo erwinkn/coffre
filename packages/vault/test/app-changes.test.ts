@@ -261,7 +261,7 @@ test('a deleted environment\'s object holds its slug before the tombstone: the c
   const slug = `dev${TOMBSTONE}deleted-2026-10-27`;
   await db.owner.insert(environments).values({ id, projectId: project, slug, name: 'Dev' });
   const read = async () => (await db.owner.select().from(environments).where(eq(environments.id, id)))[0]!;
-  const object = (row: Awaited<ReturnType<typeof read>>): EnvironmentInput => environmentObject({ ...row, archived: row.archivedAt !== null });
+  const object = (row: Awaited<ReturnType<typeof read>>): EnvironmentInput => environmentObject({ ...row, archived: row.archivedAt !== null, projectArchived: false });
   const before = object(await read());
   assert.deepEqual([before.slug, before.deleted], ['dev', true]);
   const ref: Ref = { kind: 'environment', id };

@@ -34,6 +34,8 @@ const ROLE_NAMES = ['viewer', 'contributor', 'developer', 'maintainer', 'owner',
 const PURPOSES: Purpose[] = ['reveal', 'run', 'compare', 'copy', 'use', 'expose'];
 const NATURES: Nature[] = ['plain', 'secret', 'sensitive'];
 const WRAPPED = { kekProvider: 'local', kekId: 'k1', kekVersion: '1', bytes: 'AAAA' };
+/** A plain value's digest, in the shape `plainDigest` makes (base64 of 32 bytes). */
+const PLAIN_DIGEST = 'X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=';
 
 const pick = <T>(tc: hegel.TestCase, items: readonly T[]): T => tc.draw(gs.sampledFrom(items));
 const maybe = <T>(tc: hegel.TestCase, items: readonly T[]): T | null => (tc.draw(gs.booleans()) ? pick(tc, items) : null);
@@ -63,9 +65,12 @@ function drawChange(tc: hegel.TestCase): [Ref, Op] {
     case 7: case 8: {
       const environment = pick(tc, ENVIRONMENTS);
       const reference = tc.draw(gs.integers({ minValue: 0, maxValue: 4 })) === 0;
+      const nature = pick(tc, NATURES);
+      // As `secretObject` makes them: a plain value with its text's digest and no key, a reference with neither.
+      const plain = !reference && nature === 'plain';
       return [{ kind: 'secret', id: pick(tc, KEYS) }, {
         op: 'secret.write', projectId: PROJECTS[ENVIRONMENTS.indexOf(environment) % 2]!, environmentId: environment, version: `v${tc.draw(gs.integers({ minValue: 0, maxValue: 99 }))}`,
-        nature: pick(tc, NATURES), key: reference ? null : WRAPPED, source: reference ? pick(tc, KEYS) : null,
+        nature, key: reference || plain ? null : WRAPPED, digest: plain ? PLAIN_DIGEST : null, source: reference ? pick(tc, KEYS) : null, reference: reference ? 'r' : null,
       }];
     }
     case 9: return [{ kind: 'secret', id: pick(tc, KEYS) }, { op: 'secret.delete' }];
@@ -125,9 +130,11 @@ function drawWorld(tc: hegel.TestCase): { world: World; at: number; decided: Map
   KEYS.forEach((id, n) => {
     const environmentId = ENVIRONMENTS[n % ENVIRONMENTS.length]!;
     const reference = n === KEYS.length - 1;
+    const nature = pick(tc, NATURES);
+    const plain = !reference && nature === 'plain';
     world.change({ kind: 'secret', id }, {
-      op: 'secret.write', projectId: PROJECTS[(n % ENVIRONMENTS.length) % 2]!, environmentId, version: 'v0', nature: pick(tc, NATURES),
-      key: reference ? null : WRAPPED, source: reference ? KEYS[0]! : null,
+      op: 'secret.write', projectId: PROJECTS[(n % ENVIRONMENTS.length) % 2]!, environmentId, version: 'v0', nature,
+      key: reference || plain ? null : WRAPPED, digest: plain ? PLAIN_DIGEST : null, source: reference ? KEYS[0]! : null, reference: reference ? 'r' : null,
     });
   });
   let at = 0;
@@ -271,7 +278,7 @@ test(`the bulk cap: no rolling window releases more than count keys, uses decide
   world.change({ kind: 'principal', id: 'token:ci' }, { op: 'access.grant', grant: { projectId: PROJECTS[0]!, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null } });
   world.change({ kind: 'credential', id: CREDENTIALS[0]! }, { op: 'credential.issue', principal: 'token:ci', caller: 'bearer', scope: null, expiresAt: null });
   world.change({ kind: 'environment', id: ENVIRONMENTS[0]! }, { op: 'environment.create', projectId: PROJECTS[0]!, slug: 'dev', owner: null, parentId: null, protected: false });
-  for (const id of KEYS) world.change({ kind: 'secret', id }, { op: 'secret.write', projectId: PROJECTS[0]!, environmentId: ENVIRONMENTS[0]!, version: 'v', nature: 'secret', key: WRAPPED, source: null });
+  for (const id of KEYS) world.change({ kind: 'secret', id }, { op: 'secret.write', projectId: PROJECTS[0]!, environmentId: ENVIRONMENTS[0]!, version: 'v', nature: 'secret', key: WRAPPED, digest: null, source: null, reference: null });
   const released: { key: string; at: number }[] = [];
   let clock = 100_000;
   for (let i = tc.draw(gs.integers({ minValue: 5, maxValue: 40 })); i > 0; i -= 1) {

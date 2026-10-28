@@ -15,9 +15,11 @@ import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
  * - **credential:** a session, token or binding: whose it is, what kind,
  *   its scope, its end, and whether it was revoked.
  * - **secret:** a key's current version: where it is, its nature, its
- *   wrapped data key, or, for a reference, its source.
+ *   wrapped data key or a plain value's digest, or, for a reference, its
+ *   source while its reference stands.
  * - **environment:** its project and slug, whether it is protected, a
- *   fork's parent, a personal config's owner, and whether it was deleted.
+ *   fork's parent, a personal config's owner, whether it was deleted, and
+ *   whether it or its project is archived.
  * - **roles:** the role tables, as an Owner edited them.
  * - **policy:** what the deployment set that every decision reads: the
  *   bulk cap's count and window (R52).
@@ -71,8 +73,25 @@ export type SecretInput = {
   nature: Nature;
   /** The version's data key, wrapped; null for a plain value, which the vault never opens, and for a reference. */
   key: WrappedKey | null;
-  /** A reference's source, by its key's id: its value and nature are the source's now (R23). */
+  /**
+   * A plain value's text, SHA-256, base64: what binds it, as a key binds a
+   * ciphertext (a writer who edits the text leaves a row its seal does not
+   * cover). Null for any other.
+   */
+  digest: string | null;
+  /**
+   * A reference's source, by its key's id: its value and nature are the
+   * source's now (R23). Null for a key with a value, and for a reference
+   * that has ended (no version and no source: `ended`).
+   */
   source: string | null;
+  /**
+   * The reference row it reads its source through (`secret_references.id`):
+   * what an end decides on, under the seal, never the rows alone, which a
+   * writer may rename or plant (formal/SealedObjects.tla, ReferenceInObject).
+   * Null when `source` is.
+   */
+  reference: string | null;
 };
 
 export type EnvironmentInput = {
@@ -86,7 +105,15 @@ export type EnvironmentInput = {
   parentId: string | null;
   protected: boolean;
   deleted: boolean;
+  /** Its own archival. */
   archived: boolean;
+  /**
+   * Its project's, apart: 0.14 takes it as archived when either is. One
+   * bit for both would let a writer clear the environment's own while its
+   * project is archived, under a valid seal, for the project's restore to
+   * seal in (formal/SealedObjects.tla, ArchivedApart).
+   */
+  projectArchived: boolean;
 };
 
 /**
@@ -220,12 +247,14 @@ export type Op =
   | { op: 'credential.renew'; expiresAt: number | null }
   /** A live credential's scope written: a token of 0.4's, which carried none, sealed to what its account held (`token.seal`). */
   | { op: 'credential.scope'; scope: CredentialScope | null }
-  | { op: 'secret.write'; projectId: string; environmentId: string; version: string; nature: Nature; key: WrappedKey | null; source: string | null }
+  | { op: 'secret.write'; projectId: string; environmentId: string; version: string; nature: Nature; key: WrappedKey | null; digest: string | null; source: string | null; reference: string | null }
   | { op: 'secret.delete' }
   | { op: 'environment.create'; projectId: string; slug: string; owner: string | null; parentId: string | null; protected: boolean }
   | { op: 'environment.protect'; protected: boolean }
   | { op: 'environment.rename'; slug: string }
   | { op: 'environment.archive'; archived: boolean }
+  /** Its project archived or restored: a change of each of the project's environments. */
+  | { op: 'project.archive'; archived: boolean }
   | { op: 'environment.delete' }
   | { op: 'role.define'; table: 'roles' | 'instanceRoles'; role: string; definition: RoleDefinition | null }
   | { op: 'bulk.limit'; value: PolicyInput };
@@ -304,22 +333,24 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       if (!created('secret') && secret === null) return undefined;
       // A key stays where it was made: a write elsewhere is another key.
       if (secret !== null && (secret.projectId !== op.projectId || secret.environmentId !== op.environmentId)) return undefined;
-      const { projectId, environmentId, version, nature, key, source } = op;
-      return { kind: 'secret', id: ref.id, projectId, environmentId, version, nature, key, source };
+      const { projectId, environmentId, version, nature, key, digest, source, reference } = op;
+      return { kind: 'secret', id: ref.id, projectId, environmentId, version, nature, key, digest, source, reference };
     }
     case 'secret.delete':
       return of('secret') === null ? undefined : null;
     case 'environment.create':
       return created('environment')
-        ? { kind: 'environment', id: ref.id, projectId: op.projectId, slug: op.slug, owner: op.owner, parentId: op.parentId, protected: op.protected, deleted: false, archived: false }
+        ? { kind: 'environment', id: ref.id, projectId: op.projectId, slug: op.slug, owner: op.owner, parentId: op.parentId, protected: op.protected, deleted: false, archived: false, projectArchived: false }
         : undefined;
-    case 'environment.protect': case 'environment.rename': case 'environment.archive': case 'environment.delete': {
+    case 'environment.protect': case 'environment.rename': case 'environment.archive': case 'project.archive': case 'environment.delete': {
       const environment = of('environment');
       if (environment === null || environment.deleted) return undefined;
       if (op.op === 'environment.protect') return { ...environment, protected: op.protected };
       // A scoped role's filters read the slug: a rename is a change like any other (0.14's `environment.update`).
       if (op.op === 'environment.rename') return { ...environment, slug: op.slug };
-      return op.op === 'environment.archive' ? { ...environment, archived: op.archived } : { ...environment, deleted: true };
+      if (op.op === 'project.archive') return { ...environment, projectArchived: op.archived };
+      // Deleted, it holds no project's archival (objects.ts).
+      return op.op === 'environment.archive' ? { ...environment, archived: op.archived } : { ...environment, deleted: true, projectArchived: false };
     }
     case 'role.define': {
       const edits = of('roles') ?? (created('roles') ? noEdits() : null);

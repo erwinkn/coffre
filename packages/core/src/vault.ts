@@ -323,12 +323,12 @@ type ChangeOf<K extends string, Before, After> = {
   after: After;
 };
 
-/** The version a key's value is: its ids, its nature and its wrapped data key. Never its ciphertext. */
+/** The version a key's value is: its ids, its nature and its wrapped data key; a plain one's text. Never its ciphertext. */
 export type VersionColumns = {
   id: string;
   sensitive: boolean;
-  /** Whether the value is plain: kept as text, with no data key the vault opens. */
-  plain: boolean;
+  /** A plain value's text, which it is (no data key the vault opens); null for any other. Its object holds its digest. */
+  plaintext: string | null;
   kekProvider: string;
   kekId: string;
   kekVersion: string;
@@ -339,9 +339,11 @@ export type VersionColumns = {
 /**
  * A live key's columns (`secrets`): where it is, its current version, or,
  * for a reference, the source its newest `secret_references` row names
- * while it has no version of its own (null for a key with a value).
+ * while it has no version of its own, and that row's id (both null for a
+ * key with a value, and for one whose newest reference row has ended:
+ * `ended_at`).
  */
-export type SecretColumns = { id: string; projectId: string; environmentId: string; source: string | null; version: VersionColumns | null };
+export type SecretColumns = { id: string; projectId: string; environmentId: string; source: string | null; reference: string | null; version: VersionColumns | null };
 
 /** An environment's columns (`environments`). Its slug as stored: a deleted one's carries a tombstone, `dev~deleted-…`. */
 export type EnvironmentColumns = {
@@ -352,7 +354,10 @@ export type EnvironmentColumns = {
   parentId: string | null;
   /** Null until the cutover writes it (0022): not protected. */
   protected: boolean | null;
+  /** Its own `archived_at`. */
   archived: boolean;
+  /** Its project's: 0.14 takes an environment of an archived project as archived. */
+  projectArchived: boolean;
 };
 
 export type PrepareInput = {

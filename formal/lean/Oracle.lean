@@ -211,11 +211,11 @@ def credentialIn (j : Json) : Parse CredentialIn := do
 
 def secretIn (j : Json) : Parse SecretIn := do
   pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "environmentId"), (← str (← req j "nature")) == "sensitive",
-    !(← present j "key").isNull, ← optStr (field j "source")⟩
+    !(← present j "key").isNull, ← optStr (field j "source"), (← str (← req j "version")).isEmpty && (field j "source").isNull⟩
 
 def envIn (j : Json) : Parse EnvIn := do
   pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "slug"), ← optStr (field j "owner"), ← optStr (field j "parentId"),
-    ← (← req j "protected").getBool?, ← (← req j "deleted").getBool?, ← (← req j "archived").getBool?⟩
+    ← (← req j "protected").getBool?, ← (← req j "deleted").getBool?, ← (← req j "archived").getBool?, ← (← req j "projectArchived").getBool?⟩
 
 def rolesIn (j : Json) : Parse RolesIn := do pure ⟨← table roleDef (← req j "roles"), ← table roleDef (← req j "instanceRoles")⟩
 

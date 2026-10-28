@@ -195,6 +195,17 @@ REMOVALS=(
   # Liveness, under weak fairness (HotPathOneLive's PROPERTIES).
   "HotPathOneLive WorkerHonoursDeadline UseAnswered"
   "HotPathOneLive ChangeRereads ChangeAnswered"
+  # What a 0.15 object's seal covers (SealedObjects.tla; T125, T126, T129): a reference's end, written with its entry; a
+  # project's archival on its environments; a plain value's text.
+  "SealedObjects EndInRow AllowedAsOld"
+  "SealedObjects EndWithEntry AllowedAsOld"
+  "SealedObjects ProjectInObject AllowedAsOld"
+  "SealedObjects ArchivedApart AllowedAsOld"
+  "SealedObjects DigestInSeal AllowedAsOld"
+  "SealedObjects DigestInSeal UnrefusedReadsHonest"
+  # What an end decides on: the holder's sealed object (its reference's id) and its log, never its rows (review r7).
+  "SealedObjects ReferenceInObject AllowedAsOld"
+  "SealedObjects LivenessFromLog AllowedAsOld"
   # 0.15's sealing into Merkle checkpoints, two trees as one pair (Seal.tla; W209, W212; the plan's PR 6).
   "Seal NumberUnderLock Complete"
   "Seal CloseLocks Complete"

@@ -1,5 +1,5 @@
 {
-  "id": "400b5c3e-6643-429e-9424-d35b8dfe8541",
+  "id": "e5ebe8c1-1639-4d03-8cab-a83dbcbadf35",
   "prevId": "a23fb2b6-1053-433b-9ee9-50f5c2c3b290",
   "version": "7",
   "dialect": "postgresql",
@@ -2013,6 +2013,50 @@
       },
       "isRLSEnabled": false
     },
+    "public.log_config": {
+      "name": "log_config",
+      "schema": "",
+      "columns": {
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "value": {
+          "name": "value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seal": {
+          "name": "seal",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "log_config_name_check": {
+          "name": "log_config_name_check",
+          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
+        },
+        "log_config_value_check": {
+          "name": "log_config_value_check",
+          "value": "\"log_config\".\"value\"::jsonb IS NOT NULL"
+        },
+        "log_config_seal_check": {
+          "name": "log_config_seal_check",
+          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.log_fence": {
       "name": "log_fence",
       "schema": "",
@@ -2751,6 +2795,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -3473,50 +3523,6 @@
         "service_bindings_claims_check": {
           "name": "service_bindings_claims_check",
           "value": "\"service_bindings\".\"claims\"::jsonb IS NOT NULL"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.log_config": {
-      "name": "log_config",
-      "schema": "",
-      "columns": {
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "value": {
-          "name": "value",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "seal": {
-          "name": "seal",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "log_config_name_check": {
-          "name": "log_config_name_check",
-          "value": "\"log_config\".\"name\" IN ('policy', 'roles')"
-        },
-        "log_config_value_check": {
-          "name": "log_config_value_check",
-          "value": "\"log_config\".\"value\"::jsonb IS NOT NULL"
-        },
-        "log_config_seal_check": {
-          "name": "log_config_seal_check",
-          "value": "\"log_config\".\"seal\" IS NULL OR octet_length(\"log_config\".\"seal\") = 16"
         }
       },
       "isRLSEnabled": false

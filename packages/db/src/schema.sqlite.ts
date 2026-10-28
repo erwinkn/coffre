@@ -461,6 +461,10 @@ export const secretReferences = sqliteTable(
     createdSeq: int64('created_seq').notNull(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),
+    // 0.15's end of the reference (0028): when its holder stopped reading its source, broken, replaced or cut, written
+    // with 0.14's `reference.end` in the vault's decision. The holder's object reads its newest row's source only while
+    // this is null. Null on rows 0.14 ended: 0.14's log holds those ends, which the cutover (plan PR 9) writes here.
+    endedAt: time('ended_at'),
   },
   (table) => [
     unique('secret_references_created_seq_key').on(table.createdSeq),

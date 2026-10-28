@@ -237,7 +237,9 @@ BEGIN
         'SELECT * FROM consumed_tokens',
         'SELECT prune_consumed_tokens(1)',
         'SELECT * FROM capped_alerts',
-        'SELECT * FROM secret_references',
+        'UPDATE secret_references SET ended_at = now()',
+        'UPDATE secret_references SET source_secret_id = source_secret_id',
+        'DELETE FROM secret_references',
         'SELECT * FROM dismissed_keys',
         'UPDATE projects SET folder = folder',
         'UPDATE secrets SET folder = folder',
@@ -267,5 +269,10 @@ BEGIN
     RAISE NOTICE 'PASS: coffre_vault reads no sign-in row, empties nothing, rewrites no grant or release, and acts as no one else';
 END
 $$;
+
+-- 0.15 (0029): the vault reads a reference's holder's object, whose source is its newest reference row's, and writes
+-- no reference row but through change_input and end_reference, which take an end only.
+SELECT count(*) FROM secret_references;
+\echo 'PASS: coffre_vault reads secret_references, and writes none of it directly'
 
 \echo '--- all vault guarantees held ---'
