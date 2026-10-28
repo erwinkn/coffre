@@ -307,8 +307,12 @@ export type CredentialColumns = {
 /** One object's change, as the app will write it: its columns before (null: it makes the object), their seal, and after. */
 export type ObjectChange =
   | ChangeOf<'credential', CredentialColumns, CredentialColumns>
-  /** A key's: null after, archived or erased (no object). */
-  | ChangeOf<'secret', SecretColumns, SecretColumns | null>
+  /**
+   * A key's: null after, archived or erased (no object). `restores`: an
+   * archived key unarchived, `after` its rows as read: the vault holds them
+   * to the object its log last sealed, and refuses another (`stale`).
+   */
+  | (ChangeOf<'secret', SecretColumns, SecretColumns | null> & { restores?: true })
   | ChangeOf<'environment', EnvironmentColumns, EnvironmentColumns>;
 
 type ChangeOf<K extends string, Before, After> = {
@@ -385,6 +389,8 @@ export type PreparedChange = {
   sealFrom: string | null;
   seal: string | null;
   mac: string | null;
+  /** An unarchive's: the seal of the object it restores, which must still be its log's newest sealed one; else null. */
+  restores: string | null;
 };
 
 export type Prepared = { changes: PreparedChange[] };

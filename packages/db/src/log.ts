@@ -1,6 +1,6 @@
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
-import { and, asc, count, desc, eq, gt, gte, isNull, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
@@ -548,7 +548,7 @@ export async function newestAuthentic(page: (limit: number, before: bigint | und
 
 /**
  * The app's changes to the objects its rows hold, as the vault sealed them
- * (`Vault.prepare`), each `app_change` (migrations 0025 and 0026), in its
+ * (`Vault.prepare`), each `app_change` (migrations 0025, 0026 and 0030), in its
  * transaction, once its rows and 0.14 entries are written: in order, in one
  * round trip, or in the append's own (`appendEntries`). Each entry's number;
  * 0 for a row of 0.14's, which logs nothing; null where a row's seal moved
@@ -574,11 +574,11 @@ const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'b
 
 /** `app_change`, once per call, in order, in one statement: after `before`, a `WITH` of the caller's. */
 async function callChanges(tx: Transaction, calls: readonly PreparedChange[], before: SQL): Promise<(bigint | null)[]> {
-  const rows = sql.join(calls.map((c, i) => sql`(${i}::int, ${c.kind}::text, ${c.id}::text, ${c.requestId}::text, ${c.at}::bigint, ${c.actor}::text, ${c.payload}::text, ${bytes(c.sealFrom)}::bytea, ${bytes(c.seal)}::bytea, ${bytes(c.mac)}::bytea)`), sql`, `);
+  const rows = sql.join(calls.map((c, i) => sql`(${i}::int, ${c.kind}::text, ${c.id}::text, ${c.requestId}::text, ${c.at}::bigint, ${c.actor}::text, ${c.payload}::text, ${bytes(c.sealFrom)}::bytea, ${bytes(c.seal)}::bytea, ${bytes(c.mac)}::bytea, ${bytes(c.restores)}::bytea)`), sql`, `);
   // A volatile function in the select list runs after the sort: each call in `ord`'s order, each from the seal the one before leaves.
   const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`${before}
-    SELECT c.ord, app_change(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.seal_from, c.seal, c.mac) AS number
-      FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, seal_from, seal, mac)
+    SELECT c.ord, app_change(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.seal_from, c.seal, c.mac, c.restores) AS number
+      FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, seal_from, seal, mac, restores)
      ORDER BY c.ord`);
   if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('app_change answered out of order');
   return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
@@ -624,6 +624,13 @@ async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64
   if (payload.ref?.kind !== call.kind || payload.ref.id !== call.id) throw new Error(`a change names the object it is to: ${call.kind}, ${call.id}`);
   // ChangeChecksSeal.
   if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${call.kind} object's row is not its newest change's: stale`);
+  // RestorePinned: an unarchive restores the object its key's log last sealed, still so (0030).
+  const restores = bytes(call.restores);
+  if (restores !== null) {
+    if (call.kind !== 'secret' || payload.op !== 'secret.write' || call.sealFrom !== null) throw new Error("only a key's object made again from none restores one");
+    const [kept] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(and(eq(logChanges.object, call.object), isNotNull(logChanges.seal))).orderBy(desc(logChanges.number)).limit(1);
+    if (!sameBytes(restores, kept?.seal ?? null)) throw new StaleRow('the secret object an unarchive restores is not its newest sealed one: stale');
+  }
   // ChangeCAS.
   const from = bytes(call.sealFrom);
   const done = changedRows(await tx.update(table).set({ seal }).where(and(eq(table.id, call.id), from === null ? isNull(table.seal) : eq(table.seal, from))));

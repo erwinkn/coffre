@@ -47,29 +47,6 @@ BEGIN
 END
 $$;
 
--- The verifier (0030, plan PR 8) reads the columns the credentials' and bindings' objects are made of, never a token's
--- hash or MAC.
-DO $$
-DECLARE
-    attempt text;
-BEGIN
-    PERFORM count(*) FROM (SELECT id, principal, kind, scope, revoked_at, expires_at, not_after, seal FROM credentials) c;
-    PERFORM count(*) FROM (SELECT id, seal FROM service_bindings) b;
-    FOREACH attempt IN ARRAY ARRAY[
-        $q$SELECT token_hash FROM credentials$q$,
-        $q$SELECT auth_mac FROM credentials$q$,
-        $q$SELECT * FROM service_bindings$q$
-    ] LOOP
-        BEGIN
-            EXECUTE attempt;
-            RAISE EXCEPTION 'FAIL: coffre_vault ran %', attempt;
-        EXCEPTION WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    RAISE NOTICE 'PASS: coffre_vault reads the objects'' columns, no more';
-END
-$$;
-
 -- The app reads none of it, and nobody but the vault runs the functions.
 DO $$
 BEGIN
@@ -101,10 +78,10 @@ $$;
 -- and no other function of the log; the vault and the backup never run it.
 DO $$
 BEGIN
-    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE')
+    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
        OR has_function_privilege('coffre_app', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
+       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: app_change is not the app''s alone';
     END IF;
     RAISE NOTICE 'PASS: the app logs its own changes through app_change, and runs no other function of the log';

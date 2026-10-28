@@ -234,10 +234,25 @@ function sealText(seal: Buffer | null): string | null {
  * object holds its version's id, nature and wrapped data key, never the
  * ciphertext (0.15-plan.md, "As built: PR 4b"): each version has a data key
  * of its own, and the envelope's AEAD binds the ciphertext to it.
+ *
+ * `'as read'`: the key as its rows hold it. Archived, it is brought back so
+ * (an unarchive, an override made again, a reference written again
+ * unchanged) and restores: the vault holds those rows to the object its log
+ * last sealed, since nothing checked them while it was archived (T134).
+ * Any other change over an archived key brings its own value or reference,
+ * a version or reference row this write made, never its rows'.
  */
-export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null): ObjectChange {
+export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null | 'as read'): ObjectChange {
   // Archiving leaves no seal (`secret.delete`): an archived row with one was archived around coffre, and no change moves it.
   if (before?.archived === true && before.seal !== null) throw new Error(`the key ${id} was archived around coffre, its seal kept: its row is not its newest change's`);
+  if (after === 'as read') {
+    if (before === undefined) throw new Error(`the key ${id} has no row to bring back as read`);
+    if (before.archived) return { kind: 'secret', id, before: null, after: before.columns, restores: true };
+    return { kind: 'secret', id, before: { columns: before.columns, seal: sealText(before.seal) }, after: before.columns };
+  }
+  if (before?.archived === true && after !== null && (after.version?.id ?? null) === (before.columns.version?.id ?? null) && after.reference === before.columns.reference) {
+    throw new Error(`the key ${id} is archived: brought back as its rows hold it, it restores ('as read'); written, it takes a version or reference of its own`);
+  }
   return { kind: 'secret', id, before: before === undefined || before.archived ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
 }
 
