@@ -80,8 +80,8 @@ export class MemoryStore implements CheckpointStore {
     return notes === undefined ? null : { upto, notes };
   }
 
-  async entries(after: bigint, upto: bigint, options: { limit?: number } = {}): Promise<LogEntry[]> {
-    return this.between(after, upto).slice(0, options.limit);
+  async entries(after: bigint, upto: bigint, options: { usesAbove?: bigint } = {}): Promise<LogEntry[]> {
+    return this.between(after, upto).filter((e) => e.tree === 'changes' || options.usesAbove === undefined || e.number > options.usesAbove);
   }
 
   async tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]> {

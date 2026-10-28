@@ -3134,7 +3134,7 @@ class VaultService implements Vault {
   /**
    * 0.15's log checked (verifier.ts): a page's check from the newest pair,
    * or, with `whole`, the walk from the first entry, its replay and every
-   * row, in this call, no further than `walks.whole` entries. With 0.14's
+   * row, in this call, or refused when weighed past `walks.whole`. With 0.14's
    * log alone, there is none to check.
    */
   async verifyTrees(input: TreeVerificationInput = {}): Promise<TreeVerification | TreesBusy> {

@@ -78,14 +78,13 @@ const ready = new WeakMap<object, { database: PostgresDatabase; hotDatabase?: Po
  * call is done.
  */
 /**
- * The work the whole walk of 0.15's log does in one call of the vault
- * Worker (`verifyTrees`, `walks.whole`), in entries, a checkpoint counting
- * as `PAIR_WORK` (ten), within the 30 s of CPU a paid plan's call has by
- * default. It costs some 30 µs an entry warm
- * (measured on Node at 50,000, 0.15-plan.md, "As built: PR 8"), about
- * 2.5 times that on a cold isolate: 200,000 entries is 6 s warm and 15 s
- * cold, room left for the row audit. Past it, the call stops at the next
- * checkpoint and says to walk the log on Node, where a call has no limit.
+ * The work the whole walk of 0.15's log may do in one call of the vault
+ * Worker (`verifyTrees`, `walks.whole`), weighed before it starts in
+ * entries (verifier.ts `weightOf`), within the 30 s of CPU a paid plan's
+ * call has by default. A unit costs some 20 to 26 µs warm (measured on Node
+ * at 50,000 uses, 0.15-plan.md, "As built: PR 8"), about 2.5 times that on
+ * a cold isolate: 200,000 is 5 s warm and 13 s cold. Past it, the call
+ * reads nothing and says to walk the log on Node, where a call has no limit.
  */
 const WHOLE_WALK = 200_000;
 

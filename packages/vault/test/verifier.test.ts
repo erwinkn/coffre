@@ -8,14 +8,14 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import { decodePair, openPair, PAIR_WORK } from '@coffre/core/merkle';
+import { decodePair, openPair, type LogEntry } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { TreesBusy, TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { eq, sql } from 'drizzle-orm';
 
 import { genesisCall, type ChangeKeys } from '../src/changes.ts';
-import type { SealThrough } from '../src/checkpointer.ts';
+import { FRESH_MS, type SealThrough } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { noEdits, ROLES_REF, sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
@@ -26,7 +26,7 @@ import { credentialObject, environmentObject, secretObject } from '../src/object
 import * as store from '../src/store.ts';
 import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
-import { verifierKeys } from '../src/verifier.ts';
+import { Requests, verifierKeys, weightOf } from '../src/verifier.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
@@ -236,28 +236,6 @@ test('a page\'s check names a forged entry above the newest pair, a forged newes
   clean(await w.verify());
 });
 
-test('a whole walk past what its vault walks in one call stops at a pair and says where to walk it; what it found on the way stands', async () => {
-  // Three pairs' worth of work, and their entries (`PAIR_WORK` a pair).
-  const w = await instance({ whole: 3 * PAIR_WORK + 3 });
-  assert.ok((await w.use()).ok);
-  // A pair each, past the work a call does.
-  for (let i = 0; i < 4; i += 1) assert.ok((await w.use(await w.key())).ok);
-  await w.cp.tick();
-  const short = await w.whole();
-  assert.ok(!short.ok);
-  assert.deepEqual(short.problems, []);
-  assert.match(short.tooLarge ?? '', /^0\.15's log holds more than this vault walks in one call: the walk stopped after \d+ entries, at the checkpoint up to \d+, short of the present\. .*walk the log whole on Node/);
-  assert.ok(short.sealed >= 2 && short.checkpoints <= 3 && short.checkpoint !== null && BigInt(short.checkpoint.upto) < w.cp.pair.pair.upto, JSON.stringify(short));
-  // A page's check is never bounded so: it reads a tick's worth.
-  clean(await w.verify());
-  // The log's first entry forged: found before the walk stops.
-  const [first] = await rows<{ number: string | number }>(db.owner, sql`SELECT number FROM log_changes ORDER BY number LIMIT 1`);
-  await run(db.owner, sql`UPDATE log_changes SET mac = ${randomBytes(16)} WHERE number = ${BigInt(first!.number)}`);
-  const found = await w.whole();
-  assert.ok(!found.ok && found.tooLarge !== null);
-  assert.ok(found.problems.includes(`${first!.number}: its MAC does not hold`), found.problems.join('\n'));
-});
-
 test('a row put back from before a revoke is named: its seal is an older change\'s', async () => {
   const w = await instance();
   assert.ok((await w.grant(BO, 'viewer')).ok);
@@ -442,19 +420,48 @@ test('review r9: a floor raised on the newest pair\'s row hides no entry above i
   }
 });
 
-test('review r9: the whole walk\'s bound counts the entries above the newest pair too', async () => {
+test('review r14: a whole walk weighed past its bound is refused before it reads anything; a page\'s check never is', async () => {
+  const w = await instance({ whole: 50 });
+  for (let i = 0; i < 4; i += 1) assert.ok((await w.use(await w.key())).ok);
+  // The log's first entry forged: not read, so not said, by a walk refused before it starts.
+  const [first] = await rows<{ number: string | number }>(db.owner, sql`SELECT number FROM log_changes ORDER BY number LIMIT 1`);
+  await run(db.owner, sql`UPDATE log_changes SET mac = ${randomBytes(16)} WHERE number = ${BigInt(first!.number)}`);
+  const refused = await w.whole();
+  assert.deepEqual([refused.ok, refused.problems, refused.sealed, refused.checkpoint], [false, [], 0, null]);
+  assert.match(refused.tooLarge ?? '', /^0\.15's log holds more than this vault walks in one call: .*, some [\d,]+ entries' worth of work, past its 50\. .*walk the log whole on Node/);
+  // A page's check is never weighed: it reads a tick's worth.
+  assert.ok((await w.verify()).kept);
+});
+
+test('review r14: the weight counts every unit of the walk: its entries and pairs, the rows it audits, its replay\'s sealing', async () => {
   const w = await instance();
-  const fresh = [await w.key(), await w.key(), await w.key()];
-  const { sealed, checkpoints } = await w.whole();
-  const work = sealed + checkpoints * PAIR_WORK;
-  for (const secret of fresh) assert.ok((await w.use(secret)).ok);
-  // Room for every sealed entry and pair, and two of the three entries above: stopped, not walked past its bound.
-  const short = checkedOf(await (await w.reopened({ whole: work + 2 })).verifyTrees!({ whole: true }));
-  assert.ok(!short.ok && short.tooLarge !== null && short.problems.length === 0, JSON.stringify(short));
-  clean(checkedOf(await (await w.reopened({ whole: work + 3 })).verifyTrees!({ whole: true })));
-  // Exactly as much as the log holds, all sealed: walked whole, its rows audited, not called too large (review r12).
-  await w.cp.tick();
-  const exact = checkedOf(await (await w.reopened({ whole: work + 3 + PAIR_WORK })).verifyTrees!({ whole: true }));
-  clean(exact);
-  assert.deepEqual([exact.sealed, exact.unsealed], [sealed + 3, 0]);
+  const weight = async () => weightOf(await store.walkWork(db.vault, -1n));
+  const at = await weight();
+  // Exactly the weight: walked whole; a unit less: refused.
+  clean(checkedOf(await (await w.reopened({ whole: Math.ceil(at) })).verifyTrees!({ whole: true })));
+  assert.notEqual(checkedOf(await (await w.reopened({ whole: Math.ceil(at) - 1 })).verifyTrees!({ whole: true })).tooLarge, null);
+  // Rows no change made, from before the cutover: weighed one each, though no entry counts them.
+  const { credentials } = tablesOf(db.owner);
+  await db.owner.insert(credentials).values(Array.from({ length: 100 }, () => ({
+    id: randomUUID(), kind: 'cli', authMac: Buffer.alloc(32), tokenHash: randomBytes(32), tokenHint: 'hint', generation: 0, principal: ADA, createdBy: ROOT, expiresAt: new Date(Date.now() + 86_400_000), scope: null,
+  })));
+  assert.equal(await weight(), at + 100);
+  // The replay's sealing grows with an object's changes: forty more of one member weigh their square.
+  const counted = await store.walkWork(db.vault, -1n);
+  for (let i = 0; i < 20; i += 1) {
+    assert.ok((await w.grant(BO, 'viewer')).ok);
+    assert.ok((await w.grant(BO, null)).ok);
+  }
+  const after = await store.walkWork(db.vault, -1n);
+  assert.ok(after.replay - counted.replay >= 40 * 40, JSON.stringify({ counted, after }));
+});
+
+test('review r14: requests are swept by entries taken, never by what the map holds', () => {
+  const requests = new Requests(3);
+  const entry = (at: number, id: number): LogEntry => ({ tree: 'uses', number: BigInt(id), at, columns: [BigInt(at), BigInt(id)] });
+  // Each entry past the last by more than the window kept: every sweep leaves the map one entry, a third of the mark.
+  for (let i = 1; i <= 9; i += 1) assert.ok(requests.once(entry(i * 3 * FRESH_MS, i)));
+  assert.equal(requests.sweeps, 3);
+  // Within the window, a copy is still a replay.
+  assert.equal(requests.once(entry(9 * 3 * FRESH_MS, 9)), false);
 });

@@ -1014,6 +1014,27 @@ export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
 }
 
 /**
+ * What a whole walk of 0.15's log would read, counted before it reads it
+ * (review r14), in the walk's own snapshot: the changes, every one; the uses
+ * above `usesAbove` (retention's cut), the only ones it reads; the pairs;
+ * the rows its audit reads, those from before the cutover that no change
+ * made included; and its replay's sealing, a change's work growing with its
+ * object, which grows with the changes before it: the sum over objects of
+ * their changes squared bounds it. Counts the database does, never the
+ * caller's CPU; one statement.
+ */
+export async function walkWork(db: Queryable, usesAbove: bigint): Promise<{ changes: number; uses: number; pairs: number; rows: number; replay: number }> {
+  const [row] = await rowsOf<Record<'changes' | 'uses' | 'pairs' | 'rows' | 'replay', string | number>>(db, sql`SELECT
+      (SELECT count(*) FROM log_changes) AS changes,
+      (SELECT count(*) FROM log_uses WHERE number > ${usesAbove}) AS uses,
+      (SELECT count(*) FROM log_checkpoints) AS pairs,
+      (SELECT count(*) FROM vault_members) + (SELECT count(*) FROM vault_grants) + (SELECT count(*) FROM credentials)
+        + (SELECT count(*) FROM service_bindings) + (SELECT count(*) FROM secrets) + (SELECT count(*) FROM environments) + (SELECT count(*) FROM log_config) AS rows,
+      (SELECT coalesce(sum(x.n * x.n), 0) FROM (SELECT count(*) AS n FROM log_changes GROUP BY object) x) AS replay`);
+  return { changes: Number(row!.changes), uses: Number(row!.uses), pairs: Number(row!.pairs), rows: Number(row!.rows), replay: Number(row!.replay) };
+}
+
+/**
  * Whole walks of 0.15's log an instance runs at once, at most (review r11):
  * each holds a snapshot, and a call of the vault, for seconds. One more is
  * refused at once (`TreesBusy`), never queued.

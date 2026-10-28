@@ -9,7 +9,7 @@ import { alike, refOf, sealKey, type Input, type SealKeys } from './inputs.ts';
 import { authentic, logMacKey, retentionCut } from './log-entry.ts';
 import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
 import { logStore } from './log-store.ts';
-import { heldObjects, requestsUnique, walkSlot } from './store.ts';
+import { heldObjects, requestsUnique, walkSlot, walkWork } from './store.ts';
 
 /**
  * 0.15's verifier (docs/design/0.15-plan.md, PR 8): what holds 0.15's log
@@ -39,8 +39,8 @@ import { heldObjects, requestsUnique, walkSlot } from './store.ts';
  * Uses are not replayed, and the bulk cap's rows are not held to the log:
  * their replay must agree with the live cap across `prune_bulk`, retention
  * cuts and windows changed, which is modelled first (T138, R45).
- * Past `limit` entries (a Worker's CPU time) it stops at the next pair and
- * says so, with where to walk it instead (`tooLarge`).
+ * Weighed past `limit` (a Worker's CPU time) before it starts (`weigh`), it
+ * reads nothing and says so, with where to walk it instead (`tooLarge`).
  *
  * Between whole walks, every use refuses a row put back `stale` (decide.ts).
  * What neither can see, by design: an entry deleted or reordered before its
@@ -65,7 +65,7 @@ export async function verifierKeys(seeds: readonly Uint8Array[]): Promise<Verifi
 export type VerifyOptions = {
   /** The walk from the first entry, with the replay and the row audit; else a page's check. */
   whole?: boolean;
-  /** The work a whole walk does in one call, in entries, a pair as `PAIR_WORK` (`verifyLog`); past it, `tooLarge`. */
+  /** The work a whole walk may do in one call, weighed before it starts (`weigh`); past it, `tooLarge`, nothing read. */
   limit?: number;
   /**
    * Pairs held outside the database: the signer's memory, a witness's
@@ -82,11 +82,53 @@ export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boole
 /** When a whole walk refused, as many as `WHOLE_WALKS` under way already (review r11), asks again, in seconds. */
 const WALK_RETRY_S = 5;
 
+/**
+ * What each thing a whole walk does weighs, in entries walked (some 30 µs
+ * each warm on Node): a pair, its two signatures and its heads (about
+ * 1 ms); a row audited; a unit of the replay's sealing (a grant of an
+ * object sealed, some 3 µs).
+ */
+const WEIGHTS = { pair: 30, row: 1, replay: 0.1 };
+
+/** A whole walk's work, in entries, from what `walkWork` counts. */
+export function weightOf(w: Awaited<ReturnType<typeof walkWork>>): number {
+  return w.changes + w.uses + w.pairs * WEIGHTS.pair + w.rows * WEIGHTS.row + w.replay * WEIGHTS.replay;
+}
+
+/**
+ * A whole walk weighed before it starts (review r14), in its own snapshot.
+ * Four rounds of review each found a unit of work a running budget did not
+ * pay for (a tail, one large window, the bound's own edge, pairs; then the
+ * rows, the replay's sealing, the heads' hashing): the walk is counted
+ * whole first instead, and refused, nothing read, past `limit`. First the
+ * newest pair's sizes, one statement and its signatures, so a log they put
+ * past it costs no count; then `walkWork`'s counts, the database's work.
+ * Null when it fits.
+ */
+async function weigh(tx: Database, keys: VerifierKeys, limit: number): Promise<string | null> {
+  const store = logStore(tx);
+  const retained = await store.retention();
+  const cut = retained === null ? null : retentionCut(retained.entry);
+  const newest = await store.newest();
+  const pair = newest === null ? null : await openPair(newest.notes, keys.verifiers);
+  const said = (work: number, what: string) => `0.15's log holds more than this vault walks in one call: ${what}, some ${Math.ceil(work).toLocaleString('en')} entries' worth of work, past its ${limit.toLocaleString('en')}. A Worker's call has a limit on its CPU time: walk the log whole on Node, where a call has none, with a Node deployment of coffre over this database, or over a copy \`coffre restore\` made, under the same vault key; then \`coffre verify log\` there`;
+  if (pair !== null) {
+    const sealed = pair.changes.size + pair.uses.size - (cut?.uses.size ?? 0);
+    if (sealed > limit) return said(sealed, `${sealed.toLocaleString('en')} entries sealed`);
+  }
+  const w = await walkWork(tx, cut?.upto ?? -1n);
+  const work = weightOf(w);
+  if (work <= limit) return null;
+  return said(work, `${(w.changes + w.uses).toLocaleString('en')} entries, ${w.pairs.toLocaleString('en')} checkpoints and ${w.rows.toLocaleString('en')} rows`);
+}
+
 export async function verifyTrees(db: Database, keys: VerifierKeys, options: VerifyOptions): Promise<Walked | TreesBusy> {
   const whole = options.whole === true;
   const walked = await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
     if (whole && !(await walkSlot(tx))) return null;
+    const heavy = whole && options.limit !== undefined && Number.isFinite(options.limit) ? await weigh(tx, keys, options.limit) : null;
+    if (heavy !== null) return { heavy };
     const store = logStore(tx);
     // A page's check starts at the newest pair, which its signatures and the pairs held outside vouch for. It walks no
     // use below it, so retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
@@ -111,24 +153,25 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       ...(newest === null ? {} : { from: newest.notes }),
       ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
       ...(whole ? { cut: retentionCut } : {}),
-      ...(whole && options.limit !== undefined ? { limit: options.limit } : {}),
     });
     const problems = [...verdict.problems];
     if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
     // At the present, the whole walk holds every row to its replay.
-    if (replayed !== null && verdict.done) problems.push(...audit(replayed, await heldObjects(tx)));
+    if (replayed !== null) problems.push(...audit(replayed, await heldObjects(tx)));
     return { verdict, problems };
   }, SNAPSHOT);
   if (walked === null) return { busy: true, retryAfter: WALK_RETRY_S };
+  if ('heavy' in walked) {
+    return { kept: true, whole, ok: false, problems: [], tooLarge: walked.heavy ?? null, checkpoint: null, checkpoints: 0, sealed: 0, unsealed: 0, behind: false };
+  }
   const { verdict, problems } = walked;
   const head = verdict.head === null ? null : await openPair(verdict.head, keys.verifiers);
-  const tooLarge = verdict.done ? null : `0.15's log holds more than this vault walks in one call: the walk stopped after ${verdict.sealed.toLocaleString('en')} entries${head === null ? '' : `, at the checkpoint up to ${head.upto}`}, short of the present. A Worker's call has a limit on its CPU time: walk the log whole on Node, where a call has none, with a Node deployment of coffre over this database, or over a copy \`coffre restore\` made, under the same vault key; then \`coffre verify log\` there`;
   return {
     kept: true,
     whole,
-    ok: problems.length === 0 && verdict.done,
+    ok: problems.length === 0,
     problems,
-    tooLarge,
+    tooLarge: null,
     checkpoint: head === null ? null : { upto: head.upto.toString(), at: head.at },
     checkpoints: verdict.checkpoints,
     sealed: verdict.sealed,
@@ -173,16 +216,28 @@ function logged(entry: LogEntry): Logged | string | null {
  * the pair a page's check starts at, is what the database's unique indexes
  * refuse, which every check holds to standing.
  */
-class Requests {
+export class Requests {
   readonly #seen = new Map<string, number>();
   #newest = -Infinity;
+  #taken = 0;
+  /** How many times the old requests were swept: every `every` entries taken, whatever the map holds (review r14). */
+  sweeps = 0;
+  readonly every: number;
+
+  constructor(every = 10_000) {
+    this.every = every;
+  }
 
   once(entry: LogEntry): boolean {
     const key = entry.tree === 'changes' ? `c:${String(entry.columns[1])}` : `u:${entry.at}:${String(entry.columns[1])}`;
     if (this.#seen.has(key)) return false;
     this.#seen.set(key, entry.at);
     this.#newest = Math.max(this.#newest, entry.at);
-    if (this.#seen.size % 10_000 === 0) for (const [k, at] of this.#seen) if (at < this.#newest - 2 * FRESH_MS) this.#seen.delete(k);
+    // By entries taken, never by the map's size: a sweep that left it one short of the mark swept again at the next.
+    if (++this.#taken % this.every === 0) {
+      this.sweeps += 1;
+      for (const [k, at] of this.#seen) if (at < this.#newest - 2 * FRESH_MS) this.#seen.delete(k);
+    }
     return true;
   }
 }

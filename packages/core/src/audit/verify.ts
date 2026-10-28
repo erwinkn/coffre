@@ -19,12 +19,9 @@ import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verify
  * MAC, its request ID) is the caller's to check, through `check`, which sees
  * every entry walked, in number order. The cost is the entries since the
  * start: a caller that keeps the `head` it verified walks only what came
- * after (R25). With `limit`, a walk does no more than that much work, in
- * entries, a pair opened costing `PAIR_WORK` (review r13), and reads one
- * entry more to tell what lies past it: it ends at the last pair it
- * verified (`done` false) when anything does, so a caller bounded in time
- * says so rather than walk on; a log of exactly that much is walked whole
- * (review r12).
+ * after (R25). A caller bounded in time weighs the walk before it starts
+ * (the vault's verifier counts what lies in range, review r14): the walk
+ * itself goes to the end.
  *
  * Retention (plan PR 7, formal/Seal.tla) drops days of uses, and the uses
  * tree's tiles, below a cut that a retention change names; changes are kept
@@ -48,12 +45,14 @@ export type LogReader = {
   /** The row at exactly `upto`, if any. */
   pair(upto: bigint): Promise<StoredPair | null>;
   /**
-   * The entries numbered in (after, upto], by number, both trees; at most
-   * `limit`. Uses are read from `floor`, the floor of `at` signed in the
-   * pair at `after`, when the caller gives it: a reader that takes it from
-   * its rows lets a writer hide what lies above (FloorChecked).
+   * The entries numbered in (after, upto], by number, both trees. Uses are
+   * read from `floor`, the floor of `at` signed in the pair at `after`, when
+   * the caller gives it: a reader that takes it from its rows lets a writer
+   * hide what lies above (FloorChecked). With `usesAbove`, only the uses
+   * numbered above it: those at or below retention's cut are not walked,
+   * and are not read either (review r14).
    */
-  entries(after: bigint, upto: bigint, options?: { floor?: number; limit?: number }): Promise<LogEntry[]>;
+  entries(after: bigint, upto: bigint, options?: { floor?: number; usesAbove?: bigint }): Promise<LogEntry[]>;
   tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]>;
   /** The newest retention change, if any, and its leaf index in the changes tree (plan PR 7). */
   retention?(): Promise<{ entry: LogEntry; index: number } | null>;
@@ -71,8 +70,6 @@ export type Verdict = {
   unsealed: number;
   /** The newest pair walked, when the walk found nothing wrong: the `from` of the next one. */
   head: PairNotes | null;
-  /** Whether the walk reached the log's end, the entries above the newest pair included; false for a walk cut at `limit`. */
-  done: boolean;
   /**
    * Whether the database ends before a pair held outside: deleted entries or
    * checkpoints, or the signer's own write a moment away (it remembers a pair
@@ -91,21 +88,14 @@ export type VerifyOptions = {
   check?: (entry: LogEntry) => string | null;
   /** Whether a change is a retention change, and the cut it names; null for any other entry. */
   cut?: (entry: LogEntry) => Cut | null;
-  limit?: number;
 };
 
 const PAGE = 100;
 
-/**
- * What a pair costs a walk under `limit`, in entries: its two notes'
- * signatures, about 0.3 ms against 30 µs an entry walked whole (review r13,
- * measured on Node).
- */
-export const PAIR_WORK = 10;
 
 export async function verifyLog(reader: LogReader, opts: VerifyOptions): Promise<Verdict> {
   const problems: string[] = [];
-  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, done: true, behind: false };
+  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false };
   const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
   // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
   try {
@@ -120,7 +110,7 @@ async function walk(
   reader: LogReader,
   opts: VerifyOptions,
   problems: string[],
-  verdict: { checkpoints: number; sealed: number; unsealed: number; done: boolean; behind: boolean },
+  verdict: { checkpoints: number; sealed: number; unsealed: number; behind: boolean },
   done: (head: PairNotes | null) => Verdict,
 ): Promise<Verdict> {
   // The start's pair and those held outside, each opened once: a page's check starts at the pair the signer holds, which
@@ -259,31 +249,17 @@ async function walk(
       previous = e.number > previous ? e.number : previous;
     }
   };
-  // Under `limit`, the work a walk does, in entries, a pair opened as `PAIR_WORK` (review r13: a sparse log, pairs
-  // over few entries or none, is all signatures). No read goes past what is left: that, and one entry more to tell a
-  // window that would.
-  const bound = opts.limit !== undefined && Number.isFinite(opts.limit) ? opts.limit : undefined;
-  let spent = 0;
-  const room = () => (bound === undefined ? undefined : Math.max(bound - spent, 0) + 1);
-  const bounded = (limit: number | undefined) => ({ floor, ...(limit === undefined ? {} : { limit }) });
+  // Below the cut the uses are not read at all, so none of them, a writer's planted ones included, costs the walk.
+  const reads = () => ({ floor, ...(ahead === null ? {} : { usesAbove: ahead.upto }) });
   for (let rows = await reader.pairs(start.pair.upto, PAGE); ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
-    // As many pairs as the work left pays for; past them the walk ends, at the last pair it verified.
-    const fit = bound === undefined ? rows.length : Math.min(rows.length, Math.max(Math.floor((bound - spent) / PAIR_WORK), 0));
-    const page = rows.slice(0, fit);
-    const short = page.length < rows.length;
-    if (short && page.length === 0) {
-      verdict.done = false;
-      return done(last.notes);
-    }
-    spent += page.length * PAIR_WORK;
     const stops: Stop[] = [];
-    for (const row of page) {
+    for (const row of rows) {
       const pair = await open(row);
       if (pair !== null) stops.push({ pair, notes: row.notes, row: true });
     }
-    const final = !short && rows.length < PAGE;
+    const final = rows.length < PAGE;
     const newest = (stops.at(-1) ?? last).pair.upto;
-    while (above.length > 0 && (final || above[0]!.pair.upto <= page.at(-1)!.upto)) {
+    while (above.length > 0 && (final || above[0]!.pair.upto <= rows.at(-1)!.upto)) {
       const anchor = above.shift()!;
       const row = stops.find((s) => s.pair.upto === anchor.pair.upto);
       if (row !== undefined) {
@@ -297,25 +273,15 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
-      // From the floor the pair at `cursor` signed, never its row's (review r9); and no further than the bound, which a
-      // window of millions of entries, its checkpoints between deleted, would pass in one read (review r11). Read so,
-      // the entries are whole through the last one read, and a window past it ends the walk at the pair before.
-      const limit = room();
-      const read = await reader.entries(cursor, stops.at(-1)!.pair.upto, bounded(limit));
-      const through = limit !== undefined && read.length >= limit ? read.at(-1)!.number : null;
-      const entries = read.filter((e) => !dropped(e));
+      // From the floor the pair at `cursor` signed, never its row's (review r9).
+      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, reads())).filter((e) => !dropped(e));
       let at = 0;
       for (const stop of stops) {
-        if (through !== null && stop.pair.upto >= through) {
-          verdict.done = false;
-          return done(last.notes);
-        }
         const window: LogEntry[] = [];
         while (at < entries.length && entries[at]!.number <= stop.pair.upto) window.push(entries[at++]!);
         walkEntries(window);
         for (const tree of TREES) edges[tree].append(window.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns)));
         verdict.sealed += window.length;
-        spent += window.length;
         // Time never runs back along one history: retention's freshness step rests on it. Equal is honest (a window of
         // gaps keeps the time).
         if (stop.pair.at < time) problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: signed at ${stop.pair.at}, before the pair before it (${time}): time runs back`);
@@ -346,20 +312,10 @@ async function walk(
         }
       }
     }
-    if (short) {
-      verdict.done = false;
-      return done(last.notes);
-    }
     if (final) break;
   }
   // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9).
-  const limit = room();
-  const read = await reader.entries(cursor, MAX_NUMBER, bounded(limit));
-  if (limit !== undefined && read.length >= limit) {
-    verdict.done = false;
-    return done(last.notes);
-  }
-  const unsealed = read.filter((e) => !dropped(e));
+  const unsealed = (await reader.entries(cursor, MAX_NUMBER, reads())).filter((e) => !dropped(e));
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);

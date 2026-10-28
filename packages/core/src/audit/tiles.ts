@@ -107,6 +107,8 @@ export function edgeOf(size: number): (TileKey & { width: number })[] {
 export class Edge {
   size: number;
   private tiles: Hash[][];
+  /** The head at `size`, kept until a leaf is appended: a walk asks it at every pair, most of them over few leaves or none (review r14). */
+  private head: Hash | null = null;
 
   private constructor(size: number, tiles: Hash[][]) {
     this.size = size;
@@ -135,6 +137,7 @@ export class Edge {
 
   append(leaves: readonly Hash[]): Tile[] {
     const changed: Tile[] = [];
+    if (leaves.length > 0) this.head = null;
     // Levels whose partial tile grew: written as they stand once every leaf is in.
     const grew = new Set<number>();
     for (const leaf of leaves) {
@@ -160,9 +163,11 @@ export class Edge {
 
   /** The tree head now. */
   root(): Hash {
+    if (this.head !== null) return this.head;
     const tiles = new Map<string, Buffer>();
     for (const { level, index } of edgeOf(this.size)) tiles.set(tileKey(level, index), Buffer.concat(this.tiles[level] ?? []));
-    return treeHash(nodesFrom(tiles), this.size);
+    this.head = treeHash(nodesFrom(tiles), this.size);
+    return this.head;
   }
 }
 
