@@ -27,7 +27,7 @@ import { credentialObject, environmentObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
-import { emptyDatabase, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, locksHere, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -447,14 +447,12 @@ test('an app\'s change beside a 0.14 decision on its principal: head, row, fence
 
 /** Sessions waiting for the fence (its advisory key, 1668244070 / 0). */
 async function fenceWaiters(): Promise<number> {
-  const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND objid = 0 AND NOT granted`);
-  return Number(row!.n);
+  return locksHere(db.owner, sql`locktype = 'advisory' AND classid = 1668244070 AND objid = 0 AND NOT granted`);
 }
 
 /** Sessions waiting for the fence's key (0) or the issue lock's (1). */
 async function waitersOn(objid: 0 | 1): Promise<number> {
-  const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND objid = ${objid} AND NOT granted`);
-  return Number(row!.n);
+  return locksHere(db.owner, sql`locktype = 'advisory' AND classid = 1668244070 AND objid = ${objid} AND NOT granted`);
 }
 
 /** The fence's locks and the issue lock's a client holds, as "<objid> <mode>". */
@@ -466,8 +464,7 @@ async function advisoryHeld(client: PostgresClient): Promise<string[]> {
 
 /** Sessions waiting for any lock. */
 async function waiting(): Promise<number> {
-  const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE NOT granted`);
-  return Number(row!.n);
+  return locksHere(db.owner, sql`NOT granted`);
 }
 
 async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {
