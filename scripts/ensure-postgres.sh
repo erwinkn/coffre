@@ -32,7 +32,28 @@ ready() {
     docker compose exec -T postgres pg_isready -h 127.0.0.1 -U coffre_owner -d postgres >/dev/null 2>&1
 }
 
-ready && exit 0
+# A reused container keeps the image it was created from: a compose file that
+# moved on (Alpine to Debian, R62) changes nothing for it, and a benchmark on
+# it would measure the old one. Say so; recreating is its owner's call.
+warn_stale_image() {
+    local wanted container have
+    wanted="$(docker compose config --images postgres 2>/dev/null)" || return 0
+    container="$(docker compose ps -aq postgres 2>/dev/null)" || return 0
+    [[ -n "$wanted" && -n "$container" ]] || return 0
+    have="$(docker inspect --format '{{.Config.Image}}' "$container" 2>/dev/null)" || return 0
+    if [[ -n "$have" && "$have" != "$wanted" ]]; then
+        printf 'Postgres on :%s runs %s, but docker-compose.yml names %s; it is reused as it is. Recreate it when no checkout is using it: COMPOSE_PROJECT_NAME=%s docker compose up -d --force-recreate postgres\n' \
+            "$port" "$have" "$wanted" "$COMPOSE_PROJECT_NAME" >&2
+    fi
+    return 0
+}
+
+ready_and_done() {
+    warn_stale_image
+    exit 0
+}
+
+if ready; then ready_and_done; fi
 
 # Use the host's advisory lock: the kernel releases it even if a caller is
 # killed. The file stays in place so every waiter locks the same inode.
@@ -60,7 +81,7 @@ running() {
 deadline=$((SECONDS + 120))
 last_error=''
 while ((SECONDS < deadline)); do
-    if ready; then exit 0; fi
+    if ready; then ready_and_done; fi
     if ! running; then
         if node "$(dirname "$script")/postgres-port-available.mjs" "$port"; then
             :
@@ -76,7 +97,7 @@ while ((SECONDS < deadline)); do
         fi
         if ! output="$(docker compose up -d --no-recreate postgres 2>&1)"; then
             # Another caller may have started it while this one asked.
-            if ready; then exit 0; fi
+            if ready; then ready_and_done; fi
             if running; then
                 sleep 1
                 continue

@@ -32,7 +32,7 @@
     "bump": "node scripts/bump.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "check:docs": "node scripts/check-docs.mjs",
-    "db:up": "docker compose up -d postgres",
+    "db:up": "./scripts/ensure-postgres.sh",
     "db:migrate": "pnpm --dir packages/db run db:migrate",
     "db:generate": "pnpm --dir packages/db run db:generate",
     "db:check": "pnpm --dir packages/db run db:check",

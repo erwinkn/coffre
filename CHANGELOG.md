@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The local and CI Postgres is Debian's, not Alpine's.** `docker-compose.yml`
+  runs `postgres:16.14` (glibc) in place of `postgres:16.14-alpine` (musl):
+  managed Postgres behind Hyperdrive is glibc, and musl's malloc cost a use
+  2-3x the Postgres CPU, which skewed every benchmark. The data volume is
+  renamed `coffre-pgdata-v16-debian`, so a data directory the Alpine image
+  initialized is never mounted by the Debian one. A running container keeps
+  its image: `pnpm db:up` is now `scripts/ensure-postgres.sh` (it no longer
+  recreates a container whose config differs), which warns when the container
+  is not on compose's image. AGENTS.md has the one-time swap.
+  The disposable clusters of `test:schema` and the setup tests keep
+  `--locale=C`.
 - **0.15's `/use` reads ahead in one statement, behind its switch.** A
   handle's use read its credential, the newest policy change, the place
   and every key of the environment in three statements, each planned

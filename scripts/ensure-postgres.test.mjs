@@ -30,14 +30,16 @@ const dir = ${state};
 const args = process.argv.slice(2);
 const mode = ${JSON.stringify(mode)};
 appendFileSync(dir + '/calls', JSON.stringify(args) + '\\n');
+if (mode === 'stale' && args.includes('config')) { console.log('postgres:16.14'); process.exit(0); }
+if (mode === 'stale' && args[0] === 'inspect') { console.log('postgres:16.14-alpine'); process.exit(0); }
 if (args.includes('port')) {
-    if (mode === 'healthy' || mode === 'existing' || existsSync(dir + '/created')) console.log('0.0.0.0:${port}');
+    if (mode === 'healthy' || mode === 'stale' || mode === 'existing' || existsSync(dir + '/created')) console.log('0.0.0.0:${port}');
     // Before creation, allow the mocked internal probe to reach its barrier.
     else if (mode === 'cold') console.log('0.0.0.0:${port}');
     process.exit(0);
 }
 if (args.includes('exec')) {
-    if (mode === 'healthy') process.exit(0);
+    if (mode === 'healthy' || mode === 'stale') process.exit(0);
     if (mode === 'existing') {
         const n = existsSync(dir + '/probes') ? Number(readFileSync(dir + '/probes')) : 0;
         writeFileSync(dir + '/probes', String(n + 1));
@@ -60,7 +62,7 @@ if (args.includes('exec')) {
     process.exit(1);
 }
 if (args.includes('ps')) {
-    if (mode === 'existing' || existsSync(dir + '/created')) console.log('fixture-postgres');
+    if (mode === 'existing' || mode === 'stale' || existsSync(dir + '/created')) console.log('fixture-postgres');
     process.exit(0);
 }
 if (args[0] === 'inspect') {
@@ -117,6 +119,21 @@ test('a healthy Postgres is reused without an up', async (t) => {
     const ran = await f.run();
     assert.equal(ran.code, 0, ran.output);
     assert.ok(f.calls().every((args) => !args.includes('up')));
+});
+
+test('a healthy Postgres on compose\'s image is reused without a word', async (t) => {
+    const f = await fixture(t, 'healthy');
+    const ran = await f.run();
+    assert.equal(ran.code, 0, ran.output);
+    assert.doesNotMatch(ran.output, /docker-compose\.yml names/);
+});
+
+test('a reused Postgres on another image than compose names is said so, and kept', async (t) => {
+    const f = await fixture(t, 'stale');
+    const ran = await f.run();
+    assert.equal(ran.code, 0, ran.output);
+    assert.match(ran.output, /runs postgres:16\.14-alpine, but docker-compose\.yml names postgres:16\.14; it is reused as it is/);
+    assert.ok(f.calls().every((args) => !args.includes('up')), 'a stale image is reported, never recreated');
 });
 
 test("a project's Postgres on another port than the one asked for is refused, not used", async (t) => {
