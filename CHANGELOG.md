@@ -11,6 +11,18 @@
   `COFFRE_POSTGRES_SUBNET=10.77.0.0/24`, set on every run, gives a project a
   subnet of its own; Docker's `default-address-pools` fixes it for all.
 
+- **An environment's keys are read at a cost of their own, however many keys
+  the instance holds or archives.** `secrets` was indexed by project first,
+  so a read that named the environment and not the project walked that index
+  end to end, or the table: the places tree's counts in every `me`,
+  `liveKeysIn`, `distinctSecretCounts`, a reveal's and a write's reads of
+  the environment's keys. With 10,000 archived keys in one environment, the
+  places statement read 167 pages in place of 3. Migration 0032 adds
+  `secrets_live_idx`, the live keys by environment (a plain `CREATE INDEX`:
+  it blocks writes to `secrets` while it builds, well under a second for
+  tens of thousands of rows), which the archived ones are no part of; and the
+  reads that include archived keys name their project too, so the table's
+  first index serves them. 0.14's code serves on the new schema as before.
 - **The local and CI Postgres is Debian's, not Alpine's.** `docker-compose.yml`
   runs `postgres:16.14` (glibc) in place of `postgres:16.14-alpine` (musl):
   managed Postgres behind Hyperdrive is glibc, and musl's malloc cost a use

@@ -134,6 +134,22 @@ export async function lock<T extends Table>(tx: Transaction, table: T, match: Ma
   return (await forUpdate(tx, tx.select().from(mine as Table).where(matching(mine, match)))) as Row<T>[];
 }
 
+/**
+ * An environment's rows of `secrets`, archived ones included. The table is
+ * indexed by project first (`secrets_lookup_idx`), which a read by
+ * environment alone does not name: it would walk that index end to end, or the
+ * table, every project's keys and every archived one in it (T152). So the
+ * project is read off the environment, once for the statement (an init plan),
+ * and the rows are a range of that environment's own.
+ */
+function inEnvironment(db: Queryable, environmentId: string): SQL {
+  const { secrets, environments } = tablesOf(db);
+  return and(
+    eq(secrets.environmentId, environmentId),
+    eq(secrets.projectId, sql`(SELECT ${environments.projectId} FROM ${environments} WHERE ${environments.id} = ${environmentId})`),
+  )!;
+}
+
 // --- places -----------------------------------------------------------------
 
 export type ResolvedPath = {
@@ -210,7 +226,7 @@ export async function resolvePath(
     )
     .leftJoin(
       secrets,
-      path.key === undefined || personalSlug !== null ? none : and(eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
+      path.key === undefined || personalSlug !== null ? none : and(eq(secrets.projectId, projects.id), eq(secrets.environmentId, environments.id), eq(secrets.key, path.key)),
     )
     .where(and(eq(projects.slug, path.project), alive(projects.slug)))
     .orderBy(...(either ? [sql`CASE WHEN ${environments.slug} = ${slug} THEN 0 ELSE 1 END`] : []))
@@ -229,7 +245,7 @@ export async function resolvePath(
       environment = mine ?? null;
       secret = null;
       if (mine !== undefined && path.key !== undefined) {
-        [secret = null] = await db.select().from(secrets).where(and(eq(secrets.environmentId, mine.id), eq(secrets.key, path.key)));
+        [secret = null] = await db.select().from(secrets).where(and(eq(secrets.projectId, project.id), eq(secrets.environmentId, mine.id), eq(secrets.key, path.key)));
       }
     }
   }
@@ -434,7 +450,7 @@ export async function secretsInFolder(db: Queryable, environmentId: string, fold
   return db
     .select({ id: secrets.id, key: secrets.key })
     .from(secrets)
-    .where(and(eq(secrets.environmentId, environmentId), eq(secrets.folder, folder)))
+    .where(and(inEnvironment(db, environmentId), eq(secrets.folder, folder)))
     .orderBy(asc(secrets.key));
 }
 
@@ -444,7 +460,7 @@ export async function secretFolderOf(db: Queryable, environmentId: string): Prom
   const rows = await db
     .select({ id: secrets.id, folder: secrets.folder })
     .from(secrets)
-    .where(and(eq(secrets.environmentId, environmentId), isNotNull(secrets.folder)));
+    .where(and(inEnvironment(db, environmentId), isNotNull(secrets.folder)));
   return new Map(rows.map((row) => [row.id, row.folder!]));
 }
 
@@ -1812,7 +1828,7 @@ export async function secretHeads(db: Queryable, environmentId: string, by: { ke
     plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`,
     sensitive: secretVersions.sensitive,
   }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)).where(and(
-    eq(secrets.environmentId, environmentId),
+    inEnvironment(db, environmentId),
     'id' in by ? eq(secrets.id, by.id) : inArray(secrets.key, by.keys),
   ));
   return rows.map(({ plain, sensitive, ...row }) => ({ ...row, current: row.currentVersionId === null ? null : { plain: Boolean(plain), sensitive: sensitive === true } }));
@@ -1920,6 +1936,7 @@ export async function environmentSecrets(
     .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
     .where(and(
       eq(secrets.environmentId, environmentId),
+      eq(secrets.projectId, environments.projectId),
       isNull(projects.archivedAt),
       isNull(environments.archivedAt),
       only === undefined ? undefined : 'secretId' in only ? eq(secrets.id, only.secretId) : eq(secrets.key, only.key),

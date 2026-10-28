@@ -89,7 +89,7 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
  */
 async function refuseOwnRemovals(ctx: ApiContext, tx: Transaction, place: ResolvedPath, keys: readonly string[], operationId: string): Promise<void> {
   if (keys.length === 0) return;
-  const own = (await lock(tx, secrets, { environmentId: place.environment!.id, key: [...keys] })).filter((row) => row.archivedAt === null);
+  const own = (await lock(tx, secrets, { projectId: place.project.id, environmentId: place.environment!.id, key: [...keys] })).filter((row) => row.archivedAt === null);
   if (own.length === 0) return;
   const held = (await inheritedRows(tx, place.environment!.id))?.held ?? new Map();
   const path = `${place.project.slug}/${place.environment!.slug}`;
