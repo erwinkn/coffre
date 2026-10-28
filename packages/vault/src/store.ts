@@ -977,7 +977,12 @@ export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
   const hold = (ref: Ref, row: Input | null, seal: Buffer | Uint8Array | null | undefined, as: { sealOnly?: true; unreadable?: true } = {}) =>
     found.set(objectKey(ref), { ref, row, seal: seal == null ? null : Buffer.from(seal), ...as });
   const grantsOf = new Map<string, GrantRow[]>();
-  for (const grant of held) grantsOf.set(grant.principal, [...(grantsOf.get(grant.principal) ?? []), grant]);
+  // Each grant pushed onto its principal's list, never the list copied: a copy a grant made grouping quadratic (review r15).
+  for (const grant of held) {
+    const list = grantsOf.get(grant.principal);
+    if (list === undefined) grantsOf.set(grant.principal, [grant]);
+    else list.push(grant);
+  }
   for (const m of members) hold({ kind: 'principal', id: m.principal }, principalObject({ principal: m.principal, status: m.status, ...memberStanding(m) }, grantsOf.get(m.principal) ?? []), m.seal);
   for (const c of tokens) {
     // Its end in whole ms, as the app sends it (`credentialColumns`): the earlier of expiry and hard end.

@@ -465,3 +465,21 @@ test('review r14: requests are swept by entries taken, never by what the map hol
   // Within the window, a copy is still a replay.
   assert.equal(requests.once(entry(9 * 3 * FRESH_MS, 9)), false);
 });
+
+test('review r15: grants are grouped in linear time: 50,000 of one member\'s, from before the cutover, audited at once', async () => {
+  const w = await instance();
+  assert.ok((await w.grant(BO, 'viewer')).ok);
+  // Rows no change made: the audit names them, and must reach them in time proportional to their number.
+  const { vaultGrants } = tablesOf(db.owner);
+  for (let done = 0; done < 50_000; done += 2_000) {
+    await db.owner.insert(vaultGrants).values(Array.from({ length: 2_000 }, (_, i) => ({
+      principal: BO, projectId: null, environmentId: null, environmentSlug: `s${done + i}`, role: 'viewer', expiresAt: null, grantedAt: 0, grantedBy: ROOT,
+    })));
+  }
+  const cpu = process.cpuUsage();
+  const checked = await w.whole();
+  const spent = process.cpuUsage(cpu);
+  assert.ok(checked.problems.length > 0, 'the rows are not the log\'s');
+  // Quadratic, the grouping alone copied 1.25 billion entries; linear, the whole walk takes about a second of CPU.
+  assert.ok((spent.user + spent.system) / 1000 < 5_000, `${(spent.user + spent.system) / 1000} ms`);
+});
