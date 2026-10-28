@@ -261,8 +261,24 @@ too" asks; it is out of this task's scope (T147, T148 touch it).
 
 `packages/server/test/bench/ci.ts --log 0.15 --signin-only --uses 1000
 --rtt 20`, Postgres `postgres:16.14` (Debian, R62), local, a project of
-its own; 1,000 `use_credential` calls a second beside. See the PR for the
-table; A's will sit beside it once built.
+its own; 1,000 `use_credential` calls a second beside, each one round
+trip; 3 rounds a level. W242's run of the same bench (with each job's list
+and reveal) reads the same: 30 jobs at p50 1.9 s, p99 3.6 s.
+
+| sign-ins at once | sign-in p50 / p99 | of which waiting on locks (per sign-in) | uses p50 / p99 / max | uses refused |
+|---|---|---|---|---|
+| 0 | | | 22.9 / 25.3 / 29.4 ms | none |
+| 1 | 190 / 192 ms | 15.5 ms | 22.6 / 25.3 / 27.0 ms | none |
+| 10 | 763 / 1,374 ms | 527 ms, nearly all on 0.14's head | 22.9 / 26.6 / 29.2 ms | none |
+| 30 | 1,795 / 3,451 ms | 1,616 ms, nearly all on 0.14's head | 22.9 / 25.1 / 28.8 ms | none |
+
+- R58 holds today: uses beside 30 sign-ins read as uses beside none.
+- R44 does not: every sign-in queues on the head. At 30 at once, 90% of a
+  sign-in's time is that queue.
+- A level of 60 at once did not finish within the hour's limit (stopped;
+  1 to 30 take 30 s together). Not chased here: the binding's rate is 60 a
+  minute, so the bench binds afresh between rounds, and the head's queue is
+  60 deep. To look at with A's numbers.
 
 ## 5. What the model abstracts
 
