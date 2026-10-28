@@ -542,9 +542,12 @@ export type IssuedTokenRow = {
  * since the app weighed it (`access`); what it was weighed on moved
  * while it was written, each of the three times the vault weighed it
  * (`moved`), or the policy did (`policy`); a lock not had in time
- * (`busy`); the app's key one it rotated from (`retired`).
+ * (`busy`); the app's key one it rotated from (`retired`); the credential
+ * the request came in on one 0.14 made, which the log never held, so
+ * nothing the vault could authenticate (`unlogged`: the app issues on it
+ * as before).
  */
-export type IssueTokenRefusal = 'refused' | 'ended' | 'gone' | 'access' | 'moved' | 'policy' | 'busy' | 'retired';
+export type IssueTokenRefusal = 'refused' | 'ended' | 'gone' | 'access' | 'moved' | 'policy' | 'busy' | 'retired' | 'unlogged';
 
 export type IssueTokenOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: IssueTokenRefusal; why?: string };
 

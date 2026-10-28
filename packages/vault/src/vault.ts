@@ -3209,10 +3209,10 @@ class VaultService implements Vault {
     let viaScope: CredentialScope | null = null;
     if (input.via !== null) {
       if (via === null) return refuse('ended');
+      // One 0.14 made, which the log never held, has nothing the vault can authenticate: the app issues on it as before.
+      if (via.seal === null && via.newest === null) return refuse('unlogged');
       const object = credentialObject(via.columns);
-      const logged = via.seal === null
-        ? via.newest === null
-        : via.newest !== null && via.newest.equals(via.seal) && sealedObject(log015.seals, { kind: 'credential', id: input.via }, object, via.seal);
+      const logged = via.seal !== null && via.newest !== null && via.newest.equals(via.seal) && sealedObject(log015.seals, { kind: 'credential', id: input.via }, object, via.seal);
       if (!logged || via.columns.principal !== actor || via.columns.revoked || (via.columns.expiresAt ?? Infinity) <= at || via.columns.generation !== actorRow.generation) {
         return refuse('ended');
       }

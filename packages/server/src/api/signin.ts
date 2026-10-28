@@ -653,7 +653,9 @@ export class SigninService {
    * weighs the scope itself, and writes it in one statement; no 0.14 head,
    * and no 0.14 entry: its change records the issue (D147). What it read
    * moving meanwhile, it weighs again itself; still moving after that, 409
-   * (`ObjectMoved`). Each refusal is logged as the app's are.
+   * (`ObjectMoved`). Each refusal is logged as the app's are. On a
+   * credential 0.14 made, which the vault cannot authenticate, null: the
+   * caller issues as before.
    */
   async #issuedByVault(
     ctx: Asker,
@@ -663,7 +665,7 @@ export class SigninService {
     options: CredentialOptions & { id: string },
     details: Record<string, unknown>,
     held: { accessSeq: bigint | null; refusal?: () => Refusal },
-  ): Promise<IssuedCredential> {
+  ): Promise<IssuedCredential | null> {
     const { row, issued } = this.#credential(kind, principal, options);
     const outcome = await this.#deps.vault.issueToken!({
       actor: formatMember(ctx.caller.principal),
@@ -683,6 +685,7 @@ export class SigninService {
     });
     if (outcome.ok) return issued;
     switch (outcome.refused) {
+      case 'unlogged': return null;
       case 'moved': throw new ObjectMoved();
       // The issuer's access moved since the scope was weighed: asked again, weighed as they are now (as `issuerStill`).
       case 'access': throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
@@ -1082,7 +1085,7 @@ export class SigninService {
       // With 0.15's log, the vault issues it, weighing the issuer itself (T149, PR 2): one call.
       if (await vaultIssuesTokens(this.#deps.vault)) {
         const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id }, details, { accessSeq, refusal });
-        return { ...credential, scope: byPath, withheld };
+        if (credential !== null) return { ...credential, scope: byPath, withheld };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan)]);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
@@ -1159,7 +1162,7 @@ export class SigninService {
       if (await vaultIssuesTokens(this.#deps.vault)) {
         // At the generation the request was made at: a person removed and admitted again since is refused (`#currentCaller`).
         const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id }, details, { accessSeq: null });
-        return { ...credential, scope: byPath };
+        if (credential !== null) return { ...credential, scope: byPath };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
@@ -1227,7 +1230,7 @@ export class SigninService {
       const plan = { id: randomUUID(), expiresAt: new Date(ends), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
         const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor }, details, { accessSeq: null });
-        return { ...credential, scope: byPath };
+        if (credential !== null) return { ...credential, scope: byPath };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).

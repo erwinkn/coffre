@@ -1,8 +1,8 @@
 -- The vault issues tokens itself (T149, PR 2; docs/design/credential-lifecycle.md; formal/Lifecycle.tla's issue): a service account's token, a person's personal token, a handle. They were the app's transactions under 0.14's head, `prepare` sealing whatever row the app proposed, so the vault weighed no right of the issuer's. Now the vault reads the issuer, the account and the credential the request came in on, and decides with `@coffre/core/access`'s rules whether the issuer may give the scope (R15, R32); this statement then writes the token only while what it read is still so, under those rows' locks (IssuerLocked, IssuerCAS). Nothing is held between the read and this statement. It only adds: two functions only 0.15's vault calls, behind the switch.
 --> statement-breakpoint
--- A token issued by `p_actor`, on credential `p_via` (null for none), to `p_principal` at generation `p_generation`, as the vault decided it on the members' rows at `p_actor_seq` and `p_principal_seq` (their `access_seq`: every change of what a member holds moves it), the credential at its seal `p_via_seal`, and the policy at `p_policy_seq` with the slugs of the environments it protected (`p_protected`, `p_slugs`). Its answer, JSON: `{"number": "<n>"}`, or `{"state": …}` with nothing written:
+-- A token issued by `p_actor`, on credential `p_via` (null for none), to `p_principal` at generation `p_generation`, as the vault decided it on the members' rows at `p_actor_seq` and `p_principal_seq` (their `access_seq`: every change of what a member holds moves it), the credential at its seal `p_via_seal` and its end `p_via_end`, and the policy at `p_policy_seq` with the slugs of the environments it protected (`p_protected`, `p_slugs`). Its answer, JSON: `{"number": "<n>"}`, or `{"state": …}` with nothing written:
 -- - `moved`: a member is not active as read, at its generation, or its access moved since (asked again);
--- - `ended`: the credential it came in on is revoked, past its end, another's, or not its object's newest change's;
+-- - `ended`: the credential it came in on is revoked, past its end or not at the end the vault read, another's, not sealed as read, or not its object's newest change's;
 -- - `policy`: the policy moved since (as `policyStill`);
 -- - `retired`: the app signed the row under a key it rotated from (as `sign_in`);
 -- - `expired`: the token's end is past.
@@ -10,7 +10,7 @@
 CREATE FUNCTION issue_token(
     p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea,
     p_principal text, p_generation integer, p_principal_seq bigint, p_actor_generation integer, p_actor_seq bigint,
-    p_via uuid, p_via_seal bytea,
+    p_via uuid, p_via_seal bytea, p_via_end bigint,
     p_policy_seq bigint, p_protected uuid[], p_slugs text[], p_app_key text,
     p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text,
     p_scope text, p_places text, p_expires bigint
@@ -31,9 +31,12 @@ BEGIN
     END IF;
     IF p_via IS NOT NULL THEN
         PERFORM 1 FROM public.credentials c WHERE c.id = p_via FOR SHARE;
+        -- Its end as the vault authenticated it (`p_via_end`, the earlier of its expiry and its hard end, which its seal
+        -- covers): the columns still say so, and it is still ahead. A seal compares bytes, never the columns it was made of.
         IF NOT EXISTS (SELECT 1 FROM public.credentials c
-                        WHERE c.id = p_via AND c.principal = p_actor AND c.revoked_at IS NULL AND c.seal IS NOT DISTINCT FROM p_via_seal
-                          AND c.expires_at > clock_timestamp() AND (c.not_after IS NULL OR c.not_after > clock_timestamp()))
+                        WHERE c.id = p_via AND c.principal = p_actor AND c.revoked_at IS NULL AND c.seal = p_via_seal
+                          AND floor(extract(epoch FROM least(c.expires_at, coalesce(c.not_after, c.expires_at))) * 1000)::bigint = p_via_end)
+           OR p_via_end <= (extract(epoch FROM clock_timestamp()) * 1000)::bigint
            OR p_via_seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('credential', p_via::text) ORDER BY c.number DESC LIMIT 1) THEN
             RETURN json_build_object('state', 'ended');
         END IF;
@@ -80,6 +83,6 @@ REVOKE ALL ON FUNCTION issuing_credential(uuid) FROM PUBLIC;
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION issuing_credential(uuid) TO coffre_vault;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint) TO coffre_vault;

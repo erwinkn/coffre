@@ -236,10 +236,10 @@ async function issueStatements(): Promise<{ app: Statement[]; vault: Statement[]
 /** `issue_token`'s arguments made an issue of their own: a request, a credential and a token, each new (migration 0036's order). */
 function freshIssue(values: unknown[]): unknown[] {
   const next = [...values];
-  // $1 the request, $18 the credential, $21 its token's hash.
+  // $1 the request, $19 the credential, $22 its token's hash.
   next[0] = randomUUID();
-  next[17] = randomUUID();
-  next[20] = randomBytes(32);
+  next[18] = randomUUID();
+  next[21] = randomBytes(32);
   return next;
 }
 

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { issuedGrant, storedScope } from '@coffre/core/access';
+import { HANDLE_POLICY, issuedGrant, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { IssueTokenInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
@@ -15,7 +15,7 @@ import { asc, count, eq, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey } from '../src/inputs.ts';
-import { emptyDatabase, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, withLogUnlocked, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -38,15 +38,16 @@ function configure(): ResolvedVaultConfig {
   };
 }
 
-/** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project. */
+/** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project, which has an environment. */
 async function world() {
   const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
+  const environment = await newEnvironment(db.owner, project);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
-  return { vault, project };
+  return { vault, project, environment };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -76,6 +77,19 @@ function personal(w: World, actor = ROOT, via: string | null = null, expiresAt =
     credential: { ...input.credential, kind: 'personal', tokenHint: 'coffre_pat_x', expiresAt, createdBy: actor.slice('user:'.length) },
   }));
 }
+
+/** A handle of `actor`'s on `via`, as the app makes one: a viewer of the world's environment, made for it; `grant` changes its grant. */
+function handleOf(w: World, via: string | null, expiresAt = Date.now() + 1_800_000, grant: (made: ReturnType<typeof issuedGrant>) => ReturnType<typeof issuedGrant> = (made) => made): IssueTokenInput {
+  const input = personal(w, ROOT, via, expiresAt);
+  input.credential.kind = 'handle';
+  input.credential.tokenHint = 'coffre_use_x';
+  input.credential.scope = storedScope([grant(issuedGrant({ projectId: w.project, environmentId: w.environment, role: 'viewer' }, HANDLE_POLICY))]);
+  input.credential.places = JSON.stringify([{ environmentId: w.environment, personal: false }]);
+  return input;
+}
+
+/** A handle's grant made on a viewer's personal token: what the token holds there, as the app caps it (`heldColumns`), reading only where nothing is protected. */
+const onViewerToken = (grant: ReturnType<typeof issuedGrant>) => ({ ...grant, permissions: { normal: grant.permissions!.normal, protected: ['secret.use'] } }) as ReturnType<typeof issuedGrant>;
 
 async function credentialRows(): Promise<number> {
   const { credentials } = tablesOf(db.owner);
@@ -141,20 +155,16 @@ test("a grant's columns are what a use decides on, so they are held to its role:
   forged.credential.scope = columns(['secret.read', 'grant.manage']);
   assert.equal(((await w.vault.issueToken!(forged)) as { refused?: string }).refused, 'refused');
   // A handle reads and uses: nothing it writes, whatever its person holds.
-  const handle = personal(w);
-  handle.credential.kind = 'handle';
-  handle.credential.scope = columns(['secret.read', 'secret.use', 'secret.write']);
-  assert.equal(((await w.vault.issueToken!(handle)) as { refused?: string }).refused, 'refused');
-  handle.credential.scope = storedScope([issuedGrant({ projectId: w.project, environmentId: null, role: 'developer' })]);
-  assert.equal(((await w.vault.issueToken!(handle)) as { refused?: string }).refused, 'refused', 'a handle is a viewer or a contributor');
+  const writes = handleOf(w, null, undefined, (grant) => ({ ...grant, permissions: { normal: ['secret.read', 'secret.use', 'secret.write'], protected: [] } }));
+  assert.equal(((await w.vault.issueToken!(writes)) as { refused?: string }).refused, 'refused');
+  const developer = handleOf(w, null, undefined, (grant) => ({ ...grant, role: 'developer' }));
+  assert.equal(((await w.vault.issueToken!(developer)) as { refused?: string }).refused, 'refused', 'a handle is a viewer or a contributor');
   assert.equal(await credentialRows(), 0);
   // As the app makes them, each within its role.
   const fair = personal(w);
   fair.credential.scope = columns(['secret.read']);
   assert.ok((await w.vault.issueToken!(fair)).ok);
-  handle.credential.id = randomUUID();
-  handle.credential.scope = columns(['secret.read', 'secret.use'], ['secret.read', 'secret.use']);
-  assert.ok((await w.vault.issueToken!(handle)).ok);
+  assert.ok((await w.vault.issueToken!(handleOf(w, null))).ok);
 });
 
 test("a service token keeps at most its roles' columns, and only a person gives one: a service account managing access gives none (review r2)", async () => {
@@ -183,22 +193,63 @@ test("a handle's end is held to the scoped credential it was made on, by what th
   // A writer makes the personal token a CLI session, in its row alone: its object, scope and seal unchanged.
   const { credentials } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ kind: 'cli' }).where(eq(credentials.id, token.credential.id));
-  const handle = personal(w, ROOT, token.credential.id, Date.now() + 3_600_000);
-  handle.credential.kind = 'handle';
-  handle.credential.scope = storedScope([issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' })]);
-  assert.equal(((await w.vault.issueToken!(handle)) as { refused?: string }).refused, 'refused', 'never past the token that made it');
+  const outcome = await w.vault.issueToken!(handleOf(w, token.credential.id, Date.now() + 3_600_000, onViewerToken));
+  assert.equal(!outcome.ok && outcome.why, 'a handle lasts at most a week, and never past the token that made it');
+});
+
+test("a handle names each environment it reaches, and stands in for those alone: no project's grant, no place it does not reach, no mapping it cannot read (review r3)", async () => {
+  const w = await world();
+  const wide = handleOf(w, null, undefined, (grant) => ({ ...grant, environmentId: null }));
+  assert.equal(((await w.vault.issueToken!(wide)) as { refused?: string }).refused, 'refused', "a project's grant reaches its environments to come");
+  const elsewhere = handleOf(w, null);
+  elsewhere.credential.places = JSON.stringify([{ environmentId: randomUUID(), personal: false }]);
+  assert.equal(((await w.vault.issueToken!(elsewhere)) as { refused?: string }).refused, 'refused');
+  const garbled = handleOf(w, null);
+  garbled.credential.places = 'not JSON';
+  assert.equal(((await w.vault.issueToken!(garbled)) as { refused?: string }).refused, 'refused');
+  assert.equal(await credentialRows(), 0);
+});
+
+test("a credential 0.14 made, which the log never held, authorizes no issue of the vault's: it answers `unlogged`, and the app issues as before (review r3)", async () => {
+  const w = await world();
+  const token = personal(w);
+  assert.ok((await w.vault.issueToken!(token)).ok);
+  // As 0.14 left it: no seal, no change.
+  const { credentials, logChanges } = tablesOf(db.owner);
+  await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, token.credential.id));
+  await db.owner.delete(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: token.credential.id })));
+  assert.equal(((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))) as { refused?: string }).refused, 'unlogged');
+});
+
+test("an issue's write holds the credential it came in on to the end the vault authenticated: one extended while it waits, its seal unchanged, ends it (review r3)", postgresOnly('row locks'), async () => {
+  const w = await world();
+  const token = personal(w, ROOT, null, Date.now() + 3_600_000);
+  assert.ok((await w.vault.issueToken!(token)).ok);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A writer holds the token's row and pushes its end out a day, its seal as it was; the issue reads it before that commits.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM credentials WHERE id = '${token.credential.id}' FOR UPDATE`);
+    await holder.unsafe(`UPDATE credentials SET expires_at = expires_at + interval '1 day' WHERE id = '${token.credential.id}'`);
+    const issuing = w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken));
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
+    for (let tries = 0; (await waits()) === 0; tries += 1) {
+      assert.ok(tries < 200, 'the write waits on the row');
+      await sleep(10);
+    }
+    await holder.unsafe('COMMIT');
+    const outcome = await issuing;
+    assert.equal(!outcome.ok && outcome.refused, 'ended', JSON.stringify(outcome));
+  } finally {
+    await holder.end();
+  }
 });
 
 test('a handle is made on a personal token only within its end, and not once it is revoked (IssuedByLiveCredential)', async () => {
   const w = await world();
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);
   assert.ok((await w.vault.issueToken!(token)).ok);
-  const handle = (expiresAt: number) => {
-    const input = personal(w, ROOT, token.credential.id, expiresAt);
-    input.credential.kind = 'handle';
-    input.credential.scope = storedScope([issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' })]);
-    return input;
-  };
+  const handle = (expiresAt: number) => handleOf(w, token.credential.id, expiresAt, onViewerToken);
   assert.equal((await w.vault.issueToken!(handle(Date.now() + 2 * 3_600_000))).ok, false, 'past the token that made it');
   assert.ok((await w.vault.issueToken!(handle(Date.now() + 1_800_000))).ok);
   // Revoked, it makes nothing more.

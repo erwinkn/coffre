@@ -39,7 +39,7 @@ export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answ
   const [row] = await rowsOf<{ answer: string }>(db, sql`/* writes */ SELECT issue_token(
     ${change.requestId}::text, ${String(change.at)}::bigint, ${change.actor}::text, ${change.payload}::text, ${change.mac}::bytea, ${change.seal}::bytea,
     ${input.principal}::text, ${input.generation}::integer, ${read.principal.accessSeq.toString()}::bigint, ${read.actor.generation}::integer, ${read.actor.accessSeq.toString()}::bigint,
-    ${input.via}::uuid, ${read.via?.seal ?? null}::bytea,
+    ${input.via}::uuid, ${read.via?.seal ?? null}::bytea, ${read.via?.columns.expiresAt == null ? null : String(read.via.columns.expiresAt)}::bigint,
     ${input.policy.seq}::bigint, ${sql.param(guarded.map(({ environmentId }) => environmentId))}::uuid[], ${sql.param(guarded.map(({ slug }) => slug))}::text[], ${input.appKey}::text,
     ${k.id}::uuid, ${k.kind}::text, ${c.authMac}::bytea, ${c.tokenHash}::bytea, ${k.tokenHint}::text, ${k.label}::text, ${k.createdBy}::text,
     ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint

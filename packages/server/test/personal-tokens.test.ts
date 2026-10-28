@@ -8,12 +8,12 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials } from './db/tables.ts';
+import { auditLog, credentials, logChanges } from './db/tables.ts';
 import { clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -321,6 +321,18 @@ test("a token of a person's own, asked on a request made before they were remove
   assert.equal(await status(bearer(polled.credential.token).tokens.issue(ADA, input)), 403);
   assert.deepEqual(await refusals('token.create'), ['session_ended', 'session_ended', 'session_ended']);
   assert.equal((await db.owner.select().from(credentials).where(eq(credentials.kind, 'personal'))).length, 0, 'no token was made');
+});
+
+test('a personal token made on a session 0.14 made, which the log never held, is issued as before: the vault authenticates nothing of it (T149, review r3)', async () => {
+  const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
+  await signin.decideDevice(await contextFor(deps, 'ada@acme.example'), started.userCode, true);
+  const polled = await signin.pollDevice(started.deviceCode, { requestId: 'device', sourceIp: null });
+  assert.ok(polled.status === 'approved');
+  // As 0.14 left it: no seal, no change.
+  await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, polled.credential.id));
+  await db.owner.delete(logChanges).where(sql`${logChanges.payload} LIKE ${`%${polled.credential.id}%`}`);
+  const made = await bearer(polled.credential.token).tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  assert.equal(await reads(made.token, 'dev'), 'dev-key');
 });
 
 test('a person lists and revokes their own tokens, and whoever runs the instance theirs; nobody else; and a token signs itself out', async () => {

@@ -275,6 +275,7 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
     || typeof c.expiresAt !== 'number' || !Number.isSafeInteger(c.expiresAt) || typeof c.createdBy !== 'string') {
     throw new Error('an issue\'s token is its row: an id, its kind, its token\'s hash and hint, its scope as stored, its end, its maker, and the app\'s MAC');
   }
+  if ((c.kind === 'handle') !== (c.places !== null)) throw new Error('a handle, and only a handle, names the places it stands in for');
   const scope = readScope(c.scope);
   if (scope === null || scope.length === 0) throw new Error('an issued token reaches what its stored scope names, at least one place');
   return scope;
@@ -359,10 +360,28 @@ export function weighIssue(
         return 'a handle lasts at most a week, and never past the token that made it';
       }
       if (scope.some((grant) => grant.role !== 'viewer' && grant.role !== 'contributor')) return 'a handle reads or uses, as a viewer or a contributor';
+      // Made for environments, each named: never a project's, which would reach the environments it gains later.
+      if (scope.some((grant) => grant.environmentId == null)) return 'a handle reaches environments, each by name';
+      const reached = new Set(scope.map((grant) => grant.environmentId));
+      const places = handlePlaces(credential.places);
+      if (places === null || places.some(({ environmentId }) => !reached.has(environmentId))) return 'a handle stands in for environments its scope reaches';
       if (scope.some((grant, i) => !held(grant, at_[i]!, HANDLE_POLICY))) return 'a handle reads and uses at most what its person holds, through what it was made on';
       return null;
     }
   }
+}
+
+/** A handle's places as the app writes them (`HandlePlace[]`: each environment it was made for, by id, and whether as `@me`), or null for none such. */
+function handlePlaces(stored: string | null): { environmentId: string; personal: boolean }[] | null {
+  let parsed: unknown = null;
+  try {
+    parsed = stored === null ? null : JSON.parse(stored);
+  } catch {}
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const places = parsed as { environmentId?: unknown; personal?: unknown }[];
+  return places.every((place) => typeof place === 'object' && place !== null && typeof place.environmentId === 'string' && UUID.test(place.environmentId) && typeof place.personal === 'boolean')
+    ? (places as { environmentId: string; personal: boolean }[])
+    : null;
 }
 
 /** The issue, sealed: the credential's object, its seal, its change's payload and MAC. */

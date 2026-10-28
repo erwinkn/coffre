@@ -100,8 +100,11 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
     const [via] = await tx.select({ principal: credentials.principal, revokedAt: credentials.revokedAt, seal: credentials.seal, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter })
       .from(credentials).where(eq(credentials.id, input.via));
     const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: input.via }))).orderBy(desc(logChanges.number)).limit(1);
+    // Its end as the vault authenticated it, still the columns' and still ahead (as `issue_token`).
     const sealedAs = read.via?.seal ?? null;
-    if (via === undefined || via.principal !== input.actor || via.revokedAt !== null || via.expiresAt.getTime() <= now || (via.notAfter !== null && via.notAfter.getTime() <= now)
+    const end = read.via?.columns.expiresAt ?? null;
+    const ends = via === undefined ? null : Math.min(via.expiresAt.getTime(), via.notAfter?.getTime() ?? Infinity);
+    if (via === undefined || via.principal !== input.actor || via.revokedAt !== null || sealedAs === null || end === null || ends !== end || end <= now
       || !same(via.seal ?? null, sealedAs) || !same(newest?.seal ?? null, sealedAs)) {
       return { state: 'ended' };
     }
