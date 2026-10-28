@@ -76,15 +76,16 @@ up on another.
 The image is Debian's `postgres:16.14` (glibc), not Alpine's: managed Postgres
 behind Hyperdrive is glibc, and musl's malloc costs a use 2-3x the Postgres
 CPU, so an Alpine benchmark answers for nobody. It is the reference rig for
-every Postgres number. The clusters use `--locale=C`, so ordering never
-depends on the libc, but the data volume is named for the image
-(`coffre-pgdata-v16-debian`) so that a data directory the Alpine image
-initialized is never mounted by this one. A developer with an Alpine
-container recreates it: `docker compose down` (or `docker rm -f` the
-container), then `pnpm db:up`. It starts on a fresh volume, and `pnpm dev`
-reseeds; the old `coffre-pgdata-v16` volume is unused and
-`docker volume rm`'s to reclaim its disk. Never recreate the shared
-container under others' feet: `ensure-postgres.sh` leaves a running one alone.
+every Postgres number. The clusters use `--locale=C`, which compares bytes
+whatever the libc, so the old data would have mounted fine; the volume is
+named for the image (`coffre-pgdata-v16-debian`) anyway, so that a recreated
+container starts a cluster of its own. A container already running keeps its
+image, and `pnpm db:up` (`ensure-postgres.sh`) reuses it, saying so. To move
+one to Debian, once, when no checkout is using it:
+`COMPOSE_PROJECT_NAME=coffre docker compose up -d --force-recreate postgres`.
+It starts on the fresh volume and `pnpm dev` reseeds; `docker volume rm
+coffre_coffre-pgdata-v16` reclaims the old one. A Postgres of your own
+(above) is cheaper to recreate.
 
 `scripts/ensure-postgres.sh` reuses a healthy or initializing container and
 serializes cold starts across worktrees with the host's advisory lock

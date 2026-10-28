@@ -21,8 +21,8 @@ services:
 
 volumes:
   # Versioned so adopting the PostgreSQL 16 production baseline never mounts
-  # (or destroys) an incompatible PostgreSQL 17 development volume. Named
-  # for the image too: a data directory the Alpine image (musl) initialized
-  # is never mounted by the Debian one (glibc), whose text indexes could sort
-  # differently. The old coffre-pgdata-v16 stays until someone removes it.
+  # (or destroys) an incompatible PostgreSQL 17 development volume. Named for
+  # the image too, so that a container recreated on this image starts a
+  # cluster of its own, never one the Alpine image (musl, uid 70) initialized.
+  # The old coffre-pgdata-v16 stays until someone removes it.
   coffre-pgdata-v16-debian:

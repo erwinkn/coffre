@@ -91,8 +91,9 @@ anywhere reloads in place; it resets and reseeds its database each time.
 
 The Postgres container is Debian's `postgres:16.14` (glibc), as managed
 Postgres is, not Alpine's: musl's malloc skews every benchmark. A container
-from the Alpine image is recreated, on a volume of its own, with
-`docker compose down && pnpm db:up`; `pnpm dev` reseeds it.
+already running keeps its image; `pnpm db:up` reuses it and says so.
+AGENTS.md has the one-time swap (`--force-recreate`, on a fresh volume that
+`pnpm dev` reseeds), which is for when nothing else is using that container.
 
 To sign in from another machine through a tunnel (`bb connect expose`, ngrok),
 give `pnpm dev` the URLs a browser uses, one per port:
