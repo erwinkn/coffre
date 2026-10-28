@@ -5,14 +5,15 @@
 -- - `frozen`: a manager froze the account or the binding (`p_frozen`, a workload's sign-in);
 -- - `busy`: the binding made `p_rate` credentials in the last `p_window` ms (a lock not had within `lock_timeout` raises `lock_not_available`, busy too);
 -- - `expired`: the proof's own times are past (`p_valid_until`), or the credential's end is past, or further than `p_longest` ms (and a minute, for the Worker's clock) from the database's clock;
--- - `replayed`: the ID token, by its signing input's hash (`p_spent`), was spent already.
+-- - `replayed`: the ID token, by its signing input's hash (`p_spent`), was spent already;
+-- - `retired`: the app signed the row (its `auth_mac`) under a key it has rotated from (`p_app_key`, its log key's id), which `key.rotate` or `key.reseal` names, as `appendEntries` refuses one (KeyRetired). A rotation committing while this runs leaves a row its new key refuses: dead, never live.
 -- Locks, in the order every writer takes them (0026): the account's row shared (MemberLocked: its removal waits, or is seen), the binding's exclusive (BindingLocked: its rate, and an unbind, whose update takes it before its sweep), then the issue lock shared, its number under it (IssueOffFence: never the fence, so no use waits on a sign-in, R58). Nobody can name the credential before the commit hands its token out. No 0.14 head, and no 0.14 entry: the change is the record (D147).
 CREATE FUNCTION sign_in(
     p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea,
     p_binding uuid, p_principal text, p_generation integer, p_binding_scope text, p_binding_policy text,
     p_spent bytea, p_valid_until bigint, p_frozen boolean, p_rate integer, p_window bigint, p_longest bigint,
     p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text,
-    p_scope text, p_places text, p_expires bigint, p_not_after bigint, p_jkt text
+    p_scope text, p_places text, p_expires bigint, p_not_after bigint, p_jkt text, p_app_key text
 ) RETURNS json
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '1s' AS $$
 DECLARE
@@ -45,6 +46,10 @@ BEGIN
        AND b.scope IS NOT DISTINCT FROM p_binding_scope AND b.policy IS NOT DISTINCT FROM p_binding_policy
        FOR UPDATE;
     IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
+    -- The app's key, not one it rotated from (audit_log_subject_idx).
+    IF EXISTS (SELECT 1 FROM public.audit_log a WHERE a.author = 'app' AND a.subject_principal = p_app_key AND a.action IN ('key.reseal', 'key.rotate')) THEN
+        RETURN json_build_object('state', 'retired');
+    END IF;
     -- Its tombstone: a binding put back after its unbind is none (audit_log_unbind_idx).
     IF EXISTS (SELECT 1 FROM public.audit_log a WHERE a.author = 'app' AND a.action = 'token.unbind' AND a.decision = 'allow'
                 AND (a.metadata::jsonb ->> 'bindingId') = p_binding::text) THEN
@@ -151,9 +156,9 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) TO coffre_vault;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION revoke_credential(text, bigint, text, text, bytea, bytea, bytea, uuid, bytea, bytea, bigint, text, boolean, bigint, uuid[], text[]) FROM PUBLIC;
 --> statement-breakpoint

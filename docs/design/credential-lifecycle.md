@@ -58,7 +58,9 @@ binding's columns the app names (its scope, and a workload's reads with it,
 5. the rate, 60 a minute, counted under the binding's row;
 6. the proof's own times (`validUntil`: the ID token's `exp`, its `iat`'s
    hour) and the credential's end, by the database's clock;
-7. the token spent, by the primary key of `consumed_tokens` (SpentChecked);
+7. the token spent, by the primary key of `consumed_tokens` (SpentChecked),
+   once the app's key is known not to be one it rotated from (as 0.14's
+   append refuses one, KeyRetired);
 8. the credential inserted with its seal, the binding stamped;
 9. the issue lock shared, the change numbered under it (IssueOffFence).
 
@@ -145,6 +147,8 @@ Two results drove the design:
 | no 0.14 `token.exchange` entry (D147), and, extending it, no 0.14 `token.revoke` or `sign_out` allow entry: the change records it | the app appending 0.14's entry after the call | the same reason as D147; the change carries who, the binding, the proof, the issuer, the run, a session's key and end, and for a revoke why, the credential it came in on, and whose credential of what kind. Refusals are still 0.14 entries. **For Erwin: reversible** |
 | seal the token hash in the credential's object (option (a)), in PR 3 | the app's MAC check alone (option (b)) | with W242's B1 the vault finds a use's credential by its hash, so the hash is a decision input (R53). The model shows each stops a writer who moves a hash; only (a) holds when the app's check does not run. It lands after B1 |
 | a workload proof with a `commit` keeps the old path | moving the enrollment's capacity into SQL | no such proof is registered yet |
+| every sign-in through a binding goes through the vault, one 0.4 made sealed first | the old path for those | a binding's rate is counted under its row; a sign-in that counted it under the head beside one under the row could pass it by one (review r2) |
+| the app's key checked in the statement, not under the fence | the fence, or nothing | a credential the app signed under a key it rotated from is refused, as 0.14 refuses its entry. A rotation that commits during the statement leaves a row its new key refuses at once: a dead credential, never a live one, and R41's rotation signs every session out anyway. The model leaves this out for that reason: no outcome of it widens anything |
 
 ## 5. Numbers
 

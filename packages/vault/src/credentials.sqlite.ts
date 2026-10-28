@@ -25,6 +25,9 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
     || binding.scope !== c.binding.scope || binding.policy !== c.binding.policy) {
     return { state: 'unbound' };
   }
+  const [moved] = await tx.select({ seq: auditLog.seq }).from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.subjectPrincipal, c.appKey), inArray(auditLog.action, ['key.reseal', 'key.rotate']))).limit(1);
+  if (moved !== undefined) return { state: 'retired' };
   const named = (key: string) => sql`json_extract(${auditLog.metadata}, ${`$.${key}`})`;
   const [tomb] = await tx.select({ seq: auditLog.seq }).from(auditLog)
     .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.unbind'), eq(auditLog.decision, 'allow'), eq(named('bindingId'), c.binding.id))).limit(1);

@@ -46,9 +46,11 @@ import {
 import { shownMember } from '@coffre/core/schemas';
 import type { Access, SignInCredential, SignInRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
+import { KeyRetired } from '@coffre/db/log';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
+import { appLogKey } from '../db/audit.ts';
 import {
   consumeToken,
   exchangeCandidates,
@@ -1249,6 +1251,7 @@ export class WorkloadService {
       principal: member,
       binding: { id: binding.id, generation: binding.generation, profile: binding.profile, scope: binding.scope, policy: binding.policy },
       credential: signedInCredential(row),
+      appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: verified.spentKey?.toString('base64') ?? null,
       // Its proof's end is the session's hard end, held to in the statement.
       validUntil: null,
@@ -1327,13 +1330,20 @@ export class WorkloadService {
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
     if (spent) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
-    // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. A binding 0.4 made, its scope unsealed, is sealed first, below.
-    if (!unsealedScope(binding.scope) && (await vaultMakesCredentials(vault))) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, decoded);
+    // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. Every sign-in through a binding goes there, so
+    // that each one's rate is counted under its row: one 0.4 made, its scope unsealed, is sealed first, and read again.
+    const byVault = await vaultMakesCredentials(vault);
+    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, decoded);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
     if (unsealedScope(binding.scope)) {
       await sealCredentials(db, chainKey, vault, standing, policySeq, [{ kind: 'binding', id: binding.id, principal: member, createdBy: binding.createdBy, scope: binding.scope }]);
+    }
+    if (byVault) {
+      const sealed = await findBinding(db, chainKey, member, binding.id);
+      if (sealed === null || unsealedScope(sealed.scope)) throw unbound();
+      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, decoded);
     }
 
     const service = member.slice('token:'.length);
@@ -1396,6 +1406,7 @@ export class WorkloadService {
       principal: member,
       binding: { id: binding.id, generation: binding.generation, profile: binding.profile, scope: binding.scope, policy: binding.policy },
       credential: signedInCredential({ ...row, kind: 'service' }),
+      appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: decoded.signingInputHash.toString('base64'),
       // The token's times, held to again in the statement, as the commit under 0.14's head holds them: its `exp`, and its `iat`'s hour.
       // Whole ms, down: a token's times may be fractional seconds, which the checks before took.
@@ -1444,8 +1455,10 @@ function signedInCredential(row: {
 }
 
 /** A sign-in the vault refused, as the workload's owner reads it: today's codes and words, each path its own. */
-function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen'>, string> & { frozen?: string }): ExchangeRefused {
+function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired'>, string> & { frozen?: string }): ExchangeRefused {
   switch (refused) {
+    // An instance under an app key the log moved on from, as for the seconds a deploy takes: 503, as its append would answer.
+    case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
     case 'unbound': return new ExchangeRefused('no_match', words.unbound);
     case 'busy': return new ExchangeRefused('busy', words.busy, 429);
     case 'replayed': return new ExchangeRefused('replayed', words.replayed);

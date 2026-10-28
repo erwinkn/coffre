@@ -18,11 +18,13 @@ import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { credentialObject } from '../src/objects.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
 const ISSUER = 'https://token.actions.githubusercontent.com';
+/** The app's log key's id, as its MACs name it (`appLogKey`). */
+const APP_KEY = 'app:0123456789abcdef';
 
 let db: TestDatabase;
 before(async () => {
@@ -69,6 +71,7 @@ function asked(w: World, change: (input: SignInInput) => SignInInput = (input) =
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys', scope: SCOPE,
       places: null, expiresAt: now + 5 * 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
+    appKey: APP_KEY,
     spent: randomBytes(32).toString('base64'),
     validUntil: now + 60_000,
     record: { proof: 'oidc', issuer: ISSUER, run: { run_id: '7001' } },
@@ -154,6 +157,20 @@ test('a sign-in goes ahead only while the binding is as named and stands, and it
   assert.ok((await w.vault.admit({ actor: ROOT, principal: CI })).ok);
   assert.equal((await db.owner.select({ generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, CI)))[0]!.generation, 1);
   await refused(asked(w));
+});
+
+test("a row the app signed under a key it rotated from is no sign-in: refused, nothing written, as its append would refuse (KeyRetired)", async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
+  // The app moved on from APP_KEY: its `key.rotate`, naming it, in 0.14's log.
+  await withLogUnlocked(db.owner, (owner) => owner.insert(auditLog).values({
+    seq: 1_000_000n, author: 'app', keyId: 'app:fedcba9876543210', occurredAt: Date.now(), actor: 'system:coffre', action: 'key.rotate', decision: 'allow',
+    subjectPrincipal: APP_KEY, metadata: '{}', prevHash: Buffer.alloc(32), mac: Buffer.alloc(32), hash: Buffer.alloc(32),
+  }));
+  const none = await written();
+  assert.deepEqual(await w.vault.signIn!(asked(w)), { ok: false, refused: 'retired' });
+  assert.deepEqual(await written(), none);
+  assert.ok((await w.vault.signIn!(asked(w, (input) => ({ ...input, appKey: 'app:fedcba9876543210' })))).ok, 'the key it moved to signs in');
 });
 
 test("an ID token is spent once (SpentChecked): presented again, it buys nothing, and writes nothing", async () => {

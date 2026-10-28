@@ -290,6 +290,8 @@ test('a binding 0.4 makes after the app sealed is sealed by its first exchange, 
   const first = (await trade(token(rsa))).body.token!;
   assert.notEqual(await scope(), null, 'sealed as it exchanged, before the run used its credential');
   assert.deepEqual(await seals(), [[bound]]);
+  // With 0.15's log, the vault made it all the same, once sealed: every sign-in through a binding counts its rate under its row.
+  if (LOG === '0.15') assert.equal((await signInsLogged(db.owner)).at(-1)!.record.signIn !== undefined, true);
   // A run's credential whose binding carries no scope, as one 0.4's binding issued: its first check seals the binding.
   await unseal(bound);
   assert.equal(await reveal(first, 'market/dev'), 200);

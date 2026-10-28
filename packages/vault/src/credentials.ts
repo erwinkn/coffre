@@ -44,7 +44,7 @@ type SignInRecord = { binding: string; proof: string; issuer: string; run: Recor
 /** A sign-in as the vault decided it: the statement's arguments. */
 export type SignInCall = {
   requestId: string; at: number; actor: string; payload: string; mac: Buffer; seal: Buffer;
-  binding: SignInInput['binding']; principal: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
+  binding: SignInInput['binding']; principal: string; appKey: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
   /** At most `rate` credentials a binding makes in `window` ms. */
   rate: number; window: number;
   credential: SignInCredential & { createdBy: string; tokenHashBytes: Buffer; authMacBytes: Buffer };
@@ -87,13 +87,14 @@ export async function signIn(db: Database, keys: ChangeKeys, at: number, input: 
 }
 
 function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInCall {
-  const { principal, binding, credential, spent, validUntil, record } = input ?? ({} as SignInInput);
+  const { principal, binding, credential, appKey, spent, validUntil, record } = input ?? ({} as SignInInput);
   if (typeof principal !== 'string' || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw new Error('a sign-in is a service account\'s, token:<id>');
   if (typeof binding?.id !== 'string' || !Number.isInteger(binding.generation) || typeof binding.profile !== 'string'
     || (binding.scope !== null && typeof binding.scope !== 'string') || (binding.policy !== null && typeof binding.policy !== 'string')) {
     throw new Error('a sign-in names its binding: its id, generation, profile, scope and policy as read');
   }
   checkCredential(credential);
+  if (typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)) throw new Error('a sign-in names the app\'s log key it signed the row under');
   if (spent !== null && !isBase64(spent, 32)) throw new Error('a sign-in spends its token by its signing input\'s hash, 32 bytes, or nothing');
   if (validUntil !== null && (typeof validUntil !== 'number' || !Number.isSafeInteger(validUntil))) throw new Error('a proof holds until a time, in ms, or its credential\'s end bounds it');
   if (typeof record?.proof !== 'string' || typeof record.issuer !== 'string' || !isRun(record.run)) throw new Error('a sign-in records its proof, issuer and run');
@@ -134,7 +135,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor: principal, payload, seal };
   return {
     ...row, mac: entryMac(keys.mac, { tree: 'changes', row }),
-    binding, principal, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest, rate: SIGN_INS_PER_WINDOW, window: SIGN_IN_WINDOW_MS,
+    binding, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest, rate: SIGN_INS_PER_WINDOW, window: SIGN_IN_WINDOW_MS,
     credential: { ...credential, createdBy: `binding:${binding.id}`, tokenHashBytes: Buffer.from(credential.tokenHash, 'base64'), authMacBytes: Buffer.from(credential.authMac, 'base64') },
   };
 }

@@ -432,6 +432,8 @@ export type SignInInput = {
   binding: { id: string; generation: number; profile: string; scope: string | null; policy: string | null };
   /** The credential the app hands out once made: its row, the app's MAC over it (`auth_mac`) with it. */
   credential: SignInCredential;
+  /** The id of the app's log key, under whose key the MAC was made: refused once the app has rotated from it (`retired`). */
+  appKey: string;
   /** The ID token's signing input's hash, spent once; null for a proof that spends none. */
   spent: string | null;
   /**
@@ -463,9 +465,10 @@ export type SignInCredential = {
 /**
  * Why a sign-in made nothing, the statement's own words: the account or
  * the binding not as named, frozen, its rate spent (or a lock not had in
- * time), its times past or too far, the token spent.
+ * time), its times past or too far, the token spent, the app's key one it
+ * rotated from.
  */
-export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed';
+export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired';
 
 export type SignInOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: SignInRefusal };
 
