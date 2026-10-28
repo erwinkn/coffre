@@ -7,7 +7,8 @@ import { callerFrom, newestPolicySeq, withRecalled, type Caller } from './api/ca
 import { formatMember } from './api/paths.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
-import { CredentialUncheckable, type HandlePlace, type PersonalToken } from './api/signin.ts';
+import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken } from './api/signin.ts';
+import type { CredentialRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -149,8 +150,9 @@ export async function authenticateRequest(
    * `handle`: the credential proxy's, which takes a handle and nothing else; everything else takes anything but one.
    * `recall`: the request reads values, and may decide on the vault's answer about its caller kept from an earlier
    * request, which it has the vault check before it answers (`accessFor`).
+   * `ahead`: the credential as `app_read` read it already, with what the request reads next (db/read-ahead.ts).
    */
-  options: { handle?: boolean; recall?: boolean } = {},
+  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
@@ -184,7 +186,12 @@ export async function authenticateRequest(
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
   try {
-    const verified = (await runtime.verifier.verify(token, { sourceIp, recall: options.recall === true })) as Principal & {
+    const asked = { sourceIp, recall: options.recall === true };
+    // Only coffre's own credentials are read ahead: Access's verifier reads none.
+    const verifying = options.ahead !== undefined && runtime.verifier instanceof SigninService
+      ? runtime.verifier.verify(token, { ...asked, ahead: options.ahead })
+      : runtime.verifier.verify(token, asked);
+    const verified = (await verifying) as Principal & {
       credentialId?: string;
       credentialGeneration?: number;
       access?: Access;

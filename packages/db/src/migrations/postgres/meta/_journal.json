@@ -218,6 +218,13 @@
       "when": 1793150000000,
       "tag": "0030_unarchive_restores",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1793160000000,
+      "tag": "0031_app_read",
+      "breakpoints": true
     }
   ]
 }

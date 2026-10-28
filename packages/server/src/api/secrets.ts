@@ -39,9 +39,10 @@ import {
 } from '../db/queries.ts';
 import { can, lists, permissionsAt, placeOf, type Caller } from './caller.ts';
 import { protectedFor, unprotects } from './roles.ts';
-import { AppChanges, ObjectMoved, retrying, secretChange, versionColumns, writtenSecret } from './changes.ts';
+import { AppChanges, ObjectMoved, retrying, secretChange, uses015, versionColumns, writtenSecret } from './changes.ts';
 import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
+import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
@@ -1760,7 +1761,7 @@ export async function reveal(
    * all; a path that resolves to another (renamed meanwhile) is refused
    * before anything is logged or opened.
    */
-  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string },
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string; ahead?: ReadAhead | null; only?: boolean },
   /**
    * Of a whole environment, these keys only (`coffre export --keys`): read
    * as the whole is, and what it leaves out named as the whole's would be,
@@ -1772,8 +1773,12 @@ export async function reveal(
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
   return recorded(ctx, async (log, fence, at) => {
+    // The place and its keys in one call where it can (`readValues`); the proxy's read them with the handle already.
+    // Of a use, its keys alone when it reads no other (`UseAsked.only`): it answers every key the environment holds.
+    const reads = use === undefined ? only : use.only === true && Array.isArray(use.keys) ? use.keys : undefined;
+    const ahead = use?.ahead !== undefined ? use.ahead : await readValues(ctx, path, reads);
     // `market/dev@me`: your personal config of dev, or dev while you have none.
-    const place = await resolveRead(ctx, path);
+    const place = ahead?.place !== undefined ? ahead.place : await resolveRead(ctx, path);
     const environment = place === null ? null : liveEnvironment(place);
     if (place === null || environment === null) {
       throw new Refusal(
@@ -1794,7 +1799,7 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
-    const read = await readableValues(ctx.db, place, environment, path.key);
+    const read = await readableValues(ctx.db, place, environment, path.key, ahead?.secrets);
     const named = { id: environment.environmentId, path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone
@@ -1899,7 +1904,9 @@ export async function reveal(
     if (used !== null) {
       // Appended by the vault already, the app has nothing to append: its fence takes no lock (`recorded`).
       if (opened.used !== true) log.push(used);
-      return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: null, environment: named, keys: read.items.map((item) => item.key) };
+      // Every key the environment holds, or, read `only` for its keys, those of them it holds.
+      const held = read.items.filter((item) => use?.only !== true || wanted(item)).map((item) => item.key);
+      return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: null, environment: named, keys: held };
     }
     if (rows.length === 0) {
       // An empty environment still produced a read. Log the attempt rather than nothing.
@@ -1908,6 +1915,17 @@ export async function reveal(
     // An environment's version, of exactly what was read: what a watch compares the next one with.
     return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   });
+}
+
+/**
+ * A read's place and its keys, `keys` alone when it names them, in one call
+ * of `app_read` (db/read-ahead.ts): with 0.15's uses, of a path with no key
+ * and no personal config, on Postgres. Null otherwise: the read reads them
+ * itself, as ever.
+ */
+export async function readValues(ctx: Pick<ApiContext, 'db' | 'vault'>, path: Path, keys?: readonly string[]): Promise<ReadAhead | null> {
+  if (path.environment === undefined || path.key !== undefined || !(await uses015(ctx.vault))) return null;
+  return readAhead(ctx.db, { path: { project: path.project, environment: path.environment }, keys });
 }
 
 /**

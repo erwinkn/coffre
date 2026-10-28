@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **0.15's `/use` reads ahead in one statement, behind its switch.** A
+  handle's use read its credential, the newest policy change, the place
+  and every key of the environment in three statements, each planned
+  again for every request: most of a use's Postgres CPU. Migration 0031
+  adds `app_read`, which reads them in one call, the keys the proxy names
+  only, each backend planning it once. The stable URL's two reads of
+  its handle each go through it. A reveal's place and keys go through it
+  too, and `Used.keys` still lists every key the environment holds unless
+  a plugin asks for its keys `only`. On a 2 vCPU Postgres at 20 ms a round
+  trip, a use with the proxy's cache off costs 2.2 ms of Postgres CPU
+  where it cost 3.8, answers in 85 ms where it took 128, and serves 400 a
+  second where it saturated; with the cache, 1,000 a second at a p99 of
+  8 ms, where a cold start brought it down. SQLite, and 0.14's log, read
+  as before.
 - **0.15's log is checked on every audit page visit, behind its switch:
   nothing calls it yet.** With 0.15's log on, the audit page, `coffre
   verify instance` and conformance check its newest signed checkpoint,

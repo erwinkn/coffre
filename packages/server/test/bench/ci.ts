@@ -20,8 +20,10 @@
 // own (uses.ts), and it reports their latency and refusals for each level, `0` jobs a level of uses alone (`--idle`
 // seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
 // With `--proxy <rate>` instead, the uses beside are the whole app's `/use`, the credential proxy on 100 people's
-// handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--cgroup <dir>`, the Postgres
-// container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over the uses sent).
+// handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--proxy-cache <s>` is the proxy's
+// `cacheSeconds` (0, the default here: every request opens its key); `--proxy-stable` sends each to the stable URL.
+// `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
+// the uses sent).
 // `--principals` spreads the uses over that many services (1: one hot principal, T127), `--keys` gives ci/dev that many
 // keys (7 by default, the reveal's), and `--use-cold <n>` makes n uses a second more, each on a new connection of its
 // own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
@@ -30,7 +32,8 @@
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
-//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
+//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable]
+//     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -79,6 +82,7 @@ const { values } = parseArgs({
     proxy: { type: 'string', default: '0' },
     threads: { type: 'string', default: '4' },
     'proxy-cache': { type: 'string', default: '0' },
+    'proxy-stable': { type: 'boolean', default: false },
     cgroup: { type: 'string' },
   },
 });
@@ -295,6 +299,7 @@ try {
       log: values.log === '0.15' ? '0.15' : '0.14', urls: { app: TEST_RUNTIME_DATABASE_URL, vault: TEST_VAULT_DATABASE_URL, hot: TEST_HOT_DATABASE_URL }, rtt: RTT, rate: PROXY,
       pools: { app: Number(values['use-pool']), vault: 8, hot: 16 }, handles, path: 'ci/dev', value: `${SEVEN[0]!.toLowerCase()}-value`, kek: kek.toString('base64'), owner: ROOT, chainKey: deps.chainKey.toString('base64'), origin: ORIGIN,
       cacheSeconds: Number(values['proxy-cache']),
+      stable: values['proxy-stable'],
     };
     // The proxy injects `API_KEY`: ci/dev's first key under that name.
     await root.secrets.set('ci/dev', { API_KEY: load.value });
