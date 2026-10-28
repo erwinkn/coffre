@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Local Postgres refuses a subnet the host routes elsewhere.**
+  `scripts/ensure-postgres.sh` checks, with `ip route get`, that the
+  container's address leaves through its own bridge. Cloudflare WARP routes
+  some hosts of 192.168.0.0/20, the subnet Docker first gives a project, off
+  the machine, so a connection to `127.0.0.1:<port>` reached another
+  Postgres. A container the script started is removed (its volume stays);
+  `COFFRE_POSTGRES_SUBNET=10.77.0.0/24`, set on every run, gives a project a
+  subnet of its own; Docker's `default-address-pools` fixes it for all.
+
 - **The local and CI Postgres is Debian's, not Alpine's.** `docker-compose.yml`
   runs `postgres:16.14` (glibc) in place of `postgres:16.14-alpine` (musl):
   managed Postgres behind Hyperdrive is glibc, and musl's malloc cost a use

@@ -8,7 +8,10 @@ import test from 'node:test';
 
 const script = resolve(import.meta.dirname, 'ensure-postgres.sh');
 
-async function fixture(t, mode, callers = 1) {
+// route: where the fixture's `ip` sends the container's address: its own bridge,
+// Cloudflare WARP's device, a host without that bridge (Docker Desktop), or
+// an `ip` that cannot answer. upSays is what compose says of the container.
+async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-postgres-bootstrap-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const project = 'fixture_' + dir.split('-').at(-1);
@@ -30,6 +33,7 @@ const dir = ${state};
 const args = process.argv.slice(2);
 const mode = ${JSON.stringify(mode)};
 appendFileSync(dir + '/calls', JSON.stringify(args) + '\\n');
+appendFileSync(dir + '/compose-files', (process.env.COMPOSE_FILE ?? '') + '\\n');
 if (mode === 'stale' && args.includes('config')) { console.log('postgres:16.14'); process.exit(0); }
 if (mode === 'stale' && args[0] === 'inspect') { console.log('postgres:16.14-alpine'); process.exit(0); }
 if (args.includes('port')) {
@@ -62,9 +66,16 @@ if (args.includes('exec')) {
     process.exit(1);
 }
 if (args.includes('ps')) {
-    if (mode === 'existing' || mode === 'stale' || existsSync(dir + '/created')) console.log('fixture-postgres');
+    if (mode === 'existing' || mode === 'stale' || mode === 'healthy' || existsSync(dir + '/created')) console.log('fixture-postgres');
     process.exit(0);
 }
+if (args[0] === 'inspect' && args.some((arg) => arg.includes('NetworkSettings'))) {
+    if (${JSON.stringify(inspectFails)}) process.exit(1);
+    console.log('172.30.0.2 0123456789abcdef');
+    process.exit(0);
+}
+if (args[0] === 'network') process.exit(0);
+if (args.includes('down')) { writeFileSync(dir + '/down', ''); process.exit(0); }
 if (args[0] === 'inspect') {
     console.log(mode === 'existing' || existsSync(dir + '/created') ? 'true' : 'false');
     process.exit(0);
@@ -88,13 +99,27 @@ if (args.includes('up')) {
         console.error('Conflict. The container name is already in use by container fixture-postgres');
         process.exit(1);
     }
+    console.log(' Container fixture-postgres  ' + ${JSON.stringify(upSays)});
     process.exit(0);
 }
 throw new Error('unexpected docker command: ' + args.join(' '));
 `, { mode: 0o755 });
-    const run = (asked = port) => new Promise((resolve, reject) => {
+    writeFileSync(join(dir, 'ip'), `#!${process.execPath}
+import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(${state} + '/ip-calls', JSON.stringify(args) + '\\n');
+if (args.includes('route') && ${JSON.stringify(route)} === 'fail') process.exit(2);
+if (args.includes('route')) {
+    const dev = ${JSON.stringify(route)} === 'warp' ? 'CloudflareWARP table 65743' : ${JSON.stringify(route)} === 'bridge' ? 'br-0123456789ab' : 'eth0';
+    console.log('172.30.0.2 dev ' + dev + ' src 100.96.0.1 uid 1000');
+    process.exit(0);
+}
+if (args.includes('link')) process.exit(${JSON.stringify(route)} === 'none' ? 1 : 0);
+throw new Error('unexpected ip command: ' + args.join(' '));
+`, { mode: 0o755 });
+    const run = (asked = port, env = {}) => new Promise((resolve, reject) => {
         const child = spawn('/bin/bash', [localScript], {
-            env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, COMPOSE_PROJECT_NAME: project, COFFRE_POSTGRES_PORT: String(asked) },
+            env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, COMPOSE_PROJECT_NAME: project, COFFRE_POSTGRES_PORT: String(asked), ...env },
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: true,
         });
@@ -111,7 +136,7 @@ throw new Error('unexpected docker command: ' + args.join(' '));
         child.once('error', (error) => { clearTimeout(deadline); reject(error); });
         child.once('close', (code) => { clearTimeout(deadline); resolve({ code, output }); });
     });
-    return { dir, port, run, calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse) };
+    return { dir, port, run, ipCalls: () => readFileSync(join(dir, 'ip-calls'), 'utf8').trim().split('\n').map(JSON.parse), calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse) };
 }
 
 test('a healthy Postgres is reused without an up', async (t) => {
@@ -176,4 +201,93 @@ test('a transient bind conflict is retried without replacing the container', asy
     const starts = f.calls().filter((args) => args.includes('up'));
     assert.equal(starts.length, 2);
     assert.ok(starts.every((args) => args.includes('--no-recreate')));
+});
+
+test("a started Postgres whose address the host routes off the bridge is removed and refused", async (t) => {
+    const f = await fixture(t, 'cold', 1, 'warp');
+    const ran = await f.run();
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, /routes 172\.30\.0\.2 through CloudflareWARP, not its bridge br-0123456789ab/);
+    assert.match(ran.output, /default-address-pools.*COFFRE_POSTGRES_SUBNET=/s);
+    const calls = f.calls();
+    assert.ok(calls.some((args) => args.includes('down') && !args.includes('-v')), 'the container this script started is removed, its volume kept');
+    assert.ok(calls.findIndex((args) => args.includes('down')) > calls.findIndex((args) => args.includes('up')));
+});
+
+test("a reused Postgres whose address the host routes off the bridge is refused and left running", async (t) => {
+    const f = await fixture(t, 'healthy', 1, 'warp');
+    const ran = await f.run();
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, /through CloudflareWARP/);
+    assert.match(ran.output, /already running, so it is left alone/);
+    assert.ok(f.calls().every((args) => !args.includes('up') && !args.includes('down') && !args.includes('stop')));
+});
+
+test("a Postgres routed through its own bridge passes, after one route lookup", async (t) => {
+    const f = await fixture(t, 'healthy');
+    const ran = await f.run();
+    assert.equal(ran.code, 0, ran.output);
+    assert.deepEqual(f.ipCalls().filter((args) => args.includes('route')), [['-o', 'route', 'get', '172.30.0.2']]);
+});
+
+test("a host without the container's bridge (Docker Desktop) is not held to the route", async (t) => {
+    const f = await fixture(t, 'healthy', 1, 'none');
+    const ran = await f.run();
+    assert.equal(ran.code, 0, ran.output);
+});
+
+test("COFFRE_POSTGRES_SUBNET adds the subnet file to compose's files", async (t) => {
+    const f = await fixture(t, 'healthy');
+    const ran = await f.run(f.port, { COFFRE_POSTGRES_SUBNET: '10.77.0.0/24', COMPOSE_FILE: '' });
+    assert.equal(ran.code, 0, ran.output);
+    const files = readFileSync(join(f.dir, 'compose-files'), 'utf8').trim().split('\n');
+    assert.ok(files.every((value) => value === 'docker-compose.yml:docker-compose.subnet.yml'), files.join());
+    const plain = await fixture(t, 'healthy');
+    assert.equal((await plain.run(plain.port, { COMPOSE_FILE: '' })).code, 0);
+    assert.ok(readFileSync(join(plain.dir, 'compose-files'), 'utf8').trim().split('\n').every((value) => value === ''), 'no subnet asked, compose files untouched');
+});
+
+test("a Postgres compose only found running was not started here, so it is refused but kept", async (t) => {
+    const f = await fixture(t, 'cold', 1, 'warp', { upSays: 'Running' });
+    const ran = await f.run();
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, /already running, so it is left alone/);
+    assert.ok(f.calls().every((args) => !args.includes('down')), 'a container another caller started is never removed');
+});
+
+test("a route lookup that fails to answer for an existing bridge refuses", async (t) => {
+    const f = await fixture(t, 'healthy', 1, 'fail');
+    const ran = await f.run();
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, /through no device/);
+});
+
+test("a container that cannot be inspected is refused, not passed", async (t) => {
+    const f = await fixture(t, 'healthy', 1, 'bridge', { inspectFails: true });
+    const ran = await f.run();
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, /Could not inspect/);
+    assert.doesNotMatch(ran.output, /COFFRE_POSTGRES_SUBNET/);
+});
+
+test("the subnet file joins the discovered override and a preset list, with compose's separator", async (t) => {
+    const f = await fixture(t, 'healthy');
+    writeFileSync(join(f.dir, 'docker-compose.override.yml'), '');
+    const asked = async (env) => {
+        rmSync(join(f.dir, 'compose-files'), { force: true });
+        const ran = await f.run(f.port, { COFFRE_POSTGRES_SUBNET: '10.77.0.0/24', COMPOSE_FILE: '', ...env });
+        assert.equal(ran.code, 0, ran.output);
+        return [...new Set(readFileSync(join(f.dir, 'compose-files'), 'utf8').trim().split('\n'))];
+    };
+    assert.deepEqual(await asked({}), ['docker-compose.yml:docker-compose.override.yml:docker-compose.subnet.yml']);
+    assert.deepEqual(await asked({ COMPOSE_FILE: 'a.yml:b.yml' }), ['a.yml:b.yml:docker-compose.subnet.yml']);
+    assert.deepEqual(await asked({ COMPOSE_FILE: 'a.yml;b.yml', COMPOSE_PATH_SEPARATOR: ';' }), ['a.yml;b.yml;docker-compose.subnet.yml']);
+});
+
+test("a cold start under the lock names the subnet file once", async (t) => {
+    const f = await fixture(t, 'cold');
+    const ran = await f.run(f.port, { COFFRE_POSTGRES_SUBNET: '10.77.0.0/24', COMPOSE_FILE: '' });
+    assert.equal(ran.code, 0, ran.output);
+    const files = new Set(readFileSync(join(f.dir, 'compose-files'), 'utf8').trim().split('\n'));
+    assert.deepEqual([...files], ['docker-compose.yml:docker-compose.subnet.yml']);
 });
