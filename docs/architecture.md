@@ -401,6 +401,21 @@ answers of a vault that names them (`Access.revision`); one older than
 that names nothing back from an unwrap, and the app asks before it
 answers.
 
+`GET /api/me` asks the vault nothing. It only shows its caller, who they
+are and what they hold where, which the CLI and the pages read to choose
+what to list and which buttons to show; the app reads it from the vault's
+rows itself, in the same statement as the credential
+(`packages/server/src/db/answers.ts`), by the vault's own rule
+(`answerFrom` in `@coffre/core/vault`). It cannot check those rows, which
+only the vault's keys can: a row changed around the vault is shown as it
+says, where the vault would refuse its member as tampered. So such a caller
+is `unchecked`, and no route but `GET /api/me` takes one (`serveApi`):
+whatever the caller asks for next, the vault decides, and a forged row
+shows at most what the database it was written in already holds. A page's
+render, an MCP connection and a plugin show the caller they checked
+already, a render with the instance's settings read beside its credential:
+one vault call for the whole render.
+
 ### Generated values
 
 A value can be made rather than typed, by a recipe, short text that the CLI

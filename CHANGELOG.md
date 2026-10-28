@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **`GET /api/me` asks the vault nothing.** It only shows its caller, to
+  choose what the CLI and the pages list and which buttons they show, and
+  cost two vault calls and four statements: the caller's access, then the
+  instance's settings. The app now reads both from the vault's rows in the
+  statement that reads the credential, by the vault's own rule, which moves
+  to `@coffre/core/vault` (`answerFrom`, `policyFrom`, `settingsFrom`) so
+  that both sides answer alike. The app cannot check those rows: a member
+  whose row was changed around the vault is shown as it says, rather than
+  signed out, and every other request still asks the vault, which refuses
+  them. No other route takes a caller read so. A page's render reads the
+  settings with its credential too: one vault call where it made two. At
+  20 ms a round trip, `GET /api/me` answers in 44 ms where it took 66, with
+  two statements and no vault call.
 - **The environment and project pages take a handful of round trips.** On
   Workers, every statement was a round trip of Hyperdrive's, one after the
   other. An Owner's environment page, with a reference into it and a fork

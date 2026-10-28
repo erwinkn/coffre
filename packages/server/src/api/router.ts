@@ -194,6 +194,8 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     }
     const { route } = found;
     const { def } = route;
+    // A caller the app read from the vault's rows, unchecked, is only shown (`SHOWING`, fetch-api.ts): no route but that decides on one.
+    if (ctx.caller.unchecked === true && `${route.method} ${route.shape}` !== 'GET /me') throw new Error(`a caller the vault has not checked reached ${route.method} ${route.shape}`);
     if (ctx.via !== null) {
       // Through MCP, a route is the connection's only within its scopes, whatever the person may do.
       const needed = ROUTE_SCOPES[`${route.method} ${route.shape}` as keyof typeof ROUTE_SCOPES];

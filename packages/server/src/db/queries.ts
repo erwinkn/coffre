@@ -1,7 +1,7 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
@@ -13,6 +13,7 @@ import type * as schema from '@coffre/db/schema';
 import { alias } from 'drizzle-orm/pg-core';
 import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
+import { answerQuery, settingsQuery } from './answers.ts';
 import { authMac, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
@@ -1246,12 +1247,20 @@ export async function findCredential(
   db: Queryable,
   chainKey: Buffer,
   by: { tokenHash: Buffer } | { id: string },
-  /** The row by the token's hash as `app_read` read it already (read-ahead.ts), null for none: checked here as this read's. */
-  ahead?: CredentialRead | null,
+  /**
+   * The row by the token's hash as `app_read` read it already (read-ahead.ts), null for none: checked here as this read's.
+   * `'answer'`: read by the token's hash, with what the vault's rows say of its principal, in the same statement (`answerQuery`);
+   * `'settings'`, with the instance's settings alone, as they say them.
+   */
+  ahead?: CredentialRead | null | 'answer' | 'settings',
 ) {
   let row: CredentialRead | undefined;
   if ('id' in by) {
     [row] = await credentialById(db, { id: by.id });
+  } else if (ahead === 'answer') {
+    [row] = await credentialAnswerByHash(db, { tokenHash: by.tokenHash });
+  } else if (ahead === 'settings') {
+    [row] = await credentialSettingsByHash(db, { tokenHash: by.tokenHash });
   } else if (ahead === undefined) {
     [row] = await credentialByHash(db, { tokenHash: by.tokenHash });
   } else {
@@ -1277,26 +1286,45 @@ export async function findCredential(
     now: row.now,
     /** The newest `policy.change` there was as the credential was read, by its number: before the vault is asked (`policyStill`). */
     policySeq: row.policySeq === null ? null : BigInt(row.policySeq),
+    /** What the vault's rows say of its principal, as `answerQuery` read them, when asked for (`answerOf`). */
+    answer: row.answer,
+    /** The instance's settings as the vault's rows say them, when asked for alone. */
+    settings: row.settings === undefined ? undefined : settingsFrom(row.settings),
   };
 }
 
-function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL) {
+function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL, shown: 'answer' | 'settings' | null = null) {
   const { credentials, identities } = tablesOf(db);
   // The newest policy change, as `newestPolicySeq` reads it on its own.
   const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`;
   return db
-    .select({ credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy })
+    .select({
+      credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy,
+      ...(shown === 'answer' ? { answer: sql<unknown>`(${answerQuery(db, sql`${credentials.principal}`)})` } : {}),
+      ...(shown === 'settings' ? { settings: sql<string | null>`(${settingsQuery()})` } : {}),
+    })
     .from(credentials)
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where(by(credentials));
 }
 
 /** A credential as `findCredential` reads it: its row, its sign-in account's, the database's clock, and the newest policy change. */
-export type CredentialRead = { credential: Tables['credentials']['$inferSelect']; identity: Tables['identities']['$inferSelect'] | null; now: string; policySeq: string | number | null };
+export type CredentialRead = {
+  credential: Tables['credentials']['$inferSelect'];
+  identity: Tables['identities']['$inferSelect'] | null;
+  now: string;
+  policySeq: string | number | null;
+  answer?: unknown;
+  settings?: string | null;
+};
 
 // Every request's credential, by its token's hash: built once (`prepared`).
 const credentialByHash = prepared((db) => credentialRow(db, (credentials) => eq(credentials.tokenHash, sql.placeholder('tokenHash'))));
 const credentialById = prepared((db) => credentialRow(db, (credentials) => eq(credentials.id, sql.placeholder('id'))));
+// A request's that only shows its caller, with what the vault's rows say of them (`answerShown`).
+const credentialAnswerByHash = prepared((db) => credentialRow(db, (credentials) => eq(credentials.tokenHash, sql.placeholder('tokenHash')), 'answer'));
+// A page render's, whose `me` shows the instance's settings beside the vault's answer.
+const credentialSettingsByHash = prepared((db) => credentialRow(db, (credentials) => eq(credentials.tokenHash, sql.placeholder('tokenHash')), 'settings'));
 
 // --- trust bindings -----------------------------------------------------------
 

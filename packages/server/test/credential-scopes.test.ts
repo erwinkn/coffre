@@ -385,7 +385,8 @@ test('on Workers, where each request builds its runtime, the isolate seals once:
   const request = async (isolate: typeof config) => {
     asked.length = 0;
     const answered = await fetchApi(
-      new Request(`${ORIGIN}/api/me`, { headers: { authorization: `Bearer ${issued.token}` } }),
+      // A request the vault decides: `GET /api/me` asks it nothing.
+      new Request(`${ORIGIN}/api/projects`, { headers: { authorization: `Bearer ${issued.token}` } }),
       createRuntime(isolate, deps.db, deps.vault, transport),
       { sourceIp: null },
     );

@@ -5,7 +5,6 @@ import {
   assignableToEnvironment,
   DEFAULT_POLICY,
   definitionProblem,
-  EVERY_ENVIRONMENT,
   EVERYWHERE,
   FIXED_ROLES,
   givesService,
@@ -29,7 +28,6 @@ import {
   ROLES,
   runsInstance,
   setsUpServices,
-  UNWRITTEN_FORK_MS,
   type Holdings,
   type InstanceRole,
   type Permission,
@@ -63,8 +61,19 @@ import {
   checkpointVerifier,
   describeAccessFault,
   POLICY_REVISION,
-  accessRevision,
+  answerFrom,
+  CLOSED_POLICY,
+  live,
+  PRINCIPAL,
+  CLOSED_SETTINGS,
+  livePolicy,
+  NO_EDITS,
   policyRevision,
+  readEdits,
+  roleOf,
+  settingsFrom,
+  view,
+  type PolicyEdits,
   type Access,
   type AccessChange,
   type AccessFault,
@@ -116,7 +125,7 @@ import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuth
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { SealThrough } from './checkpointer.ts';
-import { keyRefusals, live, placeIn, PRINCIPAL, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
+import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
@@ -375,47 +384,8 @@ const TAMPERED_SUBJECT = "this member's record failed the vault's integrity chec
 /** The action of the vault's entry that holds the instance's settings, and changes them (`settings`). */
 const SETTINGS = 'settings.change';
 
-/** The settings before anyone changed them: people set up service accounts anywhere they hold access. */
-const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
-
 /** The action of the vault's entry that holds the instance's access policy, and changes it (`policy`). */
 const POLICY = 'policy.change';
-
-/**
- * What a `policy.change` entry keeps: the roles an Owner edited or made,
- * each whole, and the protected environments. A role as it ships is kept by
- * none, so a release that changes a default changes it where nobody edited it.
- */
-type PolicyEdits = { roles: Record<string, RoleDefinition>; instanceRoles: Partial<Record<InstanceRole, RoleDefinition>>; protected: ProtectedPlace[] };
-
-/**
- * A protected environment, with its project's id, what a grant on the whole
- * project reaches of it, and when it was protected, by the vault's clock:
- * an id with no row ten minutes later is a fork that was never written.
- */
-type ProtectedPlace = { projectId: string; environmentId: string; at: number };
-
-
-const NO_EDITS: PolicyEdits = { roles: {}, instanceRoles: {}, protected: [] };
-
-/** A role holding nothing, which every role but Owner is under the closed policy. */
-const NOTHING_HELD = (definition: RoleDefinition): RoleDefinition => ({ ...definition, permissions: [], protected: [] });
-
-/**
- * The policy when the log has some, but none the vault wrote within reach:
- * whoever inserted rows may have hidden an Owner's narrowing, so no role
- * holds anything, a service account's neither, but Owner, which holds
- * everything always and so may write the policy again.
- */
-const CLOSED_POLICY: Policy = {
-  roles: Object.fromEntries(Object.entries(ROLES).map(([id, definition]) => [id, id === 'owner' ? definition : NOTHING_HELD(definition)])),
-  instanceRoles: Object.fromEntries(Object.entries(INSTANCE_ROLES).map(([id, definition]) => [id, id === 'owner' ? definition : NOTHING_HELD(definition)])) as Policy['instanceRoles'],
-  protected: [EVERY_ENVIRONMENT],
-  protectedIn: {},
-};
-
-/** The settings when the log has some, but none the vault wrote within reach: people set up no service accounts. */
-const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, environments: 'all' } };
 
 /** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
 const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
@@ -2013,18 +1983,7 @@ class VaultService implements Vault {
   }
 
   #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean, policy: Policy): Access {
-    const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
-    const access: Access = {
-      principal,
-      status: tampered ? 'tampered' : !PRINCIPAL.test(principal) ? 'unknown' : (row?.status ?? 'unknown'),
-      generation: row?.generation ?? 0,
-      ...(active ? roleOf(principal, row) : { role: 'member', scope: EVERYWHERE }),
-      grants: active ? held.filter((grant) => live(grant, at) && grantKind(grant) !== null).map(view) : [],
-      since: row ? iso(row.statusChangedAt) : null,
-      by: row?.statusChangedBy ?? null,
-      policy,
-    };
-    return { ...access, revision: accessRevision(access) };
+    return answerFrom(principal, row, held, at, tampered, policy);
   }
 
   /** The revision of what `access` would answer about a standing a decision read: none but an active member's matches a kept answer. */
@@ -2480,10 +2439,8 @@ class VaultService implements Vault {
       (limit, before) => store.newestVaultEntries(db, SETTINGS, limit, before),
       this.#check(reports, null),
     );
-    if (entry === 'none') return DEFAULT_SETTINGS;
-    if (typeof entry === 'string') return CLOSED_SETTINGS;
-    const { serviceAccounts } = JSON.parse(entry.metadata) as { serviceAccounts?: unknown };
-    return isScope(serviceAccounts) ? { serviceAccounts } : CLOSED_SETTINGS;
+    if (entry === 'none') return settingsFrom(null);
+    return typeof entry === 'string' ? CLOSED_SETTINGS : settingsFrom(entry.metadata);
   }
 
   // --- the instance's access policy -------------------------------------------
@@ -3818,65 +3775,8 @@ function placeKey(place: store.Place): string {
   return place.projectId !== null ? `project:${place.projectId}` : `every-project:${place.environmentSlug ?? ''}`;
 }
 
-/** A member's instance role, as their row has it: service accounts are members, whatever a row says. */
-function roleOf(principal: string, row: Member): { role: InstanceRole; scope: Scope } {
-  return principal.startsWith('user:') ? { role: row.role, scope: row.scope } : { role: 'member', scope: EVERYWHERE };
-}
-
-function view(grant: GrantRow): Grant {
-  return {
-    projectId: grant.projectId,
-    environmentId: grant.environmentId,
-    role: grant.role as Role,
-    expiresAt: grant.expiresAt === null ? null : iso(grant.expiresAt),
-    grantedAt: iso(grant.grantedAt),
-    grantedBy: grant.grantedBy,
-  };
-}
-
 function iso(ms: number): string {
   return new Date(ms).toISOString();
-}
-
-/** A policy entry's edits, checked as the vault wrote them, or null for any that does not hold. */
-function readEdits(stored: { policy?: unknown }): PolicyEdits | null {
-  const edits = stored.policy as Partial<PolicyEdits> | undefined;
-  if (typeof edits !== 'object' || edits === null) return null;
-  const { roles, instanceRoles, protected: protectedIds } = edits;
-  if (typeof roles !== 'object' || roles === null || typeof instanceRoles !== 'object' || instanceRoles === null || !Array.isArray(protectedIds)) return null;
-  const defined = (table: object) => Object.values(table).every((definition) => definitionProblem(definition as RoleDefinition) === null);
-  if (!defined(roles) || !defined(instanceRoles) || Object.keys(instanceRoles).some((role) => !isInstanceRole(role))) return null;
-  if (protectedIds.some((place) => typeof place !== 'object' || place === null || !UUID.test((place as ProtectedPlace).projectId) || !UUID.test((place as ProtectedPlace).environmentId)
-    || !Number.isSafeInteger((place as ProtectedPlace).at))) return null;
-  return { roles: roles as Record<string, RoleDefinition>, instanceRoles: instanceRoles as PolicyEdits['instanceRoles'], protected: protectedIds as ProtectedPlace[] };
-}
-
-/**
- * The policy `edits` say as of `at`: the roles as they ship, each edited
- * one replaced and each made one added; and the protected environments, but
- * for those deleted since, the project around one's included: a deleted
- * prod protects nothing, and holds nobody back from giving a service
- * account a role on all of its project (`givesService`). A fork's id with
- * no row yet stays, protected before it is written, ten minutes: one with
- * none after that is a fork refused or abandoned, never written. Each
- * keeps its slug, which a scoped instance role's filters read. The edits
- * keep them all: no write is needed.
- */
-function livePolicy(rows: ReadonlyMap<string, store.EnvironmentRow>, edits: PolicyEdits, at: number): Policy {
-  const live = edits.protected.filter((place) => {
-    const row = rows.get(place.environmentId);
-    return row === undefined ? at - place.at < UNWRITTEN_FORK_MS : !row.deleted;
-  });
-  const slugOf = (place: ProtectedPlace) => rows.get(place.environmentId)?.slug ?? null;
-  return {
-    roles: { ...ROLES, ...edits.roles },
-    instanceRoles: { ...INSTANCE_ROLES, ...edits.instanceRoles },
-    protected: live.map((place) => place.environmentId),
-    protectedIn: live.reduce<Record<string, { environmentId: string; slug: string | null }[]>>(
-      (byProject, place) => ({ ...byProject, [place.projectId]: [...(byProject[place.projectId] ?? []), { environmentId: place.environmentId, slug: slugOf(place) }] }),
-      {},
-    ),
-  };
 }
 
 /** A change, as its entry names it. */
