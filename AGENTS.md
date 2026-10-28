@@ -99,12 +99,13 @@ Before it reports ready it also asks Linux, with `ip route get`, where the
 container's address goes, and refuses unless that is the project's own bridge:
 Cloudflare WARP routes some hosts of 192.168.0.0/20, the subnet Docker gives a
 project first, off the machine, and a connection to `127.0.0.1:<port>` is
-DNATed to that address, so the first `psql` would send the dev password to a
+forwarded to that address (docker-proxy or DNAT), so the first `psql` would send the dev password to a
 stranger. A container it started is removed again (the volume stays); one it
-reused is only reported. Pick a subnet the host does not route
-(`COFFRE_POSTGRES_SUBNET=10.77.0.0/24`, `docker-compose.subnet.yml`, one no other Docker
-network uses, after a `docker compose down` of the project) or set Docker's
-`default-address-pools`. Where `ip` or the bridge is missing (macOS, Docker Desktop), the check is skipped.
+reused is only reported. Docker's `default-address-pools` (restart the daemon)
+is the fix that lasts. A project's own subnet (`COFFRE_POSTGRES_SUBNET=10.77.0.0/24`,
+one no other Docker network uses, after a `docker compose down` of the project)
+holds only while every run sets it, so export it in the shell profile or direnv:
+a later `up` without it recreates the network on Docker's pick. Where `ip` or the bridge is missing (macOS, Docker Desktop), the check is skipped.
 
 **Run the stack.** `pnpm dev` brings up Postgres + dev IdP (:8081) + coffre (:3000) +
 seed data. It runs `dev/deployment/`, shaped like `examples/workers` (`app/`, a

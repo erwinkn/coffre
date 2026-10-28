@@ -20,11 +20,14 @@ if [[ -n "${COFFRE_POSTGRES_SUBNET:-}" ]]; then
     # Naming the files turns off compose's own discovery of an override file,
     # so name that one too, and join with compose's own separator.
     files="${COMPOSE_FILE:-}"
-    if [[ -z "$files" ]]; then
+    if [[ "$files" == *docker-compose.subnet.yml ]]; then
+        : # Already added: this is the re-exec under the lock.
+    elif [[ -z "$files" ]]; then
         files=docker-compose.yml
         [[ ! -f docker-compose.override.yml ]] || files="$files${COMPOSE_PATH_SEPARATOR:-:}docker-compose.override.yml"
     fi
-    export COMPOSE_FILE="$files${COMPOSE_PATH_SEPARATOR:-:}docker-compose.subnet.yml"
+    [[ "$files" == *docker-compose.subnet.yml ]] || files="$files${COMPOSE_PATH_SEPARATOR:-:}docker-compose.subnet.yml"
+    export COMPOSE_FILE="$files"
 fi
 
 # Over TCP, not the socket: on a fresh volume the image first runs a
@@ -60,7 +63,8 @@ warn_stale_image() {
     return 0
 }
 
-# Host connections to 127.0.0.1:<port> are DNATed to the container's IP. If
+# Host connections to 127.0.0.1:<port> are forwarded (docker-proxy or DNAT) to
+# the container's IP. If
 # the host routes that IP anywhere but the project's bridge (Cloudflare WARP
 # claims hosts of 192.168.0.0/20, Docker's first default subnet), they reach
 # some other machine, and the first psql sends the dev password to it. So,
@@ -72,7 +76,7 @@ route_guard() {
     command -v ip >/dev/null || return 0
     local container addresses address network bridge dev option
     # Past this point a failed lookup refuses: an unchecked route is no pass.
-    if ! container="$(docker compose ps -q postgres 2>/dev/null)" || [[ -z "$container" ]] ||
+    if ! container="$(docker compose ps -aq postgres 2>/dev/null)" || [[ -z "$container" ]] ||
         ! addresses="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.NetworkID}}{{"\n"}}{{end}}' "$container" 2>/dev/null)"; then
         refuse_route "Could not inspect the Postgres container of project $COMPOSE_PROJECT_NAME, so where the host routes its address is unknown." no
     fi
@@ -103,7 +107,7 @@ refuse_route() {
         printf 'It was already running, so it is left alone. Remove it yourself: COMPOSE_PROJECT_NAME=%s docker compose down\n' "$COMPOSE_PROJECT_NAME" >&2
     fi
     [[ "${2:-}" != no ]] || exit 1
-    printf 'Give the project a subnet that no VPN or route claims, then run this again:\n  COFFRE_POSTGRES_SUBNET=10.<n>.0.0/24 in front of this command (one no other Docker network uses: docker network ls), or\n  "default-address-pools" in /etc/docker/daemon.json for every project (Docker restarts).\n' >&2
+    printf 'Give the project a subnet that no VPN or route claims, then run this again:\n  "default-address-pools" in /etc/docker/daemon.json, for every project (restart Docker), or\n  COFFRE_POSTGRES_SUBNET=10.<n>.0.0/24, one no other Docker network uses (docker network ls), exported for every run, after the down.\n' >&2
     exit 1
 }
 
@@ -155,7 +159,7 @@ while ((SECONDS < deadline)); do
             sleep 1
             continue
         fi
-        if ! output="$(docker compose up -d --no-recreate postgres 2>&1)"; then
+        if ! output="$(docker compose --progress plain up -d --no-recreate postgres 2>&1)"; then
             # Another caller may have started it while this one asked.
             if ready; then ready_and_done; fi
             if running; then

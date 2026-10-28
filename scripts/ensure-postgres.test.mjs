@@ -208,7 +208,7 @@ test("a started Postgres whose address the host routes off the bridge is removed
     const ran = await f.run();
     assert.equal(ran.code, 1);
     assert.match(ran.output, /routes 172\.30\.0\.2 through CloudflareWARP, not its bridge br-0123456789ab/);
-    assert.match(ran.output, /COFFRE_POSTGRES_SUBNET=.*default-address-pools/s);
+    assert.match(ran.output, /default-address-pools.*COFFRE_POSTGRES_SUBNET=/s);
     const calls = f.calls();
     assert.ok(calls.some((args) => args.includes('down') && !args.includes('-v')), 'the container this script started is removed, its volume kept');
     assert.ok(calls.findIndex((args) => args.includes('down')) > calls.findIndex((args) => args.includes('up')));
@@ -282,4 +282,12 @@ test("the subnet file joins the discovered override and a preset list, with comp
     assert.deepEqual(await asked({}), ['docker-compose.yml:docker-compose.override.yml:docker-compose.subnet.yml']);
     assert.deepEqual(await asked({ COMPOSE_FILE: 'a.yml:b.yml' }), ['a.yml:b.yml:docker-compose.subnet.yml']);
     assert.deepEqual(await asked({ COMPOSE_FILE: 'a.yml;b.yml', COMPOSE_PATH_SEPARATOR: ';' }), ['a.yml;b.yml;docker-compose.subnet.yml']);
+});
+
+test("a cold start under the lock names the subnet file once", async (t) => {
+    const f = await fixture(t, 'cold');
+    const ran = await f.run(f.port, { COFFRE_POSTGRES_SUBNET: '10.77.0.0/24', COMPOSE_FILE: '' });
+    assert.equal(ran.code, 0, ran.output);
+    const files = new Set(readFileSync(join(f.dir, 'compose-files'), 'utf8').trim().split('\n'));
+    assert.deepEqual([...files], ['docker-compose.yml:docker-compose.subnet.yml']);
 });
