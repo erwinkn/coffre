@@ -11,7 +11,7 @@ const script = resolve(import.meta.dirname, 'ensure-postgres.sh');
 // route: where the fixture's `ip` sends the container's address: its own bridge,
 // Cloudflare WARP's device, a host without that bridge (Docker Desktop), or
 // an `ip` that cannot answer. upSays is what compose says of the container.
-async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false, exited = false, downFails = false } = {}) {
+async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false, exited = false, exitedOnce = false, downFails = false } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-postgres-bootstrap-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const project = 'fixture_' + dir.split('-').at(-1);
@@ -71,7 +71,10 @@ if (args.includes('ps')) {
 }
 if (args[0] === 'inspect' && args.some((arg) => arg.includes('NetworkSettings'))) {
     if (${JSON.stringify(inspectFails)}) process.exit(1);
-    console.log(${JSON.stringify(exited)} ? 'false\\ninvalid IP 0123456789abcdef' : 'true\\n172.30.0.2 0123456789abcdef');
+    // exitedOnce: the first look finds the container exited, later ones running.
+    const looks = existsSync(dir + '/looks') ? Number(readFileSync(dir + '/looks')) : 0;
+    writeFileSync(dir + '/looks', String(looks + 1));
+    console.log(${JSON.stringify(exited)} || (${JSON.stringify(exitedOnce)} && looks === 0) ? 'false\\ninvalid IP 0123456789abcdef' : 'true\\n172.30.0.2 0123456789abcdef');
     process.exit(0);
 }
 if (args[0] === 'network') process.exit(0);
@@ -310,4 +313,14 @@ test("a container that is not running is not held to the route; the check after 
     const ran = await f.run();
     assert.equal(ran.code, 0, ran.output);
     assert.deepEqual(f.ipCalls().filter((args) => args.includes('route')), [], 'no lookup for an address it does not have');
+});
+
+test("a container found exited right after up is still checked once Postgres answers", async (t) => {
+    const f = await fixture(t, 'cold', 1, 'warp', { exitedOnce: true });
+    const ran = await f.run();
+    assert.equal(ran.code, 1, ran.output);
+    assert.match(ran.output, /through CloudflareWARP/);
+    const calls = f.calls();
+    assert.equal(calls.filter((args) => args.includes('up')).length, 1);
+    assert.ok(calls.some((args) => args.includes('down')));
 });

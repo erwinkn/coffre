@@ -98,8 +98,8 @@ reservation script is CI-only and does not change a developer's host.
 
 Before it reports ready it also asks Linux, with `ip route get`, where the
 container's address goes, and refuses unless that is the project's own bridge:
-Cloudflare WARP routes some hosts of 192.168.0.0/20, which Docker hands out once
-its 172.17-172.31 pools are taken, off the machine, and a connection to `127.0.0.1:<port>` is
+Cloudflare WARP routes some hosts of 192.168.0.0/20 off the machine (Docker hands
+that subnet out once its 172.17-172.31 pools are taken), and a connection to `127.0.0.1:<port>` is
 forwarded to that address (docker-proxy or DNAT), so the first `psql` would send the dev password to a
 stranger. A container it started is removed again (the volume stays); one it
 reused is only reported. Docker's `default-address-pools` (restart the daemon)
