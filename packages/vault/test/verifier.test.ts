@@ -360,6 +360,9 @@ test('review r2: a roles row that reads as no object is named, not thrown on', a
   const w = await instance();
   await run(db.owner, sql`UPDATE log_config SET value = '"not an object"' WHERE name = 'roles'`);
   assert.deepEqual((await w.whole()).problems, ['the roles instance: its rows do not read as an object']);
+  // An object of another kind, its seal left (review r12): named, never a comparison thrown on.
+  await run(db.owner, sql`UPDATE log_config SET value = '{"kind":"principal"}' WHERE name = 'roles'`);
+  assert.deepEqual((await w.whole()).problems, ['the roles instance: its rows do not read as an object']);
 });
 
 test('review r1: a database rolled back whole to an earlier pair is named against the signer\'s memory, on a page\'s check too', async () => {
@@ -447,4 +450,9 @@ test('review r9: the whole walk\'s bound counts the entries above the newest pai
   const short = checkedOf(await (await w.reopened({ whole: sealed + 2 })).verifyTrees!({ whole: true }));
   assert.ok(!short.ok && short.tooLarge !== null && short.problems.length === 0, JSON.stringify(short));
   clean(checkedOf(await (await w.reopened({ whole: sealed + 3 })).verifyTrees!({ whole: true })));
+  // Exactly as many as the log holds, all sealed: walked whole, its rows audited, not called too large (review r12).
+  await w.cp.tick();
+  const exact = checkedOf(await (await w.reopened({ whole: sealed + 3 })).verifyTrees!({ whole: true }));
+  clean(exact);
+  assert.deepEqual([exact.sealed, exact.unsealed], [sealed + 3, 0]);
 });

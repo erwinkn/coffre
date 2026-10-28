@@ -306,7 +306,7 @@ test('coffre verify log walks 0.15\'s log after 0.14\'s where the instance keeps
   const large = { ...whole, ok: false, tooLarge: "0.15's log holds more than this vault walks in one call: walk the log whole on Node" };
   for (const [trees, code, said] of [
     [undefined, 0, /^audit log OK: verified from the first entry through entry 11, 12 entries; members and grants replayed\nno checkpoint signed yet\n$/],
-    [whole, 0, /\n0\.15 log OK: verified from the first entry, its trees, every entry and the replay; every row is the log's\nlast checkpoint: up to entry 9, signed 2026-10-26T/],
+    [whole, 0, /\n0\.15 log OK: verified from the first entry, its trees, every entry and the changes' replay; every object's rows are the log's \(not yet the bulk cap's\)\nlast checkpoint: up to entry 9, signed 2026-10-26T/],
     [broken, 2, /^0\.15 log BROKEN:\n {2}the principal token:ci: its rows carry another change's seal/],
     // Not walked to its end, nothing found: not known broken, and where to walk it.
     [large, 3, /^0\.15 log not verified to its end: 0\.15's log holds more than this vault walks in one call: walk the log whole on Node\n$/],

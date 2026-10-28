@@ -231,7 +231,7 @@ async function verification(api: CoffreClient): Promise<string> {
   // call, nothing found as far as it went, and where to walk it whole.
   const trees = await api.audit.verifyTrees({ whole: true });
   expect(!trees.kept || trees.ok || (trees.problems.length === 0 && trees.tooLarge !== null), "0.15's log does not verify", trees);
-  const sealed = !trees.kept ? '' : trees.ok ? "; 0.15's log too, every row the replay's" : `; 0.15's log not walked to its end: ${trees.tooLarge}`;
+  const sealed = !trees.kept ? '' : trees.ok ? "; 0.15's log too, every input row the replay's" : `; 0.15's log not walked to its end: ${trees.tooLarge}`;
   return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}${sealed}`;
 }
 

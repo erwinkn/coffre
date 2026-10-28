@@ -741,7 +741,7 @@ export const routes = {
     input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,16}:[0-9a-f]{64}$/)]).optional() }),
     run: (ctx, { input }) => verifyAudit(ctx, input),
   }),
-  // 0.15's log: a page's check from the newest checkpoint; with `whole`, the walk from the first entry, its replay and every row, in this one request.
+  // 0.15's log: a page's check from the newest checkpoint; with `whole`, the walk from the first entry, its replay and every input row, in this one request.
   ...route('GET /audit/trees', {
     input: z.object({ whole: z.literal('1').optional() }),
     run: (ctx, { input }) => verifyAuditTrees(ctx, input),

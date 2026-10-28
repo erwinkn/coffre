@@ -19,9 +19,11 @@ import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verify
  * MAC, its request ID) is the caller's to check, through `check`, which sees
  * every entry walked, in number order. The cost is the entries since the
  * start: a caller that keeps the `head` it verified walks only what came
- * after (R25). With `limit`, a walk stops at the first stored pair at or
- * past that many entries, before the entries above the newest (`done`
- * false): a caller bounded in time says so rather than walk on.
+ * after (R25). With `limit`, a walk reads no more than that many entries,
+ * and one to tell what lies past them: it ends at the last pair whose
+ * window fits (`done` false) when anything does, so a caller bounded in
+ * time says so rather than walk on; a log of exactly that many is walked
+ * whole (review r12).
  *
  * Retention (plan PR 7, formal/Seal.tla) drops days of uses, and the uses
  * tree's tiles, below a cut that a retention change names; changes are kept
@@ -320,11 +322,6 @@ async function walk(
         if (stop.row) {
           verdict.checkpoints += 1;
           last = stop;
-          // A walk bounded by `limit` ends at a stored pair, short of the present: its caller says it stopped there.
-          if (bound !== undefined && verdict.sealed >= bound) {
-            verdict.done = false;
-            return done(last.notes);
-          }
         }
       }
     }

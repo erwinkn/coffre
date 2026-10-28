@@ -2074,7 +2074,7 @@ async function verifyTrees(shown: boolean): Promise<void> {
   if (!result.kept) return;
   if (result.ok) {
     const signed = result.checkpoint === null ? 'no checkpoint signed yet' : `last checkpoint: up to entry ${result.checkpoint.upto}, signed ${new Date(result.checkpoint.at).toISOString()}`;
-    process.stdout.write(`0.15 log OK: verified from the first entry, its trees, every entry and the replay; every row is the log's\n${signed}\n`);
+    process.stdout.write(`0.15 log OK: verified from the first entry, its trees, every entry and the changes' replay; every object's rows are the log's (not yet the bulk cap's)\n${signed}\n`);
     return;
   }
   if (result.problems.length > 0) {

@@ -950,7 +950,8 @@ export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
     try {
       object = configObject(c.value);
     } catch {}
-    const readable = object !== null && typeof object === 'object' && !Array.isArray(object);
+    // An object of its own kind, or none: a writer's `{"kind":"principal"}` in the roles' row is no roles (review r12).
+    const readable = object !== null && typeof object === 'object' && !Array.isArray(object) && object.kind === c.name;
     hold({ kind: c.name, id: 'instance' }, readable ? object : null, c.seal, readable ? {} : { unreadable: true });
   }
   return found;

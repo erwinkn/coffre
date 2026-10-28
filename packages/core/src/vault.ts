@@ -240,8 +240,9 @@ export interface Vault {
    * default: the newest signed pair, held to the pairs held outside, and
    * every entry after it by its MAC and request, a tick's worth (R25). With
    * `whole`, the walk someone asks for: both trees from the first entry,
-   * every entry, the log replayed and every input row and bulk row held to
-   * the replay, all in this one call, batched, kept nowhere. With 0.14's
+   * every entry, the changes replayed and every input row held to the
+   * replay, all in this one call, batched, kept nowhere; not the bulk cap's
+   * rows, which T138 holds to the log once modelled. With 0.14's
    * log alone, `kept` false; a vault older than 0.15 has none.
    */
   verifyTrees?(input: TreeVerificationInput): Promise<TreeVerification | TreesBusy>;

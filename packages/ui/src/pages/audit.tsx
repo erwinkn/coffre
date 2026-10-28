@@ -489,7 +489,7 @@ function ChainStatus({
       ? 'Audit log verified by the app and vault keys, not signed yet.'
       : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
   // 0.15's log, where it is kept: on a visit, its newest checkpoint and every entry since; walked whole, its two trees,
-  // every entry and the replay, and every row held to the replay.
+  // every entry and the changes replayed, and every input row held to them.
   const trees = chain.trees;
   // Its own numbers are not the entries' above: it is named by when its newest checkpoint was signed.
   const sealed = trees?.checkpoint == null ? null : `its checkpoint of ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;

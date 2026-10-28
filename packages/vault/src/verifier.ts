@@ -5,7 +5,7 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { loggedChange } from './changes.ts';
 import { FRESH_MS, logOrigin } from './checkpointer.ts';
-import { alike, refOf, sealKey, type SealKeys } from './inputs.ts';
+import { alike, refOf, sealKey, type Input, type SealKeys } from './inputs.ts';
 import { authentic, logMacKey, retentionCut } from './log-entry.ts';
 import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
 import { logStore } from './log-store.ts';
@@ -189,6 +189,15 @@ class Requests {
 
 // --- the rows -----------------------------------------------------------------------------------------
 
+/** Whether a row's object is the replay's; one of a shape no release writes, which the comparison cannot read, is not. */
+function same(row: Input, object: Input): boolean {
+  try {
+    return alike(row, object);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Every row held to the replay: each object the log holds is in its rows,
  * as the replay has it, with its newest seal; each the log deleted (a key
@@ -213,7 +222,7 @@ function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>
     if (rows?.unreadable === true) problems.push(`${name(key)}: its rows do not read as an object`);
     else if (rows === undefined || (rows.row === null && rows.sealOnly === undefined)) problems.push(`${name(key)}: the log holds it, its rows do not`);
     else if (rows.seal === null || !rows.seal.equals(seal)) problems.push(`${name(key)}: its rows carry ${rows.seal === null ? 'no seal' : "another change's seal than the newest"}: put back, or written around the vault`);
-    else if (rows.sealOnly === undefined && !alike(rows.row!, object)) problems.push(`${name(key)}: its rows are not the object the log makes`);
+    else if (rows.sealOnly === undefined && !same(rows.row!, object)) problems.push(`${name(key)}: its rows are not the object the log makes`);
   }
   for (const [key, rows] of held) {
     if (replayed.newest.has(key)) continue;

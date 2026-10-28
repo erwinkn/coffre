@@ -528,8 +528,8 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
  * 0.15's log checked by the vault (`verifyTrees`, docs/design/0.15-plan.md
  * PR 8): a page's check, the newest signed checkpoint and every entry since,
  * by its MAC and request; with `whole`, the walk from the first entry, both
- * trees, the replay and every input row and bulk row held to it, in this one
- * request. With 0.14's log alone, `kept` false. For whoever reads the whole
+ * trees, the changes replayed and every input row held to them (not yet the
+ * bulk cap's rows: T138), in this one request. With 0.14's log alone, `kept` false. For whoever reads the whole
  * log (`readsWholeLog`), as `verifyAudit`.
  */
 export async function verifyAuditTrees(ctx: ApiContext, query: { whole?: '1' } = {}): Promise<TreeVerification> {

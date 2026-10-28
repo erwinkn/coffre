@@ -831,6 +831,13 @@ test('review r11: a walk under `limit` reads no further than it, however many en
   for (let i = 0; i < 2; i += 1) store.append('uses', `v-${i}`);
   assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
   assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_003 })).done);
+  // Exactly as many as the log holds: walked whole, not called too large (review r12); one fewer, stopped.
+  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_002 })).done);
+  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
+  assert.ok((await cp.tick()).signed);
+  const exact = await verifyLog(store, { verifiers: k.verifiers, limit: 10_002 });
+  assert.ok(exact.ok && exact.done && exact.sealed === 10_002 && exact.unsealed === 0, JSON.stringify(exact));
+  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
 });
 
 test('review r11: a signer\'s memory that does not read as a pair is refused, never held as none; none yet is none', async () => {

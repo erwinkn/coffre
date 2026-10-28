@@ -492,7 +492,7 @@ export function createClient(options: ClientOptions) {
        * Whether 0.15's log holds (the vault's `verifyTrees`): a page's check,
        * the newest signed checkpoint and every entry since; or, with `whole`,
        * the walk from the first entry, its trees, every entry, the replay and
-       * every row, in one request. `kept` false where the instance keeps
+       * every input row, in one request. `kept` false where the instance keeps
        * 0.14's log alone.
        */
       verifyTrees: (options: { whole?: boolean } = {}) => verifyTrees(options.whole === true ? { whole: '1' } : {}),
