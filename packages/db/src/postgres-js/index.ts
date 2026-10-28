@@ -418,7 +418,7 @@ export default function postgres(given: Options): Sql {
 
     while (ready && queries.length && max-- > 0) {
       const query = queries.shift()!;
-      // Held from now: no statement of the pool's takes it before its holder resumes.
+      // Out of the pool's reach from now: none of its statements takes it before its holder resumes.
       if ('reserve' in query) return void query.reserve(move(c, reserved));
 
       ready = c.execute(query);

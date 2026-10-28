@@ -522,7 +522,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       if (!isReservation(initial)) execute(initial);
       options.shared.retries = 0;
       // Coffre: a reserve() that opened the connection is given it now, itself, even as the client ends: asked before,
-      // it is served, and its release closes the connection, which end() waits for. Upstream gave it after
+      // it is served, and its release closes the connection, which end() waits for (an end() asked in the moment before
+      // its holder resumes closes the connection then, and the holder fails, CONNECTION_DESTROYED). Upstream gave it after
       // fetch_types's own query, and without fetch_types never; and it gave the connection to the pool's first waiting,
       // which the reservation, taken from the queue to open this connection again after one closed, no longer was:
       // that reserve() waited for ever.
