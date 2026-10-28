@@ -76,9 +76,9 @@ export function market(limit = { count: 3, windowMs: 60_000 }): World {
   w.change({ kind: 'principal', id: BO }, { op: 'access.grant', grant: { projectId: MARKET, environmentId: DEV, environmentSlug: null, role: 'viewer', expiresAt: null } });
   w.change({ kind: 'principal', id: CI }, { op: 'member.add', role: 'member', scope: EVERYWHERE });
   w.change({ kind: 'principal', id: CI }, { op: 'access.grant', grant: { projectId: MARKET, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null } });
-  w.change({ kind: 'credential', id: credential(1) }, { op: 'credential.issue', principal: ADA, caller: 'person', scope: null, expiresAt: null });
-  w.change({ kind: 'credential', id: credential(2) }, { op: 'credential.issue', principal: BO, caller: 'person', scope: null, expiresAt: 1_000_000 });
-  w.change({ kind: 'credential', id: credential(3) }, { op: 'credential.issue', principal: CI, caller: 'bearer', scope: null, expiresAt: null });
+  w.change({ kind: 'credential', id: credential(1) }, { op: 'credential.issue', principal: ADA, caller: 'person', scope: null, expiresAt: null, generation: 0 });
+  w.change({ kind: 'credential', id: credential(2) }, { op: 'credential.issue', principal: BO, caller: 'person', scope: null, expiresAt: 1_000_000, generation: 0 });
+  w.change({ kind: 'credential', id: credential(3) }, { op: 'credential.issue', principal: CI, caller: 'bearer', scope: null, expiresAt: null, generation: 0 });
   for (const [n, environmentId, nature] of [[1, DEV, 'secret'], [2, DEV, 'sensitive'], [3, PROD, 'secret'], [4, DEV, 'secret'], [5, DEV, 'secret'], [6, MINE, 'secret']] as const) {
     w.change({ kind: 'secret', id: key(n) }, { op: 'secret.write', projectId: MARKET, environmentId, version: `v${n}`, nature, key: WRAPPED, digest: null, source: null, reference: null });
   }

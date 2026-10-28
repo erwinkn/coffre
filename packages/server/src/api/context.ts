@@ -257,18 +257,28 @@ export const POLICY_CHANGED = 'policy_changed';
  * it even with nothing to log (`fenced`). Either way, the way the request
  * came in must still stand (`credentialStill`), and a read decided on a
  * kept answer about the caller is one the vault vouched for, or answers
- * the same about now (`Recalled`).
+ * the same about now (`Recalled`). A read whose values 0.15's uses
+ * released says so (`stood`): each use decided on the credential the
+ * request came in on, as it was in the use's own statement, under the
+ * fence each change to it or its account takes exclusive, so the read
+ * needs no read of it after (formal/Credentials.tla, Revoking015Folded).
+ * That is all of the way in for a request on a credential alone; one
+ * through an MCP connection or a Cloudflare binding reads it as before.
+ *
+ *   Ada's /use, 0.15                      app_read, use_credential    the value: no third statement
+ *   Ada removed, admitted again           her token, not yet swept    the use refuses it: an earlier generation
  */
 export async function recorded<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
-  work: (log: AuditEntry[], fence: () => void, at: (where: EntryFields) => void) => Promise<T>,
+  work: (log: AuditEntry[], fence: () => void, at: (where: EntryFields) => void, stood: () => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
     const log: AuditEntry[] = [];
     let fencing = false;
+    let standing = false;
     // Where the read was, and its operation, for the refusal of a credential that ended meanwhile.
     let where: EntryFields = {};
-    const result = await work(log, () => (fencing = true), (fields) => (where = fields));
+    const result = await work(log, () => (fencing = true), (fields) => (where = fields), () => (standing = true));
     await ctx.caller.recalled?.confirm();
     if (log.length > 0) {
       await audited(ctx, async (tx, entries) => {
@@ -277,7 +287,7 @@ export async function recorded<T>(
       });
     } else {
       if (fencing) await fenced(ctx);
-      await credentialStill(ctx, ctx.db, 'secret.read', where);
+      if (!(standing && ctx.credentialId !== null && ctx.bindingId == null && ctx.via === null)) await credentialStill(ctx, ctx.db, 'secret.read', where);
     }
     return result;
   });

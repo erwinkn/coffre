@@ -304,6 +304,8 @@ export type CredentialColumns = {
   revoked: boolean;
   /** The earlier of its expiry and its hard end, if any, in whole ms: a stored time's sub-millisecond part dropped, never rounded. */
   expiresAt: number | null;
+  /** Its account's generation when it was issued (`credentials.generation`). */
+  generation: number;
 };
 
 /** One object's change, as the app will write it: its columns before (null: it makes the object), their seal, and after. */

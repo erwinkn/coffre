@@ -8,7 +8,7 @@ import { objectKey, type Kind } from './inputs.ts';
 import type { UseCall, UseRow } from './use.ts';
 
 /**
- * `use_credential` (0024's, as 0029 has it) on SQLite, for tests and local development
+ * `use_credential` (0024's, as 0033 has it) on SQLite, for tests and local development
  * (docs/design/0.15-plan.md, "Postgres serves; SQLite is for tests"): the
  * same reads and writes, the same row, in one transaction. SQLite runs one
  * writer at a time (`BEGIN IMMEDIATE`, @coffre/db/connect), so the fence and
@@ -41,10 +41,10 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   if (typeof cap.count !== 'number' || typeof cap.windowMs !== 'number') return nothing('unconfigured');
   const limit = { count: cap.count, windowMs: cap.windowMs };
 
-  const c = await one<{ principal: string; kind: string; scope: string | null; revoked_at: number | null; expires_at: number; not_after: number | null; seal: Buffer | null }>(
-    sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal FROM credentials WHERE id = ${call.credential}`);
-  const m = c === undefined ? undefined : await one<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null }>(
-    sql`SELECT status, owner, role, scope, seal FROM vault_members WHERE principal = ${c.principal}`);
+  const c = await one<{ principal: string; kind: string; scope: string | null; revoked_at: number | null; expires_at: number; not_after: number | null; seal: Buffer | null; generation: number }>(
+    sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation FROM credentials WHERE id = ${call.credential}`);
+  const m = c === undefined ? undefined : await one<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null; generation: number }>(
+    sql`SELECT status, owner, role, scope, seal, generation FROM vault_members WHERE principal = ${c.principal}`);
   const grants = m === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
     sql`SELECT coalesce(g.project_id, ge.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
           FROM vault_grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c!.principal}`);
@@ -145,6 +145,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     c_expires: expires === null ? null : String(expires), c_seal: blob(c?.seal), c_last: blob(lc?.seal),
     m_status: m?.status ?? null, m_owner: m === undefined ? null : Boolean(m.owner), m_role: m?.role ?? null, m_scope: m?.scope ?? null, m_seal: blob(m?.seal), m_last: blob(lm?.seal),
     m_old: lm === undefined ? null : oldOf(lm.payload), m_access: access === undefined ? null : access.seq,
+    c_generation: c?.generation ?? null, m_generation: m?.generation ?? null,
     g_project: m === undefined ? null : grants.map((g) => g.project_id), g_environment: m === undefined ? null : grants.map((g) => g.environment_id),
     g_slug: m === undefined ? null : grants.map((g) => g.environment_slug), g_role: m === undefined ? null : grants.map((g) => g.role),
     g_expires: m === undefined ? null : grants.map((g) => (g.expires_at === null ? null : String(g.expires_at))),

@@ -109,6 +109,7 @@ export type UseRow = {
   state: string | null; number: string | null; covered: string | null; newest: string | null; newest_mac: Buffer | null; inputs: string | null; probed: boolean;
   c_principal: string | null; c_kind: string | null; c_scope: string | null; c_revoked: boolean | null; c_expires: string | null; c_seal: Buffer | null; c_last: Buffer | null;
   m_status: string | null; m_owner: boolean | null; m_role: string | null; m_scope: string | null; m_seal: Buffer | null; m_last: Buffer | null; m_old: string | null; m_access: string | null;
+  c_generation: number | null; m_generation: number | null;
   g_project: (string | null)[] | null; g_environment: (string | null)[] | null; g_slug: (string | null)[] | null; g_role: string[] | null; g_expires: (string | null)[] | null;
   r_value: string | null; r_seal: Buffer | null; r_last: Buffer | null;
   p_value: string | null; p_seal: Buffer | null; p_last: Buffer | null; cap_count: number | null; cap_window: string | null;
@@ -267,10 +268,10 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
   const read = <T extends Input>(object: T | null, seal: Buffer | null, newest: Buffer | null): Read<T> => ({ row: object, seal, newest });
   const credential = read(row.c_principal === null ? null : credentialObject({
     id: request.credential, principal: row.c_principal, kind: row.c_kind!, scope: row.c_scope, revoked: row.c_revoked === true,
-    expiresAt: row.c_expires === null ? null : Number(row.c_expires),
+    expiresAt: row.c_expires === null ? null : Number(row.c_expires), generation: row.c_generation!,
   }), row.c_seal, last.c);
   const principal = row.c_principal === null ? null : read(row.m_status === null ? null : principalObject({
-    principal: row.c_principal, status: row.m_status, ...memberStanding({ owner: row.m_owner === true, role: row.m_role, scope: row.m_scope }),
+    principal: row.c_principal, status: row.m_status, generation: row.m_generation!, ...memberStanding({ owner: row.m_owner === true, role: row.m_role, scope: row.m_scope }),
   }, grantsOf(row)), row.m_seal, last.m);
   // A plain value's text, which its object's digest binds.
   const version = row.v_wrapped_dek === null ? null : {

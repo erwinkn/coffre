@@ -45,6 +45,13 @@ export type PrincipalInput = {
   kind: 'principal';
   principal: string;
   status: 'active' | 'removed';
+  /**
+   * Moved on by each removal (`member.remove`), kept by a restore: a
+   * credential issued at an earlier one is no longer its account's, before
+   * the removal's sweep revokes it (formal/Credentials.tla,
+   * UseDecidesGeneration).
+   */
+  generation: number;
   role: InstanceRole;
   scope: Scope;
   grants: readonly InputGrant[];
@@ -59,6 +66,8 @@ export type CredentialInput = {
   scope: CredentialScope | null;
   expiresAt: number | null;
   revoked: boolean;
+  /** Its account's generation when it was issued: it reaches only while the account's is the same. */
+  generation: number;
 };
 
 export type Nature = 'plain' | 'secret' | 'sensitive';
@@ -236,7 +245,7 @@ export type Op =
   | { op: 'member.restore'; role: InstanceRole; scope: Scope }
   | { op: 'access.grant'; grant: InputGrant }
   | { op: 'access.revoke'; place: GrantPlace }
-  | { op: 'credential.issue'; principal: string; caller: CallerKind; scope: CredentialScope | null; expiresAt: number | null }
+  | { op: 'credential.issue'; principal: string; caller: CallerKind; scope: CredentialScope | null; expiresAt: number | null; generation: number }
   | { op: 'credential.revoke' }
   /** A live credential's end moved: a workload's session renewed (never past its hard end, the app's to hold). */
   | { op: 'credential.renew'; expiresAt: number | null }
@@ -284,14 +293,14 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       return op.value;
     }
     case 'member.add':
-      return created('principal') ? { kind: 'principal', principal: ref.id, status: 'active', role: op.role, scope: op.scope, grants: [] } : undefined;
+      return created('principal') ? { kind: 'principal', principal: ref.id, status: 'active', generation: 0, role: op.role, scope: op.scope, grants: [] } : undefined;
     case 'member.role': {
       const member = of('principal');
       return member?.status === 'active' ? { ...member, role: op.role, scope: op.scope } : undefined;
     }
     case 'member.remove': {
       const member = of('principal');
-      return member?.status === 'active' ? { ...member, status: 'removed' } : undefined;
+      return member?.status === 'active' ? { ...member, status: 'removed', generation: member.generation + 1 } : undefined;
     }
     case 'member.restore': {
       const member = of('principal');
@@ -308,7 +317,7 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
     }
     case 'credential.issue':
       return created('credential') && callerFits(op)
-        ? { kind: 'credential', id: ref.id, principal: op.principal, caller: op.caller, scope: op.scope, expiresAt: op.expiresAt, revoked: false }
+        ? { kind: 'credential', id: ref.id, principal: op.principal, caller: op.caller, scope: op.scope, expiresAt: op.expiresAt, revoked: false, generation: op.generation }
         : undefined;
     case 'credential.revoke': {
       const credential = of('credential');

@@ -110,7 +110,7 @@ export async function openValues(
    * the record, and `used` says so too.
    */
   use?: UseRecord,
-): Promise<Keyed<string> & { used?: true }> {
+): Promise<Keyed<string> & { used?: true; stood?: true }> {
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const { credentialRow, ...asked } = asking;
@@ -121,7 +121,9 @@ export async function openValues(
     // no use decided, nor one inherited in a fork, where the use checks no permission of the caller's: the app asks.
     if (recalled !== undefined && sealed.length === items.length && sealed.every((item) => item.through === undefined)) recalled.vouched();
     let next = 0;
-    return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), used: true };
+    // `stood`: each use decided on `credentialRow` as it was then, revoked, ended or of a generation its account has moved
+    // past, sealed (formal/Credentials.tla, Revoking015Folded): what `credentialStill` would read again.
+    return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), used: true, stood: true };
   }
   const checks = recalled !== undefined && !recalled.confirmed ? recalled.revision : undefined;
   const result = await vault.unwrap({

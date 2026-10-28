@@ -390,12 +390,14 @@ function credentialRow(): CredentialInput {
     kind: 'credential', id: 'c1', principal, caller: pick(KINDS),
     scope: chance(0.6) ? null : some([scopeGrant(), scopeGrant(), { ...scopeGrant(), projectId: 'market', environmentId: null, reads: '*' as const }], 3),
     expiresAt: chance(0.8) ? null : 900 + Math.floor(random() * 600), revoked: chance(0.05),
+    // Mostly its account's, now and then one a removal has moved past, or one ahead of it (a row written around the vault).
+    generation: chance(0.9) ? 1 : pick([0, 2]),
   };
 }
 function principalRow(principal: string): PrincipalInput {
   const strong = chance(0.5);
   return {
-    kind: 'principal', principal, status: chance(0.9) ? 'active' : 'removed',
+    kind: 'principal', principal, status: chance(0.9) ? 'active' : 'removed', generation: chance(0.9) ? 1 : pick([0, 2]),
     role: strong ? pick(['owner', 'developer'] as const) : pick(INSTANCE_ROLE_NAMES) as PrincipalInput['role'], scope: strong ? EVERYWHERE_SCOPE : scope(),
     grants: some([grant(), grant(), grant()], 3).map((g) => ({ ...g, environmentSlug: null, expiresAt: chance(0.7) ? null : 900 + Math.floor(random() * 300) })),
   };
@@ -435,14 +437,14 @@ repeat(20000, () => {
   sealsHold = chance(0.5);
   const owner = sealsHold && chance(0.2);
   const credential = checkedOf(owner
-    ? { kind: 'credential' as const, id: 'c1', principal: 'user:ada', caller: 'person' as const, scope: null, expiresAt: null, revoked: false }
+    ? { kind: 'credential' as const, id: 'c1', principal: 'user:ada', caller: 'person' as const, scope: null, expiresAt: null, revoked: false, generation: 1 }
     : maybeNull(0.05, credentialRow));
   const secret = checkedOf(owner ? { ...secretRow(pick(KEYS)), environmentId: pick(['market/dev', 'ops/prod', 'market/fork']), source: null, reference: null } : maybeNull(0.08, () => secretRow(pick(KEYS))));
   const given = policy();
   const view: CheckedView = {
     credential,
     principal: credential.row === null ? null
-      : checkedOf(owner ? { ...principalRow('user:ada'), status: 'active' as const, role: 'owner' as const, scope: EVERYWHERE_SCOPE } : maybeNull(0.08, () => principalRow(credential.row!.principal))),
+      : checkedOf(owner ? { ...principalRow('user:ada'), status: 'active' as const, generation: 1, role: 'owner' as const, scope: EVERYWHERE_SCOPE } : maybeNull(0.08, () => principalRow(credential.row!.principal))),
     // An Owner's edits: some of the policy's roles, over the release's own.
     roles: checkedOf(maybeNull(0.1, () => ({
       kind: 'roles' as const, roles: Object.fromEntries(Object.entries(given.roles).filter(() => chance(0.4))),

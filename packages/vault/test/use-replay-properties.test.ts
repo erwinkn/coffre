@@ -59,7 +59,7 @@ function drawChange(tc: hegel.TestCase): [Ref, Op] {
         ? [{ projectId: pick(tc, PROJECTS), environmentId: maybe(tc, ENVIRONMENTS), role: pick(tc, ROLE_NAMES), ...(tc.draw(gs.booleans()) ? { sensitive: true } : {}),
           ...(caller === 'workload' ? { reads: tc.draw(gs.booleans()) ? '*' as const : [pick(tc, KEYS)] } : {}) }]
         : null;
-      return [{ kind: 'credential', id: pick(tc, CREDENTIALS) }, { op: 'credential.issue', principal, caller, scope, expiresAt: maybe(tc, [2_000, 20_000]) }];
+      return [{ kind: 'credential', id: pick(tc, CREDENTIALS) }, { op: 'credential.issue', principal, caller, scope, expiresAt: maybe(tc, [2_000, 20_000]), generation: pick(tc, [0, 1]) }];
     }
     case 6: return [{ kind: 'credential', id: pick(tc, CREDENTIALS) }, { op: 'credential.revoke' }];
     case 7: case 8: {
@@ -125,7 +125,7 @@ function drawWorld(tc: hegel.TestCase): { world: World; at: number; decided: Map
     const principal = PRINCIPALS[n % PRINCIPALS.length]!;
     const caller: CallerKind = principal.startsWith('user:') ? 'person' : n === 4 ? 'workload' : 'bearer';
     const scope = caller === 'workload' ? [{ projectId: PROJECTS[0]!, environmentId: null, role: 'viewer', reads: [KEYS[0]!] }] : null;
-    world.change({ kind: 'credential', id }, { op: 'credential.issue', principal, caller, scope, expiresAt: null });
+    world.change({ kind: 'credential', id }, { op: 'credential.issue', principal, caller, scope, expiresAt: null, generation: 0 });
   });
   KEYS.forEach((id, n) => {
     const environmentId = ENVIRONMENTS[n % ENVIRONMENTS.length]!;
@@ -276,7 +276,7 @@ test(`the bulk cap: no rolling window releases more than count keys, uses decide
   world.change(POLICY_REF, limitOp({ count, windowMs }));
   world.change({ kind: 'principal', id: 'token:ci' }, { op: 'member.add', role: 'member', scope: EVERYWHERE });
   world.change({ kind: 'principal', id: 'token:ci' }, { op: 'access.grant', grant: { projectId: PROJECTS[0]!, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null } });
-  world.change({ kind: 'credential', id: CREDENTIALS[0]! }, { op: 'credential.issue', principal: 'token:ci', caller: 'bearer', scope: null, expiresAt: null });
+  world.change({ kind: 'credential', id: CREDENTIALS[0]! }, { op: 'credential.issue', principal: 'token:ci', caller: 'bearer', scope: null, expiresAt: null, generation: 0 });
   world.change({ kind: 'environment', id: ENVIRONMENTS[0]! }, { op: 'environment.create', projectId: PROJECTS[0]!, slug: 'dev', owner: null, parentId: null, protected: false });
   for (const id of KEYS) world.change({ kind: 'secret', id }, { op: 'secret.write', projectId: PROJECTS[0]!, environmentId: ENVIRONMENTS[0]!, version: 'v', nature: 'secret', key: WRAPPED, digest: null, source: null, reference: null });
   const released: { key: string; at: number }[] = [];

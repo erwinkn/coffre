@@ -182,7 +182,10 @@ export async function retrying<T>(write: () => Promise<T>, tries = 3): Promise<T
   }
 }
 
-/** A credential's row as its object takes it: whose, what kind, its scope as stored, revoked or not, and its end, the earlier of its expiry and its hard end. */
+/**
+ * A credential's row as its object takes it: whose, what kind, its scope as stored, revoked or not, its end, the earlier
+ * of its expiry and its hard end, and its account's generation when it was issued.
+ */
 export function credentialColumns(row: {
   id: string;
   principal: string;
@@ -191,9 +194,12 @@ export function credentialColumns(row: {
   revokedAt: Date | null;
   expiresAt: Date;
   notAfter?: Date | null;
+  generation: number;
 }): CredentialColumns {
   const ends = [row.expiresAt.getTime(), ...(row.notAfter == null ? [] : [row.notAfter.getTime()])];
-  return { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: row.revokedAt !== null, expiresAt: Math.min(...ends) };
+  return {
+    id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: row.revokedAt !== null, expiresAt: Math.min(...ends), generation: row.generation,
+  };
 }
 
 /** Each live credential revoked: its change. */

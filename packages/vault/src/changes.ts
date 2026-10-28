@@ -373,8 +373,8 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
   switch (after.kind) {
     case 'credential': {
       if (before === null) {
-        const { principal, caller, scope, expiresAt } = after;
-        return [{ op: 'credential.issue', principal, caller, scope, expiresAt }, ...(after.revoked ? [{ op: 'credential.revoke' } as const] : [])];
+        const { principal, caller, scope, expiresAt, generation } = after;
+        return [{ op: 'credential.issue', principal, caller, scope, expiresAt, generation }, ...(after.revoked ? [{ op: 'credential.revoke' } as const] : [])];
       }
       if (before.kind !== 'credential') return [];
       const ops: Op[] = [];

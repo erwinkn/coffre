@@ -15,7 +15,8 @@
 // at once. With 5 to 15 runs a level, its p99 is its slowest run.
 // With `--log 0.15`, the vault keeps 0.15's log: the sign-in's credential is a change of it, which a Node
 // checkpointer seals before the sign-in answers (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own
-// connection, near.
+// connection, near; and each vault call has the hot path's login too, so that a job's reveal is 0.15's uses, as a
+// deployment's is (T145: without it, 0.14's unwrap queued on the log's head).
 // With `--uses <rate>`, uses run beside, that many a second, each one `use_credential` call through a relay of its
 // own (uses.ts), and it reports their latency and refusals for each level, `0` jobs a level of uses alone (`--idle`
 // seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
@@ -23,7 +24,7 @@
 // handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--proxy-cache <s>` is the proxy's
 // `cacheSeconds` (0, the default here: every request opens its key); `--proxy-stable` sends each to the stable URL.
 // `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
-// the uses sent).
+// the uses sent), and the same by login: the app's (`runtime`), the vault's, the hot path's (`vault_hot`), the server's own.
 // `--principals` spreads the uses over that many services (1: one hot principal, T127), `--keys` gives ci/dev that many
 // keys (7 by default, the reveal's), and `--use-cold <n>` makes n uses a second more, each on a new connection of its
 // own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
@@ -92,8 +93,57 @@ const JOBS = values.jobs.split(',').map(Number);
 const USES = Number(values.uses);
 const SIGNIN_ONLY = values['signin-only'];
 const PROXY = Number(values.proxy);
-/** The Postgres container's CPU so far, in µs, when `--cgroup` names its cgroup. */
-const cpuUsec = () => (values.cgroup === undefined ? 0 : Number(/usage_usec (\d+)/.exec(readFileSync(join(values.cgroup, 'cpu.stat'), 'utf8'))![1]));
+/**
+ * The Postgres container's CPU so far, in µs, when `--cgroup` names its cgroup: whole, and by login, each of its
+ * backends' own (`/proc/<pid>/stat`, in clock ticks of 10 ms) summed by the login its title names, `other` for the
+ * server's own processes. Every backend ever seen counts, at its last reading (`seen`, read every 100 ms): one that
+ * ends, as a CI job's connection or a cold use's does, keeps its CPU but for its last 100 ms.
+ */
+type CpuNow = { total: number; logins: Map<string, number> };
+/** Each backend seen, by pid and start time (a pid used again is another), with its login and CPU when last read. */
+const seen = new Map<string, { login: string; usec: number }>();
+const sampleCpu = () => {
+  if (values.cgroup === undefined) return;
+  for (const pid of readFileSync(join(values.cgroup, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean)) {
+    try {
+      const title = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // utime, stime and starttime, its 14th, 15th and 22nd fields: the 12th, 13th and 20th after its command's parenthesis.
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const login = /^postgres: (\w+) /.exec(title)?.[1] ?? 'other';
+      seen.set(`${pid}/${fields[19]}`, { login, usec: (Number(fields[11]) + Number(fields[12])) * 10_000 });
+    } catch {
+      // Gone meanwhile: its last reading stands.
+    }
+  }
+};
+const sampling = values.cgroup === undefined ? null : setInterval(sampleCpu, 100);
+sampling?.unref();
+const cpuNow = (): CpuNow => {
+  const logins = new Map<string, number>();
+  if (values.cgroup === undefined) return { total: 0, logins };
+  const total = Number(/usage_usec (\d+)/.exec(readFileSync(join(values.cgroup, 'cpu.stat'), 'utf8'))![1]);
+  sampleCpu();
+  for (const { login, usec } of seen.values()) logins.set(login, (logins.get(login) ?? 0) + usec);
+  return { total, logins };
+};
+const cpuSince = (from: CpuNow, to: CpuNow): CpuNow => ({
+  total: to.total - from.total,
+  logins: new Map([...to.logins].map(([login, usec]) => [login, usec - (from.logins.get(login) ?? 0)])),
+});
+const cpuAdd = (a: CpuNow | undefined, b: CpuNow): CpuNow => a === undefined ? b : {
+  total: a.total + b.total,
+  logins: new Map([...new Set([...a.logins.keys(), ...b.logins.keys()])].map((login) => [login, (a.logins.get(login) ?? 0) + (b.logins.get(login) ?? 0)])),
+};
+/** A phase's Postgres CPU per use, whole and by login: the app's (`coffre_runtime`), the vault's, the hot path's, and what none holds. */
+const cpuShown = (used: CpuNow | undefined, sent: number): string => {
+  if (used === undefined || values.cgroup === undefined) return '';
+  const per = (usec: number) => (usec / 1000 / Math.max(1, sent)).toFixed(2);
+  const logins = [...used.logins].filter(([, usec]) => usec > 0).sort(([a], [b]) => (a < b ? -1 : 1)).map(([login, usec]) => `${login.replace(/^coffre_/, '')} ${per(usec)}`);
+  // What no backend's reading holds: the kernel's work for the container, and backends that lived between two readings.
+  const unattributed = used.total - [...used.logins.values()].reduce((sum, usec) => sum + Math.max(0, usec), 0);
+  return `  Postgres CPU ${per(used.total)} ms/use (${logins.join(', ')}, unattributed ${per(unattributed)})`;
+};
 const BULK = { count: 1_000_000, windowMinutes: Number(values.window) };
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -136,8 +186,10 @@ class TimedPool {
 }
 
 const db = await openTestDatabase();
-const [farApp, farVault] = await Promise.all([farPostgres(TEST_RUNTIME_DATABASE_URL, RTT), farPostgres(TEST_VAULT_DATABASE_URL, RTT)]);
-const idle: { vault: LocalVault; pool: TimedPool }[] = [];
+const [farApp, farVault, farHot] = await Promise.all([
+  farPostgres(TEST_RUNTIME_DATABASE_URL, RTT), farPostgres(TEST_VAULT_DATABASE_URL, RTT), farPostgres(TEST_HOT_DATABASE_URL, RTT),
+]);
+const idle: { vault: LocalVault; pool: TimedPool; hot: TimedPool | null }[] = [];
 const checkpointerPool = postgresClient(TEST_VAULT_DATABASE_URL, { max: 4 });
 const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
 let checkpointer: RunningCheckpointer | null = null;
@@ -180,14 +232,21 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: BULK }, log) };
+        const hot = values.log === '0.15' ? new TimedPool(new HyperdrivePool(farHot.url), 'vault') : null;
+        const vault = await localVault({
+          database: createDatabase(pool.client), ...(hot === null ? {} : { hotDatabase: createDatabase(hot.client) }),
+          kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: BULK,
+        }, log);
+        return { pool, hot, vault };
       })();
       instance.pool.cost = cost;
+      if (instance.hot !== null) instance.hot.cost = cost;
       cost.vaultCalls += 1;
       try {
         return await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
       } finally {
         instance.pool.cost = newCost();
+        if (instance.hot !== null) instance.hot.cost = newCost();
         idle.push(instance);
       }
     },
@@ -313,13 +372,13 @@ try {
     }));
   }
   /** Postgres's CPU in each named phase, µs, over the uses it sent. */
-  const cpu = new Map<string, number>();
-  let cpuFrom: { phase: string; usec: number } | null = null;
+  const cpu = new Map<string, CpuNow>();
+  let cpuFrom: { phase: string; at: CpuNow } | null = null;
   /** The uses from now on count toward `phase`, or none (null): the binding's renewal between rounds is no sign-in's. */
   const usesIn = async (phase: string | null) => {
     if (proxies.length > 0) {
-      if (cpuFrom !== null) cpu.set(cpuFrom.phase, (cpu.get(cpuFrom.phase) ?? 0) + cpuUsec() - cpuFrom.usec);
-      cpuFrom = phase === null ? null : { phase, usec: cpuUsec() };
+      if (cpuFrom !== null) cpu.set(cpuFrom.phase, cpuAdd(cpu.get(cpuFrom.phase), cpuSince(cpuFrom.at, cpuNow())));
+      cpuFrom = phase === null ? null : { phase, at: cpuNow() };
       await Promise.all(proxies.map(async (worker) => {
         worker.postMessage({ phase });
         await new Promise((resolve) => worker.once('message', resolve));
@@ -327,8 +386,8 @@ try {
       return;
     }
     if (loader === null) return;
-    if (cpuFrom !== null) cpu.set(cpuFrom.phase, (cpu.get(cpuFrom.phase) ?? 0) + cpuUsec() - cpuFrom.usec);
-    cpuFrom = phase === null ? null : { phase, usec: cpuUsec() };
+    if (cpuFrom !== null) cpu.set(cpuFrom.phase, cpuAdd(cpu.get(cpuFrom.phase), cpuSince(cpuFrom.at, cpuNow())));
+    cpuFrom = phase === null ? null : { phase, at: cpuNow() };
     loader.postMessage({ phase });
     await new Promise((resolve) => loader!.once('message', resolve));
   };
@@ -383,8 +442,7 @@ try {
       const used = cpu.get(name);
       console.log(
         `  ${name.padEnd(8)} ${String(sent).padStart(6)} uses  p50 ${percentile(sorted, 50).toFixed(1).padStart(6)}  p90 ${percentile(sorted, 90).toFixed(1).padStart(6)}  p99 ${percentile(sorted, 99).toFixed(1).padStart(6)}  ` +
-          `max ${sorted.at(-1)!.toFixed(1).padStart(7)}  app CPU ${app.toFixed(2)} ms/use` +
-          `${used === undefined || values.cgroup === undefined ? '' : `  Postgres CPU ${(used / 1000 / Math.max(1, sent)).toFixed(2)} ms/use`}  refused: ${[...refused].map(([why, n]) => `${why} ${n}`).join(', ') || 'none'}`,
+          `max ${sorted.at(-1)!.toFixed(1).padStart(7)}  app CPU ${app.toFixed(2)} ms/use${cpuShown(used, sent)}  refused: ${[...refused].map(([why, n]) => `${why} ${n}`).join(', ') || 'none'}`,
       );
     }
   }
@@ -398,16 +456,17 @@ try {
       console.log(
         `  ${use.phase.padEnd(8)} ${String(use.sent).padStart(6)} uses  p50 ${use.p50.toFixed(1).padStart(6)}  p90 ${use.p90.toFixed(1).padStart(6)}  p99 ${use.p99.toFixed(1).padStart(6)}  p99.9 ${use.p999.toFixed(1).padStart(6)}  ` +
           `max ${use.max.toFixed(1).padStart(7)}  past 2 rtt ${(use.slow * 100).toFixed(1).padStart(5)}%` +
-          `${used === undefined || values.cgroup === undefined ? '' : `  Postgres CPU ${(used / 1000 / Math.max(1, use.sent)).toFixed(2)} ms/use`}  refused: ${refused}` +
+          `${cpuShown(used, use.sent)}  refused: ${refused}` +
           (use.cold === 0 ? '' : `  beside ${use.cold} each on a new backend: p50 ${use.coldP50.toFixed(1)}, max ${use.coldMax.toFixed(1)}`),
       );
     }
   }
 } finally {
+  if (sampling !== null) clearInterval(sampling);
   await loader?.terminate();
   await Promise.all(proxies.map((worker) => worker.terminate()));
-  await Promise.all(idle.map(({ vault, pool }) => vault.close().then(() => pool.end())));
-  await Promise.all([farApp.close(), farVault.close()]);
+  await Promise.all(idle.map(({ vault, pool, hot }) => vault.close().then(() => Promise.all([pool.end(), hot?.end()]))));
+  await Promise.all([farApp.close(), farVault.close(), farHot.close()]);
   await checkpointer?.stop();
   await checkpointerPool.end();
   rmSync(memory, { recursive: true, force: true });

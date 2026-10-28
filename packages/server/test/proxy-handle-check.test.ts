@@ -3,21 +3,26 @@
 // removed meanwhile, their credentials not swept yet, is refused: by the credential proxy's stable URL for a handle of
 // two environments, which names neither, cached or not; by a plugin that only asks whether a handle stands; and by one
 // that uses another person's handle after it. And `use`'s answer lists every key the environment holds unless the
-// plugin asks for its keys `only`; a plain value used long after the check, on access as it is then. The same on 0.14's
-// log and on SQLite, which hand nothing on.
+// plugin asks for its keys `only`; a plain value used long after the check, on access as it is then. Someone removed
+// and admitted again before the sweep is refused their earlier membership's handle, on the answer the app kept: by the
+// use itself on 0.15's log (T145), by `credentialStill` on 0.14's. The same on 0.14's log and on SQLite, which hand
+// nothing on. Someone whose grant was revoked since their answer was kept learns nothing of the keys made since,
+// even when the vault is too busy to use them (review r2): their read asks the vault again before it answers.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
 import { CoffreError } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
+import { eq } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
+import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute, type CoffrePlugin } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
-import { logFence } from './db/tables.ts';
+import { credentials as credentialRows, logFence } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -38,6 +43,13 @@ const FOURTH = 'fourth@acme.example';
 const FIFTH = 'fifth@acme.example';
 /** FIFTH's handle, of market/dev. */
 let fifth: string;
+const SIXTH = 'sixth@acme.example';
+const SEVENTH = 'seventh@acme.example';
+const EIGHTH = 'eighth@acme.example';
+/** SIXTH's handle, of market/dev. */
+let sixth: string;
+/** EIGHTH's handle, of market/dev. */
+let eighth: string;
 /** What happens between a check and its use (`/probe/later`). */
 let between: () => Promise<void> = async () => undefined;
 /** FOURTH's handle, of market/dev. */
@@ -68,7 +80,7 @@ const probe: CoffrePlugin = {
           await coffre.use(request.headers.get('x-other')!, { path: 'market/dev', keys: ['API_KEY'], purpose: 'use', logged: {}, only: true });
           return Response.json(checked);
         }
-        const used = await coffre.use(handle, { path: 'market/dev', keys: ['API_KEY'], purpose: 'use', logged: {}, ...(url.searchParams.has('only') ? { only: true } : {}) });
+        const used = await coffre.use(handle, { path: 'market/dev', keys: [url.searchParams.get('key') ?? 'API_KEY'], purpose: 'use', logged: {}, ...(url.searchParams.has('only') ? { only: true } : {}) });
         return Response.json({ keys: used.keys });
       } catch (error) {
         if (error instanceof CoffreError) return Response.json({ error: error.code }, { status: error.status });
@@ -102,7 +114,7 @@ before(async () => {
   const issue = async (person: string, paths: string[]) => (await runtime.signin!.issueHandle({ ...(await contextFor(deps, person)), personalToken: null }, { label: 'run', expiresInMinutes: 600, paths })).token;
   one = await issue(DEV, ['market/dev']);
   two = await issue(DEV, ['market/dev', 'market/staging']);
-  for (const person of [OTHER, THIRD, FOURTH, FIFTH]) {
+  for (const person of [OTHER, THIRD, FOURTH, FIFTH, SIXTH, SEVENTH, EIGHTH]) {
     await root.members.add(`user:${person}`);
     await root.access.set(`user:${person}`, { market: 'developer' });
   }
@@ -110,6 +122,8 @@ before(async () => {
   cachedTwo = await issue(THIRD, ['market/dev', 'market/staging']);
   fourth = await issue(FOURTH, ['market/dev']);
   fifth = await issue(FIFTH, ['market/dev']);
+  sixth = await issue(SIXTH, ['market/dev']);
+  eighth = await issue(EIGHTH, ['market/dev']);
 });
 
 after(async () => {
@@ -185,5 +199,45 @@ test("a plain value used after the handle's check is used on the person's access
     assert.equal(answer.status, 403, await answer.text());
   } finally {
     between = async () => undefined;
+  }
+});
+
+test('removed and admitted again before the sweep, a handle of the earlier membership is refused at its use, on the answer the app kept', async () => {
+  // Their answer kept, from a use.
+  assert.equal((await fetched('/use/market/dev/api/v1/charges', sixth)).status, 204);
+  // Removed in the vault, and admitted again, at the generation the removal moved on to: the app's sweeps not run.
+  assert.equal((await deps.vault.remove({ actor: `user:${ROOT}`, principal: `user:${SIXTH}` })).ok, true);
+  assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: `user:${SIXTH}` })).ok, true);
+  await clientFor(deps, ROOT).access.set(`user:${SIXTH}`, { market: 'developer' });
+  const [handle] = await db.owner.select({ revokedAt: credentialRows.revokedAt }).from(credentialRows).where(eq(credentialRows.principal, `user:${SIXTH}`));
+  assert.equal(handle!.revokedAt, null, 'the handle is not revoked: only its generation ends it');
+  const answer = await fetched('/use/market/dev/api/v1/charges', sixth);
+  assert.equal(answer.status, 401, await answer.text());
+});
+
+
+test("revoked since their answer was kept, someone learns nothing of a key made since, even when the vault is too busy to use it (review r2)", { skip: LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap" }, async () => {
+  // Two people, each with an answer kept, one through the API and one through the proxy: each path starts from its own.
+  const token = (await runtime.signin!.issuePersonalToken(await contextFor(deps, SEVENTH), { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })).token;
+  const reveal = (path: string) => fetchApi(new Request(`${ORIGIN}/api/reveals`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }),
+  }), runtime, { sourceIp: null });
+  assert.equal((await reveal('market/dev/API_KEY')).status, 200);
+  assert.equal((await fetched('/probe/use?only', eighth)).status, 200);
+  const root = clientFor(deps, ROOT);
+  for (const person of [SEVENTH, EIGHTH]) await root.access.set(`user:${person}`, { market: null });
+  await root.secrets.set('market/dev', { MADE_SINCE: 'made-since' });
+  const use = deps.vault.use!;
+  deps.vault.use = async () => ({ ok: false, busy: 'overloaded', retryAfter: 1 });
+  try {
+    // A key made since and one that never was: answered alike, as to someone with no access.
+    const made = await reveal('market/dev/MADE_SINCE');
+    const never = await reveal('market/dev/NEVER_MADE');
+    assert.deepEqual([made.status, never.status], [403, 403], `the API: ${await made.text()} / ${await never.text()}`);
+    const used = await fetched('/probe/use?only&key=MADE_SINCE', eighth);
+    const unused = await fetched('/probe/use?only&key=NEVER_MADE', eighth);
+    assert.deepEqual([used.status, unused.status], [403, 403], `the proxy: ${await used.text()} / ${await unused.text()}`);
+  } finally {
+    deps.vault.use = use;
   }
 });

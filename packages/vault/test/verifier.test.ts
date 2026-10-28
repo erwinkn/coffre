@@ -107,7 +107,7 @@ async function instance() {
   await db.owner.insert(t.credentials).values({
     id: credential, kind: 'cli', authMac: Buffer.alloc(32), tokenHash: randomBytes(32), tokenHint: 'hint', generation: 0, principal: ADA, createdBy: ROOT, expiresAt: expires, scope: null,
   });
-  await genesis({ kind: 'credential', id: credential }, credentialObject({ id: credential, principal: ADA, kind: 'cli', scope: null, revoked: false, expiresAt: expires.getTime() }));
+  await genesis({ kind: 'credential', id: credential }, credentialObject({ id: credential, principal: ADA, kind: 'cli', scope: null, revoked: false, expiresAt: expires.getTime(), generation: 0 }));
   const key = async () => {
     const ref = await where.secret(where.dev);
     const version = randomUUID();

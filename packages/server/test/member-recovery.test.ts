@@ -51,7 +51,7 @@ test('R3: removal recovers a member whose row was deleted around the vault', { s
   assert.deepEqual(recovered.grants, []);
 });
 
-test('R3: removal recovers an edited row of an already removed member', async () => {
+test('R3: removal recovers an edited row of an already removed member', { skip: START_OVER_014 }, async () => {
   await root.members.remove(MEMBER);
   const { generation } = await deps.vault.access(MEMBER);
   await db.owner.update(vaultMembers).set({ statusChangedBy: 'user:someone@acme.example' }).where(eq(vaultMembers.principal, MEMBER));

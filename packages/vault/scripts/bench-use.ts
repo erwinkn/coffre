@@ -124,12 +124,12 @@ async function seed(): Promise<void> {
       for (const grant of grants) {
         await client.unsafe(`INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, 'system:bench')`, [principal, grant.environmentId, now]);
       }
-      const member: Input = { kind: 'principal', principal, status: 'active', role: 'member', scope: { projects: 'all', environments: 'all' }, grants };
+      const member: Input = { kind: 'principal', principal, status: 'active', generation: 0, role: 'member', scope: { projects: 'all', environments: 'all' }, grants };
       await client.unsafe('UPDATE vault_members SET seal = $1 WHERE principal = $2', [await change({ kind: 'principal', id: principal }, member, client), principal]);
       const expiresAt = now + 30 * 86_400_000;
       await client.unsafe(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at) VALUES ($1, 'service', $2, $3, 'h', 0, $4, 'system:bench', $5)`,
         [credential, Buffer.alloc(32), randomBytes(32), principal, new Date(expiresAt)]);
-      const object: Input = { kind: 'credential', id: credential, principal, caller: 'bearer', scope: null, expiresAt, revoked: false };
+      const object: Input = { kind: 'credential', id: credential, principal, caller: 'bearer', scope: null, expiresAt, revoked: false, generation: 0 };
       await client.unsafe('UPDATE credentials SET seal = $1 WHERE id = $2', [await change({ kind: 'credential', id: credential }, object, client), credential]);
     }
     // 0.14's log about the members: an access entry each, as a cutover finds them.

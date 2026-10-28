@@ -460,7 +460,7 @@ export class SigninService {
       if (standing.status !== 'active') throw refuse('deactivated', preparedId);
       return retrying(async () => {
       // The session, and, binding a new account, the credentials of an earlier membership it revokes (`revokePriorMembership`).
-      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.browserSessionHours * 3_600_000) };
+      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.browserSessionHours * 3_600_000), generation: standing.generation };
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
         const prior = previous === null ? await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, priorCredentials(principal, standing.generation, new Date())) : [];
         return [this.#issueChange('browser', principal, plan), ...revokes(prior)];
@@ -514,9 +514,9 @@ export class SigninService {
         }
 
         if (bound !== null) changes?.expectRevoked([]);
+        // At the plan's generation, which its change sealed: `generation` is the same, held to it above.
         const credential = await this.#issue(tx, 'browser', principal, {
           ...plan,
-          generation,
           identityId,
           label: meta.label,
           createdBy: principalId,
@@ -653,9 +653,9 @@ export class SigninService {
   }
 
   /** The change issuing a credential makes to 0.15's log: the object of the row `#credential` writes, from the same options. */
-  #issueChange(kind: CredentialKind, principal: PrincipalRef, options: { id: string; expiresAt: Date; scope?: CredentialScope }): ObjectChange {
+  #issueChange(kind: CredentialKind, principal: PrincipalRef, options: { id: string; expiresAt: Date; scope?: CredentialScope; generation: number }): ObjectChange {
     const scope = options.scope === undefined ? null : storedScope(options.scope);
-    return credentialChange(null, { id: options.id, principal: principalOf(principal), kind, scope, revokedAt: null, expiresAt: options.expiresAt });
+    return credentialChange(null, { id: options.id, principal: principalOf(principal), kind, scope, revokedAt: null, expiresAt: options.expiresAt, generation: options.generation });
   }
 
   /** A credential's row, signed, and what its holder is given: written by whoever issues it. */
@@ -979,7 +979,7 @@ export class SigninService {
       // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
       const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.create' });
       const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
-      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000), scope };
+      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000), scope, generation: standing.generation };
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan)]);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
@@ -988,7 +988,6 @@ export class SigninService {
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           ...plan,
-          generation: standing.generation,
           identityId: null,
           label: input.label,
           createdBy: ctx.caller.principal.id,
@@ -1052,7 +1051,7 @@ export class SigninService {
     return withRefusals(this.#deps, async () => {
       const { access, scope, byPath, details } = await this.#personalScope(ctx, input);
       const person = ctx.caller.principal;
-      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope };
+      const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope, generation: access.generation };
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
@@ -1062,7 +1061,6 @@ export class SigninService {
         }
         const credential = await this.#issue(tx, 'personal', person, {
           ...plan,
-          generation: standing.generation,
           identityId: null,
           label: input.label,
           createdBy: person.id,
@@ -1117,7 +1115,7 @@ export class SigninService {
         needs: (role, place) => (role === 'contributor' ? ['secret.use'] : PERMISSIONS.filter((permission) => holds(ROLES.viewer, permission, place, holder))),
       });
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
-      const plan = { id: randomUUID(), expiresAt: new Date(ends), scope };
+      const plan = { id: randomUUID(), expiresAt: new Date(ends), scope, generation: access.generation };
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
@@ -1127,7 +1125,6 @@ export class SigninService {
         }
         const credential = await this.#issue(tx, 'handle', person, {
           ...plan,
-          generation: standing.generation,
           identityId: null,
           label: input.label,
           createdBy: person.id,
@@ -1338,7 +1335,7 @@ export class SigninService {
     if (prepared.decision === 'denied') return { status: 'denied' };
     const principal = memberOf(prepared.principal!) as PrincipalRef & { type: 'user' };
     const standing = await this.#standing(principal);
-    const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.cliSessionDays * 86_400_000) };
+    const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.cliSessionDays * 86_400_000), generation: standing.generation };
     const changes = await AppChanges.prepare(this.#deps.vault, prepared.principal!, [this.#issueChange('cli', principal, plan)]);
     try {
       return await audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
@@ -1372,7 +1369,6 @@ export class SigninService {
         changes?.keep();
         const credential = await this.#issue(tx, 'cli', principal, {
           ...plan,
-          generation: standing.generation,
           identityId: null,
           label: row.clientLabel,
           createdBy: principalId,

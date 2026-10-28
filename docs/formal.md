@@ -367,8 +367,12 @@ Each CI run holds an ID token, good for one credential.
      with no account row, no head and no kept answer: `HotPathOne.tla`
      proves that order (TotalOrder, NothingAllowedAfterAnswer). The proxy's
      `credential.use` is no entry of its own: the use is the record;
-  4. the credential checked again with no lock (`credentialStill`), as
-     after 0.14's unwrap;
+  4. on a credential alone, nothing more: the use decided on the
+     credential's generation and its account's too, each sealed in its
+     object (`decide.ts`, `decideChecked`; T145), and the app reads
+     nothing after it (`FencedInUse`; `context.ts`, `recorded`). Through
+     an MCP connection or a Cloudflare binding, the credential checked
+     again with no lock (`credentialStill`), as after 0.14's unwrap;
   5. the value answered.
 - **Ending one:**
   - revoking it (`revokeCredential`);
@@ -390,6 +394,7 @@ Each CI run holds an ID token, good for one credential.
 | That, and each use checking the binding still stands (`bindingStands`): each covers for the other | a credential of an untrusted binding that still verifies (`UnboundStayUnusable`) | |
 | Under 0.15's log, the app's check after the use, with no lock (`credentialStill`): 0.15's credential object carries no generation, and a removal ends the account's credentials by revoking each, in its sweep, after `member.remove` | a token used between a removal and its sweep, the account admitted again meanwhile: the use allows it, and the value goes to a credential the removal ended (`NoReleaseAfterEnd`, `Revoking015`) | this model, PR 5b, which keeps the check |
 | Under 0.15's log, untrusting or replacing a binding revokes what it issued, each revoke a change (`#revoke`) | the same, through a credential of an untrusted binding: the use decides on the credential's row (`NoReleaseAfterEnd`, `Revoking015`) | |
+| Under 0.15's log, the use decides on the credential's generation and its account's, each sealed in its object, and the app reads nothing after it (`decideChecked`; `recorded`, `stood`) | the same use as `Revoking015`'s, between a removal and its sweep, the account admitted again: allowed, and nothing after it withholds the value (`NoReleaseAfterEnd`, `Revoking015Folded`) | T145, which drops `credentialStill` from the use's path |
 
 The race this model found, as the script prints it with the export's fence off. A
 run's token is checked (step 5), its revocation commits (6), and the vault,
@@ -505,6 +510,7 @@ window of fifteen minutes. #292's review.
 | `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 162 thousand |
 | `Proxying` | A reader uses its token through the credential proxy alone, its use logged by the vault or by the app, while an owner revokes the token or removes the account: each fence shown needed on the proxy's own path | 505 |
 | `Revoking015` | `Revoking` with 0.15's reads: each one use, deciding on the rows as they are and logging its request. It states no `NoReadOnStaleAnswer`: a kept answer is no input of a use, whose entry is the request whatever it decides | 82 thousand |
+| `Revoking015Folded` | `Revoking015`, each use deciding on the generations too, and the app reading nothing after it (T145) | 62 thousand |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 

@@ -23,8 +23,8 @@ Every input a decision reads is one object of the log. Its row carries a
 
 | object | id | what it holds |
 |---|---|---|
-| principal | `user:ada@acme.example` | status, instance role and scope, every grant with its end |
-| credential | uuid | whose, what kind (person, bearer, workload), its scope, its end, revoked |
+| principal | `user:ada@acme.example` | status, its generation (moved on by each removal, T145), instance role and scope, every grant with its end |
+| credential | uuid | whose, what kind (person, bearer, workload), its scope, its end, revoked, its account's generation when issued |
 | secret | the key's uuid | where it is, its current version, its nature, its wrapped data key, or a reference's source |
 | environment | uuid | project, slug (renamed by its own change: a scoped role's filters read it), protected, a fork's parent, a personal config's owner, deleted, archived |
 | roles | one, `instance` | an Owner's edits of the roles, and the roles they made |
@@ -100,7 +100,8 @@ schema 0022 stores a smallint, and PR 2 reports its size.)
    `stale`. That covers a row put back from before a change, a row deleted
    outright, and a row written with no change at all.
 2. **The credential and the key:** missing, revoked or ended at the
-   request's time (`credential`); no such key (`missing`); a reference
+   request's time, or issued at an earlier generation than its active
+   account's, a removal's before its sweep revokes it (`credential`); no such key (`missing`); a reference
    whose source is gone (`ended`); a reference to a reference, a value with
    no wrapped key, or a place 0.14's `throughOk` refuses (`bad_claim`); no
    policy in the log
