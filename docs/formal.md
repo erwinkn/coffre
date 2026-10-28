@@ -1452,38 +1452,40 @@ which the cutover anchors.
 
 ### Lifecycle.tla
 
-Who owns a credential's life (T149, W246;
-[credential-lifecycle.md](design/credential-lifecycle.md)): issuing a token
-for a service account, a CI run's sign-in and a revoke, beside the uses.
-`Placement` switches them between **A**, the vault in one statement that
-takes its locks and commits inside Postgres, and **B**, 0.15 as built, the
-app's transaction under 0.14's head with the vault sealing what it
-proposes. A step's label says whether its process is in Postgres or at the
-app, a round trip away (`AtApp`). MCLifecycle.tla's four scenarios run
-under each placement: `LifecycleIssue`, `LifecycleSignIn`, `LifecycleForge`
-(a database writer holding no key) and `LifecycleCompromised` (the app's
-code, an attacker's).
+The vault owns a credential's life (T149, D146 to D148;
+[credential-lifecycle.md](design/credential-lifecycle.md)): a CI run's
+sign-in through a binding, a token a person gives a service account, and a
+revoke, each the vault's, beside uses, an unbind (still the app's
+transaction), a database writer holding no key, and the app's code turned
+hostile. A sign-in and a revoke are one statement each; an issue is two, a
+read and a write that goes ahead only while what the read decided on still
+stands, holding nothing between. MCLifecycle.tla's scenarios:
+`LifecycleIssue`, `LifecycleSignIn`, `LifecycleReplay` (one ID token
+presented twice), `LifecycleUnbind`, `LifecycleForge` and
+`LifecycleCompromised`.
 
 | protection | turned off, TLC finds |
 |---|---|
-| a revoke takes the fence exclusive (RevokeTakesFence) | `RevokeOrdersUses`, in both |
-| an issue takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues`, in both |
-| the issuer and her credential read where nothing changes them to the commit (IssuerLocked: A, their rows shared; B, `issuerStill` and `credentialStill` under the head) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` in A; `SensitiveOnlyFromOwners` in B; in A with the app compromised too |
-| the binding's rate counted under a lock (RateLocked: A, its row; B, the head) | `RateHeld`, in both |
-| the account under a lock (MemberLocked) and W242's generation at use (UseChecksGeneration), each covering for the other | `AllowedAtCurrentGeneration` without both, in both |
-| the use checks seals (SealChecked) | `AllowedOnSealed`, in both |
-| B's head (HeadInB) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`, `RateHeld`; `AllowedAtCurrentGeneration` with W242's check off too |
+| a revoke takes the fence exclusive (RevokeTakesFence) | `RevokeOrdersUses` |
+| an issue or a sign-in takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues` |
+| an issue's write holds the issuer's row and credential shared (IssuerLocked) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; with the app compromised too |
+| an issue's write goes ahead only on the objects its read decided on (IssuerCAS) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` |
+| a sign-in holds its binding's row exclusive (BindingLocked) | `RateHeld`; `EndedBindingEndsCredentials` |
+| an unbind sweeps once it holds the binding's row (SweepAfterLock) | `EndedBindingEndsCredentials` |
+| the ID token spent by a unique insert (SpentChecked) | `SpentOnce` |
+| the account's row shared (MemberLocked) and W242's generation at use (UseChecksGeneration), each covering for the other | `AllowedAtCurrentGeneration` without both |
+| the use checks seals (SealChecked) | `AllowedOnSealed` |
+| the seal covers the token's hash (HashSealed) and the app checks its MAC (AppChecksMac), each enough | `AllowedAsPresented` without both |
+| the vault verifies the ID token (VaultVerifiesToken); and takes only a binding it sealed (BindingSealed) | `SignInsOnValidTokens`, each |
 
-`EXPECTED`, with every protection on, in B only: `SignInsNeverWaitOnHead`
-and `IssuesHoldNoLockAtApp` (a sign-in queues on the head and holds it
-across round trips), `UsesWaitOnlyOnDbWork` (a revoke holds the fence
-across its `COMMIT`), and, with the app compromised,
-`SensitiveOnlyFromOwners` and `IssuedByLiveCredential` (`prepare` seals
-whatever token it is handed). A holds every one.
+The last row is PR 3's (D148): without sealed bindings, the hostile app
+writes one that trusts its own key, and the vault's check of the token
+proves nothing.
 
-**Not modelled:** the barrier and R51's wait (HotPathOneIssue's), Postgres's
-lock queue (HotPathOne's), the proof's own check, and a removal's sweep
-beyond one step.
+**Not modelled:** the checkpointer's barrier and R51's wait beyond the
+revoke's answer (HotPathOneIssue's), Postgres's lock queue (HotPathOne's),
+the proof's claims and the binding's match, and a removal's sweep beyond one
+step.
 
 ## TLC
 

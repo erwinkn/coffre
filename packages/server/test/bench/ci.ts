@@ -29,6 +29,8 @@
 // keys (7 by default, the reveal's), and `--use-cold <n>` makes n uses a second more, each on a new connection of its
 // own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
 // the cap's window in minutes (1 by default; its rows move on every tenth of it), its count a million.
+// `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own: a binding
+// takes at most 60 sign-ins a minute, so 100 at once are two bindings' (with 0.15's log, each serializes on its row).
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
@@ -85,6 +87,7 @@ const { values } = parseArgs({
     'proxy-cache': { type: 'string', default: '0' },
     'proxy-stable': { type: 'boolean', default: false },
     cgroup: { type: 'string' },
+    bindings: { type: 'string', default: '1' },
   },
 });
 const RTT = Number(values.rtt);
@@ -153,6 +156,9 @@ const MEMBER = `token:${SERVICE}`;
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const KEYS = `${ISSUER}/.well-known/jwks`;
 const CLAIMS = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/market/.github/workflows/build.yml@refs/heads/dev', ref: 'refs/heads/dev', event_name: 'push' };
+/** The claims of workflow `n`'s runs: the first is `CLAIMS`, each other a workflow of its own, which a binding of its own takes. */
+const claimsOf = (n: number) => (n === 0 ? CLAIMS : { ...CLAIMS, workflow_ref: `acme/market/.github/workflows/build-${n}.yml@refs/heads/dev` });
+const BINDINGS = Number(values.bindings);
 const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
 
 /** What a phase ran: its statements on the app's connection and the vault's, and how long they took beyond the round trip each, by statement. */
@@ -210,9 +216,9 @@ try {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const token = () => {
+  const token = (workflow = 0) => {
     const now = Math.floor(Date.now() / 1000);
-    const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/dev', iat: now - 5, exp: now + 295, jti: crypto.randomUUID(), run_id: '7001', sha: 'f'.repeat(40), repository: 'acme/market', ...CLAIMS })}`;
+    const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/dev', iat: now - 5, exp: now + 295, jti: crypto.randomUUID(), run_id: '7001', sha: 'f'.repeat(40), repository: 'acme/market', ...claimsOf(workflow) })}`;
     return `${input}.${signWith('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
   };
   const transport: WorkloadTransport = {
@@ -228,8 +234,11 @@ try {
    * isolate of its own, with a connection of its own, its statements
    * counted on the request's cost.
    */
+  let about: unknown = null;
   const vaultFor = (cost: Cost): Vault => new Proxy({} as Vault, {
     get: (_, name: string) => async (...args: unknown[]) => {
+      // What the vault says of itself, once: a deployment's runtime keeps its vault for the isolate, and asks it once.
+      if (name === 'about' && about !== null) return about;
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
         const hot = values.log === '0.15' ? new TimedPool(new HyperdrivePool(farHot.url), 'vault') : null;
@@ -243,7 +252,9 @@ try {
       if (instance.hot !== null) instance.hot.cost = cost;
       cost.vaultCalls += 1;
       try {
-        return await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
+        const answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
+        if (name === 'about') about = answered;
+        return answered;
       } finally {
         instance.pool.cost = newCost();
         if (instance.hot !== null) instance.hot.cost = newCost();
@@ -267,20 +278,23 @@ try {
   await root.secrets.set('ci/dev', Object.fromEntries(keys.map((key) => [key, `${key.toLowerCase()}-value`])));
   await root.members.add(MEMBER);
   await root.access.set(MEMBER, { 'ci/dev': 'viewer' });
-  let binding: string | null = null;
-  /** Sign-ins the binding has left this minute: a round that would pass them binds afresh, replacing it. */
-  let left = 0;
-  const bind = async () => {
-    const made = await setup.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: CLAIMS, label: 'build', replaces: binding === null ? [] : [binding] }, { dryRun: false });
+  /** Each workflow's binding, and the sign-ins it has left this minute: a round that would pass them binds afresh, replacing it. */
+  const bindings = Array.from({ length: BINDINGS }, () => ({ id: null as string | null, left: 0 }));
+  const bind = async (n: number) => {
+    const held = bindings[n]!;
+    const made = await setup.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: claimsOf(n), label: `build-${n}`, replaces: held.id === null ? [] : [held.id] }, { dryRun: false });
     if (!('binding' in made)) throw new Error('bind');
-    binding = made.binding.id;
-    left = EXCHANGES_PER_BINDING_MINUTE;
+    held.id = made.binding.id;
+    held.left = EXCHANGES_PER_BINDING_MINUTE;
   };
-  /** `jobs` sign-ins, on a binding that has them left. */
+  /** `jobs` sign-ins, job i through binding i mod `--bindings`, each binding with them left. */
   const room = async (jobs: number) => {
-    if (jobs > EXCHANGES_PER_BINDING_MINUTE) throw new Error(`a binding takes at most ${EXCHANGES_PER_BINDING_MINUTE} sign-ins a minute: run at most that many jobs at once`);
-    if (left < jobs) await bind();
-    left -= jobs;
+    for (let n = 0; n < BINDINGS; n += 1) {
+      const share = Math.ceil((jobs - n) / BINDINGS);
+      if (share > EXCHANGES_PER_BINDING_MINUTE) throw new Error(`a binding takes at most ${EXCHANGES_PER_BINDING_MINUTE} sign-ins a minute: run at most that many jobs a binding at once`);
+      if (bindings[n]!.left < share) await bind(n);
+      bindings[n]!.left -= share;
+    }
   };
 
   const ui = {} as Pages;
@@ -304,8 +318,8 @@ try {
     }
   };
   /** One CI job: its sign-in, its list and its reveal, one after the other; or, with `--signin-only`, its sign-in. */
-  const job = async () => {
-    const oidc = await request(() => new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token() }) }));
+  const job = async (n = 0) => {
+    const oidc = await request(() => new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(n % BINDINGS) }) }));
     if (SIGNIN_ONLY) return { oidc };
     const { token: credential } = oidc.body as { token: string };
     const authorization = `Bearer ${credential}`;
@@ -408,7 +422,7 @@ try {
     for (let round = 0; round < ROUNDS; round += 1) {
       await room(jobs);
       await usesIn(`${jobs} jobs`);
-      for (const done of await Promise.all(Array.from({ length: jobs }, job))) {
+      for (const done of await Promise.all(Array.from({ length: jobs }, (_, n) => job(n)))) {
         for (const phase of ['oidc', 'list', 'reveal'] as const) if (done[phase] !== undefined) phases[phase].push(done[phase]);
       }
       await usesIn(null);
