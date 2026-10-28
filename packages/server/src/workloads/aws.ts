@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { differingClaims, PROFILE_URNS } from '@coffre/core/identity';
+import { differingClaims, PROFILE_URNS, SESSION_MS } from '@coffre/core/identity';
 
 import { ExchangeRefused, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
 import { liveBindings, memberStanding, type BindingRow } from '../db/queries.ts';
@@ -280,7 +280,7 @@ export function awsProof(options: AwsProofOptions = {}): ProofKind {
   const now = options.now ?? Date.now;
   return {
     profiles: ['aws'],
-    lifetimeMs: 60 * 60 * 1000,
+    lifetimeMs: SESSION_MS,
     async verify(input: unknown, ctx: ProofContext): Promise<MatchedProof | ExchangeRefused> {
       const request = checkAwsRequest(input, { publicUrl: ctx.publicUrl, jkt: ctx.jkt, now: now() });
       if (request instanceof ExchangeRefused) return request;

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
 import {
+  EXCHANGED_CREDENTIAL_MS,
+  SESSION_MS,
   addressWithin,
   BindingInvalid,
   canonicalClaims,
@@ -277,8 +279,8 @@ export type ProofKind = {
   };
 };
 
-/** How long a session lives past each renewal, unless its proof says less: an hour (section 5.4). */
-export const SESSION_MS = 60 * 60 * 1000;
+// How long a session lives past each renewal, and a run's credential: @coffre/core, where the vault reads them too.
+export { EXCHANGED_CREDENTIAL_MS, SESSION_MS } from '@coffre/core/identity';
 
 /** The audience a token names, alone; null for none, or several. */
 function soleAudience(aud: unknown): string | null {
@@ -393,8 +395,6 @@ export type SessionIssued = { token: string; tokenType: 'DPoP'; expiresAt: strin
 /** A session made that waits for a person's approval (section 4.4): its ID, and the page that approves it. */
 export type SessionPending = { pending: string; approve: string };
 
-/** How long a credential an exchange issues lives: one `coffre run` needs it for seconds. */
-export const EXCHANGED_CREDENTIAL_MS = 5 * 60 * 1000;
 /** How many credentials one binding issues a minute, counted under its row (with 0.14's log, under the log's head). */
 export const EXCHANGES_PER_BINDING_MINUTE = 60;
 /**

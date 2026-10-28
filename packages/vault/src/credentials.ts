@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { sealedSessionScope } from '@coffre/core/access';
-import { POLICY_DEFAULTS, POLICY_FIELDS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
+import { EXCHANGED_CREDENTIAL_MS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
 import type { CredentialColumns, RevokeCredentialInput, RevokeCredentialOutcome, SignInCredential, SignInInput, SignInOutcome, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
@@ -31,9 +31,6 @@ import { credentialObject } from './objects.ts';
 export const SIGN_INS_PER_WINDOW = 60;
 export const SIGN_IN_WINDOW_MS = 60_000;
 
-/** How long a CI run's credential lives (`EXCHANGED_CREDENTIAL_MS`), and a workload's session past each renewal (`SESSION_MS`). */
-export const RUN_CREDENTIAL_MS = 5 * 60 * 1000;
-export const SESSION_MS = 60 * 60 * 1000;
 
 /** The longest a session's hard end may be, past its sign-in: the most `sessionHours` takes (workloads.ts's policy check). */
 const LONGEST_SESSION_HOURS = 168;
@@ -106,7 +103,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
       throw new Error('a CI run\'s credential comes of a binding with no policy, spends its token, and is bound to no key');
     }
     scope = binding.scope;
-    longest = RUN_CREDENTIAL_MS;
+    longest = EXCHANGED_CREDENTIAL_MS;
   } else {
     if (binding.policy === null || credential.jkt === null || credential.notAfter === null) throw new Error('a workload\'s session comes of a binding with a policy, bound to a key, with a hard end');
     const policy = JSON.parse(binding.policy) as BindingPolicy;

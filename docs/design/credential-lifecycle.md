@@ -49,9 +49,12 @@ binding's columns the app names (its scope, and a workload's reads with it,
 (migration 0034), one statement:
 
 1. a retry by request id answers the change it made;
-2. the account's row `FOR SHARE`, active at the binding's generation, its
-   seal its newest change's (MemberLocked: a removal waits for the sign-in,
-   or the sign-in sees it; a row put back is none);
+2. the account's row `FOR SHARE`, active at the binding's generation; then,
+   in a statement of its own, its seal its newest change's (MemberLocked: a
+   removal waits for the sign-in, or the sign-in sees it; a row put back is
+   none). Compared after the lock, not in its `WHERE`: a recheck there sees
+   the row's new version beside the snapshot's older changes, and would refuse
+   a sign-in that waited behind a grant (Fable's review);
 3. the binding's row `FOR UPDATE`, as named: principal, generation, scope,
    policy, not revoked (BindingLocked); and no tombstone;
 4. a workload's: no freeze of the instance, the account or the binding;
@@ -139,7 +142,7 @@ Two results drove the design:
 
 | decision | instead of | why |
 |---|---|---|
-| the vault decides the credential's object from the binding's columns the app names, and the statement holds them to the row under its lock | the vault reading the binding first | one statement, one round trip; a binding moved meanwhile is refused (`unbound`), and the app asks again |
+| the vault decides the credential's object from the binding's columns the app names (its profile, scope and policy), and the statement holds them to the row under its lock | the vault reading the binding first | one statement, one round trip; a binding changed meanwhile is refused (`unbound`, 400), and the run signs in again. Only the one-time sealing of a 0.4 binding's scope changes a binding in place, so this is rare |
 | the app computes the row's APP_KEY MAC, the vault writes it verbatim | the vault holding APP_KEY | the vault never holds the app's key; the MAC covers id, hash, kind, principal, generation, identity, expiry and revoke, all of which the vault checks or decides |
 | the vault's own scope rule (`sealedSessionScope`, `storedScope`, `readScope`) moved to `@coffre/core/access` | the vault trusting the app's scope | one rule on both sides; the app's scope must equal the vault's, or the call fails |
 | `validUntil`, the proof's own times, held to in the statement | trusting the app's check before the call | 0.14 checked the token's times again after its wait under the head; the vault does the same, by the database's clock. PR 3 computes it itself |

@@ -232,6 +232,27 @@ test('a sign-in takes the issue lock, never the fence: it commits while a change
   }
 });
 
+test("a sign-in that waits on its account's row while a change to it commits goes ahead on the change: the seal is compared once the lock is had", postgresOnly('row locks'), async () => {
+  const w = await world();
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A change of the account's (a grant, say) under way: its row held, its seal moved, its entry written, not yet committed.
+    const seal = randomBytes(16);
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`UPDATE vault_members SET seal = $1 WHERE principal = '${CI}'`, [seal]);
+    await holder.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      SELECT nextval('log_number'), c.at, gen_random_uuid()::text, c.object, c.actor, c.payload, $1, c.mac
+        FROM log_changes c WHERE c.object = log_object('principal', '${CI}') ORDER BY c.number DESC LIMIT 1`, [seal]);
+    const signing = w.vault.signIn!(asked(w));
+    await sleep(200);
+    await holder.unsafe('COMMIT');
+    assert.ok((await signing).ok, 'made on the account as the change left it');
+  } finally {
+    await holder.end();
+  }
+});
+
 test("a sign-in that waits over a second for its binding's row is refused busy at once, nothing written (R44)", postgresOnly('lock_timeout'), async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);

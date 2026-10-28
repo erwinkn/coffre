@@ -12,8 +12,6 @@ import { objectKey } from './inputs.ts';
 export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answer> {
   const { auditLog, consumedTokens, credentials, logChanges, serviceBindings, vaultMembers } = tablesOf(tx);
   const target = objectKey({ kind: 'credential', id: c.credential.id });
-  const prior = await priorChange(tx, c.requestId, target, c.payload, c.seal);
-  if (prior !== undefined) return { number: prior };
   const k = c.credential;
   const [member] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation, seal: vaultMembers.seal }).from(vaultMembers).where(eq(vaultMembers.principal, c.principal));
   if (member?.status !== 'active' || member.generation !== c.binding.generation) return { state: 'unbound' };
@@ -21,7 +19,7 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
   const [sealedAs] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'principal', id: c.principal }))).orderBy(desc(logChanges.number)).limit(1);
   if (!same(member.seal ?? null, sealedAs?.seal ?? null)) return { state: 'unbound' };
   const [binding] = await tx.select().from(serviceBindings).where(eq(serviceBindings.id, c.binding.id));
-  if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null
+  if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null || binding.profile !== c.binding.profile
     || binding.scope !== c.binding.scope || binding.policy !== c.binding.policy) {
     return { state: 'unbound' };
   }
@@ -65,8 +63,6 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
 export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answer> {
   const { auditLog, credentials, environments, logChanges, projects } = tablesOf(tx);
   const { change, policy } = c;
-  const prior = await priorChange(tx, change.requestId, change.object, change.payload, change.seal);
-  if (prior !== undefined) return { number: prior };
   const [row] = await tx.select({ seal: credentials.seal, authMac: credentials.authMac, revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, c.ref.id));
   if (row === undefined || row.revokedAt !== null || !same(row.authMac, c.macFrom) || !same(row.seal ?? null, change.sealFrom)) return { state: 'moved' };
   const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, change.object)).orderBy(desc(logChanges.number)).limit(1);
@@ -87,17 +83,6 @@ export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answ
   const number = await nextNumber(tx);
   await tx.insert(logChanges).values({ number, at: change.at, requestId: change.requestId, object: change.object, actor: change.actor, payload: change.payload, seal: change.seal, mac: change.mac });
   return { number: number.toString() };
-}
-
-/** A change this request committed already, by its request id: its number, if it is this one; another under it is refused. */
-async function priorChange(tx: Queryable, requestId: string, target: string, payload: string, seal: Buffer): Promise<string | undefined> {
-  const { logChanges } = tablesOf(tx);
-  const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, requestId));
-  if (prior === undefined) return undefined;
-  if (prior.object !== target || prior.payload !== payload || !same(prior.seal ?? null, seal)) {
-    throw Object.assign(new Error(`request ${requestId} names another change`), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
-  }
-  return String(prior.number);
 }
 
 /** One past the log's highest number, both tables' (store.ts's `changeOnSqlite` says why). */

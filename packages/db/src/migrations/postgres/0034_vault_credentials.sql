@@ -1,6 +1,6 @@
 -- The vault makes and ends credentials itself, each in one statement (T149, D146; docs/design/credential-lifecycle.md; formal/Lifecycle.tla). A sign-in through a trust binding (a CI run's, a workload's) and a revoke were the app's transactions under 0.14's head, with `prepare` sealing whatever row the app proposed: a sign-in was 8 statements, 6 holding the head every app write waits for, and a burst of them queued there (3.5 s at p99 for 30 at once). Here each is one call of the vault's, one statement and one round trip: the vault weighs the binding, the account, the rate, the token spent and the times on the rows as they are under their locks, writes the credential and its seal, and numbers its change, inside Postgres. It only adds: two functions only 0.15's vault calls, behind the switch.
 --> statement-breakpoint
--- A sign-in through binding `p_binding`, as the vault decided it from the binding's columns it names (`p_principal`, `p_generation`, `p_binding_scope`, `p_binding_policy`): it goes ahead only while they are the row's, under its lock. Its answer, JSON: `{"number": "<n>"}`, the change's number, or `{"state": …}` with nothing written:
+-- A sign-in through binding `p_binding`, as the vault decided it from the binding's columns it names (`p_principal`, `p_generation`, `p_binding_profile`, `p_binding_scope`, `p_binding_policy`): it goes ahead only while they are the row's, under its lock. Its answer, JSON: `{"number": "<n>"}`, the change's number, or `{"state": …}` with nothing written:
 -- - `unbound`: the account is not active at the binding's generation, or the binding has ended, has a tombstone, or is not as named;
 -- - `frozen`: a manager froze the account or the binding (`p_frozen`, a workload's sign-in);
 -- - `busy`: the binding made `p_rate` credentials in the last `p_window` ms (a lock not had within `lock_timeout` raises `lock_not_available`, busy too);
@@ -10,7 +10,7 @@
 -- Locks, in the order every writer takes them (0026): the account's row shared (MemberLocked: its removal waits, or is seen), the binding's exclusive (BindingLocked: its rate, and an unbind, whose update takes it before its sweep), then the issue lock shared, its number under it (IssueOffFence: never the fence, so no use waits on a sign-in, R58). Nobody can name the credential before the commit hands its token out. No 0.14 head, and no 0.14 entry: the change is the record (D147).
 CREATE FUNCTION sign_in(
     p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea,
-    p_binding uuid, p_principal text, p_generation integer, p_binding_scope text, p_binding_policy text,
+    p_binding uuid, p_principal text, p_generation integer, p_binding_profile text, p_binding_scope text, p_binding_policy text,
     p_spent bytea, p_valid_until bigint, p_frozen boolean, p_rate integer, p_window bigint, p_longest bigint,
     p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text,
     p_scope text, p_places text, p_expires bigint, p_not_after bigint, p_jkt text, p_app_key text
@@ -23,26 +23,22 @@ DECLARE
     since timestamptz;
     target uuid := public.log_object('credential', p_id::text);
 BEGIN
-    -- A retry of a sign-in that committed, by its request: its number again, if it is this one.
-    SELECT c.number, c.object, c.payload, c.seal INTO held FROM public.log_changes c WHERE c.request_id = p_request;
-    IF FOUND THEN
-        IF held.object <> target OR held.payload <> p_payload OR held.seal IS DISTINCT FROM p_seal THEN
-            RAISE EXCEPTION 'request % names another change', p_request USING ERRCODE = 'unique_violation';
-        END IF;
-        RETURN json_build_object('number', held.number::text);
-    END IF;
     IF p_created_by IS DISTINCT FROM 'binding:' || p_binding::text OR p_kind NOT IN ('service', 'workload') THEN
         RAISE EXCEPTION 'a sign-in makes a credential of its binding''s, a service''s or a workload''s' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- A lock not had within `lock_timeout` raises `lock_not_available`, which the vault answers as busy: no subtransaction to catch it here.
-    -- The account's row as its newest change sealed it, or 0.14's with neither (before the cutover): a row put back is none.
-    PERFORM 1 FROM public.vault_members m
+    -- The account's row, locked, then held to its newest change's seal in a statement of its own, which reads what committed
+    -- while it waited: a recheck under the lock sees the row's new version beside the snapshot's older changes, and would
+    -- refuse an account a grant just changed. A row put back is none; 0.14's has neither seal nor change (before the cutover).
+    SELECT m.seal INTO held FROM public.vault_members m
      WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation
-       AND m.seal IS NOT DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('principal', p_principal) ORDER BY c.number DESC LIMIT 1)
        FOR SHARE;
     IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
+    IF held.seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('principal', p_principal) ORDER BY c.number DESC LIMIT 1) THEN
+        RETURN json_build_object('state', 'unbound');
+    END IF;
     PERFORM 1 FROM public.service_bindings b
-     WHERE b.id = p_binding AND b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL
+     WHERE b.id = p_binding AND b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL AND b.profile = p_binding_profile
        AND b.scope IS NOT DISTINCT FROM p_binding_scope AND b.policy IS NOT DISTINCT FROM p_binding_policy
        FOR UPDATE;
     IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
@@ -112,16 +108,8 @@ CREATE FUNCTION revoke_credential(
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '1s' AS $$
 DECLARE
     n bigint;
-    held record;
     target uuid := public.log_object('credential', p_id::text);
 BEGIN
-    SELECT c.number, c.object, c.payload, c.seal INTO held FROM public.log_changes c WHERE c.request_id = p_request;
-    IF FOUND THEN
-        IF held.object <> target OR held.payload <> p_payload OR held.seal IS DISTINCT FROM p_seal THEN
-            RAISE EXCEPTION 'request % names another change', p_request USING ERRCODE = 'unique_violation';
-        END IF;
-        RETURN json_build_object('number', held.number::text);
-    END IF;
     IF p_seal_from IS NULL OR p_seal IS NULL THEN
         RAISE EXCEPTION 'the vault revokes a credential the log holds, from its seal' USING ERRCODE = 'invalid_parameter_value';
     END IF;
@@ -156,9 +144,9 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) TO coffre_vault;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION revoke_credential(text, bigint, text, text, bytea, bytea, bytea, uuid, bytea, bytea, bigint, text, boolean, bigint, uuid[], text[]) FROM PUBLIC;
 --> statement-breakpoint

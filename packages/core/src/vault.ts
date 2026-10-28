@@ -203,6 +203,13 @@ export interface Vault {
      * through a use (docs/design/0.15-plan.md, PR 5b). Absent otherwise.
      */
     uses?: true;
+    /**
+     * `true` when the vault makes sign-ins through trust bindings and revokes
+     * credentials itself (`signIn`, `revokeCredential`; T149): its log is
+     * 0.15's. Said here, as a Worker's stub answers any method's name.
+     * Absent otherwise.
+     */
+    credentials?: true;
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps

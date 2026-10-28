@@ -48,7 +48,7 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; cr
   const kept = {
     log,
     uses: log && about.uses === true && vault.use !== undefined,
-    credentials: log && vault.signIn !== undefined && vault.revokeCredential !== undefined,
+    credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
   };
   keeping.set(vault, kept);
   return kept;
