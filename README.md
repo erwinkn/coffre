@@ -89,6 +89,11 @@ an OpenID Connect provider, and asks which person you are. `pnpm dev` runs a
 deployment like `examples/workers` on the packages' sources, so an edit
 anywhere reloads in place; it resets and reseeds its database each time.
 
+The Postgres container is Debian's `postgres:16.14` (glibc), as managed
+Postgres is, not Alpine's: musl's malloc skews every benchmark. A container
+from the Alpine image is recreated, on a volume of its own, with
+`docker compose down && pnpm db:up`; `pnpm dev` reseeds it.
+
 To sign in from another machine through a tunnel (`bb connect expose`, ngrok),
 give `pnpm dev` the URLs a browser uses, one per port:
 `COFFRE_DEV_PUBLIC_URL=https://app.example COFFRE_DEV_IDP_PUBLIC_URL=https://idp.example pnpm dev`.

@@ -73,6 +73,19 @@ COFFRE_POSTGRES_PORT=56432 pnpm test` starts it, and every script, test and
 fixture connects to that port; `ensure-postgres.sh` refuses a project already
 up on another.
 
+The image is Debian's `postgres:16.14` (glibc), not Alpine's: managed Postgres
+behind Hyperdrive is glibc, and musl's malloc costs a use 2-3x the Postgres
+CPU, so an Alpine benchmark answers for nobody. It is the reference rig for
+every Postgres number. The clusters use `--locale=C`, so ordering never
+depends on the libc, but the data volume is named for the image
+(`coffre-pgdata-v16-debian`) so that a data directory the Alpine image
+initialized is never mounted by this one. A developer with an Alpine
+container recreates it: `docker compose down` (or `docker rm -f` the
+container), then `pnpm db:up`. It starts on a fresh volume, and `pnpm dev`
+reseeds; the old `coffre-pgdata-v16` volume is unused and
+`docker volume rm`'s to reclaim its disk. Never recreate the shared
+container under others' feet: `ensure-postgres.sh` leaves a running one alone.
+
 `scripts/ensure-postgres.sh` reuses a healthy or initializing container and
 serializes cold starts across worktrees with the host's advisory lock
 (`flock` on Linux, `lockf` on macOS), then starts with `--no-recreate`. CI reserves 55432 from Linux's outgoing port allocation before

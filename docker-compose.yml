@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16.14-alpine
+    # Debian (glibc), not Alpine: managed Postgres behind Hyperdrive is glibc,
+    # and musl's malloc costs a use 2-3x the Postgres CPU (W242). Benchmark here.
+    image: postgres:16.14
     environment:
       POSTGRES_USER: coffre_owner
       POSTGRES_PASSWORD: local-dev-only
@@ -15,9 +17,12 @@ services:
       timeout: 3s
       retries: 30
     volumes:
-      - coffre-pgdata-v16:/var/lib/postgresql/data
+      - coffre-pgdata-v16-debian:/var/lib/postgresql/data
 
 volumes:
   # Versioned so adopting the PostgreSQL 16 production baseline never mounts
-  # (or destroys) an incompatible PostgreSQL 17 development volume.
-  coffre-pgdata-v16:
+  # (or destroys) an incompatible PostgreSQL 17 development volume. Named
+  # for the image too: a data directory the Alpine image (musl) initialized
+  # is never mounted by the Debian one (glibc), whose text indexes could sort
+  # differently. The old coffre-pgdata-v16 stays until someone removes it.
+  coffre-pgdata-v16-debian:

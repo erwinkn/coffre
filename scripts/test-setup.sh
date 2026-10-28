@@ -16,6 +16,7 @@ for container in "${containers[@]}"; do
     settings=()
     if [[ "$container" == *-small ]]; then settings=(-c max_connections=15); fi
     docker run --rm -d --name "$container" -e POSTGRES_PASSWORD=local-setup-only \
+        -e POSTGRES_INITDB_ARGS='--locale=C --encoding=UTF8' \
         -p 127.0.0.1::5432 "$image" "${settings[@]}" >/dev/null
 done
 urls=()
