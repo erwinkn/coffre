@@ -103,9 +103,7 @@ import {
   type Wrapped,
   type Vault,
   type Via,
-  type TreesBusy,
   type TreeVerification,
-  type TreeVerificationInput,
   type VerifyLogInput,
   type WrapInput,
   type WrappedKey,
@@ -132,7 +130,7 @@ import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
-import { verifierKeys, verifyTrees, type VerifierKeys, type VerifyOptions, type Walked } from './verifier.ts';
+import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
 export type VaultOptions = {
   /**
@@ -3151,38 +3149,27 @@ class VaultService implements Vault {
   }
 
   /**
-   * 0.15's log checked (verifier.ts): a page's check from the newest pair,
-   * or, with `whole`, the walk from the first entry, its replay and every
-   * row, in this call, or refused when weighed past `walks.whole`. With 0.14's
-   * log alone, there is none to check.
+   * 0.15's log checked (verifier.ts): the newest pair and every entry above
+   * it, held to the pairs held outside. With 0.14's log alone, there is
+   * none to check. The signer remembers a pair before the database has it
+   * (RememberFirst), so a check that lands in between finds the database
+   * behind (`Verdict.behind`): it is checked again a tick later (review
+   * r4). A rollback is still behind then.
    */
-  async verifyTrees(input: TreeVerificationInput = {}): Promise<TreeVerification | TreesBusy> {
+  async verifyTrees(): Promise<TreeVerification> {
     await this.#settled();
     if (this.#prepared.log015 === null) return { kept: false };
-    const whole = input?.whole;
-    if (whole !== undefined && typeof whole !== 'boolean') throw new Error('verifyTrees takes `whole`, true or false');
-    const walked = await this.#walkTrees({ whole: whole === true, limit: this.#prepared.options.walks.whole });
-    if ('busy' in walked) return walked;
+    const anchors = await this.#prepared.log015.heldOutside();
+    const keys = await this.#verifierKeys();
+    const walk = () => verifyTrees(this.#db, keys, { anchors });
+    let walked = await walk();
+    if (walked.behind) {
+      await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
+      walked = await walk();
+    }
     // What crosses to the app: the verdict, never the retry's signal.
     const { behind: _behind, ...verdict } = walked;
     return verdict;
-  }
-
-  /**
-   * One check of 0.15's log, held to the pairs held outside. The signer
-   * remembers a pair before the database has it (RememberFirst), so a check
-   * that lands in between finds the database behind (`Verdict.behind`): it
-   * is checked again a tick later (review r4). A rollback is still behind
-   * then.
-   */
-  async #walkTrees(options: Omit<VerifyOptions, 'anchors'>): Promise<Walked | TreesBusy> {
-    const anchors = await this.#prepared.log015!.heldOutside();
-    const keys = await this.#verifierKeys();
-    const walk = () => verifyTrees(this.#db, keys, { ...options, anchors });
-    const first = await walk();
-    if ('busy' in first || !first.behind) return first;
-    await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
-    return walk();
   }
 
   async #verifierKeys(): Promise<VerifierKeys> {
@@ -3436,13 +3423,8 @@ type Scrubbed = { ok: true; next: Lap | null } | Broken;
 
 const FIRST_ENTRY: Resumed = { ok: true, entry: null, at: START, tally: EMPTY_TALLY, digest: accessDigest(EMPTY_TALLY.access), carrier: null, scrub: null };
 
-/**
- * How far one call walks the log, in entries: a checkpoint's walk from the
- * last, its rehash of the past, and a verification's own walk; and the
- * whole walk of 0.15's log (`verifyTrees`), its work a call in entries, which
- * Node leaves unbounded and a Worker bounds by its CPU time (cloudflare.ts).
- */
-export type Walks = { checkpoint: number; scrub: number; verify: number; whole: number };
+/** How far one call walks the log, in entries: a checkpoint's walk from the last, its rehash of the past, and a verification's own walk. */
+export type Walks = { checkpoint: number; scrub: number; verify: number };
 
 /**
  * A walk rehashes, MACs and replays some 40 µs of CPU an entry, and 95
@@ -3451,8 +3433,7 @@ export type Walks = { checkpoint: number; scrub: number; verify: number; whole: 
  * a thousand a day. The rehash of the past is a hash an entry, 14 µs warm
  * and 55 cold, beside two reads: 100 entries keep it near 6 ms a beat.
  */
-const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000, whole: Infinity };
-
+const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
 
 /** The digest of the members and grants a checkpoint keeps whole, beside the digest it says they have. */
 function keptDigest({ members, grants, newest }: AccessTally): string {

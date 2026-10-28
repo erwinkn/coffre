@@ -741,11 +741,8 @@ export const routes = {
     input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,16}:[0-9a-f]{64}$/)]).optional() }),
     run: (ctx, { input }) => verifyAudit(ctx, input),
   }),
-  // 0.15's log: a page's check from the newest checkpoint; with `whole`, the walk from the first entry, its replay and every input row, in this one request.
-  ...route('GET /audit/trees', {
-    input: z.object({ whole: z.literal('1').optional() }),
-    run: (ctx, { input }) => verifyAuditTrees(ctx, input),
-  }),
+  // 0.15's log: its newest checkpoint and every entry since, as the audit page checks it on every visit.
+  ...route('GET /audit/trees', { run: (ctx) => verifyAuditTrees(ctx) }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.
   ...route('GET /audit/keys', { run: (ctx) => auditKeys(ctx) }),
   // An Owner accepts that a range of the log is lost for good: the audit watch's anchor goes on past it.

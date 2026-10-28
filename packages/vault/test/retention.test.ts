@@ -167,18 +167,6 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   // The walk: the changes tree from genesis, every one kept; the uses tree from the cut.
   const v = await verify(store);
   assert.ok(v.ok, v.problems.join('\n'));
-  // Uses at or below the cut, D9's stragglers among them, are not read at all (review r14): nothing a writer plants there
-  // costs a walk either.
-  const read: bigint[] = [];
-  const watched: LogStore = Object.assign(Object.create(store) as LogStore, {
-    entries: async (...args: Parameters<LogStore['entries']>) => {
-      const got = await store.entries(...args);
-      read.push(...got.filter((e) => e.tree === 'uses').map((e) => e.number));
-      return got;
-    },
-  });
-  assert.ok((await verify(watched)).ok);
-  assert.ok(read.length > 0 && read.every((n) => n > cutUpto), `${read.filter((n) => n <= cutUpto).length} uses read at or below the cut`);
   for (const n of [...today, ...changes]) {
     const p = (await cp.prove(n))!;
     assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair[p.tree].root), `${n}`);

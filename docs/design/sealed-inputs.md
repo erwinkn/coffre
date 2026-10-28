@@ -161,10 +161,10 @@ sealing them would put the vault's key, or a change entry, on that write.
 So a database writer who erases a principal's rows resets its cap, and the
 use that follows is allowed where the replay says `bulk_limit`, with no
 input `stale`. The cap is a rate, not a right: nothing it lets through is
-anything the principal may not read. PR 8's row audit holds every bulk row
-to the replay's, as W211's verifier does, and names the drift. The
-property tests state exactly this: bulk rows moved change a decision only
-between allowed and `bulk_limit`.
+anything the principal may not read. Nothing holds the bulk rows to the
+replay's yet: PR 8 has no row audit (D145), and T138 models the agreement
+first. The property tests state exactly this: bulk rows moved change a
+decision only between allowed and `bulk_limit`.
 
 ## Replay
 
@@ -172,8 +172,8 @@ between allowed and `bulk_limit`.
 logged is the vault's over the object the replay has, and decides each use
 with `readUse` over the replay's rows. It names what does not hold: a
 change that does nothing, a seal that is not its object's, numbers out of
-order. PR 8's verifier adds the row audit (every row is the replay's) and
-the checkpoints.
+order. PR 8's verifier checks the checkpoints and the entries above the
+newest; it replays nothing and reads no row (D145).
 
 `readUse` is the use's statement, written over maps: which rows it reads,
 in which order, and how it moves the cap. PR 5's `use_credential` must read
@@ -215,7 +215,7 @@ the same.
 | 6 | Every seal before any row | each input's seal before its own row | both sound; the first gives `stale` for any input not the log's | none measured |
 | 7 | Seals under a key of their own (HKDF label `coffre.vault.seals.v1`) | 0.14's row key | separates 0.15's seals from 0.14's member MACs | none |
 | 8 | The roles object holds edits only, merged over the release's tables | the whole tables, sealed | a release that changes a shipped role replays the same log the same way (review r1: whole tables made the replay fault) | a decision merges two small tables |
-| 9 | The bulk rows outside the seals; the row audit (PR 8) checks them | sealed per principal | no seal, no key, on the use's statement's bulk write | an erased row resets one principal's cap until the audit names it |
+| 9 | The bulk rows outside the seals; the row audit (PR 8) checks them | sealed per principal | no seal, no key, on the use's statement's bulk write | an erased row resets one principal's cap, and no check names it yet (T138) |
 
 ## Open
 

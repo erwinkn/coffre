@@ -54,16 +54,14 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
  * Reads only coffre's own pages make, which do work for the asking: the
- * consent page's describes a client, fetching its metadata document, an
- * approval's reads what its change would replace, as the person, and the
- * audit page's walk of the whole sealed log (`audit/trees?whole=1`) reads
- * all of it, seconds of the vault's time (review r11). Asked with a cookie,
- * they take the same-origin rule a change does, so another site's `<img>`
- * or link cannot make coffre fetch a URL, read, or walk, in a signed-in
+ * consent page's describes a client, fetching its metadata document, and an
+ * approval's reads what its change would replace, as the person. Asked
+ * with a cookie, they take the same-origin rule a change does, so another
+ * site's `<img>` cannot make coffre fetch a URL, or read, in a signed-in
  * person's name. By their route, as the router reads a path, `:id` any one
  * segment: `/api//oauth/authorizations/` is the same read.
  */
-const PAGE_READS = ['oauth/authorizations', 'approvals/:id', 'audit/trees'].map((route) => route.split('/'));
+const PAGE_READS = ['oauth/authorizations', 'approvals/:id'].map((route) => route.split('/'));
 
 /** Whether a request is to one of `routes`, by its path as the router reads it. */
 function routeIn(request: Request, routes: readonly string[][]): boolean {

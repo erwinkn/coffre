@@ -19,9 +19,7 @@ import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verify
  * MAC, its request ID) is the caller's to check, through `check`, which sees
  * every entry walked, in number order. The cost is the entries since the
  * start: a caller that keeps the `head` it verified walks only what came
- * after (R25). A caller bounded in time weighs the walk before it starts
- * (the vault's verifier counts what lies in range, review r14): the walk
- * itself goes to the end.
+ * after (R25).
  *
  * Retention (plan PR 7, formal/Seal.tla) drops days of uses, and the uses
  * tree's tiles, below a cut that a retention change names; changes are kept
@@ -48,11 +46,9 @@ export type LogReader = {
    * The entries numbered in (after, upto], by number, both trees. Uses are
    * read from `floor`, the floor of `at` signed in the pair at `after`, when
    * the caller gives it: a reader that takes it from its rows lets a writer
-   * hide what lies above (FloorChecked). With `usesAbove`, only the uses
-   * numbered above it: those at or below retention's cut are not walked,
-   * and are not read either (review r14).
+   * hide what lies above (FloorChecked).
    */
-  entries(after: bigint, upto: bigint, options?: { floor?: number; usesAbove?: bigint }): Promise<LogEntry[]>;
+  entries(after: bigint, upto: bigint, options?: { floor?: number }): Promise<LogEntry[]>;
   tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]>;
   /** The newest retention change, if any, and its leaf index in the changes tree (plan PR 7). */
   retention?(): Promise<{ entry: LogEntry; index: number } | null>;
@@ -81,7 +77,9 @@ export type Verdict = {
 
 type Stop = { pair: Pair; notes: PairNotes; row: boolean };
 
-export type VerifyOptions = {
+const PAGE = 100;
+
+type Options = {
   verifiers: PairVerifiers;
   from?: PairNotes;
   anchors?: readonly PairNotes[];
@@ -90,10 +88,7 @@ export type VerifyOptions = {
   cut?: (entry: LogEntry) => Cut | null;
 };
 
-const PAGE = 100;
-
-
-export async function verifyLog(reader: LogReader, opts: VerifyOptions): Promise<Verdict> {
+export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
   const problems: string[] = [];
   const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false };
   const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
@@ -108,7 +103,7 @@ export async function verifyLog(reader: LogReader, opts: VerifyOptions): Promise
 
 async function walk(
   reader: LogReader,
-  opts: VerifyOptions,
+  opts: Options,
   problems: string[],
   verdict: { checkpoints: number; sealed: number; unsealed: number; behind: boolean },
   done: (head: PairNotes | null) => Verdict,
@@ -249,8 +244,6 @@ async function walk(
       previous = e.number > previous ? e.number : previous;
     }
   };
-  // Below the cut the uses are not read at all, so none of them, a writer's planted ones included, costs the walk.
-  const reads = () => ({ floor, ...(ahead === null ? {} : { usesAbove: ahead.upto }) });
   for (let rows = await reader.pairs(start.pair.upto, PAGE); ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
     const stops: Stop[] = [];
     for (const row of rows) {
@@ -274,7 +267,7 @@ async function walk(
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
       // From the floor the pair at `cursor` signed, never its row's (review r9).
-      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, reads())).filter((e) => !dropped(e));
+      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, { floor })).filter((e) => !dropped(e));
       let at = 0;
       for (const stop of stops) {
         const window: LogEntry[] = [];
@@ -315,7 +308,7 @@ async function walk(
     if (final) break;
   }
   // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9).
-  const unsealed = (await reader.entries(cursor, MAX_NUMBER, reads())).filter((e) => !dropped(e));
+  const unsealed = (await reader.entries(cursor, MAX_NUMBER, { floor })).filter((e) => !dropped(e));
   walkEntries(unsealed);
   verdict.unsealed = unsealed.length;
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);

@@ -79,19 +79,6 @@ test('tiles give the reference head at every size, appended in uneven batches', 
   }
 });
 
-test('review r14: the edge keeps its head until a leaf is appended, and an append of none keeps it', () => {
-  const { edge, all } = grow([65535]);
-  const head = edge.root();
-  // The same head, not hashed again: a walk asks it at every pair, most over few leaves or none.
-  assert.equal(edge.root(), head);
-  edge.append([]);
-  assert.equal(edge.root(), head);
-  const more = leaves(65536, 65535);
-  edge.append(more);
-  assert.notEqual(edge.root(), head);
-  assert.ok(edge.root().equals(reference([...all, ...more])));
-});
-
 test('the edge computes the head itself, reloads from the edge tiles alone, and a clone leaves it as it was', () => {
   for (const size of [1, 255, 256, 257, 65536, 65537, 70001]) {
     const { tiles, edge, all } = grow([size]);

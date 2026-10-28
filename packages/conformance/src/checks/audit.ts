@@ -75,15 +75,14 @@ export async function verification(deployment: Deployment, { admin }: People): P
     expect(result.through !== null && BigInt(result.through) === BigInt(last.seq), 'verification stopped before the head', { result, head: head.next_seq });
     expect(BigInt(result.entries) === BigInt(head.next_seq), 'verification did not count every entry', result);
   });
-  // 0.15's log, where the deployment keeps it (plan PR 8): its trees, every entry and the changes' replay from the
-  // first entry, and every input row the replay's (the bulk cap's rows, not yet: T138). A deployment of 0.14's log
-  // alone has none (`kept` false).
-  const trees = await admin.api.audit.verifyTrees({ whole: true });
-  expect(!trees.kept || trees.ok, "0.15's log does not verify from its first entry", trees);
+  // 0.15's log, where the deployment keeps it (plan PR 8): its newest checkpoint and every entry since, as the audit
+  // page checks it. A deployment of 0.14's log alone has none (`kept` false).
+  const trees = await admin.api.audit.verifyTrees();
+  expect(!trees.kept || trees.ok, "0.15's log does not verify from its newest checkpoint", trees);
   const page = await admin.browser.fetch('/audit');
   const html = await page.text();
   expect(page.status === 200 && html.includes('chain-seal') && !html.includes('Verifying'), 'the audit page was not sent with its verification result', { status: page.status });
-  const sealed = trees.kept ? `; 0.15's log replayed, every input row the log's, through the checkpoint up to ${trees.checkpoint?.upto ?? 0}` : '';
+  const sealed = !trees.kept ? '' : trees.checkpoint === null ? "; 0.15's log, nothing sealed yet" : `; 0.15's log from its checkpoint up to ${trees.checkpoint.upto}`;
   return `${result.entries} entries verified through the head at ${result.through}${sealed}, and the audit page sent with its result`;
 }
 

@@ -543,9 +543,9 @@ on Node, `durableSealThrough(…)` on Workers. `sealThroughDouble` in
   `make_day`, `make_tiles`), the freshness step, and the cut named in the
   uses tree's coordinates.
 - **PR 8, the verifier's surfaces:** built (`packages/vault/src/verifier.ts`;
-  0.15-plan.md, "As built: PR 8"): a page's check from the newest pair,
-  and the whole walk, which walks the uses tree from the newest retention
-  cut.
+  0.15-plan.md, "As built: PR 8"): a page's check from the newest pair.
+  No walk of the whole log on a request (D145): `verifyLog` from the first
+  entry, through the retention cut, is what an offline scan will run.
 
 ## The spec, and where the code holds it
 

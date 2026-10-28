@@ -1,72 +1,50 @@
 import { openPair, pairSigners, pairVerifiers, verifyLog, type LogEntry, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
-import type { TreesBusy, TreeVerification } from '@coffre/core/vault';
+import type { TreeVerification } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { loggedChange } from './changes.ts';
-import { FRESH_MS, logOrigin } from './checkpointer.ts';
-import { alike, refOf, sealKey, type Input, type SealKeys } from './inputs.ts';
+import { logOrigin } from './checkpointer.ts';
 import { authentic, logMacKey, retentionCut } from './log-entry.ts';
-import { emptyReplay, purposeOf, replay, type Logged, type Replayed } from './log-replay.ts';
+import { purposeOf } from './log-replay.ts';
 import { logStore } from './log-store.ts';
-import { heldObjects, requestsUnique, walkSlot, walkWork } from './store.ts';
+import { requestsUnique } from './store.ts';
 
 /**
  * 0.15's verifier (docs/design/0.15-plan.md, PR 8): what holds 0.15's log
- * to itself and the rows to the log, for the audit page, `coffre verify
- * log` and conformance. Two checks, and nothing kept between calls.
+ * to itself, for the audit page, `coffre verify instance` and conformance,
+ * on every visit (R25), and keeps nothing between calls. It checks the
+ * newest signed pair, its signatures and the pairs held outside (the
+ * signer's memory), then every entry above it by its MAC and its request:
+ * a tick's worth of entries, whatever the log's size, in six statements.
  *
- * **A page's check** (R25), on every visit: the newest signed pair, its
- * signatures and the pairs held outside (the signer's memory), then every
- * entry above it by its MAC and its request. A tick's worth of entries,
- * whatever the log's size; no replay, no row read.
- *
- * **The whole walk**, which someone asks for ("Verify whole log", `coffre
- * verify log`), in the one call that asked, read in batches (a page of
- * pairs and their entries at a time):
- * - **the trees** (`verifyLog` in @coffre/core/merkle): every pair rebuilt
- *   from the entries, both heads, from the first; so an entry deleted,
- *   added, changed or moved after its seal shows at the next pair;
- * - **each entry** by its MAC (the checkpointer's `authentic`), and its
- *   request once (RequestIdChecked): a copy of an entry is a replay;
- * - **the replay** (log-replay.ts): each change applied with `applyOp` and
- *   its seal held to the object the replay has;
- * - **the rows,** at the present, in the snapshot it read the log in: every
- *   object's rows hold the object the replay has, with its newest seal. A
- *   row put back from before a change, a row written with no change, a
- *   change's entry deleted before its seal (its row then carries a seal no
- *   entry left): each is a row the log does not make.
- * Uses are not replayed, and the bulk cap's rows are not held to the log:
- * their replay must agree with the live cap across `prune_bulk`, retention
- * cuts and windows changed, which is modelled first (T138, R45).
- * Weighed past `limit` (a Worker's CPU time) before it starts (`weigh`), it
- * reads nothing and says so, with where to walk it instead (`tooLarge`).
- *
- * Between whole walks, every use refuses a row put back `stale` (decide.ts).
- * What neither can see, by design: an entry deleted or reordered before its
- * tick (R51's window; a change answers only once sealed, so this is a use's),
- * and entries swapped whose replay is the same either way.
+ * Below the newest pair, the pair vouches for what it sealed: it is not
+ * walked again. A row a decision reads is held to its object's newest
+ * change by every use (decide.ts, `stale`), never by this check, which
+ * reads no row. What is not checked, by design (D145): an edit a database
+ * writer makes to old entries, or to rows nobody uses, until an offline
+ * scan exists; the signed pairs let one rebuild the trees later without the
+ * MAC key. There is no walk of the whole log on a request: its cost is
+ * shaped by what the database holds, which its writer chooses, and a
+ * Worker's call has a limit on its CPU time. Nor can this check see an
+ * entry deleted or reordered before its tick (R51's window; a change
+ * answers only once sealed, so this is a use's).
  */
 
-/** The keys a walk needs: the trees' public keys, the entries' MAC key, and the seal keys. */
-export type VerifierKeys = { verifiers: PairVerifiers; mac: Buffer; seals: SealKeys };
+/** The keys a check needs: the trees' public keys, and the entries' MAC key. */
+export type VerifierKeys = { verifiers: PairVerifiers; mac: Buffer };
 
-/** The verifier's keys from the vault's signing seeds: the trees' and the entries' from the first, as the checkpointer has them (log-checkpointer.ts). */
+/** The verifier's keys from the vault's first signing seed, as the checkpointer has them (log-checkpointer.ts). */
 export async function verifierKeys(seeds: readonly Uint8Array[]): Promise<VerifierKeys> {
   const seed = seeds[0]!;
   const signers = await pairSigners(await logOrigin(seed), seed);
   return {
     verifiers: await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey }),
     mac: logMacKey(seed),
-    seals: seeds.map((s) => sealKey(s)),
   };
 }
 
 export type VerifyOptions = {
-  /** The walk from the first entry, with the replay and the row audit; else a page's check. */
-  whole?: boolean;
-  /** The work a whole walk may do in one call, weighed before it starts (`weigh`); past it, `tooLarge`, nothing read. */
-  limit?: number;
   /**
    * Pairs held outside the database: the signer's memory, a witness's
    * (`VaultOptions.heldOutside`). Each check must reach each: a database
@@ -79,99 +57,40 @@ export type VerifyOptions = {
 /** The verdict as the vault gives it, and whether the database ended behind a pair held outside (`Verdict.behind`). */
 export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boolean };
 
-/** When a whole walk refused, as many as `WHOLE_WALKS` under way already (review r11), asks again, in seconds. */
-const WALK_RETRY_S = 5;
-
-/**
- * What each thing a whole walk does weighs, in entries walked (some 30 µs
- * each warm on Node): a pair, its two signatures and its heads (about
- * 1 ms); a row audited; a unit of the replay's sealing (a grant of an
- * object sealed, some 3 µs).
- */
-const WEIGHTS = { pair: 30, row: 1, replay: 0.1 };
-
-/** A whole walk's work, in entries, from what `walkWork` counts. */
-export function weightOf(w: Awaited<ReturnType<typeof walkWork>>): number {
-  return w.changes + w.uses + w.pairs * WEIGHTS.pair + w.rows * WEIGHTS.row + w.replay * WEIGHTS.replay;
-}
-
-/**
- * A whole walk weighed before it starts (review r14), in its own snapshot.
- * Four rounds of review each found a unit of work a running budget did not
- * pay for (a tail, one large window, the bound's own edge, pairs; then the
- * rows, the replay's sealing, the heads' hashing): the walk is counted
- * whole first instead, and refused, nothing read, past `limit`. First the
- * newest pair's sizes, one statement and its signatures, so a log they put
- * past it costs no count; then `walkWork`'s counts, the database's work.
- * Null when it fits.
- */
-async function weigh(tx: Database, keys: VerifierKeys, limit: number): Promise<string | null> {
-  const store = logStore(tx);
-  const retained = await store.retention();
-  const cut = retained === null ? null : retentionCut(retained.entry);
-  const newest = await store.newest();
-  const pair = newest === null ? null : await openPair(newest.notes, keys.verifiers);
-  const said = (work: number, what: string) => `0.15's log holds more than this vault walks in one call: ${what}, some ${Math.ceil(work).toLocaleString('en')} entries' worth of work, past its ${limit.toLocaleString('en')}. A Worker's call has a limit on its CPU time: walk the log whole on Node, where a call has none, with a Node deployment of coffre over this database, or over a copy \`coffre restore\` made, under the same vault key; then \`coffre verify log\` there`;
-  if (pair !== null) {
-    const sealed = pair.changes.size + pair.uses.size - (cut?.uses.size ?? 0);
-    if (sealed > limit) return said(sealed, `${sealed.toLocaleString('en')} entries sealed`);
-  }
-  const w = await walkWork(tx, cut?.upto ?? -1n);
-  const work = weightOf(w);
-  if (work <= limit) return null;
-  return said(work, `${(w.changes + w.uses).toLocaleString('en')} entries, ${w.pairs.toLocaleString('en')} checkpoints and ${w.rows.toLocaleString('en')} rows`);
-}
-
-export async function verifyTrees(db: Database, keys: VerifierKeys, options: VerifyOptions): Promise<Walked | TreesBusy> {
-  const whole = options.whole === true;
+export async function verifyTrees(db: Database, keys: VerifierKeys, options: VerifyOptions): Promise<Walked> {
   const walked = await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
-    if (whole && !(await walkSlot(tx))) return null;
-    const heavy = whole && options.limit !== undefined && Number.isFinite(options.limit) ? await weigh(tx, keys, options.limit) : null;
-    if (heavy !== null) return { heavy };
     const store = logStore(tx);
-    // A page's check starts at the newest pair, which its signatures and the pairs held outside vouch for. It walks no
-    // use below it, so retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
-    const newest = whole ? null : await store.newest();
-    const replayed = whole ? emptyReplay() : null;
-    const requests = new Requests();
+    // From the newest pair, which its signatures and the pairs held outside vouch for. It walks no use below it, so
+    // retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
+    const newest = await store.newest();
+    // Each entry's request, seen once (RequestIdChecked): a change's by its id, a use's by its time and id, which its MAC
+    // covers. A copy below the start is what the database's unique indexes refuse, which every check holds to standing.
+    const requests = new Set<string>();
     const macHolds = authentic(keys.mac);
     const check = (entry: LogEntry): string | null => {
       if (!macHolds(entry)) return 'its MAC does not hold';
-      if (!requests.once(entry)) return 'a second entry under the request of another: a replay';
-      const one = logged(entry);
-      if (typeof one === 'string') return one;
-      // The changes alone: a use's replay moves only the bulk cap, which T138 holds to the log.
-      if (replayed === null || one === null || one.kind === 'use') return null;
-      const faults = replayed.faults.length;
-      replay(keys.seals, [one], undefined, replayed);
-      return replayed.faults.length > faults ? replayed.faults.splice(faults).map((fault) => fault.replace(/^\d+: /, '')).join('; ') : null;
+      const request = entry.tree === 'changes' ? `c:${String(entry.columns[1])}` : `u:${entry.at}:${String(entry.columns[1])}`;
+      if (requests.has(request)) return 'a second entry under the request of another: a replay';
+      requests.add(request);
+      return malformed(entry);
     };
     const verdict = await verifyLog(store, {
       verifiers: keys.verifiers,
       check,
       ...(newest === null ? {} : { from: newest.notes }),
       ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
-      ...(whole ? { cut: retentionCut } : {}),
     });
     const problems = [...verdict.problems];
     if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
-    // At the present, the whole walk holds every row to its replay.
-    if (replayed !== null) problems.push(...audit(replayed, await heldObjects(tx)));
     return { verdict, problems };
   }, SNAPSHOT);
-  if (walked === null) return { busy: true, retryAfter: WALK_RETRY_S };
-  if ('heavy' in walked) {
-    return { kept: true, whole, ok: false, problems: [], tooLarge: walked.heavy ?? null, checkpoint: null, checkpoints: 0, sealed: 0, unsealed: 0, behind: false };
-  }
   const { verdict, problems } = walked;
   const head = verdict.head === null ? null : await openPair(verdict.head, keys.verifiers);
   return {
     kept: true,
-    whole,
     ok: problems.length === 0,
     problems,
-    tooLarge: null,
     checkpoint: head === null ? null : { upto: head.upto.toString(), at: head.at },
     checkpoints: verdict.checkpoints,
     sealed: verdict.sealed,
@@ -180,14 +99,13 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   };
 }
 
-// --- entries ------------------------------------------------------------------------------------------
-
 /**
- * An entry as the replay takes it, from the columns its tree seals
- * (log-entry.ts), or why it cannot be one; null for a retention change,
- * the log's own, which changes no input.
+ * Why an entry is none a release writes, from the columns its tree seals
+ * (log-entry.ts): a change whose payload names no object, or another than
+ * its own; a use of no purpose. Null for one that reads, a retention
+ * change, the log's own, included.
  */
-function logged(entry: LogEntry): Logged | string | null {
+function malformed(entry: LogEntry): string | null {
   const c = entry.columns;
   if (retentionCut(entry) !== null) return null;
   if (entry.tree === 'changes') {
@@ -199,90 +117,10 @@ function logged(entry: LogEntry): Logged | string | null {
         change = loggedChange({ number: entry.number, at: entry.at, object, payload, seal: seal === null ? null : Buffer.from(seal) });
       }
     } catch {}
-    return change ?? 'a change whose payload names no object, or another than its own';
+    return change === null ? 'a change whose payload names no object, or another than its own' : null;
   }
   // [at, request, credential, secret, purpose, place, mac]
   const [credential, secret, code, place] = [c[2], c[3], c[4], c[5]];
   const purpose = typeof code === 'number' ? purposeOf(code) : null;
-  if (purpose === null || typeof credential !== 'string' || typeof secret !== 'string' || (place !== null && typeof place !== 'string')) return 'a use no release writes';
-  return { kind: 'use', number: entry.number, request: { credential, secretId: secret, place, at: entry.at, ...purpose } };
-}
-
-/**
- * Each entry's request, seen once (RequestIdChecked): a change's by its id,
- * a use's by its time and id, which its MAC covers. A copy shares them, and
- * a copy is sealed only within FRESH_MS of the pair the signer holds, so
- * only requests that recent are kept; a copy further apart, or one below
- * the pair a page's check starts at, is what the database's unique indexes
- * refuse, which every check holds to standing.
- */
-export class Requests {
-  readonly #seen = new Map<string, number>();
-  #newest = -Infinity;
-  #taken = 0;
-  /** How many times the old requests were swept: every `every` entries taken, whatever the map holds (review r14). */
-  sweeps = 0;
-  readonly every: number;
-
-  constructor(every = 10_000) {
-    this.every = every;
-  }
-
-  once(entry: LogEntry): boolean {
-    const key = entry.tree === 'changes' ? `c:${String(entry.columns[1])}` : `u:${entry.at}:${String(entry.columns[1])}`;
-    if (this.#seen.has(key)) return false;
-    this.#seen.set(key, entry.at);
-    this.#newest = Math.max(this.#newest, entry.at);
-    // By entries taken, never by the map's size: a sweep that left it one short of the mark swept again at the next.
-    if (++this.#taken % this.every === 0) {
-      this.sweeps += 1;
-      for (const [k, at] of this.#seen) if (at < this.#newest - 2 * FRESH_MS) this.#seen.delete(k);
-    }
-    return true;
-  }
-}
-
-// --- the rows -----------------------------------------------------------------------------------------
-
-/** Whether a row's object is the replay's; one of a shape no release writes, which the comparison cannot read, is not. */
-function same(row: Input, object: Input): boolean {
-  try {
-    return alike(row, object);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Every row held to the replay: each object the log holds is in its rows,
- * as the replay has it, with its newest seal; each the log deleted (a key
- * archived) has none, and no seal; a row the log never heard of carries no
- * seal and is 0.14's, before the cutover (plan PR 9), but for the roles'
- * and the policy's, which only a change writes.
- */
-function audit(replayed: Replayed, held: Awaited<ReturnType<typeof heldObjects>>): string[] {
-  const problems: string[] = [];
-  const name = (key: string) => {
-    const row = replayed.rows.get(key)?.row;
-    const ref = held.get(key)?.ref ?? (row === undefined ? undefined : refOf(row));
-    return ref === undefined ? `object ${key}` : `the ${ref.kind} ${ref.id}`;
-  };
-  for (const [key, seal] of replayed.newest) {
-    const rows = held.get(key);
-    if (seal === null) {
-      if (rows !== undefined && (rows.row !== null || rows.seal !== null)) problems.push(`${name(key)}: its rows hold what the log deleted`);
-      continue;
-    }
-    const object = replayed.rows.get(key)!.row;
-    if (rows?.unreadable === true) problems.push(`${name(key)}: its rows do not read as an object`);
-    else if (rows === undefined || (rows.row === null && rows.sealOnly === undefined)) problems.push(`${name(key)}: the log holds it, its rows do not`);
-    else if (rows.seal === null || !rows.seal.equals(seal)) problems.push(`${name(key)}: its rows carry ${rows.seal === null ? 'no seal' : "another change's seal than the newest"}: put back, or written around the vault`);
-    else if (rows.sealOnly === undefined && !same(rows.row!, object)) problems.push(`${name(key)}: its rows are not the object the log makes`);
-  }
-  for (const [key, rows] of held) {
-    if (replayed.newest.has(key)) continue;
-    if (rows.seal !== null) problems.push(`${name(key)}: sealed, and the log holds no change of it`);
-    else if (rows.ref.kind === 'roles' || rows.ref.kind === 'policy') problems.push(`${name(key)}: written with no change: only a change writes it`);
-  }
-  return problems;
+  return purpose === null || typeof credential !== 'string' || typeof secret !== 'string' || (place !== null && typeof place !== 'string') ? 'a use no release writes' : null;
 }

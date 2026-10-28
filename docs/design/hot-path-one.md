@@ -765,12 +765,14 @@ How a use checks them:
 - Measured (fence-one): put back the member row and grant from before a
   revoke, a credential from before its revoke, a secret from before its key
   was rotated, or an environment from before its deletion. Each use is
-  refused `stale`, and the verifier names each row ("not the log's").
+  refused `stale`, and the prototype's verifier named each row ("not the
+  log's"); 0.15's reads no row (D145).
 - Without the seal check, all four would be allowed live. The replay refuses
   three of them, so a check of live against replay catches those. It does
   not catch the secret: a use that releases the old key is allowed in the
-  replay too, and only the row audit shows it. Rows, not only decisions, must
-  match the log.
+  replay too, and only a check of the rows against the log would show it
+  (PR 8 has none, D145; an offline scan, later). Rows, not only decisions,
+  must match the log.
 
 **The seal cache.** The four probes cost about half of the call's server
 time. So each isolate keeps the seals it last read, as of the log's newest
@@ -1317,7 +1319,7 @@ open to him.
 | 17 | **The use row carries purpose (+256 when a copy keeps values sensitive) and the place read through** (W216, W215) | the prototype's row (credential, key) | 140.8 B per use with the place null, as before (alignment padding); 142.6 B with a place on 10% of uses (W215, schema 0022) | the replay decides every purpose; a fork's read is named |
 | 18 | **The place read through decides nothing** (0.14's `through`): a live, unarchived environment of the key's project, not its own; the key is decided where it is held | decide at the fork | a fork-only reader reads no inherited value, as forking.md says (review r2) | none |
 | 19 | **Every seal before any row; the cap from the policy's newest change** (`StaleFirst`, `CapSealed`) | each input's seal before its own row; the cap from the row or the call | the first gives `stale` for any input not the log's (mutation-tested); the second keeps live equal to replay with a policy row put back | none measured |
-| 20 | **The bulk rows outside the seals** | sealed per principal | no key and no change entry on the use statement's bulk write | an erased row resets one principal's cap until PR 8's row audit names it (property-tested: bulk rows change a decision only between allowed and `bulk_limit`) |
+| 20 | **The bulk rows outside the seals** | sealed per principal | no key and no change entry on the use statement's bulk write | an erased row resets one principal's cap, and no check names it yet (T138; property-tested: bulk rows change a decision only between allowed and `bulk_limit`) |
 | 21 | **Object keys: the first 16 bytes of SHA-256(`coffre.object.v1\0` kind `\0` id), as a uuid**, in TS (`objectKey`) and SQL (`log_object`, STABLE so it inlines: 3.7 against 32 µs a call, W215) | text keys | about a fifth cheaper per probe (W211's estimate); vectors in `packages/vault/test/object-keys.json`, checked by `pnpm test:schema` | the principal's id hashed once per use |
 
 ## Open decisions

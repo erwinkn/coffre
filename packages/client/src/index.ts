@@ -181,13 +181,6 @@ export function createClient(options: ClientOptions) {
     return (await send(method, path, input)) as RouteOutput<K>;
   }
 
-  /** 0.15's log checked; a server older than 0.15 has no such route, and keeps 0.14's log alone (`kept` false). */
-  const verifyTrees = (query: RouteInput<'GET /audit/trees'> = {}): Promise<RouteOutput<'GET /audit/trees'>> =>
-    call('GET /audit/trees', {}, query).catch((error: unknown) => {
-      if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
-      throw error;
-    });
-
   return {
     call,
 
@@ -489,13 +482,16 @@ export function createClient(options: ClientOptions) {
         }
       },
       /**
-       * Whether 0.15's log holds (the vault's `verifyTrees`): a page's check,
-       * the newest signed checkpoint and every entry since; or, with `whole`,
-       * the walk from the first entry, its trees, every entry, the replay and
-       * every input row, in one request. `kept` false where the instance keeps
-       * 0.14's log alone.
+       * Whether 0.15's log holds (the vault's `verifyTrees`): its newest signed
+       * checkpoint and every entry since. `kept` false where the instance
+       * keeps 0.14's log alone, a server older than 0.15 (no such route)
+       * included.
        */
-      verifyTrees: (options: { whole?: boolean } = {}) => verifyTrees(options.whole === true ? { whole: '1' } : {}),
+      verifyTrees: (): Promise<RouteOutput<'GET /audit/trees'>> =>
+        call('GET /audit/trees', {}).catch((error: unknown) => {
+          if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
+          throw error;
+        }),
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
       /**

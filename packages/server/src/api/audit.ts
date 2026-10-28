@@ -23,7 +23,7 @@ import {
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import type { ApiContext } from './context.ts';
-import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
+import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
 
@@ -526,41 +526,17 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
 
 /**
  * 0.15's log checked by the vault (`verifyTrees`, docs/design/0.15-plan.md
- * PR 8): a page's check, the newest signed checkpoint and every entry since,
- * by its MAC and request; with `whole`, the walk from the first entry, both
- * trees, the changes replayed and every input row held to them (not yet the
- * bulk cap's rows: T138), in this one request. With 0.14's log alone, `kept` false. For whoever reads the whole
- * log (`readsWholeLog`), as `verifyAudit`.
+ * PR 8): the newest signed checkpoint and every entry since, by its MAC and
+ * request, as the audit page checks it on every visit. With 0.14's log
+ * alone, `kept` false. For whoever reads the whole log (`readsWholeLog`),
+ * as `verifyAudit`.
  */
-export async function verifyAuditTrees(ctx: ApiContext, query: { whole?: '1' } = {}): Promise<TreeVerification> {
+export async function verifyAuditTrees(ctx: ApiContext): Promise<TreeVerification> {
   if (!readsWholeLog(ctx.caller)) {
     throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
   }
   if (ctx.vault.verifyTrees === undefined) return { kept: false };
-  const verified = await ctx.vault.verifyTrees(query.whole === '1' ? { whole: true } : {});
-  // Whole walks under way to the bound: refused at once, to ask again (review r11).
-  if ('busy' in verified) throw new ApiError('unavailable', 'the whole log is being walked as many times as it may be at once: ask again shortly', undefined, String(verified.retryAfter));
-  return verified.kept && verified.problems.length > 0 ? { ...verified, problems: await namedObjects(ctx, verified.problems) } : verified;
-}
-
-/**
- * The vault's problems with their objects worded by name, as `named` does
- * 0.14's faults: an environment as `market/prod`, a member as they are
- * shown. Keys and credentials keep their ids, which is how the API names
- * them too.
- */
-async function namedObjects(ctx: ApiContext, problems: readonly string[]): Promise<string[]> {
-  const known = problems.some((problem) => problem.includes('the environment ')) ? await places(ctx.db, { tombstones: true }) : [];
-  const environment = (id: string) => {
-    for (const project of known) {
-      const found = project.environments.find((place) => place.id === id);
-      if (found !== undefined) return `${project.slug}/${found.slug}`;
-    }
-    return id;
-  };
-  return problems.map((problem) => problem
-    .replace(/the environment ([0-9a-f-]{36})/g, (_, id: string) => `the environment ${environment(id)}`)
-    .replace(/the principal (\S+): /g, (_, principal: string) => `the member ${principalName(principal)}: `));
+  return ctx.vault.verifyTrees();
 }
 
 /**

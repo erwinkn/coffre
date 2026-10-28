@@ -236,50 +236,27 @@ export interface Vault {
    */
   waitSealed?(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>>;
   /**
-   * Check 0.15's log (docs/design/0.15-plan.md, PR 8). A page's check, by
-   * default: the newest signed pair, held to the pairs held outside, and
-   * every entry after it by its MAC and request, a tick's worth (R25). With
-   * `whole`, the walk someone asks for: both trees from the first entry,
-   * every entry, the changes replayed and every input row held to the
-   * replay, all in this one call, batched, kept nowhere; not the bulk cap's
-   * rows, which T138 holds to the log once modelled. With 0.14's
-   * log alone, `kept` false; a vault older than 0.15 has none.
+   * Check 0.15's log (docs/design/0.15-plan.md, PR 8), as the audit page
+   * does on every visit: the newest signed pair, held to the pairs held
+   * outside, and every entry after it by its MAC and request, a tick's
+   * worth (R25). Nothing walks the whole log on a request (D145). With
+   * 0.14's log alone, `kept` false; a vault older than 0.15 has none.
    */
-  verifyTrees?(input: TreeVerificationInput): Promise<TreeVerification | TreesBusy>;
+  verifyTrees?(): Promise<TreeVerification>;
 }
 
-export type TreeVerificationInput = {
-  /** The walk from the first entry, with the replay and the row audit, rather than a page's check. */
-  whole?: boolean;
-};
-
 /**
- * A whole walk not begun: as many as the instance runs at once already are
- * (two), each holding a snapshot for seconds. The app answers 503, with
- * `Retry-After`.
- */
-export type TreesBusy = { busy: true; retryAfter: number };
-
-/**
- * 0.15's log as a check found it. `problems` names what does not hold, each
- * at its entry where it has one: a checkpoint whose heads the entries do
- * not give, an entry whose MAC fails, a replay fault, a row not the
- * replay's. Numbers are decimal text: the log's are 64-bit.
+ * 0.15's log as its check found it. `problems` names what does not hold,
+ * each at its entry where it has one: a checkpoint not signed, or not the
+ * one held outside; an entry whose MAC fails, or under another's request.
+ * Numbers are decimal text: the log's are 64-bit.
  */
 export type TreeVerification =
   | { kept: false }
   | {
       kept: true;
-      /** Whether this is the walk from the first entry, replay and rows included, or a page's check from the newest pair. */
-      whole: boolean;
       ok: boolean;
       problems: string[];
-      /**
-       * Why a whole walk was not walked, said plainly, with what to do
-       * instead: the log holds more than this vault walks in one call (a
-       * Worker's CPU time). `ok` is false, and nothing is known broken.
-       */
-      tooLarge: string | null;
       /** The newest pair checked, and when it was signed (ms); null before the first. */
       checkpoint: { upto: string; at: number } | null;
       /** Pairs walked past the start, entries sealed under them, and entries above the newest. */

@@ -9,7 +9,7 @@ import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { objectKey, type Input, type Kind, type Ref } from './inputs.ts';
-import { configObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
+import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -951,135 +951,6 @@ export async function newestSealedChanges(db: Queryable, refs: readonly Ref[]): 
   if (refs.length === 0) return new Map();
   const found = await rowsOf<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | Uint8Array }>(db, newestSealedQuery(refs));
   return new Map(found.map((row) => [row.object, { number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: Buffer.from(row.seal) }]));
-}
-
-/**
- * An object as its rows hold it, for the verifier's row audit (verifier.ts):
- * its object, null where its rows hold none (a key archived), and the seal
- * on them. A binding is held by its seal alone: no object of the log is
- * made from one yet.
- */
-export type Held = { ref: Ref; row: Input | null; seal: Buffer | null; sealOnly?: true; unreadable?: true };
-
-/**
- * Every object the rows hold, by key, each read as the use's statement and
- * the change path read it (`objects.ts`): members with their grants, lapsed
- * ones too; credentials, their end the earlier of expiry and hard end;
- * keys, archived ones with no object, a reference with its newest
- * reference's source; environments; the roles and the policy. Every row:
- * a whole walk's audit, never a page's (verifier.ts). A row a writer
- * made that reads as no object is held as unreadable, never thrown on.
- */
-export async function heldObjects(db: Queryable): Promise<Map<string, Held>> {
-  const { vaultMembers, credentials, serviceBindings, environments, projects, logConfig } = tablesOf(db);
-  const [members, held, tokens, bindings, keys, places, config] = await Promise.all([
-    db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal }).from(vaultMembers),
-    readGrants(db),
-    db.select({ id: credentials.id, principal: credentials.principal, kind: credentials.kind, scope: credentials.scope, revokedAt: credentials.revokedAt, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter, seal: credentials.seal }).from(credentials),
-    db.select({ id: serviceBindings.id, seal: serviceBindings.seal }).from(serviceBindings).where(isNotNull(serviceBindings.seal)),
-    // As `readObject` reads one: a reference's source and id from its newest row, unless that row ended; a plain
-    // value's text, for its digest.
-    rowsOf<{
-      id: string; project_id: string; environment_id: string; archived: boolean | number; seal: Buffer | Uint8Array | null; version_id: string | null; source: string | null;
-      reference: string | null; sensitive: boolean | number | null; plaintext: string | null; kek_provider: string | null; kek_id: string | null; kek_version: string | null;
-      wrapped_dek: Buffer | Uint8Array | null;
-    }>(db, sql`SELECT s.id, s.project_id, s.environment_id, ${truth(isNotNull(sql`s.archived_at`))} AS archived, s.seal, s.current_version_id AS version_id,
-        ${newestSource(sql`s.id`)} AS source, ${newestReference(sql`s.id`)} AS reference,
-        v.sensitive, v.plaintext, v.kek_provider, v.kek_id, v.kek_version, v.wrapped_dek
-      FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id`),
-    db.select({
-      id: environments.id, projectId: environments.projectId, slug: environments.slug, owner: environments.owner, parentId: environments.parentId, protected: environments.protected,
-      archivedAt: environments.archivedAt, projectArchived: truth(isNotNull(projects.archivedAt)), seal: environments.seal,
-    }).from(environments).leftJoin(projects, eq(projects.id, environments.projectId)),
-    db.select({ name: logConfig.name, value: logConfig.value, seal: logConfig.seal }).from(logConfig),
-  ]);
-  const found = new Map<string, Held>();
-  const hold = (ref: Ref, row: Input | null, seal: Buffer | Uint8Array | null | undefined, as: { sealOnly?: true; unreadable?: true } = {}) =>
-    found.set(objectKey(ref), { ref, row, seal: seal == null ? null : Buffer.from(seal), ...as });
-  const grantsOf = new Map<string, GrantRow[]>();
-  // Each grant pushed onto its principal's list, never the list copied: a copy a grant made grouping quadratic (review r15).
-  for (const grant of held) {
-    const list = grantsOf.get(grant.principal);
-    if (list === undefined) grantsOf.set(grant.principal, [grant]);
-    else list.push(grant);
-  }
-  for (const m of members) hold({ kind: 'principal', id: m.principal }, principalObject({ principal: m.principal, status: m.status, ...memberStanding(m) }, grantsOf.get(m.principal) ?? []), m.seal);
-  for (const c of tokens) {
-    // Its end in whole ms, as the app sends it (`credentialColumns`): the earlier of expiry and hard end.
-    const expiresAt = Math.min(c.expiresAt.getTime(), c.notAfter?.getTime() ?? Infinity);
-    hold({ kind: 'credential', id: c.id }, credentialObject({ id: c.id, principal: c.principal, kind: c.kind, scope: c.scope, revoked: c.revokedAt !== null, expiresAt }), c.seal);
-  }
-  for (const b of bindings) if (!found.has(objectKey({ kind: 'credential', id: b.id }))) hold({ kind: 'credential', id: b.id }, null, b.seal, { sealOnly: true });
-  for (const k of keys) {
-    const version = k.version_id === null || k.wrapped_dek === null ? null : {
-      id: k.version_id, sensitive: Boolean(k.sensitive), plaintext: k.plaintext,
-      kekProvider: k.kek_provider!, kekId: k.kek_id!, kekVersion: k.kek_version!, wrappedDek: Buffer.from(k.wrapped_dek).toString('base64'),
-    };
-    const object = Boolean(k.archived) ? null : secretObject({
-      id: k.id, projectId: k.project_id, environmentId: k.environment_id,
-      source: k.version_id === null ? k.source : null, reference: k.version_id === null ? k.reference : null, version,
-    });
-    hold({ kind: 'secret', id: k.id }, object, k.seal);
-  }
-  for (const e of places) {
-    const { id, projectId, slug, owner, parentId } = e;
-    hold({ kind: 'environment', id }, environmentObject({ id, projectId, slug, owner, parentId, protected: e.protected, archived: e.archivedAt !== null, projectArchived: Boolean(e.projectArchived) }), e.seal);
-  }
-  for (const c of config) {
-    if (c.name !== 'roles' && c.name !== 'policy') continue;
-    let object: Input | null = null;
-    try {
-      object = configObject(c.value);
-    } catch {}
-    // An object of its own kind, or none: a writer's `{"kind":"principal"}` in the roles' row is no roles (review r12).
-    const readable = object !== null && typeof object === 'object' && !Array.isArray(object) && object.kind === c.name;
-    hold({ kind: c.name, id: 'instance' }, readable ? object : null, c.seal, readable ? {} : { unreadable: true });
-  }
-  return found;
-}
-
-/**
- * What a whole walk of 0.15's log would read, counted before it reads it
- * (review r14), in the walk's own snapshot: the changes, every one; the uses
- * above `usesAbove` (retention's cut), the only ones it reads; the pairs;
- * the rows its audit reads, those from before the cutover that no change
- * made included; and its replay's sealing, a change's work growing with its
- * object, which grows with the changes before it: the sum over objects of
- * their changes squared bounds it. Counts the database does, never the
- * caller's CPU; one statement.
- */
-export async function walkWork(db: Queryable, usesAbove: bigint): Promise<{ changes: number; uses: number; pairs: number; rows: number; replay: number }> {
-  const [row] = await rowsOf<Record<'changes' | 'uses' | 'pairs' | 'rows' | 'replay', string | number>>(db, sql`SELECT
-      (SELECT count(*) FROM log_changes) AS changes,
-      (SELECT count(*) FROM log_uses WHERE number > ${usesAbove}) AS uses,
-      (SELECT count(*) FROM log_checkpoints) AS pairs,
-      (SELECT count(*) FROM vault_members) + (SELECT count(*) FROM vault_grants) + (SELECT count(*) FROM credentials)
-        + (SELECT count(*) FROM service_bindings) + (SELECT count(*) FROM secrets) + (SELECT count(*) FROM environments) + (SELECT count(*) FROM log_config) AS rows,
-      (SELECT coalesce(sum(x.n * x.n), 0) FROM (SELECT count(*) AS n FROM log_changes GROUP BY object) x) AS replay`);
-  return { changes: Number(row!.changes), uses: Number(row!.uses), pairs: Number(row!.pairs), rows: Number(row!.rows), replay: Number(row!.replay) };
-}
-
-/**
- * Whole walks of 0.15's log an instance runs at once, at most (review r11):
- * each holds a snapshot, and a call of the vault, for seconds. One more is
- * refused at once (`TreesBusy`), never queued.
- */
-export const WHOLE_WALKS = 2;
-
-/** The advisory lock of the whole walks' slots: one of its own, beside the fence's (1668244070). */
-const WALKS_LOCK = 1668244071;
-
-/**
- * Whether a whole walk has a slot, for the rest of `tx`: on Postgres, the
- * first of `WHOLE_WALKS` advisory locks free, tried and never waited on, so
- * a walk holds no connection in a lock wait (R44) and lets go at its end.
- * SQLite's transactions take their turns on its one file already.
- */
-export async function walkSlot(tx: Queryable): Promise<boolean> {
-  if (engineOf(tx) === 'sqlite') return true;
-  const tries = Array.from({ length: WHOLE_WALKS }, (_, i) => sql`WHEN pg_try_advisory_xact_lock(${WALKS_LOCK}, ${i}) THEN true`);
-  const [row] = await rowsOf<{ got: boolean }>(tx, sql`SELECT CASE ${sql.join(tries, sql` `)} ELSE false END AS got`);
-  return row?.got === true;
 }
 
 /**

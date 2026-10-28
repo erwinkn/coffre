@@ -199,7 +199,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'GET /audit/verification': { ui: [{ does: "Audit: the log's seal, verified with every visit", in: 'pages/audit.tsx', call: 'audit.verify' }] },
-  'GET /audit/trees': { ui: [{ does: "Audit: 0.15's log, its newest checkpoint and the entries since verified with every visit, and walked whole, replay and rows, on Verify whole log", in: 'pages/audit.tsx', call: 'audit.verifyTrees' }] },
+  'GET /audit/trees': { ui: [{ does: "Audit: 0.15's log, its newest checkpoint and the entries since, verified with every visit", in: 'lib/queries.ts', call: 'audit.verifyTrees' }] },
   'GET /roles': {
     ui: [
       { does: 'Settings › Roles and Instance roles; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },

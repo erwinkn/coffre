@@ -2052,38 +2052,12 @@ async function verifyLog(): Promise<void> {
       process.exit(3);
     }
     process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
-    return verifyTrees(shown);
+    return;
   }
   const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;
   const through = result.through === null ? 'nothing verified' : `verified through entry ${result.through}`;
   process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
   process.exit(2);
-}
-
-/**
- * 0.15's log, after 0.14's: both trees, every entry, the replay and every
- * row, walked from the first entry in one request. Nothing to say where the
- * instance keeps 0.14's log alone; a log larger than its vault walks in one
- * call (on Workers) is not verified, and says where to walk it instead.
- */
-async function verifyTrees(shown: boolean): Promise<void> {
-  if (shown) process.stderr.write("verifying 0.15's log from the first entry…");
-  // A server older than 0.15 has no such route: its 404 comes back to the client, which says so (`kept` false).
-  const result = await client(target(), undefined, [404]).audit.verifyTrees({ whole: true });
-  if (shown) process.stderr.write('\r\x1b[K');
-  if (!result.kept) return;
-  if (result.ok) {
-    const signed = result.checkpoint === null ? 'no checkpoint signed yet' : `last checkpoint: up to entry ${result.checkpoint.upto}, signed ${new Date(result.checkpoint.at).toISOString()}`;
-    process.stdout.write(`0.15 log OK: verified from the first entry, its trees, every entry and the changes' replay; every object's rows are the log's (not yet the bulk cap's)\n${signed}\n`);
-    return;
-  }
-  if (result.problems.length > 0) {
-    process.stderr.write(`0.15 log BROKEN:\n${result.problems.map((problem) => `  ${problem}\n`).join('')}`);
-    process.exit(2);
-  }
-  // Not verified to its end, nothing found on the way: not known broken, as 0.14's log not verified to its end.
-  process.stderr.write(`0.15 log not verified to its end: ${result.tooLarge}\n`);
-  process.exit(3);
 }
 
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */

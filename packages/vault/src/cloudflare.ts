@@ -28,7 +28,6 @@ import type {
   UnwrapInput,
   UseInput,
   Vault,
-  TreeVerificationInput,
   VerifyLogInput,
   WrapInput,
 } from '@coffre/core/vault';
@@ -77,17 +76,6 @@ const ready = new WeakMap<object, { database: PostgresDatabase; hotDatabase?: Po
  * connections belong to the call that made them; it is closed once the
  * call is done.
  */
-/**
- * The work the whole walk of 0.15's log may do in one call of the vault
- * Worker (`verifyTrees`, `walks.whole`), weighed before it starts in
- * entries (verifier.ts `weightOf`), within the 30 s of CPU a paid plan's
- * call has by default. A unit costs some 20 to 26 µs warm (measured on Node
- * at 50,000 uses, 0.15-plan.md, "As built: PR 8"), about 2.5 times that on
- * a cold isolate: 200,000 is 5 s warm and 13 s cold. Past it, the call
- * reads nothing and says to walk the log on Node, where a call has no limit.
- */
-const WHOLE_WALK = 200_000;
-
 export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async #call<T>(run: (vault: Required<Vault>) => Promise<T>): Promise<T> {
     const { prepared, database } = await this.#ready();
@@ -118,7 +106,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const prepared = await prepareVault(resolveVaultConfig(config), { walks: { whole: WHOLE_WALK }, ...(config.uses === undefined ? {} : { uses: config.uses }) });
+      const prepared = await prepareVault(resolveVaultConfig(config), config.uses === undefined ? {} : { uses: config.uses });
       // Calls that raced here each made one; the first kept serves them all from now on.
       entry = ready.get(env) ?? { database: config.database, ...(config.hotDatabase === undefined ? {} : { hotDatabase: config.hotDatabase }), prepared };
       ready.set(env, entry);
@@ -150,7 +138,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
   async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
   async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
-  async verifyTrees(input: TreeVerificationInput) { return this.#call((vault) => vault.verifyTrees(input)); }
+  async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

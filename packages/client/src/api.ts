@@ -1724,17 +1724,13 @@ export type Api = {
     };
   };
   "GET /audit/trees": {
-    input: {
-      whole?: "1";
-    };
+    input: undefined;
     output: {
       kept: false;
     } | {
       kept: true;
-      whole: boolean;
       ok: boolean;
       problems: string[];
-      tooLarge: string | null;
       checkpoint: null | {
         upto: string;
         at: number;

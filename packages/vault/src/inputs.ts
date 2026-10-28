@@ -191,11 +191,6 @@ export function sealed(keys: SealKeys, ref: Ref, input: Input, seal: Buffer | nu
   return keys.some((key) => timingSafeEqual(sealOf(key, ref, input), seal));
 }
 
-/** Whether two objects are one as their seals see them (`normalized`): a principal's grants a set, in whatever order its rows came back. */
-export function alike(a: Input, b: Input): boolean {
-  return canonical(normalized(a)) === canonical(normalized(b));
-}
-
 /**
  * An object as its seal covers it: a principal's grants as a set, in one
  * order whatever order the rows come back in. Everything else is kept as
