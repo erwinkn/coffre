@@ -31,7 +31,11 @@ test("libsql keeps a connection's snapshot open after an EXPLAIN: its next trans
   const { db: reader, close } = await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
   try {
     await rows(reader, sql`EXPLAIN QUERY PLAN SELECT max(number) FROM log_changes`);
-    await assert.rejects(writeThenBegin(reader), (error: unknown) => /SQLITE_BUSY_SNAPSHOT/.test(JSON.stringify((error as { cause?: unknown }).cause ?? error)) || /SQLITE_BUSY/.test(String(error)));
+    await assert.rejects(writeThenBegin(reader), (error: unknown) => {
+      const { extendedCode, cause } = error as { extendedCode?: string; cause?: { extendedCode?: string } };
+      assert.equal(extendedCode ?? cause?.extendedCode, 'SQLITE_BUSY_SNAPSHOT');
+      return true;
+    });
   } finally {
     await close();
   }
