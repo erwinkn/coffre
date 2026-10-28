@@ -3,12 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { sealedSessionScope } from '@coffre/core/access';
 import { POLICY_DEFAULTS, POLICY_FIELDS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
 import type { CredentialColumns, RevokeCredentialInput, RevokeCredentialOutcome, SignInCredential, SignInInput, SignInOutcome, SignInRefusal } from '@coffre/core/vault';
-import { tablesOf, type Database, type Queryable } from '@coffre/db';
-import { engineOf, rowsOf } from '@coffre/db/dialect';
-import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import type { Database } from '@coffre/db';
+import { engineOf } from '@coffre/db/dialect';
 
 import { NotLogged, payloadOf, type ChangeKeys } from './changes.ts';
 import { applyOp, canonical, objectKey, sealed, sealOf, type Op, type Ref } from './inputs.ts';
+import { revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
+import { revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
 import { entryMac } from './log-entry.ts';
 import { credentialObject } from './objects.ts';
 
@@ -41,9 +42,11 @@ const LONGEST_SESSION_HOURS = 168;
 type SignInRecord = { binding: string; proof: string; issuer: string; run: Record<string, string | number>; jkt?: string; notAfter?: number };
 
 /** A sign-in as the vault decided it: the statement's arguments. */
-type SignInCall = {
+export type SignInCall = {
   requestId: string; at: number; actor: string; payload: string; mac: Buffer; seal: Buffer;
   binding: SignInInput['binding']; principal: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
+  /** At most `rate` credentials a binding makes in `window` ms. */
+  rate: number; window: number;
   credential: SignInCredential & { createdBy: string; tokenHashBytes: Buffer; authMacBytes: Buffer };
 };
 
@@ -131,7 +134,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor: principal, payload, seal };
   return {
     ...row, mac: entryMac(keys.mac, { tree: 'changes', row }),
-    binding, principal, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest,
+    binding, principal, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest, rate: SIGN_INS_PER_WINDOW, window: SIGN_IN_WINDOW_MS,
     credential: { ...credential, createdBy: `binding:${binding.id}`, tokenHashBytes: Buffer.from(credential.tokenHash, 'base64'), authMacBytes: Buffer.from(credential.authMac, 'base64') },
   };
 }
@@ -168,69 +171,6 @@ function isRun(run: unknown): run is Record<string, string | number> {
   return entries.length <= 16 && entries.every(([key, value]) => key.length <= 64 && ((typeof value === 'string' && value.length <= 256) || (typeof value === 'number' && Number.isFinite(value))));
 }
 
-async function signInOnPostgres(db: Queryable, c: SignInCall): Promise<Answer> {
-  const k = c.credential;
-  const [row] = await rowsOf<{ answer: string }>(db, sql`/* writes */ SELECT sign_in(
-    ${c.requestId}::text, ${String(c.at)}::bigint, ${c.actor}::text, ${c.payload}::text, ${c.mac}::bytea, ${c.seal}::bytea,
-    ${c.binding.id}::uuid, ${c.principal}::text, ${c.binding.generation}::integer, ${c.binding.scope}::text, ${c.binding.policy}::text,
-    ${c.spent}::bytea, ${c.validUntil === null ? null : String(c.validUntil)}::bigint, ${c.frozen}::boolean, ${SIGN_INS_PER_WINDOW}::integer, ${String(SIGN_IN_WINDOW_MS)}::bigint, ${String(c.longest)}::bigint,
-    ${k.id}::uuid, ${k.kind}::text, ${k.authMacBytes}::bytea, ${k.tokenHashBytes}::bytea, ${k.tokenHint}::text, ${k.label}::text, ${k.createdBy}::text,
-    ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint, ${k.notAfter === null ? null : String(k.notAfter)}::bigint, ${k.jkt}::text
-  )::text AS answer`);
-  return JSON.parse(row!.answer) as Answer;
-}
-
-/**
- * `sign_in` on SQLite, step for step, in one transaction: SQLite runs one
- * writer at a time, so its locks are implicit, and an entry's number is
- * one past the log's highest.
- */
-async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answer> {
-  const { auditLog, consumedTokens, credentials, logChanges, serviceBindings, vaultMembers } = tablesOf(tx);
-  const target = objectKey({ kind: 'credential', id: c.credential.id });
-  const prior = await priorChange(tx, c.requestId, target, c.payload, c.seal);
-  if (prior !== undefined) return { number: prior };
-  const k = c.credential;
-  const [member] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, c.principal));
-  if (member?.status !== 'active' || member.generation !== c.binding.generation) return { state: 'unbound' };
-  const [binding] = await tx.select().from(serviceBindings).where(eq(serviceBindings.id, c.binding.id));
-  if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null
-    || binding.scope !== c.binding.scope || binding.policy !== c.binding.policy) {
-    return { state: 'unbound' };
-  }
-  const named = (key: string) => sql`json_extract(${auditLog.metadata}, ${`$.${key}`})`;
-  const [tomb] = await tx.select({ seq: auditLog.seq }).from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.unbind'), eq(auditLog.decision, 'allow'), eq(named('bindingId'), c.binding.id))).limit(1);
-  if (tomb !== undefined) return { state: 'unbound' };
-  if (c.frozen) {
-    for (const target of ['instance', c.principal, `binding:${c.binding.id}`]) {
-      const [newest] = await tx.select({ action: auditLog.action }).from(auditLog)
-        .where(and(eq(auditLog.author, 'app'), inArray(auditLog.action, ['workload.freeze', 'workload.unfreeze']), eq(auditLog.decision, 'allow'), eq(named('target'), target)))
-        .orderBy(desc(auditLog.seq)).limit(1);
-      if (newest?.action === 'workload.freeze') return { state: 'frozen' };
-    }
-  }
-  const now = Date.now();
-  const recent = await tx.select({ id: credentials.id }).from(credentials)
-    .where(and(eq(credentials.principal, c.principal), eq(credentials.createdBy, k.createdBy), gt(credentials.createdAt, new Date(now - SIGN_IN_WINDOW_MS))))
-    .limit(SIGN_INS_PER_WINDOW);
-  if (recent.length >= SIGN_INS_PER_WINDOW) return { state: 'busy' };
-  if ((c.validUntil !== null && c.validUntil <= now) || k.expiresAt <= now || k.expiresAt > now + c.longest + 60_000 || (k.notAfter !== null && (k.notAfter <= now || k.expiresAt > k.notAfter))) return { state: 'expired' };
-  if (c.spent !== null) {
-    const spent = await tx.insert(consumedTokens).values({ hash: c.spent }).onConflictDoNothing().returning({ hash: consumedTokens.hash });
-    if (spent.length === 0) return { state: 'replayed' };
-  }
-  await tx.insert(credentials).values({
-    id: k.id, kind: k.kind, authMac: k.authMacBytes, tokenHash: k.tokenHashBytes, tokenHint: k.tokenHint, generation: c.binding.generation,
-    principal: c.principal, identityId: null, scope: k.scope, places: k.places, label: k.label, createdBy: k.createdBy,
-    expiresAt: new Date(k.expiresAt), revokedAt: null, jkt: k.jkt, notAfter: k.notAfter === null ? null : new Date(k.notAfter), seal: c.seal,
-  });
-  await tx.update(serviceBindings).set({ lastUsedAt: new Date(now) }).where(eq(serviceBindings.id, c.binding.id));
-  const number = await nextNumber(tx);
-  await tx.insert(logChanges).values({ number, at: c.at, requestId: c.requestId, object: target, actor: c.actor, payload: c.payload, seal: c.seal, mac: c.mac });
-  return { number: number.toString() };
-}
-
 /**
  * A revoke, decided and made: the object as the app read it, checked
  * against its seal (`NotLogged`, tampered, if the vault never made it), the
@@ -259,66 +199,19 @@ export async function revokeCredential(db: Database, keys: ChangeKeys, at: numbe
     const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
     change = { payload, seal, sealFrom, requestId: row.requestId, mac: entryMac(keys.mac, { tree: 'changes', row }) };
   }
-  const call = { at, actor, ref, change, macFrom: Buffer.from(authMacFrom, 'base64'), mac: Buffer.from(authMac, 'base64'), revokedAt, revokedBy };
+  const call: RevokeCall = { at, actor, ref, change, macFrom: Buffer.from(authMacFrom, 'base64'), mac: Buffer.from(authMac, 'base64'), revokedAt, revokedBy };
   if (engineOf(db) === 'sqlite') return db.transaction((tx) => revokeOnSqlite(tx, call));
   try {
-    const [row] = await rowsOf<{ answer: string }>(db, sql`/* writes */ SELECT revoke_credential(
-      ${change?.requestId ?? randomUUID()}::text, ${String(at)}::bigint, ${actor}::text, ${change?.payload ?? null}::text, ${change?.mac ?? null}::bytea,
-      ${change?.sealFrom ?? null}::bytea, ${change?.seal ?? null}::bytea,
-      ${columns.id}::uuid, ${call.macFrom}::bytea, ${call.mac}::bytea, ${String(revokedAt)}::bigint, ${revokedBy}::text
-    )::text AS answer`);
-    return JSON.parse(row!.answer) as Answer;
+    return await revokeOnPostgres(db, call);
   } catch (error) {
     if (isBusy(error)) return { state: 'busy' };
     throw error;
   }
 }
 
-type RevokeCall = {
+export type RevokeCall = {
   at: number; actor: string; ref: Ref; macFrom: Buffer; mac: Buffer; revokedAt: number; revokedBy: string;
   change: { payload: string; seal: Buffer; sealFrom: Buffer; mac: Buffer; requestId: string } | null;
 };
 
-/** `revoke_credential` on SQLite, step for step, in one transaction. */
-async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answer> {
-  const { credentials, logChanges } = tablesOf(tx);
-  const target = objectKey(c.ref);
-  if (c.change !== null) {
-    const prior = await priorChange(tx, c.change.requestId, target, c.change.payload, c.change.seal);
-    if (prior !== undefined) return { number: prior };
-  }
-  const [row] = await tx.select({ seal: credentials.seal, authMac: credentials.authMac, revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, c.ref.id));
-  if (row === undefined || row.revokedAt !== null || !same(row.authMac, c.macFrom) || !same(row.seal ?? null, c.change?.sealFrom ?? null)) return { state: 'moved' };
-  const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, target)).orderBy(desc(logChanges.number)).limit(1);
-  if (!same(newest?.seal ?? null, c.change?.sealFrom ?? null)) return { state: 'stale' };
-  await tx.update(credentials).set({ revokedAt: new Date(c.revokedAt), revokedBy: c.revokedBy, authMac: c.mac, seal: c.change?.seal ?? null })
-    .where(and(eq(credentials.id, c.ref.id), isNull(credentials.revokedAt)));
-  if (c.change === null) return { number: null };
-  const number = await nextNumber(tx);
-  await tx.insert(logChanges).values({ number, at: c.at, requestId: c.change.requestId, object: target, actor: c.actor, payload: c.change.payload, seal: c.change.seal, mac: c.change.mac });
-  return { number: number.toString() };
-}
 
-/** A change this request committed already, by its request id: its number, if it is this one; another under it is refused. */
-async function priorChange(tx: Queryable, requestId: string, target: string, payload: string, seal: Buffer): Promise<string | undefined> {
-  const { logChanges } = tablesOf(tx);
-  const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, requestId));
-  if (prior === undefined) return undefined;
-  if (prior.object !== target || prior.payload !== payload || !same(prior.seal ?? null, seal)) {
-    throw Object.assign(new Error(`request ${requestId} names another change`), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
-  }
-  return String(prior.number);
-}
-
-/** One past the log's highest number, both tables' (store.ts's `changeOnSqlite` says why). */
-async function nextNumber(tx: Queryable): Promise<bigint> {
-  const { logChanges, logUses } = tablesOf(tx);
-  const [{ last }] = await tx.select({ last: sql<number | string | null>`max(n)` }).from(
-    sql`(SELECT max(${logChanges.number}) AS n FROM ${logChanges} UNION ALL SELECT max(${logUses.number}) FROM ${logUses})`,
-  );
-  return BigInt(last ?? 0) + 1n;
-}
-
-function same(a: Uint8Array | null, b: Uint8Array | null): boolean {
-  return a === null || b === null ? a === b : Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
-}
