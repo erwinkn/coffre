@@ -8,14 +8,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
-import { issuedGrant } from '@coffre/core/access';
+import { issuedGrant, sealedSessionScope, storedScope } from '@coffre/core/access';
 import { defineSignin, github, type BindingPolicy } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { asc, eq } from 'drizzle-orm';
 
-import { storedScope } from '../src/api/services.ts';
 import { SigninService } from '../src/api/signin.ts';
-import { sealedSessionScope } from '../src/api/workloads.ts';
 import { credentials, logChanges } from './db/tables.ts';
 import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 

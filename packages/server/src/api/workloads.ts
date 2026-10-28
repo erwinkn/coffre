@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { isCredentialScope, scopeWithReads, type CredentialScope } from '@coffre/core/access';
+import { isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
 import {
   addressWithin,
   BindingInvalid,
@@ -44,7 +44,7 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
-import type { Access, Vault } from '@coffre/core/vault';
+import type { Access, SignInCredential, SignInRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
 
@@ -71,15 +71,14 @@ import {
   type BindingRow,
   type PlaceRow,
 } from '../db/queries.ts';
-import { databaseNow, frozenTargets, insertSession, keyNames, renewSession, workloadCandidates } from '../db/workloads.ts';
-import { sessionScope } from '../workload-sessions.ts';
+import { databaseNow, frozenTargets, insertSession, keyNames, renewSession, signedSession, workloadCandidates } from '../db/workloads.ts';
 import { awsProof } from '../workloads/aws.ts';
 import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { expectedAudiences, PROFILE_RULES } from '../workloads/profiles.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { newestPolicySeq } from './caller.ts';
-import { AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes } from './changes.ts';
+import { AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes, vaultCredentials } from './changes.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, credentialStill, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
@@ -1111,6 +1110,10 @@ export class WorkloadService {
     if (policy.sources !== undefined && (meta.sourceIp === null || !addressWithin(meta.sourceIp, policy.sources))) {
       throw new ExchangeRefused('source', meta.sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${meta.sourceIp} is outside the binding's sources`);
     }
+    // With 0.15's log, the vault makes the session (T149): it spends the token, and weighs the account, the binding, its
+    // freezes and its rate, in one call. A proof that decides in the transaction (`commit`) makes it as below.
+    const signs = kind.commit === undefined ? await vaultCredentials(vault) : null;
+    if (signs !== null) return this.#signInByVault(signs, { member, name, kind, verified, policy }, meta, ctx);
     const spent = verified.spentKey;
     if (spent !== undefined && (await tokenConsumed(db, spent))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your platform for a fresh one');
     const standing = await vault.access(member);
@@ -1121,18 +1124,13 @@ export class WorkloadService {
     const service = member.slice('token:'.length);
     const actor = { caller: { principal: { type: 'service', id: service } }, requestId: meta.requestId, sourceIp: meta.sourceIp } as Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
     // The session's ends and scope, from what its proof decides under the head (`commit`), at `now`.
-    const hours = POLICY_FIELDS[binding.profile as WorkloadProfile].includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : null;
     const logged = await keeps015(vault);
     const shape = (committed: CommittedProof, now: number) => {
-      // The hard end: the binding's hours, where its profile has them, and every end its proof gave.
-      const ends = [hours === null ? null : now + hours * 3_600_000, verified.notAfter?.getTime() ?? null, committed.notAfter?.getTime() ?? null]
-        .filter((end): end is number => end !== null);
-      const notAfter = new Date(Math.min(...(ends.length === 0 ? [now + POLICY_DEFAULTS.sessionHours * 3_600_000] : ends)));
       const scope = committed.scope ?? null;
       // With 0.15's log, the scope its uses hold, its binding's reads with it, which its row then carries (`sessionScope`
       // reads the same from it): a credential's object is all its uses decide on.
       const stored = logged ? sealedSessionScope(scope, binding, policy) : scope;
-      return { notAfter, expiresAt: new Date(Math.min(now + kind.lifetimeMs, notAfter.getTime())), scope, stored };
+      return { ...sessionEnds(kind, verified, policy, committed, now), scope, stored };
     };
     // What the proof decides under the head, as a first try takes it (nothing: the binding's), then as it decided.
     let decided: CommittedProof = {};
@@ -1215,6 +1213,61 @@ export class WorkloadService {
   }
 
   /**
+   * `#signIn` with 0.15's log, for a proof that decides nothing in a
+   * transaction (oidc, aws): the vault makes the session (T149), in one
+   * call. Its binding as read here, its account, its freezes, its rate and
+   * the token spent once are weighed in the vault's statement, under their
+   * rows' locks; no 0.14 head, and no `token.exchange` entry: its change
+   * records the run (D147). The environments it reaches are read first, for
+   * its row and its answer, as nothing the vault decides is made of them.
+   */
+  async #signInByVault(
+    vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>,
+    proof: { member: string; name: ProofName; kind: ProofKind; verified: MatchedProof; policy: BindingPolicy },
+    meta: { requestId: string; sourceIp: string | null; jkt: string },
+    ctx: ProofContext,
+  ): Promise<SessionIssued> {
+    const { member, name, kind, verified, policy } = proof;
+    const { binding } = verified;
+    const known = await places(this.#deps.db);
+    const now = Date.now();
+    const { notAfter, expiresAt } = sessionEnds(kind, verified, policy, {}, now);
+    const scope = sealedSessionScope(null, binding, policy);
+    const reached = environmentsOf(readScope(binding.scope) ?? [], known);
+    const token = generateToken('workload');
+    const row = signedSession(this.#deps.chainKey, {
+      id: randomUUID(), kind: 'workload', tokenHash: hashToken(token), tokenHint: tokenHint(token), generation: binding.generation, principal: member,
+      identityId: null, label: binding.label, createdBy: issuedBy(binding.id), expiresAt, revokedAt: null, scope,
+      // Where `/use/<credential>` goes when it names no environment: the one it reaches, if one.
+      places: JSON.stringify(reached.map(({ id: environmentId }) => ({ environmentId, personal: false }))),
+      jkt: meta.jkt, notAfter, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null,
+    });
+    const outcome = await vault.signIn({
+      principal: member,
+      binding: { id: binding.id, generation: binding.generation, profile: binding.profile, scope: binding.scope, policy: binding.policy },
+      credential: signedInCredential(row),
+      spent: verified.spentKey?.toString('base64') ?? null,
+      // Its proof's end is the session's hard end, held to in the statement.
+      validUntil: null,
+      record: { proof: name, issuer: binding.issuer, run: runClaims(verified.claims) },
+    });
+    if (!outcome.ok) {
+      throw signInRefusal(outcome.refused, {
+        unbound: `no workload binding of ${shownMember(member)} takes this proof`,
+        frozen: `${shownMember(member)} is frozen: a manager stopped its use, and no session is made until they lift it`,
+        busy: `this binding made ${EXCHANGES_PER_BINDING_MINUTE} sessions in the last minute: try again shortly`,
+        replayed: 'this token was exchanged already: ask your platform for a fresh one',
+        expired: 'the proof has expired',
+      });
+    }
+    if (kind.after !== undefined) {
+      // The session is made: what runs after it never unmakes it.
+      await kind.after({ verified, committed: {}, sessionId: row.id }, ctx).catch((error: unknown) => console.error('a proof\'s after-exchange hook failed', error));
+    }
+    return { token, tokenType: 'DPoP', expiresAt: expiresAt.toISOString(), notAfter: notAfter.toISOString(), places: reached.map(({ path }) => path) };
+  }
+
+  /**
    * Move a session's expiry on, by a proof of its key (section 5.4): to
    * `lifetimeMs` past the database's clock, never past its `notAfter`. Two
    * steps, as the app computes the row's MAC: the clock read, then an
@@ -1271,6 +1324,9 @@ export class WorkloadService {
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
     if (spent) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
+    // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. A binding 0.4 made, its scope unsealed, is sealed first, below.
+    const signs = unsealedScope(binding.scope) ? null : await vaultCredentials(vault);
+    if (signs !== null) return this.#exchangeByVault(signs, member, binding, claims, decoded);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
@@ -1320,16 +1376,79 @@ export class WorkloadService {
     }, changes);
     });
   }
+
+  /**
+   * `#exchange` with 0.15's log: the vault makes the credential (T149), in
+   * one call. The binding as read here, the account active at its
+   * generation, the binding's rate and the token spent once are weighed in
+   * its statement, on their rows, under their locks (formal/Lifecycle.tla's
+   * BindingLocked, MemberLocked, SpentChecked); no 0.14 head, and no
+   * `token.exchange` entry: its change records the run (D147).
+   */
+  async #exchangeByVault(vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>, member: string, binding: BindingRow, claims: Record<string, unknown>, decoded: DecodedToken): Promise<Exchanged> {
+    const issuer = decoded.claims.iss;
+    const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
+      generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS), stored: binding.scope,
+    });
+    const outcome = await vault.signIn({
+      principal: member,
+      binding: { id: binding.id, generation: binding.generation, profile: binding.profile, scope: binding.scope, policy: binding.policy },
+      credential: signedInCredential({ ...row, kind: 'service' }),
+      spent: decoded.signingInputHash.toString('base64'),
+      // The token's times, held to again in the statement, as the commit under 0.14's head holds them: its `exp`, and its `iat`'s hour.
+      validUntil: Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000),
+      record: { proof: 'oidc', issuer, run: runClaims(claims) },
+    });
+    if (!outcome.ok) {
+      // Past its times by the statement: which of them, as the commit under the head says it.
+      const issued = outcome.refused === 'expired' ? issuedRefusal(decoded.claims.iat, Date.now() / 1000) : null;
+      if (issued !== null) throw refused(issued);
+      throw signInRefusal(outcome.refused, {
+        unbound: `no binding of ${shownMember(member)} trusts tokens from ${issuer}`,
+        busy: `this binding issued ${EXCHANGES_PER_BINDING_MINUTE} credentials in the last minute: try again shortly`,
+        replayed: 'this token was exchanged already: ask your CI for a fresh one',
+        expired: 'the token has expired',
+      });
+    }
+    return { token: issued.token, expiresAt: issued.expiresAt };
+  }
 }
 
+
 /**
- * A workload session's scope as its row stores it with 0.15's log: what its
- * uses hold (`sessionScope`), its binding's per-key reads included, so that
- * its object, all a 0.15 use decides on, is no wider than what 0.14 decides
- * on from its binding.
+ * A session's ends at `now`: its hard end the earliest of its binding's
+ * `sessionHours`, where its profile has them, and every end its proof gave
+ * (24 hours if none did); its expiry `lifetimeMs` on, never past that.
  */
-export function sealedSessionScope(scope: string | null, binding: Pick<BindingRow, 'scope'>, policy: BindingPolicy): string {
-  return storedScope(sessionScope({ scope }, binding, policy), { reads: true });
+function sessionEnds(kind: ProofKind, verified: MatchedProof, policy: BindingPolicy, committed: CommittedProof, now: number): { notAfter: Date; expiresAt: Date } {
+  const hours = POLICY_FIELDS[verified.binding.profile as WorkloadProfile].includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : null;
+  const ends = [hours === null ? null : now + hours * 3_600_000, verified.notAfter?.getTime() ?? null, committed.notAfter?.getTime() ?? null]
+    .filter((end): end is number => end !== null);
+  const notAfter = new Date(Math.min(...(ends.length === 0 ? [now + POLICY_DEFAULTS.sessionHours * 3_600_000] : ends)));
+  return { notAfter, expiresAt: new Date(Math.min(now + kind.lifetimeMs, notAfter.getTime())) };
+}
+
+/** A sign-in's row as the vault takes it (`SignInCredential`): its bytes in base64, its times in ms. */
+function signedInCredential(row: {
+  id: string; kind: 'service' | 'workload'; tokenHash: Buffer; tokenHint: string; label?: string | null; scope?: string | null; places?: string | null;
+  expiresAt: Date; notAfter?: Date | null; jkt?: string | null; authMac: Buffer;
+}): SignInCredential {
+  return {
+    id: row.id, kind: row.kind, tokenHash: row.tokenHash.toString('base64'), tokenHint: row.tokenHint, label: row.label ?? null,
+    scope: row.scope ?? null, places: row.places ?? null, expiresAt: row.expiresAt.getTime(), notAfter: row.notAfter?.getTime() ?? null,
+    jkt: row.jkt ?? null, authMac: row.authMac.toString('base64'),
+  };
+}
+
+/** A sign-in the vault refused, as the workload's owner reads it: today's codes and words, each path its own. */
+function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen'>, string> & { frozen?: string }): ExchangeRefused {
+  switch (refused) {
+    case 'unbound': return new ExchangeRefused('no_match', words.unbound);
+    case 'busy': return new ExchangeRefused('busy', words.busy, 429);
+    case 'replayed': return new ExchangeRefused('replayed', words.replayed);
+    case 'expired': return new ExchangeRefused('expired', words.expired);
+    case 'frozen': return new ExchangeRefused('frozen', words.frozen ?? words.unbound);
+  }
 }
 
 /** An uploaded key set, checked (`uploadedKeys`), or a 400 saying what is wrong with it. */

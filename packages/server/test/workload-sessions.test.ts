@@ -22,8 +22,8 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, environments, secrets, serviceBindings } from './db/tables.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, signInsLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { auditLog, credentials, environments, logChanges, secrets, serviceBindings } from './db/tables.ts';
 import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
@@ -268,10 +268,21 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
   const row = await sessionRow({ token: made.body.token as string, key });
   assert.equal(row.kind, 'workload');
   assert.equal(row.jkt, await thumbprint(key.jwk));
-  const [entry] = await entries('token.exchange');
-  assert.equal(entry!.kind, 'workload');
-  assert.equal(entry!.proof, 'oidc');
-  assert.equal(entry!.jkt, row.jkt);
+  if (LOG === '0.14') {
+    const [entry] = await entries('token.exchange');
+    assert.equal(entry!.kind, 'workload');
+    assert.equal(entry!.proof, 'oidc');
+    assert.equal(entry!.jkt, row.jkt);
+  } else {
+    // With 0.15's log, the vault makes it (T149), and its change records the sign-in (D147): its proof, key and hard end.
+    const [signedIn] = await signInsLogged(db.owner);
+    assert.deepEqual(signedIn!.record.signIn, {
+      binding: (await db.owner.select({ id: serviceBindings.id }).from(serviceBindings))[0]!.id, proof: 'oidc', issuer: GITHUB, run: signedIn!.run,
+      jkt: row.jkt, notAfter: row.notAfter!.getTime(),
+    });
+    assert.equal(signedIn!.record.caller, 'workload');
+    assert.deepEqual(await entries('token.exchange'), []);
+  }
 
   // It reads as the service, with its key's proof.
   const held = { token: made.body.token as string, key };
@@ -636,8 +647,17 @@ test('logout revokes the session, with its key', async () => {
   const out = await call(held, 'POST', '/api/auth/logout');
   assert.equal(out.status, 200, JSON.stringify(out.body));
   assert.equal((await me(held)).status, 401);
-  const [entry] = await entries('sign_out');
-  assert.equal(entry!.kind, 'workload');
+  if (LOG === '0.14') {
+    const [entry] = await entries('sign_out');
+    assert.equal(entry!.kind, 'workload');
+  } else {
+    // With 0.15's log, the vault ends it (T149), and its change records the sign-out (D147).
+    const revokes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
+      const { revoke } = JSON.parse(payload) as { revoke?: { reason: string; kind: string } };
+      return revoke === undefined ? [] : [revoke];
+    });
+    assert.deepEqual(revokes.map(({ reason, kind }) => [reason, kind]), [['sign_out', 'workload']]);
+  }
 });
 
 // --- the strict instance ------------------------------------------------------

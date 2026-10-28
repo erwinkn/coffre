@@ -15,9 +15,11 @@ import {
   ownsProject,
   PERMISSIONS,
   protectedWithin,
+  readScope,
   runsInstance,
   scopeDefinition,
   setsUpServices,
+  storedScope,
   type CredentialScope,
   type GrantPlace,
   type Holdings,
@@ -35,6 +37,9 @@ import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
 import { settingsShown } from '../db/answers.ts';
+// A row's scope, read and stored (`@coffre/core/access`, where the vault makes a credential's too).
+export { readScope, storedScope } from '@coffre/core/access';
+
 import { credentialsBy, liveCredentialsWhere, memberOf, newestAccessSeq, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
@@ -188,32 +193,6 @@ export const ACCESS_CHANGED = 'access_changed';
 export type ScopeByPath = Record<string, Role>;
 
 /**
- * A scope as a token's or binding's row stores it, under its MAC: its
- * grants as JSON, by place, each with what its role held when it was
- * issued (`issuedGrant`), so that a role widened later widens no credential,
- * and, a service's, whether it reads the sensitive values there.
- */
-export function storedScope(scope: CredentialScope, { reads = false }: { reads?: boolean } = {}): string {
-  const key = (grant: CredentialScope[number]) => `${grant.projectId}/${grant.environmentId ?? ''}`;
-  return JSON.stringify(
-    [...scope]
-      .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
-      .map((grant) => {
-        const { permissions, protected: guarded } = scopeDefinition(grant);
-        return {
-          projectId: grant.projectId,
-          environmentId: grant.environmentId,
-          role: grant.role,
-          permissions: { normal: [...permissions], protected: [...guarded] },
-          ...(grant.sensitive === undefined ? {} : { sensitive: grant.sensitive }),
-          // A workload session's, with 0.15's log: the keys its binding lets it read, which its object holds (`sealedSessionScope`).
-          ...(!reads || grant.reads === undefined ? {} : { reads: grant.reads }),
-        };
-      }),
-  );
-}
-
-/**
  * A grant of a scope as it holds now and as it was issued, whichever is
  * narrower, column by column, and reading sensitive values only if both
  * do: what a credential that inherits another's scope carries, so trusting
@@ -227,20 +206,6 @@ function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
     permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) },
     ...(now.sensitive === undefined ? {} : { sensitive: now.sensitive && before.sensitive === true }),
   };
-}
-
-/**
- * The scope a row stores: null for one 0.4 made, not sealed yet, which
- * reaches all its account holds, as then. One its MAC checked but that
- * does not read as a scope reaches nothing.
- */
-export function readScope(stored: string | null): CredentialScope | null {
-  if (stored === null) return null;
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(stored);
-  } catch {}
-  return isCredentialScope(parsed) ? parsed : [];
 }
 
 /** A scope by path, as the caller would name its places now; one deleted is left out, as it reaches nothing. */

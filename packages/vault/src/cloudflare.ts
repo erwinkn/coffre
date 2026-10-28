@@ -18,12 +18,14 @@
 import type {
   AdmitInput,
   RemoveInput,
+  RevokeCredentialInput,
   ReferenceInput,
   EndReferencesInput,
   PrepareInput,
   RewrapInput,
   SetAccessInput,
   SetSettingsInput,
+  SignInInput,
   ChangePolicyInput,
   UnwrapInput,
   UseInput,
@@ -138,6 +140,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
   async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
   async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
+  async signIn(input: SignInInput) { return this.#call((vault) => vault.signIn(input)); }
+  async revokeCredential(input: RevokeCredentialInput) { return this.#call((vault) => vault.revokeCredential(input)); }
   async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */

@@ -4,7 +4,8 @@ import type { CredentialColumns, EnvironmentColumns, ObjectChange, PreparedChang
 import type { Transaction } from '@coffre/db';
 import { appChanges, isStaleChange } from '@coffre/db/log';
 
-import type { ObjectRead, SecretRead } from '../db/queries.ts';
+import { authMac } from '../auth-rows.ts';
+import type { CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 
 import { ApiError, vaultRefused } from './errors.ts';
@@ -36,14 +37,18 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, { log: boolean; uses: boolean }>();
+const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; credentials: boolean }>();
 
-async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean }> {
+async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; credentials: boolean }> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
   const about = await vault.about();
   const log = about.log === '0.15' && vault.prepare !== undefined && vault.waitSealed !== undefined;
-  const kept = { log, uses: log && about.uses === true && vault.use !== undefined };
+  const kept = {
+    log,
+    uses: log && about.uses === true && vault.use !== undefined,
+    credentials: log && vault.signIn !== undefined && vault.revokeCredential !== undefined,
+  };
   keeping.set(vault, kept);
   return kept;
 }
@@ -51,6 +56,15 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean }> 
 /** Whether the vault keeps 0.15's log: the app's writes are its changes. */
 export async function keeps015(vault: Vault): Promise<boolean> {
   return (await about015(vault)).log;
+}
+
+/**
+ * Whether the vault makes sign-ins through trust bindings and revokes
+ * credentials itself, each in one call (`signIn`, `revokeCredential`;
+ * T149): with 0.15's log, a vault of this release does.
+ */
+export async function vaultCredentials(vault: Vault): Promise<Vault & Required<Pick<Vault, 'signIn' | 'revokeCredential'>> | null> {
+  return (await about015(vault)).credentials ? (vault as Vault & Required<Pick<Vault, 'signIn' | 'revokeCredential'>>) : null;
 }
 
 /** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */
@@ -200,6 +214,37 @@ export function credentialColumns(row: {
   return {
     id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: row.revokedAt !== null, expiresAt: Math.min(...ends), generation: row.generation,
   };
+}
+
+/**
+ * A credential revoked by the vault itself, in one call (T149,
+ * `Vault.revokeCredential`): from its row as read, live and the app's
+ * (`liveCredentialsWhere`), to revoked by `revokedBy`, the app's MAC over
+ * the revoked row with it. False when it moved meanwhile (revoked, or
+ * changed): whoever asks reads it again. A row the log does not bear out
+ * refuses, as a write to it does (`app_change`), the vault reporting it.
+ */
+export async function revokedByVault(
+  vault: Required<Pick<Vault, 'revokeCredential'>>,
+  chainKey: Buffer,
+  row: CredentialRow,
+  by: { actor: string; revokedBy: string; reason: 'revoke' | 'sign_out'; via: string | null },
+): Promise<boolean> {
+  const revokedAt = new Date();
+  const outcome = await vault.revokeCredential({
+    actor: by.actor,
+    before: { columns: credentialColumns(row), seal: row.seal === null ? null : Buffer.from(row.seal).toString('base64') },
+    authMacFrom: Buffer.from(row.authMac).toString('base64'),
+    authMac: authMac(chainKey, 'credentials', { ...row, revokedAt }).toString('base64'),
+    revokedAt: revokedAt.getTime(),
+    revokedBy: by.revokedBy,
+    reason: by.reason,
+    via: by.via,
+  });
+  if (outcome.ok) return true;
+  if (outcome.refused === 'moved') return false;
+  if (outcome.refused === 'busy') throw new ApiError('unavailable', 'coffre is busy: try again shortly', 'busy', '1');
+  throw new Error(`the credential ${row.id} is not the log's (${outcome.refused}): a row was put back around coffre`);
 }
 
 /** Each live credential revoked: its change. */

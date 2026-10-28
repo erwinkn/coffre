@@ -256,6 +256,28 @@ export interface Vault {
    */
   waitSealed?(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>>;
   /**
+   * 0.15 (T149, D146; docs/design/credential-lifecycle.md): a sign-in
+   * through a trust binding, a CI run's or a workload's, made by the vault
+   * in one statement (`sign_in`, migration 0034; formal/Lifecycle.tla).
+   * The app verifies the proof and names the binding as it read it; the
+   * vault makes the credential's object from those columns, and the
+   * statement goes ahead only while they are the binding's row, its
+   * account active at its generation, its rate not spent and the token
+   * not, under their locks: the issue lock, never the fence, so no use
+   * waits on it (R58), and no 0.14 head. No 0.14 entry either: the change
+   * records the sign-in (D147). Answers once it is sealed (R51). Only with
+   * 0.15's log on.
+   */
+  signIn?(input: SignInInput): Promise<SignInOutcome>;
+  /**
+   * 0.15 (T149): a credential revoked by the vault in one statement
+   * (`revoke_credential`, migration 0034), from its columns as the app
+   * read them and their seal: under its row's lock and the fence, held for
+   * the statement's work alone (RevokeTakesFence). The app has weighed who
+   * may. Answers once sealed (R51). Only with 0.15's log on.
+   */
+  revokeCredential?(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome>;
+  /**
    * Check 0.15's log (docs/design/0.15-plan.md, PR 8), as the audit page
    * does on every visit: the newest signed pair, held to the pairs held
    * outside, and every entry after it by its MAC and request, a tick's
@@ -398,6 +420,80 @@ export type PreparedChange = {
 };
 
 export type Prepared = { changes: PreparedChange[] };
+
+/**
+ * A sign-in through a trust binding (`Vault.signIn`). Times in ms since the
+ * epoch, bytes in base64.
+ */
+export type SignInInput = {
+  /** The account it signs in as, `token:<id>`. */
+  principal: string;
+  /** The binding as the app read it, which the vault decides on, and the statement holds to its row. */
+  binding: { id: string; generation: number; profile: string; scope: string | null; policy: string | null };
+  /** The credential the app hands out once made: its row, the app's MAC over it (`auth_mac`) with it. */
+  credential: SignInCredential;
+  /** The ID token's signing input's hash, spent once; null for a proof that spends none. */
+  spent: string | null;
+  /**
+   * The last instant the proof holds by its own times, ms (an ID token's
+   * `exp` and its `iat`'s hour, each with their tolerance): checked again
+   * in the statement, by the database's clock. Null: its credential's
+   * `notAfter` bounds it.
+   */
+  validUntil: number | null;
+  /** What the change records of the sign-in besides (D147): the proof, its issuer, and the run's claims. */
+  record: { proof: string; issuer: string; run: Record<string, string | number> };
+};
+
+/** The row a sign-in writes (`credentials`): a service's credential for a CI run, or a workload's key-bound session. */
+export type SignInCredential = {
+  id: string;
+  kind: 'service' | 'workload';
+  tokenHash: string;
+  tokenHint: string;
+  label: string | null;
+  scope: string | null;
+  places: string | null;
+  expiresAt: number;
+  notAfter: number | null;
+  jkt: string | null;
+  authMac: string;
+};
+
+/**
+ * Why a sign-in made nothing, the statement's own words: the account or
+ * the binding not as named, frozen, its rate spent (or a lock not had in
+ * time), its times past or too far, the token spent.
+ */
+export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed';
+
+export type SignInOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: SignInRefusal };
+
+/** A revoke (`Vault.revokeCredential`): the credential as the app read it, and the app's MACs over its row before and after. */
+export type RevokeCredentialInput = {
+  /** Who revokes it, as its entry names them: `user:…`, `token:…`, or the app's own (`coffre`). */
+  actor: string;
+  /** Its object's columns as read, and their seal: null for a row 0.14 made that the log never held. */
+  before: { columns: CredentialColumns; seal: string | null };
+  authMacFrom: string;
+  authMac: string;
+  revokedAt: number;
+  revokedBy: string;
+  /** Why, for its change's record: a revoke, or its holder's sign-out. */
+  reason: 'revoke' | 'sign_out';
+  /** The credential the request came in on, for its change's record: whose act it was (a run's, say). */
+  via: string | null;
+};
+
+/**
+ * A revoke: its change's number (null for a row the log never held), or
+ * why nothing was written: the row not as read, or revoked already
+ * (`moved`); not its object's newest change's (`stale`); its seal not the
+ * vault's (`tampered`, a finding); a lock not had in time (`busy`).
+ */
+export type RevokeCredentialOutcome =
+  | { ok: true; number: string | null; witnessed: boolean | null }
+  | { ok: false; refused: 'moved' | 'stale' | 'tampered' | 'busy' };
 
 /**
  * The vault's entries that change what a member holds: what their row's

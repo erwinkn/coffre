@@ -48,7 +48,7 @@ import {
 } from '../db/queries.ts';
 import { callerFrom, projectsReached, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, COFFRE_ACTOR, credentialChange, retrying, revokes } from './changes.ts';
+import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultCredentials } from './changes.ts';
 import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
@@ -148,7 +148,11 @@ export type IssuedCredential = { id: string; token: string; expiresAt: string };
 
 /** What a credential is issued with, beyond its kind and principal. */
 /** A credential's row, as its issuer writes it; `id` chosen before the transaction, so that 0.15's change of it is too (`#issueChange`). */
-type CredentialOptions = { id?: string; generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[] };
+type CredentialOptions = {
+  id?: string; generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[];
+  /** Its scope as stored, verbatim, in place of `scope`: a binding's own, which the vault holds a sign-in's to (T149). */
+  stored?: string | null;
+};
 
 /** A service or personal token as issued: its value, once, and what it reaches, by path. */
 export type IssuedToken = IssuedCredential & TokenPlan;
@@ -673,7 +677,7 @@ export class SigninService {
       label: options.label?.slice(0, 120) ?? null,
       createdBy: options.createdBy,
       expiresAt: options.expiresAt,
-      scope: options.scope === undefined ? null : storedScope(options.scope),
+      scope: options.stored !== undefined ? options.stored : options.scope === undefined ? null : storedScope(options.scope),
       places: options.places === undefined ? null : JSON.stringify(options.places.map(({ environmentId, personal }) => ({ environmentId, personal }))),
       revokedAt: null,
     };
@@ -793,6 +797,16 @@ export class SigninService {
   async signOut(token: string, meta: Omit<ClientMeta, 'label'>): Promise<void> {
     if (!isCoffreToken(token)) return;
     const tokenHash = hashToken(token);
+    const vault = await vaultCredentials(this.#deps.vault);
+    if (vault !== null) {
+      // With 0.15's log, the vault revokes it (T149): its row read, one call. Its change records the sign-out (D147).
+      for (let tries = 0; tries < 3; tries++) {
+        const [row] = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
+        if (row === undefined) return;
+        if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id })) return;
+      }
+      throw new ObjectMoved();
+    }
     await retrying(async () => {
     // Its actor, the session's own principal: a sign-out acts for whoever holds the token.
     const changes = await AppChanges.prepare(
@@ -835,6 +849,8 @@ export class SigninService {
    * as `'own handle'`, one that is not a handle of the caller's.
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
+    const vault = await vaultCredentials(this.#deps.vault);
+    if (vault !== null) return this.#revokedByVault(vault, ctx, credentialId, of);
     return retrying(async () => {
     const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId))));
     // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
@@ -867,6 +883,37 @@ export class SigninService {
       );
       return { revoked: true as const };
     }, changes);
+    });
+  }
+
+  /**
+   * `revokeCredential` with 0.15's log: the vault revokes it (T149), in one
+   * call, once the row as read says the caller may, as above. Its change
+   * records the revoke; a refusal is logged as one.
+   */
+  async #revokedByVault(
+    vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>,
+    ctx: Asker,
+    credentialId: string,
+    of: { member: string; managed: boolean } | 'own handle' | null,
+  ): Promise<{ revoked: true }> {
+    const { db, chainKey } = this.#deps;
+    return withRefusals(this.#deps, async () => {
+      for (let tries = 0; tries < 3; tries++) {
+        const [row] = await liveCredentialsWhere(db, chainKey, credentialsBy.id(credentialId));
+        const unknown = () =>
+          new Refusal(
+            notFound('unknown credential'),
+            denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { targetCredentialId: credentialId } }),
+          );
+        if (row === undefined) throw unknown();
+        const { principal } = ctx.caller;
+        const own = row.principal === principalOf(principal);
+        if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
+        if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
+        if (await revokedByVault(vault, chainKey, row, { actor: formatMember(principal), revokedBy: principal.id, reason: 'revoke', via: ctx.credentialId })) return { revoked: true as const };
+      }
+      throw new ObjectMoved();
     });
   }
 
@@ -1203,7 +1250,7 @@ export class SigninService {
    */
   exchangedCredential(
     service: string,
-    options: { generation: number; bindingId: string; label: string | null; expiresAt: Date; scope?: CredentialScope },
+    options: { generation: number; bindingId: string; label: string | null; expiresAt: Date; scope?: CredentialScope; stored?: string | null },
   ): { row: typeof credentials.$inferInsert & { id: string; principal: string; kind: string; scope: string | null; revokedAt: null; expiresAt: Date }; issued: IssuedCredential } {
     const made = this.#credential('service', { type: 'service', id: service }, {
       generation: options.generation,
@@ -1212,6 +1259,7 @@ export class SigninService {
       createdBy: issuedBy(options.bindingId),
       expiresAt: options.expiresAt,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
+      ...(options.stored === undefined ? {} : { stored: options.stored }),
     });
     return made as typeof made & { row: { id: string; principal: string; kind: string; scope: string | null; revokedAt: null; expiresAt: Date } };
   }

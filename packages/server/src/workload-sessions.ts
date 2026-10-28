@@ -17,7 +17,7 @@
 // The API (`authenticateRequest`), renewal, logout and the credential
 // proxy (`PluginContext.workload`) all come through here.
 import { UNSIGNED_BODY } from '@coffre/client/dpop';
-import { scopeWithReads, type CredentialScope } from '@coffre/core/access';
+import { sessionScope, type CredentialScope } from '@coffre/core/access';
 import {
   addressWithin,
   checkConstraints,
@@ -33,10 +33,11 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 
+export { sessionScope } from '@coffre/core/access';
+
 import { limitAlert, raiseAlert } from './alerts.ts';
 import { checkAuthRow } from './auth-rows.ts';
 import { ApiError } from './api/errors.ts';
-import { readScope } from './api/services.ts';
 import { update, type BindingRow } from './db/queries.ts';
 import { workloadSession, type SessionRow } from './db/workloads.ts';
 import { credentials } from '@coffre/db/schema';
@@ -400,17 +401,3 @@ function clauses(
   return { policy, places, place, path: own.placePath };
 }
 
-/**
- * What a session reaches, as its caller holds it: its row's scope, an
- * enrollment code's, or else its binding's, never null, with its binding's
- * `reads` on the grants of the environments they list (`scopeWithReads`).
- * Binding creation gives each such environment a grant of its own, so the
- * scope itself says each one's project, with nothing to look up. A grant
- * without `reads` is use-only, there.
- */
-export function sessionScope(row: Pick<SessionRow, 'scope'>, binding: Pick<BindingRow, 'scope'>, policy: BindingPolicy): CredentialScope {
-  const scope = readScope(row.scope ?? binding.scope) ?? [];
-  const projectOf = new Map<string, string>();
-  for (const { projectId, environmentId } of scope) if (environmentId != null && projectId !== null) projectOf.set(environmentId, projectId);
-  return scopeWithReads(scope, policy.reads, projectOf);
-}
