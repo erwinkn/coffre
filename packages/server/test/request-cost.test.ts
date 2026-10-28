@@ -826,6 +826,10 @@ test("a read of an environment's keys reads as many pages however many keys the 
     'the places tree of one project': () => places(counted, { within: [market!.id] }),
     "an environment's keys": () => environmentSecrets(counted, ids.dev!),
     "an environment's key": () => environmentSecrets(counted, ids.dev!, { key: 'API_KEY' }),
+    // The environment that piles up archived keys of its own, read by key.
+    "an archiving environment's key": () => environmentSecrets(counted, ids.prod!, { key: 'API_KEY' }),
+    "an archiving environment's heads by key": () => secretHeads(counted, ids.prod!, { keys: ['API_KEY', 'DATABASE_URL'] }),
+    "an archiving environment's lock on keys": () => counted.transaction((tx) => lock(tx, secrets, { projectId: market!.id, environmentId: ids.prod!, key: ['API_KEY', 'DATABASE_URL'] })),
     'the keys of three environments': () => liveKeysIn(counted, everything),
     'their distinct counts': () => distinctSecretCounts(counted, everything),
     'their sensitive values': () => sensitiveFrom(counted, everything),
