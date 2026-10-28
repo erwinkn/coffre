@@ -50,6 +50,8 @@ const FRESH = 150;
 let clock = 0;
 const now = () => clock;
 const RANGE = 512;
+/** A test's longest span, with room to spare: how close to 00:00 UTC a test may not start. */
+const MIDNIGHT_GUARD_MS = 20_000;
 
 before(async () => {
   db = await openTestDatabase();
@@ -62,6 +64,12 @@ before(async () => {
 after(() => db?.close());
 beforeEach(async () => {
   clock = Date.now();
+  // `later` moves the clock on within a test, and a day due is a day of the clock: a test starting within its own length of
+  // 00:00 UTC waits for it, so that the days its expectations name are the days it ends in.
+  if (DAY_MS - (clock % DAY_MS) < MIDNIGHT_GUARD_MS) {
+    await sleep(DAY_MS - (clock % DAY_MS) + 50);
+    clock = Date.now();
+  }
   TODAY = dayOf(clock);
   D10 = dayOf(clock - 10 * DAY_MS);
   D9 = dayOf(clock - 9 * DAY_MS);
@@ -416,7 +424,7 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
   const old = Date.now() - 900_000 - 60_000 - 3000 - 3_600_000 - 60_000;
   await run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) VALUES ('token:a', ${randomUUID()}, ${old}), ('token:a', ${randomUUID()}, ${Date.now()})`);
   const alerts: string[] = [];
-  const keep = upkeep(cp, store, { keepDays: null, seed, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, store, { keepDays: null, seed, now, alert: (m) => alerts.push(m) });
   await keep();
   await keep();
   assert.deepEqual(alerts, []);
@@ -433,7 +441,8 @@ test('the database drops nothing a sealed retention change does not cut, and nev
   const vault = db.vault;
   const refused = async (query: ReturnType<typeof sql>, said: RegExp) => assert.rejects(run(vault, query), (e: Error) => said.test(`${e.message} ${(e.cause as Error | undefined)?.message}`));
   await refused(sql`SELECT drop_day(${D10}::date)`, /no sealed retention change cuts the uses of/);
-  await refused(sql`SELECT drop_day(${dayOf(clock - DAY_MS)}::date)`, /are not past/);
+  // Yesterday by the database's own clock, which decides what drop_day protects.
+  await refused(sql`SELECT drop_day((clock_timestamp() AT TIME ZONE 'UTC')::date - 1)`, /are not past/);
   await refused(sql`SELECT drop_tiles(1)`, /no sealed retention change cuts the uses tree/);
   const payload = JSON.stringify({ op: 'retention', day: D10, cut: { upto: '1', at: 0, uses: 1, root: '00'.repeat(32) } });
   await refused(sql`SELECT log_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
