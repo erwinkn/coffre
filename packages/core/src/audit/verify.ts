@@ -84,6 +84,12 @@ const PAGE = 100;
 type Options = {
   verifiers: PairVerifiers;
   from?: PairNotes;
+  /**
+   * The database's newest row, as the caller read it in the walk's own
+   * snapshot, to start from instead of `from`: its row is not read again,
+   * nor the rows above it, which there are none of (PR 8 review r3).
+   */
+  newest?: StoredPair;
   anchors?: readonly PairNotes[];
   check?: (entry: LogEntry) => string | null;
   /** Whether a change is a retention change, and the cut it names; null for any other entry. */
@@ -138,10 +144,11 @@ async function walk(
 
   // The start: a pair the caller trusts, which must be the row at its place, or the genesis row.
   let start: Stop;
-  if (opts.from !== undefined) {
-    const trusted = await openHeld(opts.from);
+  const from = opts.newest?.notes ?? opts.from;
+  if (from !== undefined) {
+    const trusted = await openHeld(from);
     if (trusted === null) return (problems.push('the pair to start from is not signed by the log'), done(null));
-    const row = await reader.pair(trusted.upto);
+    const row = opts.newest ?? (await reader.pair(trusted.upto));
     const pair = row === null ? null : await open(row);
     if (pair === null || !sameNotes(pair, trusted)) return (problems.push(`no checkpoint at ${trusted.upto} with the pair to start from: checkpoints were deleted or replaced`), done(null));
     start = { pair, notes: row!.notes, row: true };
@@ -255,7 +262,7 @@ async function walk(
       previous = e.number > previous ? e.number : previous;
     }
   };
-  for (let rows = await reader.pairs(start.pair.upto, PAGE); ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
+  for (let rows = opts.newest === undefined ? await reader.pairs(start.pair.upto, PAGE) : []; ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
     const stops: Stop[] = [];
     for (const row of rows) {
       const pair = await open(row);

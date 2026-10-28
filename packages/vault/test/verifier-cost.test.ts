@@ -1,10 +1,9 @@
 // A page's check of 0.15's log (verifier.ts) costs a tick's worth of entries, however long the log (R25, R27, R48). At
 // 1,000 uses a second, with 5k and 50k sealed below: the newest pair and the entries above it, 250 at a moment picked
-// at random (half a 500 ms tick), 500 just before the tick, 1,000 when it is late. Its statements are the same
-// whatever lies below. Its CPU, in the vault's process, is logged, and held only to R27's p99 bound (20 ms) at a
-// tick's worth: CI's machines are slower than a developer's. Measured on one (docs/design/0.15-plan.md, "As built:
-// PR 8"): about 2.7 ms and 7 µs an entry, so 4.5 ms at a random moment, 6.7 ms before the tick, 9 to 10 ms late.
-// Postgres, as a deployment runs it.
+// at random (half a 500 ms tick), 500 just before the tick, 1,000 when it is late, and `ABOVE_NEWEST`, the most it
+// reads. Its statements are the same whatever lies below. Its CPU, in the vault's process, is logged, and held only to
+// R27's p99 bound (20 ms) at a tick's worth: CI's machines are slower than a developer's. Measured on one
+// (docs/design/0.15-plan.md, "As built: PR 8"). Postgres, as a deployment runs it.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -17,7 +16,7 @@ import { sql } from 'drizzle-orm';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
-import { verifierKeys, verifyTrees } from '../src/verifier.ts';
+import { ABOVE_NEWEST, verifierKeys, verifyTrees } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { openTestDatabase, postgresOnly, run, VAULT_URL, type TestDatabase } from './database.ts';
 
@@ -86,7 +85,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
         assert.ok((await cp.tick()).signed);
       }
       let above = 0;
-      for (const target of [250, 500, 1_000]) {
+      for (const target of [250, 500, 1_000, ABOVE_NEWEST]) {
         await uses(target - above, mac);
         above = target;
         const anchors = [decodePair(memory.record!)!];
@@ -106,7 +105,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
         measured[`${below} below, ${target} above`] = { statements: (statements() - before) / 9, cpuMs: Math.round(times[4]! * 100) / 100 };
       }
       assert.ok((await cp.tick()).signed);
-      sealedBelow += 1_000;
+      sealedBelow += above;
     }
   } finally {
     await close();
@@ -116,5 +115,5 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
   const counts = new Set(Object.values(measured).map((m) => m.statements));
   assert.equal(counts.size, 1, JSON.stringify(measured));
   // R27's p99 bound, at a tick's worth: CI's slower machines included.
-  for (const [where, { cpuMs }] of Object.entries(measured)) if (!where.endsWith('1000 above')) assert.ok(cpuMs < 20, `${where}: ${cpuMs} ms`);
+  for (const [where, { cpuMs }] of Object.entries(measured)) if (/ (250|500) above$/.test(where)) assert.ok(cpuMs < 20, `${where}: ${cpuMs} ms`);
 });

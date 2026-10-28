@@ -14,7 +14,7 @@ import { sql } from 'drizzle-orm';
 import { Checkpointer } from '../src/checkpointer.ts';
 import { authentic, logMacKey } from '../src/log-entry.ts';
 import { logWriter } from './log-entries.ts';
-import { logStore, tileKeys } from '../src/log-store.ts';
+import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 
@@ -244,3 +244,20 @@ test('PR 8 review r2 (W240): a use renumbered into a change\'s place is refused 
   await assert.rejects(store.locate(lost, { tree: 'changes' }), /entry \d+ is in the uses tree, not the changes: a use holds its number/);
   await assert.rejects(cp.sealThrough(lost), /cannot be proved in the signed changes tree: entry \d+ is in the uses tree/);
 });
+
+test('PR 8 review r3 (W240): a bounded read stops at its limit in the database too: 100,000 changes above, a few pages read', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+  // Changes a writer planted above the newest pair, as many as a long log holds.
+  await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT nextval('log_number'), 0, 'planted-' || g, gen_random_uuid(), 'x', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(1, 100000) g`);
+  await run(db.owner, sql`ANALYZE log_changes`);
+  const buffers = async (limit?: number) => {
+    const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }>(db.vault,
+      sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${postgresWindow(-1n, 2n ** 62n, sql`0`, undefined, limit)}`);
+    const top = plan!['QUERY PLAN'][0].Plan;
+    return top['Shared Hit Blocks'] + top['Shared Read Blocks'];
+  };
+  const whole = await buffers();
+  const bounded = await buffers(2_001);
+  assert.ok(bounded < 200 && bounded * 10 < whole, `${bounded} buffers bounded, ${whole} whole`);
+});
+

@@ -432,7 +432,7 @@ functions.
 - **`locate` finds an old use** through the uses' one index. Without its
   time, it reads between its window's floor and the sealing barrier's floor
   plus `deadline_max()` and 60 s (63 s in all); a caller that knows the
-  use's `at` (`prove(number, at)`) finds it in one probe. Its index is where
+  use's `at` (`prove(number, { at })`) finds it in one probe. Its index is where
   its leaf sits among the window's leaves, in the uses tree's level-0 tiles
   (a tick's worth: two or three tiles at 1,000/s). A use whose leaf is not
   there was changed since its tick, and `locate` says so.

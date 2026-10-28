@@ -16,7 +16,7 @@ import { requestsUnique } from './store.ts';
  * on every visit (R25), and keeps nothing between calls. It checks the
  * newest signed pair, its signatures and the pairs held outside (the
  * signer's memory), then every entry above it by its MAC and its request:
- * a tick's worth of entries, whatever the log's size, in six statements,
+ * a tick's worth of entries, whatever the log's size, in four statements,
  * and never more than `ABOVE_NEWEST` of them.
  *
  * Below the newest pair, the pair vouches for what it sealed: it is not
@@ -57,7 +57,7 @@ export type VerifyOptions = {
 
 /**
  * The most entries above the newest pair a check reads: four ticks' worth
- * at R44's 1,000 uses a second, some 16 ms at the 7 µs an entry measured
+ * at R44's 1,000 uses a second, 14 ms measured on a developer's machine
  * (verifier-cost.test.ts). More is a checkpointer behind, or rows a writer
  * planted, and is said, never read (review r1).
  */
@@ -87,7 +87,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     const verdict = await verifyLog(store, {
       verifiers: keys.verifiers,
       check,
-      ...(newest === null ? {} : { from: newest.notes }),
+      ...(newest === null ? {} : { newest }),
       ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
       above: ABOVE_NEWEST,
     });

@@ -98,14 +98,15 @@ function limitOf(limit: number | undefined): SQL {
 }
 
 /**
- * The uses of a bounded read, the first `limit` by `at`, their one index's
- * order (`log_uses_request_idx`), so that the database too stops there
- * rather than sort every use above the floor (PR 8 review r2). By number,
- * a use may lie past one of them later by `at`: a read that fills its limit
+ * One tree's half of a bounded read, its first `limit` in its index's
+ * order, so that the database too stops there rather than sort every entry
+ * above the cursor (PR 8 reviews r2, r3): the changes by number, their key;
+ * the uses by `at`, their one index (`log_uses_request_idx`). By number, a
+ * use may lie past one of them later by `at`: a read that fills its limit
  * says so, and is not taken as all there is (`verifyLog`'s `above`).
  */
-function firstUses(uses: SQL, limit: number | undefined): SQL {
-  return limit === undefined ? uses : sql`SELECT * FROM (${uses} ORDER BY u.at LIMIT ${limit}) f`;
+function first(half: SQL, order: SQL, limit: number | undefined): SQL {
+  return limit === undefined ? half : sql`SELECT * FROM (${half} ORDER BY ${order} LIMIT ${limit}) f`;
 }
 
 function bounds(after: bigint, upto: bigint, floor?: number): [SQL, SQL] {
@@ -206,6 +207,18 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
   throw new Error(`use ${entry.number} is in none of its window's leaves: the database changed it since its tick`);
 }
 
+/** Postgres's read of the entries in (after, upto], by number, uses from `floor` to `ceiling`: the window's rows (`postgresStore`). */
+export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number): SQL {
+  return sql`
+      ${first(sql`SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac,
+             NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place
+        FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
+      UNION ALL
+      ${first(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
+        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.at`, limit)}
+      ORDER BY n${limitOf(limit)}`;
+}
+
 function postgresStore(db: Database, range: number): LogStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
@@ -217,14 +230,7 @@ function postgresStore(db: Database, range: number): LogStore {
    * The window as rows, by number: the tick's read, 500 entries every 500 ms at R44's rate, so no JSON is built
    * for it (measured: the window read 6.0 ms p50 as JSON).
    */
-  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => rowsOf<WindowRow>(db, sql`
-      SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac,
-             NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place
-        FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}
-      UNION ALL
-      ${firstUses(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
-        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, limit)}
-      ORDER BY n${limitOf(limit)}`);
+  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling?: SQL, limit?: number) => rowsOf<WindowRow>(db, postgresWindow(after, upto, floor, ceiling, limit));
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
   // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
   const made = new Set<number>();
@@ -364,9 +370,9 @@ function sqliteStore(db: Database): LogStore {
     'credential', u.credential, 'secret', u.secret, 'purpose', u.purpose, 'mac', hex(u.mac), 'place', u.place)`);
   const PAIR = sql.raw(`json_object('upto', CAST(k.upto AS TEXT), 'changes', k.changes_note, 'uses', k.uses_note)`);
   const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
-      SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}
+      ${first(sql`SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
-      ${firstUses(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, limit)}
+      ${first(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.at`, limit)}
       ORDER BY 1${limitOf(limit)}
     ) e)`;
   const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
