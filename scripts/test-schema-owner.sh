@@ -85,6 +85,13 @@ DO $$ BEGIN
         WHERE has_database_privilege(role, current_database(), 'CREATE')
            OR has_database_privilege(role, current_database(), 'TEMPORARY')
     ) THEN RAISE EXCEPTION 'database privileges were not restricted'; END IF;
+    -- As a non-superuser owner, which only a login with ADMIN on them may do.
+    IF EXISTS (
+        SELECT 1 FROM unnest(ARRAY['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot']) AS login
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pg_db_role_setting s WHERE s.setrole = login::regrole AND s.setdatabase = 0 AND s.setconfig @> ARRAY['jit=off']
+        )
+    ) THEN RAISE EXCEPTION 'the runtime logins were not set to jit off'; END IF;
 END $$;
 SQL
     guarantees "$database"

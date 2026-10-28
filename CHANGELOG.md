@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **JIT is off for the runtime logins.** Every `coffre migrate` run now
+  sets `jit = off` for `coffre_runtime`, `coffre_vault_runtime` and
+  `coffre_vault_hot`, when they lack it, beside the privileges it already
+  reasserts. 0029 turned JIT off for the functions coffre runs as
+  their owner; the logins' own statements (the app's queries, the vault's
+  0.14 snapshot read) still used the server's default, and past
+  `jit_above_cost` (100,000) Postgres compiles a plan at every execution, a
+  cost that grows with the tables. Setting it takes `CREATEROLE` and `ADMIN`
+  on the three logins, as `coffre setup`'s administrator has, once per
+  server; a login without them is told the `ALTER ROLE` to have run, unless
+  it is already set.
+
 - **0.15's use reads three more things right, behind its switch: nothing
   calls it yet.** `0029_use_objects` adds `secret_references.ended_at`
   and replaces `use_credential`, `change_input` and `app_change`, which

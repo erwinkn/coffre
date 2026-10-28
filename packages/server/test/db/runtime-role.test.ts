@@ -6,8 +6,10 @@ import { migrateDatabase } from '@coffre/db/migrate';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 import {
+  TEST_HOT_DATABASE_URL,
   TEST_OWNER_DATABASE_URL,
   TEST_RUNTIME_DATABASE_URL,
+  TEST_VAULT_DATABASE_URL,
 } from './connections.ts';
 import { postgresOnly } from './engine.ts';
 
@@ -212,5 +214,25 @@ test(
       await owner.unsafe(revoke);
       await owner.end();
     }
+  },
+);
+
+test(
+  'the runtime logins run with jit off',
+  postgresOnly('SQLite has no JIT'),
+  async () => {
+    // Past jit_above_cost, a statement's plan is compiled at every execution, 150 ms where a use costs 2 (0029): whatever the server's default.
+    const logins = { coffre_runtime: TEST_RUNTIME_DATABASE_URL, coffre_vault_runtime: TEST_VAULT_DATABASE_URL, coffre_vault_hot: TEST_HOT_DATABASE_URL };
+    for (const [role, url] of Object.entries(logins)) {
+      const client = postgresClient(url, { max: 1 });
+      try {
+        const [row] = await client.unsafe<{ jit: string }[]>("SELECT current_setting('jit') AS jit");
+        assert.equal(row!.jit, 'off', role);
+      } finally {
+        await client.end();
+      }
+    }
+    // Every run reasserts it, with nothing to change on the second.
+    await migrateDatabase(TEST_OWNER_DATABASE_URL);
   },
 );

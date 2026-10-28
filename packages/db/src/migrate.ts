@@ -18,13 +18,44 @@ import { postgresSession, quoteIdentifier, type PostgresClient } from './postgre
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
 
-/** Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry. */
+/** The logins that run coffre's own statements: the app's, the vault's, and 0.15's hot path's. */
+const RUNTIME_LOGINS = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'];
+
+/**
+ * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do
+ * not carry, and the runtime logins' `jit = off`.
+ *
+ * Past `jit_above_cost` (100,000 by default) Postgres compiles a plan's
+ * expressions at every execution of it: 150 ms where a use costs under 2 ms
+ * (0029), and a statement's estimate grows with its tables. The functions that
+ * run as their owner say no JIT themselves (0029); the setting here covers
+ * every other statement of these logins, now and to come. A role's settings
+ * apply to the role that logs in, never through a group, and a pooler such as
+ * Hyperdrive may not pass a startup option on, so it is the login's own, on
+ * the server. It is the server's, not the database's, as the logins are (and
+ * as 0022 sets the hot login's): made once by a login with CREATEROLE and
+ * ADMIN on them, and found set by any other that migrates after.
+ */
 export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
-  await client.unsafe(`DO $$ BEGIN
+  await client.unsafe(`DO $$ DECLARE
+    login text;
+  BEGIN
     EXECUTE format(
       'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_vault_hot, coffre_backup',
       current_database()
     );
+    FOREACH login IN ARRAY ARRAY[${RUNTIME_LOGINS.map((role) => `'${role}'`).join(', ')}] LOOP
+      -- Only when it differs: altering a role takes CREATEROLE and its ADMIN, which a login that only migrates may lack.
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_db_role_setting s WHERE s.setrole = login::regrole AND s.setdatabase = 0 AND s.setconfig @> ARRAY['jit=off']
+      ) THEN
+        BEGIN
+          EXECUTE format('ALTER ROLE %I SET jit = off', login);
+        EXCEPTION WHEN insufficient_privilege THEN
+          RAISE EXCEPTION '% may not set jit = off on %, whose statements Postgres would compile at every run: have a login with CREATEROLE and ADMIN on it run ALTER ROLE % SET jit = off, then migrate again', current_user, login, login;
+        END;
+      END IF;
+    END LOOP;
   END $$`);
 }
 
