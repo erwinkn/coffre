@@ -2213,7 +2213,7 @@ async function environmentSlugs(db: Queryable, ids: readonly string[]): Promise<
  */
 export async function referenceRows(
   db: Queryable,
-  where: { holderSecretIds?: string[]; sourceSecretIds?: string[]; projectId?: string; createdBy?: string; endsOf?: string },
+  where: { holderSecretIds?: string[]; sourceSecretIds?: string[]; projectId?: string; createdBy?: string },
 ): Promise<ReferenceRow[]> {
   const { secretReferences, auditLog, environments } = tablesOf(db);
   if (where.holderSecretIds?.length === 0 || where.sourceSecretIds?.length === 0) return [];
@@ -2244,7 +2244,6 @@ export async function referenceRows(
     .where(and(
       bySeal ? inArray(secretReferences.createdSeq, sealedBy(db, where)) : undefined,
       where.holderSecretIds === undefined ? undefined : inArray(secretReferences.secretId, where.holderSecretIds),
-      where.endsOf === undefined ? undefined : endsNamed(db, secretReferences.secretId, where.endsOf),
     ))
     .orderBy(asc(secretReferences.createdSeq));
   type Sealed = { reference?: unknown; secretId?: unknown; also?: { projectId?: unknown; environmentId?: unknown; secretId?: unknown } };
@@ -2257,8 +2256,6 @@ export async function referenceRows(
     if (detail.reference !== row.id || !text(detail.secretId) || !text(source.projectId) || !text(source.environmentId) || !text(source.secretId)) return [];
     const holder = { projectId: seal.projectId, environmentId: seal.environmentId, secretId: detail.secretId };
     if (where.holderSecretIds !== undefined && !where.holderSecretIds.includes(holder.secretId)) return [];
-    // Found by its row's holder, which its seal must name.
-    if (where.endsOf !== undefined && holder.secretId !== row.secretId) return [];
     if (holderSlug !== null) slugs.set(row.environmentId, holderSlug);
     if (sourceSlug !== null) slugs.set(row.sourceEnvironmentId, sourceSlug);
     return [{
@@ -2297,20 +2294,6 @@ function sealedBy(db: Queryable, where: { sourceSecretIds?: string[]; projectId?
   ));
 }
 
-/**
- * Whether `secret` is an end of a reference sealed in or into `projectId`,
- * its holder or its source, as the reference's row names them: what a list
- * of the project's references reads of each end, asked beside the list.
- */
-function endsNamed(db: Queryable, secret: AnyColumn, projectId: string): SQL {
-  const { secretReferences } = tablesOf(db);
-  const sealed = inArray(secretReferences.createdSeq, sealedBy(db, { projectId }));
-  return or(
-    inArray(secret, db.select({ id: secretReferences.secretId }).from(secretReferences).where(sealed)),
-    inArray(secret, db.select({ id: secretReferences.sourceSecretId }).from(secretReferences).where(sealed)),
-  )!;
-}
-
 /** Where each secret is, by path, and whether anything of it is archived; with its current version's id and when it was written. */
 export type SecretPlaceRow = {
   id: string;
@@ -2340,12 +2323,6 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
     for (const row of await secretPlaceRows(db, inArray(secrets.id, unique.slice(start, start + 1000)))) found.set(row.id, row);
   }
   return found;
-}
-
-/** The ends of the references sealed in or into `projectId`, where each is now, as their rows name them (`endsNamed`). */
-export async function secretPlacesOfEnds(db: Queryable, projectId: string): Promise<Map<string, SecretPlaceRow>> {
-  const { secrets } = tablesOf(db);
-  return new Map((await secretPlaceRows(db, endsNamed(db, secrets.id, projectId))).map((row) => [row.id, row]));
 }
 
 function secretPlaceRows(db: Queryable, where: SQL): Promise<SecretPlaceRow[]> {

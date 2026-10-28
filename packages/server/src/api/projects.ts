@@ -191,7 +191,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   const counted: { summary: ProjectSummary; project: PlaceRow; environmentIds: string[] }[] = [];
   // Only the projects the caller reaches, as `me` reads them, and in a render the same read: one they can do nothing in is
   // not listed. Beside it, what the environments of those with a fork resolve to.
-  const [known, [live, dismissed]] = await Promise.all([reachedPlaces(ctx), forkedKeys(ctx.db, projectsReached(caller) ?? undefined)]);
+  const [known, [live, dismissed]] = await Promise.all([reachedPlaces(ctx, { teamKeys: true }), forkedKeys(ctx.db, projectsReached(caller) ?? undefined)]);
   const resolved = resolveKeys(known.filter((project) => project.environments.some((environment) => environment.parentId !== null)).flatMap((project) => project.environments), live, dismissed);
   for (const project of known) {
     const slugOf = new Map(project.environments.map((environment) => [environment.id, environment.slug]));

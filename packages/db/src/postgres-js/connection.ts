@@ -202,8 +202,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
   function build(q: Query): void {
     if (q.group !== null) {
-      for (const member of q.group) {
+      for (const [index, member] of q.group.entries()) {
+        // Named by the error, should this one be what the client cannot write.
+        q.member = index;
         built(member);
+        q.parameters = member.parameters;
         if (member.parameters.length >= 65534) throw Errors.generic('MAX_PARAMETERS_EXCEEDED', 'Max number of parameters (65534) exceeded');
         // A group goes in one write: none of its statements can wait for its parameters' types.
         if (typedByServer(member.parameters, member.statement!.types)) throw Errors.generic('GROUP_UNTYPED', 'A statement of a group has a value whose type only the server can say');

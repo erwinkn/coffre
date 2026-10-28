@@ -14,7 +14,6 @@ import {
   parentsOf,
   referenceRows,
   secretPlaces,
-  secretPlacesOfEnds,
   versionEnvelopes,
   type ReferenceRow,
   type ResolvedPath,
@@ -85,15 +84,6 @@ async function endsOf(db: Queryable, rows: readonly ReferenceRow[]): Promise<End
   const ids = [...new Set(rows.flatMap((row) => [row.holder.secretId, row.source.secretId]))];
   if (ids.length === 0) return { places: new Map(), current: new Map() };
   const [held, places] = await Promise.all([referenceRows(db, { holderSecretIds: ids }), secretPlaces(db, ids)]);
-  return { places, current: newestHeld(held, places) };
-}
-
-/**
- * Both ends of the references sealed in or into a project, as their rows
- * name them: read beside the list of them, needing nothing of it.
- */
-async function endsAround(db: Queryable, projectId: string): Promise<Ends> {
-  const [held, places] = await Promise.all([referenceRows(db, { endsOf: projectId }), secretPlacesOfEnds(db, projectId)]);
   return { places, current: newestHeld(held, places) };
 }
 
@@ -173,14 +163,9 @@ export async function readersOf(db: Queryable, secretIds: readonly string[]): Pr
   return currentOf(db, (await referenceRows(db, { sourceSecretIds: [...secretIds] })).filter((row) => row.ended === null));
 }
 
-/**
- * Of these rows, those their holder reads through now, resolved; `keep`
- * narrows them further. Their ends as read beside them (`endsAround`),
- * unless a row's seal names an end those did not find.
- */
-async function currentOf(db: Queryable, rows: readonly ReferenceRow[], keep: (row: ReferenceRow) => boolean = () => true, around?: Ends): Promise<Resolved[]> {
-  const found = around !== undefined && rows.every((row) => around.places.has(row.holder.secretId) && around.places.has(row.source.secretId));
-  const ends = found ? around : await endsOf(db, rows);
+/** Of these rows, those their holder reads through now, resolved; `keep` narrows them further. */
+async function currentOf(db: Queryable, rows: readonly ReferenceRow[], keep: (row: ReferenceRow) => boolean = () => true): Promise<Resolved[]> {
+  const ends = await endsOf(db, rows);
   return resolveReferences(db, rows.filter((row) => ends.current.get(row.holder.secretId)?.id === row.id && keep(row)), ends);
 }
 
@@ -497,8 +482,7 @@ export async function listReferences(
   if (place === null || (path.environment !== undefined && place.environment === null) || (path.key !== undefined && place.secret === null)) {
     throw notFound('no such project, environment or secret');
   }
-  const [all, around] = await Promise.all([referenceRows(ctx.db, { projectId: place.project.id }), endsAround(ctx.db, place.project.id)]);
-  const rows = all.filter((row) => row.ended === null);
+  const rows = (await referenceRows(ctx.db, { projectId: place.project.id })).filter((row) => row.ended === null);
   const at = (end: ReferenceRow['holder']) =>
     (path.environment === undefined || end.environmentId === place.environment!.id) && (path.key === undefined || end.secretId === place.secret!.id);
   const { caller } = ctx;
@@ -507,7 +491,7 @@ export async function listReferences(
   const manages = (row: ReferenceRow) => [row.holder, row.source].some((end) => can(caller, 'grant.manage', { projectId: end.projectId }));
   // Who reads through them, for whoever manages access at either end: read beside both ends, once one may be shown.
   const [resolved, readersOf] = await Promise.all([
-    currentOf(ctx.db, rows, (row) => (at(row.holder) || at(row.source)) && sees(row), around),
+    currentOf(ctx.db, rows, (row) => (at(row.holder) || at(row.source)) && sees(row)),
     rows.some((row) => (at(row.holder) || at(row.source)) && manages(row)) ? readersAt() : null,
   ]);
   const shown = resolved.filter((reference) => manages(reference.row));

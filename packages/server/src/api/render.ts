@@ -24,12 +24,13 @@ export class Render {
 }
 
 /**
- * The projects the caller reaches, with their environments (`projectsReached`)
- * and their team keys: what `me` and the project list show. Once a render.
+ * The projects the caller reaches, with their environments (`projectsReached`):
+ * what `me` and the project list show. Once a render, with each project's
+ * team keys, which its project list counts; alone, with them if asked.
  */
-export function reachedPlaces(ctx: Pick<ApiContext, 'db' | 'caller' | 'render'>): Promise<PlaceRow[]> {
-  const read = () => places(ctx.db, { within: projectsReached(ctx.caller) ?? undefined, teamKeys: true });
-  return ctx.render === undefined ? read() : ctx.render.reached(read);
+export function reachedPlaces(ctx: Pick<ApiContext, 'db' | 'caller' | 'render'>, { teamKeys = false }: { teamKeys?: boolean } = {}): Promise<PlaceRow[]> {
+  const read = (counted: boolean) => () => places(ctx.db, { within: projectsReached(ctx.caller) ?? undefined, teamKeys: counted });
+  return ctx.render === undefined ? read(teamKeys)() : ctx.render.reached(read(true));
 }
 
 /** One project and its environments: from the render's places, which hold every project its caller reaches; else read alone. */

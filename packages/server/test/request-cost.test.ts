@@ -495,18 +495,18 @@ async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
  * service accounts, for `me`); the places the caller reaches, each
  * project's team keys with them, and the keys and dismissals of the
  * projects with a fork, which the project list resolves; then, at once,
- * the environment's secrets, the project's references and both their ends
- * (two), and the keys and dismissals of the environment's siblings, for
- * its missing keys. An Owner, who manages its access, is told who reads
- * through its references, a round trip more: the members, their grants and
- * the vault's findings about them. The project page: the session and the
+ * the environment's secrets, the project's references, and the keys and
+ * dismissals of the environment's siblings, for its missing keys; then
+ * both ends of its references (two), and for an Owner, who manages its
+ * access, who reads through them: the members, their grants and the
+ * vault's findings about them. The project page: the session and the
  * places, and an Owner its grants, which are the members, their grants,
  * findings and those the log names with no row (`missingMembers`), and the
  * vault's `about`, which reads nothing.
  */
 const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost }> = {
   "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 2, vaultCalls: 2 } },
-  "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 2 } },
+  "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 2, vaultCalls: 2 } },
   "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
   "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
 };
@@ -530,7 +530,8 @@ test("a page's read that fails fails the reads sent with it, once, and each of i
     let outcomes: PromiseSettledResult<unknown>[] = [];
     const spent = await pageCost(async () => (outcomes = await environmentCalls('viewer')));
     assert.deepEqual(outcomes.map((outcome) => outcome.status === 'rejected' ? (outcome.reason as { status?: number }).status : 'answered'), [500, 500, 500]);
-    assert.deepEqual(spent, renders["a viewer's environment page"]!.budget, 'each read sent once, in as many round trips');
+    // The page's reads, each once, but the references' ends, which their list, failed, never asks.
+    assert.deepEqual(spent, { app: 8, trips: 3, vault: 2, vaultCalls: 2 }, 'each read sent once');
   } finally {
     await db.owner.execute(sql`GRANT SELECT ON secret_references TO coffre_app`);
   }
@@ -656,6 +657,19 @@ test("each hot request's statements read as many pages however long the log grow
     const runs = Math.ceil((await old()) / 10_000) + 1;
     for (let run = 0; run < runs; run++) assert.ok((await signLog()).ok);
     assert.equal(await old(), 0, 'the checkpoints forgot them all');
+    // And reference rows, a tenth as many as the entries, of a key archived in market/prod, which no page reads: rows
+    // of the app's (no seal), as an instance's history leaves them. A read of the references that scans them reads
+    // ten times as many pages; one that goes by its indexes, no more.
+    await db.owner.execute(sql`
+      INSERT INTO secrets (project_id, environment_id, key, archived_at)
+      SELECT e.project_id, e.id, 'GROWN_REFERENCED', now() FROM environments e JOIN projects p ON p.id = e.project_id
+      WHERE p.slug = 'market' AND e.slug = 'prod'
+      ON CONFLICT DO NOTHING`);
+    await db.owner.execute(sql`
+      INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
+      SELECT gen_random_uuid(), s.project_id, s.environment_id, s.id, s.project_id, s.environment_id, s.id,
+        (SELECT least(min(created_seq), 0) FROM secret_references) - g, 'system:load'
+      FROM secrets s CROSS JOIN generate_series(1, ${count / 10}) g WHERE s.key = 'GROWN_REFERENCED'`);
     // As autovacuum leaves it: the releases the checkpoints forgot taken back, and the grown log's statistics. One
     // process, as autovacuum's: parallel workers share their dead rows through the container's small /dev/shm.
     await db.owner.execute(sql`VACUUM (ANALYZE, PARALLEL 0)`);
