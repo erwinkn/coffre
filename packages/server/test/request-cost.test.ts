@@ -173,6 +173,8 @@ let environmentPage: (as: Persona) => Promise<void>;
 let projectPage: (as: Persona) => Promise<void>;
 /** The environment page's own calls, as its render asks them, each answered or refused. */
 let environmentCalls: (as: Persona) => Promise<PromiseSettledResult<unknown>[]>;
+/** Every other page's render, by its path, as its route's loaders read (`visits`). */
+let visit: (as: Persona | null, path: string, options?: VisitOptions) => Promise<void>;
 let pageTrips = 0;
 /** The proxy in front of the app's Postgres that pages' connections go through, counting their Syncs. */
 let relay: Awaited<ReturnType<typeof postgresProxy>>;
@@ -297,6 +299,22 @@ before(async () => {
       if (listed.find((project) => project.slug === 'market')?.permissions.includes('grant.manage')) await client.members.list('market');
     })]);
   });
+
+  visit = async (as, path, options = { reports: true }) => {
+    const loaders = visits[path];
+    if (loaders === undefined) throw new Error(`no page at ${path}`);
+    if (as !== null) return render(as, path, (client) => loaders(client, options));
+    // Signed out: no credential, a connection all the same.
+    const pool = new HyperdrivePool(relay.url, { groupReads: true });
+    const db = createDatabase(app.watch(pool));
+    const syncs = relay.syncs;
+    try {
+      await loaders(pageClient(new Request(`${ORIGIN}${path}`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } }), { ...runtime, db }, null), options);
+    } finally {
+      await pool.end();
+      pageTrips += relay.syncs - syncs;
+    }
+  };
 
   // A CI run's ID token, from an issuer of the test's own, for the binding of its workflow.
   await root.secrets.set('market/dev', Object.fromEntries(SEVEN.map((key) => [key, `fake-${key.toLowerCase()}`])));
@@ -477,6 +495,90 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
 
+/**
+ * What each page's loaders read, as coffre's routes make them (@coffre/ui, options.ts and lib/queries.ts), which
+ * TanStack runs side by side: the shell's (`loadShell`), which every page's own awaits for what it decides on.
+ * A read that fails is the page's to show, as `uiResult` makes it; the cost is what was asked. As this instance's
+ * deployment configures it: coffre's own sign-in, and no trusted workloads, whose bindings a service account's
+ * pages would list too (`loadServiceDirectory`, `loadSignIn`). `reports: false` leaves out an Owner's report of a
+ * member (`loadMember`), which reads what they ever read.
+ */
+type VisitOptions = { reports: boolean };
+const settle = <T>(promise: Promise<T>) => promise.catch(() => undefined);
+function shellOf(client: CoffreClient) {
+  const [auth, me, projects] = [client.auth(), settle(client.me()), settle(client.projects.list())];
+  const shell = Promise.all([auth, me, projects]).then(([, me, listed]) => ({
+    me: me ?? null,
+    projects: listed?.projects ?? [],
+    administers: me?.instanceRole === 'admin' || me?.instanceRole === 'owner',
+  }));
+  return shell;
+}
+type Shell = Awaited<ReturnType<typeof shellOf>>;
+const managesGrants = (shell: Shell) => shell.projects.some((project) => project.permissions.includes('grant.manage'));
+const listsAccess = (shell: Shell) => shell.administers || shell.me?.setsUpServices === true || managesGrants(shell);
+const page = (own: (client: CoffreClient, shell: Promise<Shell>, options: VisitOptions) => Promise<unknown>) => async (client: CoffreClient, options: VisitOptions) => {
+  const shell = shellOf(client);
+  await Promise.all([shell, own(client, shell, options)]);
+};
+/** A project's tab: once the list says its visitor may open it (`projectTab`). */
+const tab = (permission: string, own: (client: CoffreClient) => Promise<unknown>) => page(async (client, shell) => {
+  if ((await shell).projects.find((project) => project.slug === 'market')?.permissions.includes(permission as never)) await own(client);
+});
+const visits: Record<string, (client: CoffreClient, options: VisitOptions) => Promise<void>> = {
+  '/projects': page(async () => {}),
+  '/projects/market/users': tab('grant.manage', (client) => Promise.all([settle(client.members.list('market')), settle(client.references.list('market'))])),
+  '/projects/market/service-accounts': tab('grant.manage', (client) => settle(client.members.list('market'))),
+  '/projects/market/settings': tab('project.manage', async () => {}),
+  '/users': page(async (client, shell) => {
+    if ((await shell).administers) await settle(client.members.list());
+  }),
+  '/users/reader@acme.example': page(async (client, shell, { reports }) => {
+    const known = await shell;
+    await Promise.all([
+      known.me?.runsInstance && reports ? settle(client.members.get(`user:${READER}`)) : null,
+      listsAccess(known) ? settle(client.members.access(`user:${READER}`)) : null,
+    ]);
+  }),
+  '/service-accounts': page(async (client, shell) => {
+    const known = await shell;
+    if (!(known.administers || known.me?.setsUpServices)) return;
+    const listed = await settle(client.members.list());
+    await Promise.all((listed?.members ?? []).filter((member) => member.principalType === 'service' && member.managed).flatMap((member) => [
+      settle(client.tokens.list(member.member)),
+    ]));
+  }),
+  '/service-accounts/ci-web': page(async (client, shell, { reports }) => {
+    const known = await shell;
+    const [, access] = await Promise.all([
+      known.me?.runsInstance && reports ? settle(client.members.get(SERVICE)) : null,
+      listsAccess(known) ? settle(client.members.access(SERVICE)) : null,
+    ]);
+    if (access?.managed && access.status === 'active') await settle(client.tokens.list(SERVICE));
+  }),
+  '/settings': page(async (client, shell) => {
+    const known = await shell;
+    await Promise.all([
+      known.administers ? settle(client.members.list()) : null,
+      known.me?.runsInstance ? settle(client.settings.get()) : null,
+      known.me?.runsInstance ? settle(client.audit.keys()) : null,
+      settle(client.roles.list()),
+    ]);
+  }),
+  '/account': page(async (client, shell) => {
+    if ((await shell).me?.principal.type === 'user') await settle(client.identities.list());
+  }),
+  '/account/sessions': page(async (client, shell) => {
+    const { me } = await shell;
+    if (me?.principal.type === 'user') await Promise.all([settle(client.sessions.list()), settle(client.tokens.list(`user:${me.principal.id}`))]);
+  }),
+  '/login': page(async () => {}),
+  '/unregistered': page(async () => {}),
+  '/auth/device': page(async () => {}),
+  '/approvals/00000000-0000-4000-8000-000000000000': page(async (client) => settle(client.approvals.get('00000000-0000-4000-8000-000000000000'))),
+  '/oauth/authorize': page(async (client) => settle(client.oauth.describe({ client_id: 'https://app.example/client.json', redirect_uri: 'https://app.example/cb', response_type: 'code' }))),
+};
+
 /** What a page's render cost: its statements on the app's connection and the round trips they took there, and the vault's statements and calls. */
 type PageCost = { app: number; trips: number; vault: number; vaultCalls: number };
 
@@ -506,11 +608,51 @@ async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
  * findings and those the log names with no row (`missingMembers`), and the
  * vault's `about`, which reads nothing.
  */
-const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost }> = {
+/**
+ * `history`: an Owner's page of a member, whose report lists every secret they ever read (`memberActivity`, the
+ * offboarding report's exposure): it reads their history in the log, as main did, by design. Its statements are its
+ * budget's; the per-statement pages test, which grows the log, measures the page without that report.
+ */
+const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost; history?: () => Promise<unknown> }> = {
   "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 2, vaultCalls: 2 } },
   "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 2, vaultCalls: 2 } },
   "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
   "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  // Every other page, as Owner and viewer (`visits`); the sign-in page signed out too, which reads nothing. Not the
+  // audit page's: its check reads what was written since the newest checkpoint (R25), which its own test holds.
+  "/projects, owner": { request: () => visit('owner', '/projects'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/projects, viewer": { request: () => visit('viewer', '/projects'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/projects/market/users, owner": { request: () => visit('owner', '/projects/market/users'), budget: { app: 14, trips: 4, vault: 2, vaultCalls: 3 } },
+  "/projects/market/users, viewer": { request: () => visit('viewer', '/projects/market/users'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/projects/market/service-accounts, owner": { request: () => visit('owner', '/projects/market/service-accounts'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
+  "/projects/market/service-accounts, viewer": { request: () => visit('viewer', '/projects/market/service-accounts'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/projects/market/settings, owner": { request: () => visit('owner', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
+  "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 2, vaultCalls: 2 } },
+  "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 3, vaultCalls: 4 } },
+  "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 5, vaultCalls: 6 } },
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 3, vaultCalls: 4 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 5, vaultCalls: 5 } },
+  "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 4, vaultCalls: 5 } },
+  "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 2, vaultCalls: 2 } },
+  "/account, owner": { request: () => visit('owner', '/account'), budget: { app: 7, trips: 3, vault: 2, vaultCalls: 2 } },
+  "/account, viewer": { request: () => visit('viewer', '/account'), budget: { app: 7, trips: 3, vault: 2, vaultCalls: 2 } },
+  "/account/sessions, owner": { request: () => visit('owner', '/account/sessions'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 2 } },
+  "/account/sessions, viewer": { request: () => visit('viewer', '/account/sessions'), budget: { app: 11, trips: 3, vault: 2, vaultCalls: 2 } },
+  "/login, owner": { request: () => visit('owner', '/login'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/login, viewer": { request: () => visit('viewer', '/login'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/unregistered, owner": { request: () => visit('owner', '/unregistered'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/unregistered, viewer": { request: () => visit('viewer', '/unregistered'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/auth/device, owner": { request: () => visit('owner', '/auth/device'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/auth/device, viewer": { request: () => visit('viewer', '/auth/device'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/approvals/00000000-0000-4000-8000-000000000000, owner": { request: () => visit('owner', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/approvals/00000000-0000-4000-8000-000000000000, viewer": { request: () => visit('viewer', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/oauth/authorize, owner": { request: () => visit('owner', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/oauth/authorize, viewer": { request: () => visit('viewer', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+  "/login, signed out": { request: () => visit(null, '/login'), budget: { app: 0, trips: 0, vault: 0, vaultCalls: 0 } },
 };
 
 test('each page renders in exactly its budget of statements and round trips', POSTGRES, async () => {
@@ -720,7 +862,7 @@ test("each hot request's statements read as many pages however long the log grow
     "a workload's request at a proxy whose cache lapsed": coldWorkload,
     "a workload's verify at a proxy whose cache lapsed": coldVerify,
     'a handle for `coffre run`': () => reader.handles.create({ label: 'run', paths: ['market/dev'] }),
-    ...Object.fromEntries(Object.entries(renders).map(([name, { request }]) => [name, request])),
+    ...Object.fromEntries(Object.entries(renders).map(([name, { request, history }]) => [name, history ?? request])),
   };
   await grow(10_000);
   const small = await pages();
@@ -1056,3 +1198,4 @@ test("a read of an environment's keys reads as many pages however many keys the 
     }
   }
 });
+

@@ -494,8 +494,9 @@ const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  */
 export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<OffboardingReport> {
   if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
-  // Everyone, not just them: the service tokens they issued belong to others.
-  const [everyone, known, owners] = await Promise.all([directory(ctx, new Date()), places(ctx.db), declaredOwners(ctx)]);
+  // Everyone, not just them: the service tokens they issued belong to others. Beside it, every place (which whoever
+  // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
+  const [everyone, known, owners, references] = await Promise.all([directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member))]);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
@@ -509,7 +510,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
 
   const activity = await ctx.db.transaction((tx) => memberActivity(tx, [member.id]), SNAPSHOT);
   const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
-  const made = (await referencesBy(ctx.db, formatMember(member))).map((reference) => reference.view);
+  const made = references.map((reference) => reference.view);
   made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
   // Only people connect apps. Removal disconnects them, but 0.4.0's left
   // them to the generation alone: a removed member's are never listed.

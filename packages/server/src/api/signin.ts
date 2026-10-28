@@ -45,7 +45,8 @@ import {
   updateAuth,
   type CredentialRead,
 } from '../db/queries.ts';
-import { callerFrom, type PrincipalRef } from './caller.ts';
+import { callerFrom, projectsReached, type PrincipalRef } from './caller.ts';
+import { reachedPlaces } from './render.ts';
 import { AppChanges, COFFRE_ACTOR, credentialChange, retrying, revokes } from './changes.ts';
 import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
@@ -84,7 +85,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via'>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via' | 'render'>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -881,7 +882,7 @@ export class SigninService {
   // --- listing --------------------------------------------------------------
 
   async listSessions(ctx: Asker, currentCredentialId: string | null): Promise<SessionRow[]> {
-    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal }, new Date());
+    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal, standing: false }, new Date());
     const lastSeen = (row: { lastUsedAt: Date | null; createdAt: Date }) => (row.lastUsedAt ?? row.createdAt).getTime();
     return (self?.credentials ?? [])
       .filter((row) => row.kind === 'browser' || row.kind === 'cli')
@@ -901,7 +902,7 @@ export class SigninService {
   }
 
   async listIdentities(ctx: Asker): Promise<IdentityRow[]> {
-    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal }, new Date());
+    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal, standing: false }, new Date());
     return (self?.identities ?? [])
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .map((row) => ({
@@ -930,8 +931,9 @@ export class SigninService {
       throw forbidden("only admins and owners of the whole instance may see other people's tokens");
     }
     const [[held], known] = await Promise.all([
-      members(this.#deps.db, this.#deps.chainKey, { member }, new Date()),
-      places(this.#deps.db),
+      members(this.#deps.db, this.#deps.chainKey, { member, standing: false }, new Date()),
+      // Every place: in a render, what whoever reaches them all read.
+      projectsReached(ctx.caller) === null ? reachedPlaces({ db: this.#deps.db, caller: ctx.caller, render: ctx.render }) : places(this.#deps.db),
     ]);
     return tokenRows(held?.credentials ?? [], known);
   }
