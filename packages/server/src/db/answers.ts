@@ -26,6 +26,19 @@ export async function answerShown(db: Queryable, principal: string): Promise<Sho
   return answerOf(principal, row!.answer);
 }
 
+/**
+ * Whether a request that only shows its caller may show what the rows say
+ * (`answerShown`), or asks the vault, as any request does: only an active
+ * member's. Anyone else is refused, or admitted, by the vault's answer, and
+ * the rows would say neither: a person the deployment names an Owner
+ * (`owners`) with no row yet, as behind Cloudflare Access, where nothing
+ * signs them in first, is admitted by the vault's first answer about them,
+ * and the rows hold no member until it has.
+ */
+export function shownActive(access: Access): boolean {
+  return access.status === 'active';
+}
+
 /** What `answerShown` answers: the access, the settings, and the newest `policy.change`'s number, read with them. */
 export type Shown = { access: Access; settings: Settings; policySeq: bigint | null };
 

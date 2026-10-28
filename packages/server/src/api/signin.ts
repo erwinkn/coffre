@@ -21,7 +21,7 @@ import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
 
 import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows.ts';
-import { answerOf, type Shows } from '../db/answers.ts';
+import { answerOf, shownActive, type Shows } from '../db/answers.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findBinding,
@@ -721,8 +721,8 @@ export class SigninService {
       // A kept answer at the credential's generation, unless its scope is still to be sealed, from what the account holds now.
       const unsealed = row !== null && row.kind === 'service' && unsealedScope(row.scope);
       const recall = request.recall === true && row !== null && !unsealed;
-      // Only shown, read from the vault's rows; but a scope still to be sealed is sealed from the vault's answer, asked.
-      if (shown !== null && !unsealed) [access, unchecked] = [shown.access, true];
+      // Only shown, read from the vault's rows, for an active member (`shownActive`); a scope still to be sealed is sealed from the vault's answer, asked.
+      if (shown !== null && !unsealed && shownActive(shown.access)) [access, unchecked] = [shown.access, true];
       else if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
       // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {

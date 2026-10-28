@@ -8,7 +8,7 @@ import { formatMember } from './api/paths.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
 import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken } from './api/signin.ts';
-import { answerShown, policySeqAndSettings, type Shows } from './db/answers.ts';
+import { answerShown, policySeqAndSettings, shownActive, type Shows } from './db/answers.ts';
 import type { CredentialRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
@@ -222,10 +222,12 @@ export async function authenticateRequest(
   }
 
   try {
-    // Access's verifier reads nothing: what the request shows, it reads from the vault's rows with the newest policy change.
+    // Access's verifier reads nothing: what the request shows, it reads from the vault's rows with the newest policy change;
+    // for anyone but an active member, the vault is asked, as for any request (`shownActive`).
     if (checked === undefined && options.shows === 'caller') {
-      ({ access: checked, settings, policySeq } = await answerShown(runtime.db, formatMember(principal)));
-      unchecked = true;
+      const shown = await answerShown(runtime.db, formatMember(principal));
+      ({ settings, policySeq } = shown);
+      if (shownActive(shown.access)) [checked, unchecked] = [shown.access, true];
     } else if (policySeq === undefined && options.shows === 'settings') {
       ({ policySeq, settings } = await policySeqAndSettings(runtime.db));
     }
@@ -291,8 +293,10 @@ async function authenticateWorkload(
   const { row, binding, policy } = session;
   const id = row.principal.slice('token:'.length);
   try {
-    const { access, settings } = shownOnly ? await answerShown(runtime.db, row.principal) : { ...(await accessFor(runtime, row.principal)), settings: undefined };
-    const caller = withShown(callerFrom({ type: 'service', id }, access, session.policySeq, sessionScope(row, binding, policy), 'workload'), { ...(shownOnly ? { unchecked: true as const } : {}), settings });
+    const shown = shownOnly ? await answerShown(runtime.db, row.principal) : null;
+    const unchecked = shown !== null && shownActive(shown.access);
+    const access = unchecked ? shown.access : (await accessFor(runtime, row.principal)).access;
+    const caller = withShown(callerFrom({ type: 'service', id }, access, session.policySeq, sessionScope(row, binding, policy), 'workload'), { ...(unchecked ? { unchecked: true as const } : {}), settings: shown?.settings });
     // Removal may have raced the statement.
     if (caller.generation !== row.generation) return unauthenticated(runtime.auth);
     return {

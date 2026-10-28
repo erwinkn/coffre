@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { CoffreError, createClient } from '@coffre/client';
-import { github, signin } from '@coffre/core/identity';
+import { github, signin, type Principal } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
@@ -160,4 +160,28 @@ test('a row changed around the vault is shown as it says, and decides nothing: w
   for (const asked of [() => render(token).me(), () => client.projects.list(), () => client.members.list(), () => client.secrets.reveal('market/dev')]) {
     await assert.rejects(asked(), (error: unknown) => error instanceof CoffreError && error.status === 401);
   }
+});
+
+test('behind Cloudflare Access, an Owner the deployment names, never admitted, is admitted by the vault at their first `GET /api/me`, then shown from the rows', async () => {
+  const FOUNDER = 'founder@acme.example';
+  // A fresh deployment, its vault naming them: nobody has signed in yet.
+  await resetDatabase(db.owner);
+  const named = testDeps(db.runtime, [FOUNDER]);
+  const asked: string[] = [];
+  const vault = { ...named.vault, access: (principal: string) => (asked.push(principal), named.vault.access(principal)) } as Vault;
+  const access: CoffreRuntime = {
+    ...runtime, vault, signin: null, auth: { mode: 'cloudflare', access: { issuer: 'https://acme.cloudflareaccess.com', jwksUrl: 'https://acme.cloudflareaccess.com/certs', audience: 'aud' } },
+    // Every assertion is simply the email of whoever holds it.
+    verifier: { verify: async (token: string): Promise<Principal> => ({ type: 'user', id: token, email: token, subject: token }) },
+  };
+  const ask = async () => {
+    const response = await fetchApi(new Request(`${ORIGIN}/api/me`, { headers: { 'cf-access-jwt-assertion': FOUNDER } }), access, { sourceIp: null });
+    assert.equal(response.status, 200);
+    return (await response.json()) as { registered: boolean; runsInstance: boolean; instanceRole: string };
+  };
+  const first = await ask();
+  assert.deepEqual([first.registered, first.runsInstance, first.instanceRole, asked], [true, true, 'owner', [`user:${FOUNDER}`]], 'no row yet: the vault is asked, and admits them');
+  asked.length = 0;
+  const again = await ask();
+  assert.deepEqual([again, asked], [first, []], 'a member now: shown from the rows');
 });
