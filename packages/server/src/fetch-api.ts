@@ -288,9 +288,14 @@ export function pageClient(
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: async (request) =>
-      embedded && isPageRead(request)
-        ? errorResponse(new ApiError('cross_origin', 'this is read only by a page opened on its own, not one embedded in another site'))
-        : fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true, render }),
+    transport: async (request) => {
+      if (embedded && isPageRead(request)) return errorResponse(new ApiError('cross_origin', 'this is read only by a page opened on its own, not one embedded in another site'));
+      if (SAFE_METHODS.has(request.method)) return fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true, render });
+      // A change, which a credential that is no cookie may make (an Access service token's): read afresh, and what the
+      // render read before it is read afresh after it.
+      const answered = await fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true });
+      render.forget();
+      return answered;
+    },
   });
 }

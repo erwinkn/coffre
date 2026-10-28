@@ -133,6 +133,29 @@ test('with groupReads, a select marked as a write goes alone, and a group with a
   await pool.end();
 });
 
+test('with groupReads, a connection cut while a group is out fails each of its reads once, and the next read connects again', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  await db.execute(sql`select 1`);
+  const asked = Promise.allSettled([
+    db.execute(sql`select ${1}::int as n, pg_sleep(1)`),
+    db.execute(sql`select ${2}::int as n`),
+    db.execute(sql`select ${3}::int as n`),
+  ]);
+  // Once the group is out, as its first read sleeps.
+  const syncs = proxy.syncs;
+  for (let tries = 0; proxy.syncs === syncs; tries += 1) {
+    assert.ok(tries < 200, 'the group never went');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  proxy.cut();
+  const settled = await asked;
+  assert.deepEqual(settled.map((outcome) => outcome.status), ['rejected', 'rejected', 'rejected']);
+  assert.equal(n(await db.execute(sql`select ${4}::int as n`)), 4);
+  await pool.end();
+});
+
 test('without groupReads, reads asked together each take a turn, as before', { skip }, async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);

@@ -390,7 +390,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
         stack: { value: ('stack' in e ? String(e.stack) : '') + q.origin.replace(/.*\n/, '\n'), enumerable: debug },
         query: { value: begin ? q.begin : q.group === null ? q.text : q.group[q.member]!.text, enumerable: debug },
         parameters: { value: begin ? [] : q.parameters, enumerable: debug },
-        args: { value: q.args, enumerable: debug },
+        args: { value: q.group === null ? q.args : q.group[q.member]!.args, enumerable: debug },
         types: { value: q.statement?.types, enumerable: debug },
       });
     }

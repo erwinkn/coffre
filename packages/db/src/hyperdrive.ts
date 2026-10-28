@@ -24,6 +24,9 @@ type Gathered = { text: string; values: unknown[]; arrays: () => boolean; resolv
  */
 const READ = /^\s*select\b/i;
 
+/** What the client refuses to write of a group, before anything of it is sent (`build`, postgres-js/connection.ts). */
+const UNSENT = new Set(['GROUP_UNTYPED', 'MAX_PARAMETERS_EXCEEDED', 'UNDEFINED_VALUE']);
+
 /**
  * postgres.js for one call on Workers, through Hyperdrive: one connection,
  * opened by the first query, which every query and transaction of the
@@ -145,8 +148,9 @@ export class HyperdrivePool implements Client {
             const answers = await client.group(gathered.map((member) => ({ query: member.text, parameters: member.values, arrays: member.arrays() })));
             gathered.forEach((member, i) => member.resolve(answers[i]));
           } catch (error) {
-            // A value whose type only the server can say, which a group cannot wait for: nothing went, each goes alone.
-            if ((error as { code?: unknown }).code !== 'GROUP_UNTYPED') throw error;
+            // A statement the client could not write, a value whose type only the server can say among them: nothing of
+            // the group went, and each goes alone, so that only that one fails, as it would have.
+            if (!UNSENT.has((error as { code?: unknown }).code as string)) throw error;
             for (const member of gathered) await alone(member).catch(member.reject);
           }
         } catch (error) {

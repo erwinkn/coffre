@@ -8,11 +8,12 @@ import type { ApiContext } from './context.ts';
  * One page's render on the server: every API call it makes, in process
  * (`pageClient`), as one caller, whom it checks once. What they all read
  * of the instance, the projects and environments the caller reaches, is
- * read once for them all, and each path they name is found in it. A
- * render changes nothing (a change from one has no origin to show, and is
- * refused), so what its first call read holds for its last: on Workers,
- * each statement is a round trip, and the environment page's three calls
- * each read the tree, or resolved its path, again.
+ * read once for them all, and each path they name is found in it: on
+ * Workers, each statement is a round trip, and the environment page's three
+ * calls each read the tree, or resolved its path, again. A page's render
+ * changes nothing (a change with its cookie has no origin to show, and is
+ * refused), but a deployment's own route may, with a credential that is no
+ * cookie: a change goes without what the render read, and forgets it.
  */
 export class Render {
   #reached: Promise<PlaceRow[]> | null = null;
@@ -20,6 +21,11 @@ export class Render {
   /** The places the render's caller reaches, read the first time a call asks. */
   reached(read: () => Promise<PlaceRow[]>): Promise<PlaceRow[]> {
     return (this.#reached ??= read());
+  }
+
+  /** After a change: the next call reads them again. */
+  forget(): void {
+    this.#reached = null;
   }
 }
 
