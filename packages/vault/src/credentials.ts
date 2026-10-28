@@ -287,18 +287,18 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * scope and kind through it), may give `principal` a token of this kind,
  * scope and end: null if so, or why not. The app's own checks, made
  * again on the vault's reads, with the same rules (`@coffre/core/access`):
- * - a service account's (R15, R32): its issuer manages it, and could give
+ * - a service account's (R15, R32): its issuer, a person, manages it, and could give
  *   it each grant, which the account holds (`issuesCredential`); sensitive
  *   reads only where the issuer is an Owner of the project (`ownsProject`);
- *   at most `MAX_SERVICE_TOKEN_DAYS`;
+ *   each grant's columns within its role; at most `MAX_SERVICE_TOKEN_DAYS`;
  * - a personal token: its person's own, made on a session, each role one
  *   that manages no access (`delegable`), no column past what that role
  *   holds as the policy defines it nor what they hold there
  *   (`issuedGrant`'s bound); at most `MAX_PERSONAL_TOKEN_MINUTES`;
- * - a handle: its person's own, on a session or a personal token of theirs,
- *   each place a `viewer` or a `contributor`, no column past reading and
- *   using (`HANDLE_POLICY`) nor what they hold there through it; never past
- *   the end of the personal token it was made on.
+ * - a handle: its person's own, each place a `viewer` or a `contributor`,
+ *   no column past reading and using (`HANDLE_POLICY`) nor what they hold
+ *   there through the credential it came in on; never past that
+ *   credential's end when it is a scoped one, a personal token's.
  * A grant's columns are what a use decides on (`scopeDefinition`), its role
  * only a name: they are held to the role, never the name alone.
  */
@@ -316,19 +316,28 @@ export function weighIssue(
   if (places.some((place) => place === null)) return 'a place the token names is no longer there';
   const at_ = places as readonly Place[];
   const policy = holder.policy ?? DEFAULT_POLICY;
-  // Each column within the role as `roles` defines it, and within what the holder holds at the place.
-  const within = (grant: ScopeGrant, place: Place, roles: Policy) => {
+  // Each column within the role as `roles` defines it (what `issuedGrant` keeps of it at most).
+  const ofRole = (grant: ScopeGrant, roles: Policy) => {
     const role = definitionOf(roles, grant.role);
-    if (role === undefined) return false;
-    const held = heldColumns(holder, place);
     const { permissions, protected: guarded } = scopeDefinition(grant);
-    return permissions.every((p) => held.normal.includes(p) && role.permissions.includes(p))
-      && guarded.every((p) => held.protected.includes(p) && role.protected.includes(p));
+    return role !== undefined && permissions.every((p) => role.permissions.includes(p)) && guarded.every((p) => role.protected.includes(p));
   };
+  // And, for a person's own, within what the holder holds at the place, through the credential it came in on.
+  const held = (grant: ScopeGrant, place: Place, roles: Policy) => {
+    const columns = heldColumns(holder, place);
+    const { permissions, protected: guarded } = scopeDefinition(grant);
+    return ofRole(grant, roles) && permissions.every((p) => columns.normal.includes(p)) && guarded.every((p) => columns.protected.includes(p));
+  };
+  // Whether it came in on a scoped credential (a personal token's, a handle's, a connected app's) or a session: the
+  // credential's object seals its scope, never its row's kind, so the vault decides on that (R53).
+  const scoped = holder.credentialScope != null;
   switch (credential.kind) {
     case 'service': {
       if (!principal.startsWith('token:') || service === null) return 'a service token is a service account\'s';
+      // A person gives it, as the app's `managedAccount` has it: no service account or workload sets one up.
+      if (!actor.startsWith('user:')) return 'only a person issues a service account a token';
       if (credential.expiresAt > at + MAX_SERVICE_TOKEN_DAYS * 86_400_000 + 60_000) return `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days`;
+      if (scope.some((grant) => !ofRole(grant, policy))) return 'a service token keeps at most what each of its roles holds';
       const grants = scope.map((grant, i) => ({ role: grant.role, place: at_[i]!, kept: scopeDefinition(grant) }));
       if (!issuesCredential(holder, service.setting, actor, service.account, grants)) return 'a credential reaches at most what its account holds and what its issuer could give it';
       if (scope.some((grant) => grant.sensitive === true && !ownsProject(holder, grant.projectId!))) return 'only an Owner of its project gives a service account sensitive reads (R32)';
@@ -336,21 +345,21 @@ export function weighIssue(
     }
     case 'personal': {
       if (principal !== actor || !actor.startsWith('user:')) return 'a personal token is its person\'s own';
-      if (holder.credentialScope != null || (via !== null && via.kind !== 'browser' && via.kind !== 'cli')) return 'a personal token is made on a session: a token never makes another';
+      if (scoped) return 'a personal token is made on a session: a token never makes another';
       if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + 60_000) return 'a personal token lasts at most a week';
       if (scope.some((grant) => !delegable(grant.role, policy))) return 'a personal token never manages access';
-      if (scope.some((grant, i) => !within(grant, at_[i]!, policy))) return 'a personal token reaches at most what its role and its person hold';
+      if (scope.some((grant, i) => !held(grant, at_[i]!, policy))) return 'a personal token reaches at most what its role and its person hold';
       return null;
     }
     case 'handle': {
       if (principal !== actor || !actor.startsWith('user:')) return 'a handle is its person\'s own';
-      if (via !== null && via.kind !== 'browser' && via.kind !== 'cli' && via.kind !== 'personal') return 'a handle is made on a session or a personal token of its person\'s';
-      // A personal token's end bounds it; a session's does not: a handle a run holds outlives the sign-in that made it.
-      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + 60_000 || (via?.kind === 'personal' && via.expiresAt !== null && credential.expiresAt > via.expiresAt)) {
-        return 'a handle lasts at most a week, and never past the personal token that made it';
+      // A scoped credential's end bounds it (the app makes one on a personal token alone); a session's does not: a
+      // handle a run holds outlives the sign-in that made it.
+      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + 60_000 || (scoped && via !== null && via.expiresAt !== null && credential.expiresAt > via.expiresAt)) {
+        return 'a handle lasts at most a week, and never past the token that made it';
       }
       if (scope.some((grant) => grant.role !== 'viewer' && grant.role !== 'contributor')) return 'a handle reads or uses, as a viewer or a contributor';
-      if (scope.some((grant, i) => !within(grant, at_[i]!, HANDLE_POLICY))) return 'a handle reads and uses at most what its person holds, through what it was made on';
+      if (scope.some((grant, i) => !held(grant, at_[i]!, HANDLE_POLICY))) return 'a handle reads and uses at most what its person holds, through what it was made on';
       return null;
     }
   }

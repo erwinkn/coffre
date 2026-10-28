@@ -125,11 +125,14 @@ as the app weighed it and the policy it weighed on. The vault:
    the protected environments' slugs the app named;
 3. weighs the issue (`weighIssue`): what the issuer holds through that
    credential, what the account holds, the token's kind, scope and end (a
-   service token at most 366 days, a personal one a week, a handle no
-   later than the personal token it was made on, if one); each grant's
-   columns, which a use decides on, within its role as defined (the
-   policy's for a personal token, `HANDLE_POLICY`'s for a handle), never
-   its role's name alone (review r1);
+   service token at most 366 days and given by a person, a personal one a
+   week, a handle no later than the scoped credential it was made on, if
+   one); each grant's columns, which a use decides on, within its role as
+   defined (the policy's for a service or personal token,
+   `HANDLE_POLICY`'s for a handle), never its role's name alone. Only what
+   the vault authenticated decides: of the credential the request came in
+   on, its object's scope, end and caller, never its row's kind, which no
+   seal covers (R53; reviews r1 and r2);
 4. runs `issue_token`, one statement: the members' rows `FOR SHARE`, by
    principal (IssuerLocked), then, compared in a statement of its own, each
    active at its generation and its `access_seq` as read (IssuerCAS); the

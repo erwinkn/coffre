@@ -157,6 +157,38 @@ test("a grant's columns are what a use decides on, so they are held to its role:
   assert.ok((await w.vault.issueToken!(handle)).ok);
 });
 
+test("a service token keeps at most its roles' columns, and only a person gives one: a service account managing access gives none (review r2)", async () => {
+  const w = await world();
+  const OTHER = 'token:other';
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: OTHER })).ok);
+  for (const principal of [CI, OTHER]) {
+    assert.ok((await w.vault.setAccess({ actor: ROOT, caller: 'person', principal, changes: [{ projectId: w.project, environmentId: null, role: principal === CI ? 'owner' : 'developer', expiresAt: null }] })).ok);
+  }
+  // A Developer account's token named `viewer` that writes: its scope says one thing, its columns another.
+  const forged = asked(w, (input) => ({ ...input, principal: OTHER, credential: { ...input.credential, scope: storedScope([{
+    ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }),
+    permissions: { normal: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.use'] },
+  } as ReturnType<typeof issuedGrant>]) } }));
+  assert.equal(((await w.vault.issueToken!(forged)) as { refused?: string }).refused, 'refused');
+  assert.ok((await w.vault.issueToken!(asked(w, (input) => ({ ...input, principal: OTHER })))).ok, 'a viewer as the role is');
+  // An account that is an Owner of the project, on a credential of its own, gives another account nothing.
+  const bySelf = asked(w, (input) => ({ ...input, actor: CI, principal: OTHER, credential: { ...input.credential, createdBy: 'ci' } }));
+  assert.equal(((await w.vault.issueToken!(bySelf)) as { refused?: string }).refused, 'refused');
+});
+
+test("a handle's end is held to the scoped credential it was made on, by what the credential's object seals: a row whose kind was edited bounds it as before (R53, review r2)", async () => {
+  const w = await world();
+  const token = personal(w, ROOT, null, Date.now() + 120_000);
+  assert.ok((await w.vault.issueToken!(token)).ok);
+  // A writer makes the personal token a CLI session, in its row alone: its object, scope and seal unchanged.
+  const { credentials } = tablesOf(db.owner);
+  await db.owner.update(credentials).set({ kind: 'cli' }).where(eq(credentials.id, token.credential.id));
+  const handle = personal(w, ROOT, token.credential.id, Date.now() + 3_600_000);
+  handle.credential.kind = 'handle';
+  handle.credential.scope = storedScope([issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' })]);
+  assert.equal(((await w.vault.issueToken!(handle)) as { refused?: string }).refused, 'refused', 'never past the token that made it');
+});
+
 test('a handle is made on a personal token only within its end, and not once it is revoked (IssuedByLiveCredential)', async () => {
   const w = await world();
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);
