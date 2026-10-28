@@ -118,7 +118,8 @@ The setting is the login's own, as a group's never reaches its members, and
 sits on the server, where a pooler such as Hyperdrive cannot drop it. Setting it
 takes a login with `CREATEROLE` and `ADMIN` on each of them, as `coffre setup`'s
 administrator is, once per server; migrate says what to run when the login
-that migrates is not and nobody has.
+that migrates is not and nobody has. A `jit` setting of one of them for the
+database alone, which would outrank it, is refused the same way.
 
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that

@@ -21,9 +21,19 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
 /** The logins that run coffre's own statements: the app's, the vault's, and 0.15's hot path's. */
 const RUNTIME_LOGINS = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'];
 
+/** Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry, and the runtime logins' `jit = off`. */
+export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
+  await client.unsafe(`DO $$ BEGIN
+    EXECUTE format(
+      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_vault_hot, coffre_backup',
+      current_database()
+    );
+  END $$`);
+  await turnJitOff(client, RUNTIME_LOGINS);
+}
+
 /**
- * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do
- * not carry, and the runtime logins' `jit = off`.
+ * Set `jit = off` on `logins`, when they lack it.
  *
  * Past `jit_above_cost` (100,000 by default) Postgres compiles a plan's
  * expressions at every execution of it: 150 ms where a use costs under 2 ms
@@ -35,28 +45,44 @@ const RUNTIME_LOGINS = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_
  * the server. It is the server's, not the database's, as the logins are (and
  * as 0022 sets the hot login's): made once by a login with CREATEROLE and
  * ADMIN on them, and found set by any other that migrates after.
+ *
+ * Only when it differs, whatever way the boolean is spelled: altering a role
+ * takes CREATEROLE and its ADMIN, which a login that only migrates may lack.
+ * The row is the server's, and the migration lock each database's, so a run
+ * on another database may be changing it too: Postgres fails the second
+ * change (a concurrent update, or a duplicate key), and it looks again once
+ * the first has committed. A setting of the login's for this database alone
+ * outranks the server-wide one at login, so it is refused, as 0022 does.
  */
-export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
-  await client.unsafe(`DO $$ DECLARE
-    login text;
-  BEGIN
-    EXECUTE format(
-      'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_vault_hot, coffre_backup',
-      current_database()
-    );
-    FOREACH login IN ARRAY ARRAY[${RUNTIME_LOGINS.map((role) => `'${role}'`).join(', ')}] LOOP
-      -- Only when it differs: altering a role takes CREATEROLE and its ADMIN, which a login that only migrates may lack.
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_db_role_setting s WHERE s.setrole = login::regrole AND s.setdatabase = 0 AND s.setconfig @> ARRAY['jit=off']
-      ) THEN
-        BEGIN
-          EXECUTE format('ALTER ROLE %I SET jit = off', login);
-        EXCEPTION WHEN insufficient_privilege THEN
-          RAISE EXCEPTION '% may not set jit = off on %, whose statements Postgres would compile at every run: have a login with CREATEROLE and ADMIN on it run ALTER ROLE % SET jit = off, then migrate again', current_user, login, login;
-        END;
-      END IF;
-    END LOOP;
-  END $$`);
+export async function turnJitOff(client: Pick<PostgresClient, 'unsafe'>, logins: readonly string[]): Promise<void> {
+  const jit = (database: string) => `EXISTS (
+        SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
+         WHERE s.setrole = login::regrole AND s.setdatabase = ${database} AND split_part(setting, '=', 1) = 'jit'`;
+  await client.unsafe(
+    `DO $$ DECLARE
+      login text;
+      here oid := (SELECT oid FROM pg_database WHERE datname = current_database());
+    BEGIN
+      FOREACH login IN ARRAY ARRAY[${logins.map((login) => `'${login}'`).join(', ')}] LOOP
+        IF ${jit('here')} AND substr(setting, 5)::boolean) THEN
+          RAISE EXCEPTION '% has its own jit setting in this database, over the server-wide one: run ALTER ROLE % IN DATABASE % RESET jit, then migrate again', login, login, quote_ident(current_database());
+        END IF;
+        FOR attempt IN 1..5 LOOP
+          EXIT WHEN ${jit('0')} AND NOT substr(setting, 5)::boolean);
+          BEGIN
+            EXECUTE format('ALTER ROLE %I SET jit = off', login);
+            EXIT;
+          EXCEPTION
+            WHEN insufficient_privilege THEN
+              RAISE EXCEPTION '% may not set jit = off on %, whose statements Postgres would compile at every run: have a login with CREATEROLE and ADMIN on it run ALTER ROLE % SET jit = off, then migrate again', current_user, login, login;
+            WHEN internal_error OR unique_violation THEN
+              IF attempt = 5 THEN RAISE; END IF;
+              PERFORM pg_sleep(0.2);
+          END;
+        END LOOP;
+      END LOOP;
+    END $$`,
+  );
 }
 
 /** Why `login` cannot be the backup login, before anything runs, or null when it may. */
