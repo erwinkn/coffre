@@ -206,6 +206,11 @@ REMOVALS=(
   # What an end decides on: the holder's sealed object (its reference's id) and its log, never its rows (review r7).
   "SealedObjects ReferenceInObject AllowedAsOld"
   "SealedObjects LivenessFromLog AllowedAsOld"
+  # An unarchive restores what the log last sealed, still so at its commit, and an end while archived changes that (T134).
+  "SealedObjects RestoreFromLog AllowedAsOld"
+  "SealedObjects RestorePinned AllowedAsOld"
+  "SealedObjects EndWhileArchived AllowedAsOld"
+  "SealedObjects EndWhileArchived HonestUnarchive"
   # 0.15's sealing into Merkle checkpoints, two trees as one pair (Seal.tla; W209, W212; the plan's PR 6).
   "Seal NumberUnderLock Complete"
   "Seal CloseLocks Complete"

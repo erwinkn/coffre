@@ -78,10 +78,10 @@ $$;
 -- and no other function of the log; the vault and the backup never run it.
 DO $$
 BEGIN
-    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE')
+    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
        OR has_function_privilege('coffre_app', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
+       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: app_change is not the app''s alone';
     END IF;
     RAISE NOTICE 'PASS: the app logs its own changes through app_change, and runs no other function of the log';

@@ -316,7 +316,7 @@ test('an issue never waits for a use, nor a use for an issue; the barrier waits 
     await issuing.unsafe('BEGIN');
     await issuing.unsafe(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at, scope)
       VALUES ($1, $2, $3, $4, 'x', 0, $5, $6, $7, $8)`, [row.id, row.kind, randomBytes(32), randomBytes(32), row.principal, ROOT, row.expiresAt, row.scope]);
-    const [issued] = await issuing.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9) AS number', [
+    const [issued] = await issuing.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL) AS number', [
       c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
     ]);
     // It holds the issue lock, shared, and not the fence.
@@ -373,7 +373,7 @@ test('an issue of a row a savepoint inserted takes the fence: its xmin is the sa
     await issuing.unsafe(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at, scope)
       VALUES ($1, $2, $3, $4, 'x', 0, $5, $6, $7, $8)`, [row.id, row.kind, randomBytes(32), randomBytes(32), row.principal, ROOT, row.expiresAt, row.scope]);
     await issuing.unsafe('RELEASE SAVEPOINT s');
-    await issuing.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
+    await issuing.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)', [
       c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
     ]);
     assert.deepEqual(await advisoryHeld(issuing), ['0 ExclusiveLock', '1 ShareLock']);
@@ -393,7 +393,7 @@ test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its 
   try {
     await app.unsafe('BEGIN');
     await app.unsafe('UPDATE credentials SET revoked_at = now() WHERE id = $1', [row.id]);
-    const [called] = await app.unsafe('SELECT app_change($1, $2, NULL, $3, $4, NULL, NULL, NULL, NULL) AS number', ['credential', row.id, Date.now(), ROOT]);
+    const [called] = await app.unsafe('SELECT app_change($1, $2, NULL, $3, $4, NULL, NULL, NULL, NULL, NULL) AS number', ['credential', row.id, Date.now(), ROOT]);
     assert.equal(called!.number, '0', 'it logs nothing');
     assert.deepEqual(await advisoryHeld(app), ['0 ExclusiveLock', '1 ShareLock']);
     await app.unsafe('ROLLBACK');
@@ -433,7 +433,7 @@ test('an app\'s change beside a 0.14 decision on its principal: head, row, fence
     await waitFor(async () => (await waiting()) > 0, 'the decision waits for the head');
     // The app's change, the fence after the head and its row, and never Ada's member row: it does not wait for the decision.
     const c = calls[0]!;
-    const result = await app.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9) AS number', [
+    const result = await app.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL) AS number', [
       c.kind, c.id, c.requestId, c.at, c.actor, c.payload, c.sealFrom === null ? null : Buffer.from(c.sealFrom, 'base64'), Buffer.from(c.seal!, 'base64'), Buffer.from(c.mac!, 'base64'),
     ] as never[]);
     assert.ok(result[0]!.number !== null);

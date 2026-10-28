@@ -1358,9 +1358,12 @@ use reads is what 0.14 decides on and what the log says.
 is a reference whose source is a plain value. The rows: the reference's
 row id and its end, the holder's archival, the fork's own archival and its
 project's, the value's text. Honest
-code ends the reference (0.14's `reference.end`), archives and restores the
+code ends the reference (0.14's `reference.end`), archives the holder and
+unarchives it (prepared, then committed, T134), archives and restores the
 fork and the project, and writes the value; each change it makes reads its
-object's row under its seal first, and seals what it leaves. A database
+object's row under its seal first, and seals what it leaves. The holder's
+log keeps the object its newest sealed change left (`kept`): what an
+unarchive restores, its row having no seal while archived. A database
 writer with no key sets any column. A use refuses unless every object is
 its seal's; otherwise it decides, and serves the text it read.
 
@@ -1373,6 +1376,9 @@ its seal's; otherwise it decides, and serves the text it read.
 | a plain value's object holds its text's digest (DigestInSeal) | `AllowedAsOld`, `UnrefusedReadsHonest`: an edited text read under a valid seal |
 | the holder's object holds the id of the reference row it reads through, and an end decides on that object, checked against its seal (ReferenceInObject) | `AllowedAsOld`: the genuine row renamed, the end skips the holder, renamed back |
 | whether the holder has an object is its log's, not its row's `archived_at` (LivenessFromLog) | `AllowedAsOld`: a live holder marked archived, the end takes the no-object path, the marks cleared |
+| an unarchive restores the object the holder's log last sealed, its rows held to it (RestoreFromLog) | `AllowedAsOld`: the holder archived, its reference ended, the row's end cleared by a writer, and the unarchive seals it live |
+| ... still the log's newest sealed one at the commit (RestorePinned) | `AllowedAsOld`: an end between the unarchive's prepare and its commit, its row's end cleared: the rows as read, sealed live |
+| an end on an archived holder whose kept object reads through the reference logs that object ended (EndWhileArchived) | `AllowedAsOld`: the row's end cleared, the kept object restored live; `HonestUnarchive`: with no writer, the unarchive after an end refused |
 
 That the replay decides each use as live did is not this model's: a use not
 refused here reads its seals' objects, so the two agree by construction.
@@ -1385,10 +1391,10 @@ live environment of the project, one made meanwhile included (the set read
 again under 0.14's head), is an app-level guard of the kind of PR 4b's
 `expectRevoked` and `Erasure.hold`, held by
 `packages/server/test/app-places.test.ts` (an environment made while its
-project is archived), not by this model. Nor does it model a holder
-archived when its reference ends: the vault then writes the row's end alone
-(`end_reference`), tested in `packages/vault/test/app-places.test.ts`. Nor
-an environment made or deleted: a new one is made in a live project only
+project is archived), not by this model. The holder's own value is not
+modelled: an unarchive holds the whole object to the kept one, so an edited
+version is refused as an edited reference is (the vault's tests hold both).
+Nor an environment made or deleted: a new one is made in a live project only
 (each maker checks under the head), and a deleted one holds no project's
 archival (`environmentObject`, `environment.delete`), both held by the same
 tests and by the replay's `applyOp`.

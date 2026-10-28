@@ -16,7 +16,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { patchProject } from '../src/api/projects.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { resolvePath } from '../src/db/queries.ts';
-import { auditLog, environments, logChanges, logFence, projects, secretReferences, secrets } from './db/tables.ts';
+import { auditLog, environments, logChanges, logFence, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
@@ -159,6 +159,51 @@ test('each way the API writes an environment or a key is a change of 0.15\'s log
   const [config] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.owner, `user:${ROOT}`));
   assert.ok(config !== undefined);
   assert.deepEqual(await opsOf('environment', config.id), ['environment.create']);
+  await inputsLogged();
+});
+
+/** `secretId`'s versions' ids, oldest first. */
+async function versionsOf(secretId: string): Promise<string[]> {
+  return (await db.owner.select({ id: secretVersions.id }).from(secretVersions).where(eq(secretVersions.secretId, secretId)).orderBy(asc(secretVersions.version))).map(({ id }) => id);
+}
+
+/** The vault's refusal of rows its log does not bear out, reported (`vault.tampered`, its code `stale`). */
+const notTheLogs = (error: unknown) => (error as { reason?: unknown }).reason === 'tampered';
+
+test("a key's rows put back to an older version while it is archived: its unarchive and an override made again are refused and reported, nothing logged; as archived, each serves its last value (T134)", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'one' });
+  await root.secrets.set('market/dev', { A: 'two' });
+  await root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const a = await keyIn(await environmentId('dev'), 'A');
+  const [one, two] = await versionsOf(a);
+  await root.secrets.update('market/dev/A', { archived: true });
+  const ops = await opsOf('secret', a);
+  // A writer points the archived key at its first value: one the log sealed once, not the one it last did.
+  await db.owner.update(secrets).set({ currentVersionId: one! }).where(eq(secrets.id, a));
+  await assert.rejects(root.secrets.update('market/dev/A', { archived: false }), notTheLogs);
+  assert.deepEqual(await opsOf('secret', a), ops);
+  assert.deepEqual((await db.owner.select({ code: auditLog.code }).from(auditLog).where(eq(auditLog.action, 'vault.tampered'))).map(({ code }) => code), ['stale']);
+  assert.ok((await db.owner.select({ archivedAt: secrets.archivedAt }).from(secrets).where(eq(secrets.id, a)))[0]!.archivedAt !== null, 'still archived');
+  await db.owner.update(secrets).set({ currentVersionId: two! }).where(eq(secrets.id, a));
+  await root.secrets.update('market/dev/A', { archived: false });
+  const outcome = await use(token.id, a);
+  assert.ok(outcome.ok && outcome.value.versionId === two, JSON.stringify(outcome));
+
+  // A fork's override reset to the parent's, then made its own again: the same.
+  await root.environments.create('market/feature', { from: 'dev', inherit: true });
+  await root.secrets.set('market/feature', { A: 'override one' });
+  await root.secrets.set('market/feature', { A: 'override two' });
+  const own = await keyIn(await environmentId('feature'), 'A');
+  const [first, last] = await versionsOf(own);
+  await root.secrets.inherit('market/feature/A', true);
+  await db.owner.update(secrets).set({ currentVersionId: first! }).where(eq(secrets.id, own));
+  await assert.rejects(root.secrets.inherit('market/feature/A', false), notTheLogs);
+  await db.owner.update(secrets).set({ currentVersionId: last! }).where(eq(secrets.id, own));
+  await root.secrets.inherit('market/feature/A', false);
+  assert.deepEqual(await opsOf('secret', own), ['secret.write', 'secret.write', 'secret.delete', 'secret.write']);
   await inputsLogged();
 });
 
