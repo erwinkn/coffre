@@ -21,9 +21,16 @@ const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: Hyper
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
 /**
- * Postgres behind a proxy that counts the connections made to it and the
- * round trips on them (each time the client speaks again after an answer),
- * can cut them, and can hold a COMMIT on its way, as a slow network would.
+ * Postgres behind a proxy that counts the connections made to it, the
+ * round trips on them (each time the client speaks again after an answer)
+ * and the Syncs, can cut them, and can hold a COMMIT on its way, as a slow
+ * network would.
+ *
+ * A Sync is each Sync message and each simple Query, what Postgres answers
+ * with ReadyForQuery. A real Hyperdrive sends the next one on only once the
+ * one before has answered: statements written at once under several Syncs
+ * cost a round trip each there, those under one Sync one in all. So on
+ * Workers, Syncs are the round trips, which one write can hide.
  */
 async function counted() {
   const target = new URL(DATABASE);
@@ -31,6 +38,7 @@ async function counted() {
   let opened = 0;
   let peak = 0;
   let trips = 0;
+  let syncs = 0;
   let commits: Promise<void> | null = null;
   const server = createServer((client) => {
     opened += 1;
@@ -39,9 +47,22 @@ async function counted() {
     const upstream = connect(Number(target.port), target.hostname);
     let answered = true;
     let sending = Promise.resolve();
+    // What the client sent of a message not yet whole; the startup message, first, has no type.
+    let unread = Buffer.alloc(0);
+    let started = false;
     client.on('data', (chunk: Buffer) => {
       if (answered) trips += 1;
       answered = false;
+      unread = Buffer.concat([unread, chunk]);
+      for (;;) {
+        const head = started ? 1 : 0;
+        if (unread.length < head + 4) break;
+        const length = head + unread.readUInt32BE(head);
+        if (unread.length < length) break;
+        if (started && (unread[0] === 0x53 || unread[0] === 0x51)) syncs += 1; // 'S', 'Q'
+        started = true;
+        unread = unread.subarray(length);
+      }
       const held = commits !== null && /commit/i.test(chunk.toString('latin1')) ? commits : null;
       sending = sending.then(async () => {
         await held;
@@ -82,6 +103,9 @@ async function counted() {
     },
     get trips() {
       return trips;
+    },
+    get syncs() {
+      return syncs;
     },
     /** Hold every COMMIT until `until` settles. */
     holdCommits(until: Promise<void>) {
@@ -291,13 +315,17 @@ test('on Workers, each kind of value comes back as it was sent, each statement i
   const pool = new HyperdrivePool(proxy.url);
   try {
     await eachKindIn(createDatabase(pool), proxy);
-    // A transaction: its statements, the first with BEGIN, then COMMIT, each one round trip.
-    const before = proxy.trips;
-    await createDatabase(pool).transaction(async (tx) => {
-      await tx.execute(sql`select ${1}::int`);
-      await tx.execute(sql`select ${'two'}::text`);
-    });
-    assert.equal(proxy.trips - before, 3);
+    // A transaction: its statements, the first with BEGIN, then COMMIT, each one round trip and one Sync, whichever
+    // shape the first goes in: with parameters, BEGIN's Parse, Bind and Execute ahead of its own; without, one Query
+    // of both, as the vault's SET LOCAL goes.
+    for (const first of [sql`select ${1}::int`, sql`select 1`, sql.raw('SET LOCAL lock_timeout = 1000')]) {
+      const before = { trips: proxy.trips, syncs: proxy.syncs };
+      await createDatabase(pool).transaction(async (tx) => {
+        await tx.execute(first);
+        await tx.execute(sql`select ${'two'}::text`);
+      });
+      assert.deepEqual({ trips: proxy.trips - before.trips, syncs: proxy.syncs - before.syncs }, { trips: 3, syncs: 3 });
+    }
   } finally {
     await pool.end();
   }

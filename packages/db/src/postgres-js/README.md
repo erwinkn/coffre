@@ -87,10 +87,16 @@ Nine, each marked `Coffre:` in the code:
   after it, which says so (`T`), and coffre's Hyperdrive configurations
   cache nothing (`docs/deploy.md`), so that statement is never answered
   from a cache. Both shapes reach the pooler: Parse, Bind and Execute under
-  one Sync, and one Query message of two statements. Before a release,
-  check both on a real Hyperdrive: `select pg_backend_pid()` as a
-  transaction's first statement (with a parameter, and without) and again
-  as its second, the same pid; then a write and a rollback, nothing kept. A first statement described first (Parse, Describe, Flush,
+  one Sync, and one Query message of two statements. Both were checked on
+  a real Hyperdrive for 0.15: `select pg_backend_pid()` as a transaction's
+  first statement (with a parameter, and without, and after the vault's
+  `SET LOCAL`) and again later in it, the same backend and transaction
+  each time, over 11,000 transactions, 40 to 50 at once over 10 backends;
+  what rolled back or failed kept nothing. A change to how they go is
+  checked there again. Hyperdrive sends a client's Syncs on one at a
+  time, each once the one before has answered: what costs a round trip
+  there is a Sync, not a write, so `test/hyperdrive.test.ts` counts
+  both. A first statement described first (Parse, Describe, Flush,
   then a wait) would reach Hyperdrive before any ReadyForQuery had pinned
   the connection, a flow Cloudflare says hangs under its pooling; coffre
   sends none (`postgresClient`), and none is supported there. This
