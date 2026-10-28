@@ -203,9 +203,6 @@ export function referenceRefusal(
     ?? (nature !== 'plain' && useOnly(reader.live, source) ? 'use_only' : null);
 }
 
-// A member's form, and whether a grant holds: the vault's answers and the app's read them alike (@coffre/core/vault).
-export { live, PRINCIPAL };
-
 // --- a use, on sealed inputs (0.15) ---------------------------------------------
 
 /**

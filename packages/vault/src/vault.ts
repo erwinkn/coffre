@@ -63,6 +63,8 @@ import {
   POLICY_REVISION,
   answerFrom,
   CLOSED_POLICY,
+  live,
+  PRINCIPAL,
   CLOSED_SETTINGS,
   livePolicy,
   NO_EDITS,
@@ -123,7 +125,7 @@ import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuth
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { SealThrough } from './checkpointer.ts';
-import { keyRefusals, live, placeIn, PRINCIPAL, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
+import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';

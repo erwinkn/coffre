@@ -20,6 +20,10 @@ import { sql, type SQL } from 'drizzle-orm';
  *
  *   Ada, a Viewer of market/dev, at `GET /api/me`   her row, her grant, the policy   no vault call
  *   her row changed around the vault                 shown as it says                  her next reveal: refused, tampered
+ *
+ * Its clock is the database's, as the vault's is but for the offset a
+ * test may give the vault (`clockOffset`): a grant lapsed by a moved vault
+ * clock is still shown here until the database's clock passes its end.
  */
 export async function answerShown(db: Queryable, principal: string): Promise<Shown> {
   const [row] = await rowsOf<{ answer: unknown }>(db, sql`SELECT (${answerQuery(db, sql`${principal}`)}) AS answer`);
