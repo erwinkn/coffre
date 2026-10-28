@@ -933,18 +933,22 @@ export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buf
   return row === undefined ? null : { seal: row.seal ?? null };
 }
 
+/** `newestSealedChanges`' statement, which its cost test explains. */
+export function newestSealedQuery(refs: readonly Ref[]): SQL {
+  const newest = sql.join(refs.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE d.object = ${objectKey(ref)} AND d.seal IS NOT NULL ORDER BY d.number DESC LIMIT 1)`), sql`, `);
+  return sql`SELECT c.number, c.at, c.object, c.payload, c.seal FROM log_changes c WHERE c.number IN (${newest})`;
+}
+
 /**
  * Each object's newest change that left a seal, by its key in the log: what
  * an unarchive restores (an archived key's newest change is its
- * `secret.delete`, which left none). One probe of the object's changes
- * each, newest first.
+ * `secret.delete`, which left none). One probe of each object's changes,
+ * newest first (`log_changes_object_idx`), then its row by number: the
+ * same work however long its history.
  */
 export async function newestSealedChanges(db: Queryable, refs: readonly Ref[]): Promise<Map<string, { number: bigint; at: number; object: string; payload: string; seal: Buffer }>> {
   if (refs.length === 0) return new Map();
-  const objects = sql.join(refs.map((ref) => sql`${objectKey(ref)}`), sql`, `);
-  const found = await rowsOf<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | Uint8Array }>(db, sql`SELECT c.number, c.at, c.object, c.payload, c.seal
-    FROM log_changes c WHERE c.object IN (${objects})
-     AND c.number = (SELECT d.number FROM log_changes d WHERE d.object = c.object AND d.seal IS NOT NULL ORDER BY d.number DESC LIMIT 1)`);
+  const found = await rowsOf<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | Uint8Array }>(db, newestSealedQuery(refs));
   return new Map(found.map((row) => [row.object, { number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: Buffer.from(row.seal) }]));
 }
 

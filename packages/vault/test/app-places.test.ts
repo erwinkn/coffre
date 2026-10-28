@@ -17,10 +17,11 @@ import { sql } from 'drizzle-orm';
 
 import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
+import { newestSealedChanges, newestSealedQuery } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, secretObject } from '../src/objects.ts';
-import { openTestDatabase, rows, run, sealed, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, sealed, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, isolate, ROOT, SEAL, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -443,6 +444,45 @@ test("an unarchive whose key's log moved on between its prepare and its commit, 
   assert.deepEqual(await opsOf({ kind: 'secret', id }), ops, 'nothing logged');
   // Without the pin, `app_change` would have sealed the first value over the second: the rows are what the prepare read.
   assert.deepEqual((await readKey(id)).columns, read.columns);
+});
+
+/** `count` sealed changes of `object` and, newest, its archive's (no seal), as if written long ago: its history. */
+async function history(object: string, count: number): Promise<void> {
+  const [{ top }] = await rows<{ top: string | number | null }>(db.owner, sql`SELECT max(number) AS top FROM log_changes`) as [{ top: string | number | null }];
+  const from = Number(top ?? 0) + 1;
+  await run(db.owner, sql`WITH RECURSIVE g(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM g WHERE n < ${count})
+    INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT ${from} + n, 0, ${object} || '-' || (${from} + n), ${object}, 'system:x', '{"op":"x"}', CASE WHEN n < ${count} THEN ${randomBytes(16)} END, ${randomBytes(16)} FROM g`);
+}
+
+test("what an unarchive restores is read with one probe of each key's changes, however long their history: never a walk of it (T134, R48)", { timeout: 600_000 }, async () => {
+  const refs: Ref[] = [{ kind: 'secret', id: randomUUID() }, { kind: 'secret', id: randomUUID() }];
+  const cost = async (): Promise<number | string> => {
+    if (ENGINE === 'sqlite') {
+      const plan = await rows<{ detail: string }>(db.owner, sql`EXPLAIN QUERY PLAN ${newestSealedQuery(refs)}`);
+      return plan.map(({ detail }) => detail).join('; ');
+    }
+    const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${newestSealedQuery(refs)}`);
+    const json = Object.values(row!)[0];
+    const plan = (typeof json === 'string' ? JSON.parse(json) : json) as { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[];
+    return plan[0]!.Plan['Shared Hit Blocks'] + plan[0]!.Plan['Shared Read Blocks'];
+  };
+  const grown = async (count: number) => {
+    for (const ref of refs) await history(objectKey(ref), count);
+    if (ENGINE === 'postgres') await run(db.owner, sql`VACUUM ANALYZE log_changes`);
+    const found = await newestSealedChanges(db.owner, refs);
+    // Each key's newest sealed change, the one just below its archive.
+    for (const ref of refs) assert.ok(found.get(objectKey(ref))?.seal !== undefined, 'found');
+    return cost();
+  };
+  const small = await grown(1_000);
+  const large = await grown(100_000);
+  if (ENGINE === 'sqlite') {
+    // Each key's newest sealed number by its index, then its row by number: never every row of a key.
+    assert.ok(!/\bSCAN\b/.test(String(large)) && /log_changes_object_idx/.test(String(large)) && /SEARCH c USING INTEGER PRIMARY KEY/.test(String(large)), String(large));
+    return;
+  }
+  assert.ok(Number(large) - Number(small) <= 4, `${small} buffers at 1k changes a key, ${large} at 100k`);
 });
 
 test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {
