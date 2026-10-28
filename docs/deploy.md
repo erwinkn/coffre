@@ -110,6 +110,17 @@ They also make `coffre_vault_hot`, a member of `coffre_vault` with its own
 lock and statement timeouts and generic plans, for 0.15's hot path. It
 cannot log in, and nothing uses it yet.
 
+Every migrate run also sets `jit = off` on these three logins
+(`ALTER ROLE … SET jit = off`), when they lack it. Past
+`jit_above_cost` Postgres compiles a statement's plan at every execution, and a
+statement's estimate grows with its tables: a use that costs 2 ms took 150.
+The setting is the login's own, as a group's never reaches its members, and
+sits on the server, where a pooler such as Hyperdrive cannot drop it. Setting it
+takes a login with `CREATEROLE` and `ADMIN` on each of them, as `coffre setup`'s
+administrator is, once per server; migrate says what to run when the login
+that migrates is not and nobody has. A `jit` setting of one of them for the
+database alone, which would outrank it, is refused the same way.
+
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
 existing role, on every run that names it. Migrate never makes the role,
