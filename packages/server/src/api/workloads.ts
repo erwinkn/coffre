@@ -393,10 +393,14 @@ export type SessionPending = { pending: string; approve: string };
 
 /** How long a credential an exchange issues lives: one `coffre run` needs it for seconds. */
 export const EXCHANGED_CREDENTIAL_MS = 5 * 60 * 1000;
-/** How many credentials one binding issues a minute, counted under the log's head. */
+/** How many credentials one binding issues a minute, counted under its row (with 0.14's log, under the log's head). */
 export const EXCHANGES_PER_BINDING_MINUTE = 60;
-/** Exchanges under way at once in this isolate or process. */
-const MAX_IN_FLIGHT = 32;
+/**
+ * Exchanges under way at once in this isolate or process, at most: past it,
+ * 429 at once (R44). Its one writer is packages/server/test/bench/ci.ts,
+ * whose one process stands in for the many isolates a burst spreads over.
+ */
+export const exchangeLimit = { inFlight: 32 };
 let inFlight = 0;
 
 /**
@@ -1003,7 +1007,7 @@ export class WorkloadService {
    *    or none of it.
    */
   async exchange(request: ExchangeRequest, meta: { requestId: string; sourceIp: string | null }): Promise<Exchanged> {
-    if (inFlight >= MAX_IN_FLIGHT) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
+    if (inFlight >= exchangeLimit.inFlight) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
     inFlight++;
     try {
       return await this.#exchange(request, meta);
@@ -1078,7 +1082,7 @@ export class WorkloadService {
    * each renewal. One its binding has wait for approval is answered 202.
    */
   async signIn(request: SessionRequest, meta: { requestId: string; sourceIp: string | null; jkt: string }): Promise<SessionIssued | SessionPending> {
-    if (inFlight >= MAX_IN_FLIGHT) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
+    if (inFlight >= exchangeLimit.inFlight) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
     inFlight++;
     try {
       return await this.#signIn(request, meta);

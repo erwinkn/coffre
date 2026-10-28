@@ -54,7 +54,7 @@ import { localVault, runCheckpointer, type LocalVault, type RunningCheckpointer 
 import { sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../../src/config.ts';
-import { EXCHANGES_PER_BINDING_MINUTE } from '../../src/api/workloads.ts';
+import { EXCHANGES_PER_BINDING_MINUTE, exchangeLimit } from '../../src/api/workloads.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transport.ts';
@@ -159,6 +159,9 @@ const CLAIMS = { repository_owner_id: '9919', repository_id: '41532', workflow_r
 /** The claims of workflow `n`'s runs: the first is `CLAIMS`, each other a workflow of its own, which a binding of its own takes. */
 const claimsOf = (n: number) => (n === 0 ? CLAIMS : { ...CLAIMS, workflow_ref: `acme/market/.github/workflows/build-${n}.yml@refs/heads/dev` });
 const BINDINGS = Number(values.bindings);
+// An isolate takes 32 sign-ins at once, then answers 429; a burst of more spreads over isolates, each its own 32, which
+// this one process stands in for: what they share is the database, here as there (their CPU this process's, pessimistic).
+exchangeLimit.inFlight = Math.max(exchangeLimit.inFlight, ...JOBS);
 const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
 
 /** What a phase ran: its statements on the app's connection and the vault's, and how long they took beyond the round trip each, by statement. */

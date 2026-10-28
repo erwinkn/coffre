@@ -149,16 +149,32 @@ Two results drove the design:
 ## 5. Numbers
 
 Debian `postgres:16.14` (R62), local, a compose project of its own, 20 ms
-added to every round trip, 1,000 uses a second beside
-(`packages/server/test/bench/ci.ts --log 0.15 --signin-only --uses 1000 --rtt 20`).
-Before: W246's run of the same bench.
+added to every round trip, 1,000 uses a second beside, 3 rounds a level
+(`packages/server/test/bench/ci.ts --log 0.15 --signin-only --uses 1000
+--rtt 20`; 100 at once with `--bindings 2`, a binding taking 60 a minute).
+Before: W246's run of the same bench on 0.15 as it was.
 
-| sign-ins at once | before: p50 / p99 | after: p50 / p99 | uses p99, after | refused |
+| sign-ins at once | before: p50 / p99 | after: p50 / p99 | uses beside, p99 | refused |
 |---|---|---|---|---|
-| 1 | 190 / 192 ms | | | |
-| 10 | 763 / 1,374 ms | | | |
-| 30 | 1,795 / 3,451 ms | | | |
-| 100 | | | | |
+| 1 | 190 / 192 ms | 64 / 68 ms | 40.9 ms | none |
+| 10 | 763 / 1,374 ms | 83 / 211 ms | 30.7 ms | none |
+| 30 | 1,795 / 3,451 ms | 127 / 303 ms | 31.0 ms | none |
+| 60, one binding | did not finish | 178 / 301 ms | 45.4 ms | none |
+| 100, two bindings | | 235 / 555 ms | 26.9 ms | none |
+
+Uses alone: p99 26.6 ms. Each sign-in is 1 app statement and 1 vault call,
+1 statement there, at every level; what it waits for is the binding's row,
+behind the other sign-ins through it (at 30, 53 ms of its 127). R58 holds:
+uses beside 100 sign-ins read as uses beside none.
+
+Two things the bench needed. Its vault, a proxy made new for each request,
+was asked `about` on every one, which a deployment's runtime asks once; it now
+answers once. And an isolate takes 32 sign-ins at once (then 429, at once):
+W246's level of 60 hung there, its error swallowed. The bench raises that
+limit (`exchangeLimit`), its one process standing in for the isolates a burst
+spreads over, which share only the database; their CPU is this process's, so
+these numbers are, if anything, high. A cold JWKS fetch is unchanged by this
+PR (the app's, as before); the vault's own comes with PR 3.
 
 ## 6. Still open
 
