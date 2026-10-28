@@ -18,6 +18,15 @@
   records it (D147). A sign-in that waits over a second for its binding is
   refused at once, 429. `docs/design/credential-lifecycle.md`;
   `formal/Lifecycle.tla`.
+- **A new database holds its first days of uses.** With 0.15's log on, a
+  use is stored in a partition of its day, which the checkpointer made
+  ahead once it ran; a use that came first, on a database just migrated
+  and before the checkpointer's first run, failed with "no partition of
+  relation log_uses found for row". Migration 0035 makes yesterday's,
+  today's and the next three days' partitions, the same days the
+  checkpointer keeps, so the first use needs nothing made. It adds only
+  partitions, which the previous release never touches, and costs a use
+  nothing. SQLite does not partition.
 - **0.15's `/use` checks its credential in the use itself, behind its
   switch.** After a use, the app read the credential and its account's
   generation again (`credentialStill`), a statement and a round trip on

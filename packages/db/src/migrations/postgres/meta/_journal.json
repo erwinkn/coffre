@@ -246,6 +246,13 @@
       "when": 1793200483207,
       "tag": "0034_vault_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1793210483207,
+      "tag": "0035_first_days",
+      "breakpoints": true
     }
   ]
 }
