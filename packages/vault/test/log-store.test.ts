@@ -14,7 +14,7 @@ import { sql } from 'drizzle-orm';
 import { Checkpointer } from '../src/checkpointer.ts';
 import { authentic, logMacKey } from '../src/log-entry.ts';
 import { logWriter } from './log-entries.ts';
-import { logStore, tileKeys } from '../src/log-store.ts';
+import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 
@@ -185,6 +185,29 @@ test('review r3: entries and locate read one window\'s bounds, at any index, an 
   assert.deepEqual([(await store.locate(windows[1]!.at(-1)!))!.index], [0]);
 });
 
+test('T119: locate finds a use among its window\'s leaves, by its time in one probe when known; a use changed since its tick is refused', async () => {
+  const { cp, store } = await open();
+  // A window across a leaf tile's edge: 300 uses, the asked one in the second tile.
+  for (let i = 0; i < 100; i += 1) await use();
+  assert.ok((await cp.tick()).signed);
+  const at = Date.now();
+  const numbers: bigint[] = [];
+  for (let i = 0; i < 300; i += 1) numbers.push(await use(i === 250 ? at : undefined));
+  assert.ok((await cp.tick()).signed);
+  const asked = numbers[250]!;
+  for (const time of [undefined, at]) {
+    const found = (await store.locate(asked, time === undefined ? {} : { at: time }))!;
+    assert.deepEqual([found.entry.tree, found.index], ['uses', 350]);
+    const p = (await cp.prove(asked, time === undefined ? {} : { at: time }))!;
+    assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root));
+  }
+  // At another time, it is not there.
+  assert.equal(await store.locate(asked, { at: at - 1 }), null);
+  // A writer changes it after its tick: its leaf is in none of the window's tiles.
+  await run(db.owner, sql`UPDATE log_uses SET purpose = 2 WHERE number = ${asked}`);
+  await assert.rejects(store.locate(asked), /use \d+ is in none of its window's leaves: the database changed it since its tick/);
+});
+
 test('Fable review: a tile read is planned over the ranges it reads, not every range', { skip: ENGINE === 'postgres' ? false : 'Postgres only: ranges' }, async () => {
   // Forty ranges, as many days of a busy instance's retention would make.
   for (let r = 0; r < 40; r += 1) await run(db.owner, sql`SELECT make_tiles(${r * RANGE}::bigint, ${(r + 1) * RANGE}::bigint)`);
@@ -193,3 +216,48 @@ test('Fable review: a tile read is planned over the ranges it reads, not every r
   const ranges = new Set(plan.flatMap((r) => r['QUERY PLAN'].match(/log_tiles_uses_\d+(?= )/g) ?? []));
   assert.ok(ranges.size <= 2, `${ranges.size} of 40 ranges planned:\n${plan.map((r) => r['QUERY PLAN']).join('\n')}`);
 });
+
+test('PR 8 review r1 (W240): a read of the entries above a pair takes the first `limit` of them, by number, both trees', async () => {
+  const { cp, store } = await open();
+  await use();
+  assert.ok((await cp.tick()).signed);
+  const upto = cp.pair.pair.upto;
+  const above = [await use(), await change(), await use(), await use()];
+  const all = await store.entries(upto, 2n ** 62n);
+  assert.deepEqual(all.map((e) => e.number), above);
+  assert.deepEqual((await store.entries(upto, 2n ** 62n, { limit: 3 })).map((e) => e.number), above.slice(0, 3));
+});
+
+test('PR 8 review r2 (W240): a use renumbered into a change\'s place is refused before its window is read, and a window the rows make too wide is never scanned', async () => {
+  const { cp, store } = await open();
+  await use();
+  assert.ok((await cp.tick()).signed);
+  const lost = await change();
+  const moved = await use();
+  assert.ok((await cp.tick()).signed);
+  // The writer forges the sealing checkpoint's uses size: scanned, a window of 2^63 leaves.
+  await run(db.owner, sql`UPDATE log_checkpoints SET uses_size = 9223372036854775807 WHERE upto = ${cp.pair.pair.upto}`);
+  await assert.rejects(store.locate(moved), /window is \d+ to \d+ in the uses tree: no window of 1,048,576 leaves or fewer/);
+  // Then deletes the change and renumbers the use into its place: asked for a change, it is refused as a use at once.
+  await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${lost}`);
+  await run(db.owner, sql`UPDATE log_uses SET number = ${lost} WHERE number = ${moved}`);
+  await assert.rejects(store.locate(lost, { tree: 'changes' }), /entry \d+ is in the uses tree, not the changes: a use holds its number/);
+  await assert.rejects(cp.sealThrough(lost), /cannot be proved in the signed changes tree: entry \d+ is in the uses tree/);
+});
+
+test('PR 8 review r3 (W240): a bounded read stops at its limit in the database too: 100,000 changes above, a few pages read', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+  // Changes a writer planted above the newest pair, as many as a long log holds.
+  await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT nextval('log_number'), 0, 'planted-' || g, gen_random_uuid(), 'x', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(1, 100000) g`);
+  await run(db.owner, sql`ANALYZE log_changes`);
+  const buffers = async (limit?: number) => {
+    const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }>(db.vault,
+      sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${postgresWindow(-1n, 2n ** 62n, sql`0`, undefined, limit)}`);
+    const top = plan!['QUERY PLAN'][0].Plan;
+    return top['Shared Hit Blocks'] + top['Shared Read Blocks'];
+  };
+  const whole = await buffers();
+  const bounded = await buffers(2_001);
+  assert.ok(bounded < 200 && bounded * 10 < whole, `${bounded} buffers bounded, ${whole} whole`);
+});
+

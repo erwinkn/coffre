@@ -195,7 +195,7 @@ async function sealedCut(cp: Checkpointer, store: RetentionStore): Promise<Cut |
   const found = await store.retention();
   if (found === null) return null;
   const cut = retentionCut(found.entry);
-  const proof = await cp.prove(found.entry.number);
+  const proof = await cp.prove(found.entry.number, { tree: 'changes' });
   if (cut === null || proof === null || proof.tree !== 'changes' || !proof.leaf.equals(leafData('changes', found.entry.number, found.entry.columns))) {
     throw new Error(`the retention change ${found.entry.number} is not sealed in the signer's changes tree as the database holds it`);
   }

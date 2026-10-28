@@ -481,6 +481,17 @@ export function createClient(options: ClientOptions) {
           from = verdict.next;
         }
       },
+      /**
+       * Whether 0.15's log holds (the vault's `verifyTrees`): its newest signed
+       * checkpoint and every entry since. `kept` false where the instance
+       * keeps 0.14's log alone, a server older than 0.15 (no such route)
+       * included.
+       */
+      verifyTrees: (): Promise<RouteOutput<'GET /audit/trees'>> =>
+        call('GET /audit/trees', {}).catch((error: unknown) => {
+          if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
+          throw error;
+        }),
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
       /**

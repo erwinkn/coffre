@@ -27,6 +27,22 @@
   second where it saturated; with the cache, 1,000 a second at a p99 of
   8 ms, where a cold start brought it down. SQLite, and 0.14's log, read
   as before.
+- **0.15's log is checked on every audit page visit, behind its switch:
+  nothing calls it yet.** With 0.15's log on, the audit page, `coffre
+  verify instance` and conformance check its newest signed checkpoint,
+  held to the signer's memory where the vault is given it
+  (`heldOutside`, which no deployment wires yet), and every entry since by its MAC and
+  request (`GET /api/audit/trees`), in three statements and a few
+  milliseconds however long the log; past 2,000 entries since (a
+  checkpointer behind), the rest is not read, and the page says the sealed
+  log is not checked to its head rather than calling it broken. Nothing walks 0.15's log whole on a
+  request: what such a walk reads is the database's to shape, and no
+  bound kept it inside a Worker's CPU limit. So an edit a database writer
+  makes to old entries, or to rows nobody uses, is not detected until an
+  offline scan exists; the signed checkpoints make one possible later
+  without the MAC key. Every use still refuses a row put back. With the
+  switch off, the route answers that there is nothing to check, and
+  nothing changes.
 - **0.15's unarchive never seals rows edited while their key was
   archived, behind its switch: nothing calls it yet.**
   `0030_unarchive_restores` replaces `app_change` (a new argument,

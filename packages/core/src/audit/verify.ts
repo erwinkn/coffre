@@ -16,9 +16,10 @@ import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verify
  * lost entries or checkpoints.
  *
  * It needs the trees' public keys alone. What an entry's columns mean (its
- * MAC, its request ID) is the caller's to check, through `check`. The cost is
- * the entries since the start: a caller that keeps the `head` it verified
- * walks only what came after (R25).
+ * MAC, its request ID) is the caller's to check, through `check`, which sees
+ * every entry walked, in number order. The cost is the entries since the
+ * start: a caller that keeps the `head` it verified walks only what came
+ * after (R25).
  *
  * Retention (plan PR 7, formal/Seal.tla) drops days of uses, and the uses
  * tree's tiles, below a cut that a retention change names; changes are kept
@@ -41,8 +42,13 @@ export type LogReader = {
   pairs(after: bigint, limit: number): Promise<StoredPair[]>;
   /** The row at exactly `upto`, if any. */
   pair(upto: bigint): Promise<StoredPair | null>;
-  /** The entries numbered in (after, upto], by number, both trees. */
-  entries(after: bigint, upto: bigint): Promise<LogEntry[]>;
+  /**
+   * The entries numbered in (after, upto], by number, both trees. Uses are
+   * read from `floor`, the floor of `at` signed in the pair at `after`, when
+   * the caller gives it: a reader that takes it from its rows lets a writer
+   * hide what lies above (FloorChecked). With `limit`, the first that many.
+   */
+  entries(after: bigint, upto: bigint, options?: { floor?: number; limit?: number }): Promise<LogEntry[]>;
   tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]>;
   /** The newest retention change, if any, and its leaf index in the changes tree (plan PR 7). */
   retention?(): Promise<{ entry: LogEntry; index: number } | null>;
@@ -60,6 +66,21 @@ export type Verdict = {
   unsealed: number;
   /** The newest pair walked, when the walk found nothing wrong: the `from` of the next one. */
   head: PairNotes | null;
+  /** `head` opened, as the walk opened it: its place and time without its signatures checked again. */
+  headPair: Pair | null;
+  /**
+   * Whether the database ends before a pair held outside: deleted entries or
+   * checkpoints, or the signer's own write a moment away (it remembers a pair
+   * before the database holds it), which a caller may tell apart by asking
+   * again a tick later.
+   */
+  behind: boolean;
+  /**
+   * Whether more than `above` entries lie above the newest pair: the walk
+   * checked that many and stopped short of the head, which is no problem
+   * of the log (a checkpointer behind), and no verdict on the rest either.
+   */
+  capped: boolean;
 };
 
 type Stop = { pair: Pair; notes: PairNotes; row: boolean };
@@ -69,16 +90,31 @@ const PAGE = 100;
 type Options = {
   verifiers: PairVerifiers;
   from?: PairNotes;
+  /**
+   * The database's newest row, as the caller read it in the walk's own
+   * snapshot, to start from instead of `from`: its row is not read again,
+   * nor the rows above it, which there are none of (PR 8 review r3).
+   */
+  newest?: StoredPair;
   anchors?: readonly PairNotes[];
   check?: (entry: LogEntry) => string | null;
   /** Whether a change is a retention change, and the cut it names; null for any other entry. */
   cut?: (entry: LogEntry) => Cut | null;
+  /**
+   * The most entries above the newest pair a walk checks, for a caller bound
+   * in time: past it, `capped`, and the rest unread. A checkpointer stalled,
+   * or a writer's planted rows, grow what lies there without bound.
+   */
+  above?: number;
 };
 
 export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
   const problems: string[] = [];
-  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0 };
-  const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
+  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false, capped: false };
+  const done = (head: Stop | null): Verdict => {
+    const ok = problems.length === 0;
+    return { ok, problems, ...verdict, head: ok ? (head?.notes ?? null) : null, headPair: ok ? (head?.pair ?? null) : null };
+  };
   // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
   try {
     return await walk(reader, opts, problems, verdict, done);
@@ -92,11 +128,20 @@ async function walk(
   reader: LogReader,
   opts: Options,
   problems: string[],
-  verdict: { checkpoints: number; sealed: number; unsealed: number },
-  done: (head: PairNotes | null) => Verdict,
+  verdict: { checkpoints: number; sealed: number; unsealed: number; behind: boolean; capped: boolean },
+  done: (head: Stop | null) => Verdict,
 ): Promise<Verdict> {
+  // The start's pair and those held outside, each opened once: a page's check starts at the pair the signer holds, which
+  // is also its row, and four signature checks of one pair were a third of its cost. Rows past them are opened as read.
+  const held = new Map<string, Promise<Pair | null>>();
+  const noted = (notes: PairNotes) => `${notes.changes}\0${notes.uses}`;
+  const openHeld = (notes: PairNotes) => {
+    const key = noted(notes);
+    if (!held.has(key)) held.set(key, openPair(notes, opts.verifiers));
+    return held.get(key)!;
+  };
   const open = async (row: StoredPair): Promise<Pair | null> => {
-    const pair = await openPair(row.notes, opts.verifiers);
+    const pair = await (held.get(noted(row.notes)) ?? openPair(row.notes, opts.verifiers));
     if (pair === null) problems.push(`checkpoint ${row.upto}: not a pair signed by the log`);
     else if (pair.upto !== row.upto) problems.push(`checkpoint ${row.upto}: its row does not match its notes (up to ${pair.upto})`);
     else return pair;
@@ -105,10 +150,11 @@ async function walk(
 
   // The start: a pair the caller trusts, which must be the row at its place, or the genesis row.
   let start: Stop;
-  if (opts.from !== undefined) {
-    const trusted = await openPair(opts.from, opts.verifiers);
+  const from = opts.newest?.notes ?? opts.from;
+  if (from !== undefined) {
+    const trusted = await openHeld(from);
     if (trusted === null) return (problems.push('the pair to start from is not signed by the log'), done(null));
-    const row = await reader.pair(trusted.upto);
+    const row = opts.newest ?? (await reader.pair(trusted.upto));
     const pair = row === null ? null : await open(row);
     if (pair === null || !sameNotes(pair, trusted)) return (problems.push(`no checkpoint at ${trusted.upto} with the pair to start from: checkpoints were deleted or replaced`), done(null));
     start = { pair, notes: row!.notes, row: true };
@@ -152,7 +198,7 @@ async function walk(
   const reload = (pair: Pair) => load(pair).catch((error: Error) => (problems.push(error.message), null));
 
   // Pairs held outside below the start, in order, then the start: their times and floors never come down.
-  const below = (await Promise.all((opts.anchors ?? []).map((notes) => openPair(notes, opts.verifiers))))
+  const below = (await Promise.all((opts.anchors ?? []).map(openHeld)))
     .filter((a): a is Pair => a !== null && a.upto <= start.pair.upto)
     .sort((a, b) => (a.upto < b.upto ? -1 : 1));
   for (const [i, a] of below.entries()) {
@@ -167,31 +213,40 @@ async function walk(
   // tiles, in both trees.
   const above: Stop[] = [];
   for (const notes of opts.anchors ?? []) {
-    const anchor = await openPair(notes, opts.verifiers);
+    const anchor = await openHeld(notes);
     if (anchor === null) {
       problems.push('a pair held outside is not signed by the log');
     } else if (anchor.upto > start.pair.upto) {
       above.push({ pair: anchor, notes, row: false });
+    } else if (sameNotes(anchor, start.pair)) {
+      // The start itself, as a page's check starts at the pair the signer holds: its row is the start's, and a head is
+      // a prefix of itself.
     } else {
       const row = await reader.pair(anchor.upto);
       const pair = row === null ? null : await open(row);
       if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time or floor' : 'a second history'}`);
       // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside. Below a cut, the
       // uses tree's tiles are gone: its consistency is proved from the cut on only.
-      for (const tree of TREES) {
-        if (tree === 'uses' && cut !== null && anchor.uses.size < cut.uses.size) continue;
+      // Both trees' proofs at once (R42), their problems in the trees' order.
+      const forks = await Promise.all(TREES.map(async (tree) => {
+        if (tree === 'uses' && cut !== null && anchor.uses.size < cut.uses.size) return null;
         const [from, to] = [anchor[tree], start.pair[tree]];
         const proof = from.size > to.size ? null : await proveConsistency(reader, tree, from.size, to.size).catch(() => null);
-        if (proof === null || !verifyConsistency(from.size, to.size, from.root, to.root, proof)) {
-          problems.push(`the pair held outside up to ${anchor.upto}: its ${tree} head is not a prefix of the start's: a second history, or tiles deleted`);
-        }
+        return proof === null || !verifyConsistency(from.size, to.size, from.root, to.root, proof) ? tree : null;
+      }));
+      for (const tree of forks) {
+        if (tree !== null) problems.push(`the pair held outside up to ${anchor.upto}: its ${tree} head is not a prefix of the start's: a second history, or tiles deleted`);
       }
     }
   }
   above.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
-  const loaded = await reload(start.pair);
-  if (loaded === null) return done(null);
-  let edges = loaded;
+  // The trees' edges at the start, from its tiles, which a window is appended to. A walk from the newest row has no
+  // window to walk (no row above it, and a pair held outside above it is `behind`), so it reads none (PR 8 review r5).
+  let edges: Record<TreeName, Edge> | null = null;
+  if (opts.newest === undefined) {
+    edges = await reload(start.pair);
+    if (edges === null) return done(null);
+  }
 
   // The walk: a page of rows at a time, with the outside pairs that fall among them, entries read once per page.
   // `last` is the newest row walked, `cursor` how far entries have gone into the trees (an outside pair can be past it).
@@ -219,7 +274,7 @@ async function walk(
       previous = e.number > previous ? e.number : previous;
     }
   };
-  for (let rows = await reader.pairs(start.pair.upto, PAGE); ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
+  for (let rows = opts.newest === undefined ? await reader.pairs(start.pair.upto, PAGE) : []; ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
     const stops: Stop[] = [];
     for (const row of rows) {
       const pair = await open(row);
@@ -233,6 +288,7 @@ async function walk(
       if (row !== undefined) {
         if (!sameNotes(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: ${samePair(row.pair, anchor.pair) ? 'the same heads signed at another time or floor' : 'a second history'}`);
       } else if (final && anchor.pair.upto > newest) {
+        verdict.behind = true;
         problems.push(`the database ends up to ${newest}; a pair held outside seals up to ${anchor.pair.upto}: entries or checkpoints were deleted`);
       } else {
         stops.push(anchor);
@@ -240,7 +296,12 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
-      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto)).filter((e) => !dropped(e));
+      if (edges === null) {
+        edges = await reload(start.pair);
+        if (edges === null) return done(null);
+      }
+      // From the floor the pair at `cursor` signed, never its row's (review r9).
+      const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, { floor })).filter((e) => !dropped(e));
       let at = 0;
       for (const stop of stops) {
         const window: LogEntry[] = [];
@@ -266,7 +327,8 @@ async function walk(
           problems.push(`no checkpoint at the retention cut (${ahead.upto}): checkpoints were deleted or replaced`);
           cutMet = true;
         }
-        const wrong = walked.filter((tree) => edges[tree].size !== stop.pair[tree].size || !edges[tree].root().equals(stop.pair[tree].root));
+        const grown = edges;
+        const wrong = walked.filter((tree) => grown[tree].size !== stop.pair[tree].size || !grown[tree].root().equals(stop.pair[tree].root));
         if (wrong.length > 0) {
           problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: the ${wrong.join(' and ')} head${wrong.length > 1 ? 's' : ''} differ from the entries: entries deleted, added, changed or moved, or a second history`);
           // Carry on from the signed row, so one problem is reported once.
@@ -280,15 +342,24 @@ async function walk(
     }
     if (final) break;
   }
-  const unsealed = (await reader.entries(cursor, MAX_NUMBER)).filter((e) => !dropped(e));
-  walkEntries(unsealed);
-  verdict.unsealed = unsealed.length;
+  // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9). A
+  // database behind a pair held outside is broken already: what lies above its newest pair, which deleted checkpoints can
+  // make the whole log, is not read (PR 8 review r1).
+  if (!verdict.behind) {
+    const limit = opts.above === undefined ? {} : { limit: opts.above + 1 };
+    const unsealed = (await reader.entries(cursor, MAX_NUMBER, { floor, ...limit })).filter((e) => !dropped(e));
+    const checked = opts.above === undefined ? unsealed : unsealed.slice(0, opts.above);
+    walkEntries(checked);
+    verdict.unsealed = checked.length;
+    // More lie there: not checked to the head, which says nothing against the log (PR 8 review r4 of W240).
+    verdict.capped = checked.length < unsealed.length;
+  }
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);
   // Above the start, the retention change must be on the walk and sealed: in a window a checkpoint verified.
   if (!retainedMet || (retained !== null && retained.entry.number > last.pair.upto)) {
     problems.push(`${retained!.entry.number}: the retention change cutting the uses at ${cut!.upto} is not sealed in the changes tree`);
   }
-  return done(last.notes);
+  return done(last);
 }
 
 /**

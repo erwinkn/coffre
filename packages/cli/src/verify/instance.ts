@@ -227,7 +227,14 @@ async function verification(api: CoffreClient): Promise<string> {
   expect(verified.ok, 'the audit log does not verify', verified);
   // A server older than 0.10.1 says nothing of what it left, and walked it all.
   expect((verified.remaining ?? 0) === 0, 'the audit log is not verified to its end: the checkpoints are catching up', verified);
-  return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}`;
+  // 0.15's log, where the instance keeps it: its newest checkpoint and every entry since, as the audit page checks it.
+  const trees = await api.audit.verifyTrees();
+  expect(!trees.kept || trees.problems.length === 0, "0.15's log does not verify from its newest checkpoint", trees);
+  // Not checked to its head, as 0.14's checkpoints catching up above: a checkpointer behind, no break of the log, and
+  // no pass either (review r4 of W240).
+  expect(!trees.kept || !trees.capped, "0.15's log is not checked to its head: more entries wait above its newest checkpoint than a check reads, the checkpointer behind", trees);
+  const sealed = !trees.kept ? '' : trees.checkpoint === null ? "; 0.15's log too, nothing sealed yet" : `; 0.15's log too, from its newest checkpoint, up to entry ${trees.checkpoint.upto}`;
+  return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}${sealed}`;
 }
 
 /** Revoke what the run issued, and say what stays: the session among it. */

@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { chainResult, chainUnknown, queries, shownChain, type AuditSearch, type ChainResult } from '../lib/queries';
+import { chainUnknown, queries, shownChain, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -53,13 +53,18 @@ export function AuditPage() {
     setWhole(null);
     let verdict: ChainResult;
     try {
-      verdict = chainResult(await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through })), true);
+      // 0.15's log, where the instance keeps it, checked again as on a visit, from its newest checkpoint, beside the walk
+      // (R42). Nothing walks it whole on a request: its cost is the database's to shape.
+      const trees = Promise.allSettled([client.audit.verifyTrees()]);
+      const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
+      verdict = withTrees(chain, true, (await trees)[0]);
     } catch (error) {
       verdict = chainUnknown(error);
     }
-    // A walk that could not run says nothing of the log: the verdict from the newest checkpoint stands.
+    // A walk that could not run, or was refused, says nothing of the log: the verdict from the newest checkpoint stands.
     if (verdict.integrity === 'unknown') setWalkFailed(verdict.problem);
-    else if (verdict.integrity !== 'owners-only') setWhole(verdict);
+    else if (verdict.integrity === 'owners-only') setWalkFailed('the request was refused (HTTP 403)');
+    else setWhole(verdict);
     setWalked(null);
   };
   const { decision, actorId } = search;
@@ -478,6 +483,13 @@ function ChainStatus({
     : signed === null
       ? 'Audit log verified by the app and vault keys, not signed yet.'
       : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
+  // 0.15's log, where it is kept: its newest checkpoint and every entry since, on a visit and after a walk alike. Its own
+  // numbers are not the entries' above: it is named by when its newest checkpoint was signed.
+  const trees = chain.trees;
+  const sealed = trees?.checkpoint == null ? null : `its checkpoint of ${absolute(new Date(trees.checkpoint.at).toISOString(), false)} UTC`;
+  const sealedLog = trees === null ? '' : ` The sealed log: ${sealed === null ? 'nothing sealed yet' : sealed}, and every entry since, verified.`;
+  // Not known whether it holds: no seal over it, as over a log verified in part.
+  const unchecked = chain.treesFailed !== null;
   return (
     <div className="chain">
       {chain.pending > 0 && (
@@ -508,14 +520,22 @@ function ChainStatus({
           </button>
         </Toggletip>
       )}
+      {unchecked && (
+        <Toggletip align="end" label={`${chain.treesFailed}. The rest of the log's verdict stands.`}>
+          <button type="button" className="chain-flag chain-flag-warn">
+            <AlertTriangle size={14} />
+            {chain.treesBehind && chain.trees !== null ? `Sealed log not checked to the head (${chain.trees.pending.toLocaleString('en')}+ entries pending)` : 'Sealed log not checked'}
+          </button>
+        </Toggletip>
+      )}
       {!chain.whole && chain.remaining === 0 && (
         <button type="button" className="btn btn-sm" onClick={onWalk}>
           Verify whole log
         </button>
       )}
       {/* No seal over a log verified only in part: what is left could be anything. */}
-      {chain.remaining === 0 && (
-        <Toggletip align="end" label={verified}>
+      {chain.remaining === 0 && !unchecked && (
+        <Toggletip align="end" label={`${verified}${sealedLog}`}>
           <button type="button" className="chain-seal">
             <ShieldCheck size={14} />
             Verified

@@ -138,6 +138,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
   async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
   async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
+  async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {
@@ -165,5 +166,5 @@ export function checkpointer() {
   });
 }
 
-export { checkpointerAlarms, checkpointerStatus, durableSealThrough, startCheckpointer } from './checkpointer-workers.ts';
+export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer } from './checkpointer-workers.ts';
 export { durableWitness, r2Archive, witnessObject as witness, type WitnessSettings } from './witness-workers.ts';

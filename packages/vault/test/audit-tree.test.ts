@@ -6,7 +6,8 @@ import { test } from 'node:test';
 
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 
-import { Checkpointer, FRESH_MS, localWitness, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, FRESH_MS, heldIn, localWitness, Refused, type Witness } from '../src/checkpointer.ts';
+import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
 
 async function setup(seed = 1) {
@@ -30,7 +31,7 @@ async function traffic(store: MemoryStore, cp: Checkpointer, ticks: number) {
   }
 }
 
-const verify = (store: MemoryStore, k: Keys, opts: { anchors?: PairNotes[]; from?: PairNotes } = {}) =>
+const verify = (store: MemoryStore, k: Keys, opts: { anchors?: PairNotes[]; from?: PairNotes; above?: number } = {}) =>
   verifyLog(store, { verifiers: k.verifiers, check: (e) => (authentic(k.macKey)(e) ? null : 'mac'), ...opts });
 
 test('an honest log: both trees sealed every tick as one pair, verified, and every entry provable', async () => {
@@ -360,6 +361,26 @@ test('review r1: a change whose entry was deleted before its tick is refused, no
   assert.ok(alerts.some((a) => /lost before its seal/.test(a)));
 });
 
+test('PR 8 review r4: a change whose proof the database answers wrongly for is refused and alarmed, as one lost before its seal', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  const number = store.append('changes', 'revoke');
+  // As `locate` refuses a use changed since its tick that holds the change's number.
+  store.locate = async () => {
+    throw new Refused("use 9 is in none of its window's leaves: the database changed it since its tick");
+  };
+  await assert.rejects(cp.sealThrough(number), /cannot be proved in the signed changes tree: use 9 is in none/);
+  assert.ok(alerts.some((a) => /cannot be proved in the signed changes tree/.test(a)));
+  // A failure of the database's to answer at all (a connection dropped) is no refusal: it goes through, no alarm.
+  const before = alerts.length;
+  store.locate = async () => {
+    throw new Error('Connection terminated unexpectedly');
+  };
+  await assert.rejects(cp.sealThrough(number), /^Error: Connection terminated unexpectedly$/);
+  assert.equal(alerts.length, before);
+});
+
 test('review r1: prove() refuses an answer for another entry than the one asked', async () => {
   const { store, open } = await setup();
   const cp = await open();
@@ -395,7 +416,7 @@ test('review r2, KindInMac: a change deleted and a use renumbered into its place
   const use = store.append('uses', 'u');
   store.deleteEntry(number);
   store.log.find((e) => e.number === use)!.number = number;
-  await assert.rejects(cp.sealThrough(number), /not in the signed changes tree.*a use holds its number/);
+  await assert.rejects(cp.sealThrough(number), /signed changes tree: entry \d+ is in the uses tree, not the changes: a use holds its number/);
   assert.ok(alerts.some((a) => /signed changes tree/.test(a)));
 });
 
@@ -799,4 +820,61 @@ test('a change waits for the witness, then answers unwitnessed at the deadline, 
   const after = asked;
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(asked, after);
+});
+
+test('review r11: a signer\'s memory that does not read as a pair is refused, never held as none; none yet is none', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  assert.deepEqual(heldIn(null), []);
+  assert.deepEqual(heldIn(memory.record), [decodePair(memory.record!)]);
+  assert.throws(() => heldIn('{ damaged pair'), /the signer's memory does not read as a pair/);
+  // The Durable Object's answer, read from its storage: refused, so a walk is not checked against nothing.
+  const Object_ = checkpointerObject(() => {
+    throw new Error('the memory is read without the database');
+  });
+  const held = (record: string | null) => {
+    const object = new Object_({ storage: { get: async () => record ?? undefined } } as never, {} as never);
+    return durableHeldOutside({ idFromName: () => 'checkpointer', get: () => ({ fetch: (request: Request) => object.fetch(request) }) } as never)();
+  };
+  assert.deepEqual(await held(memory.record), [decodePair(memory.record!)]);
+  assert.deepEqual(await held(null), []);
+  await assert.rejects(held('{ damaged pair'), /the signer's memory does not read as a pair/);
+  // What it guards: a log rolled back to its start verifies without the anchor, never with it.
+  const remembered = decodePair(memory.record!)!;
+  store.rollBack(0n);
+  assert.ok((await verify(store, k)).ok);
+  assert.ok(!(await verify(store, k, { anchors: [remembered] })).ok);
+});
+
+test('PR 8 reviews r1, r4 (W240): above the newest pair a walk reads at most `above` entries, `capped` and no problem past them, and nothing above a database behind a pair held outside', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const signed = decodePair(memory.record!)!;
+  // A checkpointer stalled: five entries above its pair, three checked, the rest never read: not to the head, no problem.
+  const late: bigint[] = [];
+  for (let i = 0; i < 5; i += 1) late.push(store.append('uses', `late-${i}`));
+  const capped = await verify(store, k, { from: signed, above: 3 });
+  assert.deepEqual([capped.unsealed, capped.capped, capped.problems], [3, true, []]);
+  const whole = await verify(store, k, { from: signed, above: 5 });
+  assert.ok(whole.ok && !whole.capped);
+  // A forged entry among the three checked is a problem still, capped or not.
+  const forged = store.log.find((e) => e.number === late[1])!;
+  (forged.columns as unknown[])[1] = 'forged';
+  const named = await verify(store, k, { from: signed, above: 3 });
+  assert.ok(named.capped && named.problems.includes(`${late[1]}: mac`), named.problems.join('\n'));
+  (forged.columns as unknown[])[1] = 'late-1';
+  // Every checkpoint but the genesis deleted, the entries kept: behind the signer's pair, and not one entry read.
+  for (const upto of [...store.rows.keys()]) if (upto > 0n) store.rows.delete(upto);
+  let read = 0;
+  const entries = store.entries.bind(store);
+  store.entries = async (...args) => {
+    const found = await entries(...args);
+    read += found.length;
+    return found;
+  };
+  const behind = await verify(store, k, { anchors: [signed], above: 3 });
+  assert.ok(behind.behind && !behind.ok, behind.problems.join('\n'));
+  assert.deepEqual([read, behind.unsealed], [0, 0]);
 });

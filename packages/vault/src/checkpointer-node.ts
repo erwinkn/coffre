@@ -1,9 +1,10 @@
 import { appendFile, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import type { PairNotes } from '@coffre/core/merkle';
 import type { Database } from '@coffre/db';
 
-import type { Alarm, Checkpointer, Memory, SealThrough, Witness } from './checkpointer.ts';
+import { heldIn, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 
@@ -46,6 +47,8 @@ export type RunningCheckpointer = {
   sealThrough: SealThrough;
   /** The alarms raised since `since` (ms), oldest first, from the file beside the memory. */
   alarms(since?: number): Promise<Alarm[]>;
+  /** The pair the signer remembers, from its file: what the vault's verifier holds its walks to (`VaultOptions.heldOutside`). */
+  heldOutside(): Promise<PairNotes[]>;
   stop(): Promise<void>;
 };
 
@@ -123,6 +126,9 @@ export async function runCheckpointer(options: {
   return {
     checkpointer,
     sealThrough: (number, deadline) => checkpointer.sealThrough(number, deadline),
+    async heldOutside() {
+      return heldIn(await fileMemory(options.memory).last());
+    },
     async alarms(since = 0) {
       await appending;
       return (await readAlarms(alarmsPath)).filter((a) => a.at >= since);

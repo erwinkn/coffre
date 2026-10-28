@@ -6,6 +6,7 @@ import { dehydrate, hydrate, QueryObserver, type QueryClient } from '@tanstack/r
 
 import {
   affects,
+  chainResult,
   createQueryClient,
   FRESH_MS,
   keys,
@@ -178,7 +179,7 @@ test('the audit log is read on every visit, and its verification once with the p
 
 test('the audit page loads its entries and its verification together, and a check that fails does not fail the load', async () => {
   const calls: string[] = [];
-  const load = async (verify: () => Promise<unknown>) => {
+  const load = async (verify: () => Promise<unknown>, trees: unknown = { kept: false }) => {
     const queryClient = createQueryClient();
     const coffre = {
       audit: {
@@ -190,15 +191,46 @@ test('the audit page loads its entries and its verification together, and a chec
           calls.push('GET /audit/verification');
           return verify();
         },
+        verifyTrees: async () => {
+          calls.push('GET /audit/trees');
+          return await trees;
+        },
       },
     } as unknown as CoffreClient;
     const result = await loadAudit(queryClient, coffre, {});
     return { result, chain: queryClient.getQueryData<ChainResult>([...keys.audit, 'chain']) };
   };
 
-  const verified = await load(async () => ({ ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null }));
-  assert.deepEqual(calls.sort(), ['GET /audit', 'GET /audit/verification']);
+  const intact = async () => ({ ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null });
+  const verified = await load(intact);
+  assert.deepEqual(calls.sort(), ['GET /audit', 'GET /audit/trees', 'GET /audit/verification']);
   assert.equal(verified.chain?.integrity, 'intact');
+  assert.equal((verified.chain as { trees: unknown }).trees, null, "0.14's log alone: nothing more to show");
+
+  // 0.15's log kept too: its verdict is the badge's, a problem it finds a broken log.
+  const trees = { kept: true, ok: true, problems: [], checkpoint: { upto: '52', at: 1_793_000_000_000 }, unsealed: 12, capped: false };
+  const sealed = await load(intact, trees);
+  assert.deepEqual((sealed.chain as { trees: unknown }).trees, { checkpoint: trees.checkpoint, pending: 0 });
+  const problems = ['the principal token:ci: its rows carry another change\'s seal than the newest: put back, or written around the vault', 'one more'];
+  const put = await load(intact, { ...trees, ok: false, problems });
+  // A check of the sealed log that cannot run says so beside the chain's verdict, which stands.
+  const failing = await load(intact, Promise.reject(new Error('connection refused')));
+  assert.equal(failing.chain?.integrity, 'intact');
+  assert.equal((failing.chain as { treesFailed: unknown }).treesFailed, 'coffre could not check the sealed log: the request never got an answer');
+  // Refused, as when access narrows between the two checks (review r11): not checked either, and no earlier walk's seal over it.
+  const refusedTrees = await load(intact, Promise.reject(new CoffreError(403, 'forbidden', 'forbidden')));
+  assert.equal(refusedTrees.chain?.integrity, 'intact');
+  assert.equal((refusedTrees.chain as { treesFailed: unknown }).treesFailed, 'coffre could not check the sealed log: the request was refused (HTTP 403)');
+  const walked = { ...chainResult(await intact(), true), trees: { checkpoint: null } } as ChainResult;
+  assert.equal(shownChain(refusedTrees.chain!, walked), refusedTrees.chain);
+  // More above the newest checkpoint than a check reads (review r4 of W240): a checkpointer behind, never a broken log, nor
+  // "Verified", nor an earlier walk's seal over it.
+  const capped = (await load(intact, { ...trees, ok: false, unsealed: 2_000, capped: true })).chain as ChainResult & { treesBehind: boolean; treesFailed: string; trees: { pending: number } };
+  assert.equal(capped.integrity, 'intact');
+  assert.deepEqual([capped.treesBehind, capped.trees.pending], [true, 2_000]);
+  assert.match(capped.treesFailed, /^coffre checked the sealed log's first 2,000 entries above its newest checkpoint, not the rest: the checkpointer is behind$/);
+  assert.equal(shownChain(capped, walked), capped);
+  assert.deepEqual(put.chain, { integrity: 'broken', through: 9, failedAtSeq: null, author: 'vault', reason: `the sealed log: ${problems[0]} (and 1 more)` });
 
   // A vault that cannot be reached, and a refusal: each the badge's verdict, the entries still there.
   const down = await load(async () => {
@@ -221,6 +253,7 @@ test('the audit page verifies once an arrival: not again on mount, nor for a fil
         verified++;
         return { ok: true, through: 9, entries: 10, from: 4, remaining: 0, checkpoint: null };
       },
+      verifyTrees: async () => ({ kept: false }),
     },
   } as unknown as CoffreClient;
 
@@ -408,7 +441,7 @@ test('an environment of an archived project asks its secrets alone, though you r
 
 test('the page shows a break either check found, and the walk from the first entry only while the newer check agrees', () => {
   const intact = (remaining: number, whole: boolean): ChainResult => ({
-    integrity: 'intact', whole, through: 100 - remaining, entries: 101 - remaining, from: whole ? 0 : 90, remaining, checkpoint: null, pending: 0,
+    integrity: 'intact', whole, through: 100 - remaining, entries: 101 - remaining, from: whole ? 0 : 90, remaining, checkpoint: null, pending: 0, treesFailed: null, trees: null,
   });
   const broken: ChainResult = { integrity: 'broken', through: 4, failedAtSeq: 5, author: 'app', reason: 'hash does not match the entry' };
   const unknown: ChainResult = { integrity: 'unknown', problem: 'the request never got an answer' };
@@ -424,4 +457,7 @@ test('the page shows a break either check found, and the walk from the first ent
   assert.equal(shownChain(broken, walked), broken);
   assert.equal(shownChain(intact(12_000, false), walked)?.integrity === 'intact' && (shownChain(intact(12_000, false), walked) as { remaining: number }).remaining, 12_000);
   assert.equal(shownChain(unknown, walked), unknown);
+  // A newer check whose check of the sealed log could not run says so over the walk's seal (review r10).
+  const unchecked = { ...intact(0, false), treesFailed: 'coffre could not check the sealed log: the request failed with HTTP 503' } as ChainResult;
+  assert.equal(shownChain(unchecked, walked), unchecked);
 });

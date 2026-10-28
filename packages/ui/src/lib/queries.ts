@@ -371,19 +371,46 @@ export const queries = {
  * checked as a chain, so for them it is a fact about the page, not a fault.
  */
 async function verifyChain(client: CoffreClient) {
-  try {
-    return chainResult(await client.audit.verify(), false);
-  } catch (error) {
-    return chainUnknown(error);
-  }
+  const [chain, trees] = await Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()]);
+  if (chain.status === 'rejected') return chainUnknown(chain.reason);
+  return withTrees(chain.value, false, trees);
 }
+
+/**
+ * 0.14's verdict with 0.15's check beside it, each settled apart: a check
+ * of 0.15's log that could not run says so beside 0.14's verdict, never in
+ * its place, on a visit and after a walk alike.
+ */
+export function withTrees(chain: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: PromiseSettledResult<TreesResult>) {
+  if (trees.status === 'fulfilled') return chainResult(chain, whole, trees.value);
+  // Whatever turned it away, a refusal included (access narrowed between the two, review r11): not checked, never "Verified".
+  const failed = chainUnknown(trees.reason);
+  const problem = failed.integrity === 'unknown' ? failed.problem : 'the request was refused (HTTP 403)';
+  return { ...chainResult(chain, whole), ...(chain.ok ? { treesFailed: `coffre could not check the sealed log: ${problem}` } : {}) };
+}
+
+/** 0.15's log as its check found it (`audit.verifyTrees`): `kept` false where the instance keeps 0.14's alone. */
+export type TreesResult = Awaited<ReturnType<CoffreClient['audit']['verifyTrees']>>;
 
 /**
  * A verdict as the page shows it: `whole` when it comes from the walk
  * from the first entry, which someone asked for, not from the newest
- * checkpoint's.
+ * checkpoint's. Where the instance keeps 0.15's log too, its check
+ * (`trees`) is part of it: what it finds breaks the log as 0.14's would.
  */
-export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean) {
+export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: TreesResult = { kept: false }) {
+  // More entries above the newest checkpoint than a check reads: a checkpointer behind, not a break (review r4 of W240).
+  const behind = trees.kept && trees.capped;
+  if (result.ok && trees.kept && trees.problems.length > 0) {
+    const more = trees.problems.length - 1;
+    return {
+      integrity: 'broken' as const,
+      through: result.through,
+      failedAtSeq: null,
+      author: 'vault' as const,
+      reason: `the sealed log: ${trees.problems[0]}${more > 0 ? ` (and ${more} more)` : ''}`,
+    };
+  }
   return result.ok
     ? {
         integrity: 'intact' as const,
@@ -395,6 +422,17 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
         remaining: result.remaining ?? 0,
         checkpoint: result.checkpoint,
         pending: result.pending ?? 0,
+        /**
+         * Why the check of 0.15's log could not run, or stopped short of its head (`treesBehind`): the chain's verdict
+         * stands, the sealed log's is not known.
+         */
+        treesFailed: behind
+          ? `coffre checked the sealed log's first ${trees.unsealed.toLocaleString('en')} entries above its newest checkpoint, not the rest: the checkpointer is behind`
+          : (null as string | null),
+        /** The sealed log checked, but not to its head: more entries wait above its newest checkpoint than a check reads. */
+        treesBehind: behind,
+        /** 0.15's log, where it is kept: the newest pair its check reached. */
+        trees: trees.kept ? { checkpoint: trees.checkpoint, pending: trees.capped ? trees.unsealed : 0 } : null,
       }
     : {
         integrity: 'broken' as const,
@@ -413,13 +451,17 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
  * log whole too does the walk's verdict, which read further back, stand
  * over it.
  *
- *   whole broken                                  → whole
- *   whole intact, quick intact with 0 remaining   → whole
- *   whole intact, quick anything else             → quick
+ *   whole broken                                              → whole
+ *   whole intact, quick intact, 0 remaining, sealed log checked → whole
+ *   whole intact, quick anything else                         → quick
+ *
+ * A newer check that could not check the sealed log (review r10) is
+ * "anything else": the walk's seal would stand over a log nobody can now
+ * say holds.
  */
 export function shownChain(quick: ChainResult, whole: ChainResult | null): ChainResult {
   if (whole === null || whole.integrity === 'broken') return whole ?? quick;
-  return quick.integrity === 'intact' && quick.remaining === 0 && whole.integrity === 'intact' ? whole : quick;
+  return quick.integrity === 'intact' && quick.remaining === 0 && quick.treesFailed === null && whole.integrity === 'intact' ? whole : quick;
 }
 
 /** Why the log's verdict is not known: closed to the caller, or no answer. */

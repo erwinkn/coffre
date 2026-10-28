@@ -1723,6 +1723,22 @@ export type Api = {
       resumes: number | null;
     };
   };
+  "GET /audit/trees": {
+    input: undefined;
+    output: {
+      kept: false;
+    } | {
+      kept: true;
+      ok: boolean;
+      problems: string[];
+      checkpoint: null | {
+        upto: string;
+        at: number;
+      };
+      unsealed: number;
+      capped: boolean;
+    };
+  };
 };
 
 export type AccessValue = string | null | {

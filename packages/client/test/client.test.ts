@@ -77,3 +77,11 @@ test('an error that is not JSON still throws with its status', async () => {
   const { client } = recording(() => new Response('<html>', { status: 502 }));
   await assert.rejects(client.me(), { name: 'CoffreError', status: 502, code: 'http_error' });
 });
+
+test("a server older than 0.15 has no route for 0.15's log: it keeps 0.14's alone", async () => {
+  const { client } = recording(() => Response.json({ error: 'not_found', message: 'no such route' }, { status: 404 }));
+  assert.deepEqual(await client.audit.verifyTrees(), { kept: false });
+  // Any other refusal is one.
+  const { client: refused } = recording(() => Response.json({ error: 'forbidden', message: 'no' }, { status: 403 }));
+  await assert.rejects(refused.audit.verifyTrees(), { name: 'CoffreError', status: 403 });
+});

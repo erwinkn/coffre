@@ -235,7 +235,40 @@ export interface Vault {
    * log on.
    */
   waitSealed?(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>>;
+  /**
+   * Check 0.15's log (docs/design/0.15-plan.md, PR 8), as the audit page
+   * does on every visit: the newest signed pair, held to the pairs held
+   * outside, and every entry after it by its MAC and request, a tick's
+   * worth (R25). Nothing walks the whole log on a request (D145). With
+   * 0.14's log alone, `kept` false; a vault older than 0.15 has none.
+   */
+  verifyTrees?(): Promise<TreeVerification>;
 }
+
+/**
+ * 0.15's log as its check found it. `problems` names what does not hold,
+ * each at its entry where it has one: a checkpoint not signed, or not the
+ * one held outside; an entry whose MAC fails, or under another's request.
+ * Numbers are decimal text: the log's are 64-bit.
+ */
+export type TreeVerification =
+  | { kept: false }
+  | {
+      kept: true;
+      /** Checked to the head, and nothing wrong found. */
+      ok: boolean;
+      problems: string[];
+      /** The newest pair checked, and when it was signed (ms); null before the first. */
+      checkpoint: { upto: string; at: number } | null;
+      /** The entries above the newest pair it checked. */
+      unsealed: number;
+      /**
+       * Whether more lie there than a check reads (`ABOVE_NEWEST`, 2,000): a
+       * checkpointer behind. Not checked to the head, so `ok` is false; no
+       * problem either, and never a break of the log.
+       */
+      capped: boolean;
+    };
 
 /**
  * The columns of a row the app writes that a decision of 0.15's reads, as

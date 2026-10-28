@@ -41,6 +41,7 @@ import {
   type ServiceAccount,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
+import type { PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -102,6 +103,7 @@ import {
   type Wrapped,
   type Vault,
   type Via,
+  type TreeVerification,
   type VerifyLogInput,
   type WrapInput,
   type WrappedKey,
@@ -117,6 +119,7 @@ import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
+import { TICK_MS } from './log-checkpointer.ts';
 import { logMacKey } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
@@ -127,6 +130,7 @@ import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
+import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
 export type VaultOptions = {
   /**
@@ -154,6 +158,14 @@ export type VaultOptions = {
    */
   sealThrough?: SealThrough;
   /**
+   * Under 0.15's log, the pairs held where no database writer reaches: the
+   * signer's memory (`durableHeldOutside` on Workers, the Node runner's
+   * `heldOutside`), later a witness's. The verifier holds every walk to
+   * them; without, a database rolled back whole to an earlier pair verifies
+   * until the signer's next tick refuses it (verifier.ts).
+   */
+  heldOutside?: () => Promise<readonly PairNotes[]>;
+  /**
    * 0.15's uses, per isolate (use.ts): how many calls in flight at once, by
    * default the hot path's pool, `connections`, and how long a cover holds.
    */
@@ -179,13 +191,13 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'uses'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
    * Null under 0.14's alone.
    */
-  log015: (ChangeKeys & { sealThrough: SealThrough }) | null;
+  log015: (ChangeKeys & { sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]> }) | null;
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
   /** How far the chain is rehashed, by any call of this process: its head must still be there. */
@@ -210,6 +222,8 @@ export type PreparedVault = {
    * then everyone the deployment names made an Owner (`#declare`).
    */
   converted: boolean;
+  /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
+  verifier: VerifierKeys | null;
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -219,8 +233,9 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
-    log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough) : null,
+    log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
     limited: false,
+    verifier: null,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
     verified: START,
     reported: new Set(),
@@ -233,9 +248,9 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
 }
 
 /** 0.15's change keys from the vault's signing keys, the first sealing and MACing, each checking a seal. */
-function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined): ChangeKeys & { sealThrough: SealThrough } {
+function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined, heldOutside = async (): Promise<readonly PairNotes[]> => []): NonNullable<PreparedVault['log015']> {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
-  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough };
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough, heldOutside };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -3131,6 +3146,37 @@ class VaultService implements Vault {
     if (typeof input?.number !== 'string' || !/^[1-9][0-9]{0,18}$/.test(input.number)) throw new Error('waitSealed takes an entry\'s number, in decimal');
     const sealed = await log015.sealThrough(BigInt(input.number));
     return { ok: true, witnessed: sealed.witnessed ?? null };
+  }
+
+  /**
+   * 0.15's log checked (verifier.ts): the newest pair and every entry above
+   * it, held to the pairs held outside. With 0.14's log alone, there is
+   * none to check. The signer remembers a pair before the database has it
+   * (RememberFirst), so a check that lands in between finds the database
+   * behind (`Verdict.behind`): it is checked again 50 ms later, then a
+   * tick later (reviews r4, r5). A rollback is still behind then.
+   */
+  async verifyTrees(): Promise<TreeVerification> {
+    await this.#settled();
+    if (this.#prepared.log015 === null) return { kept: false };
+    const anchors = await this.#prepared.log015.heldOutside();
+    const keys = await this.#verifierKeys();
+    const walk = () => verifyTrees(this.#db, keys, { anchors });
+    let walked = await walk();
+    // The signer's write lands a moment after it remembers: asked again soon, then once more a tick later, for a write
+    // that failed and is made again at the next tick (PR 8 review r5).
+    for (const wait of [50, TICK_MS + 250]) {
+      if (!walked.behind) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      walked = await walk();
+    }
+    // What crosses to the app: the verdict, never the retry's signal.
+    const { behind: _behind, ...verdict } = walked;
+    return verdict;
+  }
+
+  async #verifierKeys(): Promise<VerifierKeys> {
+    return (this.#prepared.verifier ??= await verifierKeys(this.#config.signingKeys));
   }
 
   #log015(): NonNullable<PreparedVault['log015']> {

@@ -321,9 +321,9 @@ test("the roles object holds an Owner's edits only: a role as it ships is no edi
   assert.deepEqual(liveAndReplayed(w, [ask(2, 1)]), [null]);
 });
 
-test('the bulk rows are outside the seals: erased, they let a request the replay refuses bulk_limit through, which the row audit names', () => {
+test('the bulk rows are outside the seals: erased, they let a request the replay refuses bulk_limit through, which no check names yet', () => {
   // A database writer who erases a principal's bulk rows resets its cap, and no input reads stale: the cap is a rate,
-  // not a right, and PR 8's row audit holds every bulk row to the replay's (docs/design/sealed-inputs.md).
+  // not a right, and T138 holds the bulk rows to the replay's once modelled (docs/design/sealed-inputs.md).
   const w = market({ count: 2, windowMs: 60_000 });
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1), ask(1, 4)]), [null, null]);
   w.bulk.clear();

@@ -954,6 +954,30 @@ export async function newestSealedChanges(db: Queryable, refs: readonly Ref[]): 
 }
 
 /**
+ * Whether the indexes that keep request ids unique stand: a
+ * second entry under one request is a replay the database refuses, so a
+ * walk need hold only its own stretch to it (`RequestIdChecked`).
+ */
+export async function requestsUnique(db: Queryable): Promise<boolean> {
+  // Each index by its definition, so that one of the same name over other columns does not pass: a use's request is
+  // unique by its time and id, a change's by its id.
+  const defined = (text: string) => text.replace(/[`"\s]/g, '').toLowerCase();
+  const wanted = (uses: string | undefined, changes: string | undefined) =>
+    uses !== undefined && changes !== undefined && /^createuniqueindex.*on(only)?(public\.)?log_uses(usingbtree)?\(at,request_id\)$/.test(defined(uses))
+    && /^createuniqueindex.*on(only)?(public\.)?log_changes(usingbtree)?\(request_id\)$/.test(defined(changes));
+  if (engineOf(db) === 'sqlite') {
+    const rows = await rowsOf<{ name: string; sql: string | null }>(db, sql`SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND name IN ('log_uses_request_idx', 'log_changes_request_id_key')`);
+    const of = (name: string) => rows.find((row) => row.name === name)?.sql ?? undefined;
+    return wanted(of('log_uses_request_idx'), of('log_changes_request_id_key'));
+  }
+  const rows = await rowsOf<{ name: string; def: string }>(db, sql`SELECT c.relname AS name, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE i.indexrelid IN (to_regclass('public.log_uses_request_idx'), to_regclass('public.log_changes_request_id_key')) AND i.indisunique AND i.indisvalid`);
+  const of = (name: string) => rows.find((row) => row.name === name)?.def;
+  return wanted(of('log_uses_request_idx'), of('log_changes_request_id_key'));
+}
+
+/**
  * A key's source as its object holds it: its newest reference row's, unless
  * that row has ended (`ended_at`, 0029): a reference broken, replaced or
  * cut. Null for a key with no reference row. `secretId`: the key's id, as

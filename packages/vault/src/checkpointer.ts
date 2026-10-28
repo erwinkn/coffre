@@ -88,8 +88,13 @@ export type CheckpointStore = LogReader & {
    * state holds one head without the other.
    */
   write(row: StoredPair, tiles: Record<TreeName, Tile[]>): Promise<void>;
-  /** Entry `number` and its leaf index in its tree, if it is in the log. */
-  locate(number: bigint): Promise<{ entry: LogEntry; index: number } | null>;
+  /**
+   * Entry `number` and its leaf index in its tree, if it is in the log; a
+   * use found at `at` when the caller knows its time, which spares a scan
+   * of its window's time. With `tree`, an entry in the other is refused
+   * (`misplaced`) before its index is sought.
+   */
+  locate(number: bigint, options?: Locating): Promise<{ entry: LogEntry; index: number } | null>;
 };
 
 /**
@@ -97,6 +102,40 @@ export type CheckpointStore = LogReader & {
  * Durable Object's storage on Workers, a synced file beside a Node vault.
  */
 export type Memory = { last(): Promise<string | null>; remember(record: string): Promise<void> };
+
+/** What a proof asks of `locate`: the use's time, if known, and the tree the entry must be in. */
+export type Locating = { at?: number; tree?: TreeName };
+
+/**
+ * An answer of the database a proof refuses: an entry in the other tree, a
+ * window no checkpoints make, an entry changed since its tick. Never an I/O
+ * failure, which a caller may ask again past; `sealThrough` alarms on these
+ * alone (PR 8 review r4 of W240).
+ */
+export class Refused extends Error {}
+
+/**
+ * An entry found in the other tree than the one asked: a writer who deleted
+ * a change and renumbered a use into its place (KindInMac). Refused before
+ * its index is sought, which for a use reads its window's tiles, whose
+ * bounds are the database's (PR 8 review r2).
+ */
+export function misplaced(entry: LogEntry, tree: TreeName): Refused {
+  return new Refused(`entry ${entry.number} is in the ${entry.tree} tree, not the ${tree}: a ${entry.tree === 'uses' ? 'use' : 'change'} holds its number`);
+}
+
+/**
+ * The pairs a memory's record holds outside the database, for the verifier
+ * (`VaultOptions.heldOutside`): none before the first, and a record that does
+ * not read as a pair refused, never read as none, which would drop the walk's
+ * anchor in silence (review r11).
+ */
+export function heldIn(record: string | null): PairNotes[] {
+  if (record === null) return [];
+  const notes = decodePair(record);
+  if (notes === null) throw new Error("the signer's memory does not read as a pair: the log is not checked against it");
+  return [notes];
+}
 
 /** Somewhere each signed pair goes that a database writer cannot reach: a witness, an archive (R40's plugin). */
 export type Witness = {
@@ -540,9 +579,18 @@ export class Checkpointer {
     const head = this.head;
     // From the changes tree (KindInMac): the MAC does not cover the number, so a writer could delete the change and
     // renumber a use into its place before the tick; that use is sealed, and provable, but in the uses tree.
-    const proof = await this.proveAt(number, head);
-    if (proof === null || proof.tree !== 'changes') {
-      const message = `change ${number} is not in the signed changes tree: its entry was lost before its seal${proof === null ? '' : ', and a use holds its number'}`;
+    // A proof the database answers wrongly for (an entry changed since its tick, `locate`'s refusal) is the same alarm.
+    let proof: InclusionProof | null;
+    try {
+      proof = await this.proveAt(number, head, { tree: 'changes' });
+    } catch (error) {
+      if (!(error instanceof Refused)) throw error;
+      const message = `change ${number} cannot be proved in the signed changes tree: ${error.message}`;
+      this.options.alert(message);
+      throw new Error(message);
+    }
+    if (proof === null) {
+      const message = `change ${number} is not in the signed changes tree: its entry was lost before its seal`;
       this.options.alert(message);
       throw new Error(message);
     }
@@ -553,27 +601,32 @@ export class Checkpointer {
     return { pair: head.pair, notes: head.notes, witnessed, failures, cosigned, proof };
   }
 
-  /** Entry `number`'s inclusion proof against the newest pair, checked before it is handed out; null if not sealed. */
-  prove(number: bigint): Promise<InclusionProof | null> {
-    return this.proveAt(number, this.head);
+  /**
+   * Entry `number`'s inclusion proof against the newest pair, checked before
+   * it is handed out; null if not sealed. A use's `at`, if known, finds it
+   * in one probe; with `tree`, an entry in the other is refused.
+   */
+  prove(number: bigint, options: Locating = {}): Promise<InclusionProof | null> {
+    return this.proveAt(number, this.head, options);
   }
 
-  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }): Promise<InclusionProof | null> {
+  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
     if (number > pair.upto) return null;
-    const found = await this.store.locate(number);
+    const found = await this.store.locate(number, options);
     if (found === null) return null;
     const { entry, index } = found;
+    if (options.tree !== undefined && entry.tree !== options.tree) throw misplaced(entry, options.tree);
     if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
-      throw new Error(`the database answered for another entry than ${number}`);
+      throw new Refused(`the database answered for another entry than ${number}`);
     }
     // An entry numbered at or below the pair's place is in its tree by construction: an index past the tree is the
     // database's answer, not the tree's.
     const size = pair[entry.tree].size;
-    if (index >= size) throw new Error(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
+    if (index >= size) throw new Refused(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
     const nodes = nodesFrom(tileMap(await this.store.tiles(entry.tree, tilesFor((n) => inclusionProof(n, index, size)))));
     const proof = inclusionProof(nodes, index, size);
     if (!verifyInclusion(entryLeaf(entry.tree, entry.number, entry.columns), index, size, proof, pair[entry.tree].root)) {
-      throw new Error(`entry ${number} is not at ${index} of the ${entry.tree} tree the signer signed: the database changed it`);
+      throw new Refused(`entry ${number} is not at ${index} of the ${entry.tree} tree the signer signed: the database changed it`);
     }
     return { number, tree: entry.tree, index, size, leaf: leafData(entry.tree, entry.number, entry.columns), proof, notes };
   }

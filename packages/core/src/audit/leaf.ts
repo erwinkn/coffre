@@ -24,9 +24,7 @@ export type LeafValue = Uint8Array | string | bigint | number | null;
 
 export function leafData(tree: TreeName, number: bigint, columns: readonly LeafValue[]): Buffer {
   if (number < 0n || number > MAX_NUMBER) throw new Error(`entry number ${number} is out of range`);
-  const head = Buffer.alloc(8);
-  head.writeBigUInt64BE(number, 0);
-  return Buffer.concat([Buffer.from(`${LEAF_FORMAT}\n${tree}\n`, 'utf8'), head, encodeColumns(columns)]);
+  return encode(`${LEAF_FORMAT}\n${tree}\n`, number, columns);
 }
 
 /**
@@ -41,30 +39,42 @@ export function leafData(tree: TreeName, number: bigint, columns: readonly LeafV
 export const MAC_FORMAT = 'coffre.log.mac.v1';
 
 export function macData(tree: TreeName, columns: readonly LeafValue[]): Buffer {
-  return Buffer.concat([Buffer.from(`${MAC_FORMAT}\n${tree}\n`, 'utf8'), encodeColumns(columns)]);
+  return encode(`${MAC_FORMAT}\n${tree}\n`, null, columns);
 }
 
-/** The column count, then each column tagged and length-prefixed. */
-function encodeColumns(columns: readonly LeafValue[]): Buffer {
-  const count = Buffer.alloc(4);
-  count.writeUInt32BE(columns.length, 0);
-  const parts: Buffer[] = [count];
+/**
+ * The prefix, the number if any (8 bytes), the column count, then each
+ * column tagged and length-prefixed: sized first, then written into one
+ * buffer, which a walk does for every entry it checks.
+ */
+function encode(prefix: string, number: bigint | null, columns: readonly LeafValue[]): Buffer {
+  const tags: number[] = [];
+  const values: (Uint8Array | string | null)[] = [];
+  let size = Buffer.byteLength(prefix, 'utf8') + (number === null ? 0 : 8) + 4;
   for (const [i, value] of columns.entries()) {
     let tag: number;
-    let bytes: Buffer;
-    if (value === null) [tag, bytes] = [0, Buffer.alloc(0)];
-    else if (value instanceof Uint8Array) [tag, bytes] = [1, Buffer.from(value)];
+    let bytes: Uint8Array | string | null;
+    if (value === null) [tag, bytes] = [0, null];
+    else if (value instanceof Uint8Array) [tag, bytes] = [1, value];
     else if (typeof value === 'string') {
       if (/[\uD800-\uDFFF]/u.test(value)) throw new Error(`column ${i} is not well-formed Unicode`);
-      [tag, bytes] = [2, Buffer.from(value, 'utf8')];
-    } else if (typeof value === 'bigint' || Number.isSafeInteger(value)) [tag, bytes] = [3, Buffer.from(value.toString(10), 'utf8')];
+      [tag, bytes] = [2, value];
+    } else if (typeof value === 'bigint' || Number.isSafeInteger(value)) [tag, bytes] = [3, value.toString(10)];
     else throw new Error(`column ${i} is not a whole number`);
-    const header = Buffer.alloc(5);
-    header.writeUInt8(tag, 0);
-    header.writeUInt32BE(bytes.length, 1);
-    parts.push(header, bytes);
+    tags.push(tag);
+    values.push(bytes);
+    size += 5 + (bytes === null ? 0 : typeof bytes === 'string' ? Buffer.byteLength(bytes, 'utf8') : bytes.length);
   }
-  return Buffer.concat(parts);
+  const out = Buffer.allocUnsafe(size);
+  let at = out.write(prefix, 0, 'utf8');
+  if (number !== null) at = out.writeBigUInt64BE(number, at);
+  at = out.writeUInt32BE(columns.length, at);
+  for (const [i, bytes] of values.entries()) {
+    at = out.writeUInt8(tags[i]!, at);
+    const length = bytes === null ? 0 : typeof bytes === 'string' ? out.write(bytes, at + 4, 'utf8') : (out.set(bytes, at + 4), bytes.length);
+    at = out.writeUInt32BE(length, at) + length;
+  }
+  return out;
 }
 
 /** The leaf hash of an entry. */
