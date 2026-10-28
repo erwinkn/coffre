@@ -702,7 +702,7 @@ async function shaped(coffre: PluginContext, credential: Resolved, handle: strin
   const placeholder = credential.placeholder!;
   if (placeholder.kind === 'prefix') return `${placeholder.prefix}${handle}`;
   const key = credential.keys[0]!;
-  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', logged: { credential: credential.name, placeholder: { claims: placeholder.claims } } });
+  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', only: true, logged: { credential: credential.name, placeholder: { claims: placeholder.claims } } });
   const real = claimsOf(used.values[key]);
   if (real === null) throw new CoffreError(409, 'conflict', `${used.environment.path}'s ${key} is no JWT, which ${credential.name}'s placeholder copies its claims from`);
   const claims = Object.fromEntries(placeholder.claims.filter((claim) => Object.hasOwn(real, claim)).map((claim) => [claim, real[claim]]));
@@ -774,7 +774,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     deadline,
     arms: true,
     now: !fresh,
-    run: () => coffre.use(handle, { path: readOf(proxy, path, handle), keys: [tunnel.key], purpose: 'use', logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
+    run: () => coffre.use(handle, { path: readOf(proxy, path, handle), keys: [tunnel.key], purpose: 'use', only: true, logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
   };
   return session(tunnel, {
     handle,
@@ -821,7 +821,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
       deadline: Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS),
       arms: false,
       now: !fresh,
-      run: () => coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
+      run: () => coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', only: true, logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
     },
   ];
   return session(tunnel, {
@@ -997,7 +997,7 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
     return answer({ signature: await hmacSign(secret, message, { encoding: signer.encoding, prefix: signer.prefix ?? '' }) });
   }
   const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
-  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: [signer.key], purpose: 'use', logged: { credential: name, sign: { sha256 } } });
+  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: [signer.key], purpose: 'use', only: true, logged: { credential: name, sign: { sha256 } } });
   const pem = used.values[signer.key];
   if (pem === undefined) return failure(409, `${used.environment.path} holds no ${signer.key}, which ${name} signs with`);
   try {
@@ -1092,7 +1092,7 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
     return failure(403, `this narrowed session may not presign ${method} ${relative} through ${credential.name}`, 'narrowed');
   }
   // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
-  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
+  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: credential.keys, purpose: 'use', only: true, logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
   if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
   // Never past the handle's or the session's own end.
   const lasts = Math.min(expiresIn, Math.floor((Date.parse(used.expiresAt) - Date.now()) / 1000));
@@ -1628,7 +1628,7 @@ async function valuesFor(
   }
   let used: Used;
   try {
-    used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', logged: { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) } });
+    used = await coffre.use(user, { path: readOf(proxy, path, user), keys: credential.keys, purpose: 'use', only: true, logged: { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) } });
   } catch (error) {
     const held = proxy.cache.get(key);
     // Refused: whatever the key holds goes, an answer another request kept meanwhile included; at worst it asks again.

@@ -1164,8 +1164,22 @@ export async function findIdentity(
  * without `--caching-disabled`, a token revoked or a session signed out
  * would otherwise keep working for up to a minute.
  */
-export async function findCredential(db: Queryable, chainKey: Buffer, by: { tokenHash: Buffer } | { id: string }) {
-  const [row] = 'tokenHash' in by ? await credentialByHash(db, { tokenHash: by.tokenHash }) : await credentialById(db, { id: by.id });
+export async function findCredential(
+  db: Queryable,
+  chainKey: Buffer,
+  by: { tokenHash: Buffer } | { id: string },
+  /** The row by the token's hash as `app_read` read it already (read-ahead.ts), null for none: checked here as this read's. */
+  ahead?: CredentialRead | null,
+) {
+  let row: CredentialRead | undefined;
+  if ('id' in by) {
+    [row] = await credentialById(db, { id: by.id });
+  } else if (ahead === undefined) {
+    [row] = await credentialByHash(db, { tokenHash: by.tokenHash });
+  } else {
+    if (ahead !== null && !ahead.credential.tokenHash.equals(by.tokenHash)) throw new Error('the credential read ahead is of another token');
+    row = ahead ?? undefined;
+  }
   if (row === undefined) return null;
   verifyAuthRow(chainKey, 'credentials', row.credential);
   if (row.identity !== null) verifyAuthRow(chainKey, 'identities', row.identity);
@@ -1198,6 +1212,9 @@ function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) =
     .leftJoin(identities, eq(identities.id, credentials.identityId))
     .where(by(credentials));
 }
+
+/** A credential as `findCredential` reads it: its row, its sign-in account's, the database's clock, and the newest policy change. */
+export type CredentialRead = { credential: Tables['credentials']['$inferSelect']; identity: Tables['identities']['$inferSelect'] | null; now: string; policySeq: string | number | null };
 
 // Every request's credential, by its token's hash: built once (`prepared`).
 const credentialByHash = prepared((db) => credentialRow(db, (credentials) => eq(credentials.tokenHash, sql.placeholder('tokenHash'))));
@@ -1908,7 +1925,16 @@ export async function environmentSecrets(
       only === undefined ? undefined : 'secretId' in only ? eq(secrets.id, only.secretId) : eq(secrets.key, only.key),
     ))
     .orderBy(asc(secrets.key));
-  return rows.map((row) => ({
+  return rows.map(secretRowOf);
+}
+
+/** A key's row and its current version's columns, as `environmentSecrets` selects them, null for a key with no version. */
+type SecretColumnsRead = { id: string; key: string; folder: string | null; archivedAt: Date | null; versionId: string | null; version: number | null; createdAt: Date | null; createdBy: string | null; plaintext: string | null; sensitive: boolean | null }
+  & { [K in keyof Envelope]: Envelope[K] | null } & { recipe: string | null; pairId: string | null; pairHalf: string | null };
+
+/** A key's row as `environmentSecrets` answers it, from its columns: the same from `app_read` (read-ahead.ts). */
+export function secretRowOf(row: SecretColumnsRead): SecretRow {
+  return {
     id: row.id,
     key: row.key,
     folder: row.folder,
@@ -1926,7 +1952,7 @@ export async function environmentSecrets(
             plaintext: row.plaintext,
             sensitive: row.sensitive === true,
           },
-  }));
+  };
 }
 
 /** Every version of a secret, newest first. */

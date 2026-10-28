@@ -5,18 +5,20 @@
 // table, checks, vault and audit log as the CLI.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
-import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
 
 import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
 import { exchangeWorkloadToken, logout } from './auth-routes.ts';
 import { callerFrom, withRecalled } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
-import { parsePath } from './api/paths.ts';
+import { parsePath, type Path } from './api/paths.ts';
 import { readScope } from './api/services.ts';
 import { environmentsOf } from './api/workloads.ts';
 import { checkAuthRow } from './auth-rows.ts';
-import { environmentPaths, places as placeRows, type BindingRow } from './db/queries.ts';
+import { environmentPaths, places as placeRows, type BindingRow, type CredentialRead } from './db/queries.ts';
+import { readAhead, type ReadAhead } from './db/read-ahead.ts';
+import { uses015 } from './api/changes.ts';
 import { callBindings, frozenTargets } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
 import { fetchApi } from './fetch-api.ts';
@@ -191,9 +193,12 @@ type Standings = WeakMap<WorkloadUse, Standing>;
 /**
  * What a plugin opens values for (`PluginContext.use`): `keys` by name, or
  * chosen from what the read resolved (`PickKeys`), so that a choice about
- * an environment's rows is made on the rows that are opened.
+ * an environment's rows is made on the rows that are opened. `only`, with
+ * keys by name: the read reads those keys' rows and no other, and `Used.keys`
+ * lists those of them the environment holds, not every key it holds: for a
+ * caller that never reads that list (the credential proxy's uses).
  */
-export type UseAsked = { path: string; keys: readonly string[] | PickKeys; purpose: 'use' | 'expose'; logged: Record<string, unknown> };
+export type UseAsked = { path: string; keys: readonly string[] | PickKeys; purpose: 'use' | 'expose'; logged: Record<string, unknown>; only?: boolean };
 
 /** A refusal as a plugin throws it, its response kept to forward. */
 async function workloadRefused(response: Response, limit: WorkloadRefused['limit'] = null): Promise<WorkloadRefused> {
@@ -211,6 +216,7 @@ async function refusedWith(error: ApiError, headers: HeadersInit = {}): Promise<
  * the environment holds, the environment they came from, and when the
  * handle that opened them ends.
  */
+/** A use's answer: `keys`, every key the environment holds, or with `only`, those of the asked ones it holds. */
 export type Used = { values: Record<string, string>; plain: string[]; keys: string[]; environment: { path: string; personal: boolean }; expiresAt: string };
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
@@ -447,12 +453,26 @@ export function takesSocket(request: Request, plugins: readonly CoffrePlugin[]):
   return routesFor(request, { plugins })?.socket !== undefined;
 }
 
+/** A use's path, `market/dev`, as `use` parses it; undefined for one it would refuse. */
+function parsedPlace(path: string): Path | undefined {
+  try {
+    return parsePath(path, [2]);
+  } catch {
+    return undefined;
+  }
+}
+
 function routesFor(request: Request, runtime: Pick<CoffreRuntime, 'plugins'>) {
   const { pathname } = new URL(request.url);
   return runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
 }
 
-function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null, binding: string | null = null): PluginContext {
+function pluginContext(
+  request: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  binding: string | null = null,
+): PluginContext {
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
   // One of coffre's own routes outside the API's, in process: its answer, or its refusal as the client throws one.
@@ -461,12 +481,30 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
     return body;
   };
-  const proxyHandle = async (handle: string, recall = false): Promise<AuthenticatedIdentity> => {
+  const proxyHandle = async (handle: string, recall = false, ahead?: CredentialRead | null): Promise<AuthenticatedIdentity> => {
     // A call through a service binding is its service's alone: it carries no handle, token or session.
     if (binding !== null) throw new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
-    const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true, recall });
+    const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true, recall, ...(ahead === undefined ? {} : { ahead }) });
     if (identity instanceof Response) await answer(identity);
     return identity as AuthenticatedIdentity;
+  };
+  /**
+   * With 0.15's uses, what a handle's read reads before anything else, in one call (db/read-ahead.ts): its
+   * credential, and, for `path`, the place and the `keys` it names. Null without them, and each is read as ever.
+   */
+  const readFor = async (handle: string, path?: string, keys?: UseAsked['keys']): Promise<ReadAhead | null> => {
+    // No read for what is no handle: a request with anything else is refused on its kind alone.
+    if (binding !== null || tokenKind(handle) !== 'handle' || !(await uses015(runtime.vault))) return null;
+    try {
+      // A path that names no environment reads none ahead: the handle is checked before the read refuses it.
+      const named = path === undefined ? undefined : parsedPlace(path);
+      const place = named?.environment === undefined ? undefined : { project: named.project, environment: named.environment };
+      return await readAhead(runtime.db, { tokenHash: hashToken(handle), path: place, keys: Array.isArray(keys) ? keys : undefined });
+    } catch (error) {
+      // As a credential's own read that fails (`authenticateRequest`): an outage, not a refusal.
+      console.error('checking a credential failed', { error: logged(error) });
+      throw new CoffreError(503, 'unavailable', 'coffre cannot check who you are right now');
+    }
   };
   const noCredential = () => new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
   // The workload callers this request's context made: the only ones its `use` takes.
@@ -476,9 +514,12 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     let recalled: Recalled | undefined;
     try {
       let caller: AuthenticatedIdentity;
+      let ahead: ReadAhead | null | undefined;
       let expiresAt: string;
+      // The credential `handle()` read, for this use alone, the one that follows it: any other use goes first, and it lapses.
       if (typeof handle === 'string') {
-        caller = await proxyHandle(handle, recall);
+        ahead = await readFor(handle, asked.path, asked.only === true ? asked.keys : undefined);
+        caller = await proxyHandle(handle, recall, ahead?.credential);
         if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
         expiresAt = caller.credentialExpiresAt!;
       } else {
@@ -491,8 +532,8 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
       }
       recalled = caller.caller.recalled;
       // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
-      const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
-      const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
+      const place = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
+      const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, only: asked.only === true, ...place, ...(ahead == null ? {} : { ahead }) });
       return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;
@@ -506,7 +547,10 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
     recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {
-      const { credentialExpiresAt, handlePlaces: places } = await proxyHandle(handle);
+      // Asking the vault about the person, as ever; with 0.15's uses, its credential read ahead. A use that follows reads
+      // it again, with its place and keys, in the one call it makes anyway, and decides on the answer kept here.
+      const identity = await proxyHandle(handle, false, (await readFor(handle))?.credential);
+      const { credentialExpiresAt, handlePlaces: places } = identity;
       if (places === null) return { expiresAt: credentialExpiresAt!, paths: null };
       const named = await environmentPaths(runtime.db, places.map((place) => place.environmentId));
       const paths = places.map(({ environmentId, personal }) => (named.has(environmentId) ? `${named.get(environmentId)}${personal ? '@me' : ''}` : null));

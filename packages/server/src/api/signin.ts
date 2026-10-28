@@ -43,6 +43,7 @@ import {
   revokePriorMembership,
   update,
   updateAuth,
+  type CredentialRead,
 } from '../db/queries.ts';
 import { callerFrom, type PrincipalRef } from './caller.ts';
 import { AppChanges, COFFRE_ACTOR, credentialChange, retrying, revokes } from './changes.ts';
@@ -682,7 +683,11 @@ export class SigninService {
    * caller is, and a removed member is turned away on the next request
    * whatever credentials they still hold, before any revocation sweep.
    */
-  async verify(token: string, request: { sourceIp: string | null; recall?: boolean } = { sourceIp: null }): Promise<CredentialPrincipal> {
+  async verify(
+    token: string,
+    /** `ahead`: the credential as `app_read` read it already for this request (db/read-ahead.ts), null for none. */
+    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null } = { sourceIp: null },
+  ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
     const now = new Date();
@@ -697,7 +702,7 @@ export class SigninService {
         await sealScopes(db, chainKey, this.#deps.vault);
         this.#scopes.sealed = true;
       }
-      row = await findCredential(db, chainKey, { tokenHash });
+      row = await findCredential(db, chainKey, { tokenHash }, request.ahead);
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
       // A kept answer at the credential's generation, unless its scope is still to be sealed, from what the account holds now.

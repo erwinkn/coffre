@@ -318,13 +318,16 @@ export function testDeps(db: Database, owners: readonly string[], extra: Partial
 }
 
 /**
- * Empty every table, children first, and rewind the audit chain; and start
+ * Empty every table, children first, and rewind the audit chain; then start
  * every test vault afresh, since its members, grants and checkpoints are
- * about this data.
+ * about this data. Afresh after the tables, not before: a call still under
+ * way from the last test (a tunnel's last check) that opens a vault
+ * meanwhile writes its policy into the log about to be emptied, and that
+ * vault, which wrote it once, never writes it again: the next test's every
+ * use would answer `unconfigured`.
  */
 export async function resetDatabase(owner: Database): Promise<void> {
   await drainBackgroundTasks();
-  for (const vault of vaults) await vault.reset();
   for (const reset of anchors) reset();
   const {
     credentials,
@@ -377,6 +380,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(secrets);
   await owner.delete(environments);
   await owner.delete(projects);
+  for (const vault of vaults) await vault.reset();
 }
 
 /**
