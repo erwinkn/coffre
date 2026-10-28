@@ -48,24 +48,23 @@ binding's columns the app names (its scope, and a workload's reads with it,
 `sealedSessionScope`), seals it, MACs its change, and runs `sign_in`
 (migration 0034), one statement:
 
-1. a retry by request id answers the change it made;
-2. the account's row `FOR SHARE`, active at the binding's generation; then,
+1. the account's row `FOR SHARE`, active at the binding's generation; then,
    in a statement of its own, its seal its newest change's (MemberLocked: a
    removal waits for the sign-in, or the sign-in sees it; a row put back is
    none). Compared after the lock, not in its `WHERE`: a recheck there sees
    the row's new version beside the snapshot's older changes, and would refuse
    a sign-in that waited behind a grant (Fable's review);
-3. the binding's row `FOR UPDATE`, as named: principal, generation, scope,
-   policy, not revoked (BindingLocked); and no tombstone;
-4. a workload's: no freeze of the instance, the account or the binding;
-5. the rate, 60 a minute, counted under the binding's row;
-6. the proof's own times (`validUntil`: the ID token's `exp`, its `iat`'s
+2. the binding's row `FOR UPDATE`, as named: principal, generation, profile,
+   scope, policy, not revoked (BindingLocked); and no tombstone;
+3. a workload's: no freeze of the instance, the account or the binding;
+4. the rate, 60 a minute, counted under the binding's row;
+5. the proof's own times (`validUntil`: the ID token's `exp`, its `iat`'s
    hour) and the credential's end, by the database's clock;
-7. the token spent, by the primary key of `consumed_tokens` (SpentChecked),
+6. the token spent, by the primary key of `consumed_tokens` (SpentChecked),
    once the app's key is known not to be one it rotated from (as 0.14's
    append refuses one, KeyRetired);
-8. the credential inserted with its seal, the binding stamped;
-9. the issue lock shared, the change numbered under it (IssueOffFence).
+7. the credential inserted with its seal, the binding stamped;
+8. the issue lock shared, the change numbered under it (IssueOffFence).
 
 Then the vault waits for the seal (R51) and answers. Locks are the order every
 writer takes: member row, binding row, issue lock. No head, no fence, so no use
