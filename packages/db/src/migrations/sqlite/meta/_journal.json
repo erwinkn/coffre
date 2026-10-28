@@ -148,6 +148,13 @@
       "when": 1793130000000,
       "tag": "0020_ended_references",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1793180484098,
+      "tag": "0021_secrets_live_index",
+      "breakpoints": true
     }
   ]
 }

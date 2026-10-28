@@ -837,7 +837,7 @@ export async function setSecrets(
         ...items.map(({ key, secret }) => ({ key, id: secret.secretId })),
         ...references.map(({ key, holder }) => ({ key, id: holder.secretId })),
       ].filter(({ key }) => !prepared.has(key)).map(({ key, id }) => ({ id, ...environment, key })));
-      const rows = await lock(tx, secrets, { environmentId: environment.environmentId, key: keysIn });
+      const rows = await lock(tx, secrets, { projectId: environment.projectId, environmentId: environment.environmentId, key: keysIn });
       const byKey = new Map(rows.map((row) => [row.key, row]));
       const created = new Map([
         ...items.map((item) => [item.key, item.secret.secretId] as const),
@@ -1428,7 +1428,7 @@ async function renameBelow(
   const parent = place.environment!.slug;
   for (const fork of await descendantsOf(tx, place.environment!.id)) {
     const at = { projectId: place.project.id, environmentId: fork.id };
-    const rows = await lock(tx, secrets, { environmentId: fork.id, key: [key, nextKey] });
+    const rows = await lock(tx, secrets, { projectId: place.project.id, environmentId: fork.id, key: [key, nextKey] });
     const taken = rows.find((row) => row.key === nextKey);
     // A personal config is named to nobody but its owner: its own key of the new name moves aside, `NEXT_KEY_2`, rather than stop the rename.
     if (taken !== undefined && fork.owner !== null) {

@@ -1,0 +1,4 @@
+-- An index for the reads of an environment's live keys that do not name its project (T152): the places tree's counts in every `me`, `liveKeysIn`, `distinctSecretCounts`. `secrets_lookup_idx` leads with the project, so such a read walked it end to end, or the table, every project's keys and every archived one in it. Partial, so that the archived keys an environment piles up are no part of it: a read of the live ones costs what they do. It only adds an index: 0.14's code serves on it as before.
+--
+-- A plain CREATE INDEX, not CONCURRENTLY, which cannot run in the transaction the migrator wraps a migration in: it blocks writes to `secrets` while it builds, a table of tens of thousands of rows in well under a second.
+CREATE INDEX "secrets_live_idx" ON "secrets" USING btree ("environment_id") WHERE "archived_at" IS NULL;

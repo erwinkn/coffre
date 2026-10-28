@@ -155,6 +155,8 @@ export const secrets = pgTable(
       foreignColumns: [environments.id, environments.projectId],
     }),
     index('secrets_lookup_idx').on(table.projectId, table.environmentId, table.key),
+    // The live keys of an environment, which a read by environment alone (the places tree's counts, `liveKeysIn`) walks without the archived ones beside them; the one above leads with the project (T152, 0032).
+    index('secrets_live_idx').on(table.environmentId).where(sql`${table.archivedAt} IS NULL`),
   ],
 );
 

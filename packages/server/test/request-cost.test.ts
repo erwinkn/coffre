@@ -25,7 +25,9 @@ import { desc, eq, gt, sql } from 'drizzle-orm';
 import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
-import { insertBinding, memberStanding, places } from '../src/db/queries.ts';
+import {
+  distinctSecretCounts, environmentSecrets, insertBinding, liveKeysIn, lock, memberStanding, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder, sensitiveFrom,
+} from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -40,7 +42,7 @@ import { answer, type Pages } from './start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
-import { auditLog, credentials as credentialRows } from './db/tables.ts';
+import { auditLog, credentials as credentialRows, secrets } from './db/tables.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -801,4 +803,92 @@ test('a standing finding costs each beat the same on the app\'s side, however lo
   await edit(x!.metadata);
   for (let i = 0; i < 4; i++) await beatAnyway();
   assert.equal((await ready()).ok, true);
+});
+
+/**
+ * T152: a read of one environment's keys costs the same however many keys
+ * the others hold, and however many archived keys its own live ones have
+ * beside them. `secrets` had only (project_id, environment_id, key), so a
+ * read that knew the environment and not the project, the places tree's
+ * counts in every `me` among them, scanned the table: archived keys of every
+ * project included. Each statement run again under EXPLAIN reads as many
+ * pages once 10,000 archived keys sit in market/prod beside its live ones and
+ * thirty more projects hold theirs.
+ */
+test("a read of an environment's keys reads as many pages however many keys the instance archives and holds elsewhere", POSTGRES, async () => {
+  const counted = createDatabase(app.client);
+  const [market] = (await places(counted)).filter((project) => project.slug === 'market');
+  const ids = Object.fromEntries(market!.environments.map((environment) => [environment.slug, environment.id]));
+  const everything = [ids.dev!, ids.prod!, ids.busy!];
+  /** Each statement of these reads, run under EXPLAIN: its pages. */
+  const reads: Record<string, () => Promise<unknown>> = {
+    'the places tree of everything': () => places(counted),
+    'the places tree of one project': () => places(counted, { within: [market!.id] }),
+    "an environment's keys": () => environmentSecrets(counted, ids.dev!),
+    "an environment's key": () => environmentSecrets(counted, ids.dev!, { key: 'API_KEY' }),
+    // The environment that piles up archived keys of its own, read by key.
+    "an archiving environment's key": () => environmentSecrets(counted, ids.prod!, { key: 'API_KEY' }),
+    "an archiving environment's heads by key": () => secretHeads(counted, ids.prod!, { keys: ['API_KEY', 'DATABASE_URL'] }),
+    "an archiving environment's lock on keys": () => counted.transaction((tx) => lock(tx, secrets, { projectId: market!.id, environmentId: ids.prod!, key: ['API_KEY', 'DATABASE_URL'] })),
+    'the keys of three environments': () => liveKeysIn(counted, everything),
+    'their distinct counts': () => distinctSecretCounts(counted, everything),
+    'their sensitive values': () => sensitiveFrom(counted, everything),
+    "an environment's heads by key": () => secretHeads(counted, ids.dev!, { keys: ['API_KEY', 'DATABASE_URL'] }),
+    'a path with a key': () => resolvePath(counted, { project: 'market', environment: 'dev', key: 'API_KEY' }),
+    "an environment's folders": () => secretFolderOf(counted, ids.dev!),
+    "a folder's keys": () => secretsInFolder(counted, ids.dev!, 'tools'),
+    "a write's lock on keys": () => counted.transaction((tx) => lock(tx, secrets, { projectId: market!.id, environmentId: ids.dev!, key: ['API_KEY', 'DATABASE_URL'] })),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      // By text: a read that runs statements together (`sensitiveFrom`) records them in the order they happen to land.
+      const statements = [...app.recorded].sort((x, y) => x.text.localeCompare(y.text));
+      app.recorded = null;
+      read[name] = [];
+      for (const statement of statements) {
+        if (!/^\s*(select|with)\b/i.test(statement.text)) continue;
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  /** As autovacuum leaves it: the table's statistics and visibility map, which the plans read. */
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, secret_versions`);
+  await settle();
+  const small = await pages();
+  // 10,000 archived keys in market/prod, beside the live ones the places tree counts.
+  await db.owner.execute(sql`
+    INSERT INTO secrets (project_id, environment_id, key, current_version, archived_at)
+    SELECT e.project_id, e.id, 'ARCHIVED_' || g, 0, now() FROM environments e CROSS JOIN generate_series(1, 10000) g
+    WHERE e.project_id = ${market!.id} AND e.id = ${ids.prod!}`);
+  await settle();
+  const archived = await pages();
+  // Thirty projects of two environments, each with twenty live keys and a hundred archived.
+  await db.owner.execute(sql`
+    INSERT INTO projects (id, slug, name) SELECT gen_random_uuid(), 'other-' || g, 'Other ' || g FROM generate_series(1, 30) g`);
+  await db.owner.execute(sql`
+    INSERT INTO environments (id, project_id, slug, name)
+    SELECT gen_random_uuid(), p.id, e.slug, e.slug FROM projects p CROSS JOIN (VALUES ('dev'), ('prod')) AS e(slug) WHERE p.slug LIKE 'other-%'`);
+  await db.owner.execute(sql`
+    INSERT INTO secrets (project_id, environment_id, key, current_version, archived_at)
+    SELECT e.project_id, e.id, 'KEY_' || g, 0, CASE WHEN g > 20 THEN now() END
+    FROM environments e JOIN projects p ON p.id = e.project_id CROSS JOIN generate_series(1, 120) g WHERE p.slug LIKE 'other-%'`);
+  await settle();
+  const elsewhere = await pages();
+  for (const [name, statements] of Object.entries(small)) {
+    for (const [grown, label] of [[archived, 'archived keys of its own'], [elsewhere, 'keys of other projects']] as const) {
+      // The places tree of everything counts every live key of every project, which the second growth adds: only the first bears on it.
+      if (name === 'the places tree of everything' && grown === elsewhere) continue;
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with ${label}, ${before} before:\n${plan}`);
+      }
+    }
+  }
 });

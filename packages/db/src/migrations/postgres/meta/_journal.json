@@ -225,6 +225,13 @@
       "when": 1793160000000,
       "tag": "0031_app_read",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1793180483207,
+      "tag": "0032_secrets_live_index",
+      "breakpoints": true
     }
   ]
 }
