@@ -31,10 +31,14 @@ let verifiers: PairVerifiers;
 let macKey: Buffer;
 let log: ReturnType<typeof logWriter>;
 
-/** Two days, ten and nine days ago, and the midnight between them. */
-const D10 = dayOf(Date.now() - 10 * DAY_MS);
-const D9 = dayOf(Date.now() - 9 * DAY_MS);
-const MIDNIGHT = Date.parse(`${D9}T00:00:00Z`);
+/**
+ * The test's days, fixed at its start (`beforeEach`) from `clock` and nothing else, so that a run across 00:00 UTC, or a
+ * template migrated the day before, moves none of them: today, ten and nine days ago, and the midnight between them.
+ */
+let TODAY: string;
+let D10: string;
+let D9: string;
+let MIDNIGHT: number;
 /** A small freshness bound, so that a test waits it out: the signer's and retention's alike. */
 const FRESH = 150;
 /**
@@ -58,12 +62,17 @@ before(async () => {
 after(() => db?.close());
 beforeEach(async () => {
   clock = Date.now();
+  TODAY = dayOf(clock);
+  D10 = dayOf(clock - 10 * DAY_MS);
+  D9 = dayOf(clock - 9 * DAY_MS);
+  MIDNIGHT = Date.parse(`${D9}T00:00:00Z`);
   await log.empty();
-  await log.days();
   if (ENGINE === 'postgres') {
-    // A day a test left detached (dropped by a run it did not make) goes, and both days are made again.
-    for (const day of [D10, D9]) await run(db.owner, sql.raw(`DROP TABLE IF EXISTS log_uses_${day.replaceAll('-', '')}`));
-    await run(db.owner, sql`SELECT make_day(${D10}::date), make_day(${D9}::date)`);
+    // The days the template was migrated with (its own today, a day behind when the run is past midnight) and any a test
+    // left (detached, or dropped by a run it did not make) go, empty as the log is; the days this test relies on are made.
+    const left = await rows<{ name: string }>(db.owner, sql`SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND c.relname ~ '^log_uses_[0-9]{8}$'`);
+    for (const { name } of left) await run(db.owner, sql.raw(`DROP TABLE ${name}`));
+    await run(db.owner, sql`SELECT make_day(${D10}::date), make_day(${D9}::date), make_day(${TODAY}::date), make_day(${dayOf(clock + DAY_MS)}::date)`);
   }
 });
 
@@ -127,7 +136,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
 
   // Later: D10 goes, alone (D9 is not due yet), with the change written for it; D9's uses numbered below the cut stay.
   await later(cp);
-  const r = await retain(cp, store, { keepDays: 9, macKey });
+  const r = await retain(cp, store, { keepDays: 9, macKey, now });
   assert.equal(r.waiting, null);
   assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
   for (const n of d10) assert.equal(await store.locate(n), null, `${n} dropped`);
@@ -136,7 +145,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.deepEqual(r.detached, ENGINE === 'postgres' ? [D10] : []);
   if (ENGINE === 'postgres') {
     assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
-    assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey })).detached, []);
+    assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey, now })).detached, []);
     assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), false);
   }
   // The uses tree's leaf tiles below the cut: the range [0, 512) gone, the tile holding the cut kept, at each level.
@@ -158,11 +167,11 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.ok(cutUpto >= d9.at(-1)!, 'the cut, the first pair past the end of D10, holds D9\'s first uses too');
 
   // Then D9: covered by the cut already, so no second change; the stragglers go with it, and the log still verifies.
-  const next = await retain(cp, store, { keepDays: 1, macKey });
+  const next = await retain(cp, store, { keepDays: 1, macKey, now });
   assert.deepEqual(next.dropped, [{ day: D9, change: null }]);
   for (const n of d9) assert.equal(await store.locate(n), null);
-  await retain(cp, store, { keepDays: 1, macKey });
-  assert.deepEqual(await store.days(), [dayOf(Date.now()), dayOf(Date.now() + DAY_MS)].slice(0, ENGINE === 'postgres' ? 2 : 1));
+  await retain(cp, store, { keepDays: 1, macKey, now });
+  assert.deepEqual(await store.days(), [TODAY, dayOf(clock + DAY_MS)].slice(0, ENGINE === 'postgres' ? 2 : 1));
   const again = await verify(store);
   assert.ok(again.ok, again.problems.join('\n'));
   // Incrementally, from a head the walk verified: the uses tree from there on.
@@ -182,8 +191,8 @@ test('a dropped use put back is never sealed again', async () => {
   const { d10 } = await midnight(cp);
   const [copy] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_uses WHERE number = ${d10[0]!}`);
   await later(cp);
-  assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey })).waiting, null);
-  await retain(cp, store, { keepDays: 9, macKey });
+  assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey, now })).waiting, null);
+  await retain(cp, store, { keepDays: 9, macKey, now });
   // A writer who read it before puts it back (its day made again, on Postgres), at a fresh number: its MAC holds, and no
   // original is left for a request-ID check to find. (Beside its original, the replay's key, (at, request_id), refuses
   // it.) Stamped weeks before the floor of `at`, no tick's window reads it (BarrierChecksFloor); one that did would find
@@ -206,7 +215,7 @@ test('what a writer does below the cut after, seen: the retention change, a kept
   const { cp, store } = await open();
   const { changes } = await midnight(cp);
   await later(cp);
-  await retain(cp, store, { keepDays: 1, macKey });
+  await retain(cp, store, { keepDays: 1, macKey, now });
   assert.ok((await verify(store)).ok);
   const retention = (await store.retention())!.entry.number;
   const owner = db.owner;
@@ -249,14 +258,14 @@ test('a crash between the retention change and the drop: the next run finishes, 
       return store.dropDay(day);
     },
   });
-  await assert.rejects(retain(cp, crashing, { keepDays: 1, macKey }), /crash/);
+  await assert.rejects(retain(cp, crashing, { keepDays: 1, macKey, now }), /crash/);
   // The change stands, sealed; the uses below it are not walked, and the log verifies meanwhile.
   assert.ok((await verify(store)).ok);
   await later(cp);
-  const r = await retain(cp, crashing, { keepDays: 1, macKey });
+  const r = await retain(cp, crashing, { keepDays: 1, macKey, now });
   // A day a run on Postgres (one DETACH a run); SQLite deletes both at once.
   assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), ENGINE === 'postgres' ? [[D10, null]] : [[D10, null], [D9, null]]);
-  for (let i = 0; i < 3; i += 1) await retain(cp, crashing, { keepDays: 1, macKey });
+  for (let i = 0; i < 3; i += 1) await retain(cp, crashing, { keepDays: 1, macKey, now });
   for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
   const [count] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
   assert.equal(Number(count!.n), 1);
@@ -272,7 +281,7 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   await reader.unsafe('BEGIN');
   await reader.unsafe('SELECT count(*) FROM log_uses');
   try {
-    const held = await retain(cp, store, { keepDays: 1, macKey });
+    const held = await retain(cp, store, { keepDays: 1, macKey, now });
     assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
     assert.match(held.waiting?.reason ?? '', /^a reader holds the table past the lock timeout/);
     assert.deepEqual(held.detached, []);
@@ -282,10 +291,10 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
     await reader.end();
   }
   // One day detached a run: D10 now, D9 the next.
-  const r = await retain(cp, store, { keepDays: 1, macKey });
+  const r = await retain(cp, store, { keepDays: 1, macKey, now });
   assert.deepEqual(r.detached, [D10]);
   assert.equal(r.waiting, null);
-  assert.deepEqual((await retain(cp, store, { keepDays: 1, macKey })).detached, [D9]);
+  assert.deepEqual((await retain(cp, store, { keepDays: 1, macKey, now })).detached, [D9]);
 });
 
 /**
@@ -308,7 +317,7 @@ function pastFloors(store: LogStore, floors: number[]): LogStore {
 test('review r2: two days due at once, each cut its own: a catch-up drops both, though the tiles below the newer cut went first', async () => {
   const alerts: string[] = [];
   const store = pastFloors(logStore(db.vault, { tileRange: RANGE }), [MIDNIGHT - 3_600_000, MIDNIGHT + 10_000, MIDNIGHT + DAY_MS - 3_600_000]);
-  const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH });
+  const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   // D10 sealed below a floor before its end; D9 in two pairs, the first of them past D10's end; then today, past D9's.
   for (let i = 0; i < 300; i += 1) await log.use(MIDNIGHT - 3_000_000 + i * 1000);
   assert.ok((await cp.tick()).signed);
@@ -325,7 +334,7 @@ test('review r2: two days due at once, each cut its own: a catch-up drops both, 
   // A day a run, each cut its own, each with its change; the tiles below each newest cut go as it is sealed and fresh. A
   // day left below a newer cut (a crash, an older version's run) is not proved again from tiles that may be gone.
   const runs = [];
-  for (let i = 0; i < 4; i += 1) runs.push(await retain(cp, store, { keepDays: 1, macKey }));
+  for (let i = 0; i < 4; i += 1) runs.push(await retain(cp, store, { keepDays: 1, macKey, now }));
   assert.ok(runs.every((r) => r.waiting === null), JSON.stringify(runs.map((r) => r.waiting)));
   assert.deepEqual(runs.map((r) => r.detached), ENGINE === 'postgres' ? [[D10], [D9], [], []] : [[], [], [], []]);
   const changed = runs.flatMap((r) => r.dropped).filter((d) => d.change !== null).map((d) => d.day);
@@ -345,7 +354,7 @@ test('review r2: rows deleted to push the cut later are refused: the cut is the 
   // came before it past the end.
   const first = (await store.cutAt(MIDNIGHT))!;
   await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${first.upto}`);
-  await assert.rejects(retain(cp, store, { keepDays: 1, macKey }), /no pair of this log, at or below the signer's \(up to \d+\), that is the first past the day's end/);
+  await assert.rejects(retain(cp, store, { keepDays: 1, macKey, now }), /no pair of this log, at or below the signer's \(up to \d+\), that is the first past the day's end/);
   assert.equal((await store.retention()), null, 'no retention change');
 });
 
@@ -355,7 +364,7 @@ test('review r2: a day that waits on the same lock for a day is an alarm', { ski
   await later(cp);
   const held: LogStore = Object.assign(Object.create(store) as LogStore, { dropDay: async () => Promise.reject(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })) });
   const alerts: string[] = [];
-  let t = Date.now();
+  let t = clock;
   const keep = upkeep(cp, held, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
   await keep();
   t += DAY_MS - 3_600_000;
@@ -370,11 +379,11 @@ test('review r2: a day that waits on the same lock for a day is an alarm', { ski
 test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits with no alarm, however long', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a day with no use' }, async () => {
   const { cp, store } = await open();
   // Every day before today gone: only today's and the days made ahead are left.
-  for (const day of (await store.days()).filter((d) => d < dayOf(Date.now()))) await run(db.owner, sql.raw(`DROP TABLE log_uses_${day.replaceAll('-', '')}`));
+  for (const day of (await store.days()).filter((d) => d < TODAY)) await run(db.owner, sql.raw(`DROP TABLE log_uses_${day.replaceAll('-', '')}`));
   await log.use();
   assert.ok((await cp.tick()).signed);
   // Three days on, today's and tomorrow's days (made ahead) are due: nothing signed past their end yet.
-  let t = Date.now() + 3 * DAY_MS;
+  let t = clock + 3 * DAY_MS;
   const alerts: string[] = [];
   const keep = upkeep(cp, store, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
   await keep();
@@ -390,7 +399,7 @@ test('T119, item 2: the store forgets each leaf range it drops, and makes it aga
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
-  await retain(cp, store, { keepDays: 1, macKey });
+  await retain(cp, store, { keepDays: 1, macKey, now });
   assert.equal(await exists('log_tiles_uses_0'), false);
   // A write into the range dropped (none does: a write's tiles are at the edge, above every cut) makes it again first.
   const top = cp.pair.pair.upto + 1_000_000n;
@@ -414,7 +423,7 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
   const [bulk] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_bulk`);
   assert.equal(Number(bulk!.n), 1, 'the old row pruned, the fresh one kept');
   if (ENGINE === 'postgres') {
-    for (let d = -1; d <= DAYS_AHEAD; d += 1) assert.ok(await exists(`log_uses_${dayOf(Date.now() + d * DAY_MS).replaceAll('-', '')}`), `day ${d}`);
+    for (let d = -1; d <= DAYS_AHEAD; d += 1) assert.ok(await exists(`log_uses_${dayOf(clock + d * DAY_MS).replaceAll('-', '')}`), `day ${d}`);
   }
 });
 
@@ -424,7 +433,7 @@ test('the database drops nothing a sealed retention change does not cut, and nev
   const vault = db.vault;
   const refused = async (query: ReturnType<typeof sql>, said: RegExp) => assert.rejects(run(vault, query), (e: Error) => said.test(`${e.message} ${(e.cause as Error | undefined)?.message}`));
   await refused(sql`SELECT drop_day(${D10}::date)`, /no sealed retention change cuts the uses of/);
-  await refused(sql`SELECT drop_day(${dayOf(Date.now() - DAY_MS)}::date)`, /are not past/);
+  await refused(sql`SELECT drop_day(${dayOf(clock - DAY_MS)}::date)`, /are not past/);
   await refused(sql`SELECT drop_tiles(1)`, /no sealed retention change cuts the uses tree/);
   const payload = JSON.stringify({ op: 'retention', day: D10, cut: { upto: '1', at: 0, uses: 1, root: '00'.repeat(32) } });
   await refused(sql`SELECT log_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
@@ -447,16 +456,19 @@ test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s c
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
-  await retain(cp, store, { keepDays: 1, macKey });
+  await retain(cp, store, { keepDays: 1, macKey, now });
   /**
-   * History around it: uses of today, changes of other objects, and checkpoints, one for every hundred entries, their
+   * History around it: uses from the start of the test's day (a minute back could be yesterday's, a day with no
+   * partition), changes of other objects, and checkpoints, one for every hundred entries, their
    * floors rising as a busy log's do (their notes are not opened here).
    */
+  let grown = 0;
   const grow = async (total: number) => {
     const now = Date.now();
     const top = BigInt((await rows<{ n: string }>(db.owner, sql`SELECT max(upto)::text AS n FROM log_checkpoints`))[0]!.n);
     await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
-      SELECT nextval('log_number'), ${now - 60_000}::bigint + g % 60000, g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL FROM generate_series(1, ${total}) g`);
+      SELECT nextval('log_number'), ${Date.parse(`${TODAY}T00:00:00Z`)}::bigint + g % 60000, ${grown}::bigint + g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL FROM generate_series(1, ${total}) g`);
+    grown += total;
     await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
       SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total)}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)} FROM generate_series(1, ${total / 100}) g`);
     await run(db.owner, sql`INSERT INTO log_checkpoints (upto, at, at_floor, changes_size, changes_root, changes_note, uses_size, uses_root, uses_note)
