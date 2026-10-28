@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, credentials, environments, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
 import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -191,10 +191,14 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   assert.deepEqual(issued.withheld, ['backend/dev']);
   assert.equal(await read(issued.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789');
   assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
-  // A token's log entry says, place by place, whether it reads them.
-  const made = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
+  // A token's record says, place by place, whether it reads them: 0.14's entry, or with 0.15's log the vault's change (T149, D147).
+  const entries = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'))).orderBy(asc(auditLog.seq));
-  const reading = (entry: { metadata: string }) => (JSON.parse(entry.metadata) as { scope: { sensitive: boolean }[] }).scope.map((grant) => grant.sensitive).sort();
+  const changes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(asc(logChanges.number)))
+    .map(({ payload }) => JSON.parse(payload) as { issue?: { by: string }; scope: { sensitive: boolean }[] })
+    .flatMap((change) => (change.issue === undefined ? [] : [{ actor: change.issue.by, scope: change.scope }]));
+  const made = [...entries.map(({ actor, metadata }) => ({ actor, scope: (JSON.parse(metadata) as { scope: { sensitive: boolean }[] }).scope })), ...changes];
+  const reading = (entry: { scope: { sensitive: boolean }[] }) => entry.scope.map((grant) => grant.sensitive).sort();
   assert.deepEqual(made.map((entry) => [entry.actor, reading(entry)]), [
     [`user:${ROOT}`, [true, true]],
     [`user:${OWEN}`, [true, true]],

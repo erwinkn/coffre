@@ -11,9 +11,10 @@ import type { CoffreClient } from '@coffre/client';
 import { issuedGrant, sealedSessionScope, storedScope } from '@coffre/core/access';
 import { defineSignin, github, type BindingPolicy } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { postgresOnly } from './db/engine.ts';
 import { auditLog, credentials, logChanges } from './db/tables.ts';
 import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
@@ -125,7 +126,8 @@ test('a write answers once its change is sealed (R51): committed meanwhile, but 
     return waitSealed(input);
   });
   let answered = false;
-  const issuing = root.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 }).then((issued) => ((answered = true), issued));
+  // A browser sign-in, one of the app's writes through `prepare` (a token's issue is the vault's own, which waits for its seal itself).
+  const issuing = signin.completeSignin({ provider: 'github', subject: 'dev', emails: [DEV], name: null }, meta()).then((issued) => ((answered = true), issued));
   for (let tries = 0; asked.length === 0; tries += 1) {
     assert.ok(tries < 500, 'the write asks for its seal');
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -136,7 +138,8 @@ test('a write answers once its change is sealed (R51): committed meanwhile, but 
   assert.equal(answered, false);
   release();
   const issued = await issuing;
-  assert.deepEqual((await opsByCredential()).get(issued.id), ['credential.issue']);
+  assert.ok(issued.ok);
+  assert.deepEqual((await opsByCredential()).get(issued.credential.id), ['credential.issue']);
 });
 
 test('a workload session\'s sealed scope keeps the keys its binding lets it read: no wider than what 0.14 decides on', () => {
@@ -166,6 +169,37 @@ test("a revoke weighed on a policy that changes before the vault's statement is 
   // Asked again, it is weighed on the policy as it is now.
   await root.tokens.revoke(`token:${SERVICE}`, token.id);
   assert.deepEqual((await opsByCredential()).get(token.id), ['credential.issue', 'credential.revoke']);
+});
+
+test("a write that moves an environment's slug waits for the vault's issues in flight, which compare the protected slugs under the issue lock; one that moves none does not (T149, review r3)", postgresOnly('the issue lock is an advisory lock'), async () => {
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/dev', { name: 'dev' });
+  await root.environments.create('market/qa', { name: 'qa' });
+  // An issue in flight: the issue lock shared, from its policy check to its commit.
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding!: () => void;
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const issue = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(1668244070, 1)`);
+    holding();
+    await released;
+  });
+  await held;
+  let renamed = false;
+  let renaming: Promise<unknown> = Promise.resolve();
+  try {
+    // An archive moves no slug: it goes ahead.
+    await root.environments.update('market/qa', { archived: true });
+    renaming = root.environments.update('market/dev', { slug: 'staging' }).then(() => (renamed = true));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(renamed, false, 'the rename waits for the issue');
+  } finally {
+    release();
+    await issue;
+  }
+  await renaming;
+  assert.equal(renamed, true);
 });
 
 test("a credential 0.14 made, which the log never held, is revoked and signed out as 0.14 does, with 0.14's entry: the vault revokes only the log's (T149)", async () => {

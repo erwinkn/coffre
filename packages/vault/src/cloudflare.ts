@@ -19,6 +19,7 @@ import type {
   AdmitInput,
   RemoveInput,
   RevokeCredentialInput,
+  IssueTokenInput,
   ReferenceInput,
   EndReferencesInput,
   PrepareInput,
@@ -142,6 +143,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
   async signIn(input: SignInInput) { return this.#call((vault) => vault.signIn(input)); }
   async revokeCredential(input: RevokeCredentialInput) { return this.#call((vault) => vault.revokeCredential(input)); }
+  async issueToken(input: IssueTokenInput) { return this.#call((vault) => vault.issueToken(input)); }
   async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */

@@ -155,6 +155,29 @@ export async function signInsLogged(owner: Database): Promise<LoggedSignIn[]> {
 }
 
 /**
+ * The tokens issued by request, oldest first, as the log that records them
+ * has them: 0.14's allowed `token.create` entries; or, with 0.15's log,
+ * where the vault issues them (T149, PR 2), their changes, which record who
+ * issued what kind (D147). `scope` is the token's, as stored.
+ */
+export async function issuesLogged(owner: Database): Promise<{ actor: string; kind: string; targetCredentialId: string; label: string | null }[]> {
+  const { auditLog, logChanges } = tablesOf(owner);
+  const entries = await owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
+  const changes = await owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(logChanges.number);
+  return [
+    ...entries.map(({ actor, metadata }) => {
+      const { kind, targetCredentialId, label } = JSON.parse(metadata) as { kind: string; targetCredentialId: string; label?: string | null };
+      return { actor: actor!, kind, targetCredentialId, label: label ?? null };
+    }),
+    ...changes.flatMap(({ payload }) => {
+      const record = JSON.parse(payload) as { ref: { id: string }; issue?: { by: string; kind: string; label: string | null } };
+      return record.issue === undefined ? [] : [{ actor: record.issue.by, kind: record.issue.kind, targetCredentialId: record.ref.id, label: record.issue.label }];
+    }),
+  ];
+}
+
+/**
  * The credentials revoked by request, oldest first, as the log that records
  * them has them: 0.14's allowed `token.revoke` and `sign_out` entries; or,
  * with 0.15's log, where the vault revokes them (T149), their changes, each
@@ -264,6 +287,7 @@ export function testVault(
     waitSealed: call('waitSealed'),
     signIn: call('signIn'),
     revokeCredential: call('revokeCredential'),
+    issueToken: call('issueToken'),
     verifyTrees: call('verifyTrees'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),

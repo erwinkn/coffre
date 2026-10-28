@@ -264,6 +264,8 @@ REMOVALS=(
   "Migration015Issue BarrierIssueFirst NoWaitCycle"
   "Migration015Issue ExchangeOnlyIssues ExchangeChangesNoInput"
   "Migration015Issue ExchangeOnlyIssues NothingAllowedAfterAnswer"
+  # A policy change takes the issue lock before the fence (T149, review r3): the barrier holds it while it waits for the fence.
+  "Migration015Policy PolicyIssueFirst NoWaitCycle"
   "Migration015 Adopt EveryOldWriteAdopted"
   "Migration015 AdoptRepeats EveryOldWriteAdopted"
   "Migration015Tamper VerifyChain AnchorHolds"
@@ -286,6 +288,10 @@ REMOVALS=(
   "LifecycleIssue RevokeTakesFence RevokeOrdersUses"
   # A revoke by a right the policy gives holds that policy to the newest under the fence (T149 r1).
   "LifecycleRevoke RevokePolicyHeld RevokesOnStandingRight"
+  # An issue ordered against a policy change that narrows its issuer's role (review r3): held under the issue lock,
+  # which the change takes before the fence, so no use waits behind an issue.
+  "LifecyclePolicy IssuePolicyHeld SensitiveOnlyFromOwners"
+  "LifecyclePolicy PolicyIssueFirst UsesNeverWaitOnIssues"
   # A sign-in's binding row holds its rate; the account's row, or W242's generation at use, its removal.
   "LifecycleSignIn BindingLocked RateHeld"
   "LifecycleSignIn MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"

@@ -8,13 +8,13 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials } from './db/tables.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { auditLog, credentials, logChanges } from './db/tables.ts';
+import { clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -279,6 +279,12 @@ test('every entry made with a personal token names its person and the token, the
   for (const action of ['app secret.write', 'vault key.wrap', ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
   if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
+  // With 0.15's log, the vault issues it (T149), and its change records it (D147): the 0.15 page shows it, and the token's
+  // label beside what it made (T156), where 0.14's page reads both from 0.14's entry.
+  if (LOG === '0.15') {
+    assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
+    return;
+  }
   const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
   assert.deepEqual([create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], ['personal', 'cursor-agent', issued.id, null]);
@@ -289,6 +295,44 @@ test('every entry made with a personal token names its person and the token, the
   }
   const write = entries.find((entry) => entry.action === 'secret.write')!;
   assert.deepEqual(write.token, { id: issued.id, label: 'cursor-agent' });
+});
+
+test("a token of a person's own, asked on a request made before they were removed and admitted again, or on a session that ends meanwhile, is refused: 403, the session ended (T149, review r1)", async (t) => {
+  const input = { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } };
+  // Loaded before Ada left and came back: her old membership's request.
+  const before = await contextFor(deps, 'ada@acme.example');
+  await root.members.remove(ADA);
+  await root.members.add(ADA, { role: 'developer', scope: { environments: { only: ['dev'] } } });
+  await assert.rejects(signin.issuePersonalToken(before, input), { code: 'forbidden', message: 'that session has ended' });
+  await assert.rejects(signin.issueHandle({ ...before, personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: ['market/dev'] }), { code: 'forbidden', message: 'that session has ended' });
+  assert.deepEqual(await refusals('token.create'), ['session_ended', 'session_ended']);
+  if (LOG !== '0.15') return;
+  // With 0.15's log, a session of hers that ends once the request was checked, before the vault writes the token.
+  const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
+  await signin.decideDevice(await contextFor(deps, 'ada@acme.example'), started.userCode, true);
+  const polled = await signin.pollDevice(started.deviceCode, { requestId: 'device', sourceIp: null });
+  assert.ok(polled.status === 'approved');
+  const vault = deps.vault as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const call = vault.issueToken!.bind(vault);
+  t.mock.method(vault, 'issueToken', async (...args: unknown[]) => {
+    await signin.signOut(polled.credential.token, { requestId: 'signed-out', sourceIp: null });
+    return call(...args);
+  }, { times: 1 });
+  assert.equal(await status(bearer(polled.credential.token).tokens.issue(ADA, input)), 403);
+  assert.deepEqual(await refusals('token.create'), ['session_ended', 'session_ended', 'session_ended']);
+  assert.equal((await db.owner.select().from(credentials).where(eq(credentials.kind, 'personal'))).length, 0, 'no token was made');
+});
+
+test('a personal token made on a session 0.14 made, which the log never held, is issued as before: the vault authenticates nothing of it (T149, review r3)', async () => {
+  const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
+  await signin.decideDevice(await contextFor(deps, 'ada@acme.example'), started.userCode, true);
+  const polled = await signin.pollDevice(started.deviceCode, { requestId: 'device', sourceIp: null });
+  assert.ok(polled.status === 'approved');
+  // As 0.14 left it: no seal, no change.
+  await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, polled.credential.id));
+  await db.owner.delete(logChanges).where(sql`${logChanges.payload} LIKE ${`%${polled.credential.id}%`}`);
+  const made = await bearer(polled.credential.token).tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  assert.equal(await reads(made.token, 'dev'), 'dev-key');
 });
 
 test('a person lists and revokes their own tokens, and whoever runs the instance theirs; nobody else; and a token signs itself out', async () => {

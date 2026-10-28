@@ -210,6 +210,8 @@ export interface Vault {
      * Absent otherwise.
      */
     credentials?: true;
+    /** `true` when the vault issues tokens itself too (`issueToken`; T149, PR 2). Absent otherwise. */
+    issues?: true;
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
@@ -284,6 +286,19 @@ export interface Vault {
    * may. Answers once sealed (R51). Only with 0.15's log on.
    */
   revokeCredential?(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome>;
+  /**
+   * 0.15 (T149, PR 2): a token issued by the vault, which weighs it itself
+   * (`issue_token`, migration 0036; formal/Lifecycle.tla's issue): a
+   * service account's token, a person's personal token, or a handle. The
+   * app names the scope it worked out and the row it would hand out; the
+   * vault reads the issuer, the account and the credential the request came
+   * in on, decides with the rules of `@coffre/core/access` whether the
+   * issuer may give that scope (R15, R32), and then writes it in one
+   * statement that holds those rows shared and goes ahead only while they
+   * are as it read them (IssuerLocked, IssuerCAS). Nothing held between
+   * the two; the issue lock, never the fence (R58). Answers once sealed.
+   */
+  issueToken?(input: IssueTokenInput): Promise<IssueTokenOutcome>;
   /**
    * Check 0.15's log (docs/design/0.15-plan.md, PR 8), as the audit page
    * does on every visit: the newest signed pair, held to the pairs held
@@ -478,6 +493,63 @@ export type SignInCredential = {
 export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired';
 
 export type SignInOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: SignInRefusal };
+
+/** A token the vault issues (`Vault.issueToken`). Times in ms since the epoch, bytes in base64. */
+export type IssueTokenInput = {
+  /** Who issues it, `user:…` or `token:…`: the request's caller. */
+  actor: string;
+  /** The credential the request came in on, by id; null for none (a request the app made itself). */
+  via: string | null;
+  /** Whom it acts as: a service account's `token:<id>`, or the actor, for a personal token or a handle. */
+  principal: string;
+  /** The principal's generation it is issued at. */
+  generation: number;
+  /**
+   * The issuer's access the app weighed the scope on: the vault's newest
+   * access entry about them (`issuerNow`), which the vault holds the issue
+   * to (`access`, as `issuerStill`); null to hold it to none.
+   */
+  actorAccess: string | null;
+  credential: IssuedTokenRow;
+  /** The policy the app weighed the scope on: its newest `policy.change`, and the environments it protected (`policyStill`'s). */
+  policy: { seq: string | null; protected: { environmentId: string; slug: string | null }[] };
+  /** The id of the app's log key, under whose key the row's MAC was made (`SignInInput.appKey`). */
+  appKey: string;
+};
+
+/** The row a token's issue writes (`credentials`). */
+export type IssuedTokenRow = {
+  id: string;
+  kind: 'service' | 'personal' | 'handle';
+  tokenHash: string;
+  tokenHint: string;
+  label: string | null;
+  /** Its scope as stored (`storedScope`): what the vault weighs, and seals. */
+  scope: string;
+  /** A handle's environments, as made for; null for any other. */
+  places: string | null;
+  expiresAt: number;
+  /** Who issued it, as its row names them: the actor's id. */
+  createdBy: string;
+  authMac: string;
+};
+
+/**
+ * Why a token was not issued, the vault's own words: the issuer may not
+ * give that scope, or that kind of token (`refused`); the credential the
+ * request came in on, or the issuer, ended (`ended`); the account it is for
+ * is not the member it was weighed as (`gone`); the issuer's access moved
+ * since the app weighed it (`access`); what it was weighed on moved
+ * while it was written, each of the three times the vault weighed it
+ * (`moved`), or the policy did (`policy`); a lock not had in time
+ * (`busy`); the app's key one it rotated from (`retired`); the credential
+ * the request came in on one 0.14 made, which the log never held, so
+ * nothing the vault could authenticate (`unlogged`: the app issues on it
+ * as before).
+ */
+export type IssueTokenRefusal = 'refused' | 'ended' | 'gone' | 'access' | 'moved' | 'policy' | 'busy' | 'retired' | 'unlogged';
+
+export type IssueTokenOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: IssueTokenRefusal; why?: string };
 
 /** A revoke (`Vault.revokeCredential`): the credential as the app read it, and the app's MACs over its row before and after. */
 export type RevokeCredentialInput = {

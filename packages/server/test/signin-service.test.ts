@@ -27,6 +27,7 @@ import {
   clientFor,
   contextFor,
   holdSomething,
+  issuesLogged,
   LOG,
   openTestDatabase,
   resetDatabase,
@@ -829,6 +830,14 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.equal(row.createdBy, LEAD);
   assert.equal(row.label, 'deploys');
 
+  // With 0.15's log, the vault issues them (T149), and its changes record who issued which (D147).
+  if (LOG === '0.15') {
+    assert.deepEqual((await issuesLogged(db.owner)).map(({ actor, kind, targetCredentialId }) => [actor, kind, targetCredentialId]), [
+      [`user:${LEAD}`, 'service', issued.id],
+      [`user:${ROOT}`, 'service', byRoot.id],
+    ]);
+    return;
+  }
   const rows = await auditRows();
   assert.deepEqual(rows.map((r) => `${r.action} ${r.decision} ${r.actorId}`), [
     `token.create allow ${LEAD}`,
@@ -1167,11 +1176,11 @@ test('everything the sign-in service writes keeps the audit chain intact', async
 
   const verified = await verifyAudit(await contextFor(deps, ROOT));
   assert.equal(verified.ok, true);
-  // Every entry, the vault's for the members set up here included; ten of them the app's, or eight with 0.15's log, whose
-  // revoke and sign-out are the vault's changes (T149).
+  // Every entry, the vault's for the members set up here included; ten of them the app's, or seven with 0.15's log, whose
+  // token issue, revoke and sign-out are the vault's changes (T149).
   const [{ n }] = await db.owner.select({ n: count() }).from(auditLog);
   if (verified.ok) assert.equal(verified.entries, n);
-  assert.equal((await auditRows()).length, LOG === '0.14' ? 10 : 8);
+  assert.equal((await auditRows()).length, LOG === '0.14' ? 10 : 7);
 });
 
 // --- through the API --------------------------------------------------------------
