@@ -1074,12 +1074,14 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
  * tokens and sign-in accounts: one of them, or everyone. What they may
  * reach is the vault's to say; offboarding and the account page read this.
  * `sessions: false` reads who they are and what they hold alone, their
- * credentials and identities left empty: what a list of grants shows.
+ * credentials and identities left empty: what a list of grants shows;
+ * `standing: false` their sessions alone, their grants and the vault's
+ * findings about them left empty: what their sessions' lists show.
  */
 export async function members(
   db: Queryable,
   chainKey: Buffer,
-  filter: { member?: { type: string; id: string }; sessions?: false },
+  filter: { member?: { type: string; id: string }; sessions?: false; standing?: false },
   now: Date,
 ): Promise<MemberRow[]> {
   const { vaultMembers, credentials, identities } = tablesOf(db);
@@ -1107,8 +1109,8 @@ export async function members(
     // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
     filter.sessions === false ? [] : db.select().from(credentials).where(and(of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now))),
     filter.sessions === false ? [] : db.select().from(identities).where(of(identities.principal)),
-    readGrants(db, { ...(principal === undefined ? {} : { principal }), liveAt: now.getTime() }),
-    tamperedMembers(db, principal),
+    filter.standing === false ? [] : readGrants(db, { ...(principal === undefined ? {} : { principal }), liveAt: now.getTime() }),
+    filter.standing === false ? new Set<string>() : tamperedMembers(db, principal),
   ]);
   const validIdentities = bound.filter((row) => checkAuthRow(chainKey, 'identities', row));
   const providers = new Map(validIdentities.filter((row) => row.revokedAt === null).map((row) => [row.id, row.provider]));
@@ -1177,13 +1179,13 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     .leftJoin(projects, eq(projects.id, secrets.projectId))
     .where(where)
     .orderBy(asc(auditLog.seq));
-  const seen = await entries(and(
-    allowed,
-    inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])),
-    inArray(auditLog.action, ['secret.read', 'secret.write']),
-  ));
-  // Few, each someone's choice: all of them, for whichever secrets were seen.
-  const restores = await entries(and(allowed, eq(auditLog.action, 'secret.restore')));
+  // Their reads and writes, and every restore, few, each someone's choice, for whichever secrets were seen: one statement.
+  const logged = await entries(and(allowed, or(
+    and(inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])), inArray(auditLog.action, ['secret.read', 'secret.write'])),
+    eq(auditLog.action, 'secret.restore'),
+  )));
+  const restores = logged.filter((row) => row.action === 'secret.restore');
+  const seen = logged.filter((row) => row.action !== 'secret.restore');
   const listedOf = (row: (typeof seen)[number]) => {
     const { secrets: listed } = JSON.parse(row.metadata) as { secrets?: unknown };
     return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
