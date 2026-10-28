@@ -22,7 +22,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
@@ -136,6 +136,16 @@ beforeEach(async () => {
     await afterAccess?.();
     return answered;
   };
+  // With 0.15's log the vault makes the credential (T149), asking `access` nothing: the same moments come before its one call.
+  const signIn = deps.vault.signIn?.bind(deps.vault);
+  if (signIn !== undefined) {
+    deps.vault.signIn = async (input) => {
+      vaultCalls++;
+      await beforeAccess?.();
+      await afterAccess?.();
+      return signIn(input);
+    };
+  }
   config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
@@ -194,11 +204,17 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.ok(lifetime > 4 * 60_000 && lifetime <= 5 * 60_000 + 1000, `lives five minutes, not ${lifetime} ms`);
   assert.equal(await caller(body.token!), `service:${SERVICE}`);
 
-  const [entry] = await appEntries('token.exchange');
-  assert.equal(entry!.actor, MEMBER);
-  assert.equal(entry!.decision, 'allow');
-  assert.deepEqual(Object.keys(entry!.metadata).sort(), ['bindingId', 'credentialId', 'expiresAt', 'generation', 'issuer', 'run']);
-  assert.deepEqual((entry!.metadata.run as Record<string, unknown>).run_id, '7001');
+  // Its record: 0.14's entry; with 0.15's log, its change, which says who, through what, for which run (D147), and when (its `at`).
+  const [signedIn] = await signInsLogged(db.owner);
+  assert.equal(signedIn!.actor, MEMBER);
+  assert.equal(signedIn!.run.run_id, '7001');
+  if (LOG === '0.14') {
+    assert.deepEqual(Object.keys(signedIn!.record).sort(), ['bindingId', 'credentialId', 'expiresAt', 'generation', 'issuer', 'run']);
+  } else {
+    assert.deepEqual(Object.keys(signedIn!.record).sort(), ['caller', 'expiresAt', 'generation', 'op', 'principal', 'ref', 'scope', 'signIn']);
+    assert.deepEqual(signedIn!.record.signIn, { binding: bound, issuer: ISSUER, proof: 'oidc', run: signedIn!.run });
+    assert.deepEqual(await appEntries('token.exchange'), [], 'no 0.14 entry of its own');
+  }
   // The service's token list is for tokens people keep.
   assert.deepEqual((await runtime.signin!.listTokens(await contextFor(deps, ROOT), { type: 'service', id: SERVICE })), []);
   const [binding] = await db.owner.select().from(serviceBindings);
@@ -212,8 +228,7 @@ test("a run's token.exchange changes no decision input but the credential it iss
   const changes = await db.owner.select({ number: logChanges.number }).from(logChanges);
   const { status, body } = await trade(token(rsa));
   assert.equal(status, 200, JSON.stringify(body));
-  const [entry] = await appEntries('token.exchange');
-  const issued = entry!.metadata.credentialId as string;
+  const issued = (await signInsLogged(db.owner))[0]!.credentialId;
   assert.deepEqual(await decisionInputs(db.owner, [issued]), before);
   // By number: the heap need not keep the new rows after the old (use.test.ts, replayAgrees).
   const logged = (await db.owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(asc(logChanges.number))).slice(changes.length).map(({ payload }) => JSON.parse(payload) as { op: string; ref: { id: string } });
@@ -275,6 +290,8 @@ test('a binding 0.4 makes after the app sealed is sealed by its first exchange, 
   const first = (await trade(token(rsa))).body.token!;
   assert.notEqual(await scope(), null, 'sealed as it exchanged, before the run used its credential');
   assert.deepEqual(await seals(), [[bound]]);
+  // With 0.15's log, the vault made it all the same, once sealed: every sign-in through a binding counts its rate under its row.
+  if (LOG === '0.15') assert.equal((await signInsLogged(db.owner)).at(-1)!.record.signIn !== undefined, true);
   // A run's credential whose binding carries no scope, as one 0.4's binding issued: its first check seals the binding.
   await unseal(bound);
   assert.equal(await reveal(first, 'market/dev'), 200);
@@ -606,8 +623,8 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   /** A run's credential, by its run_id: the token, and its ID from the exchange's entry. */
   const runOf = async (runId: string) => {
     const { body } = await trade(token(rsa, { run_id: runId }));
-    const entry = (await appEntries('token.exchange')).find((exchange) => (exchange.metadata.run as { run_id?: string }).run_id === runId);
-    return { token: body.token!, id: entry!.metadata.credentialId as string };
+    const signedIn = (await signInsLogged(db.owner)).find((exchange) => exchange.run.run_id === runId);
+    return { token: body.token!, id: signedIn!.credentialId };
   };
   const [a, b, c] = [await runOf('7001'), await runOf('7002'), await runOf('7003')];
   const revoke = (credential: string, id: string) =>
@@ -622,15 +639,29 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   const revocations = (await appEntries('token.revoke')).map(({ actor, decision, metadata }) => ({
     actor, decision, credentialId: metadata.credentialId, targetCredentialId: metadata.targetCredentialId,
   }));
-  assert.deepEqual(revocations, [
-    { actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody },
-    { actor: MEMBER, decision: 'allow', credentialId: a.id, targetCredentialId: b.id },
-    { actor: `user:${ROOT}`, decision: 'allow', credentialId: undefined, targetCredentialId: c.id },
-  ]);
-  // On the audit page: A's run for A's two, and no run for the admin's.
-  const { entries } = await clientFor(deps, ROOT).audit.list({ detail: '1' });
-  const shown = entries.filter((entry) => entry.action === 'token.revoke').sort((x, y) => x.seq - y.seq).map((entry) => entry.run?.claims.run_id ?? null);
-  assert.deepEqual(shown, ['7001', '7001', null]);
+  if (LOG === '0.14') {
+    assert.deepEqual(revocations, [
+      { actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody },
+      { actor: MEMBER, decision: 'allow', credentialId: a.id, targetCredentialId: b.id },
+      { actor: `user:${ROOT}`, decision: 'allow', credentialId: undefined, targetCredentialId: c.id },
+    ]);
+    // On the audit page: A's run for A's two, and no run for the admin's.
+    const { entries } = await clientFor(deps, ROOT).audit.list({ detail: '1' });
+    const shown = entries.filter((entry) => entry.action === 'token.revoke').sort((x, y) => x.seq - y.seq).map((entry) => entry.run?.claims.run_id ?? null);
+    assert.deepEqual(shown, ['7001', '7001', null]);
+  } else {
+    // With 0.15's log, the refusal is 0.14's entry still; each revoke, the vault's change, naming the credential it came in on (T156 shows them).
+    assert.deepEqual(revocations, [{ actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody }]);
+    assert.deepEqual(await revokesLogged(db.owner), [
+      { actor: MEMBER, reason: 'revoke', targetCredentialId: b.id },
+      { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: c.id },
+    ]);
+    const vias = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
+      const { revoke } = JSON.parse(payload) as { revoke?: { via: string | null } };
+      return revoke === undefined ? [] : [revoke.via];
+    });
+    assert.deepEqual(vias, [a.id, null]);
+  }
 });
 
 test('a key the issuer rotated in is fetched once; while the issuer cannot be reached, a 503, and cached keys still work', async () => {
@@ -785,7 +816,7 @@ test('one binding trusts a workflow on several events: a pull request into its b
   const { status, body } = await trade(token(rsa, pr));
   assert.equal(status, 200, JSON.stringify(body));
   // Its entry says which pull request: its merge ref, and the branches it goes from and into.
-  const run = (await appEntries('token.exchange')).at(-1)!.metadata.run as Record<string, unknown>;
+  const run = (await signInsLogged(db.owner)).at(-1)!.run;
   assert.deepEqual([run.event_name, run.ref, run.base_ref, run.head_ref], ['pull_request', 'refs/pull/12/merge', 'main', 'feature']);
   // Into another branch, or another event at the same ref, no binding takes it.
   const elsewhere = await trade(token(rsa, { ...pr, base_ref: 'release' }));
@@ -806,7 +837,7 @@ test("a reusable workflow's binding names its caller's ref: a feature branch cal
   const feature = (await trade(token(rsa, caller('refs/heads/feature')))).body;
   assert.deepEqual([feature.reason, feature.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: ref differ`]);
   assert.equal((await trade(token(rsa, caller('refs/heads/main')))).status, 200);
-  assert.equal((await appEntries('token.exchange'))[0]!.metadata.bindingId, id);
+  assert.equal((await signInsLogged(db.owner))[0]!.bindingId, id);
 });
 
 test('a binding that names a GitHub environment takes only jobs in it, whatever their sub, the plain and the reusable profile alike', async () => {
@@ -818,7 +849,7 @@ test('a binding that names a GitHub environment takes only jobs in it, whatever 
   const staging = (await trade(token(rsa, inside('staging')))).body;
   assert.deepEqual([staging.reason, staging.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: environment differ`]);
   assert.equal((await trade(token(rsa))).body.reason, 'no_match', 'a job in no environment');
-  assert.equal(((await appEntries('token.exchange')).at(-1)!.metadata.run as Record<string, unknown>).environment, 'Production');
+  assert.equal((await signInsLogged(db.owner)).at(-1)!.run.environment, 'Production');
 
   const called = { job_workflow_ref: 'acme/workflows/.github/workflows/deploy.yml@refs/tags/v1', job_workflow_sha: 'a'.repeat(40) };
   await bind({ repository_owner_id: '9919', repository_id: '41532', ref: 'refs/heads/main', event_name: 'push', ...called, environment: 'production' }, [id], 'github-reusable');
@@ -852,7 +883,7 @@ test("keys that moved, replaced while a run exchanges: its credential stands onl
   }
   // The next run is verified under the keys' new URL, by the binding that replaced it.
   assert.equal((await trade(token(rsa))).status, 200);
-  assert.equal((await appEntries('token.exchange')).at(-1)!.metadata.bindingId, made);
+  assert.equal((await signInsLogged(db.owner)).at(-1)!.bindingId, made);
 });
 
 test("two first exchanges at once each fetch the issuer's keys, rather than one waiting on the other's request", async () => {
@@ -924,8 +955,8 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   await bind(DEPLOY);
 
   const { body } = await trade(token(rsa));
-  const [exchange] = await appEntries('token.exchange');
-  const credentialId = exchange!.metadata.credentialId as string;
+  const [exchange] = await signInsLogged(db.owner);
+  const credentialId = exchange!.credentialId;
   const reveal = (path: string) => answer(
     new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }),
     runtime, ui, IP,
@@ -938,7 +969,7 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
     .map((entry) => ({ ...entry, credentialId: (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId }));
   // Under 0.15's log, the read is a use, and names the credential as its own column: the vault's read is no entry here.
   assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`),
-    LOG === '0.15' ? ['app token.exchange allow', 'app secret.read deny'] : ['app token.exchange allow', 'vault secret.read allow', 'app secret.read deny']);
+    LOG === '0.15' ? ['app secret.read deny'] : ['app token.exchange allow', 'vault secret.read allow', 'app secret.read deny']);
   assert.ok(caused.every((entry) => entry.credentialId === credentialId));
   if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [credentialId]);
 
@@ -946,11 +977,12 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
   const { entries } = await root.audit.list({ detail: '1' });
   // The audit page reads 0.15's uses from plan PR 8: until then, the read it shows with its run is 0.14's entry.
+  // With 0.15's log, its sign-in is its change (D147), which the 0.15 page shows with its run (T156).
   if (LOG === '0.14') {
     const shown = entries.find((entry) => entry.action === 'secret.read')!;
-    assert.deepEqual(shown.run, { exchangeSeq: entries.find((entry) => entry.action === 'token.exchange')!.seq, claims: exchange!.metadata.run });
+    assert.deepEqual(shown.run, { exchangeSeq: entries.find((entry) => entry.action === 'token.exchange')!.seq, claims: exchange!.run });
+    assert.equal(entries.find((entry) => entry.action === 'token.exchange')!.run!.claims.run_id, '7001');
   }
-  assert.equal(entries.find((entry) => entry.action === 'token.exchange')!.run!.claims.run_id, '7001');
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
 });
@@ -997,7 +1029,7 @@ test('a binding that carries its keys takes a private issuer\'s tokens, by a nes
   const ok = await trade(projected(rsa));
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(issuer.fetches, 0, 'neither discovery nor keys');
-  assert.equal(((await appEntries('token.exchange')).at(-1)!.metadata.run as Record<string, unknown>)['kubernetes.io.pod.name'], 'deploy-7f9c');
+  assert.equal((await signInsLogged(db.owner)).at(-1)!.run['kubernetes.io.pod.name'], 'deploy-7f9c');
   const bound = await appEntries('token.bind');
   assert.deepEqual((bound.at(-1)!.metadata.keys as { kid: string }[]).map(({ kid }) => kid), ['rs-1']);
 
@@ -1119,7 +1151,7 @@ test('replacing keys keeps which binding a run matches: of two that take the sam
   await scoped('prod', 'market/prod');
   const matched = async () => {
     assert.equal((await trade(projected(rsa))).status, 200);
-    const id = (await appEntries('token.exchange')).at(-1)!.metadata.bindingId;
+    const id = (await signInsLogged(db.owner)).at(-1)!.bindingId;
     return (await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id as string)))[0]!.label;
   };
   assert.equal(await matched(), 'dev');
@@ -1173,3 +1205,15 @@ test("/api/auth/oidc takes only a binding of today's five profiles with no polic
 function standsAndRecent({ stands, recent }: { stands: boolean; recent: number }): { stands: boolean; recent: number } {
   return { stands, recent };
 }
+
+test("a token with fractional times, and one with every claim a run records, sign in as any other (the record's bounds are runClaims')", async () => {
+  // Times in fractional seconds, which the token's checks take: the proof's end is whole ms, down.
+  assert.equal((await trade(token(rsa, { iat: seconds() - 5.5, exp: seconds() + 295.0001 }))).status, 200);
+  const every = {
+    actor: 'octocat', base_ref: '', head_ref: '', run_attempt: '1', job_workflow_ref: DEPLOY.workflow_ref, job_workflow_sha: 'f'.repeat(40), environment: 'Production',
+    project_path: 'acme/api', project_id: '1', namespace_id: '2', pipeline_id: '3', pipeline_source: 'push', job_id: '4', 'kubernetes.io': { pod: { name: 'deploy-7f9c' } },
+  };
+  const { status, body } = await trade(token(rsa, every));
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(Object.keys((await signInsLogged(db.owner)).at(-1)!.run).length > 16, true, 'more than 16 claims recorded');
+});

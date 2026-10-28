@@ -14,7 +14,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials } from './db/tables.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -363,6 +363,11 @@ test("a personal token's label is shown wherever it goes, so it holds no control
   }
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
+  // With 0.15's log, the vault ends it (T149), and its change, which the 0.15 page shows (T156), names the token it ends.
+  if (LOG === '0.15') {
+    assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
+    return;
+  }
   const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
   const out = entries.find((entry) => entry.action === 'sign_out')!;
   assert.deepEqual(out.token, { id: issued.id, label: 'agent' });

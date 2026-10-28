@@ -276,6 +276,34 @@ REMOVALS=(
   "Migration015Marker OldWriteMarksRow AllowedOnlyWhenGranted"
   # … and a writer who clears it (MaxClears=1) breaks it with every protection on: why PR 5 keeps the probe.
   "Migration015Marker MaxClears=1 AllowedOnlyWhenGranted"
+  # The vault owns a credential's life (Lifecycle.tla, T149): a sign-in, an issue and a revoke, each one vault call.
+  # An issue's write holds the issuer's rows, and goes ahead only on the objects its read decided on: each is needed.
+  "LifecycleIssue IssuerLocked SensitiveOnlyFromOwners"
+  "LifecycleIssue IssuerLocked IssuedByLiveCredential"
+  "LifecycleIssue IssuerCAS SensitiveOnlyFromOwners"
+  "LifecycleIssue IssuerCAS IssuedByLiveCredential"
+  "LifecycleIssue IssueOffFence UsesNeverWaitOnIssues"
+  "LifecycleIssue RevokeTakesFence RevokeOrdersUses"
+  # A revoke by a right the policy gives holds that policy to the newest under the fence (T149 r1).
+  "LifecycleRevoke RevokePolicyHeld RevokesOnStandingRight"
+  # A sign-in's binding row holds its rate; the account's row, or W242's generation at use, its removal.
+  "LifecycleSignIn BindingLocked RateHeld"
+  "LifecycleSignIn MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"
+  "LifecycleSignIn IssueOffFence UsesNeverWaitOnIssues"
+  "LifecycleSignIn RevokeTakesFence RevokeOrdersUses"
+  "LifecycleReplay SpentChecked SpentOnce"
+  # An unbind sweeps what its binding issued: only all of it while the sign-in holds the row and the sweep follows its lock.
+  "LifecycleUnbind BindingLocked EndedBindingEndsCredentials"
+  "LifecycleUnbind SweepAfterLock EndedBindingEndsCredentials"
+  # A database writer: what it puts back, forges or edits serves nothing while the use checks seals; a token's hash it
+  # moves, nothing while the seal covers the hash (option (a)) or the app checks its MAC (option (b)), either one.
+  "LifecycleForge SealChecked AllowedOnSealed"
+  "LifecycleForge HashSealed+AppChecksMac AllowedAsPresented"
+  # A compromised app: the vault weighs the issuer itself; it mints a run's credential only from a token the binding's
+  # issuer signed (D148), and only through a binding the vault sealed.
+  "LifecycleCompromised IssuerLocked SensitiveOnlyFromOwners"
+  "LifecycleCompromised VaultVerifiesToken SignInsOnValidTokens"
+  "LifecycleCompromised BindingSealed SignInsOnValidTokens"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.

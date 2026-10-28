@@ -1450,6 +1450,45 @@ takes it before the fence, and they are in no cycle with the barrier.
 **Not modelled:** 0.14 uses after the cutover. They stay in 0.14's own chain,
 which the cutover anchors.
 
+### Lifecycle.tla
+
+The vault owns a credential's life (T149, D146 to D148;
+[credential-lifecycle.md](design/credential-lifecycle.md)): a CI run's
+sign-in through a binding, a token a person gives a service account, and a
+revoke, each the vault's, beside uses, an unbind (still the app's
+transaction), a database writer holding no key, and the app's code turned
+hostile. A sign-in and a revoke are one statement each; an issue is two, a
+read and a write that goes ahead only while what the read decided on still
+stands, holding nothing between. MCLifecycle.tla's scenarios:
+`LifecycleIssue`, `LifecycleSignIn`, `LifecycleReplay` (one ID token
+presented twice), `LifecycleUnbind`, `LifecycleRevoke` (a manager's revoke
+while an admin takes the right away), `LifecycleForge` and
+`LifecycleCompromised`.
+
+| protection | turned off, TLC finds |
+|---|---|
+| a revoke takes the fence exclusive (RevokeTakesFence) | `RevokeOrdersUses` |
+| a revoke holds the policy its right was weighed on to the newest, under the fence (RevokePolicyHeld) | `RevokesOnStandingRight` |
+| an issue or a sign-in takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues` |
+| an issue's write holds the issuer's row and credential shared (IssuerLocked) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; with the app compromised too |
+| an issue's write goes ahead only on the objects its read decided on (IssuerCAS) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` |
+| a sign-in holds its binding's row exclusive (BindingLocked) | `RateHeld`; `EndedBindingEndsCredentials` |
+| an unbind sweeps once it holds the binding's row (SweepAfterLock) | `EndedBindingEndsCredentials` |
+| the ID token spent by a unique insert (SpentChecked) | `SpentOnce` |
+| the account's row shared (MemberLocked) and W242's generation at use (UseChecksGeneration), each covering for the other | `AllowedAtCurrentGeneration` without both |
+| the use checks seals (SealChecked) | `AllowedOnSealed` |
+| the seal covers the token's hash (HashSealed) and the app checks its MAC (AppChecksMac), each enough | `AllowedAsPresented` without both |
+| the vault verifies the ID token (VaultVerifiesToken); and takes only a binding it sealed (BindingSealed) | `SignInsOnValidTokens`, each |
+
+The last row is PR 3's (D148): without sealed bindings, the hostile app
+writes one that trusts its own key, and the vault's check of the token
+proves nothing.
+
+**Not modelled:** the checkpointer's barrier and R51's wait beyond the
+revoke's answer (HotPathOneIssue's), Postgres's lock queue (HotPathOne's),
+the proof's claims and the binding's match, and a removal's sweep beyond one
+step.
+
 ## TLC
 
 [TLC](https://github.com/tlaplus/tlaplus) is the TLA+ tools' explicit-state

@@ -128,6 +128,54 @@ export async function usesLogged(owner: Database): Promise<{ credential: string;
   return owner.select({ credential: logUses.credential, secret: logUses.secret, purpose: logUses.purpose, place: logUses.place }).from(logUses).orderBy(logUses.number);
 }
 
+/** A sign-in through a trust binding, as its log records it (`signInsLogged`). */
+export type LoggedSignIn = { actor: string; credentialId: string; bindingId: string; run: Record<string, unknown>; record: Record<string, unknown> };
+
+/**
+ * The sign-ins through trust bindings, oldest first, as the log that records
+ * them has them: 0.14's `token.exchange` entries; or, with 0.15's log, where
+ * the vault makes them (T149), their changes, whose payload records the
+ * sign-in (D147). `record` is the entry's metadata, or the change's payload.
+ */
+export async function signInsLogged(owner: Database): Promise<LoggedSignIn[]> {
+  const { auditLog, logChanges } = tablesOf(owner);
+  const entries = await owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'token.exchange'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
+  const changes = await owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges).orderBy(logChanges.number);
+  return [
+    ...entries.map(({ actor, metadata }) => {
+      const record = JSON.parse(metadata) as Record<string, unknown>;
+      return { actor: actor!, credentialId: record.credentialId as string, bindingId: record.bindingId as string, run: record.run as Record<string, unknown>, record };
+    }),
+    ...changes.flatMap(({ actor, payload }) => {
+      const record = JSON.parse(payload) as { ref: { id: string }; signIn?: { binding: string; run: Record<string, unknown> } };
+      return record.signIn === undefined ? [] : [{ actor, credentialId: record.ref.id, bindingId: record.signIn.binding, run: record.signIn.run, record }];
+    }),
+  ];
+}
+
+/**
+ * The credentials revoked by request, oldest first, as the log that records
+ * them has them: 0.14's allowed `token.revoke` and `sign_out` entries; or,
+ * with 0.15's log, where the vault revokes them (T149), their changes, each
+ * with its reason (D147). Who, and which credential: as each one names them.
+ */
+export async function revokesLogged(owner: Database): Promise<{ actor: string; reason: 'revoke' | 'sign_out'; targetCredentialId: string }[]> {
+  const { auditLog, logChanges } = tablesOf(owner);
+  const entries = await owner.select({ actor: auditLog.actor, action: auditLog.action, metadata: auditLog.metadata }).from(auditLog)
+    .where(and(inArray(auditLog.action, ['token.revoke', 'sign_out']), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
+  const changes = await owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges).orderBy(logChanges.number);
+  return [
+    ...entries.map(({ actor, action, metadata }) => ({
+      actor: actor!, reason: action === 'sign_out' ? 'sign_out' as const : 'revoke' as const, targetCredentialId: (JSON.parse(metadata) as { targetCredentialId: string }).targetCredentialId,
+    })),
+    ...changes.flatMap(({ actor, payload }) => {
+      const record = JSON.parse(payload) as { ref: { id: string }; revoke?: { reason: 'revoke' | 'sign_out' } };
+      return record.revoke === undefined ? [] : [{ actor, reason: record.revoke.reason, targetCredentialId: record.ref.id }];
+    }),
+  ];
+}
+
 /**
  * Each use the vault is asked for from now, and its answer, until `stop` puts its `use` back: how often a value was
  * opened under 0.15's log, where `usesLogged` misses a repeat its cover rode.
@@ -214,6 +262,8 @@ export function testVault(
     verifyLog: call('verifyLog'),
     prepare: call('prepare'),
     waitSealed: call('waitSealed'),
+    signIn: call('signIn'),
+    revokeCredential: call('revokeCredential'),
     verifyTrees: call('verifyTrees'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),

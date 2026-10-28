@@ -27,8 +27,10 @@ import {
   clientFor,
   contextFor,
   holdSomething,
+  LOG,
   openTestDatabase,
   resetDatabase,
+  revokesLogged,
   testDeps,
   type FixtureDeps,
 } from './api-fixture.ts';
@@ -532,13 +534,15 @@ test('signing out revokes that credential only, once, and is audited', async () 
   assert.equal(revoked.revokedBy, DEV);
 
   const rows = await auditRows();
+  // With 0.15's log, the vault ends it (T149), and its change records the sign-out (D147), as 0.14's entry does.
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
     `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
     `sign_in allow ${DEV}`,
-    `sign_out allow ${DEV}`,
+    ...(LOG === '0.14' ? [`sign_out allow ${DEV}`] : []),
   ]);
-  assert.deepEqual(rows[3].metadata, { targetCredentialId: ended.credential.id, kind: 'browser' });
+  if (LOG === '0.14') assert.deepEqual(rows[3].metadata, { targetCredentialId: ended.credential.id, kind: 'browser' });
+  assert.deepEqual(await revokesLogged(db.owner), [{ actor: `user:${DEV}`, reason: 'sign_out', targetCredentialId: ended.credential.id }]);
 });
 
 test('sign-ins stay in the log, and the audit list shows them only when asked', async () => {
@@ -548,8 +552,10 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
 
   const audit = clientFor(deps, ROOT).audit;
   const all = (await audit.list({ detail: '1' })).entries;
-  assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.action} ${entry.decision} ${entry.detail}`), [
-    'sign_out allow true',
+  // With 0.15's log, the sign-out is the vault's change (T149, D147), which 0.15's page shows (T156).
+  const signedOut = LOG === '0.14' ? ['sign_out allow true'] : [];
+  assert.deepEqual(all.slice(0, 3 + signedOut.length).map((entry) => `${entry.action} ${entry.decision} ${entry.detail}`), [
+    ...signedOut,
     'sign_in deny true',
     'sign_in allow true',
     'account.link allow true',
@@ -564,7 +570,7 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   // Each page says what it left out of its stretch of the log, and the
   // stretches tile it: the sign-ins, newer than every entry shown, are the
   // first page's, and the next page's has none.
-  const hidden = [{ action: 'sign_in', count: 2 }, { action: 'account.link', count: 1 }, { action: 'sign_out', count: 1 }];
+  const hidden = [{ action: 'sign_in', count: 2 }, { action: 'account.link', count: 1 }, ...(LOG === '0.14' ? [{ action: 'sign_out', count: 1 }] : [])];
   assert.deepEqual(first.hidden, hidden);
   assert.deepEqual((await audit.list({ limit: 1, before: first.entries[0].seq })).hidden, []);
   assert.deepEqual((await audit.list()).hidden, hidden);
@@ -604,30 +610,40 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
   );
 
   const rows = (await auditRows()).slice(setup);
+  // Each refusal is 0.14's entry; with 0.15's log, each revoke is the vault's change (T149), naming whose credential of what kind (D147).
+  const allowed = (actor: string) => (LOG === '0.14' ? [['token.revoke', 'allow', actor, null]] : []);
   assert.deepEqual(
     rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason ?? null]),
     [
       ['token.revoke', 'deny', DEV, 'requires_instance_admin'],
       ['token.revoke', 'deny', DEV, 'requires_instance_admin'],
-      ['token.revoke', 'allow', DEV, null],
+      ...allowed(DEV),
       ['token.revoke', 'deny', DEV, 'unknown_credential'],
       ['token.revoke', 'deny', DEV, 'unknown_credential'],
-      ['token.revoke', 'allow', LEAD, null],
-      ['token.revoke', 'allow', ROOT, null],
+      ...allowed(LEAD),
+      ...allowed(ROOT),
     ],
   );
-  assert.deepEqual(rows[5].metadata, {
-    targetCredentialId: devSession.credential.id,
-    kind: 'browser',
-    principalType: 'user',
-    principalId: DEV,
-  });
-  assert.deepEqual(rows[6].metadata, {
-    targetCredentialId: token.id,
-    kind: 'service',
-    principalType: 'service',
-    principalId: SERVICE,
-  });
+  if (LOG === '0.14') {
+    assert.deepEqual(rows[5].metadata, {
+      targetCredentialId: devSession.credential.id,
+      kind: 'browser',
+      principalType: 'user',
+      principalId: DEV,
+    });
+    assert.deepEqual(rows[6].metadata, {
+      targetCredentialId: token.id,
+      kind: 'service',
+      principalType: 'service',
+      principalId: SERVICE,
+    });
+  } else {
+    assert.deepEqual(await revokesLogged(db.owner), [
+      { actor: `user:${DEV}`, reason: 'revoke', targetCredentialId: devOther.credential.id },
+      { actor: `user:${LEAD}`, reason: 'revoke', targetCredentialId: devSession.credential.id },
+      { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: token.id },
+    ]);
+  }
 });
 
 // --- linking and unlinking --------------------------------------------------------
@@ -1151,10 +1167,11 @@ test('everything the sign-in service writes keeps the audit chain intact', async
 
   const verified = await verifyAudit(await contextFor(deps, ROOT));
   assert.equal(verified.ok, true);
-  // Every entry, the vault's for the members set up here included; ten of them the app's.
+  // Every entry, the vault's for the members set up here included; ten of them the app's, or eight with 0.15's log, whose
+  // revoke and sign-out are the vault's changes (T149).
   const [{ n }] = await db.owner.select({ n: count() }).from(auditLog);
   if (verified.ok) assert.equal(verified.entries, n);
-  assert.equal((await auditRows()).length, 10);
+  assert.equal((await auditRows()).length, LOG === '0.14' ? 10 : 8);
 });
 
 // --- through the API --------------------------------------------------------------

@@ -235,7 +235,7 @@ async function endLeftOpen(owner: Database): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   if (ENGINE === 'postgres') await endLeftOpen(owner);
-  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, credentials } = tablesOf(owner);
+  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, credentials, serviceBindings, consumedTokens } = tablesOf(owner);
   await owner.delete(secretReferences);
   // SQLite checks a RESTRICT foreign key row by row, so entries that point
   // at others let go of them first.
@@ -250,8 +250,10 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.delete(logChanges);
   await owner.delete(logConfig);
   await owner.delete(vaultGrants);
-  // A session a test made, for a use to name.
+  // A session a test made, for a use to name; a binding a sign-in came through, and the tokens it spent (credentials.test.ts).
   await owner.delete(credentials);
+  await owner.delete(serviceBindings);
+  await owner.delete(consumedTokens);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);
   await owner.update(secrets).set({ currentVersionId: null });

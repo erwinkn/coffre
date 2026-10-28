@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **0.15's sign-in through a trust binding, a revoke and a sign-out are
+  each one vault call, behind its switch.** A CI run's sign-in was 8 app
+  statements, 6 of them holding 0.14's head, which every app write waits
+  for, so a burst of sign-ins queued there (3.5 s at p99 for 30 at once).
+  The vault now makes the credential itself in one statement, `sign_in`
+  (migration 0034): it weighs the binding, the account, the binding's rate,
+  the token's times and its spend on their rows, under their locks, writes
+  the credential and its seal, and numbers its change under the issue lock,
+  never the fence. The app reads the service's bindings and checks the ID
+  token, as before; a sign-in is that one statement and one vault call. A
+  workload's session signs in the same way. A revoke or a sign-out is one
+  call too, `revoke_credential`, holding the fence for its own work only.
+  Under the switch, none of the three writes a 0.14 entry: its change
+  records it (D147). A sign-in that waits over a second for its binding is
+  refused at once, 429. `docs/design/credential-lifecycle.md`;
+  `formal/Lifecycle.tla`.
 - **0.15's `/use` checks its credential in the use itself, behind its
   switch.** After a use, the app read the credential and its account's
   generation again (`credentialStill`), a statement and a round trip on

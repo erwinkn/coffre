@@ -10,7 +10,7 @@ import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, projects } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance (D97,
 // D99): docs/design/instance-roles.md, "Setting up service accounts".
@@ -119,10 +119,12 @@ test('a Developer of dev sets up CI for dev: the account, its grant, a token and
     [ADA, 'access.grant', 'allow', null],
     [ADA, 'token.create', 'allow', null],
     [ADA, 'token.bind', 'allow', null],
-    [ADA, 'token.revoke', 'allow', null],
+    // With 0.15's log, the vault revokes the token (T149), and its change records who (D147).
+    ...(LOG === '0.14' ? [[ADA, 'token.revoke', 'allow', null]] : []),
     [ADA, 'token.unbind', 'allow', 'removed'],
     [ADA, 'access.revoke', 'allow', null],
   ], 'who did each step');
+  if (LOG === '0.15') assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'revoke', targetCredentialId: issued.id }]);
 
   // Removing it is theirs too; its report, which names what it read anywhere, is not.
   const removed = await ada.members.remove(CI);

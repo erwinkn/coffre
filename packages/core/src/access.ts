@@ -792,6 +792,75 @@ export function scopeWithReads(
 }
 
 /**
+ * A scope as a token's or binding's row stores it, under its MAC: its
+ * grants as JSON, by place, each with what its role held when it was
+ * issued (`issuedGrant`), so that a role widened later widens no credential,
+ * and, a service's, whether it reads the sensitive values there.
+ */
+export function storedScope(scope: CredentialScope, { reads = false }: { reads?: boolean } = {}): string {
+  const key = (grant: CredentialScope[number]) => `${grant.projectId}/${grant.environmentId ?? ''}`;
+  return JSON.stringify(
+    [...scope]
+      .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
+      .map((grant) => {
+        const { permissions, protected: guarded } = scopeDefinition(grant);
+        return {
+          projectId: grant.projectId,
+          environmentId: grant.environmentId,
+          role: grant.role,
+          permissions: { normal: [...permissions], protected: [...guarded] },
+          ...(grant.sensitive === undefined ? {} : { sensitive: grant.sensitive }),
+          // A workload session's, with 0.15's log: the keys its binding lets it read, which its object holds (`sealedSessionScope`).
+          ...(!reads || grant.reads === undefined ? {} : { reads: grant.reads }),
+        };
+      }),
+  );
+}
+
+/**
+ * The scope a row stores: null for one 0.4 made, not sealed yet, which
+ * reaches all its account holds, as then. One its MAC checked but that
+ * does not read as a scope reaches nothing.
+ */
+export function readScope(stored: string | null): CredentialScope | null {
+  if (stored === null) return null;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {}
+  return isCredentialScope(parsed) ? parsed : [];
+}
+
+/** What a workload binding's policy lists of reads, by environment id (`BindingPolicy['reads']`). */
+type ListedReads = Readonly<Record<string, { readonly keys?: readonly string[] | '*' }>>;
+
+/**
+ * What a session reaches, as its caller holds it: its row's scope, an
+ * enrollment code's, or else its binding's, never null, with its binding's
+ * `reads` on the grants of the environments they list (`scopeWithReads`).
+ * Binding creation gives each such environment a grant of its own, so the
+ * scope itself says each one's project, with nothing to look up. A grant
+ * without `reads` is use-only, there.
+ */
+export function sessionScope(row: { scope: string | null }, binding: { scope: string | null }, policy: { reads?: ListedReads }): CredentialScope {
+  const scope = readScope(row.scope ?? binding.scope) ?? [];
+  const projectOf = new Map<string, string>();
+  for (const { projectId, environmentId } of scope) if (environmentId != null && projectId !== null) projectOf.set(environmentId, projectId);
+  return scopeWithReads(scope, policy.reads, projectOf);
+}
+
+/**
+ * A workload session's scope as its row stores it with 0.15's log: what its
+ * uses hold (`sessionScope`), its binding's per-key reads included, so that
+ * its object, all a 0.15 use decides on, is no wider than what 0.14 decides
+ * on from its binding. The vault makes it from the binding's columns too,
+ * for the session it signs in (T149).
+ */
+export function sealedSessionScope(scope: string | null, binding: { scope: string | null }, policy: { reads?: ListedReads }): string {
+  return storedScope(sessionScope({ scope }, binding, policy), { reads: true });
+}
+
+/**
  * Whether the actor may give or take grants at this place: with
  * `grant.manage` there, from a project grant or an instance role whose
  * scope takes it in. A grant on a project reaches all its environments, so

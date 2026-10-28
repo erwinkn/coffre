@@ -26,6 +26,8 @@ export const METHODS = [
   'use',
   'prepare',
   'waitSealed',
+  'signIn',
+  'revokeCredential',
   'verifyTrees',
 ] as const satisfies readonly (keyof Vault)[];
 

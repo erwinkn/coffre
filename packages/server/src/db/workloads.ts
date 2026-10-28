@@ -256,12 +256,20 @@ export async function frozenTargets(db: Queryable, targets: readonly string[]): 
 }
 
 /** Insert a workload's session, its MAC over everything that binds it (`workload_credentials`). */
-export async function insertSession(db: Queryable, chainKey: Buffer, row: Omit<Tables['credentials']['$inferInsert'], 'authMac'> & {
-  id: string; kind: 'workload'; tokenHash: Buffer; generation: number; principal: string; identityId: null; createdBy: string; expiresAt: Date;
+export async function insertSession(db: Queryable, chainKey: Buffer, row: SessionFields): Promise<void> {
+  await insert(db, tablesOf(db).credentials, signedSession(chainKey, row));
+}
+
+/** A workload's session's columns, as it is made. */
+export type SessionFields = Omit<Tables['credentials']['$inferInsert'], 'authMac'> & {
+  id: string; kind: 'workload'; tokenHash: Buffer; tokenHint: string; generation: number; principal: string; identityId: null; createdBy: string; expiresAt: Date;
   revokedAt: null; scope: string | null; places: string | null; jkt: string; notAfter: Date; ancestors: string | null; constraints: string | null;
   enrollmentId: string | null; approvedAt: Date | null; approvedBy: string | null;
-}): Promise<void> {
-  await insert(db, tablesOf(db).credentials, { ...row, authMac: authMac(chainKey, 'credentials', row) });
+};
+
+/** A workload's session's row with its MAC: what `insertSession` writes, and what the vault writes for 0.15's sign-in (T149). */
+export function signedSession(chainKey: Buffer, row: SessionFields): SessionFields & { authMac: Buffer } {
+  return { ...row, authMac: authMac(chainKey, 'credentials', row) };
 }
 
 /** The database's clock, in milliseconds, as this statement runs: renewal's first step. */

@@ -97,11 +97,16 @@ import {
   type Refusal,
   type RefusalCode,
   type RemoveInput,
+  type RevokeCredentialInput,
+  type RevokeCredentialOutcome,
   type RewrapInput,
   type SecretRef,
   type SetAccessInput,
   type SetSettingsInput,
   type Settings,
+  type SignInInput,
+  type SignInOutcome,
+  type SignInRefusal,
   type Through,
   type UnwrapInput,
   USE_METADATA_LENGTH,
@@ -124,6 +129,7 @@ import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuth
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
+import { revokeCredential, signIn, type Answer } from './credentials.ts';
 import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
@@ -3061,7 +3067,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; credentials?: true }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3071,7 +3077,8 @@ class VaultService implements Vault {
       owners: [...this.#config.owners],
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
-      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const }),
+      // With it, the vault makes sign-ins through bindings and revokes credentials itself (credentials.ts).
+      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, credentials: true as const }),
       // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
       ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const }),
     };
@@ -3098,6 +3105,44 @@ class VaultService implements Vault {
       await this.#record(reports);
       return { ok: false, refusal: refused.refusal };
     }
+  }
+
+  /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): one statement, then the seal wait (R51). */
+  async signIn(input: SignInInput): Promise<SignInOutcome> {
+    const log015 = this.#log015();
+    const answer = await signIn(this.#db, log015, Date.now() + this.#prepared.options.clockOffset(), input);
+    if (answer.number == null) return { ok: false, refused: answer.state as SignInRefusal };
+    const sealed = await log015.sealThrough(BigInt(answer.number));
+    return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
+  }
+
+  /**
+   * A credential revoked by the vault (credentials.ts, T149): one statement,
+   * then the seal wait. A row whose seal is not the vault's, or not its
+   * object's newest change's, is reported, as `prepare` reports one; one
+   * whose policy moved since its revoke was weighed is refused, nothing
+   * reported.
+   */
+  async revokeCredential(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome> {
+    const log015 = this.#log015();
+    const notLogged = async (error: NotLogged) => {
+      const reports: NewEntry[] = [];
+      this.#notLogged(reports, error);
+      await this.#record(reports);
+      return { ok: false as const, refused: error.fault };
+    };
+    let answer: Answer;
+    try {
+      answer = await revokeCredential(this.#db, log015, Date.now() + this.#prepared.options.clockOffset(), input);
+    } catch (error) {
+      if (error instanceof NotLogged) return notLogged(error);
+      throw error;
+    }
+    if (answer.state === 'stale') return notLogged(new NotLogged({ kind: 'credential', id: input.before.columns.id }, 'stale'));
+    if (answer.state === 'moved' || answer.state === 'busy' || answer.state === 'policy') return { ok: false, refused: answer.state };
+    if (answer.number == null) throw new Error('revoke_credential answered neither a change nor why it made none');
+    const sealed = await log015.sealThrough(BigInt(answer.number));
+    return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
   }
 
   /** Once entry `number` is sealed and witnessed, or its witnesses past their 2 s (R51): what a change the app made waits for. */

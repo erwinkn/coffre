@@ -673,6 +673,12 @@ export type BindingPolicy = {
   readonly unsignedUploads?: true;
 };
 
+/** How long a credential an exchange issues lives: one `coffre run` needs it for seconds. The vault holds a sign-in to it (T149). */
+export const EXCHANGED_CREDENTIAL_MS = 5 * 60 * 1000;
+
+/** How long a session lives past each renewal, unless its proof says less: an hour (section 5.4). The vault holds a sign-in to it. */
+export const SESSION_MS = 60 * 60 * 1000;
+
 /** What a field left out of a policy means. */
 export const POLICY_DEFAULTS = {
   keyAudience: false,
