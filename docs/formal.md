@@ -1450,6 +1450,41 @@ takes it before the fence, and they are in no cycle with the barrier.
 **Not modelled:** 0.14 uses after the cutover. They stay in 0.14's own chain,
 which the cutover anchors.
 
+### Lifecycle.tla
+
+Who owns a credential's life (T149, W246;
+[credential-lifecycle.md](design/credential-lifecycle.md)): issuing a token
+for a service account, a CI run's sign-in and a revoke, beside the uses.
+`Placement` switches them between **A**, the vault in one statement that
+takes its locks and commits inside Postgres, and **B**, 0.15 as built, the
+app's transaction under 0.14's head with the vault sealing what it
+proposes. A step's label says whether its process is in Postgres or at the
+app, a round trip away (`AtApp`). MCLifecycle.tla's four scenarios run
+under each placement: `LifecycleIssue`, `LifecycleSignIn`, `LifecycleForge`
+(a database writer holding no key) and `LifecycleCompromised` (the app's
+code, an attacker's).
+
+| protection | turned off, TLC finds |
+|---|---|
+| a revoke takes the fence exclusive (RevokeTakesFence) | `RevokeOrdersUses`, in both |
+| an issue takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues`, in both |
+| the issuer and her credential read where nothing changes them to the commit (IssuerLocked: A, their rows shared; B, `issuerStill` and `credentialStill` under the head) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` in A; `SensitiveOnlyFromOwners` in B; in A with the app compromised too |
+| the binding's rate counted under a lock (RateLocked: A, its row; B, the head) | `RateHeld`, in both |
+| the account under a lock (MemberLocked) and W242's generation at use (UseChecksGeneration), each covering for the other | `AllowedAtCurrentGeneration` without both, in both |
+| the use checks seals (SealChecked) | `AllowedOnSealed`, in both |
+| B's head (HeadInB) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`, `RateHeld`; `AllowedAtCurrentGeneration` with W242's check off too |
+
+`EXPECTED`, with every protection on, in B only: `SignInsNeverWaitOnHead`
+and `IssuesHoldNoLockAtApp` (a sign-in queues on the head and holds it
+across round trips), `UsesWaitOnlyOnDbWork` (a revoke holds the fence
+across its `COMMIT`), and, with the app compromised,
+`SensitiveOnlyFromOwners` and `IssuedByLiveCredential` (`prepare` seals
+whatever token it is handed). A holds every one.
+
+**Not modelled:** the barrier and R51's wait (HotPathOneIssue's), Postgres's
+lock queue (HotPathOne's), the proof's own check, and a removal's sweep
+beyond one step.
+
 ## TLC
 
 [TLC](https://github.com/tlaplus/tlaplus) is the TLA+ tools' explicit-state
