@@ -24,7 +24,7 @@ import { readUse, replay, type LoggedChange, type Replayed } from '../src/log-re
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
-import { emptyDatabase, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, postgresOnly, rows, sealed, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
+import { emptyDatabase, locksHere, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, postgresOnly, rows, sealed, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -535,14 +535,12 @@ function environment(projectId: string, id: string, slug: string): EnvironmentIn
 
 /** Sessions waiting for the fence (its advisory key, 1668244070 / 0). */
 async function fenceWaiters(): Promise<number> {
-  const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND objid = 0 AND NOT granted`);
-  return Number(row!.n);
+  return locksHere(db.owner, sql`locktype = 'advisory' AND classid = 1668244070 AND objid = 0 AND NOT granted`);
 }
 
 /** Sessions waiting for any lock. */
 async function waiting(): Promise<number> {
-  const [row] = await rows<{ n: string }>(db.owner, sql`SELECT count(*) AS n FROM pg_locks WHERE NOT granted`);
-  return Number(row!.n);
+  return locksHere(db.owner, sql`NOT granted`);
 }
 
 async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {

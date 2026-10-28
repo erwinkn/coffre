@@ -38,6 +38,7 @@ import {
   CONVERSION,
   emptyDatabase,
   ENGINE,
+  locksHere,
   log014Only,
   newEnvironment,
   newProject,
@@ -1104,28 +1105,43 @@ for (const [change, action, code] of [['removal', 'member.remove', 'removed'], [
   });
 }
 
+/**
+ * Another transaction on `database` holds the log's head, as an append
+ * under way would, until the function this answers lets go of it, and its
+ * transaction has ended. Let go in a `finally`: a test that failed holding
+ * it would leave the next one's reset waiting on its locks.
+ */
+async function holdHead(database: Database): Promise<() => Promise<void>> {
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let holding = () => {};
+  const held = new Promise<void>((resolve) => (holding = resolve));
+  const holds = database.transaction(async (tx) => {
+    await lockLogHead(tx);
+    holding();
+    await released;
+  });
+  await Promise.race([held, holds]);
+  return async () => {
+    release();
+    await holds;
+  };
+}
+
 test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
   const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
   // Another transaction holds the head, and keeps it.
-  const holder = await db.connect();
-  let release = () => {};
-  const released = new Promise<void>((resolve) => (release = resolve));
-  let holding!: () => void;
-  const held = new Promise<void>((resolve) => (holding = resolve));
-  const holds = holder.transaction(async (tx) => {
-    await lockLogHead(tx);
-    holding();
-    await released;
-  });
-  await held;
+  const release = await holdHead(await db.connect());
   const started = Date.now();
-  await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error) => isUnavailable(error));
+  try {
+    await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error) => isUnavailable(error));
+  } finally {
+    await release();
+  }
   const took = Date.now() - started;
-  release();
-  await holds;
   assert.ok(took >= 2_500 && took < 6_000, `the read waited ${took} ms`);
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'and the next one, the head free, reads');
 });
@@ -1139,34 +1155,35 @@ test("a burst of reads at a held head: those past its places in line are refused
   // so that what a process does once is done.
   const vault = await w.twin(READ_HEAD_WAITERS + 4);
   assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
-  const holder = await db.connect();
-  let release = () => {};
-  const released = new Promise<void>((resolve) => (release = resolve));
-  let holding!: () => void;
-  const held = new Promise<void>((resolve) => (holding = resolve));
-  const holds = holder.transaction(async (tx) => {
-    await lockLogHead(tx);
-    holding();
-    await released;
-  });
-  await held;
+  const release = await holdHead(await db.connect());
   // As many reads as may wait for the head, each on a connection of its own, until they all do.
   const started = Date.now();
+  // The first to answer, which none should before the read past the line.
+  let first: { ok: boolean; error: unknown } | undefined;
   const timed = () => vault.unwrap({ principal: ADA, purpose: 'reveal', items }).then(
     (outcome) => ({ ok: outcome.ok, error: null as unknown, ms: Date.now() - started }),
     (error: unknown) => ({ ok: false, error, ms: Date.now() - started }),
-  );
+  ).then((outcome) => (first ??= outcome, outcome));
   const waiting = Array.from({ length: READ_HEAD_WAITERS }, timed);
-  const inLine = async () => (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND classid::bigint = ${0x636f6668} AND granted`))[0]!.n;
-  while ((await inLine()) < READ_HEAD_WAITERS) await sleep(20);
-  // The next waits for nothing: unavailable, at once, as a lock not available.
-  const refusedAt = Date.now();
-  await assert.rejects(vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error & { code?: string }) => isUnavailable(error) && error.code === '55P03');
-  assert.ok(Date.now() - refusedAt < 1_000, `the read past the line was refused after ${Date.now() - refusedAt} ms`);
-  // Those in line give up at their bound, unavailable, within the call's deadline.
-  const outcomes = await Promise.all(waiting);
-  release();
-  await holds;
+  // Places in this database: another file's reads, in a clone of their own, take the same keys (T153).
+  const inLine = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${0x636f6668} AND granted`);
+  let outcomes: Awaited<ReturnType<typeof timed>>[];
+  try {
+    // Until they all are: one that answered first never will be, nor any past its deadline.
+    while ((await inLine()) < READ_HEAD_WAITERS) {
+      assert.equal(first, undefined, `a read answered before all were in line: ${first?.ok ? 'ok' : String(first?.error)}`);
+      assert.ok(Date.now() - started < READ_DEADLINE_MS, `the reads were not all in line after ${Date.now() - started} ms`);
+      await sleep(20);
+    }
+    // The next waits for nothing: unavailable, at once, as a lock not available.
+    const refusedAt = Date.now();
+    await assert.rejects(vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error & { code?: string }) => isUnavailable(error) && error.code === '55P03');
+    assert.ok(Date.now() - refusedAt < 1_000, `the read past the line was refused after ${Date.now() - refusedAt} ms`);
+    // Those in line give up at their bound, unavailable, within the call's deadline.
+    outcomes = await Promise.all(waiting);
+  } finally {
+    await release();
+  }
   for (const { ok, error, ms } of outcomes) {
     assert.ok(!ok && isUnavailable(error), `a read in line ended ${ok ? 'ok' : String(error)}`);
     assert.ok(ms < READ_DEADLINE_MS + 1_000, `a read in line answered after ${ms} ms`);
@@ -2395,28 +2412,22 @@ for (const edit of ['forged', 'edited', 'deleted'] as const) {
  * owner can widen at will.
  */
 async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promise<void>): Promise<T> {
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
-  let holding!: () => void;
-  const held = new Promise<void>((resolve) => (holding = resolve));
-  const holder = db.owner.transaction(async (tx) => {
-    await run(tx, sql`SELECT 1 FROM audit_chain_head FOR UPDATE`);
-    holding();
-    await released;
-  });
-  await held;
-  const pending = decision();
-  // Until the vault's login queues on the head.
-  for (let i = 0; ; i++) {
-    const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
-      WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock'`);
-    if (waiting.n > 0) break;
-    assert.ok(i < 200, 'the decision never waited on the head');
-    await sleep(25);
+  const release = await holdHead(db.owner);
+  let pending: Promise<T>;
+  try {
+    pending = decision();
+    // Until the vault's login queues on the head.
+    for (let i = 0; ; i++) {
+      const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock'`);
+      if (waiting.n > 0) break;
+      assert.ok(i < 200, 'the decision never waited on the head');
+      await sleep(25);
+    }
+    await during();
+  } finally {
+    await release();
   }
-  await during();
-  release();
-  await holder;
   return pending;
 }
 
@@ -3710,21 +3721,14 @@ test('only an Owner of the whole instance makes someone an Owner, or changes or 
  * both, on the same state; one made under it, by one after the other.
  */
 async function headHeldWhile<T>(both: () => Promise<T>[]): Promise<T[]> {
-  const holder = await db.connect();
-  let release = () => {};
-  const held = new Promise<void>((resolve) => (release = resolve));
-  let locked = () => {};
-  const isLocked = new Promise<void>((resolve) => (locked = resolve));
-  const holding = holder.transaction(async (tx) => {
-    await lockLogHead(tx);
-    locked();
-    await held;
-  });
-  await isLocked;
-  const running = both();
-  await sleep(300);
-  release();
-  await holding;
+  const release = await holdHead(await db.connect());
+  let running: Promise<T>[];
+  try {
+    running = both();
+    await sleep(300);
+  } finally {
+    await release();
+  }
   return Promise.all(running);
 }
 
@@ -3750,23 +3754,17 @@ for (const how of ['each leaving', 'each stepping down'] as const) {
  * on rows read before their lock would see what was there before `first`.
  */
 async function inTurn<A, B>(first: () => Promise<A>, second: () => Promise<B>): Promise<[A, B]> {
-  const holder = await db.connect();
-  let release = () => {};
-  const held = new Promise<void>((resolve) => (release = resolve));
-  let locked = () => {};
-  const isLocked = new Promise<void>((resolve) => (locked = resolve));
-  const holding = holder.transaction(async (tx) => {
-    await lockLogHead(tx);
-    locked();
-    await held;
-  });
-  await isLocked;
-  const one = first();
-  await sleep(200);
-  const two = second();
-  await sleep(200);
-  release();
-  await holding;
+  const release = await holdHead(await db.connect());
+  let one: Promise<A>;
+  let two: Promise<B>;
+  try {
+    one = first();
+    await sleep(200);
+    two = second();
+    await sleep(200);
+  } finally {
+    await release();
+  }
   return [await one, await two];
 }
 

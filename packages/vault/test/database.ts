@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
@@ -188,8 +189,49 @@ export async function run(db: Queryable, query: SQL): Promise<void> {
   else await (db as unknown as { run(query: SQL): Promise<unknown> }).run(query);
 }
 
+/**
+ * How many of `pg_locks`'s rows match `where` (its `locktype`, `classid`,
+ * `objid`, `mode`, `granted`), of this test's database's sessions alone.
+ * The view is the cluster's: the files running beside this one take the
+ * same advisory keys, and wait for locks, in clones of their own, and
+ * counted here they would say this file's sessions hold or wait for what
+ * they do not (T153).
+ */
+export async function locksHere(owner: Database, where: SQL): Promise<number> {
+  const [row] = await rows<{ n: number }>(owner, sql`SELECT count(*)::int AS n FROM pg_locks JOIN pg_stat_activity USING (pid)
+    WHERE datname = current_database() AND ${where}`);
+  return row!.n;
+}
+
+/** How long a transaction in the test's database may stay open, as a reset sees it, before the reset ends it. */
+const LEFT_OPEN_MS = 10_000;
+
+/**
+ * On Postgres, every other transaction in the test's database ended. One a
+ * test left open, as a holder of the log's head it never let go of, having
+ * failed first, would keep its locks for good: the reset would wait on them,
+ * and so would the file's last `close`, until CI's limit (T153). One open
+ * for over `LEFT_OPEN_MS` is ended, and the reset fails, naming what it ran
+ * last; the next test starts clean.
+ */
+async function endLeftOpen(owner: Database): Promise<void> {
+  for (;;) {
+    const open = await rows<{ pid: number; usename: string; query: string; stale: boolean }>(owner, sql`SELECT pid, usename, query,
+      xact_start < statement_timestamp() - make_interval(secs => ${LEFT_OPEN_MS / 1000}) AS stale
+      FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid() AND xact_start IS NOT NULL`);
+    if (open.length === 0) return;
+    const stale = open.filter(({ stale }) => stale);
+    if (stale.length > 0) {
+      await run(owner, sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid IN (${sql.join(stale.map(({ pid }) => sql`${pid}`), sql`, `)})`);
+      throw new Error(`a test left ${stale.length} transaction(s) open for over ${LEFT_OPEN_MS} ms, now ended: ${stale.map(({ usename, query }) => `${usename}: ${query.trim()}`).join('; ')}`);
+    }
+    await sleep(50);
+  }
+}
+
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
+  if (ENGINE === 'postgres') await endLeftOpen(owner);
   const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, credentials } = tablesOf(owner);
   await owner.delete(secretReferences);
   // SQLite checks a RESTRICT foreign key row by row, so entries that point
