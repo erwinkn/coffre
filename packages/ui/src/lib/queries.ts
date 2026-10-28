@@ -371,14 +371,22 @@ export const queries = {
  * checked as a chain, so for them it is a fact about the page, not a fault.
  */
 async function verifyChain(client: CoffreClient) {
-  // Each settled apart: a check of 0.15's log that could not run says so beside 0.14's verdict, never in its place.
   const [chain, trees] = await Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()]);
   if (chain.status === 'rejected') return chainUnknown(chain.reason);
-  if (trees.status === 'fulfilled') return chainResult(chain.value, false, trees.value);
+  return withTrees(chain.value, false, trees);
+}
+
+/**
+ * 0.14's verdict with 0.15's check beside it, each settled apart: a check
+ * of 0.15's log that could not run says so beside 0.14's verdict, never in
+ * its place, on a visit and after a walk alike.
+ */
+export function withTrees(chain: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: PromiseSettledResult<TreesResult>) {
+  if (trees.status === 'fulfilled') return chainResult(chain, whole, trees.value);
   // Whatever turned it away, a refusal included (access narrowed between the two, review r11): not checked, never "Verified".
   const failed = chainUnknown(trees.reason);
   const problem = failed.integrity === 'unknown' ? failed.problem : 'the request was refused (HTTP 403)';
-  return { ...chainResult(chain.value, false), ...(chain.value.ok ? { treesFailed: `coffre could not check the sealed log: ${problem}` } : {}) };
+  return { ...chainResult(chain, whole), ...(chain.ok ? { treesFailed: `coffre could not check the sealed log: ${problem}` } : {}) };
 }
 
 /** 0.15's log as its check found it (`audit.verifyTrees`): `kept` false where the instance keeps 0.14's alone. */

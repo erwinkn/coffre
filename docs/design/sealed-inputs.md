@@ -215,7 +215,7 @@ the same.
 | 6 | Every seal before any row | each input's seal before its own row | both sound; the first gives `stale` for any input not the log's | none measured |
 | 7 | Seals under a key of their own (HKDF label `coffre.vault.seals.v1`) | 0.14's row key | separates 0.15's seals from 0.14's member MACs | none |
 | 8 | The roles object holds edits only, merged over the release's tables | the whole tables, sealed | a release that changes a shipped role replays the same log the same way (review r1: whole tables made the replay fault) | a decision merges two small tables |
-| 9 | The bulk rows outside the seals; the row audit (PR 8) checks them | sealed per principal | no seal, no key, on the use's statement's bulk write | an erased row resets one principal's cap, and no check names it yet (T138) |
+| 9 | The bulk rows outside the seals; T138 holds them to the log once modelled | sealed per principal | no seal, no key, on the use's statement's bulk write | an erased row resets one principal's cap, and no check names it yet (T138) |
 
 ## Open
 

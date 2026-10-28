@@ -7,7 +7,8 @@
   verify instance` and conformance check its newest signed checkpoint,
   held to the signer's memory, and every entry since by its MAC and
   request (`GET /api/audit/trees`), in six statements and a few
-  milliseconds however long the log. Nothing walks 0.15's log whole on a
+  milliseconds however long the log; more than 2,000 entries since (a
+  checkpointer behind) is said, not read. Nothing walks 0.15's log whole on a
   request: what such a walk reads is the database's to shape, and no
   bound kept it inside a Worker's CPU limit. So an edit a database writer
   makes to old entries, or to rows nobody uses, is not detected until an

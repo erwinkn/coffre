@@ -216,3 +216,14 @@ test('Fable review: a tile read is planned over the ranges it reads, not every r
   const ranges = new Set(plan.flatMap((r) => r['QUERY PLAN'].match(/log_tiles_uses_\d+(?= )/g) ?? []));
   assert.ok(ranges.size <= 2, `${ranges.size} of 40 ranges planned:\n${plan.map((r) => r['QUERY PLAN']).join('\n')}`);
 });
+
+test('PR 8 review r1 (W240): a read of the entries above a pair takes the first `limit` of them, by number, both trees', async () => {
+  const { cp, store } = await open();
+  await use();
+  assert.ok((await cp.tick()).signed);
+  const upto = cp.pair.pair.upto;
+  const above = [await use(), await change(), await use(), await use()];
+  const all = await store.entries(upto, 2n ** 62n);
+  assert.deepEqual(all.map((e) => e.number), above);
+  assert.deepEqual((await store.entries(upto, 2n ** 62n, { limit: 3 })).map((e) => e.number), above.slice(0, 3));
+});

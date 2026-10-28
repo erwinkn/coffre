@@ -31,7 +31,7 @@ async function traffic(store: MemoryStore, cp: Checkpointer, ticks: number) {
   }
 }
 
-const verify = (store: MemoryStore, k: Keys, opts: { anchors?: PairNotes[]; from?: PairNotes } = {}) =>
+const verify = (store: MemoryStore, k: Keys, opts: { anchors?: PairNotes[]; from?: PairNotes; above?: number } = {}) =>
   verifyLog(store, { verifiers: k.verifiers, check: (e) => (authentic(k.macKey)(e) ? null : 'mac'), ...opts });
 
 test('an honest log: both trees sealed every tick as one pair, verified, and every entry provable', async () => {
@@ -838,4 +838,29 @@ test('review r11: a signer\'s memory that does not read as a pair is refused, ne
   store.rollBack(0n);
   assert.ok((await verify(store, k)).ok);
   assert.ok(!(await verify(store, k, { anchors: [remembered] })).ok);
+});
+
+test('PR 8 review r1 (W240): above the newest pair a walk reads at most `above` entries, and nothing above a database behind a pair held outside', async () => {
+  const { k, store, memory, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 3);
+  const signed = decodePair(memory.record!)!;
+  // A checkpointer stalled: five entries above its pair, three checked, the rest named and never read.
+  for (let i = 0; i < 5; i += 1) store.append('uses', `late-${i}`);
+  const capped = await verify(store, k, { from: signed, above: 3 });
+  assert.equal(capped.unsealed, 3);
+  assert.ok(capped.problems.some((p) => /^more than 3 entries above the newest checkpoint \(up to \d+\): the checkpointer is behind/.test(p)), capped.problems.join('\n'));
+  assert.ok((await verify(store, k, { from: signed, above: 5 })).ok);
+  // Every checkpoint but the genesis deleted, the entries kept: behind the signer's pair, and not one entry read.
+  for (const upto of [...store.rows.keys()]) if (upto > 0n) store.rows.delete(upto);
+  let read = 0;
+  const entries = store.entries.bind(store);
+  store.entries = async (...args) => {
+    const found = await entries(...args);
+    read += found.length;
+    return found;
+  };
+  const behind = await verify(store, k, { anchors: [signed], above: 3 });
+  assert.ok(behind.behind && !behind.ok, behind.problems.join('\n'));
+  assert.deepEqual([read, behind.unsealed], [0, 0]);
 });

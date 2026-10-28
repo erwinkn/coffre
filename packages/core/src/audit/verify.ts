@@ -46,9 +46,9 @@ export type LogReader = {
    * The entries numbered in (after, upto], by number, both trees. Uses are
    * read from `floor`, the floor of `at` signed in the pair at `after`, when
    * the caller gives it: a reader that takes it from its rows lets a writer
-   * hide what lies above (FloorChecked).
+   * hide what lies above (FloorChecked). With `limit`, the first that many.
    */
-  entries(after: bigint, upto: bigint, options?: { floor?: number }): Promise<LogEntry[]>;
+  entries(after: bigint, upto: bigint, options?: { floor?: number; limit?: number }): Promise<LogEntry[]>;
   tiles(tree: TreeName, keys: readonly TileKey[]): Promise<Tile[]>;
   /** The newest retention change, if any, and its leaf index in the changes tree (plan PR 7). */
   retention?(): Promise<{ entry: LogEntry; index: number } | null>;
@@ -86,6 +86,12 @@ type Options = {
   check?: (entry: LogEntry) => string | null;
   /** Whether a change is a retention change, and the cut it names; null for any other entry. */
   cut?: (entry: LogEntry) => Cut | null;
+  /**
+   * The most entries above the newest pair a walk checks, for a caller bound
+   * in time: past it, a problem, and the rest unread. A checkpointer stalled,
+   * or a writer's planted rows, grow what lies there without bound.
+   */
+  above?: number;
 };
 
 export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
@@ -307,10 +313,19 @@ async function walk(
     }
     if (final) break;
   }
-  // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9).
-  const unsealed = (await reader.entries(cursor, MAX_NUMBER, { floor })).filter((e) => !dropped(e));
-  walkEntries(unsealed);
-  verdict.unsealed = unsealed.length;
+  // Above the newest pair, no tree to hold the entries to: the signed floor is all that bounds the read (review r9). A
+  // database behind a pair held outside is broken already: what lies above its newest pair, which deleted checkpoints can
+  // make the whole log, is not read (PR 8 review r1).
+  if (!verdict.behind) {
+    const limit = opts.above === undefined ? {} : { limit: opts.above + 1 };
+    const unsealed = (await reader.entries(cursor, MAX_NUMBER, { floor, ...limit })).filter((e) => !dropped(e));
+    const checked = opts.above === undefined ? unsealed : unsealed.slice(0, opts.above);
+    walkEntries(checked);
+    verdict.unsealed = checked.length;
+    if (checked.length < unsealed.length) {
+      problems.push(`more than ${opts.above} entries above the newest checkpoint (up to ${cursor}): the checkpointer is behind, or entries were planted; checked through entry ${checked.at(-1)?.number ?? cursor}`);
+    }
+  }
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);
   // Above the start, the retention change must be on the walk and sealed: in a window a checkpoint verified.
   if (!retainedMet || (retained !== null && retained.entry.number > last.pair.upto)) {

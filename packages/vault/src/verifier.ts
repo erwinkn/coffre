@@ -16,7 +16,8 @@ import { requestsUnique } from './store.ts';
  * on every visit (R25), and keeps nothing between calls. It checks the
  * newest signed pair, its signatures and the pairs held outside (the
  * signer's memory), then every entry above it by its MAC and its request:
- * a tick's worth of entries, whatever the log's size, in six statements.
+ * a tick's worth of entries, whatever the log's size, in six statements,
+ * and never more than `ABOVE_NEWEST` of them.
  *
  * Below the newest pair, the pair vouches for what it sealed: it is not
  * walked again. A row a decision reads is held to its object's newest
@@ -54,6 +55,14 @@ export type VerifyOptions = {
   anchors?: readonly PairNotes[];
 };
 
+/**
+ * The most entries above the newest pair a check reads: four ticks' worth
+ * at R44's 1,000 uses a second, some 16 ms at the 7 µs an entry measured
+ * (verifier-cost.test.ts). More is a checkpointer behind, or rows a writer
+ * planted, and is said, never read (review r1).
+ */
+export const ABOVE_NEWEST = 2_000;
+
 /** The verdict as the vault gives it, and whether the database ended behind a pair held outside (`Verdict.behind`). */
 export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boolean };
 
@@ -80,6 +89,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
       check,
       ...(newest === null ? {} : { from: newest.notes }),
       ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
+      above: ABOVE_NEWEST,
     });
     const problems = [...verdict.problems];
     if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
@@ -91,7 +101,8 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     kept: true,
     ok: problems.length === 0,
     problems,
-    checkpoint: head === null ? null : { upto: head.upto.toString(), at: head.at },
+    // The genesis pair seals nothing and is signed at time 0: no checkpoint yet.
+    checkpoint: head === null || head.upto === 0n ? null : { upto: head.upto.toString(), at: head.at },
     checkpoints: verdict.checkpoints,
     sealed: verdict.sealed,
     unsealed: verdict.unsealed,

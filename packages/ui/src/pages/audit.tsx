@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { chainResult, chainUnknown, queries, shownChain, type AuditSearch, type ChainResult } from '../lib/queries';
+import { chainUnknown, queries, shownChain, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -56,7 +56,8 @@ export function AuditPage() {
       const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
       // 0.15's log, where the instance keeps it, checked again as on a visit: from its newest checkpoint. Nothing walks it
       // whole on a request: its cost is the database's to shape.
-      verdict = chainResult(chain, true, chain.ok ? await client.audit.verifyTrees() : undefined);
+      const [trees] = await Promise.allSettled([chain.ok ? client.audit.verifyTrees() : Promise.resolve({ kept: false as const })]);
+      verdict = withTrees(chain, true, trees);
     } catch (error) {
       verdict = chainUnknown(error);
     }
