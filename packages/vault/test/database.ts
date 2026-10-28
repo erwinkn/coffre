@@ -134,17 +134,22 @@ export function postgresOnly(reason: string): { skip: string | false } {
  * transaction; SQLite has no such switch, so they are dropped and made again.
  */
 export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
+  return withTriggersLifted(owner, 'audit_log', work);
+}
+
+/** `work`, as the owner, with `table`'s triggers lifted (`withLogUnlocked`): a secret version's erase-only, say. */
+export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions', work: (db: Queryable) => Promise<T>): Promise<T> {
   if (ENGINE === 'postgres') {
     return owner.transaction(async (tx) => {
-      await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
+      await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));
       const result = await work(tx);
-      await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER USER`);
+      await tx.execute(sql.raw(`ALTER TABLE ${table} ENABLE TRIGGER USER`));
       return result;
     });
   }
   const triggers = await rows<{ name: string; sql: string }>(
     owner,
-    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
+    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ${table}`,
   );
   for (const trigger of triggers) await run(owner, sql.raw(`DROP TRIGGER ${trigger.name}`));
   try {

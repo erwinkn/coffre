@@ -805,7 +805,7 @@ export async function setSecrets(
       marked.forEach(({ secret, to, versionId }, i) => {
         after.set(secret.secretId, writtenSecret(at(secret.secretId), versionColumns(versionId, rewrapped.values[i]!, { sensitive: to === 'sensitive', plaintext: null })));
       });
-      for (const { holder, source } of references) after.set(holder.secretId, { ...at(holder.secretId), source: source.id, version: null });
+      for (const { id, holder, source } of references) after.set(holder.secretId, { ...at(holder.secretId), source: source.id, reference: id, version: null });
       for (const key of archives) {
         const row = prepared.get(key);
         if (row !== undefined && row.archivedAt === null) after.set(row.id, null);

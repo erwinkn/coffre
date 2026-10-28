@@ -1,0 +1,1 @@
+ALTER TABLE `secret_references` ADD `ended_at` integer;

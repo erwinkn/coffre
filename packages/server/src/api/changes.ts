@@ -243,17 +243,17 @@ export function secretChange(id: string, before: SecretRead | undefined, after: 
 
 /** A key's columns with a new version of its own: its value, no reference. */
 export function writtenSecret(at: Pick<SecretColumns, 'id' | 'projectId' | 'environmentId'>, version: VersionColumns): SecretColumns {
-  return { id: at.id, projectId: at.projectId, environmentId: at.environmentId, source: null, version };
+  return { id: at.id, projectId: at.projectId, environmentId: at.environmentId, source: null, reference: null, version };
 }
 
-/** A version's columns, as its row stores them: its id, whether it is sensitive and whether plain (a plaintext kept), and the data key wrapped in its envelope. */
+/** A version's columns, as its row stores them: its id, whether it is sensitive, a plain one's text, and the data key wrapped in its envelope. */
 export function versionColumns(
   id: string,
   envelope: Pick<Envelope, 'kekProvider' | 'kekId' | 'kekVersion' | 'wrappedDek'>,
   { sensitive, plaintext }: { sensitive: boolean; plaintext: string | null },
 ): VersionColumns {
   const { kekProvider, kekId, kekVersion, wrappedDek } = envelope;
-  return { id, sensitive, plain: plaintext !== null, kekProvider, kekId, kekVersion, wrappedDek: wrappedDek.toString('base64') };
+  return { id, sensitive, plaintext, kekProvider, kekId, kekVersion, wrappedDek: wrappedDek.toString('base64') };
 }
 
 /** An environment's change: made (no read), or from its row as read, with its seal. */
@@ -264,10 +264,12 @@ export function environmentChange(before: ObjectRead<EnvironmentColumns> | undef
 /**
  * A new environment's object, 0.15's (`environmentObject`): its own id's
  * protection as the policy has it, a protected fork's (`protectIds`), which
- * `audited` holds to the policy as it commits (`policyStill`).
+ * `audited` holds to the policy as it commits (`policyStill`). Its project
+ * is live: an archived one takes no environment, which each maker checks
+ * under the head.
  */
-export function madeEnvironment(caller: Pick<Caller, 'policy'>, row: Omit<EnvironmentColumns, 'protected' | 'archived'>): EnvironmentColumns {
-  return { ...row, protected: protects(caller.policy, row.id), archived: false };
+export function madeEnvironment(caller: Pick<Caller, 'policy'>, row: Omit<EnvironmentColumns, 'protected' | 'archived' | 'projectArchived'>): EnvironmentColumns {
+  return { ...row, protected: protects(caller.policy, row.id), archived: false, projectArchived: false };
 }
 
 /** The protection a new environment's row carries with 0.15's log, its object's; none with 0.14's, which keeps it in the policy. */

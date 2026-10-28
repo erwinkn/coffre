@@ -61,6 +61,38 @@ export class NotLogged extends Error {
   }
 }
 
+/**
+ * An object as the log has it: `unlogged`, 0.14's alone (no change, no seal
+ * on its row: before the cutover); `gone`, the log's newest change of it
+ * left none (a key archived or deleted: `secret.delete`); else its object,
+ * its row checked against its seal and that seal the newest change's.
+ */
+export type Held = { log: 'unlogged' } | { log: 'gone' } | { log: 'live'; object: Input };
+
+/**
+ * Whether `ref` has an object, from its log, never its row's columns (an
+ * `archived_at` a writer set is no archive), and the object, checked: what
+ * a decision may weigh (formal/SealedObjects.tla, LivenessFromLog,
+ * ReferenceInObject). Throws `NotLogged` for a row the log does not bear
+ * out: a seal no change wrote, a gone object's row live again, a live one's
+ * row gone, or a row its seal does not cover.
+ */
+export async function heldByLog(keys: SealKeys, db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
+  const [{ row, seal }, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+  if (newest === null) {
+    if (seal !== null) throw new NotLogged(ref, 'stale');
+    return { log: 'unlogged' };
+  }
+  if (newest.seal === null) {
+    if (row !== null || seal !== null) throw new NotLogged(ref, 'stale');
+    return { log: 'gone' };
+  }
+  if (row === null) throw new NotLogged(ref, 'stale');
+  if (!sealed(keys, ref, row, seal)) throw new NotLogged(ref, 'tampered');
+  if (seal === null || !newest.seal.equals(seal)) throw new NotLogged(ref, 'stale');
+  return { log: 'live', object: row };
+}
+
 /** One of these changes' rows moved from the seal it was read at, under the locks: whoever wrote it went around the vault. */
 export class Moved extends Error {}
 
@@ -99,6 +131,14 @@ export class Changes {
   cite(ref: Ref, seq: bigint): void {
     const staged = this.#staged.get(objectKey(ref));
     if (staged !== undefined) staged.old = seq;
+  }
+
+  /**
+   * An object as the log has it (`heldByLog`), checked against its seal, for
+   * a decision to weigh before it stages anything.
+   */
+  held(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
+    return heldByLog(this.#keys.seals, db, ref);
   }
 
   /**
@@ -257,7 +297,7 @@ function objectOf(change: ObjectChange): Input | null {
  * - a key: written whole, its value or its reference (`secret.write`); or
  *   deleted, archived or erased;
  * - an environment: made, with the protection its id was given; renamed,
- *   archived or restored, then deleted.
+ *   archived or restored, its project archived or restored, then deleted.
  */
 function opsBetween(before: Input | null, after: Input | null): Op[] {
   if (after === null) return before === null ? [] : [{ op: 'secret.delete' }];
@@ -276,8 +316,8 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
     }
     case 'secret': {
       if (before !== null && canonical(before) === canonical(after)) return [];
-      const { projectId, environmentId, version, nature, key, source } = after;
-      return [{ op: 'secret.write', projectId, environmentId, version, nature, key, source }];
+      const { projectId, environmentId, version, nature, key, digest, source, reference } = after;
+      return [{ op: 'secret.write', projectId, environmentId, version, nature, key, digest, source, reference }];
     }
     case 'environment': {
       const ops: Op[] = [];
@@ -285,11 +325,14 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
         const { projectId, slug, owner, parentId } = after;
         ops.push({ op: 'environment.create', projectId, slug, owner, parentId, protected: after.protected });
         if (after.archived) ops.push({ op: 'environment.archive', archived: true });
+        if (after.projectArchived) ops.push({ op: 'project.archive', archived: true });
         return ops;
       }
       if (before.kind !== 'environment') return [];
       if (before.slug !== after.slug) ops.push({ op: 'environment.rename', slug: after.slug });
       if (before.archived !== after.archived) ops.push({ op: 'environment.archive', archived: after.archived });
+      // A deletion clears it (`environment.delete`): no restore of the project's logged on the way.
+      if (before.projectArchived !== after.projectArchived && !after.deleted) ops.push({ op: 'project.archive', archived: after.projectArchived });
       if (!before.deleted && after.deleted) ops.push({ op: 'environment.delete' });
       return ops;
     }
@@ -298,9 +341,13 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
   }
 }
 
-/** Whether `change_input` writes the object's rows from its value: those the vault's login cannot write. */
+/**
+ * Whether `change_input` writes the object's rows from its value: those the
+ * vault's login cannot write. A key's, the one change the vault makes of
+ * one: its reference's end (`ended_at`, 0029).
+ */
 function writes(ref: Ref): boolean {
-  return ref.kind === 'environment' || ref.kind === 'roles' || ref.kind === 'policy';
+  return ref.kind === 'environment' || ref.kind === 'secret' || ref.kind === 'roles' || ref.kind === 'policy';
 }
 
 /** Two objects alike as a seal sees them (a principal's grants a set). */

@@ -615,13 +615,20 @@ export type SecretRead = ObjectRead<SecretColumns> & { archived: boolean };
 /**
  * Keys as 0.15's objects take them (`secretObject`, packages/vault): each
  * one's place, its current version's nature and wrapped data key, never its
- * ciphertext, and, with no version of its own, the source its newest
- * reference names, as `use_credential` reads them. By id, or every key
- * under a place, archived ones included.
+ * ciphertext, a plain one's text (which the vault hashes: its object, and
+ * the log, hold only the digest; these columns are never logged), and, with
+ * no version of its own, the source its newest reference names while that
+ * reference has not ended, as `use_credential` reads them. By id, or every
+ * key under a place, archived ones included.
  */
 export async function secretObjects(db: Queryable, by: { ids: readonly string[] } | { under: Doomed }): Promise<Map<string, SecretRead>> {
   const { secrets, secretVersions, secretReferences } = tablesOf(db);
-  const source = sql<string | null>`(SELECT ${secretReferences.sourceSecretId} FROM ${secretReferences} WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  // Its newest reference row's source, unless that row has ended (`ended_at`): the vault's end of it, logged.
+  const source = sql<string | null>`(SELECT CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.sourceSecretId} END FROM ${secretReferences}
+    WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  // And that row's id, which the object holds beside its source.
+  const reference = sql<string | null>`(SELECT CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.id} END FROM ${secretReferences}
+    WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
   const read = (where: SQL) => db
     .select({
       id: secrets.id,
@@ -631,12 +638,13 @@ export async function secretObjects(db: Queryable, by: { ids: readonly string[] 
       seal: secrets.seal,
       versionId: secrets.currentVersionId,
       sensitive: secretVersions.sensitive,
-      plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`,
+      plaintext: secretVersions.plaintext,
       kekProvider: secretVersions.kekProvider,
       kekId: secretVersions.kekId,
       kekVersion: secretVersions.kekVersion,
       wrappedDek: secretVersions.wrappedDek,
       source,
+      reference,
     })
     .from(secrets)
     .leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
@@ -653,10 +661,11 @@ export async function secretObjects(db: Queryable, by: { ids: readonly string[] 
       projectId: row.projectId,
       environmentId: row.environmentId,
       source: row.versionId === null ? row.source : null,
+      reference: row.versionId === null ? row.reference : null,
       version: row.versionId === null || row.wrappedDek === null ? null : {
         id: row.versionId,
         sensitive: row.sensitive === true,
-        plain: Boolean(row.plain),
+        plaintext: row.plaintext ?? null,
         kekProvider: row.kekProvider!,
         kekId: row.kekId!,
         kekVersion: row.kekVersion!,
@@ -668,9 +677,13 @@ export async function secretObjects(db: Queryable, by: { ids: readonly string[] 
   }]));
 }
 
-/** Environments as 0.15's objects take them (`environmentObject`), by id, or a project's every one, deleted ones included. */
+/**
+ * Environments as 0.15's objects take them (`environmentObject`), by id, or a
+ * project's every one, deleted ones included: each with its project's
+ * archival, apart from its own.
+ */
 export async function environmentObjects(db: Queryable, by: { ids: readonly string[] } | { projectId: string }): Promise<Map<string, ObjectRead<EnvironmentColumns>>> {
-  const { environments } = tablesOf(db);
+  const { environments, projects } = tablesOf(db);
   if ('ids' in by && by.ids.length === 0) return new Map();
   const rows = await db
     .select({
@@ -681,11 +694,16 @@ export async function environmentObjects(db: Queryable, by: { ids: readonly stri
       parentId: environments.parentId,
       protected: environments.protected,
       archivedAt: environments.archivedAt,
+      projectArchived: truth(isNotNull(projects.archivedAt)),
       seal: environments.seal,
     })
     .from(environments)
+    .leftJoin(projects, eq(projects.id, environments.projectId))
     .where('ids' in by ? inArray(environments.id, [...new Set(by.ids)]) : eq(environments.projectId, by.projectId));
-  return new Map(rows.map(({ archivedAt, seal, ...row }) => [row.id, { columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null }, seal: seal ?? null }]));
+  return new Map(rows.map(({ archivedAt, projectArchived, seal, ...row }) => [row.id, {
+    columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null, projectArchived: Boolean(projectArchived) },
+    seal: seal ?? null,
+  }]));
 }
 
 // --- members and sign-in ------------------------------------------------------

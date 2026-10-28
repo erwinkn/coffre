@@ -9,7 +9,7 @@ import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { objectKey, type Input, type Kind, type Ref } from './inputs.ts';
-import { configObject, environmentObject, memberStanding, principalObject } from './objects.ts';
+import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -481,6 +481,19 @@ export async function endedReferences(db: Queryable, seqs: readonly bigint[]): P
   return new Set(rows.map((row) => row.relatedSeq!));
 }
 
+/**
+ * The vault's allowed `reference.end` entries naming these `reference.create`
+ * entries, whole, for a caller to hold to their MACs: a break weighs only
+ * authentic ends (a forged one must not stop a genuine break), where a read
+ * takes any (`endedReferences`).
+ */
+export async function referenceEnds(db: Queryable, seqs: readonly bigint[]): Promise<StoredEntry[]> {
+  if (seqs.length === 0) return [];
+  const { auditLog } = tablesOf(db);
+  return stored(await db.select(entryColumns(db)).from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow'), inArray(auditLog.relatedSeq, [...new Set(seqs)]))));
+}
+
 /** The project each environment is in: a holder's ids, checked against each other. */
 /** Whether a project of this id is there, and not deleted. */
 export async function projectLive(db: Queryable, id: string): Promise<boolean> {
@@ -815,10 +828,12 @@ function heldAs(secretVersions: ReturnType<typeof tablesOf>['secretVersions'], c
  * them; `row` null when it has none. The roles' and the policy's rows are
  * their objects as the change that made them wrote them.
  *
- * Each object is read from its own rows alone, as the change path writes
- * them: an environment is deleted when its own slug is a tombstone, not its
- * project's (a project's deletion writes its environments' rows, plan PR
- * 4b), and it is unprotected until a change or the cutover says otherwise.
+ * Each object is read from its rows as the change path writes them
+ * (objects.ts): an environment is deleted when its own slug is a tombstone,
+ * not its project's (a project's deletion writes its environments' rows,
+ * plan PR 4b), unprotected until a change or the cutover says otherwise,
+ * and holds its project's archival apart from its own; a key's source is
+ * its newest reference row's until that row has ended.
  */
 export type HeldObject = { row: Input | null; seal: Buffer | null };
 
@@ -836,11 +851,14 @@ export async function loggedRows(db: Queryable): Promise<{
   };
 }
 
-/** The kinds whose objects the change path reads so far: the vault's own, an environment's, the roles' and the policy's. */
-export type ReadKind = Exclude<Kind, 'credential' | 'secret'>;
+/**
+ * The kinds whose objects the change path reads: the vault's own, an
+ * environment's, a key's (its reference's end), the roles' and the policy's.
+ */
+export type ReadKind = Exclude<Kind, 'credential'>;
 
 export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<HeldObject> {
-  const { vaultMembers, environments, logConfig } = tablesOf(db);
+  const { vaultMembers, environments, projects, logConfig } = tablesOf(db);
   switch (ref.kind) {
     case 'principal': {
       const [row] = await db
@@ -859,13 +877,40 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): 
           parentId: environments.parentId,
           protected: environments.protected,
           archivedAt: environments.archivedAt,
+          projectArchived: truth(isNotNull(projects.archivedAt)),
           seal: environments.seal,
         })
         .from(environments)
+        .leftJoin(projects, eq(projects.id, environments.projectId))
         .where(eq(environments.id, ref.id));
       if (row === undefined) return { row: null, seal: null };
       const { projectId, slug, owner, parentId, archivedAt } = row;
-      return { row: environmentObject({ id: ref.id, projectId, slug, owner, parentId, protected: row.protected, archived: archivedAt !== null }), seal: row.seal ?? null };
+      return {
+        row: environmentObject({ id: ref.id, projectId, slug, owner, parentId, protected: row.protected, archived: archivedAt !== null, projectArchived: Boolean(row.projectArchived) }),
+        seal: row.seal ?? null,
+      };
+    }
+    case 'secret': {
+      // Unarchived: an archived key is no object (`secret.delete`). Its version's plaintext, for a plain one's digest.
+      const [row] = await rowsOf<{
+        project_id: string; environment_id: string; seal: Buffer | Uint8Array | null; version_id: string | null; source: string | null; reference: string | null;
+        sensitive: boolean | number | null; plaintext: string | null; kek_provider: string | null; kek_id: string | null; kek_version: string | null; wrapped_dek: Buffer | Uint8Array | null;
+      }>(db, sql`SELECT s.project_id, s.environment_id, s.seal, s.current_version_id AS version_id, ${newestSource(sql`s.id`)} AS source,
+          ${newestReference(sql`s.id`)} AS reference,
+          v.sensitive, v.plaintext, v.kek_provider, v.kek_id, v.kek_version, v.wrapped_dek
+        FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id WHERE s.id = ${ref.id} AND s.archived_at IS NULL`);
+      if (row === undefined) return { row: null, seal: null };
+      const version = row.version_id === null || row.wrapped_dek === null ? null : {
+        id: row.version_id, sensitive: Boolean(row.sensitive), plaintext: row.plaintext,
+        kekProvider: row.kek_provider!, kekId: row.kek_id!, kekVersion: row.kek_version!, wrappedDek: Buffer.from(row.wrapped_dek).toString('base64'),
+      };
+      return {
+        row: secretObject({
+          id: ref.id, projectId: row.project_id, environmentId: row.environment_id,
+          source: row.version_id === null ? row.source : null, reference: row.version_id === null ? row.reference : null, version,
+        }),
+        seal: row.seal === null ? null : Buffer.from(row.seal),
+      };
     }
     case 'roles': case 'policy': {
       const [row] = await db.select({ value: logConfig.value, seal: logConfig.seal }).from(logConfig).where(eq(logConfig.name, ref.kind));
@@ -886,6 +931,49 @@ export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buf
     .orderBy(desc(logChanges.number))
     .limit(1);
   return row === undefined ? null : { seal: row.seal ?? null };
+}
+
+/**
+ * A key's source as its object holds it: its newest reference row's, unless
+ * that row has ended (`ended_at`, 0029): a reference broken, replaced or
+ * cut. Null for a key with no reference row. `secretId`: the key's id, as
+ * its query names it.
+ */
+function newestSource(secretId: SQL): SQL<string | null> {
+  return sql<string | null>`(SELECT CASE WHEN y.ended_at IS NULL THEN y.source_secret_id END FROM secret_references y WHERE y.secret_id = ${secretId} ORDER BY y.created_seq DESC LIMIT 1)`;
+}
+
+/** ... and that row's id, which the object holds beside its source. */
+function newestReference(secretId: SQL): SQL<string | null> {
+  return sql<string | null>`(SELECT CASE WHEN y.ended_at IS NULL THEN y.id END FROM secret_references y WHERE y.secret_id = ${secretId} ORDER BY y.created_seq DESC LIMIT 1)`;
+}
+
+/**
+ * The rows' ends of references whose end changes no object, by their ids
+ * (`end_reference`, 0029), written beside 0.14's entry: a holder archived,
+ * holding a value, standing on another reference, or 0.14's alone (no
+ * seal, no change). A standing one of a logged holder is refused: its end
+ * is its holder's change.
+ */
+export async function endReferenceRows(tx: Transaction, ids: readonly string[], at: number): Promise<void> {
+  if (ids.length === 0) return;
+  if (!Number.isSafeInteger(at) || at < 0) throw new Error('a reference ends at a time, whole ms since the epoch');
+  if (engineOf(tx) === 'postgres') {
+    await rowsOf(tx, sql`SELECT end_reference(r.id, ${at}::bigint) FROM unnest(${sql.param([...ids])}::uuid[]) AS r(id)`);
+    return;
+  }
+  // One writer at a time on SQLite: no lock to take.
+  const listed = sql.join(ids.map((id) => sql`${id}`), sql`, `);
+  const standing = await rowsOf<{ id: string; holder: string; seal: Buffer | Uint8Array | null }>(tx, sql`SELECT y.id, x.id AS holder, x.seal FROM secret_references y JOIN secrets x ON x.id = y.secret_id
+    WHERE y.id IN (${listed}) AND y.ended_at IS NULL AND x.archived_at IS NULL AND x.current_version_id IS NULL
+      AND y.id = (SELECT z.id FROM secret_references z WHERE z.secret_id = x.id ORDER BY z.created_seq DESC LIMIT 1)`);
+  for (const row of standing) {
+    if (row.seal !== null || (await newestChange(tx, { kind: 'secret', id: row.holder })) !== null) {
+      // Postgres's code for it, `invalid_parameter_value`, as `end_reference` raises it.
+      throw Object.assign(new Error(`reference ${row.id} is its holder's standing one: its end is a change of the holder`), { code: '22023' });
+    }
+  }
+  await rowsOf(tx, sql`UPDATE secret_references SET ended_at = ${at} WHERE id IN (${listed}) AND ended_at IS NULL`);
 }
 
 /**
@@ -949,19 +1037,19 @@ export function isStale(error: unknown): boolean {
 
 class StaleRow extends Error {}
 
-/** The ops `change_input` takes, by kind (0023): the cutover's genesis on any. */
+/** The ops `change_input` takes, by kind (0023, 0029): the cutover's genesis on any. A key's: its reference's end. */
 const KNOWN_OPS: Record<Kind, readonly string[]> = {
   principal: ['member.add', 'member.role', 'member.remove', 'member.restore', 'access.grant', 'access.revoke'],
   environment: ['environment.protect', 'environment.rename', 'environment.archive'],
   roles: ['role.define'],
   policy: ['bulk.limit'],
   credential: [],
-  secret: [],
+  secret: ['secret.write'],
 };
 
 /** `change_input`, step for step, on SQLite. */
 async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint | null> {
-  const { logChanges, logUses, vaultMembers, environments, logConfig, credentials, serviceBindings, secrets } = tablesOf(tx);
+  const { logChanges, logUses, vaultMembers, environments, projects, logConfig, credentials, serviceBindings, secrets, secretReferences } = tablesOf(tx);
   const { ref } = call;
   const target = objectKey(ref);
   const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, call.requestId));
@@ -976,7 +1064,9 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
   const named = (JSON.parse(call.payload) as { ref?: { kind?: unknown; id?: unknown } }).ref;
   if ((op !== 'genesis' || named !== undefined) && (named?.kind !== ref.kind || named.id !== ref.id)) throw new Error(`a change names the object it is to: ${ref.kind}, ${ref.id}`);
   const value = call.value === null ? null : (JSON.parse(call.value) as Record<string, unknown>);
-  const valued = ref.kind === 'environment' ? op !== 'genesis' && value === null : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null) : value !== null;
+  const valued = ref.kind === 'environment' ? op !== 'genesis' && value === null
+    : ref.kind === 'secret' ? (op === 'secret.write') === (value === null)
+    : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null) : value !== null;
   if (valued) throw new Error(`a ${ref.kind} change ${op} carries the object it leaves exactly when change_input writes it`);
   // ChangeChecksSeal.
   const held = await heldSeal(tx, ref);
@@ -993,18 +1083,43 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
       done = changedRows(await tx.update(credentials).set({ seal: call.seal }).where(and(eq(credentials.id, ref.id), from(credentials.seal))))
         || changedRows(await tx.update(serviceBindings).set({ seal: call.seal }).where(and(eq(serviceBindings.id, ref.id), from(serviceBindings.seal))));
       break;
-    case 'secret':
-      done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(and(eq(secrets.id, ref.id), from(secrets.seal))));
+    case 'secret': {
+      if (value === null) {
+        done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(and(eq(secrets.id, ref.id), from(secrets.seal))));
+        break;
+      }
+      // A reference's end (0029): the holder, live with no version of its own, left with no source, its newest reference
+      // row ended, which must stand.
+      const [row] = await tx.select({ projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets)
+        .where(and(eq(secrets.id, ref.id), from(secrets.seal), isNull(secrets.archivedAt), isNull(secrets.currentVersionId)));
+      const ends = row !== undefined && value.kind === 'secret' && value.id === ref.id && row.projectId === value.projectId && row.environmentId === value.environmentId
+        && value.version === '' && value.nature === 'secret' && value.key === null && value.digest === null && value.source === null
+        && value.reference === null;
+      if (!ends) {
+        done = 0;
+        break;
+      }
+      done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(eq(secrets.id, ref.id)));
+      const [newest] = await tx.select({ id: secretReferences.id, endedAt: secretReferences.endedAt }).from(secretReferences)
+        .where(eq(secretReferences.secretId, ref.id)).orderBy(desc(secretReferences.createdSeq)).limit(1);
+      if (newest === undefined || newest.endedAt !== null) throw new StaleRow("the secret object's reference has no standing row: stale");
+      await tx.update(secretReferences).set({ endedAt: new Date(call.at) }).where(eq(secretReferences.id, newest.id));
       break;
+    }
     case 'environment': {
       if (value === null) {
         done = changedRows(await tx.update(environments).set({ seal: call.seal }).where(and(eq(environments.id, ref.id), from(environments.seal))));
         break;
       }
-      const [row] = await tx.select({ projectId: environments.projectId, parentId: environments.parentId, owner: environments.owner, slug: environments.slug, archivedAt: environments.archivedAt, seal: environments.seal }).from(environments).where(eq(environments.id, ref.id));
+      const [row] = await tx.select({
+        projectId: environments.projectId, parentId: environments.parentId, owner: environments.owner, slug: environments.slug, archivedAt: environments.archivedAt, seal: environments.seal,
+        projectArchived: truth(isNotNull(projects.archivedAt)),
+      }).from(environments).leftJoin(projects, eq(projects.id, environments.projectId)).where(eq(environments.id, ref.id));
       const deleted = value.deleted === true;
       const holds = row !== undefined && sameBytes(row.seal ?? null, call.sealFrom) && value.kind === 'environment' && value.id === ref.id
         && row.projectId === value.projectId && row.parentId === (value.parentId ?? null) && row.owner === (value.owner ?? null)
+        // Its project's archival is the project's row's, none once deleted: held, never written here (0029).
+        && (!deleted && Boolean(row.projectArchived)) === value.projectArchived
         // A deleted row keeps its tombstone, and its object the slug before it (objects.ts): never written again (0025).
         && isTombstone(row.slug) === deleted && !isTombstone(String(value.slug)) && (!deleted || row.slug.slice(0, row.slug.indexOf(TOMBSTONE)) === value.slug);
       if (!holds) {

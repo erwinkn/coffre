@@ -597,7 +597,7 @@ class StaleRow extends Error {}
 const APP_OPS: Record<PreparedChange['kind'], readonly string[]> = {
   credential: ['credential.issue', 'credential.revoke', 'credential.renew', 'credential.scope'],
   secret: ['secret.write', 'secret.delete'],
-  environment: ['environment.create', 'environment.rename', 'environment.archive', 'environment.delete'],
+  environment: ['environment.create', 'environment.rename', 'environment.archive', 'project.archive', 'environment.delete'],
 };
 
 /** `app_change` on SQLite. */

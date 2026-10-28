@@ -270,7 +270,7 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
   // The cutover seals what the use reads (plan PR 9): the environment, the roles, Ada's session and the key. PR 5's
   // statement reads a credential's and a key's rows; here their objects are the cutover's.
   const credential: CredentialInput = { kind: 'credential', id: credentialId, principal: ADA, caller: 'person', scope: null, expiresAt: null, revoked: false };
-  const secret: SecretInput = { kind: 'secret', id: secretId, projectId: project, environmentId: staging, version: randomUUID(), nature: 'secret', key: { kekProvider: 'local', kekId: 'k', kekVersion: '1', bytes: 'AA==' }, source: null };
+  const secret: SecretInput = { kind: 'secret', id: secretId, projectId: project, environmentId: staging, version: randomUUID(), nature: 'secret', key: { kekProvider: 'local', kekId: 'k', kekVersion: '1', bytes: 'AA==' }, digest: null, source: null, reference: null };
   await genesis(w.keys, { kind: 'environment', id: staging }, environment(project, staging, 'staging'));
   await genesis(w.keys, { kind: 'roles', id: 'instance' }, noEdits());
   await genesis(w.keys, { kind: 'credential', id: credentialId }, credential);
@@ -530,7 +530,7 @@ test('changes and reads at once, on the same members, all answer, and the log re
 
 /** An environment's object as a fixture's row holds it. */
 function environment(projectId: string, id: string, slug: string): EnvironmentInput {
-  return { kind: 'environment', id, projectId, slug, owner: null, parentId: null, protected: false, deleted: false, archived: false };
+  return { kind: 'environment', id, projectId, slug, owner: null, parentId: null, protected: false, deleted: false, archived: false, projectArchived: false };
 }
 
 /** Sessions waiting for the fence (its advisory key, 1668244070 / 0). */

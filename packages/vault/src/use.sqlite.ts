@@ -8,7 +8,7 @@ import { objectKey, type Kind } from './inputs.ts';
 import type { UseCall, UseRow } from './use.ts';
 
 /**
- * Schema 0024's `use_credential` on SQLite, for tests and local development
+ * `use_credential` (0024's, as 0029 has it) on SQLite, for tests and local development
  * (docs/design/0.15-plan.md, "Postgres serves; SQLite is for tests"): the
  * same reads and writes, the same row, in one transaction. SQLite runs one
  * writer at a time (`BEGIN IMMEDIATE`, @coffre/db/connect), so the fence and
@@ -53,21 +53,27 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   const policyRow = config.find((row) => row.name === 'policy');
   type SecretRow = { id: string; project_id: string; environment_id: string; current_version_id: string | null; seal: Buffer | null };
   const secretOf = (id: string) => one<SecretRow>(sql`SELECT id, project_id, environment_id, current_version_id, seal FROM secrets WHERE id = ${id} AND archived_at IS NULL`);
-  const sourceOf = async (secret: SecretRow | undefined) => secret === undefined || secret.current_version_id !== null
-    ? null
-    : (await one<{ source_secret_id: string }>(sql`SELECT source_secret_id FROM secret_references WHERE secret_id = ${secret.id} ORDER BY created_seq DESC LIMIT 1`))?.source_secret_id ?? null;
+  // Its newest reference row's source and id, unless that row has ended.
+  const referenceOf = async (secret: SecretRow | undefined) => secret === undefined || secret.current_version_id !== null
+    ? undefined
+    : one<{ source_secret_id: string | null; id: string | null }>(sql`SELECT CASE WHEN ended_at IS NULL THEN source_secret_id END AS source_secret_id,
+        CASE WHEN ended_at IS NULL THEN id END AS id FROM secret_references WHERE secret_id = ${secret.id} ORDER BY created_seq DESC LIMIT 1`);
   const s = await secretOf(call.secretId);
-  const sSource = await sourceOf(s);
+  const sReference = await referenceOf(s);
+  const sSource = sReference?.source_secret_id ?? null;
   const x = sSource === null ? undefined : await secretOf(sSource);
-  const xSource = await sourceOf(x);
+  const xReference = await referenceOf(x);
+  const xSource = xReference?.source_secret_id ?? null;
   const versionId = sSource === null ? s?.current_version_id ?? null : x?.current_version_id ?? null;
   const v = versionId === null ? undefined : await one<{
-    envelope_version: number; ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; wrapped_dek: Buffer; kek_provider: string; kek_id: string; kek_version: string; sensitive: number; plain: number;
-  }>(sql`SELECT envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, sensitive, plaintext IS NOT NULL AS plain FROM secret_versions WHERE id = ${versionId}`);
-  type EnvironmentRow = { project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: number | null; archived: number; seal: Buffer | null };
+    envelope_version: number; ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; wrapped_dek: Buffer; kek_provider: string; kek_id: string; kek_version: string; sensitive: number; plaintext: string | null;
+  }>(sql`SELECT envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, sensitive, plaintext FROM secret_versions WHERE id = ${versionId}`);
+  type EnvironmentRow = { project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: number | null; archived: number; project_archived: number; seal: Buffer | null };
+  // Its own archival and its project's, apart.
   const environmentOf = (id: string | null) => id === null
     ? Promise.resolve(undefined)
-    : one<EnvironmentRow>(sql`SELECT project_id, slug, owner, parent_id, protected, archived_at IS NOT NULL AS archived, seal FROM environments WHERE id = ${id}`);
+    : one<EnvironmentRow>(sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
+        FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
   // As 0024 names them: the place read through, the key's own, its value's elsewhere, a personal config's parent.
   const ids: (string | null)[] = [
     call.place !== null && call.place !== s?.environment_id ? call.place : null,
@@ -127,7 +133,8 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     return {
       [`${at}_id`]: ids[i] ?? null, [`${at}_project`]: row?.project_id ?? null, [`${at}_slug`]: row?.slug ?? null, [`${at}_owner`]: row?.owner ?? null,
       [`${at}_parent`]: row?.parent_id ?? null, [`${at}_protected`]: row?.protected == null ? null : Boolean(row.protected),
-      [`${at}_archived`]: row === undefined ? null : Boolean(row.archived), [`${at}_seal`]: blob(row?.seal), [`${at}_last`]: blob(le[i]?.seal),
+      [`${at}_archived`]: row === undefined ? null : Boolean(row.archived), [`${at}_project_archived`]: row === undefined ? null : Boolean(row.project_archived),
+      [`${at}_seal`]: blob(row?.seal), [`${at}_last`]: blob(le[i]?.seal),
     };
   };
   const expires = c === undefined ? null : Math.min(c.expires_at, c.not_after ?? Infinity);
@@ -143,11 +150,13 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     g_expires: m === undefined ? null : grants.map((g) => (g.expires_at === null ? null : String(g.expires_at))),
     r_value: roles?.value ?? null, r_seal: blob(roles?.seal), r_last: blob(lr?.seal),
     p_value: policyRow?.value ?? null, p_seal: blob(policyRow?.seal), p_last: cached ? null : blob(policy?.seal), cap_count: limit.count, cap_window: String(limit.windowMs),
-    s_project: s?.project_id ?? null, s_environment: s?.environment_id ?? null, s_version: s?.current_version_id ?? null, s_source: sSource, s_seal: blob(s?.seal), s_last: blob(ls?.seal),
-    x_project: x?.project_id ?? null, x_environment: x?.environment_id ?? null, x_version: x?.current_version_id ?? null, x_source: xSource, x_seal: blob(x?.seal), x_last: blob(lx?.seal),
+    s_project: s?.project_id ?? null, s_environment: s?.environment_id ?? null, s_version: s?.current_version_id ?? null, s_source: sSource,
+    s_reference: sSource === null ? null : sReference?.id ?? null, s_seal: blob(s?.seal), s_last: blob(ls?.seal),
+    x_project: x?.project_id ?? null, x_environment: x?.environment_id ?? null, x_version: x?.current_version_id ?? null, x_source: xSource,
+    x_reference: xSource === null ? null : xReference?.id ?? null, x_seal: blob(x?.seal), x_last: blob(lx?.seal),
     v_envelope: v?.envelope_version ?? null, v_ciphertext: blob(v?.ciphertext), v_iv: blob(v?.iv), v_auth_tag: blob(v?.auth_tag), v_wrapped_dek: blob(v?.wrapped_dek),
     v_kek_provider: v?.kek_provider ?? null, v_kek_id: v?.kek_id ?? null, v_kek_version: v?.kek_version ?? null,
-    v_sensitive: v === undefined ? null : Boolean(v.sensitive), v_plain: v === undefined ? null : Boolean(v.plain),
+    v_sensitive: v === undefined ? null : Boolean(v.sensitive), v_plain: v === undefined ? null : v.plaintext !== null, v_plaintext: v?.plaintext ?? null,
     ...slot(0), ...slot(1), ...slot(2), ...slot(3),
     in_set: inSet, others,
   } as UseRow;

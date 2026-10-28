@@ -72,7 +72,7 @@ async function seed(): Promise<void> {
         [person, now, Buffer.alloc(32)]);
       await client.unsafe(`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner) VALUES ($1, $2, 'dev-mine', 'Mine', false, $3, $4)`, [mine, id, dev, person]);
       for (const [env, slug, parent, own] of [[dev, 'dev', null, null], [prod, 'prod', null, null], [mine, 'dev-mine', dev, person]] as const) {
-        const object: Input = { kind: 'environment', id: env, projectId: id, slug, owner: own, parentId: parent, protected: false, deleted: false, archived: false };
+        const object: Input = { kind: 'environment', id: env, projectId: id, slug, owner: own, parentId: parent, protected: false, deleted: false, archived: false, projectArchived: false };
         await client.unsafe('UPDATE environments SET seal = $1 WHERE id = $2', [await change({ kind: 'environment', id: env }, object, client), env]);
       }
       projects.push({ id, dev, prod, mine, owner: person });
@@ -109,9 +109,9 @@ async function seed(): Promise<void> {
           (SELECT y.source_secret_id FROM secret_references y WHERE y.secret_id = s.id ORDER BY y.created_seq DESC LIMIT 1) AS source
         FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id WHERE s.id = $1`, [key.id])) as { project_id: string; environment_id: string; current_version_id: string | null; wrapped_dek: Buffer | null; source: string | null }[];
       const object: Input = row!.current_version_id === null
-        ? { kind: 'secret', id: key.id, projectId: row!.project_id, environmentId: row!.environment_id, version: '', nature: 'secret', key: null, source: row!.source }
+        ? { kind: 'secret', id: key.id, projectId: row!.project_id, environmentId: row!.environment_id, version: '', nature: 'secret', key: null, digest: null, source: row!.source, reference: row!.source }
         : { kind: 'secret', id: key.id, projectId: row!.project_id, environmentId: row!.environment_id, version: row!.current_version_id, nature: 'secret',
-          key: { kekProvider: 'local', kekId: 'bench', kekVersion: '1', bytes: row!.wrapped_dek!.toString('base64') }, source: null };
+          key: { kekProvider: 'local', kekId: 'bench', kekVersion: '1', bytes: row!.wrapped_dek!.toString('base64') }, digest: null, source: null, reference: null };
       await client.unsafe('UPDATE secrets SET seal = $1 WHERE id = $2', [await change({ kind: 'secret', id: key.id }, object, client), key.id]);
     }
     for (let m = 0; m < MEMBERS; m += 1) {
