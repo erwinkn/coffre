@@ -863,11 +863,14 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
   switch (ref.kind) {
     case 'principal': {
       const [row] = await db
-        .select({ status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal })
+        .select({ status: vaultMembers.status, generation: vaultMembers.generation, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal })
         .from(vaultMembers)
         .where(eq(vaultMembers.principal, ref.id));
       if (row === undefined) return { row: null, seal: null };
-      return { row: principalObject({ principal: ref.id, status: row.status, ...memberStanding(row) }, await readGrants(db, { principal: ref.id })), seal: row.seal ?? null };
+      return {
+        row: principalObject({ principal: ref.id, status: row.status, generation: row.generation, ...memberStanding(row) }, await readGrants(db, { principal: ref.id })),
+        seal: row.seal ?? null,
+      };
     }
     case 'environment': {
       const [row] = await db

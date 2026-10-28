@@ -47,21 +47,23 @@ def In.refusal {α} (i : In α) : Code :=
   else if !i.current then some "stale"
   else none
 
-/-- `PrincipalInput`: status, instance role and scope, and each grant with its end. -/
+/-- `PrincipalInput`: status, generation, instance role and scope, and each grant with its end. -/
 structure PrincipalIn where
   active : Bool
+  generation : Int
   role : String
   scope : Scope
   grants : List (Grant × Option Int)
   deriving Repr, Inhabited
 
-/-- `CredentialInput`. -/
+/-- `CredentialInput`, with its account's generation when it was issued. -/
 structure CredentialIn where
   principal : String
   workload : Bool
   scope : Option (List ScopeGrant)
   expiresAt : Option Int
   revoked : Bool
+  generation : Int
   deriving Repr, Inhabited
 
 /-- `SecretInput`, as a decision reads it: where it is, whether it is sensitive, a reference's source. -/
@@ -212,7 +214,9 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
   match v.credential.row with
   | none => .error "credential"
   | some c =>
-    if c.revoked || (match c.expiresAt with | some e => r.time ≥ e | none => false) then .error "credential"
+    -- Of an earlier generation than its account's: a removal ended it, before its sweep revokes it.
+    if c.revoked || (match c.expiresAt with | some e => r.time ≥ e | none => false)
+      || (match v.principal.bind (·.row) with | some m => m.active && m.generation != c.generation | none => false) then .error "credential"
     else match v.secret.row with
     | none => .error "missing"
     | some s =>
@@ -361,6 +365,21 @@ theorem allowed_keyread {v : UseView} {r : UseReq} (h : decideUse v r = none) :
     · cases hrows
     · rename_i k hk
       exact ⟨k, hk, hrows⟩
+
+/--
+**Of its account's generation.** An allowed use's credential, of an active
+account, was issued at the generation the account holds: one a removal moved
+past, which its sweep has yet to revoke, is refused (formal/Credentials.tla,
+UseDecidesGeneration).
+-/
+theorem allowed_same_generation {v : UseView} {r : UseReq} (h : decideUse v r = none) :
+    ∀ c m, v.credential.row = some c → v.principal.bind (·.row) = some m → m.active = true → m.generation = c.generation := by
+  intro c m hc hm ha
+  obtain ⟨k, hk, _⟩ := allowed_keyread h
+  cases hb : (m.generation != c.generation)
+  · simpa using hb
+  · unfold keyOf at hk
+    simp [hc, hm, ha, hb] at hk
 
 /-- **Within the cap.** An allowed use's key is in its principal's set, or fewer than the log's count of other keys count. -/
 theorem allowed_within_cap {v : UseView} {r : UseReq} (h : decideUse v r = none) :

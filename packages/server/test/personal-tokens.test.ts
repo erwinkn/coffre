@@ -171,19 +171,20 @@ test('a token weighs its person as they are at each request: narrowed, it narrow
 
 /**
  * Run `meanwhile` once, as the vault is next asked for values: after the
- * request's credential was checked, before the app answers. 0.14's unwrap
- * decides on the member, not the credential: before it. 0.15's use decides
- * on the credential too: once it has, so that only the app's check after
- * the release stands between the value and the caller (Revoking015).
+ * request's credential was checked, before the vault decides. 0.14's unwrap
+ * decides on the member, not the credential: only the app's check after the
+ * release stands between the value and a credential that ended meanwhile
+ * (Revoking). 0.15's use decides on the credential itself, as its own
+ * statement reads it, its generation included, and no check follows it
+ * (Revoking015Folded).
  */
 function beforeNextRelease(meanwhile: () => Promise<unknown>): void {
   if (LOG === '0.15') {
     const use = deps.vault.use!;
     deps.vault.use = async (...args) => {
       deps.vault.use = use;
-      const used = await use(...args);
       await meanwhile();
-      return used;
+      return use(...args);
     };
     return;
   }
@@ -195,12 +196,13 @@ function beforeNextRelease(meanwhile: () => Promise<unknown>): void {
   };
 }
 
-test('a token revoked while its read is under way gets nothing: the read checks it again once the vault has released (formal/Credentials.tla)', async () => {
+test('a token revoked while its read is under way gets nothing: 0.14\'s read checks it again once the vault has released, 0.15\'s use decides on it (formal/Credentials.tla)', async () => {
   const issued = await ada.tokens.issue(ADA, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   beforeNextRelease(() => root.tokens.revoke(ADA, issued.id));
   assert.equal(await reads(issued.token, 'dev'), 401);
-  // The vault's release is in the log, and after it, the app's refusal: withheld, not handed to a revoked token.
-  assert.deepEqual(await refusals('secret.read'), ['credential_ended']);
+  // 0.14: the vault's release is in the log, and after it, the app's refusal: withheld, not handed to a revoked token.
+  // 0.15: the use, refused, is its own record (`usesLogged`).
+  assert.deepEqual(await refusals('secret.read'), LOG === '0.15' ? [] : ['credential_ended']);
   // Removed and added again meanwhile: the vault finds her active, but at a generation the token was not issued at.
   const again = await ada.tokens.issue(ADA, { label: 'again', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   beforeNextRelease(async () => {
@@ -210,6 +212,19 @@ test('a token revoked while its read is under way gets nothing: the read checks 
   assert.equal(await reads(again.token, 'dev'), 401);
   // A session, read the same way, still reads.
   assert.equal((await ada.secrets.reveal('market/dev')).values.API_KEY, 'dev-key');
+});
+
+test("0.15: a token revoked once its use has decided ends after that read, which stands: the log orders the use before the revoke (Revoking015Folded)", { skip: LOG === '0.15' ? false : "0.14's read checks the token again after the vault's release" }, async () => {
+  const issued = await ada.tokens.issue(ADA, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  const use = deps.vault.use!;
+  deps.vault.use = async (...args) => {
+    deps.vault.use = use;
+    const used = await use(...args);
+    await root.tokens.revoke(ADA, issued.id);
+    return used;
+  };
+  assert.equal(await reads(issued.token, 'dev'), 'dev-key');
+  assert.equal(await reads(issued.token, 'dev'), 401);
 });
 
 test('a personal token makes nothing that outlives it: no token, session, app, grant, member, service account or binding; nor runs the instance', async () => {

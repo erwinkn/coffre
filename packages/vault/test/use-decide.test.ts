@@ -38,7 +38,7 @@ test('object keys are the vectors PR 2 and PR 5 compute in SQL', () => {
 
 test('a seal is 16 bytes, binds its object, and reads grants as a set', () => {
   const member: PrincipalInput = {
-    kind: 'principal', principal: ADA, status: 'active', role: 'member', scope: EVERYWHERE,
+    kind: 'principal', principal: ADA, status: 'active', generation: 0, role: 'member', scope: EVERYWHERE,
     grants: [
       { projectId: 'p', environmentId: 'a', environmentSlug: null, role: 'viewer', expiresAt: null },
       { projectId: 'p', environmentId: 'b', environmentSlug: null, role: 'developer', expiresAt: 5 },
@@ -58,8 +58,8 @@ test('a change that does nothing is never applied: creates of what exists, chang
   assert.equal(applyOp(null, policy, limitOp({ count: 10, windowMs: 24 * 3_600_000 + 1 })), undefined);
   assert.deepEqual(applyOp(null, policy, limitOp({ count: 10, windowMs: 24 * 3_600_000 })), { kind: 'policy', bulk: { count: 10, windowMs: 24 * 3_600_000 } });
   const ci = { kind: 'credential', id: credential(9) } as const;
-  assert.equal(applyOp(null, ci, { op: 'credential.issue', principal: CI, caller: 'person', scope: null, expiresAt: null }), undefined);
-  assert.equal(applyOp(null, ci, { op: 'credential.issue', principal: CI, caller: 'workload', scope: null, expiresAt: null }), undefined);
+  assert.equal(applyOp(null, ci, { op: 'credential.issue', principal: CI, caller: 'person', scope: null, expiresAt: null, generation: 0 }), undefined);
+  assert.equal(applyOp(null, ci, { op: 'credential.issue', principal: CI, caller: 'workload', scope: null, expiresAt: null, generation: 0 }), undefined);
   assert.equal(applyOp(null, ci, { op: 'credential.revoke' }), undefined);
   const w = market();
   assert.equal(w.change({ kind: 'principal', id: ADA }, { op: 'member.add', role: 'owner', scope: EVERYWHERE }), false);
@@ -97,6 +97,19 @@ test('a revoke, a removal and a deleted environment refuse, as the replay does',
   w.change({ kind: 'environment', id: PROD }, { op: 'environment.delete' });
   w.change({ kind: 'secret', id: key(1) }, { op: 'secret.delete' });
   assert.deepEqual(liveAndReplayed(w, [ask(2, 4), ask(3, 4), ask(1, 3), ask(1, 9), ask(1, 1)]), ['no_grant', 'removed', 'deleted', 'ended', 'missing']);
+});
+
+test("a removal ends its account's credentials by their generation: admitted again before the sweep, an earlier one is refused, a new one allowed (T145)", () => {
+  const w = market();
+  const ci = { kind: 'principal', id: CI } as const;
+  w.change(ci, { op: 'member.remove' });
+  w.change(ci, { op: 'member.restore', role: 'member', scope: EVERYWHERE });
+  w.change(ci, { op: 'access.grant', grant: { projectId: '00000000-0000-4000-8000-000000000001', environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null } });
+  // The account's object moved on to generation 1, and keeps it: a restore makes no new membership's past.
+  assert.equal((w.rows.get(objectKey(ci))!.row as PrincipalInput).generation, 1);
+  w.change({ kind: 'credential', id: credential(10) }, { op: 'credential.issue', principal: CI, caller: 'bearer', scope: null, expiresAt: null, generation: 1 });
+  // ci's token of generation 0, not revoked yet; one issued since.
+  assert.deepEqual(liveAndReplayed(w, [ask(3, 1), ask(10, 1)]), ['credential', null]);
 });
 
 test('a row put back from before a change is stale, a row edited is tampered, and the replay names neither: rows must be the log\'s', () => {
@@ -246,7 +259,7 @@ test('bulkStep refreshes a hot key once a refresh, not on every use', () => {
 test("a personal config's owner on a token: Ada's viewer token for dev reads her own config of dev, and nothing in prod", () => {
   const w = market();
   w.change({ kind: 'credential', id: credential(4) }, {
-    op: 'credential.issue', principal: ADA, caller: 'person', expiresAt: null,
+    op: 'credential.issue', principal: ADA, caller: 'person', expiresAt: null, generation: 0,
     scope: [{ projectId: '00000000-0000-4000-8000-000000000001', environmentId: DEV, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }],
   });
   assert.deepEqual(liveAndReplayed(w, [ask(4, 6), ask(4, 6, { purpose: 'use' }), ask(4, 3)]), [null, null, 'no_grant']);
@@ -381,7 +394,7 @@ test('a rename reaches the log: a Developer scoped to staging loses the environm
   w.change({ kind: 'environment', id: STAGING }, { op: 'environment.create', projectId: '00000000-0000-4000-8000-000000000001', slug: 'staging', owner: null, parentId: null, protected: false });
   w.change({ kind: 'secret', id: key(20) }, { op: 'secret.write', projectId: '00000000-0000-4000-8000-000000000001', environmentId: STAGING, version: 'v', nature: 'secret', key: WRAPPED, digest: null, source: null, reference: null });
   w.change({ kind: 'principal', id: SCOPED }, { op: 'member.add', role: 'developer', scope: { projects: 'all', environments: { only: ['staging'] } } });
-  w.change({ kind: 'credential', id: credential(5) }, { op: 'credential.issue', principal: SCOPED, caller: 'person', scope: null, expiresAt: null });
+  w.change({ kind: 'credential', id: credential(5) }, { op: 'credential.issue', principal: SCOPED, caller: 'person', scope: null, expiresAt: null, generation: 0 });
   assert.deepEqual(liveAndReplayed(w, [ask(5, 20)]), [null]);
   assert.equal(w.change({ kind: 'environment', id: STAGING }, { op: 'environment.rename', slug: 'prod' }), true);
   assert.deepEqual(liveAndReplayed(w, [ask(5, 20)]), ['no_grant']);
@@ -398,16 +411,16 @@ test('a plain value, or any with no wrapped key, is no use: the app hands it bac
 
 test('genesis is held to what the ops that make an object hold it to', () => {
   assert.equal(applyOp(null, { kind: 'policy', id: 'instance' }, { op: 'genesis', value: { kind: 'policy', bulk: { count: 0, windowMs: 60_000 } } }), undefined);
-  const ci = { kind: 'credential', id: 'c', principal: CI, caller: 'person', scope: null, expiresAt: null, revoked: false } as const;
+  const ci = { kind: 'credential', id: 'c', principal: CI, caller: 'person', scope: null, expiresAt: null, revoked: false, generation: 0 } as const;
   assert.equal(applyOp(null, { kind: 'credential', id: 'c' }, { op: 'genesis', value: ci }), undefined);
   assert.deepEqual(applyOp(null, { kind: 'credential', id: 'c' }, { op: 'genesis', value: { ...ci, caller: 'bearer' } }), { ...ci, caller: 'bearer' });
-  assert.equal(applyOp(null, { kind: 'principal', id: BO }, { op: 'genesis', value: { kind: 'principal', principal: ADA, status: 'active', role: 'member', scope: EVERYWHERE, grants: [] } }), undefined);
+  assert.equal(applyOp(null, { kind: 'principal', id: BO }, { op: 'genesis', value: { kind: 'principal', principal: ADA, status: 'active', generation: 0, role: 'member', scope: EVERYWHERE, grants: [] } }), undefined);
 });
 
 test("a project id a plain object already holds is a project like another to the reader's policy", () => {
   const environment = { kind: 'environment' as const, id: 'e', projectId: 'constructor', slug: 'dev', owner: null, parentId: null, protected: true, deleted: false, archived: false, projectArchived: false };
-  const credentialRow = { kind: 'credential' as const, id: 'c', principal: ADA, caller: 'person' as const, scope: null, expiresAt: null, revoked: false };
-  const member = { kind: 'principal' as const, principal: ADA, status: 'active' as const, role: 'owner' as const, scope: EVERYWHERE, grants: [] };
+  const credentialRow = { kind: 'credential' as const, id: 'c', principal: ADA, caller: 'person' as const, scope: null, expiresAt: null, revoked: false, generation: 0 };
+  const member = { kind: 'principal' as const, principal: ADA, status: 'active' as const, generation: 0, role: 'owner' as const, scope: EVERYWHERE, grants: [] };
   const reader = readerOf(member, credentialRow, noEdits(), [environment], 0);
   assert.deepEqual(reader.live.policy?.protectedIn.constructor, [{ environmentId: 'e', slug: 'dev' }]);
 });

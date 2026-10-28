@@ -63,16 +63,16 @@ async function world(options: VaultOptions = {}) {
 type World = Awaited<ReturnType<typeof world>>;
 
 /** A credential's row, as the app writes it, with the columns its object takes. */
-type Row = { id: string; principal: string; kind: string; scope: string | null; revokedAt: Date | null; expiresAt: Date };
+type Row = { id: string; principal: string; kind: string; scope: string | null; revokedAt: Date | null; expiresAt: Date; generation: number };
 
 function columns(row: Row): CredentialColumns {
-  return { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: row.revokedAt !== null, expiresAt: row.expiresAt.getTime() };
+  return { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: row.revokedAt !== null, expiresAt: row.expiresAt.getTime(), generation: row.generation };
 }
 
 const SCOPE = JSON.stringify([{ projectId: randomUUID(), environmentId: null, role: 'viewer', permissions: { normal: ['secret.read'], protected: [] }, sensitive: false }]);
 
 function token(at = Date.now()): Row {
-  return { id: randomUUID(), principal: CI, kind: 'service', scope: SCOPE, revokedAt: null, expiresAt: new Date(at + 3_600_000) };
+  return { id: randomUUID(), principal: CI, kind: 'service', scope: SCOPE, revokedAt: null, expiresAt: new Date(at + 3_600_000), generation: 0 };
 }
 
 /** The row as stored, with its seal; null if there is none. */

@@ -5,7 +5,7 @@ import { sql } from 'drizzle-orm';
 import type { UseCall, UseRow } from './use.ts';
 
 /**
- * A use on Postgres: one call of `use_credential` (0024's, as 0029 has it), one
+ * A use on Postgres: one call of `use_credential` (0024's, as 0033 has it), one
  * statement and one round trip, its own transaction. It answers its row as
  * one JSON value (0024 says why), read back here as `UseRow`.
  */

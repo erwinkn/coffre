@@ -526,7 +526,7 @@ test('a session\'s first call plans its four statements before it takes the fenc
       [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
     assert.equal(answer!.use.state, null);
     const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0029');
+    assert.equal(setting!.planned, '0033');
   } finally {
     await fence.end();
     await fresh.end();

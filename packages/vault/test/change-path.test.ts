@@ -203,7 +203,7 @@ test('change_input refuses a row that is not its object\'s newest change\'s, und
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'auditor' })).ok);
   // The row's seal put back to the one before: the vault, asked from that seal, would CAS from what it read.
   await db.owner.update(vaultMembers).set({ seal: added }).where(eq(vaultMembers.principal, ADA));
-  const call = (requestId: string) => made(w.keys, member(ADA), { op: 'member.role', role: 'admin', scope: EVERYWHERE }, { kind: 'principal', principal: ADA, status: 'active', role: 'admin', scope: EVERYWHERE, grants: [] }, added!, requestId);
+  const call = (requestId: string) => made(w.keys, member(ADA), { op: 'member.role', role: 'admin', scope: EVERYWHERE }, { kind: 'principal', principal: ADA, status: 'active', generation: 0, role: 'admin', scope: EVERYWHERE, grants: [] }, added!, requestId);
   await assert.rejects(change([call(randomUUID())]), (error) => store.isStale(error));
   assert.equal((await opsOf(w.keys, member(ADA))).length, 2);
 });
@@ -269,7 +269,7 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
   });
   // The cutover seals what the use reads (plan PR 9): the environment, the roles, Ada's session and the key. PR 5's
   // statement reads a credential's and a key's rows; here their objects are the cutover's.
-  const credential: CredentialInput = { kind: 'credential', id: credentialId, principal: ADA, caller: 'person', scope: null, expiresAt: null, revoked: false };
+  const credential: CredentialInput = { kind: 'credential', id: credentialId, principal: ADA, caller: 'person', scope: null, expiresAt: null, revoked: false, generation: 0 };
   const secret: SecretInput = { kind: 'secret', id: secretId, projectId: project, environmentId: staging, version: randomUUID(), nature: 'secret', key: { kekProvider: 'local', kekId: 'k', kekVersion: '1', bytes: 'AA==' }, digest: null, source: null, reference: null };
   await genesis(w.keys, { kind: 'environment', id: staging }, environment(project, staging, 'staging'));
   await genesis(w.keys, { kind: 'roles', id: 'instance' }, noEdits());

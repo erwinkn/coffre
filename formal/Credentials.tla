@@ -81,6 +81,23 @@ CONSTANTS
 CONSTANTS
     Uses015
 
+(***************************************************************************)
+(* Where 0.15's check of the credential after a use is (T145): in the use  *)
+(* itself, for a request on a credential alone, whose answer the app takes *)
+(* with no read after it (server api/context.ts, recorded, `stood`); or a  *)
+(* read of the app's after it, with no lock (`credentialStill`), as for    *)
+(* one through an MCP connection or a Cloudflare binding. Not a            *)
+(* protection: the way the request came in decides it.                     *)
+(***************************************************************************)
+CONSTANTS
+    FencedInUse,
+    \* The use decides on the credential's generation and its account's,
+    \* each sealed in its object (vault decide.ts, decideChecked; inputs.ts:
+    \* `credential.issue` sets the credential's, `member.remove` moves the
+    \* account's on): a credential issued at a generation the account has
+    \* moved past is refused, as `credentialStill` refused it.
+    UseDecidesGeneration
+
 None == "none"
 \* Credentials are named as entries are, by the operation that made them,
 \* or "tok", the token the account starts with.
@@ -360,12 +377,17 @@ UseDecide(p) ==
 \* as after 0.14's unwrap: a use between the removal and its sweep, the
 \* account admitted again meanwhile, is allowed on a credential the
 \* removal ended, and only that check withholds the value (TLC, Revoking015
-\* without CredentialFenceUnlocked).
+\* without CredentialFenceUnlocked). Or the use decides on the generations
+\* too, sealed (UseDecidesGeneration), and the app makes no read after it
+\* (FencedInUse): without them, the same use goes through (TLC,
+\* Revoking015Folded without UseDecidesGeneration).
 UseOne(p) ==
     /\ pc[p] = "use.use"
     /\ log' = Append(log, [Entry("use", p) EXCEPT !.cred = l[p].cred])
     /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
-    /\ Goto(p, IF ~Cred(l[p].cred).revoked /\ status = "active" THEN "use.fence" ELSE "idle")
+    /\ LET r == Cred(l[p].cred)
+           allowed == ~r.revoked /\ status = "active" /\ (UseDecidesGeneration => gen = r.gen)
+       IN Goto(p, IF ~allowed THEN "idle" ELSE IF FencedInUse THEN "use.answer" ELSE "use.fence")
     /\ UNCHANGED <<rows, locks, op, left, history>>
 
 \* Through the proxy, its use not logged by the vault: the app's own

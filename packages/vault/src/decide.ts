@@ -314,8 +314,9 @@ export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source'
  *    use refused or allowed that the log's state would decide otherwise;
  *    checked first, every such use is `stale`, never another refusal
  *    (HotPathOne's `StaleFirst`, `TamperVisible`).
- * 2. **The credential and the key:** missing, revoked or ended at the
- *    request's time; a key that is no more, a reference whose source is
+ * 2. **The credential and the key:** missing, revoked, ended at the
+ *    request's time, or of an earlier generation than its account's (a
+ *    removal's, before its sweep revokes it); a key that is no more, a reference whose source is
  *    gone or that has ended (`ended`), a reference to a reference, a value with no wrapped
  *    key (a plain one, which the vault never opens), and a place it is read
  *    through that 0.14's `throughOk` refuses (`bad_claim`): one but a live,
@@ -348,7 +349,12 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
     if (input.row !== null && !input.valid) return 'tampered';
     if (!input.current) return 'stale';
   }
-  if (credential === null || credential.revoked || (credential.expiresAt !== null && request.at >= credential.expiresAt)) return 'credential';
+  // A credential reaches only while its active account is at the generation it was issued at: a removal moves that on,
+  // which ends every credential of the account before its sweep revokes each, the account admitted again or not
+  // (formal/Credentials.tla, UseDecidesGeneration). One still removed is refused as such, by the rules below.
+  const account = view.principal?.row ?? null;
+  if (credential === null || credential.revoked || (credential.expiresAt !== null && request.at >= credential.expiresAt)
+    || (account?.status === 'active' && account.generation !== credential.generation)) return 'credential';
   if (secret === null) return 'missing';
   const value = secret.source === null ? secret : view.source!.row;
   if (value === null) return 'ended';

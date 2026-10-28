@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **0.15's `/use` checks its credential in the use itself, behind its
+  switch.** After a use, the app read the credential and its account's
+  generation again (`credentialStill`), a statement and a round trip on
+  its own connection every request. Each credential's object now seals the
+  generation it was issued at, and each account's object the one a
+  removal moves on, so the vault's use refuses a credential of an earlier
+  membership itself, and the app reads nothing after it: a cache-off
+  `/use` is `app_read` then `use_credential`. Migration 0033 has
+  `use_credential` answer both generations. A request through an MCP
+  connection or a Cloudflare binding, which 0.15's uses do not serve yet,
+  checks as before, as does every read on 0.14's log. A use answers a
+  round trip sooner: 64 ms where it took 85 on a 2 vCPU Postgres at 20 ms
+  a round trip, with the proxy's cache off.
 - **`GET /api/me` asks the vault nothing.** It only shows its caller, to
   choose what the CLI and the pages list and which buttons they show, and
   cost two vault calls and four statements: the caller's access, then the

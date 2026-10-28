@@ -122,8 +122,8 @@ export async function world(options: { count?: number; windowMs?: number; role?:
   const caller = principal.startsWith('user:') ? 'person' as const : 'bearer' as const;
   const grant = { projectId: project, environmentId: dev, environmentSlug: null, role: options.role ?? 'viewer', expiresAt: null };
   const objects = {
-    principal: { kind: 'principal', principal, status: 'active', role: 'member', scope: { projects: 'all', environments: 'all' }, grants: [grant] } as Input,
-    credential: { kind: 'credential', id: credentialId, principal, caller, scope: null, expiresAt, revoked: false } as Input,
+    principal: { kind: 'principal', principal, status: 'active', generation: 0, role: 'member', scope: { projects: 'all', environments: 'all' }, grants: [grant] } as Input,
+    credential: { kind: 'credential', id: credentialId, principal, caller, scope: null, expiresAt, revoked: false, generation: 0 } as Input,
     environment: { kind: 'environment', id: dev, projectId: project, slug: 'dev', owner: null, parentId: null, protected: false, deleted: false, archived: false, projectArchived: false } as Input,
   };
   // The instance's one policy and one roles object: the first world's.

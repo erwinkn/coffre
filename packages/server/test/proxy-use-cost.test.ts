@@ -1,10 +1,12 @@
 // What the credential proxy's `/use` costs with 0.15's uses (T135, R42, R44, R48), a person's handle at a proxy that
 // keeps nothing (`cacheSeconds: 0`), the hot path at its worst. On the app's connection, one `app_read` (migration
-// 0031): the handle's credential, the place and the key, in one call; then the vault's one `use_credential`; then the
-// credential's standing again, after the release (`credentialStill`). The stable URL first checks the handle, its
+// 0031): the handle's credential, the place and the key, in one call; then the vault's one `use_credential`, which
+// decides on the credential's standing itself, its generation included (T145): no `credentialStill` after it. The stable URL first checks the handle, its
 // credential read ahead and the vault asked about its person, for which environments it was made; then the use, as the
 // environment's URL makes it, on the answer just kept. Each statement reads as many rows, and
-// as many pages, however long the log grows and however many keys, environments and members the instance holds.
+// as many pages, however long the log grows and however many keys, environments and members the instance holds. A
+// reveal through the API, of a key, an environment or its named keys, and an export, make one use a value, and no
+// `credentialStill` after them either.
 // Postgres only: the counts are its statements, and SQLite reads as the app's statements always did.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +21,7 @@ import { localVault, type LocalVault } from '@coffre/vault/node';
 import { sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
+import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -78,6 +81,9 @@ let vault: LocalVault;
 let runtime: CoffreRuntime;
 let upstream: Server;
 let handle: string;
+/** Tokens of a person and of a service, for reveals through the API (`POST /api/reveals`). */
+let personal: string;
+let service: string;
 
 before(async () => {
   if (POSTGRES.skip) return;
@@ -95,6 +101,10 @@ before(async () => {
   await root.members.add(`user:${DEV}`);
   await root.access.set(`user:${DEV}`, { 'market/dev': 'developer' });
   handle = (await setup.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'run', expiresInMinutes: 600, paths: ['market/dev'] })).token;
+  personal = (await setup.signin!.issuePersonalToken(await contextFor(deps, DEV), { label: 'run', expiresInMinutes: 600, scope: { 'market/dev': 'viewer' } })).token;
+  await root.members.add('token:ci');
+  await root.access.set('token:ci', { 'market/dev': 'viewer' });
+  service = (await setup.signin!.issueServiceToken(await contextFor(deps, ROOT), 'ci', { label: 'ci', expiresInDays: 1 })).token;
 
   upstream = createServer((request, response) => response.writeHead(request.headers['x-api-key'] === API_KEY ? 200 : 403).end());
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -142,9 +152,9 @@ const NAMED = `${ORIGIN}/use/market/dev/api/v1/charges`;
 const STABLE = `${ORIGIN}/use/api/v1/charges`;
 const shown = (ran: Statement[]) => ran.map(({ text }) => text.replace(/\s+/g, ' ').slice(0, 32));
 
-test("a handle's /use reads ahead in one statement, uses once, and checks the credential once", POSTGRES, async () => {
+test("a handle's /use reads ahead in one statement and uses once, which checks the credential", POSTGRES, async () => {
   const named = await statements(NAMED);
-  assert.deepEqual(shown(named.app), ['SELECT app_read( $1::bytea, $2::', 'select "status", "generation", E'], 'the named URL');
+  assert.deepEqual(shown(named.app), ['SELECT app_read( $1::bytea, $2::'], 'the named URL');
   assert.deepEqual(shown(named.hot), ['SELECT use_credential( $1::uuid,']);
   assert.deepEqual(named.vault, [], 'no vault statement but the use: its answer about the person is the one kept');
   // The stable URL: the handle's check and its environments, then the use, as the environment's URL makes it.
@@ -153,7 +163,6 @@ test("a handle's /use reads ahead in one statement, uses once, and checks the cr
     'SELECT app_read( $1::bytea, $2::',
     'select "environments"."id", "env',
     'SELECT app_read( $1::bytea, $2::',
-    'select "status", "generation", E',
   ], 'the stable URL');
   assert.deepEqual(shown(stable.hot), ['SELECT use_credential( $1::uuid,']);
   // The handle's check asks the vault about its person, once: the use decides on that answer, kept.
@@ -206,5 +215,43 @@ test("a handle's /use reads as many rows and pages however the log and the insta
   for (const [i, { url, text, rows, pages }] of before.entries()) {
     assert.equal(grown[i]!.rows, rows, `${url}: ${text} answered as many rows`);
     assert.ok(grown[i]!.pages <= 2 * pages + 16, `${url}: ${text} read ${grown[i]!.pages} pages once the instance grew, ${pages} before`);
+  }
+});
+
+/** A reveal's statements through the API, by pool, as `statements` takes a use's. */
+async function revealed(token: string, body: { path: string; keys?: readonly string[] }): Promise<{ app: Statement[]; vault: Statement[]; hot: Statement[] }> {
+  const reveal = async () => {
+    const response = await fetchApi(new Request(`${ORIGIN}/api/reveals`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }), runtime, { sourceIp: null });
+    assert.equal(response.status, 200, await response.clone().text());
+    await response.arrayBuffer();
+  };
+  await reveal();
+  for (const pool of [app, vaultPool, hot]) pool.recording = [];
+  await reveal();
+  const ran = { app: app.recording!, vault: vaultPool.recording!, hot: hot.recording! };
+  for (const pool of [app, vaultPool, hot]) pool.recording = null;
+  return ran;
+}
+
+test("a reveal, an export and a reveal of named keys on 0.15's uses run no check of the credential after them (T145)", POSTGRES, async () => {
+  const credential = 'select "credentials"."id", "cred';
+  const read = 'SELECT app_read( $1::bytea, $2::';
+  const use = 'SELECT use_credential( $1::uuid,';
+  const cases = [
+    // A key's own path reads its place and key as ever: `app_read` reads an environment's.
+    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, [credential, 'select "projects"."id", "project', 'select "secrets"."id", "secrets"'], [use]],
+    ['a reveal of an environment', personal, { path: 'market/dev' }, [credential, read, 'select "secret_references"."id",', 'select "secrets"."id", "secrets"'], [use, use]],
+    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY'] }, [credential, read], [use]],
+    ['an export, as a service', service, { path: 'market/dev' }, [credential, read, 'select "secret_references"."id",', 'select "secrets"."id", "secrets"'], [use, use]],
+  ] as const;
+  // Sorted: an environment's references and keys are read at once, and recorded as each finishes.
+  const sorted = (texts: readonly string[]) => [...texts].sort();
+  for (const [name, token, body, app, hot] of cases) {
+    const ran = await revealed(token, body);
+    assert.deepEqual(sorted(shown(ran.app)), sorted(app), name);
+    assert.deepEqual(shown(ran.hot), hot, `${name}: one use a value`);
+    assert.deepEqual(ran.vault, [], `${name}: no vault call but the uses`);
   }
 });

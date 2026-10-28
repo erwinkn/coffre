@@ -202,12 +202,13 @@ def checked {α} (row : Json → Parse α) (j : Json) : Parse (In α) := do
 def principalIn (j : Json) : Parse PrincipalIn := do
   let grants ← (← list (← req j "grants")).mapM fun g => do
     pure (⟨⟨← optStr (← present g "projectId"), ← optStr (← present g "environmentId")⟩, ← str (← req g "role")⟩, ← optInt (field g "expiresAt"))
-  pure ⟨(← str (← req j "status")) == "active", ← str (← req j "role"), ← scope (← req j "scope"), grants⟩
+  pure ⟨(← str (← req j "status")) == "active", ← int (← req j "generation"), ← str (← req j "role"), ← scope (← req j "scope"), grants⟩
 
 def credentialIn (j : Json) : Parse CredentialIn := do
   let sc := field j "scope"
   pure ⟨← str (← req j "principal"), (← str (← req j "caller")) == "workload",
-    ← if sc.isNull then pure none else some <$> (← list sc).mapM scopeGrant, ← optInt (field j "expiresAt"), ← (← req j "revoked").getBool?⟩
+    ← if sc.isNull then pure none else some <$> (← list sc).mapM scopeGrant, ← optInt (field j "expiresAt"), ← (← req j "revoked").getBool?,
+    ← int (← req j "generation")⟩
 
 def secretIn (j : Json) : Parse SecretIn := do
   pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "environmentId"), (← str (← req j "nature")) == "sensitive",

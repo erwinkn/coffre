@@ -1772,7 +1772,7 @@ export async function reveal(
   only?: readonly string[],
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
-  return recorded(ctx, async (log, fence, at) => {
+  return recorded(ctx, async (log, fence, at, stood) => {
     // The place and its keys in one call where it can (`readValues`); the proxy's read them with the handle already.
     // Of a use, its keys alone when it reads no other (`UseAsked.only`): it answers every key the environment holds.
     const reads = use === undefined ? only : use.only === true && Array.isArray(use.keys) ? use.keys : undefined;
@@ -1901,6 +1901,7 @@ export async function reveal(
     // opened them itself, as no vault call did: handed back only as the policy is now (`fenced`).
     const plainKeys = rows.filter(plain).map((row) => row.key);
     if (plainKeys.length > 0) fence();
+    if (opened.stood === true) stood();
     if (used !== null) {
       // Appended by the vault already, the app has nothing to append: its fence takes no lock (`recorded`).
       if (opened.used !== true) log.push(used);

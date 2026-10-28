@@ -35,7 +35,7 @@ export type { CredentialColumns };
  */
 export function credentialObject(row: CredentialColumns): CredentialInput {
   const caller: CallerKind = row.principal.startsWith('user:') ? 'person' : row.kind === 'workload' ? 'workload' : 'bearer';
-  return { kind: 'credential', id: row.id, principal: row.principal, caller, scope: scopeOf(row.scope), expiresAt: row.expiresAt, revoked: row.revoked };
+  return { kind: 'credential', id: row.id, principal: row.principal, caller, scope: scopeOf(row.scope), expiresAt: row.expiresAt, revoked: row.revoked, generation: row.generation };
 }
 
 function scopeOf(stored: string | null): CredentialScope | null {
@@ -51,11 +51,12 @@ function scopeOf(stored: string | null): CredentialScope | null {
 type GrantColumns = Pick<InputGrant, 'projectId' | 'environmentId' | 'environmentSlug' | 'role' | 'expiresAt'>;
 
 /** A member's object, from their row (its role and scope as `storedRole` reads them) and their grants, lapsed ones too. */
-export function principalObject(member: { principal: string; status: string; role: InstanceRole; scope: Scope }, grants: readonly GrantColumns[]): PrincipalInput {
+export function principalObject(member: { principal: string; status: string; generation: number; role: InstanceRole; scope: Scope }, grants: readonly GrantColumns[]): PrincipalInput {
   return {
     kind: 'principal',
     principal: member.principal,
     status: member.status === 'active' ? 'active' : 'removed',
+    generation: member.generation,
     role: member.role,
     scope: member.scope,
     grants: grants.map(({ projectId, environmentId, environmentSlug, role, expiresAt }) => ({ projectId, environmentId, environmentSlug, role, expiresAt })),

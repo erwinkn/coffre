@@ -1140,7 +1140,7 @@ export class WorkloadService {
     const id = randomUUID();
     const planned = shape(decided, Date.now());
     const changes = logged
-      ? await AppChanges.prepare(vault, member, [credentialChange(null, { id, principal: member, kind: 'workload', scope: planned.stored, revokedAt: null, expiresAt: planned.expiresAt, notAfter: planned.notAfter })])
+      ? await AppChanges.prepare(vault, member, [credentialChange(null, { id, principal: member, kind: 'workload', scope: planned.stored, revokedAt: null, expiresAt: planned.expiresAt, notAfter: planned.notAfter, generation: binding.generation })])
       : null;
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();

@@ -65,6 +65,9 @@ REMOVALS=(
   # 0.15's reads (PR 5b): the use decides on the rows as they are, and the app's unlocked check stays needed.
   "Revoking015 CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking015 RevokeIssuedCredentials NoReleaseAfterEnd"
+  # The check in the use itself (T145): it decides on the generations, sealed, and the app reads nothing after it.
+  "Revoking015Folded UseDecidesGeneration NoReleaseAfterEnd"
+  "Revoking015Folded RevokeIssuedCredentials NoReleaseAfterEnd"
   "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"
   "Proxying CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials+BindingCheckedAtUse UnboundStayUnusable"

@@ -1764,9 +1764,12 @@ class VaultService implements Vault {
           if (held.log === 'live' && held.object.kind === 'environment') places.set(id, held.object);
         }
         if (member.log !== 'unlogged') {
-          const credential: CredentialInput = { kind: 'credential', id: principal, principal, caller: input.caller, scope: input.credentialScope ?? null, expiresAt: null, revoked: false };
-          const reader = readerOf(member.log === 'live' && member.object.kind === 'principal' ? member.object : null, credential,
-            roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits(), places.values(), d.at);
+          const account = member.log === 'live' && member.object.kind === 'principal' ? member.object : null;
+          // The way the actor came in, as a reader takes it: its kind and scope (its generation weighs nothing here).
+          const credential: CredentialInput = {
+            kind: 'credential', id: principal, principal, caller: input.caller, scope: input.credentialScope ?? null, expiresAt: null, revoked: false, generation: account?.generation ?? 0,
+          };
+          const reader = readerOf(account, credential, roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits(), places.values(), d.at);
           mayEnd(reader, places).forEach((code, i) => {
             if (places.has(seals[i]!.holder.environmentId)) codes[i] = code;
           });
