@@ -37,7 +37,7 @@ wrote them with its tagged template.
 
 ## Changes from upstream
 
-Eight, each marked `Coffre:` in the code:
+Nine, each marked `Coffre:` in the code:
 
 - **One round trip per statement** (`typedByServer`, in `connection.ts`).
   Upstream asks the server for an unnamed statement's parameter types (Parse,
@@ -49,12 +49,54 @@ Eight, each marked `Coffre:` in the code:
   as a boolean: `postgresClient` sends arrays as their text before the
   driver sees them) (porsager/postgres#1225). `postgresClient`
   (`packages/db/src/postgres.ts`) sends arrays, dates and objects as text, so none is.
-- **A transaction's BEGIN always learns its connection** (`execute`, in
-  `connection.ts`). Upstream told `begin()` which connection its BEGIN went
-  to only when more statements could follow it there, so a BEGIN queued
-  behind `max_pipeline` statements, or written to a full socket, left
-  `begin()` without its connection, and the connection inside a transaction
-  no one would end.
+- **A transaction's BEGIN goes with its first statement** (`begin`, in
+  `index.ts`; `toBuffer` and `CommandComplete`, in `connection.ts`), a round
+  trip less for every transaction. Upstream sent BEGIN alone and waited for
+  it. The two go under one Sync: as the extended protocol's Parse, Bind and
+  Execute ahead of the statement's, or, for a statement without parameters,
+  in one Query message (`begin;\n<statement>`). Either way, a BEGIN that
+  fails has Postgres skip the statement, which so never runs outside its
+  transaction; what waited behind it is not sent, nor anything the
+  transaction asks after, which fails `TRANSACTION_NOT_BEGUN`, and nothing
+  is rolled back. Nothing waits behind the BEGIN's statement for less: one
+  the client failed to write (a value it cannot send) takes its BEGIN with
+  it. A transaction that asks nothing sends nothing. It holds its
+  connection from the start, as `reserve()` does, and gives it back once
+  it has ended: upstream gave it back once Postgres said the connection
+  was idle, which it also says after a BEGIN that failed. Its end is
+  decided once its work has settled (`settle`): what the work left running
+  asks from then on is refused, unsent (`TRANSACTION_ENDED`), as is what it
+  asks once its connection closed (the close's error); the transaction
+  then waits for every statement it asked to answer, and ends with a
+  ROLLBACK if any failed, waited for or not, or if its work asked anything
+  once settled (`TRANSACTION_UNFINISHED`: it would commit only part of
+  it), else a COMMIT; and a COMMIT that Postgres answers with ROLLBACK (a
+  savepoint's statement that failed once its savepoint's work had
+  returned) fails it. A refused BEGIN's error names the BEGIN; a first
+  statement's error its position in the statement. Upstream sent
+  the COMMIT or ROLLBACK at once: a statement asked during it ran after it,
+  outside the transaction, in autocommit, kept even when the transaction
+  rolled back; and a statement that failed unwaited left a COMMIT, which
+  Postgres answers with ROLLBACK, not an error, and upstream took for
+  success. No ROLLBACK goes to a connection gone. A held
+  connection asked to end meanwhile, its `max_lifetime` say, closes once
+  given back (`release`, in `connection.ts`), and its socket draining
+  never gives it to the pool (`drain`), as upstream's could, mid-transaction. Through Hyperdrive, the
+  first statement reaches the pooler with its BEGIN, in one batch: the
+  pooler keeps the connection for the transaction from the ReadyForQuery
+  after it, which says so (`T`), and coffre's Hyperdrive configurations
+  cache nothing (`docs/deploy.md`), so that statement is never answered
+  from a cache. Both shapes reach the pooler: Parse, Bind and Execute under
+  one Sync, and one Query message of two statements. Before a release,
+  check both on a real Hyperdrive: `select pg_backend_pid()` as a
+  transaction's first statement (with a parameter, and without) and again
+  as its second, the same pid; then a write and a rollback, nothing kept. A first statement described first (Parse, Describe, Flush,
+  then a wait) would reach Hyperdrive before any ReadyForQuery had pinned
+  the connection, a flow Cloudflare says hangs under its pooling; coffre
+  sends none (`postgresClient`), and none is supported there. This
+  replaces PR A's fix for a BEGIN queued behind `max_pipeline` statements,
+  which left `begin()` without its connection: a transaction now waits for
+  a connection of its own instead.
 - **A connection closed while it opens fails its query** (`closed`, in
   `connection.ts`), as node-postgres's "Connection terminated
   unexpectedly" did. Upstream dialled again, at once and for ever (thousands
@@ -81,9 +123,15 @@ Eight, each marked `Coffre:` in the code:
   `end()` and released after it closes, which `end()` waits for, where
   upstream gave it back to the pool.
 - **A `reserve()` that opens its connection gets it** (`ReadyForQuery`, in
-  `connection.ts`). Upstream handed it over after `fetch_types`'s own
-  query, so without `fetch_types`, as coffre opened every client, a
-  `reserve()` on a pool with no connection open waited for ever.
+  `connection.ts`; `hold`, in `index.ts`). Upstream handed it over after
+  `fetch_types`'s own query, so without `fetch_types`, as coffre opened
+  every client, a `reserve()` on a pool with no connection open waited for
+  ever. And upstream's reservation both waited in the pool's queue and
+  opened a connection, which gave itself to the queue's first: one taken
+  from the queue to open a connection again, after one closed, was no
+  longer there, and waited for ever, as a transaction waiting for the
+  connection its predecessor lost would have. A reservation now either
+  waits or opens a connection, which is given to it.
 - **The pool takes the connection idle the shortest** (`Queue.pop`, in
   `queue.ts` and `index.ts`), as pg-pool does. Upstream takes the one idle the
   longest, so a steady load cycles every connection of the pool and each
@@ -103,3 +151,9 @@ Eight, each marked `Coffre:` in the code:
   the hashes are promises, which can settle after the close) writes nothing
   and fails nothing: upstream went on with the connection opened again, or
   failed on its null socket.
+- **A statement the client cannot write fails alone** (`execute`, in
+  `connection.ts`): too many parameters, a value it cannot serialize.
+  Nothing of it is sent; on an idle connection, a lone Sync answers it, so
+  the connection goes on as after any answer. Upstream failed the statement
+  already answering instead, and left this one waiting, its transaction and
+  connection with it, for ever.

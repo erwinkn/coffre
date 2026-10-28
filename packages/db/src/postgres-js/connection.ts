@@ -26,14 +26,12 @@ export type Waiting = Query | Reservation;
 const isReservation = (waiting: Waiting): waiting is Reservation => 'reserve' in waiting;
 
 /**
- * A connection held for one caller, a transaction (until Postgres says it is
- * idle again, out of the transaction) or a `reserve()` (until released): the
- * pool sends it nothing else. `next` sends the caller's next statement.
+ * A connection held for one caller, a transaction or a `reserve()`, until it
+ * gives it back (`release`): the pool sends it nothing else. `next` sends the
+ * caller's next statement.
  */
 export interface Reserved {
   next(): void;
-  /** Held until `release()`, not until the transaction ends. */
-  untilReleased: boolean;
 }
 
 export interface Connection {
@@ -50,6 +48,8 @@ export interface Connection {
   execute(query: Query): boolean;
   /** Close it once what it was sent has answered. */
   end(): Promise<void>;
+  /** Given back by what held it: closed if it was asked to end meanwhile, or the pool's again. */
+  release(): void;
   /** Close it now, failing what it was sent. */
   terminate(): void;
 }
@@ -70,7 +70,9 @@ let uid = 1;
 const Sync = b.typed('S').end();
 const Flush = b.typed('H').end();
 const SSLRequest = b.untyped().inc(4).i32(80877103).end(0);
-const ExecuteUnnamed = Buffer.concat([b.typed('E').str(N).i32(0).end(), Sync]);
+const ExecuteOnly = b.typed('E').str(N).i32(0).end();
+const ExecuteUnnamed = Buffer.concat([ExecuteOnly, Sync]);
+const BindNothing = b.typed('B').str(N).str(N).i16(0).i16(0).i16(0).end();
 const DescribeUnnamed = b.typed('D').str('S').str(N).end();
 const noop = () => {};
 
@@ -119,6 +121,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     terminate,
     execute,
     end,
+    release,
     id,
   };
 
@@ -151,35 +154,43 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       return false;
     }
 
+    let message: Buffer;
     try {
-      if (query) sent.push(q);
-      else query = q;
-
       build(q);
-      const more = write(toBuffer(q)) && !q.describeFirst && sent.length < max_pipeline;
-      // Coffre: a transaction's BEGIN learns its connection once written, however many statements are queued before
-      // it or however full the socket. Upstream asked only when more could follow, so a BEGIN behind max_pipeline
-      // statements left begin() without its connection, and the connection in a transaction no one would end.
-      if (q.options.onexecute) {
-        q.options.onexecute(connection);
-        return false;
+      message = toBuffer(q);
+      // What is sent, once it can be: its BEGIN first, if it carries one, and its values as asked.
+      if (typeof options.debug === 'function') {
+        if (q.begin !== null) options.debug(id, q.begin, [], []);
+        options.debug(id, q.text, q.args, q.statement!.types);
       }
-      return more;
     } catch (e) {
-      if (sent.length === 0) write(Sync);
-      errored(e);
+      // Coffre: a statement the client cannot write fails alone, and nothing of it is sent. On an idle connection it is
+      // answered all the same, a lone Sync's ReadyForQuery, which goes on as any answer does; behind one answering, it
+      // is dropped. Upstream failed the statement already answering there, and left this one waiting for an answer,
+      // its transaction with it.
+      queryError(q, e);
+      if (query === null) {
+        query = q;
+        write(Sync);
+      }
       return true;
     }
+    if (query) sent.push(q);
+    else query = q;
+    // Nothing follows a statement that carries its transaction's BEGIN until Postgres has said whether it took.
+    return write(message) && !q.describeFirst && q.begin === null && sent.length < max_pipeline;
   }
 
   function toBuffer(q: Query): Buffer {
     if (q.parameters.length >= 65534) throw Errors.generic('MAX_PARAMETERS_EXCEEDED', 'Max number of parameters (65534) exceeded');
 
-    return q.options.simple
-      ? b.typed('Q').str(q.statement!.string + N).end()
-      : q.describeFirst
-        ? Buffer.concat([Parse(q), DescribeUnnamed, Flush])
-        : Buffer.concat([Parse(q), DescribeUnnamed, bound(q)]);
+    // Coffre: a transaction's BEGIN goes with its first statement, a round trip less, and under the same Sync, so that
+    // a BEGIN that fails has Postgres skip the statement, which never runs outside the transaction: in one Query
+    // message, whose statements stop at the first that fails, or as the extended protocol's Parse, Bind and Execute
+    // ahead of the statement's. Upstream sent BEGIN alone and waited for it.
+    if (q.options.simple) return b.typed('Q').str((q.begin === null ? '' : q.begin + ';\n') + q.statement!.string + N).end();
+    const statement = q.describeFirst ? [Parse(q), DescribeUnnamed, Flush] : [Parse(q), DescribeUnnamed, bound(q)];
+    return Buffer.concat(q.begin === null ? statement : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly, ...statement]);
   }
 
   /** The statement's values, bound, and its execution: what follows its Parse once the values can be written. */
@@ -200,8 +211,6 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     // Coffre: an unnamed statement's plain values go with it, in one round trip (typedByServer, below).
     q.describeFirst = parameters.length > 0 && typedByServer(parameters, types);
     q.statement = { string: q.text, types, columns: null };
-
-    if (typeof options.debug === 'function') options.debug(id, q.text, parameters, types);
   }
 
   function write(x: Buffer): boolean {
@@ -257,7 +266,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function drain(): void {
-    if (!query) onopen(connection);
+    // Coffre: not a held connection, which its holder gives back: upstream could give one to the pool mid-transaction.
+    if (!query && !connection.reserved) onopen(connection);
   }
 
   function data(x: Buffer): void {
@@ -337,12 +347,22 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (isReservation(q)) return q.reject(err);
 
     const e = err && typeof err === 'object' ? err : new Error(String(err));
+    // A statement that carried its transaction's BEGIN: whose error Postgres answered, the BEGIN's or its own. Sent in
+    // one Query message, the two are parsed together: an error placed past the BEGIN is the statement's, its position
+    // then counted from the statement's start.
+    let begin = false;
+    if (q.begin !== null && e instanceof Errors.PostgresError) {
+      const prefix = q.begin.length + 2;
+      const inStatement = q.options.simple && e.position !== undefined && Number(e.position) > prefix;
+      if (inStatement) Object.defineProperty(e, 'position', { value: String(Number(e.position) - prefix), enumerable: true });
+      begin = !q.began && !inStatement;
+    }
     if (!('query' in e) && !('parameters' in e)) {
       const debug = Boolean(options.debug);
       Object.defineProperties(e, {
         stack: { value: ('stack' in e ? String(e.stack) : '') + q.origin.replace(/.*\n/, '\n'), enumerable: debug },
-        query: { value: q.text, enumerable: debug },
-        parameters: { value: q.parameters, enumerable: debug },
+        query: { value: begin ? q.begin : q.text, enumerable: debug },
+        parameters: { value: begin ? [] : q.parameters, enumerable: debug },
         args: { value: q.args, enumerable: debug },
         types: { value: q.statement?.types, enumerable: debug },
       });
@@ -358,6 +378,15 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       return new Promise((resolve) => (socket && socket.readyState !== 'closed' ? socket.once('close', () => resolve()) : resolve()));
     }
     return (ending = new Promise((resolve) => (ended = resolve)));
+  }
+
+  // Coffre: a held connection asked to end meanwhile (its lifetime, the client's end) closes once given back; upstream
+  // closed a transaction's once Postgres said it was idle, and gave a reserve()'s back to the pool, its end() still
+  // waiting, which a later end() waited on for ever.
+  function release(): void {
+    connection.reserved = null;
+    if (ending) terminate();
+    else onopen(connection);
   }
 
   function terminate(): void {
@@ -492,14 +521,15 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       // Open: what opened it goes now, a statement sent, a reservation given the connection.
       if (!isReservation(initial)) execute(initial);
       options.shared.retries = 0;
-      // Coffre: a reserve() that opened the connection is given it now, or, the connection ending meanwhile, it ends.
-      // Upstream gave it after fetch_types's own query, and without fetch_types never: that reserve() waited for ever.
-      const reserving = initial !== null && isReservation(initial);
+      // Coffre: a reserve() that opened the connection is given it now, itself, even as the client ends: asked before,
+      // it is served, and its release closes the connection, which end() waits for (an end() asked in the moment before
+      // its holder resumes closes the connection then, and the holder fails, CONNECTION_DESTROYED). Upstream gave it after
+      // fetch_types's own query, and without fetch_types never; and it gave the connection to the pool's first waiting,
+      // which the reservation, taken from the queue to open this connection again after one closed, no longer was:
+      // that reserve() waited for ever.
+      const opened = initial;
       initial = null;
-      if (reserving) {
-        if (ending) terminate();
-        else onopen(connection);
-      }
+      if (opened !== null && isReservation(opened)) opened.reserve(connection);
       return;
     }
 
@@ -507,16 +537,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (query) return; // Consider opening if able and sent.length < 50
 
     if (connection.reserved) {
-      // I: idle, out of the transaction that held it.
-      if (!connection.reserved.untilReleased && x[5] === 73) {
-        if (ending) terminate();
-        else {
-          connection.reserved = null;
-          onopen(connection);
-        }
-      } else {
-        connection.reserved.next();
-      }
+      connection.reserved.next();
     } else if (ending) {
       terminate();
     } else {
@@ -525,6 +546,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function CommandComplete(x: Buffer): void {
+    // The BEGIN sent ahead of the statement: its answer, not the statement's.
+    if (query!.begin !== null && !query!.began) {
+      query!.began = true;
+      return;
+    }
     rows = 0;
 
     for (let i = x.length - 1; i > 0; i--) {

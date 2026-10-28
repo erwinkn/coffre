@@ -1,4 +1,3 @@
-import type { Connection } from './connection.ts';
 import type { RowList } from './index.ts';
 import type { Column } from './result.ts';
 
@@ -13,8 +12,6 @@ export interface Statement {
 export interface QueryOptions {
   /** Sent with the simple protocol, one Query message: what a statement with no parameters is, by default. */
   simple: boolean;
-  /** Told which connection the statement went to, once written: a transaction's BEGIN (`begin` in index.ts). */
-  onexecute?: ((connection: Connection) => void) | undefined;
 }
 
 /**
@@ -39,6 +36,9 @@ export class Query<T = unknown> extends Promise<T> {
   statement: Statement | null = null;
   /** Whether its parameters' types are asked of the server before its values go (`typedByServer`, connection.ts). */
   describeFirst = false;
+  /** A transaction's first statement: its BEGIN, sent ahead of it under its Sync (`begin`, index.ts); and whether it took. */
+  begin: string | null = null;
+  began = false;
 
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: unknown) => void;
