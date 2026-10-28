@@ -35,7 +35,7 @@ export async function revokeOnPostgres(db: Queryable, c: RevokeCall): Promise<An
 export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answer> {
   const { change, input, read } = c;
   const k = input.credential;
-  const guarded = input.policy.protected;
+  const guarded = read.slugs;
   const [row] = await rowsOf<{ answer: string }>(db, sql`/* writes */ SELECT issue_token(
     ${change.requestId}::text, ${String(change.at)}::bigint, ${change.actor}::text, ${change.payload}::text, ${change.mac}::bytea, ${change.seal}::bytea,
     ${input.principal}::text, ${input.generation}::integer, ${read.principal.accessSeq.toString()}::bigint, ${read.actor.generation}::integer, ${read.actor.accessSeq.toString()}::bigint,

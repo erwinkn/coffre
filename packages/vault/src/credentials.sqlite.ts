@@ -112,7 +112,7 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
   const [changed] = await tx.select({ seq: auditLog.seq }).from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
   if ((changed === undefined ? null : String(changed.seq)) !== input.policy.seq) return { state: 'policy' };
-  for (const { environmentId, slug } of input.policy.protected) {
+  for (const { environmentId, slug } of read.slugs) {
     const [place] = await tx.select({ slug: environments.slug, project: projects.slug }).from(environments).innerJoin(projects, eq(projects.id, environments.projectId)).where(eq(environments.id, environmentId));
     if ((place === undefined || place.slug.includes('~') || place.project.includes('~') ? null : place.slug) !== slug) return { state: 'policy' };
   }

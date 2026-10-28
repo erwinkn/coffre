@@ -444,8 +444,8 @@ export function payloadOf(ref: Ref, op: Op, old?: bigint): string {
  * row's.
  */
 export function loggedChange(row: { number: bigint; at: number; object: string; payload: string; seal: Buffer | null }): LoggedChange | null {
-  // What a change records besides its op, which the replay leaves: the 0.14 entry it accounts for, and a sign-in's or a revoke's own (credentials.ts).
-  const { ref: named, old: _, signIn: _signIn, revoke: _revoke, ...op } = JSON.parse(row.payload) as Op & { ref?: Ref; old?: string; signIn?: unknown; revoke?: unknown };
+  // What a change records besides its op, which the replay leaves: the 0.14 entry it accounts for, and a sign-in's, a revoke's or an issue's own (credentials.ts).
+  const { ref: named, old: _, signIn: _signIn, revoke: _revoke, issue: _issue, ...op } = JSON.parse(row.payload) as Op & { ref?: Ref; old?: string; signIn?: unknown; revoke?: unknown; issue?: unknown };
   const ref = named ?? (op.op === 'genesis' ? refOf(op.value) : undefined);
   if (ref === undefined || objectKey(ref) !== row.object) return null;
   return { kind: 'change', number: row.number, at: row.at, ref: { kind: ref.kind, id: ref.id }, op: op as Op, seal: row.seal };

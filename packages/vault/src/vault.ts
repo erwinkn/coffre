@@ -3247,6 +3247,13 @@ class VaultService implements Vault {
       actor: { generation: actorRow.generation, accessSeq: actorRow.accessSeq },
       principal: { generation: principalRow.generation, accessSeq: principalRow.accessSeq },
       via: via === null ? null : { columns: via.columns, seal: via.seal },
+      // The protected environments' slugs, and the scope's as weighed: none moves before the number (Fable on PR 2).
+      slugs: [
+        ...input.policy.protected,
+        ...places.flatMap((place) => (place?.environmentId == null || input.policy.protected.some(({ environmentId }) => environmentId === place.environmentId)
+          ? []
+          : [{ environmentId: place.environmentId, slug: place.environmentSlug ?? null }])),
+      ],
     });
     const answer = await issueToken(this.#db, call);
     if (answer.number == null) return { ok: false, refused: answer.state === 'expired' ? 'refused' : answer.state as IssueTokenRefusal, ...(answer.state === 'expired' ? { why: 'its end is past' } : {}) };

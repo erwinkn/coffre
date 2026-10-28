@@ -251,6 +251,9 @@ test('a handle is made on a personal token only within its end, and not once it 
   assert.ok((await w.vault.issueToken!(token)).ok);
   const handle = (expiresAt: number) => handleOf(w, token.credential.id, expiresAt, onViewerToken);
   assert.equal((await w.vault.issueToken!(handle(Date.now() + 2 * 3_600_000))).ok, false, 'past the token that made it');
+  // Past the token's columns: reading a protected place, which a viewer's token only uses (`heldColumns`, through it).
+  const reads = await w.vault.issueToken!(handleOf(w, token.credential.id));
+  assert.equal(!reads.ok && reads.why, 'a handle reads and uses at most what its person holds, through what it was made on');
   assert.ok((await w.vault.issueToken!(handle(Date.now() + 1_800_000))).ok);
   // Revoked, it makes nothing more.
   const { credentials } = tablesOf(db.owner);
@@ -331,6 +334,30 @@ test("a policy change waits for the issues in flight, which hold the issue lock 
     assert.equal(fence!.free, true, 'it holds no fence while it waits');
     await holder.unsafe('COMMIT');
     assert.ok((await changing).ok);
+  } finally {
+    await holder.end();
+  }
+});
+
+test("an environment the scope names, renamed while the issue's write waits, refuses it: the slugs it was weighed on are held under the issue lock (Fable on PR 2)", postgresOnly('row locks'), async () => {
+  const w = await world();
+  const scoped = asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: storedScope([issuedGrant({ projectId: w.project, environmentId: w.environment, role: 'viewer' })]) } }));
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // The account's row held: the issue's read is done, its write waits; meanwhile the environment is renamed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    const issuing = w.vault.issueToken!(scoped);
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
+    for (let tries = 0; (await waits()) === 0; tries += 1) {
+      assert.ok(tries < 200, 'the write waits on the row');
+      await sleep(10);
+    }
+    await db.owner.execute(sql`UPDATE environments SET slug = 'renamed' WHERE id = ${w.environment}`);
+    await holder.unsafe('COMMIT');
+    const outcome = await issuing;
+    assert.equal(!outcome.ok && outcome.refused, 'policy', JSON.stringify(outcome));
+    assert.equal(await credentialRows(), 0);
   } finally {
     await holder.end();
   }
