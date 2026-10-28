@@ -34,7 +34,11 @@ BEGIN
         RAISE EXCEPTION 'a sign-in makes a credential of its binding''s, a service''s or a workload''s' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- A lock not had within `lock_timeout` raises `lock_not_available`, which the vault answers as busy: no subtransaction to catch it here.
-    PERFORM 1 FROM public.vault_members m WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation FOR SHARE;
+    -- The account's row as its newest change sealed it, or 0.14's with neither (before the cutover): a row put back is none.
+    PERFORM 1 FROM public.vault_members m
+     WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation
+       AND m.seal IS NOT DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('principal', p_principal) ORDER BY c.number DESC LIMIT 1)
+       FOR SHARE;
     IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
     PERFORM 1 FROM public.service_bindings b
      WHERE b.id = p_binding AND b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL
@@ -90,13 +94,15 @@ BEGIN
 END
 $$;
 --> statement-breakpoint
--- A revoke of credential `p_id`, from the row as the vault sealed its object (`p_seal_from`) and as the app signed it (`p_mac_from`), to revoked, with the app's MAC over the revoked row (`p_mac`) and the vault's seal over its object (`p_seal`). Its answer, JSON: `{"number": "<n>"}`; `{"number": null}` for a row 0.14 made that the log never held, revoked with no change; or `{"state": …}` with nothing written:
+-- A revoke of credential `p_id`, from the row as the vault sealed its object (`p_seal_from`) and as the app signed it (`p_mac_from`), to revoked, with the app's MAC over the revoked row (`p_mac`) and the vault's seal over its object (`p_seal`). Only a row the log holds: one 0.14 made, with no seal, the app revokes as 0.14 does, with its entry. Its answer, JSON: `{"number": "<n>"}`, or `{"state": …}` with nothing written:
 -- - `moved`: the row is not as named, or revoked already;
--- - `stale`: its seal is not its object's newest change's (ChangeChecksSeal), a row put back.
+-- - `stale`: its seal is not its object's newest change's (ChangeChecksSeal), a row put back;
+-- - `policy`: the caller's right to revoke it was weighed on a policy (`p_policy_seq`, the newest `policy.change` then, and the slugs of the environments it protected, `p_protected`, `p_slugs`) that has changed since (RevokePolicyHeld), as `policyStill` refuses under 0.14's head. Read once the fence is held: every policy change and rename takes it before it commits (0.14's entry, through `audit_log_fence`; 0.15's, through its change), so one that commits before is seen, and one after waits.
 -- Locks: the row's, then the fence exclusive (RevokeTakesFence), held only for the statement's work: a use in flight is numbered before, one after reads the row revoked. It issues nothing, and takes no issue lock.
 CREATE FUNCTION revoke_credential(
     p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal_from bytea, p_seal bytea,
-    p_id uuid, p_mac_from bytea, p_auth_mac bytea, p_revoked_at bigint, p_revoked_by text
+    p_id uuid, p_mac_from bytea, p_auth_mac bytea, p_revoked_at bigint, p_revoked_by text,
+    p_policy boolean, p_policy_seq bigint, p_protected uuid[], p_slugs text[]
 ) RETURNS json
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '1s' AS $$
 DECLARE
@@ -111,22 +117,33 @@ BEGIN
         END IF;
         RETURN json_build_object('number', held.number::text);
     END IF;
-    IF (p_seal_from IS NULL) <> (p_seal IS NULL) THEN
-        RAISE EXCEPTION 'a revoke seals the object it ends exactly when it was sealed' USING ERRCODE = 'invalid_parameter_value';
+    IF p_seal_from IS NULL OR p_seal IS NULL THEN
+        RAISE EXCEPTION 'the vault revokes a credential the log holds, from its seal' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     PERFORM 1 FROM public.credentials c
      WHERE c.id = p_id AND c.revoked_at IS NULL AND c.auth_mac = p_mac_from AND c.seal IS NOT DISTINCT FROM p_seal_from
        FOR UPDATE;
     IF NOT FOUND THEN RETURN json_build_object('state', 'moved'); END IF;
     PERFORM pg_advisory_xact_lock(1668244070, 0);
-    -- ChangeChecksSeal: a row the log sealed once, put back since, is not its newest change's; one never sealed has no change.
+    -- ChangeChecksSeal: a row the log sealed once, put back since, is not its newest change's.
     IF p_seal_from IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = target ORDER BY c.number DESC LIMIT 1) THEN
         RETURN json_build_object('state', 'stale');
+    END IF;
+    IF p_policy AND (
+        (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1)
+            IS DISTINCT FROM p_policy_seq
+        -- Each protected environment's slug as it stands, none once it or its project is deleted (a tombstone), as `policyNow` reads them.
+        OR EXISTS (
+            SELECT 1 FROM unnest(p_protected, p_slugs) AS p(id, slug)
+             WHERE (SELECT e.slug FROM public.environments e JOIN public.projects q ON q.id = e.project_id
+                     WHERE e.id = p.id AND strpos(e.slug, '~') = 0 AND strpos(q.slug, '~') = 0) IS DISTINCT FROM p.slug
+        )
+    ) THEN
+        RETURN json_build_object('state', 'policy');
     END IF;
     UPDATE public.credentials
        SET revoked_at = timestamptz 'epoch' + p_revoked_at * interval '1 millisecond', revoked_by = p_revoked_by, auth_mac = p_auth_mac, seal = p_seal
      WHERE id = p_id;
-    IF p_seal IS NULL THEN RETURN json_build_object('number', NULL); END IF;
     INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
         VALUES (nextval('public.log_number'), p_at, p_request, target, p_actor, p_payload, p_seal, p_mac)
         RETURNING number INTO n;
@@ -138,6 +155,6 @@ REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, tex
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text) TO coffre_vault;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION revoke_credential(text, bigint, text, text, bytea, bytea, bytea, uuid, bytea, bytea, bigint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION revoke_credential(text, bigint, text, text, bytea, bytea, bytea, uuid, bytea, bytea, bigint, text, boolean, bigint, uuid[], text[]) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION revoke_credential(text, bigint, text, text, bytea, bytea, bytea, uuid, bytea, bytea, bigint, text) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION revoke_credential(text, bigint, text, text, bytea, bytea, bytea, uuid, bytea, bytea, bigint, text, boolean, bigint, uuid[], text[]) TO coffre_vault;

@@ -11,10 +11,10 @@ import type { CoffreClient } from '@coffre/client';
 import { issuedGrant, sealedSessionScope, storedScope } from '@coffre/core/access';
 import { defineSignin, github, type BindingPolicy } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
-import { credentials, logChanges } from './db/tables.ts';
+import { auditLog, credentials, logChanges } from './db/tables.ts';
 import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -148,4 +148,37 @@ test('a workload session\'s sealed scope keeps the keys its binding lets it read
   assert.deepEqual(sealed.find((grant) => grant.environmentId === prod)?.reads, [key]);
   // As stored without its reads, the grant on prod would reach every key there.
   assert.equal((JSON.parse(storedScope(JSON.parse(sealedSessionScope(null, binding, policy)))) as { reads?: unknown }[]).some((grant) => grant.reads !== undefined), false);
+});
+
+test("a revoke weighed on a policy that changes before the vault's statement is refused, 409, and revokes nothing (T149, RevokePolicyHeld)", async (t) => {
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/dev', { name: 'dev' });
+  const token = await root.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 });
+  const revoke = deps.vault.revokeCredential!;
+  // Between the app's check of who may and the vault's statement, an Owner protects an environment: the policy moves on.
+  t.mock.method(deps.vault as Required<Vault>, 'revokeCredential', async (input: Parameters<typeof revoke>[0]) => {
+    await root.environments.protect('market/dev');
+    return revoke(input);
+  }, { times: 1 });
+  await assert.rejects(root.tokens.revoke(`token:${SERVICE}`, token.id), { status: 409, reason: 'policy_changed' });
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, token.id));
+  assert.equal(row!.revokedAt, null, 'nothing revoked');
+  // Asked again, it is weighed on the policy as it is now.
+  await root.tokens.revoke(`token:${SERVICE}`, token.id);
+  assert.deepEqual((await opsByCredential()).get(token.id), ['credential.issue', 'credential.revoke']);
+});
+
+test("a credential 0.14 made, which the log never held, is revoked and signed out as 0.14 does, with 0.14's entry: the vault revokes only the log's (T149)", async () => {
+  const issued = await root.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 });
+  const session = await signin.completeSignin({ provider: 'github', subject: 'dev', emails: [DEV], name: null }, meta());
+  assert.ok(session.ok);
+  // As 0.14 left them: no seal, no change.
+  await db.owner.update(credentials).set({ seal: null }).where(inArray(credentials.id, [issued.id, session.credential.id]));
+  await db.owner.delete(logChanges);
+  await root.tokens.revoke(`token:${SERVICE}`, issued.id);
+  await signin.signOut(session.credential.token, meta());
+  const ended = await db.owner.select({ id: credentials.id, revokedAt: credentials.revokedAt }).from(credentials).where(inArray(credentials.id, [issued.id, session.credential.id]));
+  assert.ok(ended.every((row) => row.revokedAt !== null));
+  const entries = await db.owner.select({ action: auditLog.action }).from(auditLog).where(and(inArray(auditLog.action, ['token.revoke', 'sign_out']), eq(auditLog.decision, 'allow')));
+  assert.deepEqual(entries.map(({ action }) => action).sort(), ['sign_out', 'token.revoke']);
 });

@@ -33,7 +33,8 @@
 (*           token (the same one, replayed, or two);                       *)
 (*   ub      a manager unbinding "b";                                      *)
 (*   admin   demotes Ada, or removes svc, or removes and admits it again;  *)
-(*   rev     revokes one credential;                                       *)
+(*   rev     revokes one credential, by a right the policy gives it (a     *)
+(*           service's manager's), which an admin may take away;           *)
 (*   u1, u2  uses of a sensitive value, each presenting a token handed out;*)
 (*   writer  a database writer holding no key;                             *)
 (*   evil    the app's own code, an attacker's: issues in Ada's name; as   *)
@@ -51,6 +52,10 @@ CONSTANTS
     \* A revoke takes the fence exclusive, which every use takes shared:
     \* no use decided on the live row is numbered after the revoke.
     RevokeTakesFence,
+    \* A revoke goes ahead only while the policy its right was weighed on
+    \* is still the newest, read under the fence, which every policy change
+    \* takes too (as `policyStill` under 0.14's head).
+    RevokePolicyHeld,
     \* An issue or a sign-in never takes the fence: the issue lock, shared
     \* (0026, IssueOwnLock; T123, R58).
     IssueOffFence,
@@ -143,7 +148,7 @@ VARIABLES
     answered,   \* the revokes answered: sealed, past their seal wait
     given,      \* each issue committed
     revs,       \* each revoke committed: the credential, its number
-    dems,       \* each demotion committed: its number
+    dems,       \* each policy change committed: Ada's demotion, or the revoker's right taken away; its number
     used        \* each use decided
 
 locks == <<fx, fs, hd, mx, ms, cx, cs, bx>>
@@ -179,6 +184,9 @@ Live(c) == rows[c] /= NoRow /\ Sealed(rows[c]) = Sealed(sealed[c]) /\ ~rows[c].r
            /\ StatusOf(rows[c].who) = "active" /\ rows[c].gen = GenOf(rows[c].who)
 
 FenceFree == fx = None /\ fs = {}
+
+\* Whether the revoker still holds the right the policy gave it.
+Manages == ~\E d \in dems : d.kind = "unmanage"
 
 \* The row a presented token's hash finds, if any.
 Resolve(tok) == IF \E c \in Creds : rows[c] /= NoRow /\ rows[c].hash = tok
@@ -436,7 +444,7 @@ UbCommit(b) ==
        IN /\ rows' = [c \in Creds |-> IF c \in set THEN [rows[c] EXCEPT !.revoked = TRUE] ELSE rows[c]]
           /\ sealed' = [c \in Creds |-> IF c \in set THEN [rows[c] EXCEPT !.revoked = TRUE] ELSE sealed[c]]
           /\ history' = [c \in Creds |-> IF c \in set THEN history[c] \cup {[rows[c] EXCEPT !.revoked = TRUE]} ELSE history[c]]
-          /\ revs' = revs \cup {[c |-> c, n |-> n] : c \in set}
+          /\ revs' = revs \cup {[c |-> c, n |-> n, mgr |-> FALSE] : c \in set}
           /\ unbound' = n
     /\ next' = next + 1
     /\ Done(b)
@@ -446,12 +454,13 @@ UbCommit(b) ==
 (* A revoke of one credential: one statement, its row, then the fence, the
    row weighed, numbered, committed; then the seal wait, and the answer. *)
 
+\* At the app: who may, weighed on the policy as the request was loaded.
 RevStart(r) ==
     /\ pc[r] = "start"
     /\ \E c \in Ops[r] :
         /\ op' = [op EXCEPT ![r] = [kind |-> "revoke", c |-> c]]
         /\ l' = [l EXCEPT ![r].c = c]
-    /\ Goto(r, "rows")
+    /\ Goto(r, IF Manages THEN "rows" ELSE "done")
     /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, handed, answered, given, revs, dems, used>>
 
 RevRow(r) ==
@@ -466,7 +475,7 @@ RevFence(r) ==
     /\ RevokeTakesFence => FenceFree
     /\ fx' = IF RevokeTakesFence THEN r ELSE fx
     /\ LET c == l[r].c IN
-       IF rows[c] /= NoRow /\ Sealed(rows[c]) = Sealed(sealed[c]) /\ ~rows[c].revoked
+       IF rows[c] /= NoRow /\ Sealed(rows[c]) = Sealed(sealed[c]) /\ ~rows[c].revoked /\ (RevokePolicyHeld => Manages)
        THEN /\ l' = [l EXCEPT ![r].n = next, ![r].ok = TRUE]
             /\ next' = next + 1
        ELSE UNCHANGED <<l, next>>
@@ -478,7 +487,7 @@ RevCommit(r) ==
     /\ LET c == l[r].c IN
        IF l[r].ok
        THEN /\ Write(c, [rows[c] EXCEPT !.revoked = TRUE])
-            /\ revs' = revs \cup {[c |-> c, n |-> l[r].n]}
+            /\ revs' = revs \cup {[c |-> c, n |-> l[r].n, mgr |-> TRUE]}
        ELSE UNCHANGED <<rows, sealed, history, revs>>
     /\ Goto(r, "answer")
     /\ Release(r)
@@ -497,7 +506,7 @@ RevAnswer(r) ==
    live credentials in it. A removal and admission again is two such
    transactions. *)
 
-Who(o) == IF o = "demote" THEN "ada" ELSE "svc"
+Who(o) == IF o \in {"demote", "unmanage"} THEN "ada" ELSE "svc"
 
 AdminStart(a) ==
     /\ pc[a] = "start"
@@ -532,15 +541,18 @@ AdminBody(a) ==
            swept == {c \in Creds : rows[c] /= NoRow /\ rows[c].who = "svc" /\ ~rows[c].revoked /\ Sealed(rows[c]) = Sealed(sealed[c])}
        IN CASE op[a].kind = "demote" ->
                /\ owner' = FALSE
-               /\ dems' = dems \cup {[n |-> n]}
+               /\ dems' = dems \cup {[n |-> n, kind |-> "demote"]}
                /\ UNCHANGED <<rows, sealed, history, status, gen, revs, op>>
+            [] op[a].kind = "unmanage" ->
+               /\ dems' = dems \cup {[n |-> n, kind |-> "unmanage"]}
+               /\ UNCHANGED <<rows, sealed, history, owner, status, gen, revs, op>>
             [] op[a].kind \in {"remove", "removeRestore"} ->
                /\ status' = "removed"
                /\ gen' = gen + 1
                /\ rows' = [c \in Creds |-> IF c \in swept THEN [rows[c] EXCEPT !.revoked = TRUE] ELSE rows[c]]
                /\ sealed' = [c \in Creds |-> IF c \in swept THEN [rows[c] EXCEPT !.revoked = TRUE] ELSE sealed[c]]
                /\ history' = [c \in Creds |-> IF c \in swept THEN history[c] \cup {[rows[c] EXCEPT !.revoked = TRUE]} ELSE history[c]]
-               /\ revs' = revs \cup {[c |-> c, n |-> n] : c \in swept}
+               /\ revs' = revs \cup {[c |-> c, n |-> n, mgr |-> FALSE] : c \in swept}
                /\ op' = [op EXCEPT ![a].kind = IF @ = "removeRestore" THEN "restore" ELSE @]
                /\ UNCHANGED <<owner, dems>>
             [] op[a].kind = "restore" ->
@@ -631,9 +643,14 @@ AllowedAtCurrentGeneration ==
 \* before any demotion of its issuer, and before any revoke of the
 \* credential its issue came in on.
 SensitiveOnlyFromOwners ==
-    \A g \in given, d \in dems : g.sens => g.n < d.n
+    \A g \in given, d \in dems : (g.sens /\ d.kind = "demote") => g.n < d.n
 IssuedByLiveCredential ==
     \A g \in given, r \in revs : g.via = r.c => g.n < r.n
+
+\* A revoke by a right the policy gave is numbered before that right was
+\* taken away: none ends a credential its revoker no longer may.
+RevokesOnStandingRight ==
+    \A r \in revs, d \in dems : (r.mgr /\ d.kind = "unmanage") => r.n < d.n
 
 \* The binding makes at most Rate credentials, and an ID token buys one.
 RateHeld ==

@@ -284,6 +284,8 @@ REMOVALS=(
   "LifecycleIssue IssuerCAS IssuedByLiveCredential"
   "LifecycleIssue IssueOffFence UsesNeverWaitOnIssues"
   "LifecycleIssue RevokeTakesFence RevokeOrdersUses"
+  # A revoke by a right the policy gives holds that policy to the newest under the fence (T149 r1).
+  "LifecycleRevoke RevokePolicyHeld RevokesOnStandingRight"
   # A sign-in's binding row holds its rate; the account's row, or W242's generation at use, its removal.
   "LifecycleSignIn BindingLocked RateHeld"
   "LifecycleSignIn MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"

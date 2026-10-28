@@ -473,8 +473,8 @@ export type SignInOutcome = { ok: true; number: string; witnessed: boolean | nul
 export type RevokeCredentialInput = {
   /** Who revokes it, as its entry names them: `user:…`, `token:…`, or the app's own (`coffre`). */
   actor: string;
-  /** Its object's columns as read, and their seal: null for a row 0.14 made that the log never held. */
-  before: { columns: CredentialColumns; seal: string | null };
+  /** Its object's columns as read, and their seal: a row the log holds (one 0.14 made, with none, the app revokes as 0.14 does). */
+  before: { columns: CredentialColumns; seal: string };
   authMacFrom: string;
   authMac: string;
   revokedAt: number;
@@ -483,17 +483,25 @@ export type RevokeCredentialInput = {
   reason: 'revoke' | 'sign_out';
   /** The credential the request came in on, for its change's record: whose act it was (a run's, say). */
   via: string | null;
+  /**
+   * The policy the caller's right to revoke it was weighed on, held to under
+   * the fence (as `policyStill` holds a write to it under 0.14's head): the
+   * newest `policy.change`'s sequence number, and the environments it
+   * protected, by id, with their slugs (null: deleted). Null for a revoke no policy weighs
+   * (its holder's own sign-out).
+   */
+  policy: { seq: string | null; protected: { environmentId: string; slug: string | null }[] } | null;
 };
 
 /**
- * A revoke: its change's number (null for a row the log never held), or
- * why nothing was written: the row not as read, or revoked already
- * (`moved`); not its object's newest change's (`stale`); its seal not the
- * vault's (`tampered`, a finding); a lock not had in time (`busy`).
+ * A revoke: its change's number, or why nothing was written: the row not
+ * as read, or revoked already (`moved`); not its object's newest change's
+ * (`stale`); its seal not the vault's (`tampered`, a finding); the policy
+ * it was weighed on changed (`policy`); a lock not had in time (`busy`).
  */
 export type RevokeCredentialOutcome =
-  | { ok: true; number: string | null; witnessed: boolean | null }
-  | { ok: false; refused: 'moved' | 'stale' | 'tampered' | 'busy' };
+  | { ok: true; number: string; witnessed: boolean | null }
+  | { ok: false; refused: 'moved' | 'stale' | 'tampered' | 'policy' | 'busy' };
 
 /**
  * The vault's entries that change what a member holds: what their row's

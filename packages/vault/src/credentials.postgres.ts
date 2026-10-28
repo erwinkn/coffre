@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -21,10 +19,14 @@ export async function signInOnPostgres(db: Queryable, c: SignInCall): Promise<An
 
 /** `revoke_credential` (migration 0034): one statement, its own transaction, its answer one JSON value. */
 export async function revokeOnPostgres(db: Queryable, c: RevokeCall): Promise<Answer> {
+  const { change, policy } = c;
+  const guarded = policy?.protected ?? [];
   const [row] = await rowsOf<{ answer: string }>(db, sql`/* writes */ SELECT revoke_credential(
-    ${c.change?.requestId ?? randomUUID()}::text, ${String(c.at)}::bigint, ${c.actor}::text, ${c.change?.payload ?? null}::text, ${c.change?.mac ?? null}::bytea,
-    ${c.change?.sealFrom ?? null}::bytea, ${c.change?.seal ?? null}::bytea,
-    ${c.ref.id}::uuid, ${c.macFrom}::bytea, ${c.mac}::bytea, ${String(c.revokedAt)}::bigint, ${c.revokedBy}::text
+    ${change.requestId}::text, ${String(change.at)}::bigint, ${change.actor}::text, ${change.payload}::text, ${change.mac}::bytea,
+    ${change.sealFrom}::bytea, ${change.seal}::bytea,
+    ${c.ref.id}::uuid, ${c.macFrom}::bytea, ${c.mac}::bytea, ${String(c.revokedAt)}::bigint, ${c.revokedBy}::text,
+    ${policy !== null}::boolean, ${policy?.seq ?? null}::bigint,
+    ${sql.param(guarded.map(({ environmentId }) => environmentId))}::uuid[], ${sql.param(guarded.map(({ slug }) => slug))}::text[]
   )::text AS answer`);
   return JSON.parse(row!.answer) as Answer;
 }

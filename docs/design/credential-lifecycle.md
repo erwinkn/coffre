@@ -11,7 +11,7 @@ Three pull requests, each leaving `main` shippable, all in 0.15:
 
 | PR | what | Lifecycle.tla's protections it builds |
 |---|---|---|
-| 1 (T149, W250) | sign-in through a trust binding (`POST /api/auth/oidc` and a workload's `POST /api/workloads/session`), revoke and sign-out, by the vault; the spec | BindingLocked, MemberLocked, SpentChecked, IssueOffFence, RevokeTakesFence, SweepAfterLock (as built already) |
+| 1 (T149, W250) | sign-in through a trust binding (`POST /api/auth/oidc` and a workload's `POST /api/workloads/session`), revoke and sign-out, by the vault; the spec | BindingLocked, MemberLocked, SpentChecked, IssueOffFence, RevokeTakesFence, RevokePolicyHeld, SweepAfterLock (as built already) |
 | 2 | a service token, a personal token and a handle, issued by the vault, which weighs the issuer's rights itself | IssuerLocked, IssuerCAS |
 | 3 | the vault verifies the CI run's ID token (D148), takes only bindings it sealed, and seals each credential's token hash | VaultVerifiesToken, BindingSealed, HashSealed |
 
@@ -49,8 +49,9 @@ binding's columns the app names (its scope, and a workload's reads with it,
 (migration 0034), one statement:
 
 1. a retry by request id answers the change it made;
-2. the account's row `FOR SHARE`, active at the binding's generation
-   (MemberLocked: a removal waits for the sign-in, or the sign-in sees it);
+2. the account's row `FOR SHARE`, active at the binding's generation, its
+   seal its newest change's (MemberLocked: a removal waits for the sign-in,
+   or the sign-in sees it; a row put back is none);
 3. the binding's row `FOR UPDATE`, as named: principal, generation, scope,
    policy, not revoked (BindingLocked); and no tombstone;
 4. a workload's: no freeze of the instance, the account or the binding;
@@ -79,12 +80,19 @@ with a `commit` (the enrollment proof, not registered yet) keeps the old path.
 
 **Revoke and sign-out.** The app reads the row (`liveCredentialsWhere`, its
 MAC checked), weighs who may as before, and calls `Vault.revokeCredential`
-with the object's columns and seal and its MAC over the revoked row. The vault
-checks the seal is its own (`tampered` otherwise, reported), seals the revoke,
-and runs `revoke_credential`: the row `FOR UPDATE` as read (its MAC and seal,
-else `moved`, and the app reads again), the fence exclusive, the row's seal its
-object's newest change's (else `stale`, reported: a row put back), the update,
-the change. The fence is held for the statement's work, never a round trip.
+with the object's columns and seal, its MAC over the revoked row, and the
+policy the caller's right was weighed on. The vault checks the seal is its
+own (`tampered` otherwise, reported), seals the revoke, and runs
+`revoke_credential`: the row `FOR UPDATE` as read (its MAC and seal, else
+`moved`, and the app reads again), the fence exclusive, the row's seal its
+object's newest change's (else `stale`, reported: a row put back), the policy
+still the newest and its protected environments' slugs as weighed (else
+`policy`, 409, as `policyStill` under 0.14's head: every policy change and
+rename takes the fence before it commits, so reading it under the fence
+orders the two; RevokePolicyHeld), the update, the change. The fence is held
+for the statement's work, never a round trip. A row 0.14 made, with no seal,
+is revoked as before, with 0.14's entry: the log holds no object of it to
+change.
 
 ## 3. The model: `formal/Lifecycle.tla`
 
@@ -97,6 +105,7 @@ every protection on; each protection removed breaks the invariant beside it
 | invariant | says | broken without |
 |---|---|---|
 | `RevokeOrdersUses`, `NothingAfterRevokeAnswered` | no use allowed is numbered after a revoke; none begun after its answer serves | RevokeTakesFence |
+| `RevokesOnStandingRight` | a revoke by a right the policy gives is numbered before that right is taken away | RevokePolicyHeld |
 | `UsesNeverWaitOnIssues` (R58) | a use never waits on an issue or a sign-in | IssueOffFence |
 | `SignInsTakeNoHead` (R44), `IssuesHoldNoLockBetween` | no sign-in takes 0.14's head; an issue holds nothing between its two statements | (by construction) |
 | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` | rights never widen: a token is numbered before its issuer's demotion and her credential's revoke | IssuerLocked, IssuerCAS (each) |
@@ -108,7 +117,7 @@ every protection on; each protection removed breaks the invariant beside it
 | `SignInsOnValidTokens` | the app's code, hostile, mints no run's credential | VaultVerifiesToken; BindingSealed |
 
 Scenarios: `LifecycleIssue`, `LifecycleSignIn`, `LifecycleReplay`,
-`LifecycleUnbind`, `LifecycleForge`, `LifecycleCompromised`, each a few
+`LifecycleUnbind`, `LifecycleRevoke`, `LifecycleForge`, `LifecycleCompromised`, each a few
 seconds. `docs/formal.md` says what each abstracts.
 
 Two results drove the design:
@@ -132,7 +141,7 @@ Two results drove the design:
 | the app computes the row's APP_KEY MAC, the vault writes it verbatim | the vault holding APP_KEY | the vault never holds the app's key; the MAC covers id, hash, kind, principal, generation, identity, expiry and revoke, all of which the vault checks or decides |
 | the vault's own scope rule (`sealedSessionScope`, `storedScope`, `readScope`) moved to `@coffre/core/access` | the vault trusting the app's scope | one rule on both sides; the app's scope must equal the vault's, or the call fails |
 | `validUntil`, the proof's own times, held to in the statement | trusting the app's check before the call | 0.14 checked the token's times again after its wait under the head; the vault does the same, by the database's clock. PR 3 computes it itself |
-| `lock_timeout = '1s'` on both functions, refused as busy | waiting | R44: overload refused fast; a burst on one binding waits on its row about 1 to 3 ms a sign-in |
+| `lock_timeout = '1s'` on both functions, refused as busy | `NOWAIT` (review r1) | R44: overload refused fast. The binding's row lock is what holds its rate (BindingLocked); `NOWAIT` would refuse every sign-in of a burst on one binding but the first, which R44 asks to serve. Each holder keeps the row for its statement's work, a few ms, and a backend waits only behind those; one second bounds the rare long holder (an unbind's transaction) |
 | no 0.14 `token.exchange` entry (D147), and, extending it, no 0.14 `token.revoke` or `sign_out` allow entry: the change records it | the app appending 0.14's entry after the call | the same reason as D147; the change carries who, the binding, the proof, the issuer, the run, a session's key and end, and for a revoke why, the credential it came in on, and whose credential of what kind. Refusals are still 0.14 entries. **For Erwin: reversible** |
 | seal the token hash in the credential's object (option (a)), in PR 3 | the app's MAC check alone (option (b)) | with W242's B1 the vault finds a use's credential by its hash, so the hash is a decision input (R53). The model shows each stops a writer who moves a hash; only (a) holds when the app's check does not run. It lands after B1 |
 | a workload proof with a `commit` keeps the old path | moving the enrollment's capacity into SQL | no such proof is registered yet |

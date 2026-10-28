@@ -10,7 +10,7 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { CredentialColumns, SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
-import { asc, count, eq } from 'drizzle-orm';
+import { and, asc, count, desc, eq } from 'drizzle-orm';
 
 import { loggedChange, type ChangeKeys } from '../src/changes.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
@@ -18,7 +18,7 @@ import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { credentialObject } from '../src/objects.ts';
-import { emptyDatabase, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
@@ -244,13 +244,13 @@ async function signedIn(w: World) {
 async function read(id: string) {
   const { credentials } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, id));
-  return { row: row!, before: { columns: columnsOf(row!), seal: row!.seal === null ? null : Buffer.from(row!.seal).toString('base64') } };
+  return { row: row!, before: { columns: columnsOf(row!), seal: row!.seal === null ? '' : Buffer.from(row!.seal).toString('base64') } };
 }
 
 function revoking(made: Awaited<ReturnType<typeof read>>, by = ROOT) {
   return {
     actor: by, before: made.before, authMacFrom: Buffer.from(made.row.authMac).toString('base64'), authMac: randomBytes(32).toString('base64'),
-    revokedAt: Date.now(), revokedBy: 'root@acme.example', reason: 'revoke' as const, via: null,
+    revokedAt: Date.now(), revokedBy: 'root@acme.example', reason: 'revoke' as const, via: null, policy: null,
   };
 }
 
@@ -295,22 +295,57 @@ test('a revoked row put back with the seal it had (ChangeChecksSeal) is stale, a
   assert.ok((await db.owner.select({ n: count() }).from(auditLog))[0]!.n > reports, 'reported, as a finding');
 });
 
-test("a seal the vault never made is tampered, refused before any statement; a 0.14 row the log never held is revoked with no change", async () => {
+test("a seal the vault never made is tampered, refused before any statement; a 0.14 row the log never held is none of the vault's to revoke", async () => {
   const w = await world();
   const made = await signedIn(w);
   const forged = { ...made, before: { ...made.before, seal: randomBytes(16).toString('base64') } };
   assert.deepEqual(await w.vault.revokeCredential!(revoking(forged)), { ok: false, refused: 'tampered' });
-  // 0.14's: no seal, no change.
+  // 0.14's: no seal, no change. The app revokes it as 0.14 does, with 0.14's entry.
   const { credentials } = tablesOf(db.owner);
   const old = randomUUID();
   await db.owner.insert(credentials).values({
     id: old, kind: 'service', authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, principal: CI, createdBy: ROOT,
     expiresAt: new Date(Date.now() + 300_000),
   });
-  const before = await written();
-  assert.deepEqual(await w.vault.revokeCredential!(revoking(await read(old))), { ok: true, number: null, witnessed: null });
-  assert.notEqual((await read(old)).row.revokedAt, null);
-  assert.equal((await written()).changes, before.changes);
+  await assert.rejects(w.vault.revokeCredential!(revoking(await read(old))), /its seal/);
+  assert.equal((await read(old)).row.revokedAt, null);
+});
+
+/** The newest `policy.change`'s sequence number, as a request's caller is loaded with it. */
+async function policySeq(): Promise<string | null> {
+  const { auditLog } = tablesOf(db.owner);
+  const [newest] = await db.owner.select({ seq: auditLog.seq }).from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
+  return newest === undefined ? null : String(newest.seq);
+}
+
+test("a revoke goes ahead only on the policy its right was weighed on, read under the fence (RevokePolicyHeld): changed since, nothing written", async () => {
+  const w = await world();
+  const { environments } = tablesOf(db.owner);
+  const project = await newProject(db.owner);
+  const dev = await newEnvironment(db.owner, project);
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: project, environmentIds: [dev], protected: true } })).ok);
+  const [{ slug }] = await db.owner.select({ slug: environments.slug }).from(environments).where(eq(environments.id, dev));
+  const weighed = { seq: await policySeq(), protected: [{ environmentId: dev, slug: slug! }] };
+  const made = await signedIn(w);
+  const none = await written();
+  // The policy changed since, or the protected environment was renamed: refused, as `policyStill` refuses under 0.14's head.
+  assert.deepEqual(await w.vault.revokeCredential!({ ...revoking(made), policy: { ...weighed, seq: '999999' } }), { ok: false, refused: 'policy' });
+  assert.deepEqual(await w.vault.revokeCredential!({ ...revoking(made), policy: { ...weighed, protected: [{ environmentId: dev, slug: 'renamed' }] } }), { ok: false, refused: 'policy' });
+  assert.deepEqual(await written(), none);
+  assert.ok((await w.vault.revokeCredential!({ ...revoking(made), policy: weighed })).ok);
+});
+
+test("a sign-in refuses an account's row put back with a seal its log has moved past: a removed member restored around the vault is no member (MemberLocked, R53)", async () => {
+  const w = await world();
+  const { vaultMembers } = tablesOf(db.owner);
+  const [active] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
+  // A writer puts back the active row, seal and all: the vault's, but not its newest change's.
+  await db.owner.update(vaultMembers).set({ status: active!.status, generation: active!.generation, seal: active!.seal, mac: active!.mac }).where(eq(vaultMembers.principal, CI));
+  const none = await written();
+  assert.deepEqual(await w.vault.signIn!(asked(w)), { ok: false, refused: 'unbound' });
+  assert.deepEqual(await written(), none);
 });
 
 test('a revoke takes the fence exclusive, for its own work alone: it waits for a use holding it shared, then commits (RevokeTakesFence)', postgresOnly('the fence is an advisory lock'), async () => {

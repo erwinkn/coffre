@@ -28,6 +28,10 @@ ReplayOps == [p \in ReplayProcs |-> CASE p \in {"s1", "s2"} -> {[tok |-> "j1", b
 UnbindProcs == {"s1", "ub", "u1"}
 UnbindOps == [p \in UnbindProcs |-> CASE p = "s1" -> {[tok |-> "j1", b |-> "b", evil |-> FALSE]} [] OTHER -> {}]
 
+\* A manager revokes svc's token while an admin takes the right away; a use of it.
+RevokeProcs == {"rev", "admin", "u1"}
+RevokeOps == [p \in RevokeProcs |-> CASE p = "rev" -> {"cS"} [] p = "admin" -> {"unmanage"} [] OTHER -> {}]
+
 \* A database writer puts back, forges, edits or moves a row while svc is
 \* removed or its token revoked; two uses.
 ForgeProcs == {"writer", "admin", "rev", "u1", "u2"}

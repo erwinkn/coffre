@@ -1203,3 +1203,15 @@ test("/api/auth/oidc takes only a binding of today's five profiles with no polic
 function standsAndRecent({ stands, recent }: { stands: boolean; recent: number }): { stands: boolean; recent: number } {
   return { stands, recent };
 }
+
+test("a token with fractional times, and one with every claim a run records, sign in as any other (the record's bounds are runClaims')", async () => {
+  // Times in fractional seconds, which the token's checks take: the proof's end is whole ms, down.
+  assert.equal((await trade(token(rsa, { iat: seconds() - 5.5, exp: seconds() + 295.0001 }))).status, 200);
+  const every = {
+    actor: 'octocat', base_ref: '', head_ref: '', run_attempt: '1', job_workflow_ref: DEPLOY.workflow_ref, job_workflow_sha: 'f'.repeat(40), environment: 'Production',
+    project_path: 'acme/api', project_id: '1', namespace_id: '2', pipeline_id: '3', pipeline_source: 'push', job_id: '4', 'kubernetes.io': { pod: { name: 'deploy-7f9c' } },
+  };
+  const { status, body } = await trade(token(rsa, every));
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(Object.keys((await signInsLogged(db.owner)).at(-1)!.run).length > 16, true, 'more than 16 claims recorded');
+});

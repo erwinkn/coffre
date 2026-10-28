@@ -1461,12 +1461,14 @@ hostile. A sign-in and a revoke are one statement each; an issue is two, a
 read and a write that goes ahead only while what the read decided on still
 stands, holding nothing between. MCLifecycle.tla's scenarios:
 `LifecycleIssue`, `LifecycleSignIn`, `LifecycleReplay` (one ID token
-presented twice), `LifecycleUnbind`, `LifecycleForge` and
+presented twice), `LifecycleUnbind`, `LifecycleRevoke` (a manager's revoke
+while an admin takes the right away), `LifecycleForge` and
 `LifecycleCompromised`.
 
 | protection | turned off, TLC finds |
 |---|---|
 | a revoke takes the fence exclusive (RevokeTakesFence) | `RevokeOrdersUses` |
+| a revoke holds the policy its right was weighed on to the newest, under the fence (RevokePolicyHeld) | `RevokesOnStandingRight` |
 | an issue or a sign-in takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues` |
 | an issue's write holds the issuer's row and credential shared (IssuerLocked) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; with the app compromised too |
 | an issue's write goes ahead only on the objects its read decided on (IssuerCAS) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` |

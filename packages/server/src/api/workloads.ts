@@ -1396,7 +1396,8 @@ export class WorkloadService {
       credential: signedInCredential({ ...row, kind: 'service' }),
       spent: decoded.signingInputHash.toString('base64'),
       // The token's times, held to again in the statement, as the commit under 0.14's head holds them: its `exp`, and its `iat`'s hour.
-      validUntil: Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000),
+      // Whole ms, down: a token's times may be fractional seconds, which the checks before took.
+      validUntil: Math.floor(Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000)),
       record: { proof: 'oidc', issuer, run: runClaims(claims) },
     });
     if (!outcome.ok) {

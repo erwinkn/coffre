@@ -15,8 +15,11 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
   const prior = await priorChange(tx, c.requestId, target, c.payload, c.seal);
   if (prior !== undefined) return { number: prior };
   const k = c.credential;
-  const [member] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, c.principal));
+  const [member] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation, seal: vaultMembers.seal }).from(vaultMembers).where(eq(vaultMembers.principal, c.principal));
   if (member?.status !== 'active' || member.generation !== c.binding.generation) return { state: 'unbound' };
+  // Its row as its newest change sealed it, or 0.14's with neither: a row put back is none.
+  const [sealedAs] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'principal', id: c.principal }))).orderBy(desc(logChanges.number)).limit(1);
+  if (!same(member.seal ?? null, sealedAs?.seal ?? null)) return { state: 'unbound' };
   const [binding] = await tx.select().from(serviceBindings).where(eq(serviceBindings.id, c.binding.id));
   if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null
     || binding.scope !== c.binding.scope || binding.policy !== c.binding.policy) {
@@ -57,21 +60,29 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
 
 /** `revoke_credential` on SQLite, step for step, in one transaction. */
 export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answer> {
-  const { credentials, logChanges } = tablesOf(tx);
-  const target = objectKey(c.ref);
-  if (c.change !== null) {
-    const prior = await priorChange(tx, c.change.requestId, target, c.change.payload, c.change.seal);
-    if (prior !== undefined) return { number: prior };
-  }
+  const { auditLog, credentials, environments, logChanges, projects } = tablesOf(tx);
+  const { change, policy } = c;
+  const prior = await priorChange(tx, change.requestId, change.object, change.payload, change.seal);
+  if (prior !== undefined) return { number: prior };
   const [row] = await tx.select({ seal: credentials.seal, authMac: credentials.authMac, revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, c.ref.id));
-  if (row === undefined || row.revokedAt !== null || !same(row.authMac, c.macFrom) || !same(row.seal ?? null, c.change?.sealFrom ?? null)) return { state: 'moved' };
-  const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, target)).orderBy(desc(logChanges.number)).limit(1);
-  if (!same(newest?.seal ?? null, c.change?.sealFrom ?? null)) return { state: 'stale' };
-  await tx.update(credentials).set({ revokedAt: new Date(c.revokedAt), revokedBy: c.revokedBy, authMac: c.mac, seal: c.change?.seal ?? null })
+  if (row === undefined || row.revokedAt !== null || !same(row.authMac, c.macFrom) || !same(row.seal ?? null, change.sealFrom)) return { state: 'moved' };
+  const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, change.object)).orderBy(desc(logChanges.number)).limit(1);
+  if (!same(newest?.seal ?? null, change.sealFrom)) return { state: 'stale' };
+  if (policy !== null) {
+    const [changed] = await tx.select({ seq: auditLog.seq }).from(auditLog)
+      .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
+    if ((changed === undefined ? null : String(changed.seq)) !== policy.seq) return { state: 'policy' };
+    for (const { environmentId, slug } of policy.protected) {
+      const [place] = await tx.select({ slug: environments.slug, project: projects.slug }).from(environments)
+        .innerJoin(projects, eq(projects.id, environments.projectId)).where(eq(environments.id, environmentId));
+      const standing = place === undefined || place.slug.includes('~') || place.project.includes('~') ? null : place.slug;
+      if (standing !== slug) return { state: 'policy' };
+    }
+  }
+  await tx.update(credentials).set({ revokedAt: new Date(c.revokedAt), revokedBy: c.revokedBy, authMac: c.mac, seal: change.seal })
     .where(and(eq(credentials.id, c.ref.id), isNull(credentials.revokedAt)));
-  if (c.change === null) return { number: null };
   const number = await nextNumber(tx);
-  await tx.insert(logChanges).values({ number, at: c.at, requestId: c.change.requestId, object: target, actor: c.actor, payload: c.change.payload, seal: c.change.seal, mac: c.change.mac });
+  await tx.insert(logChanges).values({ number, at: change.at, requestId: change.requestId, object: change.object, actor: change.actor, payload: change.payload, seal: change.seal, mac: change.mac });
   return { number: number.toString() };
 }
 

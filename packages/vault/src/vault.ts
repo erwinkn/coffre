@@ -3118,7 +3118,9 @@ class VaultService implements Vault {
   /**
    * A credential revoked by the vault (credentials.ts, T149): one statement,
    * then the seal wait. A row whose seal is not the vault's, or not its
-   * object's newest change's, is reported, as `prepare` reports one.
+   * object's newest change's, is reported, as `prepare` reports one; one
+   * whose policy moved since its revoke was weighed is refused, nothing
+   * reported.
    */
   async revokeCredential(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome> {
     const log015 = this.#log015();
@@ -3136,8 +3138,8 @@ class VaultService implements Vault {
       throw error;
     }
     if (answer.state === 'stale') return notLogged(new NotLogged({ kind: 'credential', id: input.before.columns.id }, 'stale'));
-    if (answer.state === 'moved' || answer.state === 'busy') return { ok: false, refused: answer.state };
-    if (answer.number == null) return { ok: true, number: null, witnessed: null };
+    if (answer.state === 'moved' || answer.state === 'busy' || answer.state === 'policy') return { ok: false, refused: answer.state };
+    if (answer.number == null) throw new Error('revoke_credential answered neither a change nor why it made none');
     const sealed = await log015.sealThrough(BigInt(answer.number));
     return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
   }

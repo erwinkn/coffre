@@ -51,7 +51,7 @@ export type SignInCall = {
 };
 
 /** The statement's answer: its change's number, or why it made nothing. */
-export type Answer = { number?: string | null; state?: SignInRefusal | 'moved' | 'stale' };
+export type Answer = { number?: string | null; state?: SignInRefusal | 'moved' | 'stale' | 'policy' };
 
 /** A lock not had within the functions' `lock_timeout`, or a statement cancelled: overloaded, refused at once (R44). */
 const BUSY_CODES = new Set(['55P03', '57014']);
@@ -164,11 +164,11 @@ function isBase64(value: unknown, bytes: number): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9+/]+={0,2}$/.test(value) && Buffer.from(value, 'base64').length === bytes;
 }
 
-/** A run's claims as the change records them: a few short strings and numbers (workloads.ts's `runClaims`). */
+/** A run's claims as the change records them: short strings and numbers, at most as many as `runClaims` keeps (23 today). */
 function isRun(run: unknown): run is Record<string, string | number> {
   if (typeof run !== 'object' || run === null || Array.isArray(run)) return false;
   const entries = Object.entries(run);
-  return entries.length <= 16 && entries.every(([key, value]) => key.length <= 64 && ((typeof value === 'string' && value.length <= 256) || (typeof value === 'number' && Number.isFinite(value))));
+  return entries.length <= 32 && entries.every(([key, value]) => key.length <= 64 && ((typeof value === 'string' && value.length <= 256) || (typeof value === 'number' && Number.isFinite(value))));
 }
 
 /**
@@ -178,28 +178,27 @@ function isRun(run: unknown): run is Record<string, string | number> {
  * log never held is revoked with no change, as `prepare` leaves one.
  */
 export async function revokeCredential(db: Database, keys: ChangeKeys, at: number, input: RevokeCredentialInput): Promise<Answer> {
-  const { actor, before, authMacFrom, authMac, revokedAt, revokedBy, reason, via } = input ?? ({} as RevokeCredentialInput);
+  const { actor, before, authMacFrom, authMac, revokedAt, revokedBy, reason, via, policy } = input ?? ({} as RevokeCredentialInput);
   const columns = before?.columns;
   if (typeof actor !== 'string' || actor.length === 0 || typeof columns?.id !== 'string' || typeof columns.principal !== 'string' || columns.revoked !== false
-    || (before.seal !== null && !isBase64(before.seal, 16)) || !isBase64(authMacFrom, 32) || !isBase64(authMac, 32)
+    || !isBase64(before.seal, 16) || !isBase64(authMacFrom, 32) || !isBase64(authMac, 32)
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || (reason !== 'revoke' && reason !== 'sign_out')
-    || (via !== null && typeof via !== 'string')) {
-    throw new Error('a revoke names the credential as read, live, its seal, and the app\'s MACs before and after');
+    || (via !== null && typeof via !== 'string') || !isPolicy(policy)) {
+    throw new Error('a revoke names the credential as read, live, its seal, the app\'s MACs before and after, and the policy it was weighed on');
   }
   const ref: Ref = { kind: 'credential', id: columns.id };
-  let change: { payload: string; seal: Buffer; sealFrom: Buffer; mac: Buffer; requestId: string } | null = null;
-  if (before.seal !== null) {
-    const now = credentialObject(columns);
-    const sealFrom = Buffer.from(before.seal, 'base64');
-    if (!sealed(keys.seals, ref, now, sealFrom)) throw new NotLogged(ref, 'tampered');
-    const after = applyOp(now, ref, { op: 'credential.revoke' })!;
-    const seal = sealOf(keys.seals[0]!, ref, after);
-    // What a revoke's record says besides (D147): why, the credential the request came in on, and whose credential of what kind it ends.
-    const payload = canonical({ ...JSON.parse(payloadOf(ref, { op: 'credential.revoke' })), revoke: { reason, via, kind: columns.kind, principal: columns.principal } });
-    const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
-    change = { payload, seal, sealFrom, requestId: row.requestId, mac: entryMac(keys.mac, { tree: 'changes', row }) };
-  }
-  const call: RevokeCall = { at, actor, ref, change, macFrom: Buffer.from(authMacFrom, 'base64'), mac: Buffer.from(authMac, 'base64'), revokedAt, revokedBy };
+  const now = credentialObject(columns);
+  const sealFrom = Buffer.from(before.seal, 'base64');
+  if (!sealed(keys.seals, ref, now, sealFrom)) throw new NotLogged(ref, 'tampered');
+  const after = applyOp(now, ref, { op: 'credential.revoke' })!;
+  const seal = sealOf(keys.seals[0]!, ref, after);
+  // What a revoke's record says besides (D147): why, the credential the request came in on, and whose credential of what kind it ends.
+  const payload = canonical({ ...JSON.parse(payloadOf(ref, { op: 'credential.revoke' })), revoke: { reason, via, kind: columns.kind, principal: columns.principal } });
+  const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
+  const call: RevokeCall = {
+    ref, macFrom: Buffer.from(authMacFrom, 'base64'), mac: Buffer.from(authMac, 'base64'), revokedAt, revokedBy, policy,
+    change: { ...row, sealFrom, mac: entryMac(keys.mac, { tree: 'changes', row }) },
+  };
   if (engineOf(db) === 'sqlite') return db.transaction((tx) => revokeOnSqlite(tx, call));
   try {
     return await revokeOnPostgres(db, call);
@@ -209,9 +208,18 @@ export async function revokeCredential(db: Database, keys: ChangeKeys, at: numbe
   }
 }
 
+/** A policy a revoke was weighed on, as the app names it: the newest change's sequence number, the protected environments' slugs. */
+function isPolicy(policy: unknown): policy is RevokeCredentialInput['policy'] {
+  if (policy === null) return true;
+  const { seq, protected: guarded } = (policy ?? {}) as { seq?: unknown; protected?: unknown };
+  return (seq === null || (typeof seq === 'string' && /^-?[0-9]{1,19}$/.test(seq)))
+    && Array.isArray(guarded) && guarded.every((place) => typeof place?.environmentId === 'string' && (place.slug === null || typeof place.slug === 'string'));
+}
+
+/** A revoke as the vault decided it: the statement's arguments. */
 export type RevokeCall = {
-  at: number; actor: string; ref: Ref; macFrom: Buffer; mac: Buffer; revokedAt: number; revokedBy: string;
-  change: { payload: string; seal: Buffer; sealFrom: Buffer; mac: Buffer; requestId: string } | null;
+  ref: Ref; macFrom: Buffer; mac: Buffer; revokedAt: number; revokedBy: string; policy: RevokeCredentialInput['policy'];
+  change: { at: number; actor: string; requestId: string; object: string; payload: string; seal: Buffer; sealFrom: Buffer; mac: Buffer };
 };
 
 

@@ -799,13 +799,15 @@ export class SigninService {
     const tokenHash = hashToken(token);
     const vault = await vaultCredentials(this.#deps.vault);
     if (vault !== null) {
-      // With 0.15's log, the vault revokes it (T149): its row read, one call. Its change records the sign-out (D147).
-      for (let tries = 0; tries < 3; tries++) {
+      // With 0.15's log, the vault revokes it (T149): its row read, one call. Its change records the sign-out (D147). A row
+      // 0.14 made, which the log never held, is signed out as below, with 0.14's entry.
+      for (let tries = 0; ; tries++) {
         const [row] = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
         if (row === undefined) return;
-        if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id })) return;
+        if (row.seal === null) break;
+        if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id, caller: null })) return;
+        if (tries === 2) throw new ObjectMoved();
       }
-      throw new ObjectMoved();
     }
     await retrying(async () => {
     // Its actor, the session's own principal: a sign-out acts for whoever holds the token.
@@ -850,7 +852,8 @@ export class SigninService {
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
     const vault = await vaultCredentials(this.#deps.vault);
-    if (vault !== null) return this.#revokedByVault(vault, ctx, credentialId, of);
+    const byVault = vault === null ? null : await this.#revokedByVault(vault, ctx, credentialId, of);
+    if (byVault !== null) return byVault;
     return retrying(async () => {
     const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId))));
     // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
@@ -888,15 +891,18 @@ export class SigninService {
 
   /**
    * `revokeCredential` with 0.15's log: the vault revokes it (T149), in one
-   * call, once the row as read says the caller may, as above. Its change
-   * records the revoke; a refusal is logged as one.
+   * call, once the row as read says the caller may, as above, holding the
+   * policy that weighed it to the newest under the fence (as `audited`
+   * holds it under 0.14's head). Its change records the revoke; a refusal
+   * is logged as one. Null for a row 0.14 made, which the log never held:
+   * revoked as above, with 0.14's entry.
    */
   async #revokedByVault(
     vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>,
     ctx: Asker,
     credentialId: string,
     of: { member: string; managed: boolean } | 'own handle' | null,
-  ): Promise<{ revoked: true }> {
+  ): Promise<{ revoked: true } | null> {
     const { db, chainKey } = this.#deps;
     return withRefusals(this.#deps, async () => {
       for (let tries = 0; tries < 3; tries++) {
@@ -911,7 +917,8 @@ export class SigninService {
         const own = row.principal === principalOf(principal);
         if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
         if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
-        if (await revokedByVault(vault, chainKey, row, { actor: formatMember(principal), revokedBy: principal.id, reason: 'revoke', via: ctx.credentialId })) return { revoked: true as const };
+        if (row.seal === null) return null;
+        if (await revokedByVault(vault, chainKey, row, { actor: formatMember(principal), revokedBy: principal.id, reason: 'revoke', via: ctx.credentialId, caller: ctx.caller })) return { revoked: true as const };
       }
       throw new ObjectMoved();
     });

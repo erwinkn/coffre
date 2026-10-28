@@ -7,6 +7,7 @@ import { appChanges, isStaleChange } from '@coffre/db/log';
 import { authMac } from '../auth-rows.ts';
 import type { CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
+import { POLICY_CHANGED } from './context.ts';
 
 import { ApiError, vaultRefused } from './errors.ts';
 
@@ -218,9 +219,11 @@ export function credentialColumns(row: {
 
 /**
  * A credential revoked by the vault itself, in one call (T149,
- * `Vault.revokeCredential`): from its row as read, live and the app's
- * (`liveCredentialsWhere`), to revoked by `revokedBy`, the app's MAC over
- * the revoked row with it. False when it moved meanwhile (revoked, or
+ * `Vault.revokeCredential`): from its row as read, live, the app's
+ * (`liveCredentialsWhere`) and the log's (sealed), to revoked by
+ * `revokedBy`, the app's MAC over the revoked row with it, and, for a
+ * caller whose right to it the policy weighs, that policy, held to under
+ * the fence. False when it moved meanwhile (revoked, or
  * changed): whoever asks reads it again. A row the log does not bear out
  * refuses, as a write to it does (`app_change`), the vault reporting it.
  */
@@ -228,21 +231,28 @@ export async function revokedByVault(
   vault: Required<Pick<Vault, 'revokeCredential'>>,
   chainKey: Buffer,
   row: CredentialRow,
-  by: { actor: string; revokedBy: string; reason: 'revoke' | 'sign_out'; via: string | null },
+  by: { actor: string; revokedBy: string; reason: 'revoke' | 'sign_out'; via: string | null; caller: Pick<Caller, 'policy' | 'policySeq'> | null },
 ): Promise<boolean> {
+  if (row.seal === null) throw new Error(`the credential ${row.id} is 0.14's, which the log never held: it is revoked as 0.14 revokes it`);
   const revokedAt = new Date();
   const outcome = await vault.revokeCredential({
     actor: by.actor,
-    before: { columns: credentialColumns(row), seal: row.seal === null ? null : Buffer.from(row.seal).toString('base64') },
+    before: { columns: credentialColumns(row), seal: Buffer.from(row.seal).toString('base64') },
     authMacFrom: Buffer.from(row.authMac).toString('base64'),
     authMac: authMac(chainKey, 'credentials', { ...row, revokedAt }).toString('base64'),
     revokedAt: revokedAt.getTime(),
     revokedBy: by.revokedBy,
     reason: by.reason,
     via: by.via,
+    // The policy the caller's right was weighed on, which the vault holds to under the fence, as `policyStill` under 0.14's head.
+    policy: by.caller === null ? null : {
+      seq: by.caller.policySeq?.toString() ?? null,
+      protected: Object.values(by.caller.policy.protectedIn).flat().map(({ environmentId, slug }) => ({ environmentId, slug })),
+    },
   });
   if (outcome.ok) return true;
   if (outcome.refused === 'moved') return false;
+  if (outcome.refused === 'policy') throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
   if (outcome.refused === 'busy') throw new ApiError('unavailable', 'coffre is busy: try again shortly', 'busy', '1');
   throw new Error(`the credential ${row.id} is not the log's (${outcome.refused}): a row was put back around coffre`);
 }
