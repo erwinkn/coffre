@@ -21,7 +21,7 @@ import { newestSealedChanges, newestSealedQuery } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, secretObject } from '../src/objects.ts';
-import { ENGINE, openTestDatabase, rows, run, sealed, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, sealed, sqlitePlan, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, isolate, ROOT, SEAL, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -458,10 +458,7 @@ async function history(object: string, count: number): Promise<void> {
 test("what an unarchive restores is read with one probe of each key's changes, however long their history: never a walk of it (T134, R48)", { timeout: 600_000 }, async () => {
   const refs: Ref[] = [{ kind: 'secret', id: randomUUID() }, { kind: 'secret', id: randomUUID() }];
   const cost = async (): Promise<number | string> => {
-    if (ENGINE === 'sqlite') {
-      const plan = await rows<{ detail: string }>(db.owner, sql`EXPLAIN QUERY PLAN ${newestSealedQuery(refs)}`);
-      return plan.map(({ detail }) => detail).join('; ');
-    }
+    if (ENGINE === 'sqlite') return (await sqlitePlan(newestSealedQuery(refs))).join('; ');
     const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${newestSealedQuery(refs)}`);
     const json = Object.values(row!)[0];
     const plan = (typeof json === 'string' ? JSON.parse(json) : json) as { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[];

@@ -165,6 +165,23 @@ export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
   return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
 }
 
+/**
+ * SQLite's plan for `query`, one line per step, read on a connection of its own that is closed after.
+ *
+ * libsql never resets an `EXPLAIN`'s statement (`all`, `run`): it stays active on its connection, so every read
+ * that connection makes after it keeps its snapshot open. The next write from another connection then ends that
+ * connection's `BEGIN IMMEDIATE` in SQLITE_BUSY_SNAPSHOT, and every one after, until the statement is collected.
+ * Run on a pooled connection, an EXPLAIN made a later test fail now and then (T146).
+ */
+export async function sqlitePlan(query: SQL): Promise<string[]> {
+  const { db, close } = await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
+  try {
+    return (await rows<{ detail: string }>(db, sql`EXPLAIN QUERY PLAN ${query}`)).map(({ detail }) => detail);
+  } finally {
+    await close();
+  }
+}
+
 /** A raw statement, on either engine. */
 export async function run(db: Queryable, query: SQL): Promise<void> {
   if (ENGINE === 'postgres') await db.execute(query);
