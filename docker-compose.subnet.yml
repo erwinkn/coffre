@@ -1,0 +1,9 @@
+# Added by scripts/ensure-postgres.sh when COFFRE_POSTGRES_SUBNET is set, so a
+# project can pick the subnet of its network. It is a file of its own: putting
+# ipam in docker-compose.yml would change the network of every project already
+# running, and the next `docker compose up` would recreate it, container too.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${COFFRE_POSTGRES_SUBNET:?}

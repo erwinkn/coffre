@@ -14,6 +14,11 @@ cd "$(dirname "$script")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
 # Another port is another container: give it its own COMPOSE_PROJECT_NAME.
 port="${COFFRE_POSTGRES_PORT:-55432}"
+# Its own subnet for this project's network, when the one Docker picks is a
+# route the host sends elsewhere (see route_guard).
+if [[ -n "${COFFRE_POSTGRES_SUBNET:-}" ]]; then
+    export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:docker-compose.subnet.yml"
+fi
 
 # Over TCP, not the socket: on a fresh volume the image first runs a
 # temporary server on the socket alone, to create the database, then stops
@@ -48,7 +53,47 @@ warn_stale_image() {
     return 0
 }
 
+# Host connections to 127.0.0.1:<port> are DNATed to the container's IP. If
+# the host routes that IP anywhere but the project's bridge (Cloudflare WARP
+# claims hosts of 192.168.0.0/20, Docker's first default subnet), they reach
+# some other machine, and the first psql sends the dev password to it. So,
+# before any caller connects over the port, ask the kernel where the packets go.
+# Only on Linux with `ip`, and only where the bridge exists on this host:
+# Docker Desktop and rootless Docker have no route to a container at all.
+started=0
+route_guard() {
+    command -v ip >/dev/null || return 0
+    local container address network bridge dev option
+    container="$(docker compose ps -q postgres 2>/dev/null)" || return 0
+    [[ -n "$container" ]] || return 0
+    while read -r address network; do
+        [[ -n "$address" && -n "$network" ]] || continue
+        bridge="br-${network:0:12}"
+        dev="$(ip -o route get "$address" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')" || dev=''
+        [[ -n "$dev" && "$dev" != "$bridge" ]] || continue
+        # A network can name its bridge (a custom compose driver option).
+        option="$(docker network inspect --format '{{index .Options "com.docker.network.bridge.name"}}' "$network" 2>/dev/null)" || option=''
+        if [[ -n "$option" ]]; then
+            bridge="$option"
+            [[ "$dev" != "$bridge" ]] || continue
+        fi
+        ip link show "$bridge" >/dev/null 2>&1 || continue
+        printf 'Postgres container %s is at %s, but this host routes %s through %s, not its bridge %s: connections to 127.0.0.1:%s would reach another machine, not this container (Cloudflare WARP does this to some hosts of 192.168.0.0/20, Docker'"'"'s first default subnet).\n' \
+            "$COMPOSE_PROJECT_NAME" "$address" "$address" "$dev" "$bridge" "$port" >&2
+        if ((started)); then
+            docker compose down >/dev/null 2>&1 || true
+            printf 'This script started it, so it is removed again (its data volume is kept).\n' >&2
+        else
+            printf 'It was already running, so it is left alone. Remove it yourself: COMPOSE_PROJECT_NAME=%s docker compose down\n' "$COMPOSE_PROJECT_NAME" >&2
+        fi
+        printf 'Give the project a subnet that no VPN or route claims, then run this again:\n  COFFRE_POSTGRES_SUBNET=10.<n>.0.0/24 in front of this command (one no other Docker network uses: docker network ls), or\n  "default-address-pools" in /etc/docker/daemon.json for every project (Docker restarts).\n' >&2
+        exit 1
+    done < <(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.NetworkID}}{{"\n"}}{{end}}' "$container" 2>/dev/null || true)
+    return 0
+}
+
 ready_and_done() {
+    route_guard
     warn_stale_image
     exit 0
 }
@@ -113,6 +158,10 @@ while ((SECONDS < deadline)); do
                 printf '%s\nWaiting for Postgres startup contention to clear.\n' "$output" >&2
             fi
             last_error="$output"
+        else
+            # Ours: refuse a bad route at once, not after a wait for readiness.
+            started=1
+            route_guard
         fi
     fi
     sleep 1
