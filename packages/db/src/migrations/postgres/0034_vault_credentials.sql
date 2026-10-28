@@ -19,6 +19,7 @@ DECLARE
     n bigint;
     held record;
     now_ms bigint;
+    since timestamptz;
     target uuid := public.log_object('credential', p_id::text);
 BEGIN
     -- A retry of a sign-in that committed, by its request: its number again, if it is this one.
@@ -55,10 +56,13 @@ BEGIN
     ) THEN
         RETURN json_build_object('state', 'frozen');
     END IF;
-    -- Its rate, under the binding's row (credentials_issued_by_idx: the last window's, never the history).
+    -- Its rate, under the binding's row (credentials_issued_by_idx: the last window's, never the history). Its start a
+    -- value, not `clock_timestamp()`, which is volatile: compared with that, the index bounds nothing, and the window's
+    -- count would read the binding's every credential.
+    since := clock_timestamp() - p_window * interval '1 millisecond';
     IF (SELECT count(*) FROM (
             SELECT 1 FROM public.credentials c
-             WHERE c.principal = p_principal AND c.created_by = p_created_by AND c.created_at > clock_timestamp() - p_window * interval '1 millisecond'
+             WHERE c.principal = p_principal AND c.created_by = p_created_by AND c.created_at > since
              LIMIT p_rate
         ) z) >= p_rate THEN
         RETURN json_build_object('state', 'busy');
