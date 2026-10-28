@@ -40,6 +40,8 @@ export type ProxyLoad = {
   origin: string;
   /** The proxy's `cacheSeconds`: 0, every request opens its key; its default, 60, as a deployment runs it. */
   cacheSeconds: number;
+  /** The stable URL, `/use/<credential>/…`, as an app's own config names it (R14), which asks first which environment the handle was made for; else the environment's. */
+  stable: boolean;
 };
 
 const load = workerData as ProxyLoad;
@@ -89,7 +91,8 @@ let next = 0;
 const use = async (phase: Phase, due: number) => {
   const handle = load.handles[next++ % load.handles.length]!;
   try {
-    const response = await answer(new Request(`${load.origin}/use/${load.path}/api/thing`, { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
+    const url = load.stable ? `${load.origin}/use/api/thing` : `${load.origin}/use/${load.path}/api/thing`;
+    const response = await answer(new Request(url, { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
       const why = `${response.status} ${(await response.text()).slice(0, 80)}`;
       phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);

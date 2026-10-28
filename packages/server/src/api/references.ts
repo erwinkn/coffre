@@ -19,6 +19,7 @@ import {
   type ReferenceRow,
   type ResolvedPath,
   type SecretPlaceRow,
+  type SecretRow,
   type VersionRecipe,
 } from '../db/queries.ts';
 import { can, lists } from './caller.ts';
@@ -303,8 +304,13 @@ export async function readableValues(
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
   key?: string,
+  /**
+   * The environment's own rows as `app_read` read them already (db/read-ahead.ts): of an environment with no parent
+   * only, whose read is that one statement. A fork's layers are read together, in one snapshot.
+   */
+  ahead?: readonly SecretRow[],
 ): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
-  if (place.environment!.parentId === null) return resolveValues(db, place, environment, key);
+  if (place.environment!.parentId === null) return resolveValues(db, place, environment, key, ahead);
   return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
 }
 
@@ -314,6 +320,8 @@ export async function resolveValues(
   place: ResolvedPath,
   environment: { projectId: string; environmentId: string },
   key?: string,
+  /** The environment's own rows, read ahead (`readableValues`). */
+  ahead?: readonly SecretRow[],
 ): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
   const here = `${place.project.slug}/${place.environment!.slug}`;
   // An environment that names no parent has none: nothing to read.
@@ -331,7 +339,7 @@ export async function resolveValues(
       refused.push({ reason: `${here} inherits from ${place.project.slug}/${layer.slug}, which is ${layer.deleted ? 'deleted' : 'archived'}` });
       break;
     }
-    const own = await valuesIn(tx, place.project.slug, { projectId: environment.projectId, environmentId: layer.id, slug: layer.slug }, key);
+    const own = await valuesIn(tx, place.project.slug, { projectId: environment.projectId, environmentId: layer.id, slug: layer.slug }, key, depth === 0 ? ahead : undefined);
     for (const item of own.items) {
       if (settled.has(item.key)) continue;
       items.push(parent === undefined ? item : { ...item, through: environment.environmentId, parent });
@@ -374,8 +382,9 @@ async function valuesIn(
   project: string,
   environment: { projectId: string; environmentId: string; slug: string },
   key?: string,
+  ahead?: readonly SecretRow[],
 ): Promise<{ items: Readable[]; unreadable: { key: string; reason: string }[]; hollow: string[] }> {
-  const rows = (await environmentSecrets(db, environment.environmentId, key === undefined ? undefined : { key })).filter((row) => row.archivedAt === null);
+  const rows = (ahead ?? (await environmentSecrets(db, environment.environmentId, key === undefined ? undefined : { key }))).filter((row) => row.archivedAt === null);
   const references = await currentReferences(db, rows.filter((row) => row.current === null).map((row) => row.id));
   const live = [...references.values()].filter((reference) => reference.state === 'live');
   const envelopes = await versionEnvelopes(db, live.map((reference) => reference.source!.currentVersionId!));
