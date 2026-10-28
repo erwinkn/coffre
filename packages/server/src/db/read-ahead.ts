@@ -3,7 +3,7 @@ import { tablesOf, type Queryable } from '@coffre/db';
 import { clock, engineOf, rowsOf, type Table } from '@coffre/db/dialect';
 import { getTableColumns, sql } from 'drizzle-orm';
 
-import { secretRowOf, type CredentialRead, type ResolvedPath, type SecretRow } from './queries.ts';
+import { resolvedPlace, secretRowOf, type CredentialRead, type ResolvedPath, type SecretRow } from './queries.ts';
 
 /**
  * What a read of values reads before anything else, in one call of
@@ -55,19 +55,7 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
     } else {
       const project = rowOf(projects, read.project);
       const environment = read.environment === null ? null : rowOf(environments, read.environment);
-      ahead.place = {
-        project: { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt },
-        environment: environment === null ? null : {
-          id: environment.id,
-          slug: environment.slug,
-          name: environment.name,
-          archivedAt: environment.archivedAt,
-          parentId: environment.parentId,
-          parentSlug: environment.parentId === null ? null : read.parent,
-          owner: environment.owner,
-        },
-        secret: null,
-      };
+      ahead.place = { ...resolvedPlace(project, environment, environment?.parentId == null ? null : read.parent), secret: null };
       if (read.secrets !== null) {
         ahead.secrets = read.secrets.map(({ secret, version }) => {
           const s = rowOf(secrets, secret);

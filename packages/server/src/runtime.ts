@@ -4,6 +4,7 @@ import type { Database } from '@coffre/db';
 
 import { Accesses } from './accesses.ts';
 import type { ApiContext } from './api/context.ts';
+import type { Render } from './api/render.ts';
 import { SigninService } from './api/signin.ts';
 import { WorkloadService } from './api/workloads.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
@@ -151,7 +152,7 @@ export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (act
 }
 
 /** What a handler gets: the runtime's stores and the request's caller. */
-export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdentity): ApiContext {
+export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdentity, render?: Render): ApiContext {
   const watch = watchOf(runtime);
   const actor: WatchActor = { actorType: identity.caller.principal.type, actorId: identity.caller.principal.id, requestId: identity.requestId, sourceIp: identity.sourceIp };
   return {
@@ -174,6 +175,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     personalToken: identity.personalToken,
     credentialExpiresAt: identity.credentialExpiresAt,
     rotateAfterDays: runtime.rotateAfterDays,
+    ...(render === undefined ? {} : { render }),
   };
 }
 

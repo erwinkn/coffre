@@ -3,6 +3,7 @@ import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from 
 
 import { AccessChanged } from './accesses.ts';
 import { ApiError } from './api/errors.ts';
+import { Render } from './api/render.ts';
 import { API_BODY_BYTES, routeParts, serveApi } from './api/router.ts';
 import {
   authenticateRequest,
@@ -184,8 +185,9 @@ export async function fetchApi(
   /**
    * `inProcess`: a page's render (`pageClient`), whose cookie the browser sent to coffre's own page.
    * `recall: false`: asked again, its caller asked of the vault (`RECALLING`).
+   * `render`: the page's render it is one call of, whose calls read the instance's places once.
    */
-  options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean; recall?: false },
+  options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean; recall?: false; render?: Render },
 ): Promise<Response> {
   const recall = options.recall !== false && options.authenticate === undefined && request.method === 'POST' && routeIn(request, RECALLING);
   // A request decided on a kept answer, which may start over: its body, read once within the API's bound, kept for that.
@@ -220,7 +222,7 @@ export async function fetchApi(
       const replay = () => new Request(request.url, { method: request.method, headers: request.headers, body });
       [served, again] = [replay(), replay()];
     }
-    const response = await serveApi(served, apiContext(runtime, identity));
+    const response = await serveApi(served, apiContext(runtime, identity, options.render));
     // Nothing goes back on a kept answer the vault has not vouched for this request.
     await identity.caller.recalled?.confirm();
     if (identity.workload == null) return response;
@@ -260,8 +262,9 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
  * the session's last-seen address. `answered` hears each answer's status.
  *
  * The render is one request: its calls carry one credential, which is
- * checked once, by one call to the vault, and its caller is every call's.
- * Each call still passes the checks of its own method.
+ * checked once, by one call to the vault, and its caller is every call's;
+ * and they read the places that caller reaches once (`Render`). Each call
+ * still passes the checks of its own method.
  */
 export function pageClient(
   page: Request,
@@ -275,6 +278,7 @@ export function pageClient(
   const dest = page.headers.get('sec-fetch-dest');
   const embedded = dest !== null && dest !== 'document';
   let checked: Promise<AuthenticatedIdentity | Response> | undefined;
+  const render = new Render();
   const authenticate: Authenticate = async (token) => {
     checked ??= authenticateRequest(page, runtime, crypto.randomUUID(), token, sourceIp);
     const identity = await checked;
@@ -284,9 +288,14 @@ export function pageClient(
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: async (request) =>
-      embedded && isPageRead(request)
-        ? errorResponse(new ApiError('cross_origin', 'this is read only by a page opened on its own, not one embedded in another site'))
-        : fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true }),
+    transport: async (request) => {
+      if (embedded && isPageRead(request)) return errorResponse(new ApiError('cross_origin', 'this is read only by a page opened on its own, not one embedded in another site'));
+      if (SAFE_METHODS.has(request.method)) return fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true, render });
+      // A change, which a credential that is no cookie may make (an Access service token's): read afresh, and what the
+      // render read before it is read afresh after it.
+      const answered = await fetchApi(request, runtime, { sourceIp, authenticate, inProcess: true });
+      render.forget();
+      return answered;
+    },
   });
 }

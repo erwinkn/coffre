@@ -6,115 +6,24 @@
 // proxy that sees each one, in front of the suite's Postgres.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { connect, createServer, type Socket } from 'node:net';
-
 import { sql } from 'drizzle-orm';
 
 import { openDatabase } from '../src/connect.ts';
-import { createDatabase, QueryOutsideTransaction } from '../src/database.ts';
+import { createDatabase, QueryOutsideTransaction, tablesOf } from '../src/database.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 
 import { postgresClient } from '../src/postgres.ts';
+import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
 const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: Hyperdrive' : false;
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
-/**
- * Postgres behind a proxy that counts the connections made to it, the
- * round trips on them (each time the client speaks again after an answer)
- * and the Syncs, can cut them, and can hold a COMMIT on its way, as a slow
- * network would.
- *
- * A Sync is each Sync message and each simple Query, what Postgres answers
- * with ReadyForQuery. A real Hyperdrive sends the next one on only once the
- * one before has answered: statements written at once under several Syncs
- * cost a round trip each there, those under one Sync one in all. So on
- * Workers, Syncs are the round trips, which one write can hide.
- */
+/** The proxy in front of the suite's Postgres (`postgresProxy`), closed once the file's tests are done. */
 async function counted() {
-  const target = new URL(DATABASE);
-  const open = new Set<Socket>();
-  let opened = 0;
-  let peak = 0;
-  let trips = 0;
-  let syncs = 0;
-  let commits: Promise<void> | null = null;
-  const server = createServer((client) => {
-    opened += 1;
-    open.add(client);
-    peak = Math.max(peak, open.size);
-    const upstream = connect(Number(target.port), target.hostname);
-    let answered = true;
-    let sending = Promise.resolve();
-    // What the client sent of a message not yet whole; the startup message, first, has no type.
-    let unread = Buffer.alloc(0);
-    let started = false;
-    client.on('data', (chunk: Buffer) => {
-      if (answered) trips += 1;
-      answered = false;
-      unread = Buffer.concat([unread, chunk]);
-      for (;;) {
-        const head = started ? 1 : 0;
-        if (unread.length < head + 4) break;
-        const length = head + unread.readUInt32BE(head);
-        if (unread.length < length) break;
-        if (started && (unread[0] === 0x53 || unread[0] === 0x51)) syncs += 1; // 'S', 'Q'
-        started = true;
-        unread = unread.subarray(length);
-      }
-      const held = commits !== null && /commit/i.test(chunk.toString('latin1')) ? commits : null;
-      sending = sending.then(async () => {
-        await held;
-        upstream.write(chunk);
-      });
-    });
-    upstream.on('data', (chunk: Buffer) => {
-      answered = true;
-      client.write(chunk);
-    });
-    const end = () => {
-      open.delete(client);
-      client.destroy();
-      upstream.destroy();
-    };
-    client.on('close', end).on('error', end);
-    upstream.on('close', end).on('error', end);
-  });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const url = new URL(DATABASE);
-  url.port = String((server.address() as { port: number }).port);
-  after(() => {
-    // Whatever a failed test left open goes, so that the file ends.
-    for (const socket of open) socket.destroy();
-    return new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-  return {
-    url: url.href,
-    get opened() {
-      return opened;
-    },
-    get peak() {
-      return peak;
-    },
-    get open() {
-      return open.size;
-    },
-    get trips() {
-      return trips;
-    },
-    get syncs() {
-      return syncs;
-    },
-    /** Hold every COMMIT until `until` settles. */
-    holdCommits(until: Promise<void>) {
-      commits = until;
-    },
-    cut: () => {
-      for (const socket of open) socket.destroy();
-    },
-  };
+  const proxy = await postgresProxy(DATABASE);
+  // Whatever a failed test left open goes, so that the file ends.
+  after(() => proxy.close());
+  return proxy;
 }
 
 const n = (rows: Record<string, unknown>[]) => Number(rows[0]!.n);
@@ -136,6 +45,138 @@ test('a call opens one connection, and its queries and transactions take turns o
   for (let tries = 0; proxy.open > 0; tries += 1) {
     assert.ok(tries < 100, 'the connection was left open');
     await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+});
+
+test('with groupReads, the reads asked together go under one Sync, each answered with its own rows', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  const { projects } = tablesOf(db);
+  await db.execute(sql`select 1`);
+  const syncs = proxy.syncs;
+  // With values and without, as rows and as arrays (Drizzle's selects), a hundred of them: one round trip.
+  const [listed, ...answers] = await Promise.all([
+    db.select({ id: projects.id }).from(projects).where(sql`false`),
+    db.execute(sql`select 'none' as n`),
+    ...Array.from({ length: 100 }, (_, i) => db.execute(sql`select ${i}::int as n, ${`v${i}`}::text as v`)),
+  ]);
+  assert.deepEqual(listed, []);
+  assert.equal(answers[0]![0]!.n, 'none');
+  assert.deepEqual(answers.slice(1).map((rows) => [Number(rows[0]!.n), rows[0]!.v]), Array.from({ length: 100 }, (_, i) => [i, `v${i}`]));
+  assert.equal(proxy.syncs - syncs, 1);
+  // One after another, each is a round trip of its own.
+  for (const value of [1, 2]) assert.equal(n(await db.execute(sql`select ${value}::int as n`)), value);
+  assert.equal(proxy.syncs - syncs, 3);
+  await pool.end();
+});
+
+test('with groupReads, a write or a transaction asked among reads goes alone, and every statement in the order asked', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  await db.execute(sql`create temporary table grouped (v int)`);
+  const syncs = proxy.syncs;
+  // Asked of the pool in this order, each at once: a transaction starts when it is asked, a Drizzle query when awaited.
+  const count = () => pool.unsafe('select count(*)::int as n from grouped').then(n);
+  const [before, , after, , inside, last] = await Promise.all([
+    count(),
+    pool.unsafe('insert into grouped values (1)').then(() => null),
+    count(),
+    pool.begin((tx) => tx.unsafe('insert into grouped values (2)')),
+    pool.begin(async (tx) => n(await tx.unsafe('select count(*)::int as n from grouped'))),
+    count(),
+  ]);
+  assert.deepEqual([before, after, inside, last], [0, 1, 2, 2]);
+  // The reads, the insert, the reads after it, the two transactions (their BEGIN with their statement, then COMMIT), the last read.
+  assert.equal(proxy.syncs - syncs, 1 + 1 + 1 + 2 + 2 + 1);
+  await pool.end();
+});
+
+test('with groupReads, a read that fails fails its group, each read with its error, once; the connection goes on', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  await db.execute(sql`select 1`);
+  const syncs = proxy.syncs;
+  const settled = await Promise.allSettled([
+    db.execute(sql`select 1 as n`),
+    db.execute(sql`select 1 / ${0}::int as n`),
+    db.execute(sql`select 3 as n`),
+  ]);
+  for (const outcome of settled) {
+    assert.equal(outcome.status, 'rejected');
+    // Drizzle's error, around Postgres's: the division's, for each.
+    assert.equal(((outcome as PromiseRejectedResult).reason as { cause?: { code?: string } }).cause?.code, '22012');
+  }
+  // Sent once, not again: a group that fails is not asked a second time.
+  assert.equal(proxy.syncs - syncs, 1);
+  assert.equal(n(await db.execute(sql`select 4 as n`)), 4);
+  await pool.end();
+});
+
+test('with groupReads, a select marked as a write goes alone, and a group with a value only the server can type goes each alone', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  await db.execute(sql`select 1`);
+  let syncs = proxy.syncs;
+  // A function that writes, called by a select: said so, it takes its own turn.
+  await Promise.all([db.execute(sql`/* writes */ select ${1}::int as n`), db.execute(sql`select ${2}::int as n`)]);
+  assert.equal(proxy.syncs - syncs, 2);
+  // An object of a class of its own, which the server types, alone: nothing of the group went, then each went alone.
+  const typed = new (class Five { toString() { return '5'; } })();
+  syncs = proxy.syncs;
+  const [five, six] = await Promise.all([db.execute(sql`select ${typed}::int as n`), db.execute(sql`select ${6}::int as n`)]);
+  assert.deepEqual([n(five), n(six)], [5, 6]);
+  assert.ok(proxy.syncs - syncs >= 2, 'each went alone');
+  await pool.end();
+});
+
+test('with groupReads, a connection cut while a group is out fails each of its reads once, and the next read connects again', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  await db.execute(sql`select 1`);
+  const asked = Promise.allSettled([
+    db.execute(sql`select ${1}::int as n, pg_sleep(1)`),
+    db.execute(sql`select ${2}::int as n`),
+    db.execute(sql`select ${3}::int as n`),
+  ]);
+  // Once the group is out, as its first read sleeps.
+  const syncs = proxy.syncs;
+  for (let tries = 0; proxy.syncs === syncs; tries += 1) {
+    assert.ok(tries < 200, 'the group never went');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  proxy.cut();
+  const settled = await asked;
+  assert.deepEqual(settled.map((outcome) => outcome.status), ['rejected', 'rejected', 'rejected']);
+  assert.equal(n(await db.execute(sql`select ${4}::int as n`)), 4);
+  await pool.end();
+});
+
+test('without groupReads, reads asked together each take a turn, as before', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url);
+  const db = createDatabase(pool);
+  await db.execute(sql`select 1`);
+  const syncs = proxy.syncs;
+  await Promise.all([1, 2, 3].map((value) => db.execute(sql`select ${value}::int as n`)));
+  assert.equal(proxy.syncs - syncs, 3);
+  await pool.end();
+});
+
+test("postgres.js's group holds plain reads alone, and never none", { skip }, async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  try {
+    assert.throws(() => client.group([{ query: 'select 1' }, { query: 'insert into nowhere values (1)' }]), { code: 'GROUP_NOT_READ' });
+    assert.throws(() => client.group([{ query: 'with x as (delete from nowhere) select 1' }]), { code: 'GROUP_NOT_READ' });
+    assert.throws(() => client.group([]), { code: 'EMPTY_GROUP' });
+    const [a, b] = await client.group([{ query: 'select $1::int as n', parameters: [5] }, { query: 'select 6 as n', arrays: true }]);
+    assert.deepEqual([a![0], b![0]], [{ n: 5 }, [6]]);
+  } finally {
+    await client.end();
   }
 });
 

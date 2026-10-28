@@ -18,7 +18,9 @@ import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/c
 import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '@coffre/core/identity';
 import { createDatabase, type Client } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
+import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { appendEntries } from '@coffre/db/log';
+import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { localVault } from '@coffre/vault/node';
 import { desc, eq, gt, sql } from 'drizzle-orm';
 
@@ -29,7 +31,8 @@ import {
   distinctSecretCounts, environmentSecrets, insertBinding, liveKeysIn, lock, memberStanding, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder, sensitiveFrom,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
-import { fetchApi } from '../src/fetch-api.ts';
+import { fetchApi, pageClient } from '../src/fetch-api.ts';
+import { sessionCookieName } from '../src/auth.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import { appLogKey, CHAIN_WALK } from '../src/db/audit.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
@@ -40,6 +43,7 @@ import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testAnchor, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditLog, credentials as credentialRows, secrets } from './db/tables.ts';
@@ -74,7 +78,12 @@ class CountingPool {
 
   constructor(pool: PostgresClient) {
     this.#pool = pool;
-    this.client = watched(pool, ({ text, values, rows, held }) => {
+    this.client = this.watch(pool);
+  }
+
+  /** `client`, its statements counted here: another connection of the same login, a page's own. */
+  watch<C extends Client>(client: C): C {
+    return watched(client, ({ text, values, rows, held }) => {
       this.recorded?.push({ text, values });
       for (const count of held ? [this.count, this.held] : [this.count]) {
         count.statements += 1;
@@ -159,6 +168,16 @@ let signLog: () => Promise<{ ok: boolean }>;
 let ready: () => Promise<{ ok: boolean }>;
 /** `count` entries of the app's appended at once, as many requests would write them. */
 let append: (count: number) => Promise<void>;
+/** A page's server render, as Owner or viewer, on a connection of its own, as on Workers; and the round trips its connections took. */
+let environmentPage: (as: Persona) => Promise<void>;
+let projectPage: (as: Persona) => Promise<void>;
+/** The environment page's own calls, as its render asks them, each answered or refused. */
+let environmentCalls: (as: Persona) => Promise<PromiseSettledResult<unknown>[]>;
+let pageTrips = 0;
+/** The proxy in front of the app's Postgres that pages' connections go through, counting their Syncs. */
+let relay: Awaited<ReturnType<typeof postgresProxy>>;
+
+type Persona = 'owner' | 'viewer';
 
 /** A client that calls the API as a CLI or a CI run does, its token checked on each request. */
 function bearer(runtime: CoffreRuntime, token: string): CoffreClient {
@@ -225,6 +244,59 @@ before(async () => {
   if (polled.status !== 'approved') throw new Error('the device login was not approved');
   reader = bearer(runtime, polled.credential.token);
   service = bearer(runtime, (await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).token);
+
+  // A page's render, as Workers runs it: the app's database one Hyperdrive connection, which each statement and
+  // transaction takes its turn on, through a proxy that counts the Syncs, a round trip each on Hyperdrive. Its calls go
+  // in process (`pageClient`), as the visitor, signed in in a browser. A reference into market/dev, as most
+  // environments have, so that its page lists one.
+  await root.secrets.set('market/busy', { DEV_API_KEY: { ref: 'market/dev/API_KEY' } });
+  // And a project with a fork, as most instances hold one, a personal config included: what the project list resolves.
+  await root.projects.create('shop', { name: 'Shop' });
+  await root.environments.create('shop/dev', { name: 'dev' });
+  await root.secrets.set('shop/dev', { SHOP_KEY: 'fake-shop-key' });
+  await root.environments.create('shop/dev-eu', { name: 'dev-eu', from: 'dev', inherit: true });
+  relay = await postgresProxy(TEST_RUNTIME_DATABASE_URL);
+  const sessions = new Map<Persona, string>();
+  for (const [persona, email] of [['owner', ROOT], ['viewer', READER]] as const) {
+    const signed = await signinService.completeSignin({ provider: 'github', subject: persona, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
+    if (!('credential' in signed)) throw new Error(`${email} was not signed in`);
+    sessions.set(persona, signed.credential.token);
+  }
+  const scopes = { sealed: true };
+  const render = async <T>(as: Persona, path: string, calls: (client: CoffreClient) => Promise<T>): Promise<T> => {
+    const pool = new HyperdrivePool(relay.url, { groupReads: true });
+    const db = createDatabase(app.watch(pool));
+    // As a configuration keeps them between requests: the vault's answers, and that older releases' scopes are sealed.
+    const signin = new SigninService({ ...base, db, signin: auth.signin, accesses, scopes });
+    const page = new Request(`${ORIGIN}${path}`, { headers: { cookie: `${sessionCookieName(auth)}=${sessions.get(as)!}`, 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
+    const syncs = relay.syncs;
+    try {
+      return await calls(pageClient(page, { ...runtime, db, signin, verifier: signin }, null));
+    } finally {
+      await pool.end();
+      pageTrips += relay.syncs - syncs;
+    }
+  };
+  // The loaders' reads, as coffre's routes make them (@coffre/ui, options.ts and lib/queries.ts), which TanStack runs
+  // side by side: the shell's (`loadShell`), and the environment's, which asks all three at once once the project list,
+  // the shell's own, says its visitor reads it (`loadEnvironment`).
+  environmentCalls = (as) => render(as, '/projects/market/dev', async (client) => {
+    const projects = client.projects.list();
+    const [, , , calls] = await Promise.all([client.auth(), client.me(), projects, projects.then(() => Promise.allSettled([
+      client.secrets.list('market/dev'), client.references.list('market/dev'), client.environments.missing('market/dev'),
+    ]))]);
+    return calls;
+  });
+  environmentPage = async (as) => {
+    for (const outcome of await environmentCalls(as)) if (outcome.status === 'rejected') throw outcome.reason;
+  };
+  // The shell's, and the project's tabs': once the project list says its visitor manages its access, its grants.
+  projectPage = (as) => render(as, '/projects/market', async (client) => {
+    const projects = client.projects.list();
+    await Promise.all([client.auth(), client.me(), projects, projects.then(async ({ projects: listed }) => {
+      if (listed.find((project) => project.slug === 'market')?.permissions.includes('grant.manage')) await client.members.list('market');
+    })]);
+  });
 
   // A CI run's ID token, from an issuer of the test's own, for the binding of its workflow.
   await root.secrets.set('market/dev', Object.fromEntries(SEVEN.map((key) => [key, `fake-${key.toLowerCase()}`])));
@@ -345,7 +417,7 @@ before(async () => {
 after(async () => {
   if (POSTGRES.skip) return;
   await resetDatabase(db.owner);
-  await Promise.all([app.end(), vaultPool.end(), db.close()]);
+  await Promise.all([app.end(), vaultPool.end(), db.close(), relay.close()]);
 });
 
 /**
@@ -356,7 +428,7 @@ after(async () => {
 async function warm(): Promise<void> {
   if (ciEnds - Date.now() < 120_000) await buyCi();
   renewProxy();
-  for (const { request } of Object.values(requests)) await request();
+  for (const { request } of [...Object.values(requests), ...Object.values(renders)]) await request();
 }
 
 async function cost(request: () => Promise<unknown>): Promise<Cost> {
@@ -404,6 +476,69 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   // A Cloudflare call naming its environment: its binding, member, place and freezes in one statement; the vault's decision warm.
   "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
+
+/** What a page's render cost: its statements on the app's connection and the round trips they took there, and the vault's statements and calls. */
+type PageCost = { app: number; trips: number; vault: number; vaultCalls: number };
+
+async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
+  const trips = pageTrips;
+  const spent = await cost(request);
+  return { app: spent.app.statements, trips: pageTrips - trips, vault: spent.vault.statements, vaultCalls: spent.vaultCalls };
+}
+
+/**
+ * Each page's server render, warm, as Owner and as viewer. On Workers, its
+ * app connection takes each statement in turn, a round trip of Hyperdrive's
+ * each, but for the reads asked together, which go under one Sync
+ * (`groupReads`); each vault call is a connection of its own.
+ *
+ * The environment page: the session, with the newest policy change; the
+ * vault's `access`, and beside the next its `settings` (who sets up
+ * service accounts, for `me`); the places the caller reaches, each
+ * project's team keys with them, and the keys and dismissals of the
+ * projects with a fork, which the project list resolves; then, at once,
+ * the environment's secrets, the project's references, and the keys and
+ * dismissals of the environment's siblings, for its missing keys; then
+ * both ends of its references (two), and for an Owner, who manages its
+ * access, who reads through them: the members, their grants and the
+ * vault's findings about them. The project page: the session and the
+ * places, and an Owner its grants, which are the members, their grants,
+ * findings and those the log names with no row (`missingMembers`), and the
+ * vault's `about`, which reads nothing.
+ */
+const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost }> = {
+  "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 2, vaultCalls: 2 } },
+  "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 2, vaultCalls: 2 } },
+  "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
+  "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
+};
+
+test('each page renders in exactly its budget of statements and round trips', POSTGRES, async () => {
+  await warm();
+  for (const [name, { request, budget }] of Object.entries(renders)) assert.deepEqual(await pageCost(request), budget, name);
+});
+
+/**
+ * A page's reads go under one Sync, as one implicit transaction: one that
+ * fails, here the project's references, which its login may no longer
+ * read, fails those sent with it: the environment's keys, missing keys and
+ * dismissals. Each of the page's calls answers with
+ * an error, as one whose own read failed does, and nothing is sent again.
+ */
+test("a page's read that fails fails the reads sent with it, once, and each of its calls says so", POSTGRES, async () => {
+  await environmentPage('viewer');
+  await db.owner.execute(sql`REVOKE SELECT ON secret_references FROM coffre_app`);
+  try {
+    let outcomes: PromiseSettledResult<unknown>[] = [];
+    const spent = await pageCost(async () => (outcomes = await environmentCalls('viewer')));
+    assert.deepEqual(outcomes.map((outcome) => outcome.status === 'rejected' ? (outcome.reason as { status?: number }).status : 'answered'), [500, 500, 500]);
+    // The page's reads, each once, but the references' ends, which their list, failed, never asks.
+    assert.deepEqual(spent, { app: 8, trips: 3, vault: 2, vaultCalls: 2 }, 'each read sent once');
+  } finally {
+    await db.owner.execute(sql`GRANT SELECT ON secret_references TO coffre_app`);
+  }
+  for (const outcome of await environmentCalls('viewer')) assert.equal(outcome.status, 'fulfilled');
+});
 
 test('each hot request runs exactly its budget of statements, on as many connections', POSTGRES, async () => {
   await warm();
@@ -461,6 +596,8 @@ test('a request runs the same statements, and reads the same rows, however large
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
+  const smallPages: Record<string, PageCost> = {};
+  for (const [name, { request }] of Object.entries(renders)) smallPages[name] = await pageCost(request);
 
   // The log grown by writes elsewhere, each an entry of the app's and one of the vault's.
   for (let i = 0; i < 150; i++) await root.secrets.set('market/busy', { [`KEY_${i % 20}`]: `fake-${i}` });
@@ -478,6 +615,10 @@ test('a request runs the same statements, and reads the same rows, however large
   for (const [name, { request }] of Object.entries(requests)) {
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
+  // A page lists what there is, so its rows grow with the members and places it shows; its statements and round trips do not.
+  for (const [name, { request }] of Object.entries(renders)) {
+    assert.deepEqual(await pageCost(request), smallPages[name], `${name} ran more statements or round trips once the instance grew`);
+  }
 });
 
 /**
@@ -486,7 +627,8 @@ test('a request runs the same statements, and reads the same rows, however large
  * pages of the database (shared buffers, cached or not) on a log of ten
  * thousand entries as on one ten times longer, grown as Equisafe's grows:
  * the vault's reads of a few principals and the proxy's uses, over the last
- * day, some within the bulk limit's window. No statement scans the log, nor
+ * day, some within the bulk limit's window, and the changes to what its
+ * members hold, which the member list reads by principal. No statement scans the log, nor
  * one principal's reads in it (the bulk count reads `vault_releases`).
  */
 test("each hot request's statements read as many pages however long the log grows", POSTGRES, async () => {
@@ -517,6 +659,19 @@ test("each hot request's statements read as many pages however long the log grow
     const runs = Math.ceil((await old()) / 10_000) + 1;
     for (let run = 0; run < runs; run++) assert.ok((await signLog()).ok);
     assert.equal(await old(), 0, 'the checkpoints forgot them all');
+    // And reference rows, a tenth as many as the entries, of a key archived in market/prod, which no page reads: rows
+    // of the app's (no seal), as an instance's history leaves them. A read of the references that scans them reads
+    // ten times as many pages; one that goes by its indexes, no more.
+    await db.owner.execute(sql`
+      INSERT INTO secrets (project_id, environment_id, key, archived_at)
+      SELECT e.project_id, e.id, 'GROWN_REFERENCED', now() FROM environments e JOIN projects p ON p.id = e.project_id
+      WHERE p.slug = 'market' AND e.slug = 'prod'
+      ON CONFLICT DO NOTHING`);
+    await db.owner.execute(sql`
+      INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
+      SELECT gen_random_uuid(), s.project_id, s.environment_id, s.id, s.project_id, s.environment_id, s.id,
+        (SELECT least(min(created_seq), 0) FROM secret_references) - g, 'system:load'
+      FROM secrets s CROSS JOIN generate_series(1, ${count / 10}) g WHERE s.key = 'GROWN_REFERENCED'`);
     // As autovacuum leaves it: the releases the checkpoints forgot taken back, and the grown log's statistics. One
     // process, as autovacuum's: parallel workers share their dead rows through the container's small /dev/shm.
     await db.owner.execute(sql`VACUUM (ANALYZE, PARALLEL 0)`);
@@ -530,7 +685,7 @@ test("each hot request's statements read as many pages however long the log grow
   // As many rounds of copies as make `count`, no more: `count` rounds, each numbered before the limit, would sort
   // hundreds of megabytes on disk a part.
   const more = (count: number) => sql`
-      WITH e AS (SELECT * FROM audit_log WHERE seq >= 0 AND action IN ('secret.read', 'credential.use'))
+      WITH e AS (SELECT * FROM audit_log WHERE seq >= 0 AND action IN ('secret.read', 'credential.use', ${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}))
       INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, project_id, environment_id, secret_id,
         secret_version_id, operation_id, request_id, source_ip, related_seq, metadata, prev_hash, mac, hash)
       SELECT (SELECT least(min(seq), 0) FROM audit_log) - row_number() OVER (ORDER BY g, e.seq), author, key_id, occurred_at - (g * 7919) % 86400000, actor,
@@ -565,6 +720,7 @@ test("each hot request's statements read as many pages however long the log grow
     "a workload's request at a proxy whose cache lapsed": coldWorkload,
     "a workload's verify at a proxy whose cache lapsed": coldVerify,
     'a handle for `coffre run`': () => reader.handles.create({ label: 'run', paths: ['market/dev'] }),
+    ...Object.fromEntries(Object.entries(renders).map(([name, { request }]) => [name, request])),
   };
   await grow(10_000);
   const small = await pages();
@@ -632,6 +788,8 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
+  const smallPages: Record<string, PageCost> = {};
+  for (const [name, { request }] of Object.entries(renders)) smallPages[name] = await pageCost(request);
   // Places made so far: names from a counter, since the instance keeps what every case made. So Hegel's replay of a
   // failing case runs on a larger instance, and may pass, which it reports as flaky: the first failure is printed whole.
   const made = { projects: [] as string[], environments: ['market/busy', 'market/prod'], keys: [] as string[] };
@@ -706,6 +864,12 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
       const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;
       if (JSON.stringify(spent) !== JSON.stringify(small[name])) console.error(why);
       assert.deepEqual(spent, small[name], why);
+    }
+    for (const [name, { request }] of Object.entries(renders)) {
+      const spent = await pageCost(request);
+      const why = `${name} ran more statements or round trips once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(smallPages[name])}`;
+      if (JSON.stringify(spent) !== JSON.stringify(smallPages[name])) console.error(why);
+      assert.deepEqual(spent, smallPages[name], why);
     }
   }, growthSettings);
 });

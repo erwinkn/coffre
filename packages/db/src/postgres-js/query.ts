@@ -15,6 +15,18 @@ export interface QueryOptions {
 }
 
 /**
+ * One statement of a group (`group`, index.ts): its text and values, whether
+ * its rows come as arrays, and what the connection works out as it sends it.
+ */
+export interface Member {
+  text: string;
+  args: unknown[];
+  arrays: boolean;
+  parameters: unknown[];
+  statement: Statement | null;
+}
+
+/**
  * A statement, sent once awaited (`then`, `catch`, `finally`) or `execute`d,
  * a task later, through the pool or the transaction that made it: its
  * `handler`. A promise of its result, its rows as objects or, after
@@ -39,6 +51,12 @@ export class Query<T = unknown> extends Promise<T> {
   /** A transaction's first statement: its BEGIN, sent ahead of it under its Sync (`begin`, index.ts); and whether it took. */
   begin: string | null = null;
   began = false;
+  /**
+   * Coffre: a group's statements, sent under one Sync and answered together, each its own result (`group`, index.ts),
+   * and the one answering now. Null for a statement of its own.
+   */
+  group: Member[] | null = null;
+  member = 0;
 
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: unknown) => void;

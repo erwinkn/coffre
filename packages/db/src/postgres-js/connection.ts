@@ -9,7 +9,7 @@ import * as Errors from './errors.ts';
 import { FIELDS, type Notice } from './errors.ts';
 import type { Settings } from './index.ts';
 import type { Socket, TlsOptions } from './platform.ts';
-import type { Query } from './query.ts';
+import type { Member, Query } from './query.ts';
 import { Queue } from './queue.ts';
 import { Result, type Backend, type Column } from './result.ts';
 import { inferType } from './types.ts';
@@ -161,7 +161,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       // What is sent, once it can be: its BEGIN first, if it carries one, and its values as asked.
       if (typeof options.debug === 'function') {
         if (q.begin !== null) options.debug(id, q.begin, [], []);
-        options.debug(id, q.text, q.args, q.statement!.types);
+        for (const member of q.group ?? [q]) options.debug(id, member.text, member.args, member.statement!.types);
       }
     } catch (e) {
       // Coffre: a statement the client cannot write fails alone, and nothing of it is sent. On an idle connection it is
@@ -189,6 +189,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     // message, whose statements stop at the first that fails, or as the extended protocol's Parse, Bind and Execute
     // ahead of the statement's. Upstream sent BEGIN alone and waited for it.
     if (q.options.simple) return b.typed('Q').str((q.begin === null ? '' : q.begin + ';\n') + q.statement!.string + N).end();
+    // Coffre: a group's statements, each its Parse, Describe, Bind and Execute, and one Sync after the last.
+    if (q.group !== null) return Buffer.concat([...q.group.flatMap((member) => [Parse(member), DescribeUnnamed, Bind(member.parameters, member.statement!.types), ExecuteOnly]), Sync]);
     const statement = q.describeFirst ? [Parse(q), DescribeUnnamed, Flush] : [Parse(q), DescribeUnnamed, bound(q)];
     return Buffer.concat(q.begin === null ? statement : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly, ...statement]);
   }
@@ -199,18 +201,43 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function build(q: Query): void {
+    if (q.group !== null) {
+      for (const [index, member] of q.group.entries()) {
+        // Named by the error, should this one be what the client cannot write.
+        q.member = index;
+        built(member);
+        q.parameters = member.parameters;
+        if (member.parameters.length >= 65534) throw Errors.generic('MAX_PARAMETERS_EXCEEDED', 'Max number of parameters (65534) exceeded');
+        // A group goes in one write: none of its statements can wait for its parameters' types.
+        if (typedByServer(member.parameters, member.statement!.types)) throw Errors.generic('GROUP_UNTYPED', 'A statement of a group has a value whose type only the server can say');
+      }
+      return startMember(q, 0);
+    }
+    built(q);
+    // Coffre: an unnamed statement's plain values go with it, in one round trip (typedByServer, below).
+    q.describeFirst = q.parameters.length > 0 && typedByServer(q.parameters, q.statement!.types);
+  }
+
+  /** A statement's values as sent, and their types as the client knows them (0 for the server to say). */
+  function built(statement: Query | Member): void {
     const parameters: unknown[] = [];
     const types: number[] = [];
-    for (const x of q.args) {
+    for (const x of statement.args) {
       if (x === undefined) throw Errors.generic('UNDEFINED_VALUE', 'Undefined values are not allowed');
       parameters.push(x);
       types.push(inferType(x));
     }
+    statement.parameters = parameters;
+    statement.statement = { string: statement.text, types, columns: null };
+  }
 
-    q.parameters = parameters;
-    // Coffre: an unnamed statement's plain values go with it, in one round trip (typedByServer, below).
-    q.describeFirst = parameters.length > 0 && typedByServer(parameters, types);
-    q.statement = { string: q.text, types, columns: null };
+  /** A group's statement `index`, the one answering from now: its rows are read as it describes them. */
+  function startMember(q: Query, index: number): void {
+    const member = q.group![index]!;
+    q.member = index;
+    q.statement = member.statement;
+    q.arrays = member.arrays;
+    q.parameters = member.parameters;
   }
 
   function write(x: Buffer): boolean {
@@ -361,9 +388,9 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       const debug = Boolean(options.debug);
       Object.defineProperties(e, {
         stack: { value: ('stack' in e ? String(e.stack) : '') + q.origin.replace(/.*\n/, '\n'), enumerable: debug },
-        query: { value: begin ? q.begin : q.text, enumerable: debug },
+        query: { value: begin ? q.begin : q.group === null ? q.text : q.group[q.member]!.text, enumerable: debug },
         parameters: { value: begin ? [] : q.parameters, enumerable: debug },
-        args: { value: q.args, enumerable: debug },
+        args: { value: q.group === null ? q.args : q.group[q.member]!.args, enumerable: debug },
         types: { value: q.statement?.types, enumerable: debug },
       });
     }
@@ -566,6 +593,17 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       return errored(Errors.generic('UNSAFE_TRANSACTION', 'Only use sql.begin, sql.reserved or max: 1'));
     }
 
+    // Coffre: a group's statement answered: its rows are its own result, and the next statement's go in another.
+    const q = query!;
+    if (q.group !== null) {
+      results ??= [result];
+      if (q.member + 1 < q.group.length) {
+        results.push((result = new Result()));
+        startMember(q, q.member + 1);
+      }
+      return;
+    }
+
     if (query!.options.simple) return BindComplete();
   }
 
@@ -751,7 +789,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     return b.end();
   }
 
-  function Parse(q: Query): Buffer {
+  function Parse(q: Query | Member): Buffer {
     const { string, types } = q.statement!;
     b.typed('P').str(N).str(string + N).i16(q.parameters.length);
     q.parameters.forEach((_, i) => b.i32(types[i] || 0));

@@ -45,7 +45,8 @@ import {
   type StoredGrant,
 } from '../db/queries.ts';
 import { setAccess, type AccessChange, type AccessValue } from './access.ts';
-import { canAnywhere, placeOf } from './caller.ts';
+import { canAnywhere, placeOf, projectsReached } from './caller.ts';
+import { reachedPlaces } from './render.ts';
 import { AppChanges, retrying, revokes } from './changes.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
@@ -267,12 +268,15 @@ type Listed = {
 
 /**
  * Everyone in the directory, or one member, read from the rows rather than
- * asked of the vault: a list is a display, not a decision.
+ * asked of the vault: a list is a display, not a decision. `sessions: false`
+ * leaves out their credentials and identities, which only a report shows;
+ * `missing: false`, those the log names with no row (`missingMembers`).
  */
-async function directory(ctx: ApiContext, now: Date, member?: MemberRef): Promise<Listed[]> {
+async function directory(ctx: ApiContext, now: Date, read: { member?: MemberRef; sessions?: false; missing?: false } = {}): Promise<Listed[]> {
+  const { member, sessions } = read;
   const [rows, missing] = await Promise.all([
-    loadMembers(ctx.db, ctx.chainKey, member === undefined ? {} : { member }, now),
-    missingMembers(ctx.db, member),
+    loadMembers(ctx.db, ctx.chainKey, { ...(member === undefined ? {} : { member }), ...(sessions === undefined ? {} : { sessions }) }, now),
+    read.missing === false ? [] : missingMembers(ctx.db, member),
   ]);
   const byPrincipal = new Map(rows.map((row) => [formatMember(row), row]));
   const principals = new Set([...byPrincipal.keys(), ...missing]);
@@ -328,8 +332,9 @@ export async function listMembers(
   const { caller } = ctx;
   const administrator = administers(caller.role);
   const [all, known, setting, owners] = await Promise.all([
-    directory(ctx, new Date()),
-    places(ctx.db),
+    directory(ctx, new Date(), { sessions: false }),
+    // Every place: in a render, what the caller reaches when they reach them all, as it read them.
+    projectsReached(caller) === null ? reachedPlaces(ctx) : places(ctx.db),
     runsInstance(caller) ? null : serviceSettingFor(ctx.vault, caller),
     declaredOwners(ctx),
   ]);
@@ -546,18 +551,19 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   };
 }
 
+/** Where a reference is held, and what it reads: whose readers `readersAt` names. */
+export type ReadPlace = { projectId: string; environmentId: string; environmentSlug: string; source?: Place };
+
 /**
  * Who reads each of these environments, by a grant or their instance role,
  * as members: those a reference held there lets read its source. As the
  * policy has it: a person holds their roles' protected column in a
- * protected environment, a service account the other one.
+ * protected environment, a service account the other one. Read first,
+ * then asked of each place: the members are read beside what names the
+ * places. Those the log names without a row are no readers: they hold nothing.
  */
-export async function readersAt(
-  ctx: ApiContext,
-  places: readonly { projectId: string; environmentId: string; environmentSlug: string; source?: Place }[],
-): Promise<string[][]> {
-  if (places.length === 0) return [];
-  const all = await directory(ctx, new Date());
+export async function readersAt(ctx: ApiContext): Promise<(places: readonly ReadPlace[]) => string[][]> {
+  const all = await directory(ctx, new Date(), { sessions: false, missing: false });
   const holdings = (listed: (typeof all)[number]): Holdings => ({
     role: instanceRole(listed),
     scope: scopeOf(listed),
@@ -566,7 +572,7 @@ export async function readersAt(
     service: listed.member.type === 'service',
   });
   // Through a reference too, its readers are the holder's: a reference takes its permissions from where it lives.
-  return places.map((place) => all
+  return (places) => places.map((place) => all
     .filter((listed) => listed.status === 'active' && allows(holdings(listed), 'secret.read', place))
     .map((listed) => formatMember(listed.member)));
 }

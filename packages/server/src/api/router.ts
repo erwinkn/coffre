@@ -3,13 +3,14 @@ import { environmentPath, folderName, roleId, secretKey, slug } from '@coffre/co
 import { z } from 'zod';
 
 import { AccessChanged } from '../accesses.ts';
-import { resolvePath, type ResolvedPath } from '../db/queries.ts';
+import type { ResolvedPath } from '../db/queries.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
 import { makePersonal, ownerOf, resolveRead } from './personal.ts';
+import { placeAt } from './render.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
 import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
 import { ISSUING_ROUTES, WORKLOAD_ROUTES } from './workload-routes.ts';
@@ -132,7 +133,7 @@ async function locate(
   if (params.project === undefined) return null;
   const path = { project: params.project, environment: params.environment, key: params.key };
   const last = params.key !== undefined ? 'key' : params.environment !== undefined ? 'environment' : 'project';
-  let place = await resolvePath(ctx.db, path, { owner: ownerOf(ctx) });
+  let place = await placeAt(ctx, path, { owner: ownerOf(ctx) });
   // `dev@me` while the caller has no personal config of dev: a read is of dev, a write that may make one makes it
   // (a dry run makes nothing), and anything else finds none.
   if (place?.personal !== undefined && place.environment === null) {
