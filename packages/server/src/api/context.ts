@@ -12,6 +12,7 @@ import { can, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
 import type { Asking } from './keys.ts';
 import { formatMember } from './paths.ts';
+import type { Render } from './render.ts';
 import type { PersonalToken, SigninService } from './signin.ts';
 import type { WorkloadService } from './workloads.ts';
 import type { McpService } from '../mcp/service.ts';
@@ -76,6 +77,8 @@ export type ApiContext = {
    * when `asCaller`.
    */
   watch?: { hooks: Watcher; context: (asCaller?: boolean) => WatchContext } | null;
+  /** The page's render the request is one call of, whose calls read the instance's places once (`Render`); none for a request of its own. */
+  render?: Render;
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */

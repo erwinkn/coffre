@@ -130,6 +130,18 @@ export interface Sql {
    */
   begin<T>(fn: (sql: TransactionSql) => T | Promise<T>): Promise<Settled<T>>;
   begin<T>(options: string, fn: (sql: TransactionSql) => T | Promise<T>): Promise<Settled<T>>;
+  /**
+   * Coffre: statements sent together under one Sync, a round trip in all
+   * through a pooler that sends a client's Syncs on one at a time, as
+   * Hyperdrive does; answered once the last has, each with its own rows,
+   * as an array (`arrays` for a statement's rows as arrays of values). They
+   * run as one implicit transaction: if one fails, Postgres skips those
+   * after it, and the group fails, with that error. Plain reads alone
+   * (`select …`), on the pool alone, never in a transaction, whose
+   * statements each go under its own; each with the extended protocol, as
+   * a statement with parameters.
+   */
+  group(statements: readonly { query: string; parameters?: unknown[]; arrays?: boolean }[]): PendingQuery<RowList<Row[]>[]>;
   /** A connection of the pool, held for the caller until it releases it. */
   reserve(): Promise<ReservedSql>;
   /** Close every connection once what it was sent has answered; after `timeout` seconds, at once. */
@@ -159,11 +171,22 @@ export default function postgres(given: Options): Sql {
 
   return {
     unsafe: unsafeOn(pooled),
+    group,
     begin,
     reserve,
     end,
     options,
   };
+
+  function group(statements: readonly { query: string; parameters?: unknown[]; arrays?: boolean }[]): PendingQuery<RowList<Row[]>[]> {
+    if (statements.length === 0) throw Errors.generic('EMPTY_GROUP', 'A group needs a statement');
+    // Reads alone: a write grouped with a statement that fails would be rolled back with it, by an error not its own.
+    const write = statements.find((statement) => !/^\s*select\b/i.test(statement.query));
+    if (write !== undefined) throw Errors.generic('GROUP_NOT_READ', `A group holds plain reads alone, select …, not: ${write.query.slice(0, 80)}`);
+    const query = new Query(statements.map((statement) => statement.query).join(';\n'), [], pooled, { simple: false }, Boolean(options.debug));
+    query.group = statements.map(({ query: text, parameters = [], arrays = false }) => ({ text, args: parameters, arrays, parameters: [], statement: null }));
+    return query as never;
+  }
 
   /** `unsafe`, sending each statement through `handler`. */
   function unsafeOn(handler: (query: Query) => void): Sql['unsafe'] {

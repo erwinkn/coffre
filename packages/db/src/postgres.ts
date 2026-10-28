@@ -108,6 +108,10 @@ function asPgSends<T extends object>(client: T): T {
         return (text: string, values?: unknown[], ...rest: unknown[]) =>
           (value as (...args: unknown[]) => unknown).call(target, text, Array.isArray(values) ? values.map(sent) : values, ...rest);
       }
+      if (key === 'group') {
+        return (statements: { query: string; parameters?: unknown[]; arrays?: boolean }[]) =>
+          (value as (...args: unknown[]) => unknown).call(target, statements.map((statement) => ({ ...statement, parameters: statement.parameters?.map(sent) })));
+      }
       if (key === 'begin' || key === 'savepoint' || key === 'reserve') {
         return (...args: unknown[]) => {
           const work = args.at(-1);

@@ -15,6 +15,12 @@ export function postgres(hyperdrive: { readonly connectionString: string }): Pos
 /** A statement asked of the pool, sent at its turn once awaited or `execute`d, as postgres.js sends one. */
 type Statement = Promise<unknown> & { values(): Statement; execute(): Statement };
 
+/** A read asked while a group gathers (`groupReads`): sent with the others at its turn, and answered with its own rows. */
+type Gathered = { text: string; values: unknown[]; arrays: () => boolean; resolve: (rows: unknown) => void; reject: (error: unknown) => void };
+
+/** A plain read: what a group may hold. Anything else, a write or a transaction's, goes alone. */
+const READ = /^\s*select\b/i;
+
 /**
  * postgres.js for one call on Workers, through Hyperdrive: one connection,
  * opened by the first query, which every query and transaction of the
@@ -34,6 +40,16 @@ type Statement = Promise<unknown> & { values(): Statement; execute(): Statement 
  * transaction: a query on the database there would wait for the transaction
  * to end, which waits for it. Neither the vault nor the server does.
  *
+ * With `groupReads`, the plain reads (`select …`, outside a transaction)
+ * asked while the pool waits for their turn, or in the same task, take it
+ * together, sent under one Sync (`group` in postgres-js/index.ts): on
+ * Hyperdrive, which sends a client's Syncs on one at a time, a round trip
+ * for them all, where each alone took one. They run as one implicit
+ * transaction, so if one fails they all do, with its error; each is a
+ * read, so none had anything to keep. Anything else asked meanwhile, a
+ * write or a transaction, closes the group, and goes after it: statements
+ * still go in the order they are asked.
+ *
  * Closed by `end`, once what was asked has answered; asked again after, as
  * a call's background work may, it opens a connection again.
  */
@@ -49,29 +65,38 @@ export class HyperdrivePool implements Client {
   #busy = 0;
   /** What waits for every turn to be done: `end`. */
   readonly #idle: (() => void)[] = [];
+  /** Whether plain reads asked together go together (`groupReads`). */
+  readonly #groupReads: boolean;
+  /** The reads that will take the next group's turn, while it has not started: what a read asked now joins. */
+  #gathering: Gathered[] | null = null;
 
   /**
    * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
    * now and then: the connection closes once it has been idle that long,
-   * and the next query connects again.
+   * and the next query connects again. `groupReads`: plain reads asked
+   * together go together, under one Sync.
    */
-  constructor(connectionString: string, options: { closeIdleMs?: number } = {}) {
+  constructor(connectionString: string, options: { closeIdleMs?: number; groupReads?: boolean } = {}) {
     if (connectionString.trim().length === 0) {
       throw new Error('Hyperdrive returned an empty connection string');
     }
     this.#connectionString = connectionString;
     this.#closeIdleMs = options.closeIdleMs;
+    this.#groupReads = options.groupReads === true;
   }
 
   readonly unsafe = ((...args: Parameters<PostgresClient['unsafe']>) => {
     let values = false;
     let answer: Promise<unknown> | undefined;
+    const [text, parameters = [], options] = args;
     /** Its turn, asked once: the first `then`, `catch`, `finally` or `execute` asks it. */
     const asked = () =>
-      (answer ??= this.#turn(() => {
-        const query = this.#connected().unsafe(...args);
-        return values ? query.values() : query;
-      }));
+      (answer ??= this.#groupReads && options === undefined && READ.test(text)
+        ? this.#gather({ text, values: parameters, arrays: () => values })
+        : this.#turn(() => {
+          const query = this.#connected().unsafe(...args);
+          return values ? query.values() : query;
+        }));
     const statement = {
       values: () => {
         values = true;
@@ -93,6 +118,39 @@ export class HyperdrivePool implements Client {
   readonly begin = ((...args: unknown[]) =>
     this.#turn(() => (this.#connected().begin as (...beginArgs: unknown[]) => Promise<unknown>)(...args))) as PostgresClient['begin'];
 
+  /**
+   * A read, in the group gathering for the next turn, or in a new one: it
+   * starts a task later, so that the reads asked with it join, and once
+   * the turns before it are done, which those asked while they ran join.
+   */
+  #gather(read: Omit<Gathered, 'resolve' | 'reject'>): Promise<unknown> {
+    let members = this.#gathering;
+    if (members === null) {
+      const gathered: Gathered[] = (members = []);
+      const asked = new Promise((resolve) => setTimeout(resolve, 0));
+      void this.#turn(async () => {
+        await asked;
+        if (this.#gathering === gathered) this.#gathering = null;
+        const client = this.#connected();
+        try {
+          if (gathered.length === 1) {
+            const [only] = gathered;
+            const query = client.unsafe(only!.text, only!.values);
+            only!.resolve(await (only!.arrays() ? query.values() : query));
+          } else {
+            const answers = await client.group(gathered.map((member) => ({ query: member.text, parameters: member.values, arrays: member.arrays() })));
+            gathered.forEach((member, i) => member.resolve(answers[i]));
+          }
+        } catch (error) {
+          for (const member of gathered) member.reject(error);
+        }
+      });
+      // After its turn is asked, which closes any group gathering before it.
+      this.#gathering = gathered;
+    }
+    return new Promise((resolve, reject) => members.push({ ...read, resolve, reject }));
+  }
+
   /** Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. */
   async end(): Promise<void> {
     // A statement awaited just before reaches the pool a few promise steps later, through Drizzle's session: a task
@@ -106,8 +164,9 @@ export class HyperdrivePool implements Client {
     await client?.end().catch(() => {});
   }
 
-  /** `go` once every turn asked before it is done. */
+  /** `go` once every turn asked before it is done. Anything but a group's closes the group gathering: it goes after. */
   #turn<T>(go: () => PromiseLike<T>): Promise<T> {
+    this.#gathering = null;
     this.#busy += 1;
     const answer = this.#tail.then(go);
     this.#tail = answer.then(

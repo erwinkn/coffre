@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **The environment and project pages take a handful of round trips.** On
+  Workers, every statement was a round trip of Hyperdrive's, one after the
+  other: the environment page's render ran 15 of the app's (17 with the
+  vault's), the project page's 12 (14), about 580 and 490 ms at 34 ms a
+  trip. A render's calls now read the places their caller reaches once,
+  and find each path in them (`Render`); the project list counts its
+  keys with them, `me` and the list read the same projects, and a
+  reference's list reads its seal, its end and its environments in one
+  statement, and both its ends beside it. Then the app's reads asked
+  together go under one Sync (`HyperdrivePool`'s `groupReads`, on the
+  app's connection only), which Hyperdrive sends in one round trip: an
+  Owner's environment page, a reference into it and a fork in the
+  instance, is 13 statements in 4 round trips, a viewer's 10 in 3; the
+  project page 8 in 3 and 4 in 2 (`request-cost.test.ts`). Reads sent
+  together fail together: one that fails fails the others, each call
+  answering with its error, as when its own read fails. The member list
+  no longer reads the log's history of who held what: it finds the
+  principals the log names one step of an index each (R48).
 - **Local Postgres refuses a subnet the host routes elsewhere.**
   `scripts/ensure-postgres.sh` checks, with `ip route get`, that the
   container's address leaves through its own bridge. Cloudflare WARP routes

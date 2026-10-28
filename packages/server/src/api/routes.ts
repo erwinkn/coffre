@@ -455,7 +455,7 @@ export const routes = {
 
   ...route('GET /references', {
     input: z.object({ path: z.string().max(400) }),
-    run: (ctx, { input }) => listReferences(ctx, parsePath(input.path, [1, 2, 3]), (places) => readersAt(ctx, places)),
+    run: (ctx, { input }) => listReferences(ctx, parsePath(input.path, [1, 2, 3]), () => readersAt(ctx)),
   }),
   ...route('POST /reveals', {
     // `keys`: of an environment, these only, as `coffre export --keys` reads them: the rest is neither opened nor logged.

@@ -13,8 +13,8 @@ import {
   MAX_PARENTS,
   parentsOf,
   referenceRows,
-  resolvePath,
   secretPlaces,
+  secretPlacesOfEnds,
   versionEnvelopes,
   type ReferenceRow,
   type ResolvedPath,
@@ -26,6 +26,8 @@ import { can, lists } from './caller.ts';
 import { asking, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound, vaultRefused } from './errors.ts';
 import { formatMember, type Path } from './paths.ts';
+import { placeAt } from './render.ts';
+import type { ReadPlace } from './members.ts';
 
 /**
  * References: a secret whose value is another's, read live through it by
@@ -75,18 +77,34 @@ export function placeOfRow(place: SecretPlaceRow): Place {
   return { projectId: place.projectId, environmentId: place.environmentId, environmentSlug: place.environment };
 }
 
-/** Each row, with both ends read and its state decided. */
-export async function resolveReferences(db: Queryable, rows: readonly ReferenceRow[]): Promise<Resolved[]> {
+/** Both ends of some references: where each secret is now, and the reference each is now, if any (`currentRows`). */
+type Ends = { places: Map<string, SecretPlaceRow>; current: Map<string, ReferenceRow> };
+
+/** Both ends of each row, read at once: two statements, side by side. */
+async function endsOf(db: Queryable, rows: readonly ReferenceRow[]): Promise<Ends> {
+  const ids = [...new Set(rows.flatMap((row) => [row.holder.secretId, row.source.secretId]))];
+  if (ids.length === 0) return { places: new Map(), current: new Map() };
+  const [held, places] = await Promise.all([referenceRows(db, { holderSecretIds: ids }), secretPlaces(db, ids)]);
+  return { places, current: newestHeld(held, places) };
+}
+
+/**
+ * Both ends of the references sealed in or into a project, as their rows
+ * name them: read beside the list of them, needing nothing of it.
+ */
+async function endsAround(db: Queryable, projectId: string): Promise<Ends> {
+  const [held, places] = await Promise.all([referenceRows(db, { endsOf: projectId }), secretPlacesOfEnds(db, projectId)]);
+  return { places, current: newestHeld(held, places) };
+}
+
+/** Each row, with both ends read (`ends`, when its caller read them already) and its state decided. */
+export async function resolveReferences(db: Queryable, rows: readonly ReferenceRow[], ends?: Ends): Promise<Resolved[]> {
   if (rows.length === 0) return [];
-  const sourceIds = rows.map((row) => row.source.secretId);
-  const [places, sourceHolds] = await Promise.all([
-    secretPlaces(db, [...rows.map((row) => row.holder.secretId), ...sourceIds]),
-    currentRows(db, sourceIds),
-  ]);
+  const { places, current } = ends ?? await endsOf(db, rows);
   return rows.map((row) => {
     const holder = places.get(row.holder.secretId)!;
     const source = places.get(row.source.secretId) ?? null;
-    const state = stateOf(row, source, sourceHolds.has(row.source.secretId));
+    const state = stateOf(row, source, current.has(row.source.secretId));
     return {
       row,
       holder,
@@ -124,6 +142,11 @@ function stateOf(row: ReferenceRow, source: SecretPlaceRow | null, sourceIsRefer
 async function currentRows(db: Queryable, secretIds: readonly string[]): Promise<Map<string, ReferenceRow>> {
   if (secretIds.length === 0) return new Map();
   const [rows, places] = await Promise.all([referenceRows(db, { holderSecretIds: [...new Set(secretIds)] }), secretPlaces(db, secretIds)]);
+  return newestHeld(rows, places);
+}
+
+/** Of the references these secrets held, each one's newest, while it has no value of its own: the reference it is now. */
+function newestHeld(rows: readonly ReferenceRow[], places: ReadonlyMap<string, SecretPlaceRow>): Map<string, ReferenceRow> {
   const newest = new Map<string, ReferenceRow>();
   for (const row of rows) newest.set(row.holder.secretId, row);
   for (const secretId of [...newest.keys()]) {
@@ -147,9 +170,18 @@ export async function referencesBy(db: Queryable, member: string): Promise<Resol
 /** Live references whose source is one of these secrets: what reads them from elsewhere. */
 export async function readersOf(db: Queryable, secretIds: readonly string[]): Promise<Resolved[]> {
   if (secretIds.length === 0) return [];
-  const rows = (await referenceRows(db, { sourceSecretIds: [...secretIds] })).filter((row) => row.ended === null);
-  const current = await currentRows(db, rows.map((row) => row.holder.secretId));
-  return resolveReferences(db, rows.filter((row) => current.get(row.holder.secretId)?.id === row.id));
+  return currentOf(db, (await referenceRows(db, { sourceSecretIds: [...secretIds] })).filter((row) => row.ended === null));
+}
+
+/**
+ * Of these rows, those their holder reads through now, resolved; `keep`
+ * narrows them further. Their ends as read beside them (`endsAround`),
+ * unless a row's seal names an end those did not find.
+ */
+async function currentOf(db: Queryable, rows: readonly ReferenceRow[], keep: (row: ReferenceRow) => boolean = () => true, around?: Ends): Promise<Resolved[]> {
+  const found = around !== undefined && rows.every((row) => around.places.has(row.holder.secretId) && around.places.has(row.source.secretId));
+  const ends = found ? around : await endsOf(db, rows);
+  return resolveReferences(db, rows.filter((row) => ends.current.get(row.holder.secretId)?.id === row.id && keep(row)), ends);
 }
 
 /** What an archive takes: a project, one of its environments, or keys in one. */
@@ -173,8 +205,7 @@ export async function archiveBlockers(db: Queryable, place: ArchivedPlace): Prom
     && (place.secretIds === undefined || place.secretIds.includes(end.secretId));
   const rows = (await referenceRows(db, place.secretIds === undefined ? { projectId: place.projectId } : { sourceSecretIds: [...place.secretIds] }))
     .filter((row) => row.ended === null && within(row.source) && !within(row.holder));
-  const current = await currentRows(db, rows.map((row) => row.holder.secretId));
-  const resolved = await resolveReferences(db, rows.filter((row) => current.get(row.holder.secretId)?.id === row.id));
+  const resolved = await currentOf(db, rows);
   return resolved.filter((reference) => reference.state === 'live' && !archived(reference.holder));
 }
 
@@ -460,24 +491,27 @@ export type ListedReference = ReferenceView & {
 export async function listReferences(
   ctx: ApiContext,
   path: Path,
-  readersAt: (places: { projectId: string; environmentId: string; environmentSlug: string; source?: Place }[]) => Promise<string[][]>,
+  readersAt: () => Promise<(places: ReadPlace[]) => string[][]>,
 ): Promise<{ references: ListedReference[] }> {
-  const place = await resolvePath(ctx.db, path);
+  const place = await placeAt(ctx, path);
   if (place === null || (path.environment !== undefined && place.environment === null) || (path.key !== undefined && place.secret === null)) {
     throw notFound('no such project, environment or secret');
   }
-  const rows = (await referenceRows(ctx.db, { projectId: place.project.id })).filter((row) => row.ended === null);
-  const current = await currentRows(ctx.db, rows.map((row) => row.holder.secretId));
+  const [all, around] = await Promise.all([referenceRows(ctx.db, { projectId: place.project.id }), endsAround(ctx.db, place.project.id)]);
+  const rows = all.filter((row) => row.ended === null);
   const at = (end: ReferenceRow['holder']) =>
     (path.environment === undefined || end.environmentId === place.environment!.id) && (path.key === undefined || end.secretId === place.secret!.id);
   const { caller } = ctx;
   const sees = (row: ReferenceRow) => [row.holder, row.source].some((end) =>
     lists(caller, end) || can(caller, 'grant.manage', { projectId: end.projectId }));
-  const resolved = await resolveReferences(ctx.db, rows.filter((row) =>
-    current.get(row.holder.secretId)?.id === row.id && (at(row.holder) || at(row.source)) && sees(row)));
   const manages = (row: ReferenceRow) => [row.holder, row.source].some((end) => can(caller, 'grant.manage', { projectId: end.projectId }));
+  // Who reads through them, for whoever manages access at either end: read beside both ends, once one may be shown.
+  const [resolved, readersOf] = await Promise.all([
+    currentOf(ctx.db, rows, (row) => (at(row.holder) || at(row.source)) && sees(row), around),
+    rows.some((row) => (at(row.holder) || at(row.source)) && manages(row)) ? readersAt() : null,
+  ]);
   const shown = resolved.filter((reference) => manages(reference.row));
-  const readers = await readersAt(shown.map((reference) => ({ ...reference.row.holder, ...(reference.source === null ? {} : { source: placeOfRow(reference.source) }) })));
+  const readers = readersOf?.(shown.map((reference) => ({ ...reference.row.holder, ...(reference.source === null ? {} : { source: placeOfRow(reference.source) }) }))) ?? [];
   return {
     references: resolved.map((reference) => ({
       ...reference.view,

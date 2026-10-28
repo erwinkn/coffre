@@ -9,17 +9,15 @@ import { environments, projects, secrets } from '@coffre/db/schema';
 
 import {
   deletionScope,
-  dismissalsAcross,
   distinctSecretCounts,
   environmentObjects,
   eraseVersions,
+  forkedKeys,
   forksOf,
   insert,
   liveSecretsUnder,
   liveEnvironment,
-  liveKeysIn,
   parentsOf,
-  places,
   projectsInFolder,
   resolvePath,
   secretObjects,
@@ -35,13 +33,14 @@ import {
 } from '../db/queries.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
+import { reachedPlaces } from './render.ts';
 import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectMoved, retrying, sameIds, secretChange } from './changes.ts';
 import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, vaultCredential, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 import { formatMember } from './paths.ts';
-import { resolveKeys, type Held } from './inheritance.ts';
+import { resolveKeys } from './inheritance.ts';
 import { protectedFor, unprotects } from './roles.ts';
 import { endReferences, referencesAt, refuseIfRead } from './references.ts';
 
@@ -148,8 +147,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
   const { caller } = ctx;
   const reachable: Me['environments'] = [];
   // Only the projects the caller reaches: a page's every render asks, and the instance may hold many more.
-  const within = projectsReached(caller) ?? undefined;
-  const [known, setting] = await Promise.all([places(ctx.db, { within }), serviceSettingFor(ctx.vault, caller)]);
+  const [known, setting] = await Promise.all([reachedPlaces(ctx), serviceSettingFor(ctx.vault, caller)]);
   for (const project of known) {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {
@@ -190,9 +188,11 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   const { caller } = ctx;
   const summaries: ProjectSummary[] = [];
   // The projects whose secrets the caller may count, and where they may.
-  const counted: { summary: ProjectSummary; projectId: string; environmentIds: string[] }[] = [];
-  const [known, folders] = await Promise.all([places(ctx.db), projectFolderOf(ctx.db)]);
-  const resolved = await forkKeys(ctx.db, known);
+  const counted: { summary: ProjectSummary; project: PlaceRow; environmentIds: string[] }[] = [];
+  // Only the projects the caller reaches, as `me` reads them, and in a render the same read: one they can do nothing in is
+  // not listed. Beside it, what the environments of those with a fork resolve to.
+  const [known, [live, dismissed]] = await Promise.all([reachedPlaces(ctx), forkedKeys(ctx.db, projectsReached(caller) ?? undefined)]);
+  const resolved = resolveKeys(known.filter((project) => project.environments.some((environment) => environment.parentId !== null)).flatMap((project) => project.environments), live, dismissed);
   for (const project of known) {
     const slugOf = new Map(project.environments.map((environment) => [environment.id, environment.slug]));
     const parent = (environment: { parentId: string | null }) => (environment.parentId === null ? null : (slugOf.get(environment.parentId) ?? null));
@@ -208,7 +208,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       slug: project.slug,
       name: project.name,
       archivedAt: iso(project.archivedAt),
-      folder: folders.get(project.id) ?? null,
+      folder: project.folder,
       permissions: permissionsAt(caller, scope),
       // Someone else's personal config is not listed; your own is, as `dev@me`.
       environments: project.environments.filter((environment) => environment.owner === null || mine(caller, environment)).map((environment) => {
@@ -248,33 +248,27 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
       )
       .map((environment) => environment.id);
     if (project.archivedAt === null && environmentIds.length > 0) {
-      counted.push({ summary, projectId: project.id, environmentIds });
+      counted.push({ summary, project, environmentIds });
     }
   }
 
-  // One query counts every project, rather than one list per environment. A
-  // project with forks counts the names its environments resolve to, which
-  // its environments' own rows may not hold: a fork inherits them.
-  const distinct = await distinctSecretCounts(ctx.db, counted.flatMap((entry) => entry.environmentIds));
-  for (const { summary, projectId, environmentIds } of counted) {
-    const names = environmentIds.some((id) => resolved.has(id))
-      ? new Set(environmentIds.flatMap((id) => [...(resolved.get(id)?.keys() ?? [])])).size
-      : undefined;
-    summary.secretCount = names ?? distinct.get(projectId) ?? 0;
+  // A project with forks counts the names its environments resolve to, which its environments' own rows may not hold: a
+  // fork inherits them. One whose team environments the caller lists, each and no other, counts its team's keys, and
+  // one environment alone its own: both read with the places. One query counts the rest, not one list per environment.
+  const names = (environmentIds: string[]) => environmentIds.some((id) => resolved.has(id))
+    ? new Set(environmentIds.flatMap((id) => [...(resolved.get(id)?.keys() ?? [])])).size
+    : undefined;
+  const team = (project: PlaceRow, environmentIds: string[]) => {
+    if (environmentIds.length === 1) return project.environments.find((environment) => environment.id === environmentIds[0])!.secretCount;
+    const ids = project.environments.filter((environment) => environment.archivedAt === null && environment.owner === null).map((environment) => environment.id);
+    return ids.length === environmentIds.length && ids.every((id) => environmentIds.includes(id)) ? project.teamKeys : undefined;
+  };
+  const rest = counted.filter(({ project, environmentIds }) => names(environmentIds) === undefined && team(project, environmentIds) === undefined);
+  const distinct = await distinctSecretCounts(ctx.db, rest.flatMap((entry) => entry.environmentIds));
+  for (const { summary, project, environmentIds } of counted) {
+    summary.secretCount = names(environmentIds) ?? team(project, environmentIds) ?? distinct.get(project.id) ?? 0;
   }
   return { projects: summaries };
-}
-
-/**
- * The keys each environment resolves to, its own and those it inherits, in
- * the projects that have a fork: two queries for all of them, none without.
- */
-async function forkKeys(db: Queryable, known: readonly PlaceRow[]): Promise<Map<string, Map<string, Held>>> {
-  const forked = known.filter((project) => project.environments.some((environment) => environment.parentId !== null));
-  const ids = forked.flatMap((project) => project.environments.map((environment) => environment.id));
-  if (ids.length === 0) return new Map();
-  const [live, dismissed] = await Promise.all([liveKeysIn(db, ids), dismissalsAcross(db, ids)]);
-  return resolveKeys(forked.flatMap((project) => project.environments), live, dismissed);
 }
 
 /** Whether an environment is the caller's personal config. */

@@ -174,7 +174,9 @@ does not reproduce. Concurrent first calls each do their own reads
 **One connection per call.** On Workers, each app request and each vault
 call has one Postgres client through Hyperdrive (`HyperdrivePool` in
 `@coffre/db`), connected on its first query. Its queries take turns on it,
-and a transaction holds it from BEGIN to COMMIT. So code inside a
+and a transaction holds it from BEGIN to COMMIT; the app's plain reads
+asked together take one turn, under one Sync, one round trip
+(`groupReads`), and fail together. So code inside a
 transaction queries through its `tx`, never the database: a query on the
 database would wait for the transaction, which waits for it. `createDatabase`
 refuses one at once, on Node too, so the suites catch it: each transaction's

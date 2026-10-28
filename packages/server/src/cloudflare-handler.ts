@@ -81,7 +81,8 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
 
   function runtimeFor(env: Env, ctx: WaitUntil) {
     const entry = configured(env);
-    const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
+    // A request's plain reads asked together go under one Sync, a round trip for them all: a page's calls read side by side.
+    const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString, { groupReads: true });
     const left: Promise<unknown>[] = [];
     const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport(), (promise) => {
       left.push(promise);

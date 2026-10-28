@@ -37,7 +37,7 @@ wrote them with its tagged template.
 
 ## Changes from upstream
 
-Nine, each marked `Coffre:` in the code:
+Ten, each marked `Coffre:` in the code:
 
 - **One round trip per statement** (`typedByServer`, in `connection.ts`).
   Upstream asks the server for an unnamed statement's parameter types (Parse,
@@ -103,6 +103,22 @@ Nine, each marked `Coffre:` in the code:
   replaces PR A's fix for a BEGIN queued behind `max_pipeline` statements,
   which left `begin()` without its connection: a transaction now waits for
   a connection of its own instead.
+- **Statements in a group go under one Sync** (`group`, in `index.ts`;
+  `toBuffer`, `build` and `CommandComplete`, in `connection.ts`), a round
+  trip for them all through a pooler that sends a client's Syncs on one at
+  a time, as Hyperdrive does (`HyperdrivePool`'s `groupReads`, in
+  `../hyperdrive.ts`). Each is its own Parse, Describe, Bind and Execute,
+  its values sent with it; one Sync follows the last. The group is one
+  query to the connection: each statement's rows are its own result,
+  split at its CommandComplete, and the group answers once Postgres is
+  ready again, every result at once. Postgres runs them as one implicit
+  transaction, so if one fails it skips the rest, and the group fails with
+  that error, naming the statement. A group holds plain reads alone
+  (`select …`, `GROUP_NOT_READ` otherwise: a write grouped with a statement
+  that fails would be rolled back by an error not its own), and is the
+  pool's alone: a transaction's statements each go under its own Sync, so
+  BEGIN and COMMIT mean what they did. Upstream has no such thing; its
+  pipelined statements each carry a Sync.
 - **A connection closed while it opens fails its query** (`closed`, in
   `connection.ts`), as node-postgres's "Connection terminated
   unexpectedly" did. Upstream dialled again, at once and for ever (thousands

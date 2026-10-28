@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction } from '@coffre/db';
 import { dismissedKeys, secrets } from '@coffre/db/schema';
 
-import { dismissalsAcross, dismissalsIn, environmentSecrets, liveKeysIn, lock, places, update, upsert, type ResolvedPath } from '../db/queries.ts';
+import { dismissalsAcross, dismissalsIn, keysAcross, lock, update, upsert, type ResolvedPath } from '../db/queries.ts';
 import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound } from './errors.ts';
 import { inheritedRows, resolveKeys } from './inheritance.ts';
+import { projectPlaces } from './render.ts';
 import { checkEnvironment } from './secrets.ts';
 
 /**
@@ -42,20 +43,18 @@ function live(place: ResolvedPath): { projectId: string; environmentId: string }
  */
 export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise<{ missing: MissingKey[]; dismissed: DismissedKey[] }> {
   const here = live(place);
-  const project = (await places(ctx.db)).find((each) => each.id === here.projectId)!;
+  const project = (await projectPlaces(ctx, here.projectId))!;
   const below = forksBelow(project.environments, here.environmentId);
   // Personal configs are nobody's siblings: theirs are no team's keys, and nobody else may learn what they hold.
   const others = project.environments.filter((environment) =>
     environment.id !== here.environmentId && environment.archivedAt === null && !below.has(environment.id) && environment.owner === null);
   const ids = project.environments.map((environment) => environment.id);
-  const [present, liveKeys, removed, dismissals] = await Promise.all([
-    environmentSecrets(ctx.db, here.environmentId),
-    liveKeysIn(ctx.db, ids),
-    dismissalsAcross(ctx.db, ids),
-    dismissalsIn(ctx.db, here.environmentId),
-  ]);
+  const [keys, removed] = await Promise.all([keysAcross(ctx.db, ids, here.environmentId), dismissalsAcross(ctx.db, ids)]);
+  const liveKeys = keys.filter((row) => row.archivedAt === null);
+  const dismissals = removed.filter((row) => row.environmentId === here.environmentId);
   const resolved = resolveKeys(project.environments, liveKeys, removed);
-  const has = new Set([...present.map((secret) => secret.key), ...resolved.get(here.environmentId)!.keys()]);
+  // A key archived here is held all the same.
+  const has = new Set([...keys.filter((row) => row.environmentId === here.environmentId).map((row) => row.key), ...resolved.get(here.environmentId)!.keys()]);
   const found = new Map<string, { in: string[]; folders: Set<string | null> }>();
   for (const other of others) {
     for (const [key, held] of resolved.get(other.id)!) {
@@ -66,14 +65,14 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
       found.set(key, entry);
     }
   }
-  const keys = [...found.entries()]
+  const absent = [...found.entries()]
     .map(([key, entry]): MissingKey => ({ key, in: entry.in.sort(), folder: entry.folders.size === 1 ? [...entry.folders][0]! : null }))
     .sort((a, b) => (a.key < b.key ? -1 : 1));
   const dismissedBy = new Map(dismissals.map((row) => [row.key, row]));
   return {
-    missing: keys.filter((entry) => !dismissedBy.has(entry.key)),
+    missing: absent.filter((entry) => !dismissedBy.has(entry.key)),
     // Only what is still missing: a dismissal of a key no sibling has any more is moot.
-    dismissed: keys.flatMap((entry) => {
+    dismissed: absent.flatMap((entry) => {
       const row = dismissedBy.get(entry.key);
       return row === undefined ? [] : [{ ...entry, dismissedBy: row.dismissedBy, dismissedAt: row.dismissedAt.toISOString() }];
     }),
