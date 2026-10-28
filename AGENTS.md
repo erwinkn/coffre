@@ -61,7 +61,8 @@ which relies on native type-stripping (default only in Node 23.6+/24). The
 published CLI is bundled JavaScript targeting Node 20 and runs on Node >= 20, as
 does the published client (built for Node 20, no dependency); this does not relax the
 workspace's or deployments' Node 24 requirement.
-`pnpm install` itself is version-agnostic.
+`pnpm install` itself is version-agnostic. Docker Compose **>= 2.19** (`docker compose --progress`,
+which `scripts/ensure-postgres.sh` passes so that it can read what compose says).
 
 **Database.** Postgres runs in Docker via `docker compose` on **:55432** (owner
 `coffre_owner`, restricted runtime logins `coffre_runtime` for the app and
@@ -97,8 +98,8 @@ reservation script is CI-only and does not change a developer's host.
 
 Before it reports ready it also asks Linux, with `ip route get`, where the
 container's address goes, and refuses unless that is the project's own bridge:
-Cloudflare WARP routes some hosts of 192.168.0.0/20, the subnet Docker gives a
-project first, off the machine, and a connection to `127.0.0.1:<port>` is
+Cloudflare WARP routes some hosts of 192.168.0.0/20, which Docker hands out once
+its 172.17-172.31 pools are taken, off the machine, and a connection to `127.0.0.1:<port>` is
 forwarded to that address (docker-proxy or DNAT), so the first `psql` would send the dev password to a
 stranger. A container it started is removed again (the volume stays); one it
 reused is only reported. Docker's `default-address-pools` (restart the daemon)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
@@ -11,7 +11,7 @@ const script = resolve(import.meta.dirname, 'ensure-postgres.sh');
 // route: where the fixture's `ip` sends the container's address: its own bridge,
 // Cloudflare WARP's device, a host without that bridge (Docker Desktop), or
 // an `ip` that cannot answer. upSays is what compose says of the container.
-async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false } = {}) {
+async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false, exited = false, downFails = false } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-postgres-bootstrap-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const project = 'fixture_' + dir.split('-').at(-1);
@@ -71,11 +71,15 @@ if (args.includes('ps')) {
 }
 if (args[0] === 'inspect' && args.some((arg) => arg.includes('NetworkSettings'))) {
     if (${JSON.stringify(inspectFails)}) process.exit(1);
-    console.log('172.30.0.2 0123456789abcdef');
+    console.log(${JSON.stringify(exited)} ? 'false\\ninvalid IP 0123456789abcdef' : 'true\\n172.30.0.2 0123456789abcdef');
     process.exit(0);
 }
 if (args[0] === 'network') process.exit(0);
-if (args.includes('down')) { writeFileSync(dir + '/down', ''); process.exit(0); }
+if (args.includes('down')) {
+    if (${JSON.stringify(downFails)}) { console.error('daemon error: network has active endpoints'); process.exit(1); }
+    writeFileSync(dir + '/down', '');
+    process.exit(0);
+}
 if (args[0] === 'inspect') {
     console.log(mode === 'existing' || existsSync(dir + '/created') ? 'true' : 'false');
     process.exit(0);
@@ -136,7 +140,7 @@ throw new Error('unexpected ip command: ' + args.join(' '));
         child.once('error', (error) => { clearTimeout(deadline); reject(error); });
         child.once('close', (code) => { clearTimeout(deadline); resolve({ code, output }); });
     });
-    return { dir, port, run, ipCalls: () => readFileSync(join(dir, 'ip-calls'), 'utf8').trim().split('\n').map(JSON.parse), calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse) };
+    return { dir, port, run, ipCalls: () => (existsSync(join(dir, 'ip-calls')) ? readFileSync(join(dir, 'ip-calls'), 'utf8').trim().split('\n').map(JSON.parse) : []), calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse) };
 }
 
 test('a healthy Postgres is reused without an up', async (t) => {
@@ -290,4 +294,20 @@ test("a cold start under the lock names the subnet file once", async (t) => {
     assert.equal(ran.code, 0, ran.output);
     const files = new Set(readFileSync(join(f.dir, 'compose-files'), 'utf8').trim().split('\n'));
     assert.deepEqual([...files], ['docker-compose.yml:docker-compose.subnet.yml']);
+});
+
+test("a failed down is reported as a failure: the container may still publish the port", async (t) => {
+    const f = await fixture(t, 'cold', 1, 'warp', { downFails: true });
+    const ran = await f.run();
+    assert.equal(ran.code, 1);
+    assert.match(ran.output, /daemon error: network has active endpoints/);
+    assert.match(ran.output, /docker compose down failed: it may still be running and publishing :\d+/);
+    assert.doesNotMatch(ran.output, /removed again/);
+});
+
+test("a container that is not running is not held to the route; the check after readiness is", async (t) => {
+    const f = await fixture(t, 'healthy', 1, 'warp', { exited: true });
+    const ran = await f.run();
+    assert.equal(ran.code, 0, ran.output);
+    assert.deepEqual(f.ipCalls().filter((args) => args.includes('route')), [], 'no lookup for an address it does not have');
 });
