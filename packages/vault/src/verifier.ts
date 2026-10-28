@@ -1,4 +1,4 @@
-import { openPair, pairSigners, pairVerifiers, verifyLog, type LogEntry, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
+import { pairSigners, pairVerifiers, verifyLog, type LogEntry, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
 import type { TreeVerification } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
@@ -96,7 +96,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     return { verdict, problems };
   }, SNAPSHOT);
   const { verdict, problems } = walked;
-  const head = verdict.head === null ? null : await openPair(verdict.head, keys.verifiers);
+  const head = verdict.headPair;
   return {
     kept: true,
     ok: problems.length === 0,

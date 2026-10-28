@@ -3,7 +3,7 @@ import type { Database } from '@coffre/db';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
-import type { CheckpointStore } from './checkpointer.ts';
+import { misplaced, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
 import type { RetentionStore } from './retention.ts';
@@ -97,6 +97,17 @@ function limitOf(limit: number | undefined): SQL {
   return limit === undefined ? sql`` : sql` LIMIT ${limit}`;
 }
 
+/**
+ * The uses of a bounded read, the first `limit` by `at`, their one index's
+ * order (`log_uses_request_idx`), so that the database too stops there
+ * rather than sort every use above the floor (PR 8 review r2). By number,
+ * a use may lie past one of them later by `at`: a read that fills its limit
+ * says so, and is not taken as all there is (`verifyLog`'s `above`).
+ */
+function firstUses(uses: SQL, limit: number | undefined): SQL {
+  return limit === undefined ? uses : sql`SELECT * FROM (${uses} ORDER BY u.at LIMIT ${limit}) f`;
+}
+
 function bounds(after: bigint, upto: bigint, floor?: number): [SQL, SQL] {
   return [
     floor === undefined ? sql`coalesce((SELECT k.at_floor FROM log_checkpoints k WHERE k.upto <= ${after} ORDER BY k.upto DESC LIMIT 1), 0)` : sql`${floor}`,
@@ -146,6 +157,9 @@ async function one<T>(db: Database, query: SQL): Promise<T> {
   return (typeof v === 'string' ? JSON.parse(v) : v) as T;
 }
 
+/** The widest window of uses a proof reads the leaves of: 4,096 leaf tiles, some 17 minutes at 1,000 uses a second. */
+const PROOF_WINDOW = 2 ** 20;
+
 /** What `locate` reads in one statement: the entry, a change's place among its window's changes, and the uses tree's size at each end of the window. */
 type Located = { entry: RawEntry | null; before: string | null; from: string | null; to: string | null };
 
@@ -166,14 +180,20 @@ function useAt(at: number | undefined): SQL {
  * second): counting the uses before it by `at` read every use the window's
  * slack holds, about 63,000 index entries at that rate (T119: 9.6 ms and
  * 1,397 buffers a proof, measured at 1M uses). A use whose leaf is not
- * there was changed since its tick.
+ * there was changed since its tick. The window's bounds are its rows'
+ * sizes, the database's: one wider than `PROOF_WINDOW` leaves is refused,
+ * never scanned (PR 8 review r2).
  */
-async function located(found: Located | null | undefined, tiles: (keys: TileKey[]) => Promise<Tile[]>): Promise<{ entry: LogEntry; index: number } | null> {
+async function located(found: Located | null | undefined, tiles: (keys: TileKey[]) => Promise<Tile[]>, tree?: TreeName): Promise<{ entry: LogEntry; index: number } | null> {
   if (found === null || found === undefined || found.entry === null) return null;
   const entry = toEntry(found.entry);
+  if (tree !== undefined && entry.tree !== tree) throw misplaced(entry, tree);
   if (entry.tree === 'changes') return found.before === null ? null : { entry, index: Number(found.before) };
   if (found.from === null || found.to === null) return null;
   const [from, to] = [Number(found.from), Number(found.to)];
+  if (!(from <= to && to - from <= PROOF_WINDOW)) {
+    throw new Error(`use ${entry.number}'s window is ${from} to ${to} in the uses tree: no window of ${PROOF_WINDOW.toLocaleString('en')} leaves or fewer, so the database's checkpoint sizes are not the signer's, or a tick sealed a stall longer than a proof reads`);
+  }
   const leaf = entryLeaf('uses', entry.number, entry.columns);
   const wanted: TileKey[] = [];
   for (let index = Math.floor(from / 256); index * 256 < to; index += 1) wanted.push({ level: 0, index });
@@ -202,8 +222,8 @@ function postgresStore(db: Database, range: number): LogStore {
              NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place
         FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}
       UNION ALL
-      SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL, NULL, NULL, NULL, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
-        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}
+      ${firstUses(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
+        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, limit)}
       ORDER BY n${limitOf(limit)}`);
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
   // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
@@ -268,7 +288,7 @@ function postgresStore(db: Database, range: number): LogStore {
           ${sql.param(all.map(([tree]) => tree))}::text[], ${sql.param(all.map(([, t]) => t.level))}::smallint[],
           ${sql.param(all.map(([, t]) => String(leafOf(t))))}::bigint[], ${sql.param(all.map(([, t]) => t.hashes))}::bytea[])`);
     },
-    async locate(number, at) {
+    async locate(number, { at, tree }: Locating = {}) {
       const found = await one<Located | null>(db, sql`
         WITH sealing AS (SELECT upto, at_floor, uses_size FROM log_checkpoints WHERE upto >= ${number} ORDER BY upto LIMIT 1),
              prior AS (SELECT upto, at_floor, changes_size, uses_size FROM log_checkpoints WHERE upto < ${number} ORDER BY upto DESC LIMIT 1)
@@ -280,7 +300,7 @@ function postgresStore(db: Database, range: number): LogStore {
           'from', (SELECT uses_size FROM prior)::text,
           'to', (SELECT uses_size FROM sealing)::text) AS v
         WHERE EXISTS (SELECT 1 FROM sealing)`);
-      return located(found, (keys) => tiles('uses', keys));
+      return located(found, (keys) => tiles('uses', keys), tree);
     },
     async retention() {
       // The newest at or below the newest checkpoint (sealed, as far as the database says: log_cut's), by its object's
@@ -288,7 +308,7 @@ function postgresStore(db: Database, range: number): LogStore {
       const [r] = await rowsOf<{ n: string | null }>(db, sql`SELECT (SELECT c.number FROM log_changes c
           WHERE c.object = ${RETENTION_OBJECT}::uuid AND c.number <= (SELECT coalesce(max(k.upto), -1) FROM log_checkpoints k)
           ORDER BY c.number DESC LIMIT 1)::text AS n`);
-      return r?.n == null ? null : this.locate(BigInt(r.n));
+      return r?.n == null ? null : this.locate(BigInt(r.n), { tree: 'changes' });
     },
     async days() {
       // Every day of uses there is, attached or left detached by a drop that stopped between its two steps: the
@@ -346,7 +366,7 @@ function sqliteStore(db: Database): LogStore {
   const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
       SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}
       UNION ALL
-      SELECT u.number, ${USE} FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}
+      ${firstUses(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, limit)}
       ORDER BY 1${limitOf(limit)}
     ) e)`;
   const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
@@ -411,7 +431,7 @@ function sqliteStore(db: Database): LogStore {
           VALUES (${row.upto}, ${h.at}, ${h.floor}, ${h.changes.size}, ${h.changes.root}, ${row.notes.changes}, ${h.uses.size}, ${h.uses.root}, ${row.notes.uses})`);
       });
     },
-    async locate(number, at) {
+    async locate(number, { at, tree }: Locating = {}) {
       const found = await one<Located | null>(db, sql`
         WITH sealing AS (SELECT upto, at_floor, uses_size FROM log_checkpoints WHERE upto >= ${number} ORDER BY upto LIMIT 1),
              prior AS (SELECT upto, at_floor, changes_size, uses_size FROM log_checkpoints WHERE upto < ${number} ORDER BY upto DESC LIMIT 1)
@@ -423,7 +443,7 @@ function sqliteStore(db: Database): LogStore {
           'from', CAST((SELECT uses_size FROM prior) AS TEXT),
           'to', CAST((SELECT uses_size FROM sealing) AS TEXT)) AS v
         WHERE EXISTS (SELECT 1 FROM sealing)`);
-      return located(found, (keys) => tiles('uses', keys));
+      return located(found, (keys) => tiles('uses', keys), tree);
     },
     // Retention on SQLite (tests and local development): no partitions, so a day's uses and the tiles below a cut are
     // deleted rows, in one statement each; no functions, so no checks but the vault's own.
@@ -431,7 +451,7 @@ function sqliteStore(db: Database): LogStore {
       const [r] = await rowsOf<{ n: string | null }>(db, sql`SELECT CAST((SELECT c.number FROM log_changes c
           WHERE c.object = ${RETENTION_OBJECT} AND c.number <= (SELECT coalesce(max(k.upto), -1) FROM log_checkpoints k)
           ORDER BY c.number DESC LIMIT 1) AS TEXT) AS n`);
-      return r?.n == null ? null : this.locate(BigInt(r.n));
+      return r?.n == null ? null : this.locate(BigInt(r.n), { tree: 'changes' });
     },
     async days() {
       // Each day that holds a use: the first use at or past the end of the one before, by the uses' index, a probe a day.

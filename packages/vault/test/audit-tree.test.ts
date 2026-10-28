@@ -409,7 +409,7 @@ test('review r2, KindInMac: a change deleted and a use renumbered into its place
   const use = store.append('uses', 'u');
   store.deleteEntry(number);
   store.log.find((e) => e.number === use)!.number = number;
-  await assert.rejects(cp.sealThrough(number), /not in the signed changes tree.*a use holds its number/);
+  await assert.rejects(cp.sealThrough(number), /signed changes tree: entry \d+ is in the uses tree, not the changes: a use holds its number/);
   assert.ok(alerts.some((a) => /signed changes tree/.test(a)));
 });
 

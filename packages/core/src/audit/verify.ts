@@ -66,6 +66,8 @@ export type Verdict = {
   unsealed: number;
   /** The newest pair walked, when the walk found nothing wrong: the `from` of the next one. */
   head: PairNotes | null;
+  /** `head` opened, as the walk opened it: its place and time without its signatures checked again. */
+  headPair: Pair | null;
   /**
    * Whether the database ends before a pair held outside: deleted entries or
    * checkpoints, or the signer's own write a moment away (it remembers a pair
@@ -97,7 +99,10 @@ type Options = {
 export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
   const problems: string[] = [];
   const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false };
-  const done = (head: PairNotes | null): Verdict => ({ ok: problems.length === 0, problems, ...verdict, head: problems.length === 0 ? head : null });
+  const done = (head: Stop | null): Verdict => {
+    const ok = problems.length === 0;
+    return { ok, problems, ...verdict, head: ok ? (head?.notes ?? null) : null, headPair: ok ? (head?.pair ?? null) : null };
+  };
   // What the database holds is the adversary's to shape: anything the walk cannot read is a problem, never a crash.
   try {
     return await walk(reader, opts, problems, verdict, done);
@@ -112,7 +117,7 @@ async function walk(
   opts: Options,
   problems: string[],
   verdict: { checkpoints: number; sealed: number; unsealed: number; behind: boolean },
-  done: (head: PairNotes | null) => Verdict,
+  done: (head: Stop | null) => Verdict,
 ): Promise<Verdict> {
   // The start's pair and those held outside, each opened once: a page's check starts at the pair the signer holds, which
   // is also its row, and four signature checks of one pair were a third of its cost. Rows past them are opened as read.
@@ -331,7 +336,7 @@ async function walk(
   if (!retainedMet || (retained !== null && retained.entry.number > last.pair.upto)) {
     problems.push(`${retained!.entry.number}: the retention change cutting the uses at ${cut!.upto} is not sealed in the changes tree`);
   }
-  return done(last.notes);
+  return done(last);
 }
 
 /**

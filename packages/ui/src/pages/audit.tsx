@@ -53,11 +53,11 @@ export function AuditPage() {
     setWhole(null);
     let verdict: ChainResult;
     try {
+      // 0.15's log, where the instance keeps it, checked again as on a visit, from its newest checkpoint, beside the walk
+      // (R42). Nothing walks it whole on a request: its cost is the database's to shape.
+      const trees = Promise.allSettled([client.audit.verifyTrees()]);
       const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
-      // 0.15's log, where the instance keeps it, checked again as on a visit: from its newest checkpoint. Nothing walks it
-      // whole on a request: its cost is the database's to shape.
-      const [trees] = await Promise.allSettled([chain.ok ? client.audit.verifyTrees() : Promise.resolve({ kept: false as const })]);
-      verdict = withTrees(chain, true, trees);
+      verdict = withTrees(chain, true, (await trees)[0]);
     } catch (error) {
       verdict = chainUnknown(error);
     }

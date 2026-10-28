@@ -91,9 +91,10 @@ export type CheckpointStore = LogReader & {
   /**
    * Entry `number` and its leaf index in its tree, if it is in the log; a
    * use found at `at` when the caller knows its time, which spares a scan
-   * of its window's time.
+   * of its window's time. With `tree`, an entry in the other is refused
+   * (`misplaced`) before its index is sought.
    */
-  locate(number: bigint, at?: number): Promise<{ entry: LogEntry; index: number } | null>;
+  locate(number: bigint, options?: Locating): Promise<{ entry: LogEntry; index: number } | null>;
 };
 
 /**
@@ -101,6 +102,19 @@ export type CheckpointStore = LogReader & {
  * Durable Object's storage on Workers, a synced file beside a Node vault.
  */
 export type Memory = { last(): Promise<string | null>; remember(record: string): Promise<void> };
+
+/** What a proof asks of `locate`: the use's time, if known, and the tree the entry must be in. */
+export type Locating = { at?: number; tree?: TreeName };
+
+/**
+ * An entry found in the other tree than the one asked: a writer who deleted
+ * a change and renumbered a use into its place (KindInMac). Refused before
+ * its index is sought, which for a use reads its window's tiles, whose
+ * bounds are the database's (PR 8 review r2).
+ */
+export function misplaced(entry: LogEntry, tree: TreeName): Error {
+  return new Error(`entry ${entry.number} is in the ${entry.tree} tree, not the ${tree}: a ${entry.tree === 'uses' ? 'use' : 'change'} holds its number`);
+}
 
 /**
  * The pairs a memory's record holds outside the database, for the verifier
@@ -560,14 +574,14 @@ export class Checkpointer {
     // A proof the database answers wrongly for (an entry changed since its tick, `locate`'s refusal) is the same alarm.
     let proof: InclusionProof | null;
     try {
-      proof = await this.proveAt(number, head);
+      proof = await this.proveAt(number, head, { tree: 'changes' });
     } catch (error) {
       const message = `change ${number} cannot be proved in the signed changes tree: ${(error as Error).message}`;
       this.options.alert(message);
       throw new Error(message);
     }
-    if (proof === null || proof.tree !== 'changes') {
-      const message = `change ${number} is not in the signed changes tree: its entry was lost before its seal${proof === null ? '' : ', and a use holds its number'}`;
+    if (proof === null) {
+      const message = `change ${number} is not in the signed changes tree: its entry was lost before its seal`;
       this.options.alert(message);
       throw new Error(message);
     }
@@ -578,16 +592,21 @@ export class Checkpointer {
     return { pair: head.pair, notes: head.notes, witnessed, failures, cosigned, proof };
   }
 
-  /** Entry `number`'s inclusion proof against the newest pair, checked before it is handed out; null if not sealed. A use's `at`, if known, finds it in one probe. */
-  prove(number: bigint, at?: number): Promise<InclusionProof | null> {
-    return this.proveAt(number, this.head, at);
+  /**
+   * Entry `number`'s inclusion proof against the newest pair, checked before
+   * it is handed out; null if not sealed. A use's `at`, if known, finds it
+   * in one probe; with `tree`, an entry in the other is refused.
+   */
+  prove(number: bigint, options: Locating = {}): Promise<InclusionProof | null> {
+    return this.proveAt(number, this.head, options);
   }
 
-  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, at?: number): Promise<InclusionProof | null> {
+  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
     if (number > pair.upto) return null;
-    const found = await this.store.locate(number, at);
+    const found = await this.store.locate(number, options);
     if (found === null) return null;
     const { entry, index } = found;
+    if (options.tree !== undefined && entry.tree !== options.tree) throw misplaced(entry, options.tree);
     if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
       throw new Error(`the database answered for another entry than ${number}`);
     }
