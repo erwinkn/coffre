@@ -78,7 +78,7 @@ import { expectedAudiences, PROFILE_RULES } from '../workloads/profiles.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { newestPolicySeq } from './caller.ts';
-import { AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes, vaultCredentials } from './changes.ts';
+import { AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, credentialStill, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
@@ -1112,8 +1112,7 @@ export class WorkloadService {
     }
     // With 0.15's log, the vault makes the session (T149): it spends the token, and weighs the account, the binding, its
     // freezes and its rate, in one call. A proof that decides in the transaction (`commit`) makes it as below.
-    const signs = kind.commit === undefined ? await vaultCredentials(vault) : null;
-    if (signs !== null) return this.#signInByVault(signs, { member, name, kind, verified, policy }, meta, ctx);
+    if (kind.commit === undefined && (await vaultMakesCredentials(vault))) return this.#signInByVault(vault as CredentialsVault, { member, name, kind, verified, policy }, meta, ctx);
     const spent = verified.spentKey;
     if (spent !== undefined && (await tokenConsumed(db, spent))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your platform for a fresh one');
     const standing = await vault.access(member);
@@ -1222,7 +1221,7 @@ export class WorkloadService {
    * its row and its answer, as nothing the vault decides is made of them.
    */
   async #signInByVault(
-    vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>,
+    vault: CredentialsVault,
     proof: { member: string; name: ProofName; kind: ProofKind; verified: MatchedProof; policy: BindingPolicy },
     meta: { requestId: string; sourceIp: string | null; jkt: string },
     ctx: ProofContext,
@@ -1325,8 +1324,7 @@ export class WorkloadService {
 
     if (spent) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your CI for a fresh one');
     // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. A binding 0.4 made, its scope unsealed, is sealed first, below.
-    const signs = unsealedScope(binding.scope) ? null : await vaultCredentials(vault);
-    if (signs !== null) return this.#exchangeByVault(signs, member, binding, claims, decoded);
+    if (!unsealedScope(binding.scope) && (await vaultMakesCredentials(vault))) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, decoded);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
@@ -1385,7 +1383,7 @@ export class WorkloadService {
    * BindingLocked, MemberLocked, SpentChecked); no 0.14 head, and no
    * `token.exchange` entry: its change records the run (D147).
    */
-  async #exchangeByVault(vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>, member: string, binding: BindingRow, claims: Record<string, unknown>, decoded: DecodedToken): Promise<Exchanged> {
+  async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, decoded: DecodedToken): Promise<Exchanged> {
     const issuer = decoded.claims.iss;
     const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
       generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS), stored: binding.scope,

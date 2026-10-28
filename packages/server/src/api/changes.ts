@@ -59,13 +59,18 @@ export async function keeps015(vault: Vault): Promise<boolean> {
   return (await about015(vault)).log;
 }
 
+/** A vault that makes sign-ins through trust bindings and revokes credentials itself (`vaultMakesCredentials`). */
+export type CredentialsVault = Vault & Required<Pick<Vault, 'signIn' | 'revokeCredential'>>;
+
 /**
  * Whether the vault makes sign-ins through trust bindings and revokes
  * credentials itself, each in one call (`signIn`, `revokeCredential`;
- * T149): with 0.15's log, a vault of this release does.
+ * T149): with 0.15's log, a vault of this release does. A boolean, never
+ * the vault: a vault an async function returns is awaited, and a Worker's
+ * stub, or a proxy, answers `then` as it answers any method.
  */
-export async function vaultCredentials(vault: Vault): Promise<Vault & Required<Pick<Vault, 'signIn' | 'revokeCredential'>> | null> {
-  return (await about015(vault)).credentials ? (vault as Vault & Required<Pick<Vault, 'signIn' | 'revokeCredential'>>) : null;
+export async function vaultMakesCredentials(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).credentials;
 }
 
 /** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */

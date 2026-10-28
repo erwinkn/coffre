@@ -48,7 +48,7 @@ import {
 } from '../db/queries.ts';
 import { callerFrom, projectsReached, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultCredentials } from './changes.ts';
+import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
@@ -797,8 +797,8 @@ export class SigninService {
   async signOut(token: string, meta: Omit<ClientMeta, 'label'>): Promise<void> {
     if (!isCoffreToken(token)) return;
     const tokenHash = hashToken(token);
-    const vault = await vaultCredentials(this.#deps.vault);
-    if (vault !== null) {
+    if (await vaultMakesCredentials(this.#deps.vault)) {
+      const vault = this.#deps.vault as CredentialsVault;
       // With 0.15's log, the vault revokes it (T149): its row read, one call. Its change records the sign-out (D147). A row
       // 0.14 made, which the log never held, is signed out as below, with 0.14's entry.
       for (let tries = 0; ; tries++) {
@@ -851,8 +851,7 @@ export class SigninService {
    * as `'own handle'`, one that is not a handle of the caller's.
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
-    const vault = await vaultCredentials(this.#deps.vault);
-    const byVault = vault === null ? null : await this.#revokedByVault(vault, ctx, credentialId, of);
+    const byVault = (await vaultMakesCredentials(this.#deps.vault)) ? await this.#revokedByVault(this.#deps.vault as CredentialsVault, ctx, credentialId, of) : null;
     if (byVault !== null) return byVault;
     return retrying(async () => {
     const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId))));
@@ -898,7 +897,7 @@ export class SigninService {
    * revoked as above, with 0.14's entry.
    */
   async #revokedByVault(
-    vault: NonNullable<Awaited<ReturnType<typeof vaultCredentials>>>,
+    vault: CredentialsVault,
     ctx: Asker,
     credentialId: string,
     of: { member: string; managed: boolean } | 'own handle' | null,
