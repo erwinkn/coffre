@@ -55,20 +55,22 @@ export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): 
  * outranks the server-wide one at login, so it is refused, as 0022 does.
  */
 export async function turnJitOff(client: Pick<PostgresClient, 'unsafe'>, logins: readonly string[]): Promise<void> {
-  const jit = (database: string) => `EXISTS (
+  // Whether the login has a jit setting, in `database` (0 for the server's), that is `value`; the cast is only of a jit row's.
+  const jit = (database: string, value: 'TRUE' | 'FALSE') => `EXISTS (
         SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
-         WHERE s.setrole = login::regrole AND s.setdatabase = ${database} AND split_part(setting, '=', 1) = 'jit'`;
+         WHERE s.setrole = login::regrole AND s.setdatabase = ${database}
+           AND (CASE WHEN split_part(setting, '=', 1) = 'jit' THEN substr(setting, 5)::boolean END) IS ${value})`;
   await client.unsafe(
     `DO $$ DECLARE
       login text;
       here oid := (SELECT oid FROM pg_database WHERE datname = current_database());
     BEGIN
       FOREACH login IN ARRAY ARRAY[${logins.map((login) => `'${login}'`).join(', ')}] LOOP
-        IF ${jit('here')} AND substr(setting, 5)::boolean) THEN
+        IF ${jit('here', 'TRUE')} THEN
           RAISE EXCEPTION '% has its own jit setting in this database, over the server-wide one: run ALTER ROLE % IN DATABASE % RESET jit, then migrate again', login, login, quote_ident(current_database());
         END IF;
         FOR attempt IN 1..5 LOOP
-          EXIT WHEN ${jit('0')} AND NOT substr(setting, 5)::boolean);
+          EXIT WHEN ${jit('0', 'FALSE')};
           BEGIN
             EXECUTE format('ALTER ROLE %I SET jit = off', login);
             EXIT;
