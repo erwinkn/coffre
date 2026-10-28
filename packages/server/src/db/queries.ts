@@ -331,9 +331,10 @@ export type PlaceRow = {
   folder: string | null;
   /**
    * Distinct live keys across its live environments but personal configs,
-   * the team's: the project list's count for whoever lists every one of them.
+   * the team's: the project list's count for whoever lists every one of
+   * them. Null unless asked for (`teamKeys`).
    */
-  teamKeys: number;
+  teamKeys: number | null;
   /** Each with its live secret count, its own rows: a fork's inherited keys are its parent's. */
   environments: {
     id: string;
@@ -354,15 +355,21 @@ export type PlaceRow = {
  * name an id the log holds. `within` reads only the projects of these ids,
  * for a request whose caller reaches no others: it reads as many rows, and
  * counts as many secrets, however many projects there are beside them.
+ * `teamKeys` counts each project's team keys too, in the same statement.
  */
-export async function places(db: Queryable, { tombstones = false, within }: { tombstones?: boolean; within?: readonly string[] } = {}): Promise<PlaceRow[]> {
+export async function places(
+  db: Queryable,
+  { tombstones = false, within, teamKeys: counted = false }: { tombstones?: boolean; within?: readonly string[]; teamKeys?: boolean } = {},
+): Promise<PlaceRow[]> {
   if (within?.length === 0) return [];
-  const rows = within !== undefined ? await placeRows(db, tombstones, within) : tombstones ? await everyPlace(db) : await livePlaces(db);
+  const rows = within !== undefined
+    ? await placeRows(db, tombstones, counted, within)
+    : tombstones ? await everyPlace(db) : counted ? await liveCountedPlaces(db) : await livePlaces(db);
   const found: PlaceRow[] = [];
   for (const { project, environment, secretCount, teamKeys } of rows) {
     let place = found.at(-1);
     if (place?.id !== project.id) {
-      place = { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt, folder: project.folder, teamKeys: Number(teamKeys ?? 0), environments: [] };
+      place = { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt, folder: project.folder, teamKeys: counted ? Number(teamKeys ?? 0) : null, environments: [] };
       found.push(place);
     }
     if (environment === null) continue;
@@ -384,15 +391,16 @@ export async function places(db: Queryable, { tombstones = false, within }: { to
   return found;
 }
 
-function placeRows(db: Queryable, tombstones: boolean, within?: readonly string[]) {
+function placeRows(db: Queryable, tombstones: boolean, counted: boolean, within?: readonly string[]) {
   const { projects, environments, secrets } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
-  // Each project's team keys (`PlaceRow.teamKeys`), in the same statement: what the project list counts.
+  // Each project's team keys (`PlaceRow.teamKeys`), in the same statement, when asked: what the project list counts.
+  // Unasked, the subquery reads nothing (`false`), and the statement is the same shape.
   const team = db
     .select({ projectId: secrets.projectId, keys: countDistinct(secrets.key).as('team_keys') })
     .from(secrets)
     .innerJoin(environments, and(eq(environments.id, secrets.environmentId), isNull(environments.archivedAt), isNull(environments.owner), standing(environments.slug)))
-    .where(and(isNull(secrets.archivedAt), within === undefined ? undefined : inArray(secrets.projectId, [...within])))
+    .where(counted ? and(isNull(secrets.archivedAt), within === undefined ? undefined : inArray(secrets.projectId, [...within])) : sql`false`)
     .groupBy(secrets.projectId)
     .as('team');
   return db
@@ -412,8 +420,9 @@ function placeRows(db: Queryable, tombstones: boolean, within?: readonly string[
 }
 
 // What most requests read of the instance, every project and environment: built once (`prepared`).
-const livePlaces = prepared((db) => placeRows(db, false));
-const everyPlace = prepared((db) => placeRows(db, true));
+const livePlaces = prepared((db) => placeRows(db, false, false));
+const liveCountedPlaces = prepared((db) => placeRows(db, false, true));
+const everyPlace = prepared((db) => placeRows(db, true, false));
 
 // --- folders --------------------------------------------------------------------
 // One level, for projects and for an environment's secrets, which arrange
@@ -1520,7 +1529,8 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
  */
 export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
   if (dialect.engineOf(db) === 'postgres') {
-    const [{ pruned }] = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`) as unknown as [{ pruned: number }];
+    // A write, through its function: marked so, it never goes with the reads asked beside it (`groupReads`, @coffre/db/hyperdrive).
+    const [{ pruned }] = await db.execute<{ pruned: number }>(sql`/* writes */ SELECT prune_consumed_tokens(${atMost}) AS pruned`) as unknown as [{ pruned: number }];
     return pruned;
   }
   const { consumedTokens } = tablesOf(db);

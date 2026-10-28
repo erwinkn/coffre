@@ -115,7 +115,9 @@ Ten, each marked `Coffre:` in the code:
   transaction, so if one fails it skips the rest, and the group fails with
   that error, naming the statement. A group holds plain reads alone
   (`select …`, `GROUP_NOT_READ` otherwise: a write grouped with a statement
-  that fails would be rolled back by an error not its own), and is the
+  that fails would be rolled back by an error not its own; a `select` that
+  writes through a function is not seen, and says so ahead of itself, as
+  `/* writes */ select …`, which no group takes), and is the
   pool's alone: a transaction's statements each go under its own Sync, so
   BEGIN and COMMIT mean what they did. Upstream has no such thing; its
   pipelined statements each carry a Sync.

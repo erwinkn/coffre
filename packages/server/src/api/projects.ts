@@ -261,7 +261,7 @@ export async function listProjects(ctx: ApiContext): Promise<{ projects: Project
   const team = (project: PlaceRow, environmentIds: string[]) => {
     if (environmentIds.length === 1) return project.environments.find((environment) => environment.id === environmentIds[0])!.secretCount;
     const ids = project.environments.filter((environment) => environment.archivedAt === null && environment.owner === null).map((environment) => environment.id);
-    return ids.length === environmentIds.length && ids.every((id) => environmentIds.includes(id)) ? project.teamKeys : undefined;
+    return ids.length === environmentIds.length && ids.every((id) => environmentIds.includes(id)) ? project.teamKeys ?? undefined : undefined;
   };
   const rest = counted.filter(({ project, environmentIds }) => names(environmentIds) === undefined && team(project, environmentIds) === undefined);
   const distinct = await distinctSecretCounts(ctx.db, rest.flatMap((entry) => entry.environmentIds));

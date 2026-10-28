@@ -24,11 +24,11 @@ export class Render {
 }
 
 /**
- * The projects the caller reaches, with their environments (`projectsReached`):
- * what `me` and the project list show. Once a render.
+ * The projects the caller reaches, with their environments (`projectsReached`)
+ * and their team keys: what `me` and the project list show. Once a render.
  */
 export function reachedPlaces(ctx: Pick<ApiContext, 'db' | 'caller' | 'render'>): Promise<PlaceRow[]> {
-  const read = () => places(ctx.db, { within: projectsReached(ctx.caller) ?? undefined });
+  const read = () => places(ctx.db, { within: projectsReached(ctx.caller) ?? undefined, teamKeys: true });
   return ctx.render === undefined ? read() : ctx.render.reached(read);
 }
 

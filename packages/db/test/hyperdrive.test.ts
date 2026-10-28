@@ -115,6 +115,24 @@ test('with groupReads, a read that fails fails its group, each read with its err
   await pool.end();
 });
 
+test('with groupReads, a select marked as a write goes alone, and a group with a value only the server can type goes each alone', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url, { groupReads: true });
+  const db = createDatabase(pool);
+  await db.execute(sql`select 1`);
+  let syncs = proxy.syncs;
+  // A function that writes, called by a select: said so, it takes its own turn.
+  await Promise.all([db.execute(sql`/* writes */ select ${1}::int as n`), db.execute(sql`select ${2}::int as n`)]);
+  assert.equal(proxy.syncs - syncs, 2);
+  // An object of a class of its own, which the server types, alone: nothing of the group went, then each went alone.
+  const typed = new (class Five { toString() { return '5'; } })();
+  syncs = proxy.syncs;
+  const [five, six] = await Promise.all([db.execute(sql`select ${typed}::int as n`), db.execute(sql`select ${6}::int as n`)]);
+  assert.deepEqual([n(five), n(six)], [5, 6]);
+  assert.ok(proxy.syncs - syncs >= 2, 'each went alone');
+  await pool.end();
+});
+
 test('without groupReads, reads asked together each take a turn, as before', { skip }, async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);

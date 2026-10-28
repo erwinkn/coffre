@@ -32,6 +32,7 @@ const ROOT = 'admin@acme.example';
 const READER = 'reader@acme.example';
 const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }).resolve(ORIGIN);
 if (auth.mode !== 'signin') throw new Error('unreachable');
+const signinConfig = auth.signin;
 
 const db = await openTestDatabase();
 await resetDatabase(db.owner);
@@ -41,7 +42,7 @@ const setupPool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
 const vault = await localVault({ database: createDatabase(vaultPool), kek: { id: 'bench-kek', key: randomBytes(32).toString('base64') }, owners: [ROOT] });
 const base: FixtureDeps = { db: createDatabase(setupPool), vault: vault as unknown as FixtureDeps['vault'], chainKey: randomBytes(32), anchor: testAnchor() };
 const accesses = new Accesses();
-const setupSignin = new SigninService({ ...base, signin: auth.signin, accesses });
+const setupSignin = new SigninService({ ...base, signin: signinConfig, accesses });
 const runtime: CoffreRuntime = {
   db: base.db, vault: base.vault, chainKey: base.chainKey, previousChainKeys: [], signin: setupSignin, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
   verifier: setupSignin, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, plugins: [],
@@ -71,7 +72,7 @@ for (const [persona, email] of [['owner', ROOT], ['viewer', READER]] as const) {
 async function render(as: Persona, path: string, calls: (client: CoffreClient) => Promise<unknown>): Promise<{ ms: number; app: number; vault: number }> {
   const pool = new HyperdrivePool(app.url, { groupReads: true });
   const renderDb = createDatabase(pool);
-  const signin = new SigninService({ ...base, db: renderDb, signin: auth.signin, accesses, scopes: { sealed: true } });
+  const signin = new SigninService({ ...base, db: renderDb, signin: signinConfig, accesses, scopes: { sealed: true } });
   const page = new Request(`${ORIGIN}${path}`, { headers: { cookie: `${sessionCookieName(auth)}=${sessions.get(as)!}`, 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
   const [appSyncs, vaultSyncs] = [app.syncs, vaultSide.syncs];
   const started = performance.now();

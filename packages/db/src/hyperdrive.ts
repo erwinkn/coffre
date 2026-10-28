@@ -18,7 +18,10 @@ type Statement = Promise<unknown> & { values(): Statement; execute(): Statement 
 /** A read asked while a group gathers (`groupReads`): sent with the others at its turn, and answered with its own rows. */
 type Gathered = { text: string; values: unknown[]; arrays: () => boolean; resolve: (rows: unknown) => void; reject: (error: unknown) => void };
 
-/** A plain read: what a group may hold. Anything else, a write or a transaction's, goes alone. */
+/**
+ * A plain read: what a group may hold. Anything else, a write or a transaction's, goes alone; so does a `select` that
+ * writes through a function, which says so first, in a comment `writes`, as `pruneSpentTokens` in @coffre/server does.
+ */
 const READ = /^\s*select\b/i;
 
 /**
@@ -131,15 +134,20 @@ export class HyperdrivePool implements Client {
       void this.#turn(async () => {
         await asked;
         if (this.#gathering === gathered) this.#gathering = null;
-        const client = this.#connected();
         try {
-          if (gathered.length === 1) {
-            const [only] = gathered;
-            const query = client.unsafe(only!.text, only!.values);
-            only!.resolve(await (only!.arrays() ? query.values() : query));
-          } else {
+          const client = this.#connected();
+          const alone = async (member: Gathered) => {
+            const query = client.unsafe(member.text, member.values);
+            member.resolve(await (member.arrays() ? query.values() : query));
+          };
+          if (gathered.length === 1) return await alone(gathered[0]!);
+          try {
             const answers = await client.group(gathered.map((member) => ({ query: member.text, parameters: member.values, arrays: member.arrays() })));
             gathered.forEach((member, i) => member.resolve(answers[i]));
+          } catch (error) {
+            // A value whose type only the server can say, which a group cannot wait for: nothing went, each goes alone.
+            if ((error as { code?: unknown }).code !== 'GROUP_UNTYPED') throw error;
+            for (const member of gathered) await alone(member).catch(member.reject);
           }
         } catch (error) {
           for (const member of gathered) member.reject(error);
