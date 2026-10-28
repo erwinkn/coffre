@@ -34,6 +34,7 @@ import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials, serviceBindings } from '@coffre/db/schema';
 
+import { settingsShown } from '../db/answers.ts';
 import { credentialsBy, liveCredentialsWhere, memberOf, newestAccessSeq, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
@@ -52,6 +53,16 @@ import { formatMember, formatPath, parsePath } from './paths.ts';
 export async function serviceSettingFor(vault: Vault, caller: Caller): Promise<ServiceSetting | null> {
   if (caller.principal.type !== 'user' || !caller.registered) return null;
   return (await vault.settings()).serviceAccounts;
+}
+
+/**
+ * The same, to show it: as the vault's newest entry says it, read by the
+ * app and unchecked, with the credential (`Caller.settings`) or on its own
+ * (`settingsShown`).
+ */
+export async function serviceSettingShown(db: Queryable, caller: Caller): Promise<ServiceSetting | null> {
+  if (caller.principal.type !== 'user' || !caller.registered) return null;
+  return (caller.settings ?? (await settingsShown(db))).serviceAccounts;
 }
 
 /** Every project and environment there is, as a permission check names them. */

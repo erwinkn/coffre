@@ -86,6 +86,17 @@ const isPageRead = (request: Request) => routeIn(request, PAGE_READS);
 const RECALLING = [['reveals']];
 
 /**
+ * The reads that only show their caller, and decide nothing: who they
+ * are, and what they hold where, to choose which places and buttons to
+ * show. The app reads their caller from the vault's rows itself, asking
+ * nothing of the vault (`answerShown`), and the caller is `unchecked`,
+ * which no other route takes (`serveApi`): whatever it then asks for, the
+ * vault decides. A page's render, an MCP connection or a plugin asks with
+ * the caller it checked already, and its `me` shows that one.
+ */
+const SHOWING = [['me']];
+
+/**
  * Routes only the browser reaches: an approval is decided on coffre's page,
  * by its person, not by an app holding their CLI session. With
  * coffre's sign-in, the credential must be a browser session, which the
@@ -190,6 +201,7 @@ export async function fetchApi(
   options: { sourceIp: string | null; authenticate?: Authenticate; inProcess?: boolean; recall?: false; render?: Render },
 ): Promise<Response> {
   const recall = options.recall !== false && options.authenticate === undefined && request.method === 'POST' && routeIn(request, RECALLING);
+  const shows = options.authenticate === undefined && request.method === 'GET' && routeIn(request, SHOWING);
   // A request decided on a kept answer, which may start over: its body, read once within the API's bound, kept for that.
   let again: Request | null = null;
   try {
@@ -197,8 +209,8 @@ export async function fetchApi(
     if (pathname === '/api/auth') {
       return request.method === 'GET' ? jsonResponse(authInfo(request, runtime)) : methodNotAllowed(['GET']);
     }
-    const authenticate: Authenticate | undefined = recall
-      ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, { recall: true })
+    const authenticate: Authenticate | undefined = recall || shows
+      ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, recall ? { recall: true } : { shows: 'caller' })
       : options.authenticate;
     const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess);
     if (identity instanceof Response) return identity;
@@ -280,7 +292,8 @@ export function pageClient(
   let checked: Promise<AuthenticatedIdentity | Response> | undefined;
   const render = new Render();
   const authenticate: Authenticate = async (token) => {
-    checked ??= authenticateRequest(page, runtime, crypto.randomUUID(), token, sourceIp);
+    // With the instance's settings, read with the credential, which its `me` shows.
+    checked ??= authenticateRequest(page, runtime, crypto.randomUUID(), token, sourceIp, { shows: 'settings' });
     const identity = await checked;
     // A refusal's body is read once: each call answers with its own copy.
     return identity instanceof Response ? identity.clone() : identity;

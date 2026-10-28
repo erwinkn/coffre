@@ -16,7 +16,7 @@ import {
   type Role,
   type Scope,
 } from '@coffre/core/access';
-import type { Access, CallerKind, Vault } from '@coffre/core/vault';
+import type { Access, CallerKind, Settings, Vault } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { newestVaultSeq } from '@coffre/db/log';
 
@@ -86,6 +86,19 @@ export type Caller = {
    * the vault has vouched for it, or confirmed it (`Recalled`).
    */
   recalled?: Recalled;
+  /**
+   * Set when the app read this caller from the vault's rows itself, which
+   * it cannot check, rather than asked the vault (`answerShown`): what
+   * `GET /api/me` shows, and nothing else reads. Everything such a caller
+   * then asks for, the vault decides.
+   */
+  unchecked?: true;
+  /**
+   * The instance's settings as the vault's newest entry says them, read by
+   * the app with the credential, unchecked, for a request that shows them:
+   * `me`, which shows what the caller may set up (`serviceSettingShown`).
+   */
+  settings?: Settings;
 };
 
 /** The principal and their live grants, in one vault call. */
@@ -140,6 +153,15 @@ export function callerFrom(
 /** The caller, marked as built from a kept answer when it was (`Caller.recalled`). */
 export function withRecalled(caller: Caller, recalled: Recalled | null): Caller {
   return recalled === null ? caller : { ...caller, recalled };
+}
+
+/** The caller, with what the app read of the vault's rows to show: the caller itself (`Caller.unchecked`), or the settings alone. */
+export function withShown(caller: Caller, shown: { unchecked?: true; settings?: Settings }): Caller {
+  return {
+    ...caller,
+    ...(shown.unchecked === undefined ? {} : { unchecked: shown.unchecked }),
+    ...(shown.settings === undefined ? {} : { settings: shown.settings }),
+  };
 }
 
 /**

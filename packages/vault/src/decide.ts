@@ -2,7 +2,7 @@ import {
   allows, EVERYWHERE, INSTANCE_ROLES, NOTHING, ROLES, ownsProject, readsSensitive, useOnly, withinCredential,
   type HeldKey, type Holdings, type Permission, type Place, type Policy,
 } from '@coffre/core/access';
-import { handsBack, type Access, type Purpose, type RefusalCode, type UseCode } from '@coffre/core/vault';
+import { handsBack, live, PRINCIPAL, type Access, type Purpose, type RefusalCode, type UseCode } from '@coffre/core/vault';
 
 import { overCap, type BulkRead } from './bulk.ts';
 import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
@@ -203,13 +203,8 @@ export function referenceRefusal(
     ?? (nature !== 'plain' && useOnly(reader.live, source) ? 'use_only' : null);
 }
 
-/** A member: `user:<email>` or `token:<name>`. */
-export const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
-
-/** Whether a grant still holds at `at`. */
-export function live(grant: { expiresAt: number | null }, at: number): boolean {
-  return grant.expiresAt === null || grant.expiresAt > at;
-}
+// A member's form, and whether a grant holds: the vault's answers and the app's read them alike (@coffre/core/vault).
+export { live, PRINCIPAL };
 
 // --- a use, on sealed inputs (0.15) ---------------------------------------------
 

@@ -7,6 +7,26 @@ export type { CallerKind } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
+export {
+  answerFrom,
+  CLOSED_POLICY,
+  CLOSED_SETTINGS,
+  DEFAULT_SETTINGS,
+  live,
+  livePolicy,
+  NO_EDITS,
+  policyFrom,
+  PRINCIPAL,
+  readEdits,
+  roleOf,
+  settingsFrom,
+  view,
+  type GrantFacts,
+  type MemberFacts,
+  type PolicyEdits,
+  type PolicyEnvironment,
+  type ProtectedPlace,
+} from './answers.ts';
 
 /**
  * The vault as the app sees it: the contract between `@coffre/server` and

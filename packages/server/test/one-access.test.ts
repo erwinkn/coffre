@@ -1,7 +1,8 @@
 // One call to the vault for each request: checking a coffre credential asks
 // the vault who its member is, and that answer is the caller, rather than
 // a second call; and a page's render, which makes several API calls in
-// process, checks its credential once for all of them. Every vault call
+// process, checks its credential once for all of them. `GET /api/me`, which
+// only shows its caller, asks none: the app reads the vault's rows itself. Every vault call
 // costs a round trip to the vault Worker, and on Cloudflare the page that
 // made seven of them was the slowest, and the likeliest to meet a hang.
 import test, { after, before, beforeEach } from 'node:test';
@@ -83,14 +84,14 @@ async function cliToken(email: string): Promise<string> {
   return polled.credential.token;
 }
 
-test('an API request with a coffre credential asks the vault once', async () => {
+test('an API request with a coffre credential asks the vault once, and one that only shows its caller not at all', async () => {
   const token = await cliToken(DEV);
-  asked = [];
-  for (const path of ['/api/me', '/api/projects', '/api/secrets/market/dev']) {
+  for (const [path, calls] of [['/api/me', []], ['/api/projects', [`user:${DEV}`]], ['/api/secrets/market/dev', [`user:${DEV}`]]] as const) {
+    asked = [];
     const response = await fetchApi(new Request(`${ORIGIN}${path}`, { headers: { authorization: `Bearer ${token}` } }), runtime, { sourceIp: null });
     assert.equal(response.status, 200, path);
+    assert.deepEqual(asked, calls, path);
   }
-  assert.deepEqual(asked, [`user:${DEV}`, `user:${DEV}`, `user:${DEV}`], 'one vault call for each request');
 });
 
 test("a page's render, its loaders calling the API at once, asks the vault once for all of them", async () => {

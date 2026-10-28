@@ -15,12 +15,13 @@ import {
   type SigninProfile,
 } from '@coffre/core/identity';
 import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
-import type { Access, ObjectChange, Vault } from '@coffre/core/vault';
+import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
 
 import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows.ts';
+import { answerOf, type Shows } from '../db/answers.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findBinding,
@@ -193,6 +194,10 @@ export type CredentialPrincipal = Principal & {
   access: Access;
   /** Set when `access` is the vault's answer kept from an earlier request (`accessFor`), for a request that `recall`s. */
   recalled?: Recalled;
+  /** Set when `access` is the app's own read of the vault's rows, for a request that only shows its caller (`answerShown`). */
+  unchecked?: true;
+  /** The instance's settings as the vault's rows say them, read with the credential for a request that shows them. */
+  settings?: Settings;
   /** The newest `policy.change` as the credential was read, before the vault was asked for `access`; null for none. */
   policySeq: bigint | null;
   /** Its scope, a service or personal token's or its binding's, past which nothing it asks reaches; null for a session's. */
@@ -686,8 +691,11 @@ export class SigninService {
    */
   async verify(
     token: string,
-    /** `ahead`: the credential as `app_read` read it already for this request (db/read-ahead.ts), null for none. */
-    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null } = { sourceIp: null },
+    /**
+     * `ahead`: the credential as `app_read` read it already for this request (db/read-ahead.ts), null for none.
+     * `shows`: what the request shows of its caller, read with the credential from the vault's rows (`Shows`).
+     */
+    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows } = { sourceIp: null },
   ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
@@ -697,18 +705,25 @@ export class SigninService {
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
     let recalled: Recalled | null = null;
+    let unchecked: true | undefined;
+    let settings: Settings | undefined;
     let policySeq: bigint | null = null;
     try {
       if (!this.#scopes.sealed) {
         await sealScopes(db, chainKey, this.#deps.vault);
         this.#scopes.sealed = true;
       }
-      row = await findCredential(db, chainKey, { tokenHash }, request.ahead);
+      row = await findCredential(db, chainKey, { tokenHash }, request.shows === 'caller' ? 'answer' : request.shows ?? request.ahead);
+      const shown = row === null || request.shows !== 'caller' ? null : answerOf(row.principal, row.answer);
+      settings = shown?.settings ?? row?.settings;
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
       policySeq = row?.policySeq ?? null;
       // A kept answer at the credential's generation, unless its scope is still to be sealed, from what the account holds now.
-      const recall = request.recall === true && row !== null && !(row.kind === 'service' && unsealedScope(row.scope));
-      if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
+      const unsealed = row !== null && row.kind === 'service' && unsealedScope(row.scope);
+      const recall = request.recall === true && row !== null && !unsealed;
+      // Only shown, read from the vault's rows; but a scope still to be sealed is sealed from the vault's answer, asked.
+      if (shown !== null && !unsealed) [access, unchecked] = [shown.access, true];
+      else if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
       // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
         const binding = issuingBinding(row.createdBy);
@@ -742,6 +757,8 @@ export class SigninService {
           credentialGeneration: row.generation,
           access,
           ...(recalled === null ? {} : { recalled }),
+          ...(unchecked === undefined ? {} : { unchecked }),
+          ...(settings === undefined ? {} : { settings }),
           policySeq,
           credentialScope: readScope(row.scope),
           exchanged: row.bindingStands !== null,
@@ -759,6 +776,8 @@ export class SigninService {
           exchanged: false,
           access,
           ...(recalled === null ? {} : { recalled }),
+          ...(unchecked === undefined ? {} : { unchecked }),
+          ...(settings === undefined ? {} : { settings }),
           policySeq,
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
           credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,

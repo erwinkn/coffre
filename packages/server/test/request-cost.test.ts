@@ -482,7 +482,8 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
   'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
   'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
-  "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 2, vaultCalls: 2 } },
+  // Only shown: its credential and what the vault's rows say of its caller in one statement, its places in another, and no vault call.
+  "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 0, vaultCalls: 0 } },
   "a CI run's sign-in": { request: () => exchange(), budget: { app: 8, vault: 1, vaultCalls: 1 } },
   "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: { app: 4, vault: 1, vaultCalls: 1 } },
   "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: { app: 5, vault: 7, vaultCalls: 1 } },

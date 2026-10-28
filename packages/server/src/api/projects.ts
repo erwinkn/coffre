@@ -38,7 +38,7 @@ import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectM
 import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, vaultCredential, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { scopeView } from './members.ts';
-import { scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
+import { scopeByPath, serviceSettingShown, setsUp, type ScopeByPath } from './services.ts';
 import { formatMember } from './paths.ts';
 import { resolveKeys } from './inheritance.ts';
 import { protectedFor, unprotects } from './roles.ts';
@@ -147,7 +147,8 @@ export async function me(ctx: ApiContext): Promise<Me> {
   const { caller } = ctx;
   const reachable: Me['environments'] = [];
   // Only the projects the caller reaches: a page's every render asks, and the instance may hold many more.
-  const [known, setting] = await Promise.all([reachedPlaces(ctx), serviceSettingFor(ctx.vault, caller)]);
+  // The setting as the vault's newest entry says it, unchecked: `me` only shows what the caller may set up.
+  const [known, setting] = await Promise.all([reachedPlaces(ctx), serviceSettingShown(ctx.db, caller)]);
   for (const project of known) {
     if (project.archivedAt !== null) continue;
     for (const environment of project.environments) {
