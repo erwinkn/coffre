@@ -160,11 +160,11 @@ const shown = (ran: Statement[]) => ran.map(({ text }) => text.replace(/\s+/g, '
 /** `sign_in`'s arguments made a sign-in of their own: a request, a token spent and a credential, each new (migration 0034's order). */
 function freshSignIn(values: unknown[]): unknown[] {
   const next = [...values];
-  // $1 the request, $13 the token spent, $19 the credential, $22 its token's hash.
+  // $1 the request, $17 the token spent, $23 the credential, $26 its token's hash (migration 0037's order).
   next[0] = randomUUID();
-  next[12] = randomBytes(32);
-  next[18] = randomUUID();
-  next[21] = randomBytes(32);
+  next[16] = randomBytes(32);
+  next[22] = randomUUID();
+  next[25] = randomBytes(32);
   return next;
 }
 

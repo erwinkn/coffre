@@ -14,7 +14,9 @@ Three pull requests, each leaving `main` shippable, all in 0.15:
 |---|---|---|
 | 1 (T149, W250) | sign-in through a trust binding (`POST /api/auth/oidc` and a workload's `POST /api/workloads/session`), revoke and sign-out, by the vault; the spec | BindingLocked, MemberLocked, SpentChecked, IssueOffFence, RevokeTakesFence, RevokePolicyHeld, SweepAfterLock (as built already) |
 | 2 (T149, W250) | a service token, a personal token and a handle, issued by the vault, which weighs the issuer's rights itself | IssuerLocked, IssuerCAS |
-| 3 | the vault verifies the CI run's ID token (D148), takes only bindings it sealed, and seals each credential's token hash | VaultVerifiesToken, BindingSealed, HashSealed |
+| 3a (T149, W250) | a service's trust bindings made and ended by the vault, which weighs who binds as it weighs a service token's issue; a sign-in through none it did not seal | BindingSealed; IssuerLocked, IssuerCAS, IssuePolicyHeld for a bind |
+| 3b | the vault verifies the CI run's ID token (D148), against the sealed binding's keys | VaultVerifiesToken |
+| 3c | each credential's token hash sealed, after W242's B1 | HashSealed |
 
 ## 1. Before: CI sign-in as 0.15 had it
 
@@ -169,7 +171,57 @@ The app's 0.14 entry is gone here too (D147): the change records the issue,
 Under 0.14's log, and with a vault that does not say `issues`, the app
 issues as before.
 
-## 4. The model: `formal/Lifecycle.tla`
+## 4. Bindings, as built (PR 3a)
+
+A trust binding was the app's row, vouched for by its APP_KEY MAC alone. The
+app's code, turned hostile, holds that key: it could write a binding that
+trusts its own key and sign in through it. `Lifecycle.tla` breaks
+`SignInsOnValidTokens` that way, with the vault checking the ID token or
+not, which is why D148 needs sealed bindings.
+
+Behind the switch, a binding is a 0.15 object (`BindingInput`: the account,
+its generation, profile, issuer, keys, claims, scope, policy, revoked), and
+the vault's to change, in one call, `Vault.changeBindings`:
+
+- **making one** is weighed as a service token's issue: on `#issuerRead`'s
+  reads, by `weighService` (a person who manages the account, never more than
+  it holds, sensitive reads only from an Owner, R32). An Admin's binding
+  that reads sensitive values is refused, as an Admin's token would be;
+- **ending one** (an unbind, or the binding a new one replaces) takes every
+  live credential it issued with it. The app names them, each with its seal
+  and MAC; the statement holds the set to the rows, so one a sign-in made
+  meanwhile is read again;
+- one statement, `change_bindings` (migration 0037): the account's row
+  (its update lock, so that two binds take turns over the 16-binding cap)
+  and the maker's (shared), compared; the credential the request came in
+  on; the bindings it ends and their credentials, `FOR UPDATE`, compared;
+  the issue lock shared, then the policy under it; the fence exclusive only
+  when it ends something; the writes; a change per object.
+
+A sign-in names its binding's columns and seal. The vault takes it only
+when the seal is its own over those columns (`unsealed` otherwise, 401 with
+"bind it again"), and `sign_in` holds the row to them and the seal to the
+binding's newest change, so a row put back after its end is none.
+
+A binding 0.14 made, which the log never held, signs nobody in under the
+switch (fail closed): 0.15 is unreleased, nobody runs it, and a fallback to
+the app's own check would be the hole sealed bindings close. Plan PR 9's
+cutover can adopt them; until then a manager binds again. Ending one goes
+the app's way, as before.
+
+Bindings keep 0.14's `token.bind` and `token.unbind` entries, written once
+the vault's change has committed, following through on its decision. The
+app's own credential checks read `token.unbind` as a binding's tombstone,
+so a row put back stays dead to them too, and the 0.14 audit page keeps
+showing bindings until T156. D147 asked only that no `token.exchange` be
+written; binds are rare admin acts.
+
+A sign-in is still 1 app statement and 1 vault statement. On the Debian rig
+at 20 ms a round trip, beside 1,000 uses a second: 65 ms alone, 72 / 180 ms
+(p50 / p99) with 10 at once, 128 / 264 ms with 30; PR 1 measured 64,
+83 / 211 and 127 / 303. Uses beside stay at 25 ms p99.
+
+## 5. The model: `formal/Lifecycle.tla`
 
 W246's model compared both placements. It now models the vault's alone, and
 more of it: issue, sign-in, unbind, revoke and the seal wait beside uses, a
@@ -191,7 +243,8 @@ every protection on; each protection removed breaks the invariant beside it
 | `AllowedAsPresented` | a use serves the credential whose token was presented | HashSealed and AppChecksMac (each suffices) |
 | `SignInsOnValidTokens` | the app's code, hostile, mints no run's credential | VaultVerifiesToken; BindingSealed |
 
-Scenarios: `LifecycleIssue`, `LifecyclePolicy`, `LifecycleSignIn`, `LifecycleReplay`,
+Scenarios: `LifecycleIssue`, `LifecyclePolicy`, `LifecycleBind` (Ada binds svc's CI
+through the vault while she is demoted), `LifecycleSignIn`, `LifecycleReplay`,
 `LifecycleUnbind`, `LifecycleRevoke`, `LifecycleForge`, `LifecycleCompromised`, each a few
 seconds. `docs/formal.md` says what each abstracts.
 
@@ -205,10 +258,12 @@ Two results drove the design:
 - **D148 needs sealed bindings.** With the vault checking the ID token but
   taking any binding row, the hostile app writes a binding that trusts its own
   key (it holds `coffre_app` and APP_KEY) and signs a token for it. TLC breaks
-  `SignInsOnValidTokens` that way. So PR 3 also makes a binding a 0.15 object,
+  `SignInsOnValidTokens` that way. So PR 3a makes a binding a 0.15 object,
   sealed when a manager makes it, and the sign-in takes only a sealed one.
+  The model's bind is an issue that commits a binding (its maker held as an
+  issuer is), and its unbind is the vault's statement, no 0.14 head.
 
-## 5. Decisions
+## 6. Decisions
 
 | decision | instead of | why |
 |---|---|---|
@@ -227,7 +282,7 @@ Two results drove the design:
 | an issue compares the policy under the issue lock shared, which a policy change, or a write that moves an environment's slug, takes exclusive after its rows and before the fence (`holdIssues`; IssuePolicyHeld, PolicyIssueFirst) | the fence, as a revoke takes it (RevokePolicyHeld); or nothing, which PR 2 first did | a use waits on the fence, and never on the issue lock (R58). With no lock, a policy change that narrows the issuer alone (Developer loses `secret.read`; the account's own Viewer grant still reads) could commit between the issue's check and its number (review r3): a use's check of the account does not catch it. The change waits for the issues in flight, a few ms each; an issue behind a change waits for it, bounded by `lock_timeout` |
 | the app still weighs the scope, and names the issuer's access it weighed on; the vault refuses `access` when it moved | the vault alone | the app's scope reads what the vault does not hold (sensitive values, references); a demotion between the two is refused, 409, as `issuerStill` did |
 
-## 6. Numbers
+## 7. Numbers
 
 Debian `postgres:16.14` (R62), local, a compose project of its own, 20 ms
 added to every round trip, 1,000 uses a second beside, 3 rounds a level
@@ -278,7 +333,7 @@ isolates read their keys on their first call, as a cold isolate does. The
 write is never among the statements that wait longest: the rows it locks it
 shares with the other issues.
 
-## 7. Still open
+## 8. Still open
 
 - **A hostile app.** In 0.15 the app names the caller to the vault, so it can
   act as anyone whose credential hash it reads. PR 3 stops it minting run

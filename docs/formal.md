@@ -1462,7 +1462,9 @@ hostile. A sign-in and a revoke are one statement each; an issue is two, a
 read and a write that goes ahead only while what the read decided on still
 stands, holding nothing between. MCLifecycle.tla's scenarios:
 `LifecycleIssue`, `LifecyclePolicy` (an issue while an Owner's policy
-change takes the right from the issuer's role), `LifecycleSignIn`,
+change takes the right from the issuer's role), `LifecycleBind` (Ada binds
+svc's CI through the vault, an issue that commits a binding, while she is
+demoted; a run signs in through it), `LifecycleSignIn`,
 `LifecycleReplay` (one ID token
 presented twice), `LifecycleUnbind`, `LifecycleRevoke` (a manager's revoke
 while an admin takes the right away), `LifecycleForge` and
@@ -1473,7 +1475,7 @@ while an admin takes the right away), `LifecycleForge` and
 | a revoke takes the fence exclusive (RevokeTakesFence) | `RevokeOrdersUses` |
 | a revoke holds the policy its right was weighed on to the newest, under the fence (RevokePolicyHeld) | `RevokesOnStandingRight` |
 | an issue or a sign-in takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues` |
-| an issue's write holds the issuer's row and credential shared (IssuerLocked) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; with the app compromised too |
+| an issue's write holds the issuer's row and credential shared (IssuerLocked) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; with the app compromised too; for a bind too (`LifecycleBind`) |
 | an issue's write goes ahead only on the objects its read decided on (IssuerCAS) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` |
 | an issue compares the policy under the issue lock shared, which a policy change takes exclusive (IssuePolicyHeld) | `SensitiveOnlyFromOwners`: a change narrowing the issuer's role, her row untouched, commits between the check and the number |
 | a policy change takes the issue lock before the fence (PolicyIssueFirst) | `UsesNeverWaitOnIssues`: it holds the fence while it waits for an issue, and a use waits behind it |

@@ -22,16 +22,16 @@ import {
   type ServiceSetting,
 } from '@coffre/core/access';
 import { EXCHANGED_CREDENTIAL_MS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
-import type { CredentialColumns, IssueTokenInput, IssueTokenRefusal, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
+import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
 import { NotLogged, payloadOf, type ChangeKeys } from './changes.ts';
 import { applyOp, canonical, objectKey, sealed, sealOf, type Op, type Ref } from './inputs.ts';
-import { issueOnPostgres, revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
-import { issueOnSqlite, revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
+import { bindingsOnPostgres, issueOnPostgres, revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
+import { bindingsOnSqlite, issueOnSqlite, revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
 import { entryMac } from './log-entry.ts';
-import { credentialObject } from './objects.ts';
+import { bindingObject, credentialObject } from './objects.ts';
 
 /**
  * The vault makes and ends credentials itself, each in one statement
@@ -61,14 +61,15 @@ type SignInRecord = { binding: string; proof: string; issuer: string; run: Recor
 /** A sign-in as the vault decided it: the statement's arguments. */
 export type SignInCall = {
   requestId: string; at: number; actor: string; payload: string; mac: Buffer; seal: Buffer;
-  binding: SignInInput['binding']; principal: string; appKey: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
+  /** The binding's columns as the vault checked its seal (`bindingSeal`): the statement holds the row to both. */
+  binding: BindingColumns; bindingSeal: Buffer; principal: string; appKey: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
   /** At most `rate` credentials a binding makes in `window` ms. */
   rate: number; window: number;
   credential: SignInCredential & { createdBy: string; tokenHashBytes: Buffer; authMacBytes: Buffer };
 };
 
 /** The statement's answer: its change's number, or why it made nothing. */
-export type Answer = { number?: string | null; state?: SignInRefusal | IssueTokenRefusal | 'moved' | 'stale' | 'policy' };
+export type Answer = { number?: string | null; state?: SignInRefusal | IssueTokenRefusal | 'moved' | 'stale' | 'policy' | 'unbound' | 'full' };
 
 /** A lock not had within the functions' `lock_timeout`, or a statement cancelled: overloaded, refused at once (R44). */
 const BUSY_CODES = new Set(['55P03', '57014']);
@@ -104,11 +105,14 @@ export async function signIn(db: Database, keys: ChangeKeys, at: number, input: 
 }
 
 function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInCall {
-  const { principal, binding, credential, appKey, spent, validUntil, record } = input ?? ({} as SignInInput);
+  const { principal, credential, appKey, spent, validUntil, record } = input ?? ({} as SignInInput);
   if (typeof principal !== 'string' || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw new Error('a sign-in is a service account\'s, token:<id>');
-  if (typeof binding?.id !== 'string' || !Number.isInteger(binding.generation) || typeof binding.profile !== 'string'
-    || (binding.scope !== null && typeof binding.scope !== 'string') || (binding.policy !== null && typeof binding.policy !== 'string')) {
-    throw new Error('a sign-in names its binding: its id, generation, profile, scope and policy as read');
+  const binding = checkBinding(input?.binding?.columns);
+  if (input.binding.seal !== null && !isBase64(input.binding.seal, 16)) throw new Error('a binding\'s seal is 16 bytes, in base64, or none');
+  // Only a binding the vault sealed, live, of this account (BindingSealed): one 0.14 made, or a row not its object, signs nobody in.
+  const bindingSeal = input.binding.seal === null ? null : Buffer.from(input.binding.seal, 'base64');
+  if (bindingSeal === null || binding.revoked || binding.principal !== principal || !sealed(keys.seals, { kind: 'binding', id: binding.id }, bindingObject(binding), bindingSeal)) {
+    throw new SignInRefused('unsealed');
   }
   checkCredential(credential);
   if (typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)) throw new Error('a sign-in names the app\'s log key it signed the row under');
@@ -152,9 +156,20 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor: principal, payload, seal };
   return {
     ...row, mac: entryMac(keys.mac, { tree: 'changes', row }),
-    binding, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest, rate: SIGN_INS_PER_WINDOW, window: SIGN_IN_WINDOW_MS,
+    binding, bindingSeal, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest, rate: SIGN_INS_PER_WINDOW, window: SIGN_IN_WINDOW_MS,
     credential: { ...credential, createdBy: `binding:${binding.id}`, tokenHashBytes: Buffer.from(credential.tokenHash, 'base64'), authMacBytes: Buffer.from(credential.authMac, 'base64') },
   };
+}
+
+/** A binding's columns as the app names them; throws on a shape no app of this release sends. */
+export function checkBinding(columns: BindingColumns | undefined): BindingColumns {
+  const c = columns ?? ({} as BindingColumns);
+  const text = (value: unknown) => typeof value === 'string';
+  if (!text(c.id) || !UUID.test(c.id) || !text(c.principal) || !Number.isInteger(c.generation) || !text(c.profile) || !text(c.issuer) || !text(c.jwksUri)
+    || !text(c.claims) || (c.scope !== null && !text(c.scope)) || (c.policy !== null && !text(c.policy)) || typeof c.revoked !== 'boolean') {
+    throw new Error('a binding is named by its columns as its row keeps them: id, account, generation, profile, issuer, keys, claims, scope, policy, revoked');
+  }
+  return c;
 }
 
 /** A sign-in the vault refuses before any statement: its own check of the times. */
@@ -329,13 +344,7 @@ export function weighIssue(
   if (places.some((place) => place === null)) return 'a place the token names is no longer there';
   const at_ = places as readonly Place[];
   const policy = holder.policy ?? DEFAULT_POLICY;
-  // Each column within the role as `roles` defines it (what `issuedGrant` keeps of it at most).
-  const ofRole = (grant: ScopeGrant, roles: Policy) => {
-    const role = definitionOf(roles, grant.role);
-    const { permissions, protected: guarded } = scopeDefinition(grant);
-    return role !== undefined && permissions.every((p) => role.permissions.includes(p)) && guarded.every((p) => role.protected.includes(p));
-  };
-  // And, for a person's own, within what the holder holds at the place, through the credential it came in on.
+  // Each column within the role, and, for a person's own, within what the holder holds at the place, through the credential it came in on.
   const held = (grant: ScopeGrant, place: Place, roles: Policy) => {
     const columns = heldColumns(holder, place);
     const { permissions, protected: guarded } = scopeDefinition(grant);
@@ -345,17 +354,9 @@ export function weighIssue(
   // credential's object seals its scope, never its row's kind, so the vault decides on that (R53).
   const scoped = holder.credentialScope != null;
   switch (credential.kind) {
-    case 'service': {
-      if (!principal.startsWith('token:') || service === null) return 'a service token is a service account\'s';
-      // A person gives it, as the app's `managedAccount` has it: no service account or workload sets one up.
-      if (!actor.startsWith('user:')) return 'only a person issues a service account a token';
+    case 'service':
       if (credential.expiresAt > at + MAX_SERVICE_TOKEN_DAYS * 86_400_000 + CLOCK_SLACK_MS) return `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days`;
-      if (scope.some((grant) => !ofRole(grant, policy))) return 'a service token keeps at most what each of its roles holds';
-      const grants = scope.map((grant, i) => ({ role: grant.role, place: at_[i]!, kept: scopeDefinition(grant) }));
-      if (!issuesCredential(holder, service.setting, actor, service.account, grants)) return 'a credential reaches at most what its account holds and what its issuer could give it';
-      if (scope.some((grant) => grant.sensitive === true && !ownsProject(holder, grant.projectId!))) return 'only an Owner of its project gives a service account sensitive reads (R32)';
-      return null;
-    }
+      return weighService(actor, principal, scope, holder, at_, service);
     case 'personal': {
       if (principal !== actor || !actor.startsWith('user:')) return 'a personal token is its person\'s own';
       if (scoped) return 'a personal token is made on a session: a token never makes another';
@@ -381,6 +382,42 @@ export function weighIssue(
       return null;
     }
   }
+}
+
+/** Each column of `grant` within its role as `roles` defines it: what `issuedGrant` keeps of it at most. */
+function ofRole(grant: ScopeGrant, roles: Policy): boolean {
+  const role = definitionOf(roles, grant.role);
+  const { permissions, protected: guarded } = scopeDefinition(grant);
+  return role !== undefined && permissions.every((p) => role.permissions.includes(p)) && guarded.every((p) => role.protected.includes(p));
+}
+
+/**
+ * Whether `actor`, as the vault read them (`holder`), may give service
+ * account `principal` a grant of `scope` (`places`, by its environments'
+ * slugs): a service token's issue, or a trust binding's, whose sign-ins
+ * reach the same (PR 3a). Null if so, or why not. A person gives it, as the
+ * app's `managedAccount` has it, who manages the account and could give it
+ * each grant, which the account holds (`issuesCredential`; R15); each
+ * grant's columns within its role; sensitive reads only where they are an
+ * Owner of the project (`ownsProject`, R32).
+ */
+export function weighService(
+  actor: string,
+  principal: string,
+  scope: CredentialScope,
+  holder: Holdings,
+  places: readonly Place[],
+  service: { setting: ServiceSetting | null; account: ServiceAccount } | null,
+): string | null {
+  if (!principal.startsWith('token:') || service === null) return 'a service account\'s access is a service account\'s';
+  // No service account or workload sets one up.
+  if (!actor.startsWith('user:')) return 'only a person gives a service account its access';
+  const policy = holder.policy ?? DEFAULT_POLICY;
+  if (scope.some((grant) => !ofRole(grant, policy))) return 'a service account\'s grant keeps at most what each of its roles holds';
+  const grants = scope.map((grant, i) => ({ role: grant.role, place: places[i]!, kept: scopeDefinition(grant) }));
+  if (!issuesCredential(holder, service.setting, actor, service.account, grants)) return 'a credential reaches at most what its account holds and what its issuer could give it';
+  if (scope.some((grant) => grant.sensitive === true && !ownsProject(holder, grant.projectId!))) return 'only an Owner of its project gives a service account sensitive reads (R32)';
+  return null;
 }
 
 /** A handle's places as the app writes them (`HandlePlace[]`: each environment it was made for, by id, and whether as `@me`), or null for none such. */
@@ -417,6 +454,129 @@ export async function issueToken(db: Database, call: IssueCall): Promise<Answer>
   if (engineOf(db) === 'sqlite') return db.transaction((tx) => issueOnSqlite(tx, call));
   try {
     return await issueOnPostgres(db, call);
+  } catch (error) {
+    if (isBusy(error)) return { state: 'busy' };
+    throw error;
+  }
+}
+
+// --- a service's bindings (PR 3a) -----------------------------------------------
+
+/** A change of bindings as the vault decided it: the statement's arguments, and each object's change in order. */
+export type BindingsCall = {
+  at: number;
+  actor: string;
+  principal: string;
+  /** The binding made, its seal; and its maker's standing as read (`IssueRead`): null for an unbind. */
+  make: { row: MadeBinding; authMac: Buffer; seal: Buffer; read: IssueRead; via: string | null } | null;
+  ends: { id: string; macFrom: Buffer; sealFrom: Buffer; authMac: Buffer; seal: Buffer }[];
+  credentials: { id: string; binding: string; macFrom: Buffer; sealFrom: Buffer; authMac: Buffer; seal: Buffer }[];
+  revokedAt: number;
+  revokedBy: string;
+  policy: { seq: string | null; slugs: { environmentId: string; slug: string | null }[] };
+  appKey: string;
+  changes: { requestId: string; object: string; payload: string; seal: Buffer; mac: Buffer }[];
+};
+
+/** The shape of a change of bindings as the app sends it; throws on one no app of this release sends. */
+export function checkChangeBindings(input: ChangeBindingsInput): void {
+  const { actor, via, actorAccess, make, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
+  const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
+  const named = (before: { columns?: unknown; seal?: unknown } | undefined) => before !== undefined && isBase64(before.seal, 16);
+  if (typeof actor !== 'string' || !member.test(actor) || (via !== null && (typeof via !== 'string' || !UUID.test(via)))
+    || (actorAccess !== null && (typeof actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(actorAccess)))
+    || !Array.isArray(ends) || (make === null && ends.length === 0) || !['replaced', 'keys_moved', 'unbound'].includes(reason)
+    || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || !isPolicy(policy) || policy === null
+    || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)) {
+    throw new Error('a change of bindings names who makes it, on what, the binding it makes or those it ends, why, when, the policy weighed, and the app\'s key');
+  }
+  if (make !== null) {
+    checkBinding(make);
+    if (make.revoked || (make.jwks !== null && typeof make.jwks !== 'string') || (make.label !== null && typeof make.label !== 'string') || typeof make.createdBy !== 'string'
+      || !isBase64(make.authMac, 32) || make.scope === null || !Number.isSafeInteger(make.createdAt)) {
+      throw new Error('a binding made is live, has a scope, names its keys, label and maker, and carries the app\'s MAC');
+    }
+  }
+  for (const end of ends) {
+    if (!named(end?.before) || !isBase64(end.authMacFrom, 32) || !isBase64(end.authMac, 32) || !Array.isArray(end.credentials)) {
+      throw new Error('a binding ended is named as read, with its seal, the app\'s MACs before and after, and the credentials it issued');
+    }
+    checkBinding(end.before.columns);
+    for (const credential of end.credentials) {
+      if (!named(credential?.before) || typeof credential.before.columns?.id !== 'string' || !isBase64(credential.authMacFrom, 32) || !isBase64(credential.authMac, 32)) {
+        throw new Error('a credential a binding ended issued is named as read, with its seal and the app\'s MACs before and after');
+      }
+    }
+  }
+}
+
+/**
+ * The change, sealed: the binding made (`binding.make`), each ended
+ * (`binding.revoke`), and each credential they issued (`credential.revoke`),
+ * each object's seal over what it becomes and its change's MAC. Only rows
+ * the vault sealed: a binding 0.14 made, which the log never held, is
+ * `unlogged` (the app ends it as before); one whose seal is not the
+ * vault's, or not over its columns, `tampered`; a credential of another
+ * binding, or account, too.
+ */
+export function bindingsCall(
+  keys: ChangeKeys, input: ChangeBindingsInput, at: number, read: IssueRead | null,
+): BindingsCall | { refused: 'unlogged' | 'tampered' } {
+  const { actor, make, ends, reason } = input;
+  const principal = make?.principal ?? ends[0]!.before.columns.principal;
+  const changes: BindingsCall['changes'] = [];
+  const change = (ref: Ref, payload: string, seal: Buffer) => {
+    const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
+    changes.push({ requestId: row.requestId, object: row.object, payload, seal, mac: entryMac(keys.mac, { tree: 'changes', row }) });
+  };
+  let made: BindingsCall['make'] = null;
+  if (make !== null) {
+    const ref: Ref = { kind: 'binding', id: make.id };
+    const value = bindingObject(make);
+    const seal = sealOf(keys.seals[0]!, ref, value);
+    // What the change records besides (D147): who made it, on which credential, its label, and those it replaces.
+    change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.make', value })), bind: { by: actor, via: input.via, label: make.label, replaces: ends.map((end) => end.before.columns.id) } }), seal);
+    made = { row: make, authMac: Buffer.from(make.authMac, 'base64'), seal, read: read!, via: input.via };
+  }
+  const ended: BindingsCall['ends'] = [];
+  const swept: BindingsCall['credentials'] = [];
+  const sweeps: (() => void)[] = [];
+  for (const end of ends) {
+    const { columns } = end.before;
+    const ref: Ref = { kind: 'binding', id: columns.id };
+    const sealFrom = Buffer.from(end.before.seal, 'base64');
+    const before = bindingObject(columns);
+    if (columns.principal !== principal || columns.revoked) return { refused: 'tampered' };
+    if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
+    const seal = sealOf(keys.seals[0]!, ref, applyOp(before, ref, { op: 'binding.revoke' })!);
+    change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' })), unbind: { by: actor, reason, replacedBy: make?.id ?? null } }), seal);
+    ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
+    for (const credential of end.credentials) {
+      const cref: Ref = { kind: 'credential', id: credential.before.columns.id };
+      const cfrom = Buffer.from(credential.before.seal, 'base64');
+      const now = credentialObject(credential.before.columns);
+      if (credential.before.columns.principal !== principal || credential.before.columns.revoked || !sealed(keys.seals, cref, now, cfrom)) return { refused: 'tampered' };
+      const cseal = sealOf(keys.seals[0]!, cref, applyOp(now, cref, { op: 'credential.revoke' })!);
+      // Each after the bindings', in the order named.
+      sweeps.push(() => change(cref, canonical({
+        ...JSON.parse(payloadOf(cref, { op: 'credential.revoke' })),
+        revoke: { reason: 'unbound', via: null, kind: credential.before.columns.kind, principal, binding: columns.id },
+      }), cseal));
+      swept.push({ id: cref.id, binding: columns.id, macFrom: Buffer.from(credential.authMacFrom, 'base64'), sealFrom: cfrom, authMac: Buffer.from(credential.authMac, 'base64'), seal: cseal });
+    }
+  }
+  for (const sweep of sweeps) sweep();
+  return {
+    at, actor, principal, make: made, ends: ended, credentials: swept, revokedAt: input.revokedAt, revokedBy: input.revokedBy,
+    policy: { seq: input.policy.seq, slugs: read?.slugs ?? input.policy.protected }, appKey: input.appKey, changes,
+  };
+}
+
+/** The change's statement, on the engine `db` is. */
+export async function changeBindings(db: Database, call: BindingsCall): Promise<Answer> {
+  if (engineOf(db) === 'sqlite') return db.transaction((tx) => bindingsOnSqlite(tx, call));
+  try {
+    return await bindingsOnPostgres(db, call);
   } catch (error) {
     if (isBusy(error)) return { state: 'busy' };
     throw error;

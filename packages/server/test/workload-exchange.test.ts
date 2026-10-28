@@ -9,7 +9,7 @@ import type { Role } from '@coffre/core/access';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Client, type Database } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
-import { asc, eq, sql, type SQL } from 'drizzle-orm';
+import { asc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
@@ -265,7 +265,9 @@ test("a run's credential reaches what both its binding's scope and the account h
   );
 });
 
-test('a binding 0.4 makes after the app sealed is sealed by its first exchange, and a run credential of one by its first check: an account widened after reaches neither', async () => {
+test('a binding 0.4 makes after the app sealed is sealed by its first exchange, and a run credential of one by its first check: an account widened after reaches neither', {
+  skip: LOG === '0.15' ? "0.15's vault signs in through no binding it did not seal (PR 3a): one 0.4 made is bound again" : false,
+}, async () => {
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   for (const environment of ['dev', 'prod']) {
@@ -608,7 +610,9 @@ test('removing a binding revokes only what is live: its expired history costs no
     const counting = { ...deps, db: createDatabase(counted(pool, seen)) };
     const read = (table: string) => seen.filter((statement) => new RegExp(`from "${table}"`, 'i').test(statement.text)).reduce((n, statement) => n + statement.rows, 0);
     await createRuntime(config, counting.db, deps.vault, transport).workloads!.unbind(await contextFor(counting, ROOT), SERVICE, binding!.id);
-    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, 1, 'the run under way, not the thousand over');
+    // With 0.15's log, the vault's one statement ends the binding and the run under way (PR 3a): the app writes none.
+    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, LOG === '0.15' ? 0 : 1, 'the run under way, not the thousand over');
+    assert.equal((await db.owner.select().from(credentials).where(isNotNull(credentials.revokedAt))).length, 1, 'the run under way, not the thousand over');
     assert.ok(read('credentials') <= 2, `read ${read('credentials')} credential rows`);
     assert.equal(await caller(body.token!), 401);
     seen.length = 0;

@@ -46,13 +46,13 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
-import type { Access, SignInCredential, SignInRefusal, Vault } from '@coffre/core/vault';
+import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
 
 import { issuedBy } from '../auth-rows.ts';
-import { appLogKey } from '../db/audit.ts';
+import { appLogKey, type AuditEntry } from '../db/audit.ts';
 import {
   consumeToken,
   exchangeCandidates,
@@ -81,11 +81,12 @@ import { discoverKeys, DiscoveryFailed } from '../workloads/discovery.ts';
 import { expectedAudiences, PROFILE_RULES } from '../workloads/profiles.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
-import { newestPolicySeq } from './caller.ts';
-import { AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
+import { newestPolicySeq, type Caller } from './caller.ts';
+import { endedBinding, madeBinding, sealedBinding, vaultBinds, AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import type { Asker, SigninService } from './signin.ts';
-import { allowed, audited, credentialStill, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, withRefusals, type ApiContext } from './context.ts';
 import {
+  ACCESS_CHANGED,
   inheritedScope,
   issuedScope,
   issuerNow,
@@ -143,7 +144,9 @@ export type ExchangeReason =
   | 'source'
   | 'superseded'
   | 'frozen'
-  | 'full';
+  | 'full'
+  // With 0.15's log, a binding the vault never sealed (one 0.14 made), or one changed around it: it signs nobody in (PR 3a).
+  | 'unsealed';
 
 /**
  * A refused exchange: 401 with its reason, 429 when too many come at once,
@@ -665,6 +668,44 @@ export class WorkloadService {
       });
       if (options.dryRun) return plan(replaced);
 
+      // With 0.15's log, the vault makes it, weighing who may as it weighs a service token's issue, and ends those it
+      // replaces with what they issued, in one statement (PR 3a): no 0.14 head, no 0.14 entry.
+      if (await vaultBinds(this.#deps.vault)) {
+        return retrying(async () => {
+          const live = await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation);
+          const planned = plan(replacing(live));
+          if (reads.length > 0 && JSON.stringify(readsById(await resolveReads(this.#deps.db, wantedReads))) !== JSON.stringify(readsById(reads))) {
+            throw conflict('the keys its reads name changed while it was made: try again');
+          }
+          if (inherits && planned.replaces.map(({ id }) => id).join() !== replaced.map(({ id }) => id).join()) {
+            throw conflict('the bindings it replaces changed while it was made: try again');
+          }
+          const row = {
+            id: randomUUID(), principal: member, generation: standing.generation, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
+            jwks: uploaded?.jwks ?? null, claims: canonicalClaims(planned.claims), scope: storedScope(scope), policy: rules === null ? null : policyText(rules),
+            label: input.label?.slice(0, 120) ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
+          };
+          const ending = live.filter((candidate) => planned.replaces.some(({ id }) => id === candidate.id));
+          const entries = [
+            ...planned.replaces.map((replacing) => allowed(ctx, 'token.unbind', {
+              metadata: { bindingId: replacing.id, principalType: 'service', principalId: serviceId, reason: replacing.why === 'asked' ? 'replaced' : 'keys_moved', by: row.id },
+            })),
+            allowed(ctx, 'token.bind', {
+              metadata: {
+                bindingId: row.id, principalType: 'service', principalId: serviceId, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
+                ...(uploaded === null ? {} : { keys: uploaded.keys }), claims: planned.claims, scope,
+                ...(rules === null ? {} : { policy: rules }), ...(reads.length === 0 ? {} : { reads: shownPolicy(rules!, reads).reads }),
+                replaces: planned.replaces.map((replacing) => replacing.id),
+              },
+            }),
+          ];
+          await this.#bindingsByVault(ctx, caller, accessSeq, member, row, ending, planned.replaces.some(({ why }) => why === 'keys_moved') ? 'keys_moved' : 'replaced', details, entries);
+          return {
+            binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, planned.policy),
+            replaced: planned.replaces.map(({ id }) => id),
+          };
+        });
+      }
       return retrying(async () => {
       // With 0.15's log, the credentials of those it replaces, ended with them: those it replaces now, read again on a retry.
       const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => {
@@ -789,6 +830,35 @@ export class WorkloadService {
       if (options.dryRun) return plan;
       // Each new binding's policy, its old one's, shown by path and name.
       const shown = await this.#shownPolicies(replaced);
+      // With 0.15's log, each replaced by the vault, one call each, in the order of those they replace (PR 3a).
+      if (await vaultBinds(this.#deps.vault)) {
+        return retrying(async () => {
+          const live = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
+          if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
+          const bindings: BindingView[] = [];
+          const now = Date.now();
+          for (const [i, old] of live.entries()) {
+            const { scope, byPath } = scopes.get(old.id)!;
+            const row = {
+              id: randomUUID(), principal: member, generation: standing.generation, profile: old.profile, issuer: old.issuer, jwksUri, jwks: uploaded.jwks,
+              claims: old.claims, scope: storedScope(scope), policy: old.policy, label: old.label, createdBy: ctx.caller.principal.id,
+              // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
+              createdAt: new Date(now + i),
+            };
+            await this.#bindingsByVault(ctx, caller, accessSeq, member, row, [old], 'keys_moved', { ...details, bindingId: old.id }, [
+              allowed(ctx, 'token.unbind', { metadata: { bindingId: old.id, principalType: 'service', principalId: serviceId, reason: 'keys_replaced', by: row.id } }),
+              allowed(ctx, 'token.bind', {
+                metadata: {
+                  bindingId: row.id, principalType: 'service', principalId: serviceId, profile: old.profile, issuer: old.issuer, jwksUri, keys: uploaded.keys,
+                  claims: JSON.parse(old.claims) as BindingClaims, scope, replaces: [old.id],
+                },
+              }),
+            ]);
+            bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, shown(old.policy)));
+          }
+          return { bindings, replaced: plan.replaces };
+        });
+      }
 
       return retrying(async () => {
       const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => plan.replaces);
@@ -856,6 +926,17 @@ export class WorkloadService {
     return withRefusals(this.#deps, async () => {
       // Logged as a denial, which no tombstone check counts.
       if (!(await managedAccount(this.#deps, ctx.caller, serviceId)).managed) throw notManager(ctx, 'token.unbind', metadata, 'remove its trust bindings');
+      // With 0.15's log, the vault ends it and what it issued, in one statement (PR 3a).
+      if (await vaultBinds(this.#deps.vault)) {
+        return retrying(async () => {
+          const row = await findBinding(this.#deps.db, this.#deps.chainKey, member, bindingId);
+          const live = row !== null && row.revokedAt === null
+            && (await liveBindings(this.#deps.db, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
+          if (!live) throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
+          await this.#bindingsByVault(ctx, ctx.caller, null, member, null, [row], 'unbound', metadata, [allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } })]);
+          return { unbound: true as const };
+        });
+      }
       return retrying(async () => {
         const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => [bindingId]);
         // Who manages it was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
@@ -961,6 +1042,93 @@ export class WorkloadService {
     if (!setsUp(ctx.caller, await serviceSettingFor(this.#deps.vault, ctx.caller), await places(this.#deps.db))) {
       throw forbidden('only those who set up service accounts may trust workloads');
     }
+  }
+
+  /**
+   * With 0.15's log, a service's bindings changed by the vault itself (T149,
+   * PR 3a): `make` made, weighed there as a service token's issue is, and
+   * `ends` ended with every live credential each issued, in one statement
+   * (`Vault.changeBindings`). One of `ends` that 0.14 made, which the log
+   * never held, is ended as before first (`#unbindByApp`). Then 0.14's
+   * entries, `entries`, follow through on the vault's decision (`audited`
+   * with no caller): its `token.unbind` is the tombstone the app's own
+   * checks read (`hasTombstone`), so a binding row put back stays dead to
+   * them too, and the 0.14 audit page shows it. Refusals as the app's own are.
+   */
+  async #bindingsByVault(
+    ctx: Asker,
+    caller: Caller,
+    accessSeq: bigint | null,
+    member: string,
+    make: Parameters<typeof madeBinding>[1] | null,
+    ends: readonly BindingRow[],
+    reason: ChangeBindingsInput['reason'],
+    details: Record<string, unknown>,
+    entries: readonly AuditEntry[],
+  ): Promise<void> {
+    const { db, chainKey, vault } = this.#deps;
+    const at = new Date();
+    const sealedEnds: EndedBinding[] = [];
+    for (const row of ends) {
+      const live = await liveCredentialsWhere(db, chainKey, liveCredentialsOf({ principal: member, createdBy: issuedBy(row.id), at }));
+      const ended = endedBinding(chainKey, row, live, at);
+      if (ended === null) await this.#unbindByApp(ctx, member, row.id, reason === 'unbound' ? 'removed' : reason);
+      else sealedEnds.push(ended);
+    }
+    if (make === null && sealedEnds.length === 0) return;
+    const sealedIds = new Set(sealedEnds.map(({ before }) => before.columns.id));
+    // A binding 0.14 made was ended with its own entry: only the others' follow the vault's change.
+    const following = entries.filter((entry) => entry.action !== 'token.unbind' || sealedIds.has(String((entry.metadata as { bindingId?: unknown } | undefined)?.bindingId)));
+    const action = make === null ? 'token.unbind' : 'token.bind';
+    const outcome = await vault.changeBindings!({
+      actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
+      make: make === null ? null : madeBinding(chainKey, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
+      policy: {
+        seq: caller.policySeq?.toString() ?? null,
+        protected: Object.values(caller.policy.protectedIn).flat().map(({ environmentId, slug }) => ({ environmentId, slug })),
+      },
+      appKey: appLogKey(chainKey).keyId,
+    });
+    if (outcome.ok) {
+      await audited({ db, chainKey }, async (_tx, log) => {
+        log.push(...following);
+      });
+      return;
+    }
+    switch (outcome.refused) {
+      case 'moved': throw new ObjectMoved();
+      case 'access': throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
+      case 'gone': throw new Refusal(notFound('unknown service'), denied(ctx, action, 'unknown_principal', { metadata: details }));
+      // The credential the request came in on ended, or is one 0.14 made, which the vault cannot vouch for: signed in again, it can.
+      case 'ended': case 'unlogged':
+        throw new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked: sign in again'), denied(ctx, action, 'credential_ended', { metadata: details }));
+      case 'refused':
+        throw new Refusal(forbidden(outcome.why ?? 'not allowed to trust workloads as it'), denied(ctx, action, 'vault_refused', { metadata: { ...details, why: outcome.why ?? null } }));
+      case 'policy': throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
+      case 'busy': throw new ApiError('unavailable', 'coffre is busy: try again shortly', 'busy', '1');
+      case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
+      case 'full': throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
+      case 'stale': case 'tampered': throw new Error(`a binding of ${member}'s is not the log's (${outcome.refused}): a row was put back around coffre`);
+    }
+  }
+
+  /** A binding ended as before 0.15's vault made them: the app's transaction, its `token.unbind` its tombstone. */
+  async #unbindByApp(ctx: Asker, member: string, bindingId: string, reason: string): Promise<void> {
+    const metadata = { bindingId, principalType: 'service', principalId: member.slice('token:'.length) };
+    await retrying(async () => {
+      const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => [bindingId]);
+      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+        const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
+        const live = row !== null && row.revokedAt === null
+          && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
+        const ended = live ? await this.#revoke(tx, bindingId, member, ctx.caller.principal.id, new Date()) : null;
+        if (ended === null || ended.revoked === 0) {
+          throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
+        }
+        changes?.expectRevoked(ended.credentials);
+        log.push(allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason } }));
+      }, changes);
+    });
   }
 
   /** Revoke a binding, and every credential it issued that still lives: they die with it. */
@@ -1249,7 +1417,7 @@ export class WorkloadService {
     });
     const outcome = await vault.signIn({
       principal: member,
-      binding: { id: binding.id, generation: binding.generation, profile: binding.profile, scope: binding.scope, policy: binding.policy },
+      binding: sealedBinding(binding),
       credential: signedInCredential(row),
       appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: verified.spentKey?.toString('base64') ?? null,
@@ -1404,7 +1572,7 @@ export class WorkloadService {
     });
     const outcome = await vault.signIn({
       principal: member,
-      binding: { id: binding.id, generation: binding.generation, profile: binding.profile, scope: binding.scope, policy: binding.policy },
+      binding: sealedBinding(binding),
       credential: signedInCredential({ ...row, kind: 'service' }),
       appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: decoded.signingInputHash.toString('base64'),
@@ -1455,7 +1623,7 @@ function signedInCredential(row: {
 }
 
 /** A sign-in the vault refused, as the workload's owner reads it: today's codes and words, each path its own. */
-function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired'>, string> & { frozen?: string }): ExchangeRefused {
+function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired' | 'unsealed'>, string> & { frozen?: string }): ExchangeRefused {
   switch (refused) {
     // An instance under an app key the log moved on from, as for the seconds a deploy takes: 503, as its append would answer.
     case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
@@ -1464,6 +1632,8 @@ function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefus
     case 'replayed': return new ExchangeRefused('replayed', words.replayed);
     case 'expired': return new ExchangeRefused('expired', words.expired);
     case 'frozen': return new ExchangeRefused('frozen', words.frozen ?? words.unbound);
+    // Made before the vault sealed bindings, or changed around it: a manager binds it again (PR 3a).
+    case 'unsealed': return new ExchangeRefused('unsealed', 'this binding is none the vault sealed, made before it sealed them or changed since: bind it again');
   }
 }
 

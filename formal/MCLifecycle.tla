@@ -32,6 +32,13 @@ UnbindOps == [p \in UnbindProcs |-> CASE p = "s1" -> {[tok |-> "j1", b |-> "b", 
 RevokeProcs == {"rev", "admin", "u1"}
 RevokeOps == [p \in RevokeProcs |-> CASE p = "rev" -> {"cS"} [] p = "admin" -> {"unmanage"} [] OTHER -> {}]
 
+\* Ada binds svc's CI (b3, through the vault, as a token is issued) while an
+\* admin demotes her; a run signs in through b3 once it is there, and uses
+\* what it got (PR 3a).
+BindProcs == {"ada", "admin", "s1", "u1"}
+BindOps == [p \in BindProcs |-> CASE p = "ada" -> {"bind"} [] p = "admin" -> {"demote"}
+                                  [] p = "s1" -> {[tok |-> "j1", b |-> "b3", evil |-> FALSE]} [] OTHER -> {}]
+
 \* Ada gives svc a token while an Owner's policy change takes that right
 \* from her role, her member row untouched; a use meanwhile (review r3).
 PolicyProcs == {"ada", "pol", "u1"}

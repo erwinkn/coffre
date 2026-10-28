@@ -70,6 +70,28 @@ export type CredentialInput = {
   generation: number;
 };
 
+/**
+ * A trust binding (T149, PR 3a; D148): what a sign-in through it decides on,
+ * which the vault seals when a manager of its account makes it, and takes
+ * no other. Its keys by `jwksUri`: the issuer's discovered URL, or, for keys
+ * uploaded with it, `sha256:<hex>` of them, so its seal covers them too.
+ * Its claims and policy as their canonical JSON, as the row keeps them.
+ */
+export type BindingInput = {
+  kind: 'binding';
+  id: string;
+  principal: string;
+  /** Its account's generation when it was made: it signs in nobody of a later one. */
+  generation: number;
+  profile: string;
+  issuer: string;
+  jwksUri: string;
+  claims: string;
+  scope: CredentialScope | null;
+  policy: string | null;
+  revoked: boolean;
+};
+
 export type Nature = 'plain' | 'secret' | 'sensitive';
 
 export type SecretInput = {
@@ -140,7 +162,7 @@ export type RolesInput = {
 
 export type PolicyInput = { kind: 'policy'; bulk: BulkLimit };
 
-export type Input = PrincipalInput | CredentialInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput;
+export type Input = PrincipalInput | CredentialInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput;
 export type Kind = Input['kind'];
 
 /** An object of the log: its kind and its id (the instance's own for the roles and the policy, of which there is one each). */
@@ -247,6 +269,10 @@ export type Op =
   | { op: 'access.revoke'; place: GrantPlace }
   | { op: 'credential.issue'; principal: string; caller: CallerKind; scope: CredentialScope | null; expiresAt: number | null; generation: number }
   | { op: 'credential.revoke' }
+  /** A binding made (PR 3a): its whole object, which the vault weighed its maker on. */
+  | { op: 'binding.make'; value: BindingInput }
+  /** A binding ended: unbound, or replaced by another. */
+  | { op: 'binding.revoke' }
   /** A live credential's end moved: a workload's session renewed (never past its hard end, the app's to hold). */
   | { op: 'credential.renew'; expiresAt: number | null }
   /** A live credential's scope written: a token of 0.4's, which carried none, sealed to what its account held (`token.seal`). */
@@ -322,6 +348,12 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
     case 'credential.revoke': {
       const credential = of('credential');
       return credential !== null && !credential.revoked ? { ...credential, revoked: true } : undefined;
+    }
+    case 'binding.make':
+      return created('binding') && op.value.id === ref.id && !op.value.revoked ? op.value : undefined;
+    case 'binding.revoke': {
+      const binding = of('binding');
+      return binding !== null && !binding.revoked ? { ...binding, revoked: true } : undefined;
     }
     case 'credential.renew': {
       const credential = of('credential');

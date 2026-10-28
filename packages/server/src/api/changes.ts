@@ -1,11 +1,11 @@
 import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
-import type { CredentialColumns, EnvironmentColumns, ObjectChange, PreparedChange, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
+import type { BindingColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Transaction } from '@coffre/db';
 import { appChanges, holdIssues, isStaleChange } from '@coffre/db/log';
 
 import { authMac } from '../auth-rows.ts';
-import type { CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
+import type { BindingRow, CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
 import { POLICY_CHANGED } from './context.ts';
 
@@ -38,9 +38,9 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; credentials: boolean; issues: boolean }>();
+const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; credentials: boolean; issues: boolean; binds: boolean }>();
 
-async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; credentials: boolean; issues: boolean }> {
+async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; credentials: boolean; issues: boolean; binds: boolean }> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
   const about = await vault.about();
@@ -50,6 +50,7 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; cr
     uses: log && about.uses === true && vault.use !== undefined,
     credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
     issues: log && about.issues === true && vault.issueToken !== undefined,
+    binds: log && about.binds === true && vault.changeBindings !== undefined,
   };
   keeping.set(vault, kept);
   return kept;
@@ -350,6 +351,51 @@ export function versionColumns(
 /** An environment's change: made (no read), or from its row as read, with its seal. */
 export function environmentChange(before: ObjectRead<EnvironmentColumns> | undefined, after: EnvironmentColumns): ObjectChange {
   return { kind: 'environment', id: after.id, before: before === undefined ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
+}
+
+/** A binding's row as its object takes it (PR 3a): its columns, its seal (null for one the vault never sealed). */
+export function sealedBinding(row: BindingRow): { columns: BindingColumns; seal: string | null } {
+  return {
+    columns: {
+      id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer, jwksUri: row.jwksUri, claims: row.claims,
+      scope: row.scope, policy: row.policy, revoked: row.revokedAt !== null,
+    },
+    seal: sealText(row.seal ?? null),
+  };
+}
+
+/** A binding the vault makes (`changeBindings`): its row, as `insertBinding` writes it, and the app's MAC over it. */
+export function madeBinding(chainKey: Buffer, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal'>): MadeBinding {
+  const signed = { ...row, revokedAt: null };
+  return {
+    ...sealedBinding({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }).columns,
+    jwks: row.jwks ?? null, label: row.label ?? null, createdBy: row.createdBy, createdAt: row.createdAt.getTime(), authMac: authMac(chainKey, 'service_bindings', signed).toString('base64'),
+  };
+}
+
+/**
+ * A binding the vault ends (`changeBindings`), with the live credentials it
+ * issued, each as read with its seal and MAC and the app's MAC over it
+ * revoked at `at`; null when it or one of them is 0.14's, which the log
+ * never held, and the app ends as before.
+ */
+export function endedBinding(chainKey: Buffer, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding | null {
+  if (row.seal === null || credentials.some((credential) => credential.seal === null)) return null;
+  return {
+    before: { columns: sealedBinding(row).columns, seal: Buffer.from(row.seal).toString('base64') },
+    authMacFrom: Buffer.from(row.authMac).toString('base64'),
+    authMac: authMac(chainKey, 'service_bindings', { ...row, revokedAt: at }).toString('base64'),
+    credentials: credentials.map((credential) => ({
+      before: { columns: credentialColumns(credential), seal: Buffer.from(credential.seal!).toString('base64') },
+      authMacFrom: Buffer.from(credential.authMac).toString('base64'),
+      authMac: authMac(chainKey, 'credentials', { ...credential, revokedAt: at }).toString('base64'),
+    })),
+  };
+}
+
+/** Whether the vault makes and ends bindings itself, and signs in through none it did not seal (`about().binds`, PR 3a). */
+export async function vaultBinds(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).binds;
 }
 
 /**

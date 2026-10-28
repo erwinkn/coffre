@@ -212,6 +212,8 @@ export interface Vault {
     credentials?: true;
     /** `true` when the vault issues tokens itself too (`issueToken`; T149, PR 2). Absent otherwise. */
     issues?: true;
+    /** `true` when the vault makes and ends trust bindings itself, and signs in through none it did not seal (`changeBindings`; T149, PR 3a). Absent otherwise. */
+    binds?: true;
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
@@ -299,6 +301,15 @@ export interface Vault {
    * the two; the issue lock, never the fence (R58). Answers once sealed.
    */
   issueToken?(input: IssueTokenInput): Promise<IssueTokenOutcome>;
+  /**
+   * With 0.15's log, a service's trust bindings changed by the vault itself
+   * (T149, PR 3a; D148): the binding a manager makes, weighed as a service
+   * token's issue is (who may give the account that scope, R15, R32), and
+   * those it replaces ended, with the credentials each issued; or, making
+   * none, an unbind. One statement, which holds what it read as read;
+   * answers once sealed. A sign-in takes only a binding the vault sealed.
+   */
+  changeBindings?(input: ChangeBindingsInput): Promise<ChangeBindingsOutcome>;
   /**
    * Check 0.15's log (docs/design/0.15-plan.md, PR 8), as the audit page
    * does on every visit: the newest signed pair, held to the pairs held
@@ -450,8 +461,12 @@ export type Prepared = { changes: PreparedChange[] };
 export type SignInInput = {
   /** The account it signs in as, `token:<id>`. */
   principal: string;
-  /** The binding as the app read it, which the vault decides on, and the statement holds to its row. */
-  binding: { id: string; generation: number; profile: string; scope: string | null; policy: string | null };
+  /**
+   * The binding as the app read it, with its seal: the vault decides only
+   * on one whose seal is its own (PR 3a), and the statement holds the row
+   * to it and to its object's newest change.
+   */
+  binding: { columns: BindingColumns; seal: string | null };
   /** The credential the app hands out once made: its row, the app's MAC over it (`auth_mac`) with it. */
   credential: SignInCredential;
   /** The id of the app's log key, under whose key the MAC was made: refused once the app has rotated from it (`retired`). */
@@ -468,6 +483,69 @@ export type SignInInput = {
   /** What the change records of the sign-in besides (D147): the proof, its issuer, and the run's claims. */
   record: { proof: string; issuer: string; run: Record<string, string | number> };
 };
+
+/**
+ * A trust binding's columns as its object takes them (T149, PR 3a): what a
+ * sign-in through it decides on. Its keys by `jwksUri` (the issuer's
+ * discovered URL, or `sha256:<hex>` of keys uploaded with it); its claims
+ * and policy as the row keeps them, canonical JSON.
+ */
+export type BindingColumns = {
+  id: string;
+  principal: string;
+  generation: number;
+  profile: string;
+  issuer: string;
+  jwksUri: string;
+  claims: string;
+  scope: string | null;
+  policy: string | null;
+  revoked: boolean;
+};
+
+/** A binding the vault makes (`changeBindings`): its object's columns and the rest of its row, with the app's MAC over it. */
+export type MadeBinding = BindingColumns & { jwks: string | null; label: string | null; createdBy: string; createdAt: number; authMac: string };
+
+/** A binding a change ends: as the app read it, with its seal and MAC, the app's MAC over it revoked, and the credentials it issued that are live. */
+export type EndedBinding = {
+  before: { columns: BindingColumns; seal: string };
+  authMacFrom: string;
+  authMac: string;
+  /** Every live credential it issued, each as `revokeCredential` names one: the statement holds the set to the rows. */
+  credentials: { before: { columns: CredentialColumns; seal: string }; authMacFrom: string; authMac: string }[];
+};
+
+export type ChangeBindingsInput = {
+  /** Who changes them, as its entry names them. */
+  actor: string;
+  /** The credential the request came in on, by id; null for none. */
+  via: string | null;
+  /** The issuer's access as the app weighed the scope on (`access_seq`), decimal; null when it weighed none. */
+  actorAccess: string | null;
+  /** The binding it makes; null for an unbind. Its account at its generation, as its columns name them. */
+  make: MadeBinding | null;
+  /** The bindings it ends: those the new one replaces, or the one unbound. */
+  ends: EndedBinding[];
+  /** Why they end, for the changes' record. */
+  reason: 'replaced' | 'keys_moved' | 'unbound';
+  revokedAt: number;
+  revokedBy: string;
+  /** The policy the app weighed on: the newest `policy.change`'s seq and the protected environments' slugs. */
+  policy: { seq: string | null; protected: { environmentId: string; slug: string | null }[] };
+  appKey: string;
+};
+
+/**
+ * Why bindings were not changed, nothing written: as an issue's
+ * (`IssueTokenRefusal`); `stale` or `tampered`, a row the log does not
+ * hold as its newest (put back) or not the vault's seal; `unlogged`, a
+ * binding 0.14 made, which the log never held (the app ends it as before);
+ * `full`, the account holds as many live bindings as one may
+ * (`MAX_BINDINGS`), besides those the change ends.
+ */
+export type ChangeBindingsRefusal = IssueTokenRefusal | 'stale' | 'tampered' | 'full';
+
+export type ChangeBindingsOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: ChangeBindingsRefusal; why?: string };
 
 /** The row a sign-in writes (`credentials`): a service's credential for a CI run, or a workload's key-bound session. */
 export type SignInCredential = {
@@ -490,7 +568,8 @@ export type SignInCredential = {
  * time), its times past or too far, the token spent, the app's key one it
  * rotated from.
  */
-export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired';
+/** Why a sign-in made nothing; `unsealed`: its binding is none the vault sealed (one 0.14 made, or a row not its object), which signs nobody in (PR 3a). */
+export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed';
 
 export type SignInOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: SignInRefusal };
 

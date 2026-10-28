@@ -263,7 +263,7 @@ try {
       try {
         let answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
         if (name === 'about' && values.legacy) {
-          const { credentials: _, issues: __, ...before } = answered as Record<string, unknown>;
+          const { credentials: _, issues: __, binds: ___, ...before } = answered as Record<string, unknown>;
           answered = before;
         }
         if (name === 'about') about = answered;
