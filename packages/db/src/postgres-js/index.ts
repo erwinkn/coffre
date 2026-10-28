@@ -152,6 +152,15 @@ export interface Sql {
 /** What a transaction's work answers: an array of promises, each awaited. */
 export type Settled<T> = T extends readonly unknown[] ? { -readonly [K in keyof T]: Awaited<T[K]> } : Awaited<T>;
 
+/**
+ * Coffre: whether a statement is a plain read, what a group may hold (`group`): one that starts `select`. A `select`
+ * that writes through a function says so first, in a comment, which this does not take (`pruneSpentTokens` in
+ * @coffre/server). The extended protocol takes one statement a message, so none rides behind it.
+ */
+export function plainRead(text: string): boolean {
+  return /^\s*select\b/i.test(text);
+}
+
 /** A pool of connections, opened as statements ask for them. */
 export default function postgres(given: Options): Sql {
   const options = settle(given);
@@ -181,7 +190,7 @@ export default function postgres(given: Options): Sql {
   function group(statements: readonly { query: string; parameters?: unknown[]; arrays?: boolean }[]): PendingQuery<RowList<Row[]>[]> {
     if (statements.length === 0) throw Errors.generic('EMPTY_GROUP', 'A group needs a statement');
     // Reads alone: a write grouped with a statement that fails would be rolled back with it, by an error not its own.
-    const write = statements.find((statement) => !/^\s*select\b/i.test(statement.query));
+    const write = statements.find((statement) => !plainRead(statement.query));
     if (write !== undefined) throw Errors.generic('GROUP_NOT_READ', `A group holds plain reads alone, select …, not: ${write.query.slice(0, 80)}`);
     const query = new Query(statements.map((statement) => statement.query).join(';\n'), [], pooled, { simple: false }, Boolean(options.debug));
     query.group = statements.map(({ query: text, parameters = [], arrays = false }) => ({ text, args: parameters, arrays, parameters: [], statement: null }));

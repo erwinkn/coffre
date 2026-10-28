@@ -1,6 +1,6 @@
 import { personalOf } from '@coffre/core/schemas';
 
-import { places, resolvePath, type PlaceRow, type ResolvedPath } from '../db/queries.ts';
+import { places, resolvedPlace, resolvePath, type PlaceRow, type ResolvedPath } from '../db/queries.ts';
 import { projectsReached } from './caller.ts';
 import type { ApiContext } from './context.ts';
 
@@ -60,13 +60,7 @@ export async function placeAt(
     const project = (await reachedPlaces(ctx)).find((each) => each.slug === path.project);
     const environment = path.environment === undefined ? null : project?.environments.find((each) => each.slug === path.environment);
     if (project !== undefined && environment !== undefined) {
-      return {
-        project: { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt },
-        environment: environment === null
-          ? null
-          : { id: environment.id, slug: environment.slug, name: environment.name, archivedAt: environment.archivedAt, parentId: environment.parentId, parentSlug: environment.parentSlug, owner: environment.owner },
-        secret: null,
-      };
+      return { ...resolvedPlace(project, environment, environment?.parentSlug ?? null), secret: null };
     }
   }
   return resolvePath(ctx.db, path, options);

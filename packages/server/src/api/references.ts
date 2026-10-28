@@ -489,7 +489,8 @@ export async function listReferences(
   const sees = (row: ReferenceRow) => [row.holder, row.source].some((end) =>
     lists(caller, end) || can(caller, 'grant.manage', { projectId: end.projectId }));
   const manages = (row: ReferenceRow) => [row.holder, row.source].some((end) => can(caller, 'grant.manage', { projectId: end.projectId }));
-  // Who reads through them, for whoever manages access at either end: read beside both ends, once one may be shown.
+  // Who reads through them, for whoever manages access at either end: read beside both ends, once one may be shown;
+  // sometimes for none, should every such row be a holder's older reference, which only its ends tell.
   const [resolved, readersOf] = await Promise.all([
     currentOf(ctx.db, rows, (row) => (at(row.holder) || at(row.source)) && sees(row)),
     rows.some((row) => (at(row.holder) || at(row.source)) && manages(row)) ? readersAt() : null,

@@ -240,19 +240,7 @@ export async function resolvePath(
       ? personal.of.slug
       : ((await db.select({ slug: environments.slug }).from(environments).where(eq(environments.id, environment.parentId)))[0]?.slug ?? null);
   return {
-    project: { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt },
-    environment:
-      environment === null
-        ? null
-        : {
-            id: environment.id,
-            slug: environment.slug,
-            name: environment.name,
-            archivedAt: environment.archivedAt,
-            parentId: environment.parentId,
-            parentSlug,
-            owner: environment.owner,
-          },
+    ...resolvedPlace(project, environment, parentSlug),
     ...(personal === undefined ? {} : { personal }),
     secret:
       secret === null
@@ -264,6 +252,24 @@ export async function resolvePath(
             currentVersionId: secret.currentVersionId,
             currentVersion: secret.currentVersion,
           },
+  };
+}
+
+/**
+ * A project and an environment as a resolved path names them, from their
+ * rows and the parent's slug: what `resolvePath` answers, and what a read
+ * that found them otherwise answers in its place.
+ */
+export function resolvedPlace(
+  project: { id: string; slug: string; name: string; archivedAt: Date | null },
+  environment: { id: string; slug: string; name: string; archivedAt: Date | null; parentId: string | null; owner: string | null } | null,
+  parentSlug: string | null,
+): Pick<ResolvedPath, 'project' | 'environment'> {
+  return {
+    project: { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt },
+    environment: environment === null
+      ? null
+      : { id: environment.id, slug: environment.slug, name: environment.name, archivedAt: environment.archivedAt, parentId: environment.parentId, parentSlug, owner: environment.owner },
   };
 }
 

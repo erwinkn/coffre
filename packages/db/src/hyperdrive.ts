@@ -1,4 +1,5 @@
 import type { Client } from './database.ts';
+import { plainRead } from './postgres-js/index.ts';
 import { postgresClient, textTypes, type PostgresClient } from './postgres.ts';
 
 /** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
@@ -18,11 +19,6 @@ type Statement = Promise<unknown> & { values(): Statement; execute(): Statement 
 /** A read asked while a group gathers (`groupReads`): sent with the others at its turn, and answered with its own rows. */
 type Gathered = { text: string; values: unknown[]; arrays: () => boolean; resolve: (rows: unknown) => void; reject: (error: unknown) => void };
 
-/**
- * A plain read: what a group may hold. Anything else, a write or a transaction's, goes alone; so does a `select` that
- * writes through a function, which says so first, in a comment `writes`, as `pruneSpentTokens` in @coffre/server does.
- */
-const READ = /^\s*select\b/i;
 
 /** What the client refuses to write of a group, before anything of it is sent (`build`, postgres-js/connection.ts). */
 const UNSENT = new Set(['GROUP_UNTYPED', 'MAX_PARAMETERS_EXCEEDED', 'UNDEFINED_VALUE']);
@@ -97,7 +93,7 @@ export class HyperdrivePool implements Client {
     const [text, parameters = [], options] = args;
     /** Its turn, asked once: the first `then`, `catch`, `finally` or `execute` asks it. */
     const asked = () =>
-      (answer ??= this.#groupReads && options === undefined && READ.test(text)
+      (answer ??= this.#groupReads && options === undefined && plainRead(text)
         ? this.#gather({ text, values: parameters, arrays: () => values })
         : this.#turn(() => {
           const query = this.#connected().unsafe(...args);
