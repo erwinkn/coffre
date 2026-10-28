@@ -174,7 +174,7 @@ let projectPage: (as: Persona) => Promise<void>;
 /** The environment page's own calls, as its render asks them, each answered or refused. */
 let environmentCalls: (as: Persona) => Promise<PromiseSettledResult<unknown>[]>;
 /** Every other page's render, by its path, as its route's loaders read (`visits`). */
-let visit: (as: Persona | null, path: string) => Promise<void>;
+let visit: (as: Persona | null, path: string, options?: VisitOptions) => Promise<void>;
 let pageTrips = 0;
 /** The proxy in front of the app's Postgres that pages' connections go through, counting their Syncs. */
 let relay: Awaited<ReturnType<typeof postgresProxy>>;
@@ -300,16 +300,16 @@ before(async () => {
     })]);
   });
 
-  visit = async (as, path) => {
+  visit = async (as, path, options = { reports: true }) => {
     const loaders = visits[path];
     if (loaders === undefined) throw new Error(`no page at ${path}`);
-    if (as !== null) return render(as, path, (client) => loaders(client));
+    if (as !== null) return render(as, path, (client) => loaders(client, options));
     // Signed out: no credential, a connection all the same.
     const pool = new HyperdrivePool(relay.url, { groupReads: true });
     const db = createDatabase(app.watch(pool));
     const syncs = relay.syncs;
     try {
-      await loaders(pageClient(new Request(`${ORIGIN}${path}`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } }), { ...runtime, db }, null));
+      await loaders(pageClient(new Request(`${ORIGIN}${path}`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } }), { ...runtime, db }, null), options);
     } finally {
       await pool.end();
       pageTrips += relay.syncs - syncs;
@@ -498,8 +498,12 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
 /**
  * What each page's loaders read, as coffre's routes make them (@coffre/ui, options.ts and lib/queries.ts), which
  * TanStack runs side by side: the shell's (`loadShell`), which every page's own awaits for what it decides on.
- * A read that fails is the page's to show, as `uiResult` makes it; the cost is what was asked.
+ * A read that fails is the page's to show, as `uiResult` makes it; the cost is what was asked. As this instance's
+ * deployment configures it: coffre's own sign-in, and no trusted workloads, whose bindings a service account's
+ * pages would list too (`loadServiceDirectory`, `loadSignIn`). `reports: false` leaves out an Owner's report of a
+ * member (`loadMember`), which reads what they ever read.
  */
+type VisitOptions = { reports: boolean };
 const settle = <T>(promise: Promise<T>) => promise.catch(() => undefined);
 function shellOf(client: CoffreClient) {
   const [auth, me, projects] = [client.auth(), settle(client.me()), settle(client.projects.list())];
@@ -513,27 +517,26 @@ function shellOf(client: CoffreClient) {
 type Shell = Awaited<ReturnType<typeof shellOf>>;
 const managesGrants = (shell: Shell) => shell.projects.some((project) => project.permissions.includes('grant.manage'));
 const listsAccess = (shell: Shell) => shell.administers || shell.me?.setsUpServices === true || managesGrants(shell);
-const page = (own: (client: CoffreClient, shell: Promise<Shell>) => Promise<unknown>) => async (client: CoffreClient) => {
+const page = (own: (client: CoffreClient, shell: Promise<Shell>, options: VisitOptions) => Promise<unknown>) => async (client: CoffreClient, options: VisitOptions) => {
   const shell = shellOf(client);
-  await Promise.all([shell, own(client, shell)]);
+  await Promise.all([shell, own(client, shell, options)]);
 };
 /** A project's tab: once the list says its visitor may open it (`projectTab`). */
 const tab = (permission: string, own: (client: CoffreClient) => Promise<unknown>) => page(async (client, shell) => {
   if ((await shell).projects.find((project) => project.slug === 'market')?.permissions.includes(permission as never)) await own(client);
 });
-const visits: Record<string, (client: CoffreClient) => Promise<void>> = {
+const visits: Record<string, (client: CoffreClient, options: VisitOptions) => Promise<void>> = {
   '/projects': page(async () => {}),
   '/projects/market/users': tab('grant.manage', (client) => Promise.all([settle(client.members.list('market')), settle(client.references.list('market'))])),
   '/projects/market/service-accounts': tab('grant.manage', (client) => settle(client.members.list('market'))),
   '/projects/market/settings': tab('project.manage', async () => {}),
-  '/audit': page((client) => Promise.all([settle(client.audit.list({ limit: 200 })), Promise.allSettled([client.audit.verify(), client.audit.verifyTrees()])])),
   '/users': page(async (client, shell) => {
     if ((await shell).administers) await settle(client.members.list());
   }),
-  '/users/reader@acme.example': page(async (client, shell) => {
+  '/users/reader@acme.example': page(async (client, shell, { reports }) => {
     const known = await shell;
     await Promise.all([
-      known.me?.runsInstance ? settle(client.members.get(`user:${READER}`)) : null,
+      known.me?.runsInstance && reports ? settle(client.members.get(`user:${READER}`)) : null,
       listsAccess(known) ? settle(client.members.access(`user:${READER}`)) : null,
     ]);
   }),
@@ -545,10 +548,10 @@ const visits: Record<string, (client: CoffreClient) => Promise<void>> = {
       settle(client.tokens.list(member.member)),
     ]));
   }),
-  '/service-accounts/ci-web': page(async (client, shell) => {
+  '/service-accounts/ci-web': page(async (client, shell, { reports }) => {
     const known = await shell;
     const [, access] = await Promise.all([
-      known.me?.runsInstance ? settle(client.members.get(SERVICE)) : null,
+      known.me?.runsInstance && reports ? settle(client.members.get(SERVICE)) : null,
       listsAccess(known) ? settle(client.members.access(SERVICE)) : null,
     ]);
     if (access?.managed && access.status === 'active') await settle(client.tokens.list(SERVICE));
@@ -608,9 +611,9 @@ async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
 /**
  * `history`: an Owner's page of a member, whose report lists every secret they ever read (`memberActivity`, the
  * offboarding report's exposure): it reads their history in the log, as main did, by design. Its statements are its
- * budget's, but the per-statement pages test, which grows the log, leaves it out.
+ * budget's; the per-statement pages test, which grows the log, measures the page without that report.
  */
-const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost; history?: true }> = {
+const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost; history?: () => Promise<unknown> }> = {
   "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 2, vaultCalls: 2 } },
   "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 2, vaultCalls: 2 } },
   "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
@@ -627,11 +630,11 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
   "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 2, vaultCalls: 3 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 2, vaultCalls: 2 } },
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 2, vaultCalls: 3 }, history: true },
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 2, vaultCalls: 2 } },
   "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 3, vaultCalls: 4 } },
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 5, vaultCalls: 6 } },
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 3, vaultCalls: 4 }, history: true },
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 3, vaultCalls: 4 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 5, vaultCalls: 5 } },
   "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 4, vaultCalls: 5 } },
   "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 2, vaultCalls: 2 } },
@@ -859,7 +862,7 @@ test("each hot request's statements read as many pages however long the log grow
     "a workload's request at a proxy whose cache lapsed": coldWorkload,
     "a workload's verify at a proxy whose cache lapsed": coldVerify,
     'a handle for `coffre run`': () => reader.handles.create({ label: 'run', paths: ['market/dev'] }),
-    ...Object.fromEntries(Object.entries(renders).filter(([, { history }]) => history === undefined).map(([name, { request }]) => [name, request])),
+    ...Object.fromEntries(Object.entries(renders).map(([name, { request, history }]) => [name, history ?? request])),
   };
   await grow(10_000);
   const small = await pages();
