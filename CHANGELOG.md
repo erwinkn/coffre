@@ -7,7 +7,7 @@
   verify instance` and conformance check its newest signed checkpoint,
   held to the signer's memory where the vault is given it
   (`heldOutside`, which no deployment wires yet), and every entry since by its MAC and
-  request (`GET /api/audit/trees`), in four statements and a few
+  request (`GET /api/audit/trees`), in three statements and a few
   milliseconds however long the log; past 2,000 entries since (a
   checkpointer behind), the rest is not read, and the page says the sealed
   log is not checked to its head rather than calling it broken. Nothing walks 0.15's log whole on a

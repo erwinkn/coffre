@@ -227,20 +227,26 @@ async function walk(
       if (pair !== null && !sameNotes(pair, anchor)) problems.push(`checkpoint ${anchor.upto}: not the pair held outside for that place: ${samePair(pair, anchor) ? 'the same heads signed at another time or floor' : 'a second history'}`);
       // A row that agrees proves nothing by itself: a fork can be both the row and the pair held outside. Below a cut, the
       // uses tree's tiles are gone: its consistency is proved from the cut on only.
-      for (const tree of TREES) {
-        if (tree === 'uses' && cut !== null && anchor.uses.size < cut.uses.size) continue;
+      // Both trees' proofs at once (R42), their problems in the trees' order.
+      const forks = await Promise.all(TREES.map(async (tree) => {
+        if (tree === 'uses' && cut !== null && anchor.uses.size < cut.uses.size) return null;
         const [from, to] = [anchor[tree], start.pair[tree]];
         const proof = from.size > to.size ? null : await proveConsistency(reader, tree, from.size, to.size).catch(() => null);
-        if (proof === null || !verifyConsistency(from.size, to.size, from.root, to.root, proof)) {
-          problems.push(`the pair held outside up to ${anchor.upto}: its ${tree} head is not a prefix of the start's: a second history, or tiles deleted`);
-        }
+        return proof === null || !verifyConsistency(from.size, to.size, from.root, to.root, proof) ? tree : null;
+      }));
+      for (const tree of forks) {
+        if (tree !== null) problems.push(`the pair held outside up to ${anchor.upto}: its ${tree} head is not a prefix of the start's: a second history, or tiles deleted`);
       }
     }
   }
   above.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
-  const loaded = await reload(start.pair);
-  if (loaded === null) return done(null);
-  let edges = loaded;
+  // The trees' edges at the start, from its tiles, which a window is appended to. A walk from the newest row has no
+  // window to walk (no row above it, and a pair held outside above it is `behind`), so it reads none (PR 8 review r5).
+  let edges: Record<TreeName, Edge> | null = null;
+  if (opts.newest === undefined) {
+    edges = await reload(start.pair);
+    if (edges === null) return done(null);
+  }
 
   // The walk: a page of rows at a time, with the outside pairs that fall among them, entries read once per page.
   // `last` is the newest row walked, `cursor` how far entries have gone into the trees (an outside pair can be past it).
@@ -290,6 +296,10 @@ async function walk(
     }
     stops.sort((a, b) => (a.pair.upto < b.pair.upto ? -1 : 1));
     if (stops.length > 0) {
+      if (edges === null) {
+        edges = await reload(start.pair);
+        if (edges === null) return done(null);
+      }
       // From the floor the pair at `cursor` signed, never its row's (review r9).
       const entries = (await reader.entries(cursor, stops.at(-1)!.pair.upto, { floor })).filter((e) => !dropped(e));
       let at = 0;
@@ -317,7 +327,8 @@ async function walk(
           problems.push(`no checkpoint at the retention cut (${ahead.upto}): checkpoints were deleted or replaced`);
           cutMet = true;
         }
-        const wrong = walked.filter((tree) => edges[tree].size !== stop.pair[tree].size || !edges[tree].root().equals(stop.pair[tree].root));
+        const grown = edges;
+        const wrong = walked.filter((tree) => grown[tree].size !== stop.pair[tree].size || !grown[tree].root().equals(stop.pair[tree].root));
         if (wrong.length > 0) {
           problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: the ${wrong.join(' and ')} head${wrong.length > 1 ? 's' : ''} differ from the entries: entries deleted, added, changed or moved, or a second history`);
           // Carry on from the signed row, so one problem is reported once.

@@ -3153,8 +3153,8 @@ class VaultService implements Vault {
    * it, held to the pairs held outside. With 0.14's log alone, there is
    * none to check. The signer remembers a pair before the database has it
    * (RememberFirst), so a check that lands in between finds the database
-   * behind (`Verdict.behind`): it is checked again a tick later (review
-   * r4). A rollback is still behind then.
+   * behind (`Verdict.behind`): it is checked again 50 ms later, then a
+   * tick later (reviews r4, r5). A rollback is still behind then.
    */
   async verifyTrees(): Promise<TreeVerification> {
     await this.#settled();
@@ -3163,8 +3163,11 @@ class VaultService implements Vault {
     const keys = await this.#verifierKeys();
     const walk = () => verifyTrees(this.#db, keys, { anchors });
     let walked = await walk();
-    if (walked.behind) {
-      await new Promise((resolve) => setTimeout(resolve, TICK_MS + 250));
+    // The signer's write lands a moment after it remembers: asked again soon, then once more a tick later, for a write
+    // that failed and is made again at the next tick (PR 8 review r5).
+    for (const wait of [50, TICK_MS + 250]) {
+      if (!walked.behind) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
       walked = await walk();
     }
     // What crosses to the app: the verdict, never the retry's signal.

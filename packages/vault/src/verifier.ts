@@ -16,7 +16,7 @@ import { requestsUnique } from './store.ts';
  * on every visit (R25), and keeps nothing between calls. It checks the
  * newest signed pair, its signatures and the pairs held outside (the
  * signer's memory), then every entry above it by its MAC and its request:
- * a tick's worth of entries, whatever the log's size, in four statements,
+ * a tick's worth of entries, whatever the log's size, in three statements,
  * and never more than `ABOVE_NEWEST` of them.
  *
  * Below the newest pair, the pair vouches for what it sealed: it is not
