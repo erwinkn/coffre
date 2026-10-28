@@ -857,7 +857,8 @@ export async function loggedRows(db: Queryable): Promise<{
  */
 export type ReadKind = Exclude<Kind, 'credential'>;
 
-export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<HeldObject> {
+/** `archived`: a key's rows read even while it is archived, as its unarchive would make them (an end's check, T134). */
+export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, { archived = false } = {}): Promise<HeldObject> {
   const { vaultMembers, environments, projects, logConfig } = tablesOf(db);
   switch (ref.kind) {
     case 'principal': {
@@ -891,14 +892,14 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }): 
       };
     }
     case 'secret': {
-      // Unarchived: an archived key is no object (`secret.delete`). Its version's plaintext, for a plain one's digest.
+      // Unarchived (unless asked): an archived key is no object (`secret.delete`). Its version's plaintext, for a plain one's digest.
       const [row] = await rowsOf<{
         project_id: string; environment_id: string; seal: Buffer | Uint8Array | null; version_id: string | null; source: string | null; reference: string | null;
         sensitive: boolean | number | null; plaintext: string | null; kek_provider: string | null; kek_id: string | null; kek_version: string | null; wrapped_dek: Buffer | Uint8Array | null;
       }>(db, sql`SELECT s.project_id, s.environment_id, s.seal, s.current_version_id AS version_id, ${newestSource(sql`s.id`)} AS source,
           ${newestReference(sql`s.id`)} AS reference,
           v.sensitive, v.plaintext, v.kek_provider, v.kek_id, v.kek_version, v.wrapped_dek
-        FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id WHERE s.id = ${ref.id} AND s.archived_at IS NULL`);
+        FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id WHERE s.id = ${ref.id} ${archived ? sql`` : sql`AND s.archived_at IS NULL`}`);
       if (row === undefined) return { row: null, seal: null };
       const version = row.version_id === null || row.wrapped_dek === null ? null : {
         id: row.version_id, sensitive: Boolean(row.sensitive), plaintext: row.plaintext,

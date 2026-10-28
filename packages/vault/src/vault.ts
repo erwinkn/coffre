@@ -1804,7 +1804,8 @@ class VaultService implements Vault {
       //   PR 9); or archived, whose unarchive restores what its log last sealed (`keptObjects`, T134), never its rows.
       // - So an archived holder whose kept object reads through this reference has that object ended too: written
       //   ended, then deleted again, still no object (EndWhileArchived). Otherwise its unarchive would restore it
-      //   live, the row's end cleared by a writer, or refuse an honest one for the end in its rows.
+      //   live, the row's end cleared by a writer, or refuse an honest one for the end in its rows. Its rows must make
+      //   the kept object, as a live holder's must make its sealed one: else the end is refused, reported.
       if (d.changes !== null) {
         const changes = d.changes;
         const rows: string[] = [];
@@ -1825,7 +1826,11 @@ class VaultService implements Vault {
           }
           if (held.log === 'gone') {
             const kept = await changes.kept(d.tx, ref);
-            if (kept?.kind === 'secret' && kept.reference === reference) end(ref, kept, true);
+            if (kept?.kind === 'secret' && kept.reference === reference) {
+              // Its rows must make that object, or its end would write none of them: refused, reported, as a live one's.
+              await changes.rowsAsKept(d.tx, ref, kept);
+              end(ref, kept, true);
+            }
           }
           rows.push(reference);
         }

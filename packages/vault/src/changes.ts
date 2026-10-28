@@ -147,6 +147,16 @@ export class Changes {
   }
 
   /**
+   * That an archived key's rows make its kept object, as its unarchive
+   * would read them, before a decision changes that object (an end, T134):
+   * `stale` otherwise, as a live object's rows not its seal's refuse it.
+   */
+  async rowsAsKept(db: Queryable, ref: Ref & { kind: 'secret' }, kept: Input): Promise<void> {
+    const { row } = await readObject(db, ref, { archived: true });
+    if (!sameObject(this.#keys.seals[0]!, ref, row, kept)) throw new NotLogged(ref, 'stale');
+  }
+
+  /**
    * Read and check each object staged, in `db` before the decision's writes
    * run, and apply its ops to it in turn.
    */

@@ -614,6 +614,29 @@ test("an archived holder's end cleared by a writer: its unarchive would restore 
   assert.deepEqual(await opsOf({ kind: 'secret', id: holder }), ['secret.write', 'secret.delete', 'secret.write', 'secret.delete']);
 });
 
+test("a reference broken while its archived holder's rows are a writer's (moved to another environment): refused as tampered and reported, nothing changed; put back, the break holds (T134, Fable's review)", async () => {
+  const w = await world();
+  const source = await w.key();
+  const vault = await deciding();
+  const { holder, via } = await reference(w, vault, source);
+  await archive(holder);
+  const home = w.dev;
+  const elsewhere = await fork(w);
+  await run(db.owner, sql`UPDATE secrets SET environment_id = ${elsewhere} WHERE id = ${holder}`);
+  const ops = await opsOf({ kind: 'secret', id: holder });
+  const refused = await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] });
+  assert.ok(!refused.ok && refused.refusal.code === 'tampered', JSON.stringify(refused));
+  assert.deepEqual(await opsOf({ kind: 'secret', id: holder }), ops);
+  assert.deepEqual((await endedAt(holder)).map((at) => at !== null), [false]);
+  const reported = await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered'`);
+  assert.ok(reported.some(({ code }) => code === 'stale'), JSON.stringify(reported));
+  await run(db.owner, sql`UPDATE secrets SET environment_id = ${home} WHERE id = ${holder}`);
+  assert.ok((await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] })).ok);
+  await unarchive(holder);
+  assert.equal(codeOf(await used(w, holder)), 'ended');
+  await replayAgrees();
+});
+
 test("a reference broken whose holder 0.14's log alone holds (no seal, no change: before the cutover): its row's end alone, no change, so no genesis seals it live (T125)", async () => {
   const w = await world();
   const source = await w.key();

@@ -792,11 +792,11 @@ export async function setSecrets(
       // the two reads is prepared again, or a change prepared from one state would be committed beside a write from the other.
       if (heads.some((row) => !sameHead(row, objects.get(row.id)))) throw new PrepareAgain();
       const at = (id: string) => ({ id, ...environment });
-      const after = new Map<string, SecretColumns | null>();
-      // Unarchived with nothing written: as it was (a reference written again unchanged).
+      const after = new Map<string, SecretColumns | null | 'as read'>();
+      // Unarchived with nothing written: as it was (a reference written again unchanged), restored.
       for (const key of keysIn) {
         const row = prepared.get(key);
-        if (row !== undefined && patch[key] !== null && row.archivedAt !== null && objects.has(row.id)) after.set(row.id, objects.get(row.id)!.columns);
+        if (row !== undefined && patch[key] !== null && row.archivedAt !== null && objects.has(row.id)) after.set(row.id, 'as read');
       }
       items.forEach(({ key, secret, value, versionId }, i) => {
         const level = levelOf(key);
@@ -1347,7 +1347,7 @@ export async function patchSecret(
     let read: SecretRead | undefined;
     const changes = !archiving ? null : await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
-      return read === undefined ? [] : [secretChange(secret.id, read, archived ? null : read.columns)];
+      return read === undefined ? [] : [secretChange(secret.id, read, archived ? null : 'as read')];
     });
     return audited(ctx, async (tx, log) => {
       // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
@@ -1506,7 +1506,7 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
     let read: SecretRead | undefined;
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
-      return read === undefined ? [] : [secretChange(secret.id, read, inherit ? null : read.columns)];
+      return read === undefined ? [] : [secretChange(secret.id, read, inherit ? null : 'as read')];
     });
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
