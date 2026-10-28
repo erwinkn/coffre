@@ -1,99 +1,110 @@
 ------------------------------ MODULE Lifecycle ------------------------------
 (***************************************************************************)
-(* Who owns a credential's life in 0.15 (T149): its issue (a person's      *)
-(* token for a service account, a CI run's sign-in), its revoke, and the   *)
-(* uses beside them. Two placements, one constant:                         *)
+(* The vault owns a credential's life in 0.15 (T149, D146-D148;            *)
+(* docs/design/credential-lifecycle.md): a CI run's sign-in, a token's     *)
+(* issue and a revoke are each one vault call, beside the uses.            *)
 (*                                                                         *)
-(*   A  the vault. An issue, a sign-in and a revoke are each one vault     *)
-(*      call, one statement in Postgres (one transaction, autocommit): it  *)
-(*      takes its locks, decides on the rows as they are under them,       *)
-(*      writes the row, its seal and its number, and commits, all without  *)
-(*      a round trip to anyone. The app verifies the request (the CI       *)
-(*      run's ID token, the issuer's own credential) and names it.         *)
+(*   sign-in  one statement: the account's row shared, the binding's row   *)
+(*            exclusive, the binding, the account, the rate and the ID     *)
+(*            token weighed on them, the token spent, the credential       *)
+(*            written and numbered under the issue lock, the commit.       *)
+(*   issue    a token a person gives a service account: the vault reads    *)
+(*            the issuer's objects and decides (statement 1, no lock),     *)
+(*            then writes only while they are still what it decided on,    *)
+(*            under their rows (statement 2). Nothing is held between.     *)
+(*   revoke   one statement: the credential's row, the fence exclusive,    *)
+(*            the row weighed, numbered, committed; then the seal wait.    *)
 (*                                                                         *)
-(*   B  the app, as 0.15 is built (W220, W224, with W242's sealed          *)
-(*      generation). The app asks the vault about the issuer and the       *)
-(*      account (`access`), has the vault seal the row it will write       *)
-(*      (`prepare`, which reads nothing and weighs no right), then, in its *)
-(*      own transaction, takes 0.14's head, checks again under it          *)
-(*      (`issuerStill`, `credentialStill`, `exchangeStill`), writes the    *)
-(*      row with `app_change` numbering it, and commits: a round trip a    *)
-(*      statement.                                                         *)
+(* Uses: one statement under the fence shared, deciding on the credential  *)
+(* the presented token's hash names, only if its row is its object's       *)
+(* newest sealed change, at its account's generation (W242).               *)
 (*                                                                         *)
-(* Uses are the vault's in both: one statement under the fence shared,     *)
-(* deciding on the credential's row only if it is its object's newest      *)
-(* sealed change, and its account's (W242) generation.                     *)
+(* An unbind is still the app's transaction (0.14's head, the binding's    *)
+(* row, then the sweep of what it issued, the fence), as built.            *)
 (*                                                                         *)
-(* One step is one statement, or the part of one that runs between two    *)
-(* lock waits; READ COMMITTED, each step reading what is committed. A      *)
-(* step's label says where the process is: in Postgres (a statement        *)
-(* running or waiting for a lock), or at the app, a round trip away,       *)
-(* between two statements of its transaction (`AtApp`). What a lock holder *)
-(* does at the app is what everyone waiting for that lock waits for.       *)
+(* One step is one statement, or the part of one between two lock waits;   *)
+(* READ COMMITTED, each step reading what is committed.                    *)
 (*                                                                         *)
 (* Who is who:                                                             *)
-(*   ada     an Owner of the project, issuing the service account "svc" a  *)
+(*   ada     an Owner of the project, giving the service account "svc" a   *)
 (*           token that reads sensitive values (R32), on her session cA;   *)
-(*   s1, s2  two CI runs signing in as svc through one binding, which      *)
-(*           makes at most Rate credentials a window;                      *)
+(*   s1, s2  two CI runs signing in as svc through binding "b", which      *)
+(*           makes at most Rate credentials a window, each with an ID      *)
+(*           token (the same one, replayed, or two);                       *)
+(*   ub      a manager unbinding "b";                                      *)
 (*   admin   demotes Ada, or removes svc, or removes and admits it again;  *)
-(*   rev     revokes one credential: Ada's session, svc's token cS, or the *)
-(*           token Ada issued;                                             *)
-(*   u1, u2  svc's uses of a sensitive value, each naming a credential     *)
-(*           whose token was handed out;                                   *)
-(*   writer  a database writer holding no key: puts back a row the log     *)
-(*           sealed once, forges one, or edits one;                        *)
-(*   evil    the app's own code, an attacker's: it calls the vault as it   *)
-(*           likes, claiming Ada as the issuer.                            *)
-(*                                                                         *)
-(* docs/design/credential-lifecycle.md weighs the two with these results;  *)
-(* docs/formal.md says what the model abstracts.                           *)
+(*   rev     revokes one credential;                                       *)
+(*   u1, u2  uses of a sensitive value, each presenting a token handed out;*)
+(*   writer  a database writer holding no key;                             *)
+(*   evil    the app's own code, an attacker's: issues in Ada's name; as   *)
+(*           "eb", writes a binding that trusts its own key; as a sign-in, *)
+(*           presents a token nobody signed, or one through that binding.  *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
-    Placement,      \* "A": the vault issues and revokes; "B": the app does, the vault seals
     Procs,          \* the processes of the scenario (MCLifecycle.tla)
     Ops,            \* Ops[p]: what process p may do, one of them
     Rate            \* how many credentials the binding makes a window
 
 CONSTANTS
-    \* A revoke takes the fence exclusive, which every use takes shared
-    \* (app_change; 0.15-plan.md, PR 4b): no use decided on the live row
-    \* is numbered after the revoke.
+    \* A revoke takes the fence exclusive, which every use takes shared:
+    \* no use decided on the live row is numbered after the revoke.
     RevokeTakesFence,
-    \* An issue, a token's or a sign-in's, never takes the fence: the issue
-    \* lock, shared (0026, IssueOwnLock; T123, R58).
+    \* An issue or a sign-in never takes the fence: the issue lock, shared
+    \* (0026, IssueOwnLock; T123, R58).
     IssueOffFence,
-    \* The issuer's standing (an Owner) and the credential the request came
-    \* in on, read again where nothing can change them before the commit.
-    \* A: in the vault's statement, under Ada's member row and her
-    \* credential's row, shared. B: under 0.14's head (`issuerStill`,
-    \* `credentialStill`), which the demotion and the revoke take too.
+    \* An issue's write holds the issuer's member row and the credential
+    \* she asks on, shared, to its commit: a demotion or a revoke waits.
     IssuerLocked,
-    \* The account's standing and generation, likewise. A: under svc's
-    \* member row, shared, which its removal takes exclusive. B:
-    \* `stillMember`, `exchangeStill`, under the head.
+    \* An issue's write goes ahead only while the issuer's objects are the
+    \* ones the vault decided on in its read (their seals, compared under
+    \* the locks); otherwise it answers "moved" and the vault reads again.
+    IssuerCAS,
+    \* A sign-in holds the account's row shared, which its removal takes
+    \* exclusive.
     MemberLocked,
-    \* The binding's rate, counted where no other sign-in of it can commit
-    \* meanwhile. A: under the binding's row, exclusive, in the statement.
-    \* B: `exchangeStill`'s count, under the head.
-    RateLocked,
     \* A use refuses a credential issued at an earlier generation of its
-    \* account (W242, T145: the generation sealed into both objects).
+    \* account (W242, T145).
     UseChecksGeneration,
+    \* A sign-in holds the binding's row exclusive while it weighs the
+    \* binding and its rate: another sign-in through it, or its unbind,
+    \* waits.
+    BindingLocked,
+    \* An unbind sweeps what the binding issued only once it holds the
+    \* binding's row (its update comes first).
+    SweepAfterLock,
+    \* The ID token spent once: the sign-in's insert into
+    \* `consumed_tokens`, unique.
+    SpentChecked,
     \* A use decides only on a row that is its object's newest sealed
-    \* change (sealed-inputs.md: `stale`, `tampered`).
+    \* change (sealed-inputs.md).
     SealChecked,
-    \* B as built: the app's transaction takes 0.14's head first (`audited`,
-    \* and `app_change` takes it again). B's checks above are under it, or
-    \* under nothing. A takes no head: no 0.14 entry of its own.
-    HeadInB
+    \* The credential's object seals its token's hash (D-T149 (a)): a row
+    \* whose hash moved is not the sealed object.
+    HashSealed,
+    \* The app checks the row's APP_KEY MAC, which covers the token's hash,
+    \* before anything leaves (W242 B1, option (b)): a row the app once
+    \* wrote passes, one put back included; an edited, forged or moved one
+    \* does not. A compromised app checks nothing.
+    AppChecksMac,
+    \* The vault verifies the CI run's ID token itself (D148), against the
+    \* binding's keys.
+    VaultVerifiesToken,
+    \* The vault takes only a binding it sealed (a change of the log, made
+    \* by a manager of the account): the app's row alone is no binding.
+    BindingSealed
 
 None == "none"
 Members == {"ada", "svc"}
 Creds == {"cA", "cS", "t", "e", "x1", "x2", "f"}
 Sens == {"read", "sens"}
+Bindings == {"b", "b2"}
+\* The ID tokens: j1 and j2, signed by b's issuer; "bad", signed by nobody;
+\* "e2", signed by the key evil's binding b2 trusts.
+IdTokens == {"j1", "j2", "bad", "e2"}
+SignedBy == [b \in Bindings |-> IF b = "b" THEN {"j1", "j2"} ELSE {"e2"}]
+Valid == SignedBy["b"]
 
 \* The credential each issuing process makes.
 IssuedBy == [p \in {"ada", "evil", "s1", "s2"} |->
@@ -102,46 +113,52 @@ Issuers == {"ada", "evil"} \cap Procs
 SignIns == {"s1", "s2"} \cap Procs
 Uses == {"u1", "u2"} \cap Procs
 
-Row(who, scope, gen) == [who |-> who, scope |-> scope, gen |-> gen, revoked |-> FALSE]
-NoRow == [who |-> None, scope |-> {}, gen |-> 0, revoked |-> TRUE]
+\* A credential's row: who it acts as, its scope, its account's generation,
+\* revoked, the binding that issued it, and its token's hash (named after
+\* the credential it was made for).
+Row(who, scope, g, by, hash) == [who |-> who, scope |-> scope, gen |-> g, revoked |-> FALSE, by |-> by, hash |-> hash]
+NoRow == [who |-> None, scope |-> {}, gen |-> 0, revoked |-> TRUE, by |-> None, hash |-> None]
+
+\* What the vault's seal covers of a row: all of it, or all but its hash.
+Sealed(row) == IF HashSealed THEN row ELSE [row EXCEPT !.hash = None]
 
 VARIABLES
     rows,       \* rows[c]: the credentials table as committed; NoRow for none
     sealed,     \* sealed[c]: what c's newest change in the log left; NoRow for none
-    history,    \* every object of c's changes ever left: a writer may put any back
+    history,    \* every row c ever had honestly: a writer may put any back
     owner,      \* whether Ada is an Owner of the project
     status,     \* svc's membership: "active" or "removed"
-    gen,        \* and its generation: a removal moves it on, an admission keeps it (W242)
+    gen,        \* and its generation: a removal moves it on, an admission keeps it
     next,       \* the log's next number
     fx, fs,     \* the fence: its exclusive holder, its shared holders
-    hd,         \* 0.14's head
+    hd,         \* 0.14's head (an admin's change, an unbind)
     mx, ms,     \* members' rows: exclusive holder, shared holders
     cx, cs,     \* credentials' rows: exclusive holder, shared holders
-    bx,         \* the binding's row
+    bx,         \* binding b's row
+    bindings,   \* the binding rows: b, and b2 once evil writes it
+    unbound,    \* whether b was unbound, and its number (0: not)
+    spent,      \* the ID tokens spent (`consumed_tokens`)
     pc, op, l,  \* each process: where it is, what it does, what it read
-    handed,     \* the credentials whose token went out: a use may name them
-    given,      \* each issue committed: its kind, the credential it came in on, its number, whether it reads sensitive values
+    handed,     \* the tokens that went out: a use may present them
+    answered,   \* the revokes answered: sealed, past their seal wait
+    given,      \* each issue committed
     revs,       \* each revoke committed: the credential, its number
     dems,       \* each demotion committed: its number
-    used        \* each use decided: its credential, the row and seal it read, the account's generation then, its number, the outcome
+    used        \* each use decided
 
 locks == <<fx, fs, hd, mx, ms, cx, cs, bx>>
-vars == <<rows, sealed, history, owner, status, gen, next, locks, pc, op, l, handed, given, revs, dems, used>>
+vars == <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, pc, op, l, handed, answered, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
-(* Where a process is *)
-
-\* The labels at which a process is at the app, between two statements of
-\* its transaction: whatever it holds, it holds across a round trip.
-AppLabels == {"still", "change", "commit"}
-AtApp(p) == Placement = "B" /\ p \in Issuers \cup SignIns \cup {"rev"} /\ pc[p] \in AppLabels
+(* Locks *)
 
 Holds(p) ==
     \/ fx = p \/ p \in fs \/ hd = p \/ bx = p
     \/ \E m \in Members : mx[m] = p \/ p \in ms[m]
     \/ \E c \in Creds : cx[c] = p \/ p \in cs[c]
 
-\* Every lock p holds, let go: at its commit, or its refusal's rollback.
+\* Every lock p holds, let go: at its commit, its refusal's rollback, or a
+\* statement's end.
 Release(p) ==
     /\ fx' = IF fx = p THEN None ELSE fx
     /\ fs' = fs \ {p}
@@ -157,20 +174,24 @@ Done(p) == /\ Goto(p, "done") /\ Release(p)
 
 StatusOf(m) == IF m = "svc" THEN status ELSE "active"
 GenOf(m) == IF m = "svc" THEN gen ELSE 0
-\* A credential as the vault would weigh it now: its row the log's, live, of its account's generation.
-Live(c) == rows[c] /= NoRow /\ rows[c] = sealed[c] /\ ~rows[c].revoked
+\* A credential as the vault weighs it now: its row the log's, live, of its account's generation.
+Live(c) == rows[c] /= NoRow /\ Sealed(rows[c]) = Sealed(sealed[c]) /\ ~rows[c].revoked
            /\ StatusOf(rows[c].who) = "active" /\ rows[c].gen = GenOf(rows[c].who)
 
-\* The fence exclusive, once nobody holds it: a use waits for whoever does.
 FenceFree == fx = None /\ fs = {}
+
+\* The row a presented token's hash finds, if any.
+Resolve(tok) == IF \E c \in Creds : rows[c] /= NoRow /\ rows[c].hash = tok
+                THEN CHOOSE c \in Creds : rows[c] /= NoRow /\ rows[c].hash = tok
+                ELSE None
 
 -----------------------------------------------------------------------------
 (* Initial state: Ada's session and svc's token cS, which an Owner gave
    sensitive reads, are in the log. *)
 
 Init ==
-    /\ rows = [c \in Creds |-> CASE c = "cA" -> Row("ada", Sens, 0)
-                                 [] c = "cS" -> Row("svc", Sens, 0)
+    /\ rows = [c \in Creds |-> CASE c = "cA" -> Row("ada", Sens, 0, None, "cA")
+                                 [] c = "cS" -> Row("svc", Sens, 0, None, "cS")
                                  [] OTHER -> NoRow]
     /\ sealed = rows
     /\ history = [c \in Creds |-> {rows[c]} \ {NoRow}]
@@ -181,262 +202,276 @@ Init ==
     /\ fx = None /\ fs = {} /\ hd = None /\ bx = None
     /\ mx = [m \in Members |-> None] /\ ms = [m \in Members |-> {}]
     /\ cx = [c \in Creds |-> None] /\ cs = [c \in Creds |-> {}]
+    /\ bindings = {"b"}
+    /\ unbound = 0
+    /\ spent = {}
     /\ pc = [p \in Procs |-> "start"]
     /\ op = [p \in Procs |-> [kind |-> "none"]]
-    /\ l = [p \in Procs |-> [c |-> None, n |-> 0, gen |-> 0, ok |-> FALSE, w |-> NoRow]]
+    /\ l = [p \in Procs |-> [c |-> None, tok |-> None, n |-> 0, gen |-> 0, ok |-> FALSE, w |-> NoRow,
+                             owner |-> FALSE, cA |-> NoRow, set |-> {}, b |-> None, before |-> {}]]
     /\ handed = {"cS"}
+    /\ answered = {}
     /\ given = {} /\ revs = {} /\ dems = {} /\ used = {}
 
-\* Writing a credential's row and the log's object for it, as one commit.
+\* A credential's row and the log's object for it, written as one commit.
 Write(c, row) ==
     /\ rows' = [rows EXCEPT ![c] = row]
     /\ sealed' = [sealed EXCEPT ![c] = row]
     /\ history' = [history EXCEPT ![c] = @ \cup {row}]
 
 -----------------------------------------------------------------------------
-(* Uses: one statement, the fence shared, the decision on the rows read,
-   the number, the commit. The read and the number are two steps: within
-   one statement, a commit can come between its snapshot and its
-   `nextval`. *)
+(* Uses: one statement, the fence shared, the decision, the number, the
+   commit. The read and the number are two steps: within one statement, a
+   commit can come between its snapshot and its `nextval`. *)
 
 UseStart(u) ==
     /\ pc[u] = "start"
-    /\ \E c \in handed :
-        /\ l' = [l EXCEPT ![u].c = c]
-        /\ op' = [op EXCEPT ![u] = [kind |-> "use", c |-> c]]
-        /\ Goto(u, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, handed, given, revs, dems, used>>
+    /\ \E tok \in handed : l' = [l EXCEPT ![u].tok = tok]
+    /\ Goto(u, "fence")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
+\* Which revokes had answered when the use began: none of theirs may serve it.
 UseFence(u) ==
     /\ pc[u] = "fence"
     /\ fx = None
     /\ fs' = fs \cup {u}
+    /\ l' = [l EXCEPT ![u].before = answered]
     /\ Goto(u, "read")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, hd, mx, ms, cx, cs, bx, op, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, hd, mx, ms, cx, cs, bx, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseRead(u) ==
     /\ pc[u] = "read"
-    /\ LET c == l[u].c
-           row == rows[c]
-           allow == /\ row /= NoRow
-                    /\ SealChecked => row = sealed[c]
+    /\ LET tok == l[u].tok
+           c == Resolve(tok)
+           row == IF c = None THEN NoRow ELSE rows[c]
+           allow == /\ c /= None
+                    /\ SealChecked => Sealed(row) = Sealed(sealed[c])
+                    \* The app's MAC check: a row it once signed for c, as written then (a row put back passes).
+                    /\ AppChecksMac => row \in history[c]
                     /\ ~row.revoked
                     /\ StatusOf(row.who) = "active"
                     /\ UseChecksGeneration => row.gen = GenOf(row.who)
                     /\ "sens" \in row.scope
-       IN l' = [l EXCEPT ![u] = [@ EXCEPT !.ok = allow, !.w = row, !.gen = GenOf(row.who)]]
+       IN l' = [l EXCEPT ![u] = [@ EXCEPT !.c = c, !.ok = allow, !.w = row, !.gen = GenOf(row.who)]]
     /\ Goto(u, "number")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, op, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseNumber(u) ==
     /\ pc[u] = "number"
     /\ l' = [l EXCEPT ![u].n = next]
     /\ next' = next + 1
     /\ Goto(u, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, op, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseCommit(u) ==
     /\ pc[u] = "commit"
-    /\ used' = used \cup {[c |-> l[u].c, row |-> l[u].w, seal |-> sealed[l[u].c], gen |-> l[u].gen, n |-> l[u].n, allow |-> l[u].ok]}
+    /\ used' = used \cup {[c |-> l[u].c, tok |-> l[u].tok, row |-> l[u].w, seal |-> IF l[u].c = None THEN NoRow ELSE sealed[l[u].c],
+                           gen |-> l[u].gen, n |-> l[u].n, allow |-> l[u].ok, before |-> l[u].before]}
     /\ Done(u)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, op, l, handed, given, revs, dems>>
-
-\* `seal` above is the newest sealed object when the use commits; under the
-\* fence shared, no change of the credential commits between its read and
-\* its commit, so it is the one its read was weighed against.
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, unbound, spent, op, l, handed, answered, given, revs, dems>>
 
 -----------------------------------------------------------------------------
 (* A token: Ada, on her session cA, gives svc sensitive reads; or the app's
-   attacker, claiming her. *)
+   attacker, naming her session. The vault weighs both the same way: on
+   what it reads, never on what the app says of her. *)
 
-\* At the app: what the vault answers about Ada and svc (`access`). The
-\* attacker claims whatever passes.
-IssueStart(p) ==
-    /\ pc[p] = "start"
+\* Statement 1: the vault reads Ada's objects, and decides on them, at the vault.
+IssueRead(p) ==
+    /\ pc[p] \in {"start", "read"}
     /\ op' = [op EXCEPT ![p] = [kind |-> "issue"]]
-    /\ l' = [l EXCEPT ![p] = [@ EXCEPT !.gen = gen, !.ok = (p = "evil" \/ (owner /\ Live("cA") /\ status = "active"))]]
-    /\ Goto(p, IF Placement = "A" THEN "rows" ELSE "prepare")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, handed, given, revs, dems, used>>
+    /\ IF owner /\ Live("cA") /\ status = "active"
+       THEN /\ l' = [l EXCEPT ![p] = [@ EXCEPT !.owner = owner, !.cA = rows["cA"], !.gen = gen]]
+            /\ Goto(p, "rows")
+       ELSE /\ Goto(p, "done") /\ UNCHANGED l
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, handed, answered, given, revs, dems, used>>
 
-\* A, in the vault's statement: Ada's row and her credential's, svc's, shared.
+\* Statement 2: Ada's row and her credential's, svc's, shared.
 IssueRows(p) ==
     /\ pc[p] = "rows"
     /\ IssuerLocked => mx["ada"] = None /\ cx["cA"] = None
     /\ MemberLocked => mx["svc"] = None
     /\ ms' = [m \in Members |-> IF (m = "ada" /\ IssuerLocked) \/ (m = "svc" /\ MemberLocked) THEN ms[m] \cup {p} ELSE ms[m]]
     /\ cs' = [cs EXCEPT !["cA"] = IF IssuerLocked THEN @ \cup {p} ELSE @]
-    /\ Goto(p, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, bx, op, l, handed, given, revs, dems, used>>
+    /\ Goto(p, "check")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
-\* A: the fence, only if an issue takes it.
+\* Still the objects it decided on? Else "moved": the statement ends, and the vault reads again.
+IssueCheck(p) ==
+    /\ pc[p] = "check"
+    /\ LET same == /\ owner = l[p].owner
+                   /\ rows["cA"] = l[p].cA /\ Sealed(sealed["cA"]) = Sealed(l[p].cA)
+                   /\ status = "active" /\ gen = l[p].gen
+       IN IF IssuerCAS => same
+          THEN Goto(p, "fence") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>
+          ELSE Goto(p, "read") /\ Release(p)
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+
+\* The fence, only if an issue takes it.
 IssueFence(p) ==
     /\ pc[p] = "fence"
     /\ IssueOffFence \/ FenceFree
     /\ fx' = IF IssueOffFence THEN fx ELSE p
-    /\ Goto(p, "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, op, l, handed, given, revs, dems, used>>
+    /\ Goto(p, "number")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
-\* A: the vault weighs the issue on the rows as they are, whatever the app said.
-IssueBody(p) ==
-    /\ pc[p] = "body"
-    /\ IF owner /\ Live("cA") /\ status = "active"
-       THEN /\ l' = [l EXCEPT ![p].gen = gen]
-            /\ Goto(p, "number")
-            /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>
-       ELSE /\ Done(p) /\ UNCHANGED l
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, op, handed, given, revs, dems, used>>
-
-\* B, at the app: the vault seals the row the app proposes, weighing no right.
-IssuePrepare(p) ==
-    /\ pc[p] = "prepare"
-    /\ IF l[p].ok THEN Goto(p, "head") ELSE Goto(p, "done")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, op, l, handed, given, revs, dems, used>>
-
-\* B: BEGIN and 0.14's head, the attacker's own transaction excepted.
-TakeHead(p) ==
-    /\ pc[p] = "head"
-    /\ IF HeadInB /\ p /= "evil" THEN hd = None /\ hd' = p ELSE UNCHANGED hd
-    /\ Goto(p, "still")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, op, l, handed, given, revs, dems, used>>
-
-\* B, a round trip later: the checks again, as committed now; the attacker checks nothing.
-IssueStill(p) ==
-    /\ pc[p] = "still"
-    /\ LET ok == /\ IssuerLocked => owner /\ Live("cA")
-                 /\ MemberLocked => status = "active" /\ gen = l[p].gen
-       IN IF p = "evil" \/ ok
-          THEN (Goto(p, "change") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>)
-          ELSE Done(p)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, op, l, handed, given, revs, dems, used>>
-
-\* B, a round trip later: the row and `app_change`, its number under the issue lock, or the fence.
-IssueChange(p) ==
-    /\ pc[p] = "change"
-    /\ IssueOffFence \/ FenceFree
-    /\ fx' = IF IssueOffFence THEN fx ELSE p
-    /\ l' = [l EXCEPT ![p].n = next]
-    /\ next' = next + 1
-    /\ Goto(p, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cx, cs, bx, op, handed, given, revs, dems, used>>
-
-\* A: the number, in the statement.
 IssueNumber(p) ==
     /\ pc[p] = "number"
     /\ l' = [l EXCEPT ![p].n = next]
     /\ next' = next + 1
     /\ Goto(p, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, op, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 IssueCommit(p) ==
     /\ pc[p] = "commit"
-    /\ Write(IssuedBy[p], Row("svc", Sens, l[p].gen))
-    /\ given' = given \cup {[kind |-> "token", via |-> "cA", n |-> l[p].n, sens |-> TRUE]}
+    /\ Write(IssuedBy[p], Row("svc", Sens, l[p].gen, None, IssuedBy[p]))
+    /\ given' = given \cup {[kind |-> "token", via |-> "cA", n |-> l[p].n, sens |-> TRUE, tok |-> None]}
     /\ handed' = handed \cup {IssuedBy[p]}
     /\ Done(p)
-    /\ UNCHANGED <<owner, status, gen, next, op, l, revs, dems, used>>
+    /\ UNCHANGED <<owner, status, gen, next, bindings, unbound, spent, op, l, answered, revs, dems, used>>
 
 -----------------------------------------------------------------------------
-(* A CI run's sign-in: its ID token verified at the app (signature,
-   claims, binding: not modelled), then the credential. *)
+(* A CI run's sign-in. At the app: the run's ID token, and the binding it
+   names (b; or b2, which evil wrote). The honest app verifies the token's
+   signature against the binding's keys; evil checks nothing. Then the
+   vault's one statement. *)
 
 SignInStart(s) ==
     /\ pc[s] = "start"
-    /\ op' = [op EXCEPT ![s] = [kind |-> "signin"]]
-    \* What the vault answers about svc (`access`), and, unlocked, the binding's rate.
-    /\ l' = [l EXCEPT ![s] = [@ EXCEPT !.gen = gen,
-                                       !.ok = status = "active" /\ Cardinality({g \in given : g.kind = "signin"}) < Rate]]
-    /\ Goto(s, IF Placement = "A" THEN "rows" ELSE "prepare")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, handed, given, revs, dems, used>>
+    /\ \/ \E o \in Ops[s] :
+            /\ o.b \in bindings
+            /\ l' = [l EXCEPT ![s].tok = o.tok, ![s].b = o.b]
+            /\ op' = [op EXCEPT ![s] = [kind |-> "signin"]]
+            \* The honest app refuses a token its binding's keys did not sign.
+            /\ IF o.evil \/ o.tok \in SignedBy[o.b] THEN Goto(s, "rows") ELSE Goto(s, "done")
+       \/ \* Never asks.
+          /\ Goto(s, "done") /\ UNCHANGED <<l, op>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, handed, answered, given, revs, dems, used>>
 
-\* A: the binding's row exclusive, svc's shared, in the vault's statement.
+\* svc's row shared, the binding's exclusive, in the vault's statement.
 SignInRows(s) ==
     /\ pc[s] = "rows"
-    /\ RateLocked => bx = None
     /\ MemberLocked => mx["svc"] = None
-    /\ bx' = IF RateLocked THEN s ELSE bx
+    /\ BindingLocked /\ l[s].b = "b" => bx = None
     /\ ms' = [ms EXCEPT !["svc"] = IF MemberLocked THEN @ \cup {s} ELSE @]
-    /\ Goto(s, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, cs, op, l, handed, given, revs, dems, used>>
+    /\ bx' = IF BindingLocked /\ l[s].b = "b" THEN s ELSE bx
+    /\ Goto(s, "body")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, cs, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
+\* The binding, the account, the rate and the token weighed as they are now; the token spent.
 SignInBody(s) ==
     /\ pc[s] = "body"
-    /\ IF status = "active" /\ Cardinality({g \in given : g.kind = "signin"}) < Rate
-       THEN /\ l' = [l EXCEPT ![s].gen = gen]
-            /\ Goto(s, "number")
-            /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>
-       ELSE /\ Done(s) /\ UNCHANGED l
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, op, handed, given, revs, dems, used>>
-
-\* B, a round trip after the head: `exchangeStill`, the account and the rate again.
-SignInStill(s) ==
-    /\ pc[s] = "still"
-    /\ LET ok == /\ MemberLocked => status = "active" /\ gen = l[s].gen
-                 /\ RateLocked => Cardinality({g \in given : g.kind = "signin"}) < Rate
-       IN IF ok THEN (Goto(s, "change") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>) ELSE Done(s)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, op, l, handed, given, revs, dems, used>>
+    /\ LET b == l[s].b
+           tok == l[s].tok
+           ok == /\ b = "b" => unbound = 0
+                 /\ BindingSealed => b = "b"
+                 /\ VaultVerifiesToken => tok \in SignedBy[b]
+                 /\ status = "active" /\ gen = 0
+                 /\ Cardinality({g \in given : g.kind = "signin"}) < Rate
+                 /\ SpentChecked => tok \notin spent
+       IN IF ok
+          THEN /\ l' = [l EXCEPT ![s].gen = gen]
+               /\ spent' = spent \cup {tok}
+               /\ Goto(s, "fence")
+               /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>
+          ELSE /\ Done(s) /\ UNCHANGED <<l, spent>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, unbound, op, handed, answered, given, revs, dems, used>>
 
 SignInCommit(s) ==
     /\ pc[s] = "commit"
-    /\ Write(IssuedBy[s], Row("svc", Sens, l[s].gen))
-    /\ given' = given \cup {[kind |-> "signin", via |-> None, n |-> l[s].n, sens |-> FALSE]}
+    /\ Write(IssuedBy[s], Row("svc", Sens, l[s].gen, l[s].b, IssuedBy[s]))
+    /\ given' = given \cup {[kind |-> "signin", via |-> None, n |-> l[s].n, sens |-> FALSE, tok |-> l[s].tok]}
     /\ handed' = handed \cup {IssuedBy[s]}
     /\ Done(s)
-    /\ UNCHANGED <<owner, status, gen, next, op, l, revs, dems, used>>
+    /\ UNCHANGED <<owner, status, gen, next, bindings, unbound, spent, op, l, answered, revs, dems, used>>
 
 -----------------------------------------------------------------------------
-(* A revoke of one credential. A: one statement, its row then the fence.
-   B: the vault seals the revoke from the row the app read, then the app's
-   transaction: the head, the row again, the update with `app_change` under
-   the fence, the commit. *)
+(* evil writes a binding row of its own, b2, trusting its own key: the app's
+   login may write the table, and the app holds APP_KEY. *)
+
+EvilBinding(e) ==
+    /\ pc[e] = "start"
+    /\ "bind" \in Ops[e]
+    /\ bindings' = bindings \cup {"b2"}
+    /\ Goto(e, "done")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+
+-----------------------------------------------------------------------------
+(* An unbind of b, the app's transaction as built: 0.14's head, the
+   binding's row (its update) and the sweep of the live credentials it
+   issued, in the order SweepAfterLock says, then the fence, the changes
+   numbered, the commit. *)
+
+UbStart(b) ==
+    /\ pc[b] = "start"
+    /\ hd = None
+    /\ hd' = b
+    /\ op' = [op EXCEPT ![b] = [kind |-> "unbind"]]
+    /\ Goto(b, IF SweepAfterLock THEN "lock" ELSE "sweep")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, bindings, unbound, spent, l, handed, answered, given, revs, dems, used>>
+
+UbLock(b) ==
+    /\ pc[b] = "lock"
+    /\ bx = None
+    /\ bx' = b
+    /\ Goto(b, IF SweepAfterLock THEN "sweep" ELSE "fence")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+
+UbSweep(b) ==
+    /\ pc[b] = "sweep"
+    /\ l' = [l EXCEPT ![b].set = {c \in Creds : rows[c] /= NoRow /\ rows[c].by = "b" /\ ~rows[c].revoked}]
+    /\ Goto(b, IF SweepAfterLock THEN "fence" ELSE "lock")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
+
+UbFence(b) ==
+    /\ pc[b] = "fence"
+    /\ FenceFree
+    /\ fx' = b
+    /\ Goto(b, "commit")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+
+UbCommit(b) ==
+    /\ pc[b] = "commit"
+    /\ LET set == l[b].set
+           n == next
+       IN /\ rows' = [c \in Creds |-> IF c \in set THEN [rows[c] EXCEPT !.revoked = TRUE] ELSE rows[c]]
+          /\ sealed' = [c \in Creds |-> IF c \in set THEN [rows[c] EXCEPT !.revoked = TRUE] ELSE sealed[c]]
+          /\ history' = [c \in Creds |-> IF c \in set THEN history[c] \cup {[rows[c] EXCEPT !.revoked = TRUE]} ELSE history[c]]
+          /\ revs' = revs \cup {[c |-> c, n |-> n] : c \in set}
+          /\ unbound' = n
+    /\ next' = next + 1
+    /\ Done(b)
+    /\ UNCHANGED <<owner, status, gen, bindings, spent, op, l, handed, answered, given, dems, used>>
+
+-----------------------------------------------------------------------------
+(* A revoke of one credential: one statement, its row, then the fence, the
+   row weighed, numbered, committed; then the seal wait, and the answer. *)
 
 RevStart(r) ==
     /\ pc[r] = "start"
     /\ \E c \in Ops[r] :
         /\ op' = [op EXCEPT ![r] = [kind |-> "revoke", c |-> c]]
         /\ l' = [l EXCEPT ![r].c = c]
-    /\ Goto(r, IF Placement = "A" THEN "rows" ELSE "head")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, handed, given, revs, dems, used>>
+    /\ Goto(r, "rows")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, handed, answered, given, revs, dems, used>>
 
 RevRow(r) ==
     /\ pc[r] = "rows"
     /\ cx[l[r].c] = None /\ cs[l[r].c] = {}
     /\ cx' = [cx EXCEPT ![l[r].c] = r]
     /\ Goto(r, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cs, bx, op, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cs, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
-\* A, in the statement: the fence, the row weighed, the number.
 RevFence(r) ==
     /\ pc[r] = "fence"
     /\ RevokeTakesFence => FenceFree
     /\ fx' = IF RevokeTakesFence THEN r ELSE fx
     /\ LET c == l[r].c IN
-       IF rows[c] /= NoRow /\ rows[c] = sealed[c] /\ ~rows[c].revoked
+       IF rows[c] /= NoRow /\ Sealed(rows[c]) = Sealed(sealed[c]) /\ ~rows[c].revoked
        THEN /\ l' = [l EXCEPT ![r].n = next, ![r].ok = TRUE]
             /\ next' = next + 1
        ELSE UNCHANGED <<l, next>>
     /\ Goto(r, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cx, cs, bx, op, handed, given, revs, dems, used>>
-
-\* B, a round trip after the head: the row, as its prepare read it, still live.
-RevStill(r) ==
-    /\ pc[r] = "still"
-    /\ LET c == l[r].c IN
-       IF rows[c] /= NoRow /\ rows[c] = sealed[c] /\ ~rows[c].revoked
-       THEN (Goto(r, "change") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx>>)
-       ELSE Done(r)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, op, l, handed, given, revs, dems, used>>
-
-\* B, a round trip later: the update, its row's lock, and `app_change` under the fence.
-RevChange(r) ==
-    /\ pc[r] = "change"
-    /\ cx[l[r].c] = None /\ cs[l[r].c] = {}
-    /\ RevokeTakesFence => FenceFree
-    /\ cx' = [cx EXCEPT ![l[r].c] = r]
-    /\ fx' = IF RevokeTakesFence THEN r ELSE fx
-    /\ l' = [l EXCEPT ![r].n = next, ![r].ok = TRUE]
-    /\ next' = next + 1
-    /\ Goto(r, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cs, bx, op, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cx, cs, bx, bindings, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 RevCommit(r) ==
     /\ pc[r] = "commit"
@@ -445,14 +480,22 @@ RevCommit(r) ==
        THEN /\ Write(c, [rows[c] EXCEPT !.revoked = TRUE])
             /\ revs' = revs \cup {[c |-> c, n |-> l[r].n]}
        ELSE UNCHANGED <<rows, sealed, history, revs>>
-    /\ Done(r)
-    /\ UNCHANGED <<owner, status, gen, next, op, l, handed, given, dems, used>>
+    /\ Goto(r, "answer")
+    /\ Release(r)
+    /\ UNCHANGED <<owner, status, gen, next, bindings, unbound, spent, op, l, handed, answered, given, dems, used>>
+
+\* Sealed in a checkpoint (R51), then answered: whoever asked may tell the world.
+RevAnswer(r) ==
+    /\ pc[r] = "answer"
+    /\ answered' = answered \cup (IF l[r].ok THEN {l[r].c} ELSE {})
+    /\ Goto(r, "done")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, op, l, handed, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
-(* The vault's own changes to a member, in either placement (`change_input`):
-   the member's row, 0.14's head, the fence, then the change, and a removal
-   revokes the account's live credentials in it. A removal and admission
-   again is two such transactions. Each is in Postgres throughout. *)
+(* The vault's own changes to a member (`change_input`): the member's row,
+   0.14's head, the fence, then the change; a removal revokes the account's
+   live credentials in it. A removal and admission again is two such
+   transactions. *)
 
 Who(o) == IF o = "demote" THEN "ada" ELSE "svc"
 
@@ -460,34 +503,33 @@ AdminStart(a) ==
     /\ pc[a] = "start"
     /\ \E o \in Ops[a] : op' = [op EXCEPT ![a] = [kind |-> o]]
     /\ Goto(a, "row")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, l, handed, answered, given, revs, dems, used>>
 
 AdminRow(a) ==
     /\ pc[a] = "row"
     /\ mx[Who(op[a].kind)] = None /\ ms[Who(op[a].kind)] = {}
     /\ mx' = [mx EXCEPT ![Who(op[a].kind)] = a]
     /\ Goto(a, "head")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, ms, cx, cs, bx, op, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, ms, cx, cs, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 AdminHead(a) ==
     /\ pc[a] = "head"
     /\ hd = None
     /\ hd' = a
     /\ Goto(a, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, op, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 AdminFence(a) ==
     /\ pc[a] = "fence"
     /\ FenceFree
     /\ fx' = a
     /\ Goto(a, "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, op, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
-\* The change, written and committed. A removal sweeps svc's live rows as they are now (`expectRevoked`).
 AdminBody(a) ==
     /\ pc[a] = "body"
     /\ LET n == next
-           swept == {c \in Creds : rows[c] /= NoRow /\ rows[c].who = "svc" /\ ~rows[c].revoked /\ rows[c] = sealed[c]}
+           swept == {c \in Creds : rows[c] /= NoRow /\ rows[c].who = "svc" /\ ~rows[c].revoked /\ Sealed(rows[c]) = Sealed(sealed[c])}
        IN CASE op[a].kind = "demote" ->
                /\ owner' = FALSE
                /\ dems' = dems \cup {[n |-> n]}
@@ -508,7 +550,7 @@ AdminBody(a) ==
     /\ next' = next + 1
     /\ pc' = [pc EXCEPT ![a] = IF op'[a].kind = "restore" THEN "row" ELSE "done"]
     /\ Release(a)
-    /\ UNCHANGED <<l, handed, given, used>>
+    /\ UNCHANGED <<bindings, unbound, spent, l, handed, answered, given, used>>
 
 -----------------------------------------------------------------------------
 (* A database writer, holding no key: one write, or none. *)
@@ -516,31 +558,31 @@ AdminBody(a) ==
 WriterStep(w) ==
     /\ pc[w] = "start"
     /\ \/ \* Gives up.
-          /\ UNCHANGED <<rows, handed>>
-       \/ \* Puts back an object the log sealed once: cS live again after its revoke.
+          UNCHANGED rows
+       \/ \* Puts back a row the log sealed once: cS live again after its revoke.
           /\ "putBack" \in Ops[w]
           /\ \E c \in {"cS", "x1"} : \E h \in history[c] : h /= rows[c] /\ rows' = [rows EXCEPT ![c] = h]
-          /\ UNCHANGED handed
-       \/ \* Writes a row of its own, a token it holds, for svc's sensitive reads.
+       \/ \* Writes a row of its own, for svc's sensitive reads, under the hash of a token handed out (cS's).
           /\ "forge" \in Ops[w]
-          /\ rows' = [rows EXCEPT !["f"] = Row("svc", Sens, gen)]
-          /\ handed' = handed \cup {"f"}
+          /\ rows' = [rows EXCEPT !["f"] = Row("svc", Sens, gen, None, "cS"), !["cS"] = [@ EXCEPT !.hash = None]]
        \/ \* Edits a credential of svc's: live, and of the account's generation now.
           /\ "edit" \in Ops[w]
           /\ \E c \in {"cS", "x1"} : rows[c] /= NoRow /\ rows' = [rows EXCEPT ![c] = [@ EXCEPT !.revoked = FALSE, !.gen = gen]]
-          /\ UNCHANGED handed
+       \/ \* Moves the hash of svc's token cS onto cA, Ada's session: cS's holder would act as Ada.
+          /\ "move" \in Ops[w]
+          /\ rows' = [rows EXCEPT !["cA"] = [@ EXCEPT !.hash = "cS"], !["cS"] = [@ EXCEPT !.hash = None]]
     /\ Goto(w, "done")
-    /\ UNCHANGED <<sealed, history, owner, status, gen, next, locks, op, l, given, revs, dems, used>>
+    /\ UNCHANGED <<sealed, history, owner, status, gen, next, locks, bindings, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 
 Step(p) ==
     \/ p \in Uses /\ (UseStart(p) \/ UseFence(p) \/ UseRead(p) \/ UseNumber(p) \/ UseCommit(p))
-    \/ p \in Issuers /\ (IssueStart(p) \/ IssueRows(p) \/ IssueFence(p) \/ IssueBody(p) \/ IssueNumber(p)
-                         \/ IssuePrepare(p) \/ TakeHead(p) \/ IssueStill(p) \/ IssueChange(p) \/ IssueCommit(p))
-    \/ p \in SignIns /\ (SignInStart(p) \/ SignInRows(p) \/ IssueFence(p) \/ SignInBody(p) \/ IssueNumber(p)
-                         \/ IssuePrepare(p) \/ TakeHead(p) \/ SignInStill(p) \/ IssueChange(p) \/ SignInCommit(p))
-    \/ p = "rev" /\ (RevStart(p) \/ RevRow(p) \/ RevFence(p) \/ TakeHead(p) \/ RevStill(p) \/ RevChange(p) \/ RevCommit(p))
+    \/ p \in Issuers /\ (IssueRead(p) \/ IssueRows(p) \/ IssueCheck(p) \/ IssueFence(p) \/ IssueNumber(p) \/ IssueCommit(p))
+    \/ p = "eb" /\ EvilBinding(p)
+    \/ p \in SignIns /\ (SignInStart(p) \/ SignInRows(p) \/ SignInBody(p) \/ IssueFence(p) \/ IssueNumber(p) \/ SignInCommit(p))
+    \/ p = "ub" /\ (UbStart(p) \/ UbLock(p) \/ UbSweep(p) \/ UbFence(p) \/ UbCommit(p))
+    \/ p = "rev" /\ (RevStart(p) \/ RevRow(p) \/ RevFence(p) \/ RevCommit(p) \/ RevAnswer(p))
     \/ p = "admin" /\ (AdminStart(p) \/ AdminRow(p) \/ AdminHead(p) \/ AdminFence(p) \/ AdminBody(p))
     \/ p = "writer" /\ WriterStep(p)
 
@@ -560,52 +602,66 @@ TypeOK ==
     /\ bx \in Procs \cup {None}
     /\ status \in {"active", "removed"}
     /\ handed \subseteq Creds
+    /\ spent \subseteq IdTokens
 
 \* A revoke orders its credential's uses: none allowed is numbered after it.
-\* (A use that starts after the revoke commits reads it revoked; one in
-\* flight is numbered before it, or refused.)
 RevokeOrdersUses ==
     \A u \in used, r \in revs : (u.allow /\ u.c = r.c) => u.n < r.n
+
+\* No use that began once a revoke was sealed and answered serves its credential.
+NothingAfterRevokeAnswered ==
+    \A u \in used : u.allow => u.c \notin u.before
 
 \* Only rows the log sealed decide: nothing a database writer put back,
 \* forged or edited serves a use.
 AllowedOnSealed ==
-    \A u \in used : u.allow => u.row = u.seal
+    \A u \in used : u.allow => Sealed(u.row) = Sealed(u.seal)
 
-\* A credential serves only at the generation of its account it was
-\* issued at: removed, its credentials end, whatever admits it again.
+\* A use serves the credential whose token was presented, never another
+\* whose row a writer gave that token's hash.
+AllowedAsPresented ==
+    \A u \in used : u.allow => u.c = u.tok
+
+\* A credential serves only at its account's generation: removed, its
+\* credentials end, whatever admits it again.
 AllowedAtCurrentGeneration ==
     \A u \in used : u.allow => u.row.gen = u.gen
 
 \* Rights never widen (R15, R32): a token giving sensitive reads is numbered
 \* before any demotion of its issuer, and before any revoke of the
-\* credential its issue came in on. Its issue was weighed on both as they
-\* stood at its number.
+\* credential its issue came in on.
 SensitiveOnlyFromOwners ==
     \A g \in given, d \in dems : g.sens => g.n < d.n
 IssuedByLiveCredential ==
     \A g \in given, r \in revs : g.via = r.c => g.n < r.n
 
-\* The binding makes at most Rate credentials.
+\* The binding makes at most Rate credentials, and an ID token buys one.
 RateHeld ==
     Cardinality({g \in given : g.kind = "signin"}) <= Rate
+SpentOnce ==
+    \A g, h \in given : (g.kind = "signin" /\ h.kind = "signin" /\ g.tok = h.tok) => g = h
 
-\* R58: a use never waits on an issue or a sign-in.
+\* A run's credential comes only of an ID token its binding's issuer signed:
+\* never of one nobody signed, nor through a binding the app made up (D148).
+SignInsOnValidTokens ==
+    \A g \in given : g.kind = "signin" => g.tok \in Valid
+
+\* Unbound, a binding's credentials end: none serves a use numbered after.
+EndedBindingEndsCredentials ==
+    \A u \in used : (u.allow /\ u.row.by = "b" /\ unbound > 0) => u.n < unbound
+
+\* R58: a use never waits on an issue or a sign-in, nor on any lock but
+\* the fence (it takes no row's).
 UsesNeverWaitOnIssues ==
     \A u \in Uses : (pc[u] = "fence" /\ fx /= None) => fx \notin Issuers \cup SignIns
 
-\* R44: a sign-in never queues behind 0.14's head.
-SignInsNeverWaitOnHead ==
-    \A s \in SignIns : ~(pc[s] = "head" /\ HeadInB /\ hd \notin {None, s})
+\* An issue holds no lock between its two statements: what waits for it
+\* waits for Postgres, never for the vault's round trip.
+IssuesHoldNoLockBetween ==
+    \A p \in Issuers : pc[p] = "read" => ~Holds(p)
 
-\* An issue or a sign-in holds no lock across a round trip to the app: what
-\* waits for it waits for Postgres, never for the network.
-IssuesHoldNoLockAtApp ==
-    \A p \in Issuers \cup SignIns : AtApp(p) => ~Holds(p)
-
-\* A use waits on a revoke only while the revoke runs in Postgres, never
-\* for its round trips (R58 lets a revoke hold uses briefly).
-UsesWaitOnlyOnDbWork ==
-    \A u \in Uses : (pc[u] = "fence" /\ fx /= None) => ~AtApp(fx)
+\* R44: a sign-in never takes 0.14's head.
+SignInsTakeNoHead ==
+    \A s \in SignIns : hd /= s
 
 =============================================================================
