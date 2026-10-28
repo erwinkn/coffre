@@ -234,10 +234,17 @@ function sealText(seal: Buffer | null): string | null {
  * object holds its version's id, nature and wrapped data key, never the
  * ciphertext (0.15-plan.md, "As built: PR 4b"): each version has a data key
  * of its own, and the envelope's AEAD binds the ciphertext to it.
+ *
+ * An archived key brought back as its rows hold it (an unarchive, an
+ * override again, a reference written again unchanged) restores: the vault
+ * holds those rows to the object its log last sealed, since nothing checked
+ * them while it was archived (T134). One given a new value or reference is
+ * made from this write's columns, not its rows.
  */
 export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null): ObjectChange {
   // Archiving leaves no seal (`secret.delete`): an archived row with one was archived around coffre, and no change moves it.
   if (before?.archived === true && before.seal !== null) throw new Error(`the key ${id} was archived around coffre, its seal kept: its row is not its newest change's`);
+  if (before?.archived === true && after !== null && JSON.stringify(after) === JSON.stringify(before.columns)) return { kind: 'secret', id, before: null, after, restores: true };
   return { kind: 'secret', id, before: before === undefined || before.archived ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
 }
 

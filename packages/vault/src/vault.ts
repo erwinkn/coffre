@@ -111,7 +111,7 @@ import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
+import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, live, placeIn, PRINCIPAL, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
@@ -1799,23 +1799,33 @@ class VaultService implements Vault {
       // - A holder whose object reads its source through this reference changes: `secret.write`, no source, whose
       //   newest row, this one, `change_input` ends.
       // - Any other ends this row alone, by its id (`end_reference`): an abandoned reference's stored none, and its
-      //   end touches no other. A holder with no object (archived, or 0.14's alone before the cutover) has only rows,
-      //   which decide nothing here: an unarchive seals what they hold (a task of its own), and the cutover holds
-      //   each reference row to 0.14's `reference.create` and `reference.end` (plan PR 9).
+      //   end touches no other. A holder with no object has only rows, which decide nothing here: 0.14's alone
+      //   before the cutover, which holds each reference row to 0.14's `reference.create` and `reference.end` (plan
+      //   PR 9); or archived, whose unarchive restores what its log last sealed (`keptObjects`, T134), never its rows.
+      // - So an archived holder whose kept object reads through this reference has that object ended too: written
+      //   ended, then deleted again, still no object (EndWhileArchived). Otherwise its unarchive would restore it
+      //   live, the row's end cleared by a writer, or refuse an honest one for the end in its rows.
       if (d.changes !== null) {
         const changes = d.changes;
         const rows: string[] = [];
         const staged = new Set<string>();
+        const end = (ref: Ref & { kind: 'secret' }, at: { projectId: string; environmentId: string }, archived: boolean) => {
+          if (staged.has(ref.id)) return;
+          staged.add(ref.id);
+          changes.stage(ref, { op: 'secret.write', projectId: at.projectId, environmentId: at.environmentId, version: '', nature: 'secret', key: null, digest: null, source: null, reference: null }, principal);
+          if (archived) changes.stage(ref, { op: 'secret.delete' }, principal);
+        };
         for (const [i, { holder }] of seals.entries()) {
           const reference = vias[i]!.reference;
           const ref = { kind: 'secret' as const, id: holder.secretId };
           const held = await changes.held(d.tx, ref);
           if (held.log === 'live' && held.object.kind === 'secret' && held.object.reference === reference) {
-            if (staged.has(holder.secretId)) continue;
-            staged.add(holder.secretId);
-            const ended = { op: 'secret.write', projectId: holder.projectId, environmentId: holder.environmentId, version: '', nature: 'secret', key: null, digest: null, source: null, reference: null } as const;
-            changes.stage(ref, ended, principal);
+            end(ref, holder, false);
             continue;
+          }
+          if (held.log === 'gone') {
+            const kept = await changes.kept(d.tx, ref);
+            if (kept?.kind === 'secret' && kept.reference === reference) end(ref, kept, true);
           }
           rows.push(reference);
         }
@@ -3088,15 +3098,19 @@ class VaultService implements Vault {
   }
 
   /**
-   * The app's changes, sealed (`prepareChanges`, plan PR 4b): no read, no
-   * lock, nothing written, but the report of a row that is not the vault's,
-   * which refuses them all (`tampered`), as a decision of its own would.
+   * The app's changes, sealed (`prepareChanges`, plan PR 4b): no lock,
+   * nothing written, and no read but, for an unarchive, what its key's log
+   * last sealed (`keptObjects`, T134); but the report of a row that is not
+   * the vault's, which refuses them all (`tampered`, `stale`), as a decision
+   * of its own would.
    */
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
     const log015 = this.#log015();
     if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
     try {
-      return { ok: true, changes: prepareChanges(log015, Date.now() + this.#prepared.options.clockOffset(), input.actor, input.changes) };
+      const restored = input.changes.flatMap((change) => (change.kind === 'secret' && change.restores === true ? [{ kind: 'secret' as const, id: change.id }] : []));
+      const kept = restored.length === 0 ? new Map() : await keptObjects(log015.seals, this.#db, restored);
+      return { ok: true, changes: prepareChanges(log015, Date.now() + this.#prepared.options.clockOffset(), input.actor, input.changes, kept) };
     } catch (error) {
       if (!(error instanceof NotLogged)) throw error;
       const reports: NewEntry[] = [];

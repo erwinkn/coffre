@@ -15,7 +15,7 @@ import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { appChanges, isStaleChange } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
-import { loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
+import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
@@ -37,9 +37,15 @@ type World = Awaited<ReturnType<typeof world>>;
 
 class Moved extends Error {}
 
+/** The app's changes sealed (`Vault.prepare`): an unarchive's against what its key's log last sealed. */
+async function prepared(changes: ObjectChange[]) {
+  const restored = changes.flatMap((change) => (change.kind === 'secret' && change.restores === true ? [{ kind: 'secret' as const, id: change.id }] : []));
+  return prepareChanges(KEYS, Date.now(), ROOT, changes, await keptObjects(KEYS.seals, db.owner, restored));
+}
+
 /** The app's write: its changes sealed before (`prepare`), then its rows and the changes in one transaction, as `audited` commits them. */
 async function write(changes: ObjectChange[], rowsOf: (tx: Transaction) => Promise<void>): Promise<bigint[]> {
-  const calls = prepareChanges(KEYS, Date.now(), ROOT, changes);
+  const calls = await prepared(changes);
   return db.owner.transaction(async (tx: Transaction) => {
     await rowsOf(tx);
     const numbers = await appChanges(tx, calls);
@@ -83,9 +89,10 @@ async function readEnvironment(id: string): Promise<{ columns: EnvironmentColumn
   };
 }
 
-/** A key's change from its row as read now (archived: no object) to `after`. */
+/** A key's change from its row as read now (archived: no object; brought back as its rows hold it, a restore) to `after`. */
 async function keyChange(id: string, after: SecretColumns | null): Promise<ObjectChange> {
   const read = await readKey(id);
+  if (read.archived && after !== null && JSON.stringify(after) === JSON.stringify(read.columns)) return { kind: 'secret', id, before: null, after, restores: true };
   return { kind: 'secret', id, before: read.archived ? null : { columns: read.columns, seal: read.seal }, after };
 }
 
@@ -220,9 +227,9 @@ test('a key\'s row moved to another environment, its seal kept, is refused as ta
   const id = await w.key();
   const read = await readKey(id);
   const elsewhere = randomUUID();
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', id, before: { columns: { ...read.columns, environmentId: elsewhere }, seal: read.seal }, after: null }]),
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', id, before: { columns: { ...read.columns, environmentId: elsewhere }, seal: read.seal }, after: null }], new Map()),
     (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', id, before: { columns: read.columns, seal: read.seal }, after: { ...read.columns, environmentId: elsewhere } }]),
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', id, before: { columns: read.columns, seal: read.seal }, after: { ...read.columns, environmentId: elsewhere } }], new Map()),
     /does nothing|no change the log knows/);
 });
 
@@ -253,7 +260,7 @@ test('an environment made protected, renamed, archived and restored through the 
   assert.deepEqual(await opsOf({ kind: 'environment', id: fork }), ['environment.create']);
   // What the app may not write: a protection (the vault's), a parent, another project.
   for (const after of [{ ...stored.columns, protected: false }, { ...stored.columns, parentId: null }, { ...stored.columns, projectId: randomUUID() }]) {
-    assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: fork, before: stored, after }]), /no change the log knows/);
+    assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: fork, before: stored, after }], new Map()), /no change the log knows/);
   }
   await replayAgrees();
 });
@@ -287,7 +294,7 @@ async function deletedWithKeys(tombstone: string): Promise<void> {
   assert.deepEqual(await opsOf({ kind: 'environment', id: w.dev }), ['genesis', 'environment.delete']);
   // A deleted environment changes no more.
   const now = await readEnvironment(w.dev);
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: w.dev, before: now, after: { ...now.columns, archived: true } }]), /does nothing/);
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: w.dev, before: now, after: { ...now.columns, archived: true } }], new Map()), /does nothing/);
   await replayAgrees();
 }
 
@@ -334,6 +341,130 @@ test('a key put back to an earlier version with that version\'s seal: valid, but
   assert.equal(archive.before?.seal, old.seal, 'the vault takes the seal: it is its own');
   await assert.rejects(write([archive], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = ${new Date().toISOString()} WHERE id = ${id}`)), (error: unknown) => isStaleChange(error));
   assert.deepEqual(await opsOf({ kind: 'secret', id }), ['genesis', 'secret.write']);
+});
+
+// --- an unarchive restores what the log sealed (0030; formal/SealedObjects.tla, T134) ---------------------------------
+
+/** `id` archived through the app: its object gone, its row's seal none. */
+async function archive(id: string): Promise<void> {
+  await write([await keyChange(id, null)], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = ${new Date().toISOString()} WHERE id = ${id}`));
+}
+
+/** `id` unarchived through the app, as its rows hold it now (`restores`). */
+async function unarchive(id: string): Promise<bigint[]> {
+  const change = await keyChange(id, (await readKey(id)).columns);
+  assert.equal(change.kind === 'secret' && change.restores, true, 'an unarchive restores');
+  return write([change], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = NULL WHERE id = ${id}`));
+}
+
+/** Its unarchive refused before anything is written (`prepare`: rows no change of its log sealed), and every use still finds no key. */
+async function refusesUnarchive(w: World, id: string): Promise<void> {
+  const ops = await opsOf({ kind: 'secret', id });
+  await assert.rejects(unarchive(id), (error: unknown) => error instanceof NotLogged && error.fault === 'stale');
+  assert.deepEqual(await opsOf({ kind: 'secret', id }), ops, 'nothing logged');
+  const read = await readKey(id);
+  assert.ok(read.archived && read.seal === null, 'still archived, no seal');
+  const outcome = await used(w, id);
+  assert.ok(!outcome.ok && !['stale', 'tampered'].includes(codeOf(outcome)!), JSON.stringify(outcome));
+}
+
+test("a key's rows edited while it is archived (another version, its wrapped key, an older version put back): its unarchive is refused, nothing sealed; put back, it restores the value it had, live as replayed (T134)", async () => {
+  const w = await world();
+  const id = await w.key('first');
+  const first = (await readKey(id)).columns.version!;
+  const next = await newVersion(w, id, 'second');
+  await write([await keyChange(id, { ...(await readKey(id)).columns, version: next.columns })], next.insert);
+  await archive(id);
+  // A version planted, as current: a new value.
+  const planted = await newVersion(w, id, 'planted');
+  await planted.insert(db.owner);
+  await refusesUnarchive(w, id);
+  // The genuine version back, its wrapped key swapped for the planted one's.
+  await run(db.owner, sql`UPDATE secrets SET current_version_id = ${next.columns.id} WHERE id = ${id}`);
+  await withTriggersLifted(db.owner, 'secret_versions', (tx) => run(tx, sql`UPDATE secret_versions SET wrapped_dek = ${Buffer.from(planted.columns.wrappedDek, 'base64')} WHERE id = ${next.columns.id}`));
+  await refusesUnarchive(w, id);
+  await withTriggersLifted(db.owner, 'secret_versions', (tx) => run(tx, sql`UPDATE secret_versions SET wrapped_dek = ${Buffer.from(next.columns.wrappedDek, 'base64')} WHERE id = ${next.columns.id}`));
+  // The first version put back: a value the log sealed once, not the one it last did.
+  await run(db.owner, sql`UPDATE secrets SET current_version_id = ${first.id} WHERE id = ${id}`);
+  await refusesUnarchive(w, id);
+  // As the archive left it: unarchived, its last value.
+  await run(db.owner, sql`UPDATE secrets SET current_version_id = ${next.columns.id} WHERE id = ${id}`);
+  await unarchive(id);
+  const outcome = await used(w, id);
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.equal(outcome.value.versionId, next.columns.id);
+  assert.deepEqual(await opsOf({ kind: 'secret', id }), ['genesis', 'secret.write', 'secret.delete', 'secret.write']);
+  await replayAgrees();
+});
+
+test("an archived holder's reference rows edited (a row planted to another source, its source moved, its row's end marked): its unarchive is refused, never sealing the edit (T134)", async () => {
+  const w = await world();
+  const [source, other] = [await w.key('the source'), await w.key('another')];
+  const vault = await deciding();
+  const { holder, via } = await reference(w, vault, source);
+  await archive(holder);
+  // A newer row to another source: the holder would read it.
+  await plant(w, vault, holder, other);
+  await refusesUnarchive(w, holder);
+  await run(db.owner, sql`DELETE FROM secret_references WHERE secret_id = ${holder} AND id <> ${via.reference}`);
+  // The genuine row's source moved.
+  await run(db.owner, sql`UPDATE secret_references SET source_secret_id = ${other} WHERE id = ${via.reference}`);
+  await refusesUnarchive(w, holder);
+  await run(db.owner, sql`UPDATE secret_references SET source_secret_id = ${source} WHERE id = ${via.reference}`);
+  // Its end marked by the writer, no end of the vault's: no denial sealed either.
+  await run(db.owner, sql`UPDATE secret_references SET ended_at = ${new Date().toISOString()} WHERE id = ${via.reference}`);
+  await refusesUnarchive(w, holder);
+  await run(db.owner, sql`UPDATE secret_references SET ended_at = NULL WHERE id = ${via.reference}`);
+  await unarchive(holder);
+  const outcome = await used(w, holder);
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  await replayAgrees();
+});
+
+test("an unarchive whose key's log moved on between its prepare and its commit, its rows put back as read, is refused under the fence (T134, RestorePinned)", async () => {
+  const w = await world();
+  const id = await w.key('first');
+  await archive(id);
+  const read = await readKey(id);
+  const restore = await keyChange(id, read.columns);
+  const calls = await prepared([restore]);
+  assert.ok(calls[0]!.restores !== null, 'it carries the seal it restores');
+  // Meanwhile: unarchived, written, archived again; a writer puts the rows back as the prepare read them.
+  await unarchive(id);
+  const next = await newVersion(w, id, 'second');
+  await write([await keyChange(id, { ...(await readKey(id)).columns, version: next.columns })], next.insert);
+  await archive(id);
+  await run(db.owner, sql`UPDATE secrets SET current_version_id = ${read.columns.version!.id} WHERE id = ${id}`);
+  const ops = await opsOf({ kind: 'secret', id });
+  await assert.rejects(db.owner.transaction(async (tx: Transaction) => {
+    await run(tx, sql`UPDATE secrets SET archived_at = NULL WHERE id = ${id}`);
+    await appChanges(tx, calls);
+  }), (error: unknown) => isStaleChange(error));
+  assert.deepEqual(await opsOf({ kind: 'secret', id }), ops, 'nothing logged');
+  // Without the pin, `app_change` would have sealed the first value over the second: the rows are what the prepare read.
+  assert.deepEqual((await readKey(id)).columns, read.columns);
+});
+
+test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {
+  const w = await world();
+  const id = randomUUID();
+  const t = tablesOf(db.owner);
+  await db.owner.insert(t.secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `OLD_${id.slice(0, 4)}`, archivedAt: new Date() });
+  const calls = await prepared([await keyChange(id, (await readKey(id)).columns)]);
+  assert.deepEqual(calls.map((call) => call.requestId), [null]);
+  await unarchive(id);
+  assert.deepEqual(await opsOf({ kind: 'secret', id }), []);
+});
+
+test("`app_change` takes a restored seal only on a key's object made again from none", async () => {
+  const w = await world();
+  const id = await w.key();
+  const next = await newVersion(w, id, 'second');
+  const [call] = await prepared([await keyChange(id, { ...(await readKey(id)).columns, version: next.columns })]);
+  await assert.rejects(db.owner.transaction(async (tx: Transaction) => {
+    await next.insert(tx);
+    await appChanges(tx, [{ ...call!, restores: call!.seal }]);
+  }), (error: unknown) => /restores one/.test(String(error)) || /restores one/.test(String((error as { cause?: unknown }).cause)));
 });
 
 // --- what an object covers (0029; formal/SealedObjects.tla) ------------------------------------------------------
@@ -409,22 +540,38 @@ test('an end undone around the vault, its row read live again, is refused as tam
   assert.equal((await rows(db.owner, sql`SELECT number FROM log_changes`)).length, before.length);
 });
 
-test("a reference broken while its holder is archived: its row's end alone, so the holder unarchived reads it ended, live as replayed (T125)", async () => {
+test("a reference broken while its holder is archived: its row's end, and its kept object logged ended (written ended, deleted again), so the holder unarchived reads it ended, live as replayed (T125, T134)", async () => {
   const w = await world();
   const source = await w.key();
   const vault = await deciding();
   const { holder, via } = await reference(w, vault, source);
   await write([await keyChange(holder, null)], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = ${new Date().toISOString()} WHERE id = ${holder}`));
-  const before = (await rows(db.owner, sql`SELECT number FROM log_changes`)).length;
   assert.ok((await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] })).ok);
-  // No object changes (the holder has none); its row says it ended.
-  assert.equal((await rows(db.owner, sql`SELECT number FROM log_changes`)).length, before);
+  // Still no object (the delete after the write); its row says it ended, and the object its unarchive restores too.
+  assert.deepEqual(await opsOf({ kind: 'secret', id: holder }), ['secret.write', 'secret.delete', 'secret.write', 'secret.delete']);
+  assert.equal((await readKey(holder)).seal, null);
   const [at] = await endedAt(holder);
   assert.ok(at !== null && at !== undefined);
-  // Unarchived as it is: an ended reference's object, no source.
+  const archived = await used(w, holder);
+  assert.ok(!archived.ok && !['stale', 'tampered'].includes(codeOf(archived)!), JSON.stringify(archived));
+  // Unarchived as it is: an ended reference's object, no source, the one its log kept.
   await write([await keyChange(holder, (await readKey(holder)).columns)], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = NULL WHERE id = ${holder}`));
   assert.equal(codeOf(await used(w, holder)), 'ended');
   await replayAgrees();
+});
+
+test("an archived holder's end cleared by a writer: its unarchive would restore the reference live, but its log kept it ended, so it is refused `stale` and nothing is sealed (T134, EndWhileArchived)", async () => {
+  const w = await world();
+  const source = await w.key();
+  const vault = await deciding();
+  const { holder, via } = await reference(w, vault, source);
+  await write([await keyChange(holder, null)], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = ${new Date().toISOString()} WHERE id = ${holder}`));
+  assert.ok((await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] })).ok);
+  await run(db.owner, sql`UPDATE secret_references SET ended_at = NULL WHERE secret_id = ${holder}`);
+  const restore = await keyChange(holder, (await readKey(holder)).columns);
+  assert.equal(restore.kind === 'secret' && restore.restores, true);
+  await assert.rejects(prepared([restore]), (error: unknown) => error instanceof NotLogged && error.fault === 'stale');
+  assert.deepEqual(await opsOf({ kind: 'secret', id: holder }), ['secret.write', 'secret.delete', 'secret.write', 'secret.delete']);
 });
 
 test("a reference broken whose holder 0.14's log alone holds (no seal, no change: before the cutover): its row's end alone, no change, so no genesis seals it live (T125)", async () => {
@@ -714,7 +861,7 @@ test("an environment's own archival and its project's are apart: either edited a
   await run(db.owner, sql`UPDATE environments SET archived_at = NULL WHERE id = ${through}`);
   assert.equal(codeOf(await used(w, id, { place: through })), 'tampered');
   const edited = await readEnvironment(through);
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: through, before: edited, after: { ...edited.columns, projectArchived: false } }]),
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: through, before: edited, after: { ...edited.columns, projectArchived: false } }], new Map()),
     (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
   // The project's archival cleared around the app: a use in its environment refused too.
   await run(db.owner, sql`UPDATE environments SET archived_at = ${new Date().toISOString()} WHERE id = ${through}`);
@@ -742,6 +889,6 @@ test("a plain value's text under its seal: its digest in its object and its chan
   assert.equal(codeOf(await used(w, holder)), 'tampered');
   // And the next write of it, prepared from the edited text, is refused: the vault seals no edit in.
   const archive = await keyChange(id, null);
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [archive]), (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [archive], new Map()), (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
 });
 

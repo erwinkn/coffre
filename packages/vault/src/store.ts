@@ -934,6 +934,21 @@ export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buf
 }
 
 /**
+ * Each object's newest change that left a seal, by its key in the log: what
+ * an unarchive restores (an archived key's newest change is its
+ * `secret.delete`, which left none). One probe of the object's changes
+ * each, newest first.
+ */
+export async function newestSealedChanges(db: Queryable, refs: readonly Ref[]): Promise<Map<string, { number: bigint; at: number; object: string; payload: string; seal: Buffer }>> {
+  if (refs.length === 0) return new Map();
+  const objects = sql.join(refs.map((ref) => sql`${objectKey(ref)}`), sql`, `);
+  const found = await rowsOf<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | Uint8Array }>(db, sql`SELECT c.number, c.at, c.object, c.payload, c.seal
+    FROM log_changes c WHERE c.object IN (${objects})
+     AND c.number = (SELECT d.number FROM log_changes d WHERE d.object = c.object AND d.seal IS NOT NULL ORDER BY d.number DESC LIMIT 1)`);
+  return new Map(found.map((row) => [row.object, { number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: Buffer.from(row.seal) }]));
+}
+
+/**
  * A key's source as its object holds it: its newest reference row's, unless
  * that row has ended (`ended_at`, 0029): a reference broken, replaced or
  * cut. Null for a key with no reference row. `secretId`: the key's id, as
@@ -980,8 +995,8 @@ export async function endReferenceRows(tx: Transaction, ids: readonly string[], 
  * A change as `change_input` takes it: the object, the request it is (a
  * retry finds its entry), when and by whom, what it does (`payload`, the
  * op as logged), the object it leaves where the function writes it
- * (`value`), the seal it was read at and the one it leaves, and the
- * entry's MAC.
+ * (`value`), the seal it was read at and the one it leaves (none: a key
+ * deleted), and the entry's MAC.
  */
 export type ChangeCall = {
   ref: Ref;
@@ -991,7 +1006,7 @@ export type ChangeCall = {
   payload: string;
   value: string | null;
   sealFrom: Buffer | null;
-  seal: Buffer;
+  seal: Buffer | null;
   mac: Buffer;
 };
 
@@ -1037,14 +1052,17 @@ export function isStale(error: unknown): boolean {
 
 class StaleRow extends Error {}
 
-/** The ops `change_input` takes, by kind (0023, 0029): the cutover's genesis on any. A key's: its reference's end. */
+/**
+ * The ops `change_input` takes, by kind (0023, 0029, 0030): the cutover's genesis on any. A key's: its reference's
+ * end, and an archived holder's object deleted again after its end.
+ */
 const KNOWN_OPS: Record<Kind, readonly string[]> = {
   principal: ['member.add', 'member.role', 'member.remove', 'member.restore', 'access.grant', 'access.revoke'],
   environment: ['environment.protect', 'environment.rename', 'environment.archive'],
   roles: ['role.define'],
   policy: ['bulk.limit'],
   credential: [],
-  secret: ['secret.write'],
+  secret: ['secret.write', 'secret.delete'],
 };
 
 /** `change_input`, step for step, on SQLite. */
@@ -1088,11 +1106,13 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
         done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(and(eq(secrets.id, ref.id), from(secrets.seal))));
         break;
       }
-      // A reference's end (0029): the holder, live with no version of its own, left with no source, its newest reference
-      // row ended, which must stand.
-      const [row] = await tx.select({ projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets)
-        .where(and(eq(secrets.id, ref.id), from(secrets.seal), isNull(secrets.archivedAt), isNull(secrets.currentVersionId)));
-      const ends = row !== undefined && value.kind === 'secret' && value.id === ref.id && row.projectId === value.projectId && row.environmentId === value.environmentId
+      // A reference's end (0029): the holder, with no version of its own, left with no source. Live, from its seal, its
+      // newest reference row ended, which must stand; archived, from none, its row ended by its id already
+      // (`end_reference`), and its object deleted again after (0030).
+      const [row] = await tx.select({ projectId: secrets.projectId, environmentId: secrets.environmentId, archivedAt: secrets.archivedAt }).from(secrets)
+        .where(and(eq(secrets.id, ref.id), from(secrets.seal), isNull(secrets.currentVersionId)));
+      const ends = row !== undefined && (row.archivedAt === null) === (call.sealFrom !== null)
+        && value.kind === 'secret' && value.id === ref.id && row.projectId === value.projectId && row.environmentId === value.environmentId
         && value.version === '' && value.nature === 'secret' && value.key === null && value.digest === null && value.source === null
         && value.reference === null;
       if (!ends) {
@@ -1100,6 +1120,7 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
         break;
       }
       done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(eq(secrets.id, ref.id)));
+      if (row.archivedAt !== null) break;
       const [newest] = await tx.select({ id: secretReferences.id, endedAt: secretReferences.endedAt }).from(secretReferences)
         .where(eq(secretReferences.secretId, ref.id)).orderBy(desc(secretReferences.createdSeq)).limit(1);
       if (newest === undefined || newest.endedAt !== null) throw new StaleRow("the secret object's reference has no standing row: stale");

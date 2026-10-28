@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **0.15's unarchive never seals rows edited while their key was
+  archived, behind its switch: nothing calls it yet.**
+  `0030_unarchive_restores` replaces `app_change` (a new argument,
+  `p_restores`) and `change_input`, which only 0.15's log calls. With
+  0.15's log on, an unarchive (and an override made again) restores the
+  object its key's log last sealed, and is refused, reported as a stale
+  row, when its rows make another: a version or a reference edited in the
+  database meanwhile, or an older version put back. A reference's end on
+  an archived key is logged on what that key would be unarchived as, so
+  it comes back ended. With the switch off, as every deployment has it,
+  nothing changes.
 - **JIT is off for the runtime logins.** Every `coffre migrate` run now
   sets `jit = off` for `coffre_runtime`, `coffre_vault_runtime` and
   `coffre_vault_hot`, when they lack it, beside the privileges it already

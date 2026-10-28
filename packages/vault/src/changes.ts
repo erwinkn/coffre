@@ -7,7 +7,7 @@ import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type Input, type 
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac } from './log-entry.ts';
 import { credentialObject, environmentObject, secretObject } from './objects.ts';
-import { changeInputs, isStale, newestChange, readObject, type ChangeCall, type ReadKind } from './store.ts';
+import { changeInputs, isStale, newestChange, newestSealedChanges, readObject, type ChangeCall, type ReadKind } from './store.ts';
 
 /**
  * 0.15's change path (plan PR 4a; formal/HotPathOne.tla's change actions):
@@ -141,6 +141,11 @@ export class Changes {
     return heldByLog(this.#keys.seals, db, ref);
   }
 
+  /** What a key with no object would be unarchived as (`keptObjects`): null for one its log never held. */
+  async kept(db: Queryable, ref: Ref & { kind: 'secret' }): Promise<Input | null> {
+    return (await keptObjects(this.#keys.seals, db, [ref])).get(objectKey(ref))?.object ?? null;
+  }
+
   /**
    * Read and check each object staged, in `db` before the decision's writes
    * run, and apply its ops to it in turn.
@@ -171,6 +176,8 @@ export class Changes {
       if (row !== null) throw new NotLogged(ref, 'tampered');
     }
     if (row !== null && !sealed(this.#keys.seals, ref, row, seal)) throw new NotLogged(ref, 'tampered');
+    // Gone (a key archived: `secret.delete`), its row no object and no seal: only an op that makes one applies.
+    if (newest !== null && newest.seal === null && row === null && seal === null) return { logged: true, seal, now: null, afters: [] };
     // A row whose seal is not its newest change's; one with no row the log has a change for (deleted outright).
     if (newest !== null ? seal === null || newest.seal === null || !newest.seal.equals(seal) : row !== null) throw new NotLogged(ref, 'stale');
     return { logged: true, seal, now: row, afters: [] };
@@ -201,11 +208,11 @@ export class Changes {
       }
       let from = base;
       steps.forEach(({ op, actor }, i) => {
-        // No op of these deletes an object: each leaves one to seal.
+        // A key deleted again (an archived holder's end) leaves no object, and no seal.
         const after = afters[i]!;
-        const seal = sealOf(this.#keys.seals[0]!, ref, after);
+        const seal = after === null ? null : sealOf(this.#keys.seals[0]!, ref, after);
         const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op, old), seal };
-        calls.push({ ref, ...row, value: writes(ref) ? canonical(after) : null, sealFrom: from, mac: entryMac(this.#keys.mac, { tree: 'changes', row }) });
+        calls.push({ ref, ...row, value: writes(ref) && after !== null ? canonical(after) : null, sealFrom: from, mac: entryMac(this.#keys.mac, { tree: 'changes', row }) });
         from = seal;
       });
     }
@@ -222,10 +229,40 @@ export class Changes {
 }
 
 /**
+ * What each key in `refs` would be unarchived as: the object its log's
+ * newest change with a seal left it (`newestSealedChanges`; an archive,
+ * `secret.delete`, leaves none), by the key's key in the log; null for a key
+ * the log never held (0.14's alone, before the cutover). That change's seal
+ * is checked over the object its payload makes (`tampered` otherwise). A
+ * key's every sealed change is its whole object: a write or a genesis.
+ * Read outside any transaction: `app_change` holds the seal to the log's
+ * newest sealed one again under the fence (formal/SealedObjects.tla,
+ * RestorePinned).
+ */
+export async function keptObjects(keys: SealKeys, db: Queryable, refs: readonly (Ref & { kind: 'secret' })[]): Promise<Map<string, { object: Input; seal: Buffer } | null>> {
+  const found = await newestSealedChanges(db, refs);
+  const kept = new Map<string, { object: Input; seal: Buffer } | null>();
+  for (const ref of refs) {
+    const row = found.get(objectKey(ref));
+    if (row === undefined) {
+      kept.set(objectKey(ref), null);
+      continue;
+    }
+    // Its payload names the key (`loggedChange` holds it to the row's key in the log), and makes its whole object.
+    const change = loggedChange(row);
+    const object = change === null ? undefined : applyOp(null, ref, change.op);
+    if (object == null || !sealed(keys, ref, object, row.seal)) throw new NotLogged(ref, 'tampered');
+    kept.set(objectKey(ref), { object, seal: row.seal });
+  }
+  return kept;
+}
+
+/**
  * The changes the app is about to write to objects its own rows hold (plan
  * PR 4b, `prepare`): credentials, keys and environments, sealed for its
  * transaction to commit (`app_change`, 0025), at `at`, by `actor`. Pure:
- * the vault reads nothing.
+ * what the vault reads is `kept`, each unarchived key's object as its log
+ * last sealed it (`keptObjects`).
  *
  * - **Before:** the row's columns as the app read them, and their seal,
  *   which must be the vault's over them (else `tampered`). That it is the
@@ -245,8 +282,14 @@ export class Changes {
  *   protection, which is the vault's) are a bug of the app's, which fails
  *   the call. Columns no object holds (a credential's MAC, a key's name, an
  *   environment's display name) are no change.
+ * - **An unarchive** (`restores`) restores the object its key's log last
+ *   sealed, its rows having no seal while archived (T134): rows that make
+ *   any other (a version, a reference row or a source edited meanwhile, an
+ *   older version put back, an end cleared) are `stale`. Its change carries
+ *   that seal, which `app_change` holds to the log's newest sealed one. A
+ *   key its log never held is 0.14's, before the cutover: logged nothing.
  */
-export function prepareChanges(keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[]): PreparedChange[] {
+export function prepareChanges(keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[], kept: ReadonlyMap<string, { object: Input; seal: Buffer } | null>): PreparedChange[] {
   const prepared: PreparedChange[] = [];
   for (const change of changes) {
     const { kind, id, before } = change;
@@ -257,9 +300,22 @@ export function prepareChanges(keys: ChangeKeys, at: number, actor: string, chan
     }
     const ref: Ref = { kind, id };
     const object = objectKey(ref);
+    const unlogged = { kind, id, requestId: null, at, object, actor, payload: null, sealFrom: null, seal: null, mac: null, restores: null };
     if (before !== null && before.seal === null) {
-      prepared.push({ kind, id, requestId: null, at, object, actor, payload: null, sealFrom: null, seal: null, mac: null });
+      prepared.push(unlogged);
       continue;
+    }
+    let restores: Buffer | null = null;
+    if (change.kind === 'secret' && change.restores === true) {
+      if (before !== null || after === null) throw new Error(`an unarchive makes an archived key's object again: the ${kind} ${id} is none to restore`);
+      const last = kept.get(object);
+      if (last === undefined) throw new Error(`the ${kind} ${id} is restored from what its log last sealed, which was not read`);
+      if (last === null) {
+        prepared.push(unlogged);
+        continue;
+      }
+      if (!sameObject(keys.seals[0]!, ref, last.object, after)) throw new NotLogged(ref, 'stale');
+      restores = last.seal;
     }
     let now: Input | null = before === null ? null : OBJECTS[kind](before.columns as never);
     let from: Buffer | null = before === null ? null : Buffer.from(before.seal!, 'base64');
@@ -271,7 +327,10 @@ export function prepareChanges(keys: ChangeKeys, at: number, actor: string, chan
       const seal = next === null ? null : sealOf(keys.seals[0]!, ref, next);
       const row = { at, requestId: randomUUID(), object, actor, payload: payloadOf(ref, op), seal };
       const mac = entryMac(keys.mac, { tree: 'changes', row });
-      prepared.push({ kind, id, ...row, seal: seal?.toString('base64') ?? null, sealFrom: from?.toString('base64') ?? null, mac: mac.toString('base64') });
+      prepared.push({
+        kind, id, ...row, seal: seal?.toString('base64') ?? null, sealFrom: from?.toString('base64') ?? null, mac: mac.toString('base64'),
+        restores: restores?.toString('base64') ?? null,
+      });
       now = next;
       from = seal;
     }
