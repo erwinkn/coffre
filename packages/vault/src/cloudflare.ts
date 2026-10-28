@@ -78,9 +78,10 @@ const ready = new WeakMap<object, { database: PostgresDatabase; hotDatabase?: Po
  * call is done.
  */
 /**
- * Sealed entries the whole walk of 0.15's log takes in one call of the
- * vault Worker (`verifyTrees`, `walks.whole`), within the 30 s of CPU a
- * paid plan's call has by default. It costs some 30 µs an entry warm
+ * The work the whole walk of 0.15's log does in one call of the vault
+ * Worker (`verifyTrees`, `walks.whole`), in entries, a checkpoint counting
+ * as `PAIR_WORK` (ten), within the 30 s of CPU a paid plan's call has by
+ * default. It costs some 30 µs an entry warm
  * (measured on Node at 50,000, 0.15-plan.md, "As built: PR 8"), about
  * 2.5 times that on a cold isolate: 200,000 entries is 6 s warm and 15 s
  * cold, room left for the row audit. Past it, the call stops at the next

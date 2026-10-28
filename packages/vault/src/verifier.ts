@@ -65,7 +65,7 @@ export async function verifierKeys(seeds: readonly Uint8Array[]): Promise<Verifi
 export type VerifyOptions = {
   /** The walk from the first entry, with the replay and the row audit; else a page's check. */
   whole?: boolean;
-  /** Sealed entries a whole walk takes in one call, to the first pair past them; past it, `tooLarge`. */
+  /** The work a whole walk does in one call, in entries, a pair as `PAIR_WORK` (`verifyLog`); past it, `tooLarge`. */
   limit?: number;
   /**
    * Pairs held outside the database: the signer's memory, a witness's

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import { decodePair, openPair } from '@coffre/core/merkle';
+import { decodePair, openPair, PAIR_WORK } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { TreesBusy, TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
@@ -237,16 +237,17 @@ test('a page\'s check names a forged entry above the newest pair, a forged newes
 });
 
 test('a whole walk past what its vault walks in one call stops at a pair and says where to walk it; what it found on the way stands', async () => {
-  const w = await instance({ whole: 3 });
+  // Three pairs' worth of work, and their entries (`PAIR_WORK` a pair).
+  const w = await instance({ whole: 3 * PAIR_WORK + 3 });
   assert.ok((await w.use()).ok);
-  // A pair each, past the three entries a call walks.
+  // A pair each, past the work a call does.
   for (let i = 0; i < 4; i += 1) assert.ok((await w.use(await w.key())).ok);
   await w.cp.tick();
   const short = await w.whole();
   assert.ok(!short.ok);
   assert.deepEqual(short.problems, []);
   assert.match(short.tooLarge ?? '', /^0\.15's log holds more than this vault walks in one call: the walk stopped after \d+ entries, at the checkpoint up to \d+, short of the present\. .*walk the log whole on Node/);
-  assert.ok(short.sealed >= 3 && short.checkpoint !== null && BigInt(short.checkpoint.upto) < w.cp.pair.pair.upto);
+  assert.ok(short.sealed >= 2 && short.checkpoints <= 3 && short.checkpoint !== null && BigInt(short.checkpoint.upto) < w.cp.pair.pair.upto, JSON.stringify(short));
   // A page's check is never bounded so: it reads a tick's worth.
   clean(await w.verify());
   // The log's first entry forged: found before the walk stops.
@@ -444,15 +445,16 @@ test('review r9: a floor raised on the newest pair\'s row hides no entry above i
 test('review r9: the whole walk\'s bound counts the entries above the newest pair too', async () => {
   const w = await instance();
   const fresh = [await w.key(), await w.key(), await w.key()];
-  const { sealed } = await w.whole();
+  const { sealed, checkpoints } = await w.whole();
+  const work = sealed + checkpoints * PAIR_WORK;
   for (const secret of fresh) assert.ok((await w.use(secret)).ok);
-  // Room for every sealed entry and two of the three above: stopped, not walked past its bound.
-  const short = checkedOf(await (await w.reopened({ whole: sealed + 2 })).verifyTrees!({ whole: true }));
+  // Room for every sealed entry and pair, and two of the three entries above: stopped, not walked past its bound.
+  const short = checkedOf(await (await w.reopened({ whole: work + 2 })).verifyTrees!({ whole: true }));
   assert.ok(!short.ok && short.tooLarge !== null && short.problems.length === 0, JSON.stringify(short));
-  clean(checkedOf(await (await w.reopened({ whole: sealed + 3 })).verifyTrees!({ whole: true })));
-  // Exactly as many as the log holds, all sealed: walked whole, its rows audited, not called too large (review r12).
+  clean(checkedOf(await (await w.reopened({ whole: work + 3 })).verifyTrees!({ whole: true })));
+  // Exactly as much as the log holds, all sealed: walked whole, its rows audited, not called too large (review r12).
   await w.cp.tick();
-  const exact = checkedOf(await (await w.reopened({ whole: sealed + 3 })).verifyTrees!({ whole: true }));
+  const exact = checkedOf(await (await w.reopened({ whole: work + 3 + PAIR_WORK })).verifyTrees!({ whole: true }));
   clean(exact);
   assert.deepEqual([exact.sealed, exact.unsealed], [sealed + 3, 0]);
 });

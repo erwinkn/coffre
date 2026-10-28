@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
+import { decodePair, encodePair, leafHash, noteSigner, openPair, PAIR_WORK, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 
 import { Checkpointer, FRESH_MS, heldIn, localWitness, type Witness } from '../src/checkpointer.ts';
 import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
@@ -825,19 +825,36 @@ test('review r11: a walk under `limit` reads no further than it, however many en
   const count = () => (checked += 1, null);
   const short = await verifyLog(store, { verifiers: k.verifiers, limit: 3, check: count });
   assert.deepEqual([short.done, short.sealed, checked], [false, 0, 0], 'stopped at the pair before the window, none of it read');
-  // With room for the window, walked whole; and the entries above the newest pair count against it too.
-  const whole = await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 });
+  // With room for the window and its pair (`PAIR_WORK`), walked whole; and the entries above the newest pair count too.
+  const W = PAIR_WORK;
+  const whole = await verifyLog(store, { verifiers: k.verifiers, limit: 10_000 + W + 1 });
   assert.ok(whole.ok && whole.done && whole.sealed === 10_000, JSON.stringify(whole));
   for (let i = 0; i < 2; i += 1) store.append('uses', `v-${i}`);
-  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
-  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_003 })).done);
-  // Exactly as many as the log holds: walked whole, not called too large (review r12); one fewer, stopped.
-  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_002 })).done);
-  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
+  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_000 + W + 1 })).done, false);
+  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_000 + W + 3 })).done);
+  // Exactly as much as the log holds: walked whole, not called too large (review r12); one fewer, stopped.
+  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 10_000 + W + 2 })).done);
+  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_000 + W + 1 })).done, false);
   assert.ok((await cp.tick()).signed);
-  const exact = await verifyLog(store, { verifiers: k.verifiers, limit: 10_002 });
+  const exact = await verifyLog(store, { verifiers: k.verifiers, limit: 10_002 + 2 * W });
   assert.ok(exact.ok && exact.done && exact.sealed === 10_002 && exact.unsealed === 0, JSON.stringify(exact));
-  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 })).done, false);
+  assert.equal((await verifyLog(store, { verifiers: k.verifiers, limit: 10_001 + 2 * W })).done, false);
+});
+
+test('review r13: under `limit`, each pair opened costs PAIR_WORK: a log of empty checkpoints is bounded too', async () => {
+  const { k, store, open } = await setup();
+  const cp = await open();
+  // A pair over every number rolled back and nothing else: windows of no entry, each two signatures to check.
+  for (let i = 0; i < 250; i += 1) {
+    store.skip();
+    assert.ok((await cp.tick()).signed);
+  }
+  const all = await verifyLog(store, { verifiers: k.verifiers });
+  assert.ok(all.ok && all.done && all.sealed === 0 && all.checkpoints === 250, JSON.stringify(all));
+  // Work for 30 pairs: no more opened, the walk ended at the last it verified.
+  const short = await verifyLog(store, { verifiers: k.verifiers, limit: 30 * PAIR_WORK + PAIR_WORK - 1 });
+  assert.deepEqual([short.ok, short.done, short.checkpoints], [true, false, 30]);
+  assert.ok((await verifyLog(store, { verifiers: k.verifiers, limit: 250 * PAIR_WORK + 1 })).done);
 });
 
 test('review r11: a signer\'s memory that does not read as a pair is refused, never held as none; none yet is none', async () => {

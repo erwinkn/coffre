@@ -3420,7 +3420,7 @@ const FIRST_ENTRY: Resumed = { ok: true, entry: null, at: START, tally: EMPTY_TA
 /**
  * How far one call walks the log, in entries: a checkpoint's walk from the
  * last, its rehash of the past, and a verification's own walk; and the
- * whole walk of 0.15's log (`verifyTrees`), sealed entries a call, which
+ * whole walk of 0.15's log (`verifyTrees`), its work a call in entries, which
  * Node leaves unbounded and a Worker bounds by its CPU time (cloudflare.ts).
  */
 export type Walks = { checkpoint: number; scrub: number; verify: number; whole: number };

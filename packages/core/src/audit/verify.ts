@@ -19,11 +19,12 @@ import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verify
  * MAC, its request ID) is the caller's to check, through `check`, which sees
  * every entry walked, in number order. The cost is the entries since the
  * start: a caller that keeps the `head` it verified walks only what came
- * after (R25). With `limit`, a walk reads no more than that many entries,
- * and one to tell what lies past them: it ends at the last pair whose
- * window fits (`done` false) when anything does, so a caller bounded in
- * time says so rather than walk on; a log of exactly that many is walked
- * whole (review r12).
+ * after (R25). With `limit`, a walk does no more than that much work, in
+ * entries, a pair opened costing `PAIR_WORK` (review r13), and reads one
+ * entry more to tell what lies past it: it ends at the last pair it
+ * verified (`done` false) when anything does, so a caller bounded in time
+ * says so rather than walk on; a log of exactly that much is walked whole
+ * (review r12).
  *
  * Retention (plan PR 7, formal/Seal.tla) drops days of uses, and the uses
  * tree's tiles, below a cut that a retention change names; changes are kept
@@ -94,6 +95,13 @@ export type VerifyOptions = {
 };
 
 const PAGE = 100;
+
+/**
+ * What a pair costs a walk under `limit`, in entries: its two notes'
+ * signatures, about 0.3 ms against 30 µs an entry walked whole (review r13,
+ * measured on Node).
+ */
+export const PAIR_WORK = 10;
 
 export async function verifyLog(reader: LogReader, opts: VerifyOptions): Promise<Verdict> {
   const problems: string[] = [];
@@ -251,19 +259,31 @@ async function walk(
       previous = e.number > previous ? e.number : previous;
     }
   };
-  // Under `limit`, no read goes past it: what is left of it, and one entry more to tell a window that would.
+  // Under `limit`, the work a walk does, in entries, a pair opened as `PAIR_WORK` (review r13: a sparse log, pairs
+  // over few entries or none, is all signatures). No read goes past what is left: that, and one entry more to tell a
+  // window that would.
   const bound = opts.limit !== undefined && Number.isFinite(opts.limit) ? opts.limit : undefined;
-  const room = () => (bound === undefined ? undefined : Math.max(bound - verdict.sealed, 0) + 1);
+  let spent = 0;
+  const room = () => (bound === undefined ? undefined : Math.max(bound - spent, 0) + 1);
   const bounded = (limit: number | undefined) => ({ floor, ...(limit === undefined ? {} : { limit }) });
   for (let rows = await reader.pairs(start.pair.upto, PAGE); ; rows = await reader.pairs(rows.at(-1)!.upto, PAGE)) {
+    // As many pairs as the work left pays for; past them the walk ends, at the last pair it verified.
+    const fit = bound === undefined ? rows.length : Math.min(rows.length, Math.max(Math.floor((bound - spent) / PAIR_WORK), 0));
+    const page = rows.slice(0, fit);
+    const short = page.length < rows.length;
+    if (short && page.length === 0) {
+      verdict.done = false;
+      return done(last.notes);
+    }
+    spent += page.length * PAIR_WORK;
     const stops: Stop[] = [];
-    for (const row of rows) {
+    for (const row of page) {
       const pair = await open(row);
       if (pair !== null) stops.push({ pair, notes: row.notes, row: true });
     }
-    const final = rows.length < PAGE;
+    const final = !short && rows.length < PAGE;
     const newest = (stops.at(-1) ?? last).pair.upto;
-    while (above.length > 0 && (final || above[0]!.pair.upto <= rows.at(-1)!.upto)) {
+    while (above.length > 0 && (final || above[0]!.pair.upto <= page.at(-1)!.upto)) {
       const anchor = above.shift()!;
       const row = stops.find((s) => s.pair.upto === anchor.pair.upto);
       if (row !== undefined) {
@@ -295,6 +315,7 @@ async function walk(
         walkEntries(window);
         for (const tree of TREES) edges[tree].append(window.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns)));
         verdict.sealed += window.length;
+        spent += window.length;
         // Time never runs back along one history: retention's freshness step rests on it. Equal is honest (a window of
         // gaps keeps the time).
         if (stop.pair.at < time) problems.push(`${stop.row ? 'checkpoint' : 'the pair held outside up to'} ${stop.pair.upto}: signed at ${stop.pair.at}, before the pair before it (${time}): time runs back`);
@@ -324,6 +345,10 @@ async function walk(
           last = stop;
         }
       }
+    }
+    if (short) {
+      verdict.done = false;
+      return done(last.notes);
     }
     if (final) break;
   }
