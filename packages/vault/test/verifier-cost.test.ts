@@ -18,7 +18,7 @@ import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
 import { ABOVE_NEWEST, verifierKeys, verifyTrees } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
-import { openTestDatabase, postgresOnly, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, postgresOnly, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -99,7 +99,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
           const checked = await check();
           const spent = process.cpuUsage(cpu);
           times.push((spent.user + spent.system) / 1000);
-          assert.ok(checked.ok && checked.unsealed === target && checked.sealed === 0, JSON.stringify(checked));
+          assert.ok(checked.ok && checked.unsealed === target && !checked.capped, JSON.stringify(checked));
         }
         times.sort((a, b) => a - b);
         measured[`${below} below, ${target} above`] = { statements: (statements() - before) / 9, cpuMs: Math.round(times[4]! * 100) / 100 };
@@ -116,4 +116,28 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
   assert.equal(counts.size, 1, JSON.stringify(measured));
   // R27's p99 bound, at a tick's worth: CI's slower machines included.
   for (const [where, { cpuMs }] of Object.entries(measured)) if (/ (250|500) above$/.test(where)) assert.ok(cpuMs < 20, `${where}: ${cpuMs} ms`);
+});
+
+test('review r4 (W240): more than `ABOVE_NEWEST` entries above the newest pair are `capped`, not a problem; a forged one among those checked is one', postgresOnly('the deployed engine'), async () => {
+  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles', 'log_changes']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}`);
+  const today = new Date().toISOString().slice(0, 10);
+  await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
+  const seed = randomBytes(32);
+  const mac = logMacKey(seed);
+  const memory = variableMemory();
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  const keys = await verifierKeys([seed]);
+  await uses(100, mac);
+  assert.ok((await cp.tick()).signed);
+  // A checkpointer stalled while uses go on: one more than a check reads.
+  await uses(ABOVE_NEWEST + 1, mac);
+  const anchors = [decodePair(memory.record!)!];
+  const behind = await verifyTrees(db.vault, keys, { anchors });
+  assert.deepEqual([behind.ok, behind.capped, behind.problems, behind.unsealed], [false, true, [], ABOVE_NEWEST]);
+  // The first above the pair, forged: inside what the check reads, so named.
+  const [first] = await rows<{ number: string }>(db.owner, sql`SELECT min(number)::text AS number FROM log_uses WHERE number > ${cp.pair.pair.upto}`);
+  await run(db.owner, sql`UPDATE log_uses SET mac = ${randomBytes(16)} WHERE number = ${BigInt(first!.number)}`);
+  const named = await verifyTrees(db.vault, keys, { anchors });
+  assert.ok(named.capped && named.problems.includes(`${first!.number}: its MAC does not hold`), named.problems.join('\n'));
 });

@@ -8,8 +8,9 @@
   held to the signer's memory where the vault is given it
   (`heldOutside`, which no deployment wires yet), and every entry since by its MAC and
   request (`GET /api/audit/trees`), in four statements and a few
-  milliseconds however long the log; more than 2,000 entries since (a
-  checkpointer behind) is said, not read. Nothing walks 0.15's log whole on a
+  milliseconds however long the log; past 2,000 entries since (a
+  checkpointer behind), the rest is not read, and the page says the sealed
+  log is not checked to its head rather than calling it broken. Nothing walks 0.15's log whole on a
   request: what such a walk reads is the database's to shape, and no
   bound kept it inside a Worker's CPU limit. So an edit a database writer
   makes to old entries, or to rows nobody uses, is not detected until an

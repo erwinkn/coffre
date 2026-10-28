@@ -3,7 +3,7 @@ import type { Database } from '@coffre/db';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { misplaced, type CheckpointStore, type Locating } from './checkpointer.ts';
+import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
 import type { RetentionStore } from './retention.ts';
@@ -86,12 +86,6 @@ function toEntry(r: RawEntry): LogEntry {
   });
 }
 
-/**
- * The `at` a read of the entries in (after, upto] needs: from the floor of the pair at or below `after`, to the slack
- * past the floor of the first pair at or above `upto`, the barrier that sealed it; without one, no upper bound. A
- * verifier gives the floor its pair signed (`floor`): the row's own is a column any writer may raise, which would hide
- * every entry above the newest pair from it (review r9).
- */
 /** A window read's first `limit` entries, by number, when the caller bounds it (`LogReader.entries`). */
 function limitOf(limit: number | undefined): SQL {
   return limit === undefined ? sql`` : sql` LIMIT ${limit}`;
@@ -109,6 +103,12 @@ function first(half: SQL, order: SQL, limit: number | undefined): SQL {
   return limit === undefined ? half : sql`SELECT * FROM (${half} ORDER BY ${order} LIMIT ${limit}) f`;
 }
 
+/**
+ * The `at` a read of the entries in (after, upto] needs: from the floor of the pair at or below `after`, to the slack
+ * past the floor of the first pair at or above `upto`, the barrier that sealed it; without one, no upper bound. A
+ * verifier gives the floor its pair signed (`floor`): the row's own is a column any writer may raise, which would hide
+ * every entry above the newest pair from it (review r9).
+ */
 function bounds(after: bigint, upto: bigint, floor?: number): [SQL, SQL] {
   return [
     floor === undefined ? sql`coalesce((SELECT k.at_floor FROM log_checkpoints k WHERE k.upto <= ${after} ORDER BY k.upto DESC LIMIT 1), 0)` : sql`${floor}`,
@@ -193,7 +193,7 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
   if (found.from === null || found.to === null) return null;
   const [from, to] = [Number(found.from), Number(found.to)];
   if (!(from <= to && to - from <= PROOF_WINDOW)) {
-    throw new Error(`use ${entry.number}'s window is ${from} to ${to} in the uses tree: no window of ${PROOF_WINDOW.toLocaleString('en')} leaves or fewer, so the database's checkpoint sizes are not the signer's, or a tick sealed a stall longer than a proof reads`);
+    throw new Refused(`use ${entry.number}'s window is ${from} to ${to} in the uses tree: no window of ${PROOF_WINDOW.toLocaleString('en')} leaves or fewer, so the database's checkpoint sizes are not the signer's, or a tick sealed a stall longer than a proof reads`);
   }
   const leaf = entryLeaf('uses', entry.number, entry.columns);
   const wanted: TileKey[] = [];
@@ -204,7 +204,7 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
       if (tile.hashes.subarray(offset, offset + 32).equals(leaf)) return { entry, index: i };
     }
   }
-  throw new Error(`use ${entry.number} is in none of its window's leaves: the database changed it since its tick`);
+  throw new Refused(`use ${entry.number} is in none of its window's leaves: the database changed it since its tick`);
 }
 
 /** Postgres's read of the entries in (after, upto], by number, uses from `floor` to `ceiling`: the window's rows (`postgresStore`). */

@@ -1735,9 +1735,8 @@ export type Api = {
         upto: string;
         at: number;
       };
-      checkpoints: number;
-      sealed: number;
       unsealed: number;
+      capped: boolean;
     };
   };
 };

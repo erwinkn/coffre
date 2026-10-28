@@ -6,7 +6,7 @@ import { test } from 'node:test';
 
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 
-import { Checkpointer, FRESH_MS, heldIn, localWitness, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, FRESH_MS, heldIn, localWitness, Refused, type Witness } from '../src/checkpointer.ts';
 import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
 
@@ -368,10 +368,17 @@ test('PR 8 review r4: a change whose proof the database answers wrongly for is r
   const number = store.append('changes', 'revoke');
   // As `locate` refuses a use changed since its tick that holds the change's number.
   store.locate = async () => {
-    throw new Error("use 9 is in none of its window's leaves: the database changed it since its tick");
+    throw new Refused("use 9 is in none of its window's leaves: the database changed it since its tick");
   };
   await assert.rejects(cp.sealThrough(number), /cannot be proved in the signed changes tree: use 9 is in none/);
   assert.ok(alerts.some((a) => /cannot be proved in the signed changes tree/.test(a)));
+  // A failure of the database's to answer at all (a connection dropped) is no refusal: it goes through, no alarm.
+  const before = alerts.length;
+  store.locate = async () => {
+    throw new Error('Connection terminated unexpectedly');
+  };
+  await assert.rejects(cp.sealThrough(number), /^Error: Connection terminated unexpectedly$/);
+  assert.equal(alerts.length, before);
 });
 
 test('review r1: prove() refuses an answer for another entry than the one asked', async () => {
@@ -840,17 +847,24 @@ test('review r11: a signer\'s memory that does not read as a pair is refused, ne
   assert.ok(!(await verify(store, k, { anchors: [remembered] })).ok);
 });
 
-test('PR 8 review r1 (W240): above the newest pair a walk reads at most `above` entries, and nothing above a database behind a pair held outside', async () => {
+test('PR 8 reviews r1, r4 (W240): above the newest pair a walk reads at most `above` entries, `capped` and no problem past them, and nothing above a database behind a pair held outside', async () => {
   const { k, store, memory, open } = await setup();
   const cp = await open();
   await traffic(store, cp, 3);
   const signed = decodePair(memory.record!)!;
-  // A checkpointer stalled: five entries above its pair, three checked, the rest named and never read.
-  for (let i = 0; i < 5; i += 1) store.append('uses', `late-${i}`);
+  // A checkpointer stalled: five entries above its pair, three checked, the rest never read: not to the head, no problem.
+  const late: bigint[] = [];
+  for (let i = 0; i < 5; i += 1) late.push(store.append('uses', `late-${i}`));
   const capped = await verify(store, k, { from: signed, above: 3 });
-  assert.equal(capped.unsealed, 3);
-  assert.ok(capped.problems.some((p) => /^more than 3 entries above the newest checkpoint \(up to \d+\): the checkpointer is behind/.test(p)), capped.problems.join('\n'));
-  assert.ok((await verify(store, k, { from: signed, above: 5 })).ok);
+  assert.deepEqual([capped.unsealed, capped.capped, capped.problems], [3, true, []]);
+  const whole = await verify(store, k, { from: signed, above: 5 });
+  assert.ok(whole.ok && !whole.capped);
+  // A forged entry among the three checked is a problem still, capped or not.
+  const forged = store.log.find((e) => e.number === late[1])!;
+  (forged.columns as unknown[])[1] = 'forged';
+  const named = await verify(store, k, { from: signed, above: 3 });
+  assert.ok(named.capped && named.problems.includes(`${late[1]}: mac`), named.problems.join('\n'));
+  (forged.columns as unknown[])[1] = 'late-1';
   // Every checkpoint but the genesis deleted, the entries kept: behind the signer's pair, and not one entry read.
   for (const upto of [...store.rows.keys()]) if (upto > 0n) store.rows.delete(upto);
   let read = 0;

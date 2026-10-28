@@ -78,7 +78,10 @@ export async function verification(deployment: Deployment, { admin }: People): P
   // 0.15's log, where the deployment keeps it (plan PR 8): its newest checkpoint and every entry since, as the audit
   // page checks it. A deployment of 0.14's log alone has none (`kept` false).
   const trees = await admin.api.audit.verifyTrees();
-  expect(!trees.kept || trees.ok, "0.15's log does not verify from its newest checkpoint", trees);
+  expect(!trees.kept || trees.problems.length === 0, "0.15's log does not verify from its newest checkpoint", trees);
+  // Not checked to its head, as 0.14's checkpoints catching up above: a checkpointer behind, no break of the log, and
+  // no pass either (review r4 of W240).
+  expect(!trees.kept || !trees.capped, "0.15's log is not checked to its head: more entries wait above its newest checkpoint than a check reads, the checkpointer behind", trees);
   const page = await admin.browser.fetch('/audit');
   const html = await page.text();
   expect(page.status === 200 && html.includes('chain-seal') && !html.includes('Verifying'), 'the audit page was not sent with its verification result', { status: page.status });

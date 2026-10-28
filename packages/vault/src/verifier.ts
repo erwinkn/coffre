@@ -59,7 +59,7 @@ export type VerifyOptions = {
  * The most entries above the newest pair a check reads: four ticks' worth
  * at R44's 1,000 uses a second, 14 ms measured on a developer's machine
  * (verifier-cost.test.ts). More is a checkpointer behind, or rows a writer
- * planted, and is said, never read (review r1).
+ * planted, and is said (`capped`), never read (reviews r1, r4).
  */
 export const ABOVE_NEWEST = 2_000;
 
@@ -99,13 +99,12 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
   const head = verdict.headPair;
   return {
     kept: true,
-    ok: problems.length === 0,
+    ok: problems.length === 0 && !verdict.capped,
     problems,
     // The genesis pair seals nothing and is signed at time 0: no checkpoint yet.
     checkpoint: head === null || head.upto === 0n ? null : { upto: head.upto.toString(), at: head.at },
-    checkpoints: verdict.checkpoints,
-    sealed: verdict.sealed,
     unsealed: verdict.unsealed,
+    capped: verdict.capped,
     behind: verdict.behind,
   };
 }

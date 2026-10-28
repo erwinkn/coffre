@@ -255,14 +255,19 @@ export type TreeVerification =
   | { kept: false }
   | {
       kept: true;
+      /** Checked to the head, and nothing wrong found. */
       ok: boolean;
       problems: string[];
       /** The newest pair checked, and when it was signed (ms); null before the first. */
       checkpoint: { upto: string; at: number } | null;
-      /** Pairs walked past the start, entries sealed under them, and entries above the newest. */
-      checkpoints: number;
-      sealed: number;
+      /** The entries above the newest pair it checked. */
       unsealed: number;
+      /**
+       * Whether more lie there than a check reads (`ABOVE_NEWEST`, 2,000): a
+       * checkpointer behind. Not checked to the head, so `ok` is false; no
+       * problem either, and never a break of the log.
+       */
+      capped: boolean;
     };
 
 /**

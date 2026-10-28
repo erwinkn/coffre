@@ -107,13 +107,21 @@ export type Memory = { last(): Promise<string | null>; remember(record: string):
 export type Locating = { at?: number; tree?: TreeName };
 
 /**
+ * An answer of the database a proof refuses: an entry in the other tree, a
+ * window no checkpoints make, an entry changed since its tick. Never an I/O
+ * failure, which a caller may ask again past; `sealThrough` alarms on these
+ * alone (PR 8 review r4 of W240).
+ */
+export class Refused extends Error {}
+
+/**
  * An entry found in the other tree than the one asked: a writer who deleted
  * a change and renumbered a use into its place (KindInMac). Refused before
  * its index is sought, which for a use reads its window's tiles, whose
  * bounds are the database's (PR 8 review r2).
  */
-export function misplaced(entry: LogEntry, tree: TreeName): Error {
-  return new Error(`entry ${entry.number} is in the ${entry.tree} tree, not the ${tree}: a ${entry.tree === 'uses' ? 'use' : 'change'} holds its number`);
+export function misplaced(entry: LogEntry, tree: TreeName): Refused {
+  return new Refused(`entry ${entry.number} is in the ${entry.tree} tree, not the ${tree}: a ${entry.tree === 'uses' ? 'use' : 'change'} holds its number`);
 }
 
 /**
@@ -576,7 +584,8 @@ export class Checkpointer {
     try {
       proof = await this.proveAt(number, head, { tree: 'changes' });
     } catch (error) {
-      const message = `change ${number} cannot be proved in the signed changes tree: ${(error as Error).message}`;
+      if (!(error instanceof Refused)) throw error;
+      const message = `change ${number} cannot be proved in the signed changes tree: ${error.message}`;
       this.options.alert(message);
       throw new Error(message);
     }
@@ -608,16 +617,16 @@ export class Checkpointer {
     const { entry, index } = found;
     if (options.tree !== undefined && entry.tree !== options.tree) throw misplaced(entry, options.tree);
     if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
-      throw new Error(`the database answered for another entry than ${number}`);
+      throw new Refused(`the database answered for another entry than ${number}`);
     }
     // An entry numbered at or below the pair's place is in its tree by construction: an index past the tree is the
     // database's answer, not the tree's.
     const size = pair[entry.tree].size;
-    if (index >= size) throw new Error(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
+    if (index >= size) throw new Refused(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
     const nodes = nodesFrom(tileMap(await this.store.tiles(entry.tree, tilesFor((n) => inclusionProof(n, index, size)))));
     const proof = inclusionProof(nodes, index, size);
     if (!verifyInclusion(entryLeaf(entry.tree, entry.number, entry.columns), index, size, proof, pair[entry.tree].root)) {
-      throw new Error(`entry ${number} is not at ${index} of the ${entry.tree} tree the signer signed: the database changed it`);
+      throw new Refused(`entry ${number} is not at ${index} of the ${entry.tree} tree the signer signed: the database changed it`);
     }
     return { number, tree: entry.tree, index, size, leaf: leafData(entry.tree, entry.number, entry.columns), proof, notes };
   }

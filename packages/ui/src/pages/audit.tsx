@@ -524,7 +524,7 @@ function ChainStatus({
         <Toggletip align="end" label={`${chain.treesFailed}. The rest of the log's verdict stands.`}>
           <button type="button" className="chain-flag chain-flag-warn">
             <AlertTriangle size={14} />
-            Sealed log not checked
+            {chain.treesBehind && chain.trees !== null ? `Sealed log not checked to the head (${chain.trees.pending.toLocaleString('en')}+ entries pending)` : 'Sealed log not checked'}
           </button>
         </Toggletip>
       )}

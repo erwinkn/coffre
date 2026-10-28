@@ -183,7 +183,7 @@ test('R25: a page\'s check reads the newest pair and the entries since, whatever
   for (const secret of fresh) assert.ok((await w.use(secret)).ok);
   const page = await w.verify();
   clean(page);
-  assert.deepEqual([page.checkpoints, page.sealed, page.unsealed], [0, 0, 3], 'only the entries above the newest pair');
+  assert.deepEqual([page.unsealed, page.capped], [3, false], 'only the entries above the newest pair');
   assert.equal(page.checkpoint?.upto, w.cp.pair.pair.upto.toString());
   // A row written around the vault is not the page's to find: it reads none. Every use of it refuses it (D145): its
   // object is not the one its seal covers.

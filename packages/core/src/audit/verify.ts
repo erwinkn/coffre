@@ -75,6 +75,12 @@ export type Verdict = {
    * again a tick later.
    */
   behind: boolean;
+  /**
+   * Whether more than `above` entries lie above the newest pair: the walk
+   * checked that many and stopped short of the head, which is no problem
+   * of the log (a checkpointer behind), and no verdict on the rest either.
+   */
+  capped: boolean;
 };
 
 type Stop = { pair: Pair; notes: PairNotes; row: boolean };
@@ -96,7 +102,7 @@ type Options = {
   cut?: (entry: LogEntry) => Cut | null;
   /**
    * The most entries above the newest pair a walk checks, for a caller bound
-   * in time: past it, a problem, and the rest unread. A checkpointer stalled,
+   * in time: past it, `capped`, and the rest unread. A checkpointer stalled,
    * or a writer's planted rows, grow what lies there without bound.
    */
   above?: number;
@@ -104,7 +110,7 @@ type Options = {
 
 export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
   const problems: string[] = [];
-  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false };
+  const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false, capped: false };
   const done = (head: Stop | null): Verdict => {
     const ok = problems.length === 0;
     return { ok, problems, ...verdict, head: ok ? (head?.notes ?? null) : null, headPair: ok ? (head?.pair ?? null) : null };
@@ -122,7 +128,7 @@ async function walk(
   reader: LogReader,
   opts: Options,
   problems: string[],
-  verdict: { checkpoints: number; sealed: number; unsealed: number; behind: boolean },
+  verdict: { checkpoints: number; sealed: number; unsealed: number; behind: boolean; capped: boolean },
   done: (head: Stop | null) => Verdict,
 ): Promise<Verdict> {
   // The start's pair and those held outside, each opened once: a page's check starts at the pair the signer holds, which
@@ -334,9 +340,8 @@ async function walk(
     const checked = opts.above === undefined ? unsealed : unsealed.slice(0, opts.above);
     walkEntries(checked);
     verdict.unsealed = checked.length;
-    if (checked.length < unsealed.length) {
-      problems.push(`more than ${opts.above} entries above the newest checkpoint (up to ${cursor}): the checkpointer is behind, or entries were planted; checked through entry ${checked.at(-1)?.number ?? cursor}`);
-    }
+    // More lie there: not checked to the head, which says nothing against the log (PR 8 review r4 of W240).
+    verdict.capped = checked.length < unsealed.length;
   }
   if (!cutMet) problems.push(`no checkpoint at the retention cut (${ahead!.upto}): checkpoints were deleted or replaced`);
   // Above the start, the retention change must be on the walk and sealed: in a window a checkpoint verified.

@@ -399,6 +399,8 @@ export type TreesResult = Awaited<ReturnType<CoffreClient['audit']['verifyTrees'
  * (`trees`) is part of it: what it finds breaks the log as 0.14's would.
  */
 export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: TreesResult = { kept: false }) {
+  // More entries above the newest checkpoint than a check reads: a checkpointer behind, not a break (review r4 of W240).
+  const behind = trees.kept && trees.capped;
   if (result.ok && trees.kept && trees.problems.length > 0) {
     const more = trees.problems.length - 1;
     return {
@@ -420,10 +422,17 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
         remaining: result.remaining ?? 0,
         checkpoint: result.checkpoint,
         pending: result.pending ?? 0,
-        /** Why the check of 0.15's log could not run, when it could not: the chain's verdict stands, the sealed log's is not known. */
-        treesFailed: null as string | null,
+        /**
+         * Why the check of 0.15's log could not run, or stopped short of its head (`treesBehind`): the chain's verdict
+         * stands, the sealed log's is not known.
+         */
+        treesFailed: behind
+          ? `coffre checked the sealed log's first ${trees.unsealed.toLocaleString('en')} entries above its newest checkpoint, not the rest: the checkpointer is behind`
+          : (null as string | null),
+        /** The sealed log checked, but not to its head: more entries wait above its newest checkpoint than a check reads. */
+        treesBehind: behind,
         /** 0.15's log, where it is kept: the newest pair its check reached. */
-        trees: trees.kept ? { checkpoint: trees.checkpoint } : null,
+        trees: trees.kept ? { checkpoint: trees.checkpoint, pending: trees.capped ? trees.unsealed : 0 } : null,
       }
     : {
         integrity: 'broken' as const,
