@@ -126,7 +126,10 @@ as the app weighed it and the policy it weighed on. The vault:
 3. weighs the issue (`weighIssue`): what the issuer holds through that
    credential, what the account holds, the token's kind, scope and end (a
    service token at most 366 days, a personal one a week, a handle no
-   later than the token it was made on);
+   later than the personal token it was made on, if one); each grant's
+   columns, which a use decides on, within its role as defined (the
+   policy's for a personal token, `HANDLE_POLICY`'s for a handle), never
+   its role's name alone (review r1);
 4. runs `issue_token`, one statement: the members' rows `FOR SHARE`, by
    principal (IssuerLocked), then, compared in a statement of its own, each
    active at its generation and its `access_seq` as read (IssuerCAS); the

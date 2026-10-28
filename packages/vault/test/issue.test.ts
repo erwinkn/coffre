@@ -130,6 +130,33 @@ test("a personal token is its person's own, a role that manages no access, made 
   assert.equal(!outcome.ok && outcome.refused, 'refused');
 });
 
+test("a grant's columns are what a use decides on, so they are held to its role: a viewer's that manages access, or a handle's that writes, is refused (review r1)", async () => {
+  const w = await world();
+  const columns = (normal: string[], protectedColumn: string[] = []) => storedScope([{
+    ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }),
+    permissions: { normal, protected: protectedColumn },
+  } as ReturnType<typeof issuedGrant>]);
+  // The Owner holds `grant.manage`: as the viewer's columns, it would make a personal token that manages access.
+  const forged = personal(w);
+  forged.credential.scope = columns(['secret.read', 'grant.manage']);
+  assert.equal(((await w.vault.issueToken!(forged)) as { refused?: string }).refused, 'refused');
+  // A handle reads and uses: nothing it writes, whatever its person holds.
+  const handle = personal(w);
+  handle.credential.kind = 'handle';
+  handle.credential.scope = columns(['secret.read', 'secret.use', 'secret.write']);
+  assert.equal(((await w.vault.issueToken!(handle)) as { refused?: string }).refused, 'refused');
+  handle.credential.scope = storedScope([issuedGrant({ projectId: w.project, environmentId: null, role: 'developer' })]);
+  assert.equal(((await w.vault.issueToken!(handle)) as { refused?: string }).refused, 'refused', 'a handle is a viewer or a contributor');
+  assert.equal(await credentialRows(), 0);
+  // As the app makes them, each within its role.
+  const fair = personal(w);
+  fair.credential.scope = columns(['secret.read']);
+  assert.ok((await w.vault.issueToken!(fair)).ok);
+  handle.credential.id = randomUUID();
+  handle.credential.scope = columns(['secret.read', 'secret.use'], ['secret.read', 'secret.use']);
+  assert.ok((await w.vault.issueToken!(handle)).ok);
+});
+
 test('a handle is made on a personal token only within its end, and not once it is revoked (IssuedByLiveCredential)', async () => {
   const w = await world();
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);

@@ -14,7 +14,7 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, holds, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -358,20 +358,6 @@ export function normalizeUserCode(input: string): string | null {
   return `${letters.slice(0, 4)}-${letters.slice(4)}`;
 }
 
-/** What a handle reads and uses, and no more: it writes nothing. */
-const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
-
-/**
- * The roles a handle's scope is issued under (`issueHandle`): each place
- * keeps what its person holds there, in each column, of reading and using
- * (`issuedGrant`, capped by `heldColumns`), whatever an Owner made of the
- * roles. `viewer` names a place its person reads, `contributor` one they
- * only use.
- *
- *   an Owner, at a protected prod       read, use / read, use
- *   a Developer, at the same            read, use / use
- */
-const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS } };
 
 /**
  * coffre's own sign-in: who may come in, and the credentials they hold.
@@ -703,8 +689,11 @@ export class SigninService {
       // The account it is for is not the member it was weighed as: removed, or admitted again since.
       case 'gone':
         throw held.refusal?.() ?? new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
+      // The issuer's credential, or their membership, ended: a person's own token says their session did, as before.
       case 'ended':
-        throw new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
+        throw kind === 'service'
+          ? new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }))
+          : new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
       case 'refused':
         throw new Refusal(forbidden(outcome.why ?? 'not allowed to issue this token'), denied(ctx, 'token.create', 'vault_refused', { metadata: { ...details, why: outcome.why ?? null } }));
       case 'policy': throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
@@ -1168,7 +1157,8 @@ export class SigninService {
       const person = ctx.caller.principal;
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
-        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, identityId: null, label: input.label, createdBy: person.id }, details, { accessSeq: null });
+        // At the generation the request was made at: a person removed and admitted again since is refused (`#currentCaller`).
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id }, details, { accessSeq: null });
         return { ...credential, scope: byPath };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
@@ -1236,7 +1226,7 @@ export class SigninService {
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       const plan = { id: randomUUID(), expiresAt: new Date(ends), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
-        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, identityId: null, label: input.label, createdBy: person.id, places: madeFor }, details, { accessSeq: null });
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor }, details, { accessSeq: null });
         return { ...credential, scope: byPath };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);

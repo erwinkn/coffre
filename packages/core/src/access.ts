@@ -552,6 +552,21 @@ export function delegableRoles(policy: Policy = DEFAULT_POLICY): Role[] {
 /** The roles a personal token's scope may name, as they ship. */
 export const DELEGABLE_ROLES: readonly Role[] = delegableRoles();
 
+/** What a handle reads and uses, and no more: it writes nothing. */
+export const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
+
+/**
+ * The roles a handle's scope is issued under (the server's `issueHandle`; the vault holds a handle's columns to them, T149): each place
+ * keeps what its person holds there, in each column, of reading and using
+ * (`issuedGrant`, capped by `heldColumns`), whatever an Owner made of the
+ * roles. `viewer` names a place its person reads, `contributor` one they
+ * only use.
+ *
+ *   an Owner, at a protected prod       read, use / read, use
+ *   a Developer, at the same            read, use / use
+ */
+export const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS } };
+
 /**
  * The longest a personal token lasts: a week. It is for an afternoon's
  * script or agent, and whoever needs it longer makes another, as a person,
