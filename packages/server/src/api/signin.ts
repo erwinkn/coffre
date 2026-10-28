@@ -514,9 +514,9 @@ export class SigninService {
         }
 
         if (bound !== null) changes?.expectRevoked([]);
+        // At the plan's generation, which its change sealed: `generation` is the same, held to it above.
         const credential = await this.#issue(tx, 'browser', principal, {
           ...plan,
-          generation,
           identityId,
           label: meta.label,
           createdBy: principalId,
