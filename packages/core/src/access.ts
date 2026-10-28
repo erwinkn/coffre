@@ -559,6 +559,9 @@ export const DELEGABLE_ROLES: readonly Role[] = delegableRoles();
  */
 export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
 
+/** The longest a service account's token lives, in days. The vault holds an issue to it (T149). */
+export const MAX_SERVICE_TOKEN_DAYS = 366;
+
 /**
  * How long a `coffre login` code waits to be approved. The server expires it
  * then, and the CLI's sign-in hint says so before it has asked for one.

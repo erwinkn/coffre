@@ -39,6 +39,8 @@ export type Snapshot = {
   newestAccess: Map<string, StoredEntry>;
   /** The newest allowed `policy.change` in the vault's name, unchecked. */
   newestPolicy: StoredEntry | null;
+  /** With `asked.settings`, the newest allowed `settings.change` in the vault's name, unchecked, or null for none; not asked, undefined. */
+  newestSettings: StoredEntry | null | undefined;
   /**
    * The asked environments, the environments each personal config among
    * them is a config of, and those the newest `policy.change` names, by id.
@@ -72,6 +74,8 @@ export type Asked = {
   /** Whose grants and newest access entry; with `members`, their rows too, unlocked. */
   principals: readonly string[];
   members?: boolean;
+  /** The newest `settings.change` too (`newestSettings`). */
+  settings?: boolean;
   environments?: readonly string[];
   references?: readonly bigint[];
   /**
@@ -126,6 +130,7 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
     grants: new Map(asked.principals.map((principal) => [principal, raw.grants.filter((grant) => grant.principal === principal).map(grantOf)])),
     newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
     newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
+    newestSettings: asked.settings !== true ? undefined : raw.settings == null ? null : entryOf(raw.settings),
     environments: new Map(raw.environments.map(({ id, ...environment }) => [id, {
       ...environment,
       deleted: Boolean(environment.deleted),
@@ -165,6 +170,7 @@ type Raw = {
   grants: { principal: string; projectId: string | null; environmentId: string | null; environmentSlug: string | null; role: string; expiresAt: Int | null; grantedAt: Int; grantedBy: string }[];
   access: RawEntry[];
   policy: RawEntry | null;
+  settings?: RawEntry | null;
   environments: { id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number }[];
   ended: Int[];
   released: Int | null;

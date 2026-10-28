@@ -14,14 +14,16 @@ import {
   type SigninConfig,
   type SigninProfile,
 } from '@coffre/core/identity';
-import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { allows, DEFAULT_POLICY, DEVICE_TTL_SECONDS, holds, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
+import { KeyRetired } from '@coffre/db/log';
 import { credentials, deviceAuthorizations, identities } from '@coffre/db/schema';
 
 import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows.ts';
 import { answerOf, shownActive, type Shows } from '../db/answers.ts';
+import { appLogKey } from '../db/audit.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findBinding,
@@ -46,14 +48,15 @@ import {
   updateAuth,
   type CredentialRead,
 } from '../db/queries.ts';
-import { callerFrom, projectsReached, type PrincipalRef } from './caller.ts';
+import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
-import { allowed, audited, credentialStill, denied, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
+import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
+  ACCESS_CHANGED,
   issuedScope,
   issuerNow,
   issuerStill,
@@ -292,7 +295,7 @@ const DEVICE_PENDING_TOTAL = 200;
 /** No vowels, so a code never spells a word; no 0/O or 1/I lookalikes. */
 const USER_CODE_ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ';
 const TOUCH_INTERVAL_MS = 5 * 60 * 1000;
-export const MAX_SERVICE_TOKEN_DAYS = 366;
+export { MAX_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
 
 function userCode(): string {
   const chars: string[] = [];
@@ -654,6 +657,60 @@ export class SigninService {
     const { row, issued } = this.#credential(kind, principal, options);
     await insert(tx, credentials, row);
     return issued;
+  }
+
+  /**
+   * A token issued by the vault itself, with 0.15's log (T149, PR 2): the
+   * row `#credential` makes, its scope as the app worked it out, and the
+   * policy it was weighed on (`weighed`'s), in one call. The vault reads
+   * the issuer, the account and the credential the request came in on,
+   * weighs the scope itself, and writes it in one statement; no 0.14 head,
+   * and no 0.14 entry: its change records the issue (D147). What it read
+   * moving meanwhile, it weighs again itself; still moving after that, 409
+   * (`ObjectMoved`). Each refusal is logged as the app's are.
+   */
+  async #issuedByVault(
+    ctx: Asker,
+    weighed: Pick<Caller, 'policy' | 'policySeq'>,
+    kind: 'service' | 'personal' | 'handle',
+    principal: PrincipalRef,
+    options: CredentialOptions & { id: string },
+    details: Record<string, unknown>,
+    held: { accessSeq: bigint | null; refusal?: () => Refusal },
+  ): Promise<IssuedCredential> {
+    const { row, issued } = this.#credential(kind, principal, options);
+    const outcome = await this.#deps.vault.issueToken!({
+      actor: formatMember(ctx.caller.principal),
+      via: ctx.credentialId,
+      principal: principalOf(principal),
+      generation: options.generation,
+      actorAccess: held.accessSeq?.toString() ?? null,
+      credential: {
+        id: row.id!, kind, tokenHash: row.tokenHash.toString('base64'), tokenHint: row.tokenHint, label: row.label ?? null, scope: row.scope!, places: row.places ?? null,
+        expiresAt: row.expiresAt.getTime(), createdBy: row.createdBy, authMac: row.authMac.toString('base64'),
+      },
+      policy: {
+        seq: weighed.policySeq?.toString() ?? null,
+        protected: Object.values(weighed.policy.protectedIn).flat().map(({ environmentId, slug }) => ({ environmentId, slug })),
+      },
+      appKey: appLogKey(this.#deps.chainKey).keyId,
+    });
+    if (outcome.ok) return issued;
+    switch (outcome.refused) {
+      case 'moved': throw new ObjectMoved();
+      // The issuer's access moved since the scope was weighed: asked again, weighed as they are now (as `issuerStill`).
+      case 'access': throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
+      // The account it is for is not the member it was weighed as: removed, or admitted again since.
+      case 'gone':
+        throw held.refusal?.() ?? new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
+      case 'ended':
+        throw new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
+      case 'refused':
+        throw new Refusal(forbidden(outcome.why ?? 'not allowed to issue this token'), denied(ctx, 'token.create', 'vault_refused', { metadata: { ...details, why: outcome.why ?? null } }));
+      case 'policy': throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
+      case 'busy': throw new ApiError('unavailable', 'coffre is busy: try again shortly', 'busy', '1');
+      case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
+    }
   }
 
   /** The change issuing a credential makes to 0.15's log: the object of the row `#credential` writes, from the same options. */
@@ -1033,6 +1090,11 @@ export class SigninService {
       const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.create' });
       const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000), scope, generation: standing.generation };
+      // With 0.15's log, the vault issues it, weighing the issuer itself (T149, PR 2): one call.
+      if (await vaultIssuesTokens(this.#deps.vault)) {
+        const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id }, details, { accessSeq, refusal });
+        return { ...credential, scope: byPath, withheld };
+      }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan)]);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
@@ -1105,6 +1167,10 @@ export class SigninService {
       const { access, scope, byPath, details } = await this.#personalScope(ctx, input);
       const person = ctx.caller.principal;
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope, generation: access.generation };
+      if (await vaultIssuesTokens(this.#deps.vault)) {
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, identityId: null, label: input.label, createdBy: person.id }, details, { accessSeq: null });
+        return { ...credential, scope: byPath };
+      }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
@@ -1169,6 +1235,10 @@ export class SigninService {
       });
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       const plan = { id: randomUUID(), expiresAt: new Date(ends), scope, generation: access.generation };
+      if (await vaultIssuesTokens(this.#deps.vault)) {
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, identityId: null, label: input.label, createdBy: person.id, places: madeFor }, details, { accessSeq: null });
+        return { ...credential, scope: byPath };
+      }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {

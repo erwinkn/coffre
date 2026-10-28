@@ -38,9 +38,9 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; credentials: boolean }>();
+const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; credentials: boolean; issues: boolean }>();
 
-async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; credentials: boolean }> {
+async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; credentials: boolean; issues: boolean }> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
   const about = await vault.about();
@@ -49,6 +49,7 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; cr
     log,
     uses: log && about.uses === true && vault.use !== undefined,
     credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
+    issues: log && about.issues === true && vault.issueToken !== undefined,
   };
   keeping.set(vault, kept);
   return kept;
@@ -71,6 +72,11 @@ export type CredentialsVault = Vault & Required<Pick<Vault, 'signIn' | 'revokeCr
  */
 export async function vaultMakesCredentials(vault: Vault): Promise<boolean> {
   return (await about015(vault)).credentials;
+}
+
+/** Whether the vault issues tokens itself too, in one call (`issueToken`; T149, PR 2). A boolean, as `vaultMakesCredentials` says why. */
+export async function vaultIssuesTokens(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).issues;
 }
 
 /** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */

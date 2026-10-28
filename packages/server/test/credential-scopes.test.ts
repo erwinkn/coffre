@@ -20,8 +20,8 @@ import { sealScopes } from '../src/api/services.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, environments, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
-import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
+import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -294,9 +294,12 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
     .select({ metadata: auditLog.metadata })
     .from(auditLog)
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow')));
+  // With 0.15's log, the vault issues it (T149): its change records the scope it seals, the entry none (D147).
+  const [change] = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).filter(({ payload }) => (JSON.parse(payload) as { issue?: unknown }).issue !== undefined);
+  const logged = LOG === '0.14' ? (JSON.parse(entry!.metadata) as { scope: unknown }).scope : (JSON.parse(change!.payload) as { scope: unknown }).scope;
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   // With what viewer held when it was issued, both columns: a role widened later widens no credential.
-  assert.deepEqual(JSON.parse(entry!.metadata).scope, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }]);
+  assert.deepEqual(logged, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }]);
 });
 
 test("a scope changed or cleared around the app fails the row's MAC, and the token is refused", async () => {

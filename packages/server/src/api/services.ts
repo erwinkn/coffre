@@ -158,8 +158,8 @@ export async function issuerNow(
   as?: { ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>; action: string },
 ): Promise<{ caller: Caller; accessSeq: bigint | null }> {
   const member = formatMember(principal);
-  const policySeq = await newestPolicySeq(deps.db);
-  const accessSeq = await newestAccessSeq(deps.db, member);
+  // Both read before the vault is asked, together: a change after either is seen by the check that holds the issue to them.
+  const [policySeq, accessSeq] = await Promise.all([newestPolicySeq(deps.db), newestAccessSeq(deps.db, member)]);
   const access = await deps.vault.access(member);
   // The membership the request came in as, or none: removed and admitted again since, they are someone the request is not.
   // A row that fails its check is refused as one, by what weighs the answer (`callerFrom`).

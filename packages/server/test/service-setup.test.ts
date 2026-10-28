@@ -10,7 +10,7 @@ import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, projects } from './db/tables.ts';
-import { clientFor, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance (D97,
 // D99): docs/design/instance-roles.md, "Setting up service accounts".
@@ -117,14 +117,17 @@ test('a Developer of dev sets up CI for dev: the account, its grant, a token and
     [ADA, 'member.add', 'allow', null],
     [ADA, 'access.grant', 'allow', null],
     [ADA, 'access.grant', 'allow', null],
-    [ADA, 'token.create', 'allow', null],
+    // With 0.15's log, the vault issues the token and revokes it (T149), and its changes record who (D147).
+    ...(LOG === '0.14' ? [[ADA, 'token.create', 'allow', null]] : []),
     [ADA, 'token.bind', 'allow', null],
-    // With 0.15's log, the vault revokes the token (T149), and its change records who (D147).
     ...(LOG === '0.14' ? [[ADA, 'token.revoke', 'allow', null]] : []),
     [ADA, 'token.unbind', 'allow', 'removed'],
     [ADA, 'access.revoke', 'allow', null],
   ], 'who did each step');
-  if (LOG === '0.15') assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'revoke', targetCredentialId: issued.id }]);
+  if (LOG === '0.15') {
+    assert.deepEqual((await issuesLogged(db.owner)).map(({ actor, kind, targetCredentialId }) => [actor, kind, targetCredentialId]), [[ADA, 'service', issued.id]]);
+    assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'revoke', targetCredentialId: issued.id }]);
+  }
 
   // Removing it is theirs too; its report, which names what it read anywhere, is not.
   const removed = await ada.members.remove(CI);
@@ -238,10 +241,12 @@ test('an account that holds prod is out of a dev Developer\'s hands: no token, n
   // A Developer everywhere holds what it holds, and manages it.
   assert.equal((await bo.tokens.issue(CI, { label: 'bo', expiresInDays: 1 })).expiresAt.length > 0, true);
 
+  // The refusal is 0.14's entry; with 0.15's log, the issue is the vault's change (T149, D147).
   assert.deepEqual((await logged('token.create')).filter(([actor]) => actor === ADA).map(([, , decision, reason]) => [decision, reason]), [
-    ['allow', null],
+    ...(LOG === '0.14' ? [['allow', null]] : []),
     ['deny', 'not_service_manager'],
   ]);
+  if (LOG === '0.15') assert.deepEqual((await issuesLogged(db.owner)).filter(({ actor }) => actor === ADA).map(({ targetCredentialId }) => targetCredentialId), [before.id]);
 });
 
 test('an account with no grant is its maker\'s, or theirs who run the instance', async () => {

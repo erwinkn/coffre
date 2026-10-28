@@ -253,6 +253,13 @@
       "when": 1793210483207,
       "tag": "0035_first_days",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1793220483207,
+      "tag": "0036_vault_issues",
+      "breakpoints": true
     }
   ]
 }

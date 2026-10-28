@@ -1,7 +1,8 @@
 # 0.15: the vault owns a credential's life (T149)
 
 Behind 0.15's switch, the vault makes and ends credentials itself, each in
-one call and one Postgres statement (D146). The app reads what it needs to
+one call (D146): one Postgres statement for a sign-in or a revoke, a read
+and one write for a token's issue (section 3). The app reads what it needs to
 check the request, names it, and passes it on. W246 mapped today's paths and
 modelled two placements (the vault, or the app with the vault sealing what it
 proposes); Erwin chose the vault on 2026-10-28. This page says what is built,
@@ -12,7 +13,7 @@ Three pull requests, each leaving `main` shippable, all in 0.15:
 | PR | what | Lifecycle.tla's protections it builds |
 |---|---|---|
 | 1 (T149, W250) | sign-in through a trust binding (`POST /api/auth/oidc` and a workload's `POST /api/workloads/session`), revoke and sign-out, by the vault; the spec | BindingLocked, MemberLocked, SpentChecked, IssueOffFence, RevokeTakesFence, RevokePolicyHeld, SweepAfterLock (as built already) |
-| 2 | a service token, a personal token and a handle, issued by the vault, which weighs the issuer's rights itself | IssuerLocked, IssuerCAS |
+| 2 (T149, W250) | a service token, a personal token and a handle, issued by the vault, which weighs the issuer's rights itself | IssuerLocked, IssuerCAS |
 | 3 | the vault verifies the CI run's ID token (D148), takes only bindings it sealed, and seals each credential's token hash | VaultVerifiesToken, BindingSealed, HashSealed |
 
 ## 1. Before: CI sign-in as 0.15 had it
@@ -98,7 +99,66 @@ for the statement's work, never a round trip. A row 0.14 made, with no seal,
 is revoked as before, with 0.14's entry: the log holds no object of it to
 change.
 
-## 3. The model: `formal/Lifecycle.tla`
+## 3. Token issue, as built (PR 2)
+
+Three tokens, each made by a person or a service for an account: a service
+token (`POST /api/services/<name>/tokens`), a person's personal token and a
+handle. Under 0.14's head, the app weighed who may give what, then `prepare`
+sealed whatever row it proposed: the vault weighed no right of the issuer's.
+Behind the switch, the vault weighs it itself, with the same rules from
+`@coffre/core/access` (`issuesCredential`, `managesService`, `ownsProject`
+for sensitive reads, R32; `delegable` and `heldColumns` for a person's own).
+
+The app checks the request as before, works out the scope (5 statements:
+the issuer's newest policy and access entries, the places, what sensitive
+values and references they hold), builds the row and its APP_KEY MAC, and
+makes one vault call, `Vault.issueToken`, naming the issuer, the credential
+the request came in on, the account at its generation, the issuer's access
+as the app weighed it and the policy it weighed on. The vault:
+
+1. reads, in one snapshot, both members with their grants, the newest
+   policy and, for a service token, the instance's settings; beside it, the
+   credential the request came in on (`issuing_credential`, migration 0036:
+   the vault's login reads no credential otherwise);
+2. checks each row as `access` does (its MAC, its newest access entry), the
+   credential's seal its own and its object's newest change's, the policy and
+   the protected environments' slugs the app named;
+3. weighs the issue (`weighIssue`): what the issuer holds through that
+   credential, what the account holds, the token's kind, scope and end (a
+   service token at most 366 days, a personal one a week, a handle no
+   later than the token it was made on);
+4. runs `issue_token`, one statement: the members' rows `FOR SHARE`, by
+   principal (IssuerLocked), then, compared in a statement of its own, each
+   active at its generation and its `access_seq` as read (IssuerCAS); the
+   credential's row `FOR SHARE`, then live, the issuer's, its seal as read
+   and its object's newest; the policy still the newest; the app's key not
+   one it rotated from; then the insert, and the change numbered under the
+   issue lock (IssueOffFence);
+5. waits for the seal (R51) and answers.
+
+Nothing is held between the read and the write, so no lock waits on the
+vault's round trip (`IssuesHoldNoLockBetween`). A write that finds a row
+moved writes nothing, and the vault reads and weighs again, at most three
+times (the model's IssueCheck); a demotion that commits meanwhile is seen,
+and the issue refused on what the issuer holds now
+(`packages/vault/test/issue.test.ts`). When the app weighed the scope on
+the issuer's access as it was, the vault answers `access` and the app asks
+again (409, as `issuerStill` did).
+
+**Not one statement.** D146 asked for one. A sign-in is one because the
+app names everything the statement can hold to the binding's row. An
+issue's decision is on the issuer's rights, which the vault has to read and
+check, MACs included, before it can weigh them; the app's `Access` answer
+carries no MAC the vault could take back. So it is one call: reads on two
+round trips (the snapshot, with the credential beside it, then the places
+the account's grants name), then the one write.
+
+The app's 0.14 entry is gone here too (D147): the change records the issue,
+`issue: {by, via, kind, label}`, and refusals are 0.14 entries as before.
+Under 0.14's log, and with a vault that does not say `issues`, the app
+issues as before.
+
+## 4. The model: `formal/Lifecycle.tla`
 
 W246's model compared both placements. It now models the vault's alone, and
 more of it: issue, sign-in, unbind, revoke and the seal wait beside uses, a
@@ -137,7 +197,7 @@ Two results drove the design:
   `SignInsOnValidTokens` that way. So PR 3 also makes a binding a 0.15 object,
   sealed when a manager makes it, and the sign-in takes only a sealed one.
 
-## 4. Decisions
+## 5. Decisions
 
 | decision | instead of | why |
 |---|---|---|
@@ -151,8 +211,12 @@ Two results drove the design:
 | a workload proof with a `commit` keeps the old path | moving the enrollment's capacity into SQL | no such proof is registered yet |
 | every sign-in through a binding goes through the vault, one 0.4 made sealed first | the old path for those | a binding's rate is counted under its row; a sign-in that counted it under the head beside one under the row could pass it by one (review r2) |
 | the app's key checked in the statement, not under the fence | the fence, or nothing | a credential the app signed under a key it rotated from is refused, as 0.14 refuses its entry. A rotation that commits during the statement leaves a row its new key refuses at once: a dead credential, never a live one, and R41's rotation signs every session out anyway. The model leaves this out for that reason: no outcome of it widens anything |
+| an issue is one call, a read and one write, holding nothing between (PR 2) | one statement, as D146 asked | the vault weighs the issuer's rights, which it has to read and check first: the app's `Access` answer carries no MAC the vault could take back. The write holds what the read decided on (IssuerLocked, IssuerCAS), which the model shows enough. **For Erwin: a deviation from D146** |
+| a row moved under the write: the vault reads and weighs again, up to three times, then `moved` (409) | answering `moved` at once, for the app to ask again | the vault reads everything it weighs, so it can weigh again itself, as the model's IssueCheck does; the app reads nothing more |
+| an issue reads the policy without the fence | taking the fence, as a revoke does (RevokePolicyHeld) | a use waits on the fence (R58). A policy change committing during the write leaves a token whose every use is weighed on its account's rights as they are then, the policy's included: nothing wider |
+| the app still weighs the scope, and names the issuer's access it weighed on; the vault refuses `access` when it moved | the vault alone | the app's scope reads what the vault does not hold (sensitive values, references); a demotion between the two is refused, 409, as `issuerStill` did |
 
-## 5. Numbers
+## 6. Numbers
 
 Debian `postgres:16.14` (R62), local, a compose project of its own, 20 ms
 added to every round trip, 1,000 uses a second beside, 3 rounds a level
@@ -182,15 +246,38 @@ spreads over, which share only the database; their CPU is this process's, so
 these numbers are, if anything, high. A cold JWKS fetch is unchanged by this
 PR (the app's, as before); the vault's own comes with PR 3.
 
-## 6. Still open
+**Token issue (PR 2).** The same rig, 5 rounds a level, a service token's
+issue by the Owner (`ci.ts --log 0.15 --issue --uses 1000 --rtt 20`).
+Before: the same bench with `--legacy`, whose vault hides from the app that
+it issues tokens, so that the app issues as before T149.
+
+| issues at once | before: p50 / p99 | after: p50 / p99 | uses beside, p99: before / after | refused |
+|---|---|---|---|---|
+| 1 | 360 / 417 ms | 233 / 246 ms | 40.6 / 25.3 ms | none |
+| 10 | 1,176 / 2,039 ms | 239 / 569 ms | 42.7 / 25.5 ms | none |
+| 30 | 2,839 / 5,433 ms | 297 / 634 ms | 43.1 / 25.0 ms | none |
+| 100 | 9,125 / 17,593 ms | 473 / 880 ms | 43.5 / 25.3 ms | none |
+
+Uses alone: p99 25.5 ms, 25.9 before. Each issue is 5 app statements, all
+reads, and 3 vault calls (the app's two `access` and the issue); before, 15
+app statements, most under 0.14's head, and 4 calls. The uses beside an issue
+waited on the fence before; now none does (R58). Past one at once, a call
+averages 6.3 to 6.8 vault statements rather than 5: the bench's new vault
+isolates read their keys on their first call, as a cold isolate does. The
+write is never among the statements that wait longest: the rows it locks it
+shares with the other issues.
+
+## 7. Still open
 
 - **A hostile app.** In 0.15 the app names the caller to the vault, so it can
   act as anyone whose credential hash it reads. PR 3 stops it minting run
   credentials from nothing; closing the rest means the vault taking the raw
   bearer token and hashing it itself. Not decided.
-- **The 0.14 audit page under the switch** shows no sign-in, revoke or
-  sign-out of the vault's, and no run beside the entries a run's credential
-  caused (`withCredentials` reads `token.exchange`). T156 reads them from the
-  changes.
+- **The 0.14 audit page under the switch** shows no sign-in, revoke,
+  sign-out or token issue of the vault's, no run beside the entries a run's
+  credential caused, and no label beside those a personal token the vault
+  issued caused (`withCredentials` reads `token.exchange` and
+  `personalTokensOf` `token.create`). T156 reads them from the changes,
+  whose payloads carry both.
 - **Still the app's, with `prepare`:** browser and device sign-ins, renewal,
   a member's removal sweep, unbinding, the key rotation's sign-outs.

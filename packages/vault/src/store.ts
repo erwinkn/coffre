@@ -1,7 +1,7 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { isTombstone, TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type CredentialColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
@@ -1231,4 +1231,26 @@ async function heldSeal(db: Queryable, ref: Ref): Promise<Buffer | null> {
 
 function sameBytes(a: Buffer | null, b: Buffer | null): boolean {
   return a === null || b === null ? a === b : Buffer.compare(a, b) === 0;
+}
+
+/**
+ * A credential a token's issue came in on (`Vault.issueToken`, T149): its
+ * object's columns, as the app sends them (`CredentialColumns`), its seal,
+ * and its object's newest change's seal, in one read; null for no row.
+ */
+export async function issuingCredential(db: Queryable, id: string): Promise<{ columns: CredentialColumns; seal: Buffer | null; newest: Buffer | null } | null> {
+  type Read = { id: string; principal: string; kind: string; scope: string | null; revoked: boolean | number; expires_at: number | string; not_after: number | string | null; generation: number; seal: Buffer | null; newest: Buffer | null };
+  const [row] = engineOf(db) === 'postgres'
+    ? await rowsOf<Read>(db, sql`SELECT * FROM issuing_credential(${id}::uuid)`)
+    : await rowsOf<Read>(db, sql`SELECT c.id, c.principal, c.kind, c.scope, c.revoked_at IS NOT NULL AS revoked, c.expires_at, c.not_after, c.generation, c.seal,
+        (SELECT l.seal FROM log_changes l WHERE l.object = ${objectKey({ kind: 'credential', id })} ORDER BY l.number DESC LIMIT 1) AS newest
+        FROM credentials c WHERE c.id = ${id}`);
+  if (row === undefined) return null;
+  const ends = [Number(row.expires_at), ...(row.not_after == null ? [] : [Number(row.not_after)])];
+  const bytes = (value: Buffer | null) => (value == null ? null : Buffer.from(value));
+  return {
+    columns: { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: Boolean(row.revoked), expiresAt: Math.min(...ends), generation: Number(row.generation) },
+    seal: bytes(row.seal),
+    newest: bytes(row.newest),
+  };
 }

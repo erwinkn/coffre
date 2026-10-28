@@ -1,7 +1,7 @@
 import { tablesOf, type Queryable } from '@coffre/db';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 
-import type { Answer, RevokeCall, SignInCall } from './credentials.ts';
+import type { Answer, IssueCall, RevokeCall, SignInCall } from './credentials.ts';
 import { objectKey } from './inputs.ts';
 
 /**
@@ -80,6 +80,47 @@ export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answ
   }
   await tx.update(credentials).set({ revokedAt: new Date(c.revokedAt), revokedBy: c.revokedBy, authMac: c.mac, seal: change.seal })
     .where(and(eq(credentials.id, c.ref.id), isNull(credentials.revokedAt)));
+  const number = await nextNumber(tx);
+  await tx.insert(logChanges).values({ number, at: change.at, requestId: change.requestId, object: change.object, actor: change.actor, payload: change.payload, seal: change.seal, mac: change.mac });
+  return { number: number.toString() };
+}
+
+/** `issue_token` on SQLite, step for step, in one transaction: its one writer holds every row as read. */
+export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer> {
+  const { auditLog, credentials, environments, logChanges, projects, vaultMembers } = tablesOf(tx);
+  const { change, input, read } = c;
+  const k = input.credential;
+  const standing = async (principal: string, generation: number, accessSeq: bigint) => {
+    const [row] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation, accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+    return row?.status === 'active' && row.generation === generation && BigInt(row.accessSeq) === accessSeq;
+  };
+  if (!(await standing(input.actor, read.actor.generation, read.actor.accessSeq)) || !(await standing(input.principal, input.generation, read.principal.accessSeq))) return { state: 'moved' };
+  const now = Date.now();
+  if (input.via !== null) {
+    const [via] = await tx.select({ principal: credentials.principal, revokedAt: credentials.revokedAt, seal: credentials.seal, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter })
+      .from(credentials).where(eq(credentials.id, input.via));
+    const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: input.via }))).orderBy(desc(logChanges.number)).limit(1);
+    const sealedAs = read.via?.seal ?? null;
+    if (via === undefined || via.principal !== input.actor || via.revokedAt !== null || via.expiresAt.getTime() <= now || (via.notAfter !== null && via.notAfter.getTime() <= now)
+      || !same(via.seal ?? null, sealedAs) || !same(newest?.seal ?? null, sealedAs)) {
+      return { state: 'ended' };
+    }
+  }
+  const [changed] = await tx.select({ seq: auditLog.seq }).from(auditLog)
+    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
+  if ((changed === undefined ? null : String(changed.seq)) !== input.policy.seq) return { state: 'policy' };
+  for (const { environmentId, slug } of input.policy.protected) {
+    const [place] = await tx.select({ slug: environments.slug, project: projects.slug }).from(environments).innerJoin(projects, eq(projects.id, environments.projectId)).where(eq(environments.id, environmentId));
+    if ((place === undefined || place.slug.includes('~') || place.project.includes('~') ? null : place.slug) !== slug) return { state: 'policy' };
+  }
+  const [moved] = await tx.select({ seq: auditLog.seq }).from(auditLog)
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.subjectPrincipal, input.appKey), inArray(auditLog.action, ['key.reseal', 'key.rotate']))).limit(1);
+  if (moved !== undefined) return { state: 'retired' };
+  if (k.expiresAt <= now) return { state: 'expired' };
+  await tx.insert(credentials).values({
+    id: k.id, kind: k.kind, authMac: c.authMac, tokenHash: c.tokenHash, tokenHint: k.tokenHint, generation: input.generation, principal: input.principal,
+    identityId: null, scope: k.scope, places: k.places, label: k.label, createdBy: k.createdBy, expiresAt: new Date(k.expiresAt), revokedAt: null, seal: change.seal,
+  });
   const number = await nextNumber(tx);
   await tx.insert(logChanges).values({ number, at: change.at, requestId: change.requestId, object: change.object, actor: change.actor, payload: change.payload, seal: change.seal, mac: change.mac });
   return { number: number.toString() };

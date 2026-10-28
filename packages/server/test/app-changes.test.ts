@@ -125,7 +125,8 @@ test('a write answers once its change is sealed (R51): committed meanwhile, but 
     return waitSealed(input);
   });
   let answered = false;
-  const issuing = root.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 }).then((issued) => ((answered = true), issued));
+  // A browser sign-in, one of the app's writes through `prepare` (a token's issue is the vault's own, which waits for its seal itself).
+  const issuing = signin.completeSignin({ provider: 'github', subject: 'dev', emails: [DEV], name: null }, meta()).then((issued) => ((answered = true), issued));
   for (let tries = 0; asked.length === 0; tries += 1) {
     assert.ok(tries < 500, 'the write asks for its seal');
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -136,7 +137,8 @@ test('a write answers once its change is sealed (R51): committed meanwhile, but 
   assert.equal(answered, false);
   release();
   const issued = await issuing;
-  assert.deepEqual((await opsByCredential()).get(issued.id), ['credential.issue']);
+  assert.ok(issued.ok);
+  assert.deepEqual((await opsByCredential()).get(issued.credential.id), ['credential.issue']);
 });
 
 test('a workload session\'s sealed scope keeps the keys its binding lets it read: no wider than what 0.14 decides on', () => {

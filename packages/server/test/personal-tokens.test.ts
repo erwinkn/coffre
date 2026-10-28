@@ -14,7 +14,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials } from './db/tables.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -279,6 +279,12 @@ test('every entry made with a personal token names its person and the token, the
   for (const action of ['app secret.write', 'vault key.wrap', ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
   if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
+  // With 0.15's log, the vault issues it (T149), and its change records it (D147): the 0.15 page shows it, and the token's
+  // label beside what it made (T156), where 0.14's page reads both from 0.14's entry.
+  if (LOG === '0.15') {
+    assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
+    return;
+  }
   const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
   assert.deepEqual([create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], ['personal', 'cursor-agent', issued.id, null]);

@@ -1,15 +1,32 @@
 import { randomUUID } from 'node:crypto';
 
-import { sealedSessionScope } from '@coffre/core/access';
+import {
+  DEFAULT_POLICY,
+  delegable,
+  heldColumns,
+  issuesCredential,
+  MAX_PERSONAL_TOKEN_MINUTES,
+  MAX_SERVICE_TOKEN_DAYS,
+  ownsProject,
+  readScope,
+  scopeDefinition,
+  sealedSessionScope,
+  type CredentialScope,
+  type Holdings,
+  type Place,
+  type ScopeGrant,
+  type ServiceAccount,
+  type ServiceSetting,
+} from '@coffre/core/access';
 import { EXCHANGED_CREDENTIAL_MS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
-import type { CredentialColumns, RevokeCredentialInput, RevokeCredentialOutcome, SignInCredential, SignInInput, SignInOutcome, SignInRefusal } from '@coffre/core/vault';
+import type { CredentialColumns, IssueTokenInput, IssueTokenRefusal, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
 import { NotLogged, payloadOf, type ChangeKeys } from './changes.ts';
 import { applyOp, canonical, objectKey, sealed, sealOf, type Op, type Ref } from './inputs.ts';
-import { revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
-import { revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
+import { issueOnPostgres, revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
+import { issueOnSqlite, revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
 import { entryMac } from './log-entry.ts';
 import { credentialObject } from './objects.ts';
 
@@ -48,7 +65,7 @@ export type SignInCall = {
 };
 
 /** The statement's answer: its change's number, or why it made nothing. */
-export type Answer = { number?: string | null; state?: SignInRefusal | 'moved' | 'stale' | 'policy' };
+export type Answer = { number?: string | null; state?: SignInRefusal | IssueTokenRefusal | 'moved' | 'stale' | 'policy' };
 
 /** A lock not had within the functions' `lock_timeout`, or a statement cancelled: overloaded, refused at once (R44). */
 const BUSY_CODES = new Set(['55P03', '57014']);
@@ -220,4 +237,134 @@ export type RevokeCall = {
   change: { at: number; actor: string; requestId: string; object: string; payload: string; seal: Buffer; sealFrom: Buffer; mac: Buffer };
 };
 
+// --- a token's issue (PR 2) -----------------------------------------------------
 
+/** What an issue was weighed on, read by the vault before its statement: the rows the statement then holds to. */
+export type IssueRead = {
+  at: number;
+  actor: { generation: number; accessSeq: bigint };
+  principal: { generation: number; accessSeq: bigint };
+  /** The credential the request came in on, as read, and its seal; null for none. */
+  via: { columns: CredentialColumns; seal: Buffer | null } | null;
+};
+
+/** An issue as the vault decided it: the statement's arguments. */
+export type IssueCall = {
+  change: { at: number; actor: string; requestId: string; object: string; payload: string; seal: Buffer; mac: Buffer };
+  input: IssueTokenInput;
+  read: IssueRead;
+  tokenHash: Buffer;
+  authMac: Buffer;
+};
+
+/** The shape of an issue as the app sends it; throws on one no app of this release sends. */
+export function checkIssue(input: IssueTokenInput): CredentialScope {
+  const { actor, via, principal, generation, credential: c, policy, appKey } = input ?? ({} as IssueTokenInput);
+  const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
+  if (typeof actor !== 'string' || !member.test(actor) || typeof principal !== 'string' || !member.test(principal) || !Number.isInteger(generation)
+    || (via !== null && (typeof via !== 'string' || !UUID.test(via))) || !isPolicy(policy)
+    || (input.actorAccess !== null && (typeof input.actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(input.actorAccess))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)) {
+    throw new Error('an issue names its issuer, the credential it came in on, whom it acts as at which generation, the policy weighed, and the app\'s key');
+  }
+  if (typeof c?.id !== 'string' || !UUID.test(c.id) || (c.kind !== 'service' && c.kind !== 'personal' && c.kind !== 'handle') || !isBase64(c.tokenHash, 32)
+    || !isBase64(c.authMac, 32) || typeof c.tokenHint !== 'string' || c.tokenHint.length === 0 || c.tokenHint.length > 64
+    || (c.label !== null && (typeof c.label !== 'string' || c.label.length > 120)) || typeof c.scope !== 'string' || (c.places !== null && typeof c.places !== 'string')
+    || typeof c.expiresAt !== 'number' || !Number.isSafeInteger(c.expiresAt) || typeof c.createdBy !== 'string') {
+    throw new Error('an issue\'s token is its row: an id, its kind, its token\'s hash and hint, its scope as stored, its end, its maker, and the app\'s MAC');
+  }
+  const scope = readScope(c.scope);
+  if (scope === null || scope.length === 0) throw new Error('an issued token reaches what its stored scope names, at least one place');
+  return scope;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Whether the issuer, as the vault read them (`holder`, its credential's
+ * scope and kind through it), may give `principal` a token of this kind,
+ * scope and end: null if so, or why not. The app's own checks, made
+ * again on the vault's reads, with the same rules (`@coffre/core/access`):
+ * - a service account's (R15, R32): its issuer manages it, and could give
+ *   it each grant, which the account holds (`issuesCredential`); sensitive
+ *   reads only where the issuer is an Owner of the project (`ownsProject`);
+ *   at most `MAX_SERVICE_TOKEN_DAYS`;
+ * - a personal token: its person's own, made on a session, each role one
+ *   that manages no access (`delegable`), no column past what they hold
+ *   there (`heldColumns`); at most `MAX_PERSONAL_TOKEN_MINUTES`;
+ * - a handle: its person's own, on a session or a personal token of theirs,
+ *   no column past what they hold there through it, never past its end.
+ */
+export function weighIssue(
+  input: IssueTokenInput,
+  scope: CredentialScope,
+  holder: Holdings,
+  places: readonly (Place | null)[],
+  via: CredentialColumns | null,
+  at: number,
+  service: { setting: ServiceSetting | null; account: ServiceAccount } | null,
+): string | null {
+  const { actor, principal, credential } = input;
+  if (credential.createdBy !== actor.slice(actor.indexOf(':') + 1)) return 'a token names who made it, its issuer';
+  if (places.some((place) => place === null)) return 'a place the token names is no longer there';
+  const at_ = places as readonly Place[];
+  const policy = holder.policy ?? DEFAULT_POLICY;
+  const within = (grant: ScopeGrant, place: Place) => {
+    const held = heldColumns(holder, place);
+    const { permissions, protected: guarded } = scopeDefinition(grant);
+    return permissions.every((p) => held.normal.includes(p)) && guarded.every((p) => held.protected.includes(p));
+  };
+  switch (credential.kind) {
+    case 'service': {
+      if (!principal.startsWith('token:') || service === null) return 'a service token is a service account\'s';
+      if (credential.expiresAt > at + MAX_SERVICE_TOKEN_DAYS * 86_400_000 + 60_000) return `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days`;
+      const grants = scope.map((grant, i) => ({ role: grant.role, place: at_[i]!, kept: scopeDefinition(grant) }));
+      if (!issuesCredential(holder, service.setting, actor, service.account, grants)) return 'a credential reaches at most what its account holds and what its issuer could give it';
+      if (scope.some((grant) => grant.sensitive === true && !ownsProject(holder, grant.projectId!))) return 'only an Owner of its project gives a service account sensitive reads (R32)';
+      return null;
+    }
+    case 'personal': {
+      if (principal !== actor || !actor.startsWith('user:')) return 'a personal token is its person\'s own';
+      if (holder.credentialScope != null || (via !== null && via.kind !== 'browser' && via.kind !== 'cli')) return 'a personal token is made on a session: a token never makes another';
+      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + 60_000) return 'a personal token lasts at most a week';
+      if (scope.some((grant) => !delegable(grant.role, policy))) return 'a personal token never manages access';
+      if (scope.some((grant, i) => !within(grant, at_[i]!))) return 'a personal token reaches at most what its person holds';
+      return null;
+    }
+    case 'handle': {
+      if (principal !== actor || !actor.startsWith('user:')) return 'a handle is its person\'s own';
+      if (via !== null && via.kind !== 'browser' && via.kind !== 'cli' && via.kind !== 'personal') return 'a handle is made on a session or a personal token of its person\'s';
+      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + 60_000 || (via !== null && via.expiresAt !== null && credential.expiresAt > via.expiresAt)) {
+        return 'a handle lasts at most a week, and never past the credential that made it';
+      }
+      if (scope.some((grant, i) => !within(grant, at_[i]!))) return 'a handle reaches at most what its person holds, through what it was made on';
+      return null;
+    }
+  }
+}
+
+/** The issue, sealed: the credential's object, its seal, its change's payload and MAC. */
+export function issueCall(keys: ChangeKeys, input: IssueTokenInput, read: IssueRead): IssueCall {
+  const { credential: c } = input;
+  const ref: Ref = { kind: 'credential', id: c.id };
+  const object = credentialObject({ id: c.id, principal: input.principal, kind: c.kind, scope: c.scope, revoked: false, expiresAt: c.expiresAt, generation: input.generation });
+  const op: Op = { op: 'credential.issue', principal: input.principal, caller: object.caller, scope: object.scope, expiresAt: object.expiresAt, generation: object.generation };
+  // What the change records of the issue besides (D147): who, on which credential, which kind, its label.
+  const payload = canonical({ ...JSON.parse(payloadOf(ref, op)), issue: { by: input.actor, via: input.via, kind: c.kind, label: c.label } });
+  const seal = sealOf(keys.seals[0]!, ref, object);
+  const row = { at: read.at, requestId: randomUUID(), object: objectKey(ref), actor: input.actor, payload, seal };
+  return {
+    change: { ...row, mac: entryMac(keys.mac, { tree: 'changes', row }) }, input, read,
+    tokenHash: Buffer.from(c.tokenHash, 'base64'), authMac: Buffer.from(c.authMac, 'base64'),
+  };
+}
+
+/** The issue's statement, on the engine `db` is. */
+export async function issueToken(db: Database, call: IssueCall): Promise<Answer> {
+  if (engineOf(db) === 'sqlite') return db.transaction((tx) => issueOnSqlite(tx, call));
+  try {
+    return await issueOnPostgres(db, call);
+  } catch (error) {
+    if (isBusy(error)) return { state: 'busy' };
+    throw error;
+  }
+}

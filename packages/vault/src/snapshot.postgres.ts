@@ -60,6 +60,9 @@ export function snapshotQuery(asked: Asked): SQL {
         ) e
       ),
       'policy', (SELECT ${ENTRY} FROM policy e),
+      'settings', ${asked.settings === true
+        ? sql`(SELECT ${ENTRY} FROM audit_log e WHERE author = 'vault' AND action = 'settings.change' AND decision = 'allow' ORDER BY seq DESC LIMIT 1)`
+        : sql`NULL`},
       'environments', (
         SELECT coalesce(json_agg(json_build_object(
           'id', env.id, 'projectId', env.project_id, 'slug', env.slug, 'owner', env.owner, 'parentId', env.parent_id,

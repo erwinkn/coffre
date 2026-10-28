@@ -220,3 +220,58 @@ test("a sign-in's statements read as many rows and pages however many credential
     assert.ok(grown[i]!.pages <= 2 * pages + 16, `${text} read ${grown[i]!.pages} pages once the instance grew, ${pages} before`);
   }
 });
+
+/** A service token's issue by the Owner, through the counted pools, one run before: its statements by pool, and its vault calls. */
+async function issueStatements(): Promise<{ app: Statement[]; vault: Statement[]; vaultCalls: number }> {
+  const issue = async () => runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), SERVICE, { label: 'deploys', expiresInDays: 30 });
+  await issue();
+  for (const pool of [app, vaultPool]) pool.recording = [];
+  vaultCalls = 0;
+  await issue();
+  const ran = { app: app.recording!, vault: vaultPool.recording!, vaultCalls };
+  for (const pool of [app, vaultPool]) pool.recording = null;
+  return ran;
+}
+
+/** `issue_token`'s arguments made an issue of their own: a request, a credential and a token, each new (migration 0036's order). */
+function freshIssue(values: unknown[]): unknown[] {
+  const next = [...values];
+  // $1 the request, $18 the credential, $21 its token's hash.
+  next[0] = randomUUID();
+  next[17] = randomUUID();
+  next[20] = randomBytes(32);
+  return next;
+}
+
+test("a service token's issue: the app's reads and the vault's two answers, as before; then one vault call, its write one statement, no 0.14 head (T149, PR 2)", POSTGRES, async () => {
+  const ran = await issueStatements();
+  // The issuer's newest policy and access entries, the places, and what sensitive values and references they hold: the
+  // scope as the app works it out, by path, with what it withholds.
+  assert.equal(ran.app.length, 5);
+  assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
+  // `access` for the issuer and for the account (the app's checks), a snapshot each; then the issue: one snapshot (the
+  // members, their grants, the policy, the setting), the places the account's grants name, and its one write.
+  assert.equal(ran.vaultCalls, 3);
+  assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'select "environments"."id", ', '/* writes */ SELECT issue_to']);
+});
+
+test("an issue's write reads as many rows and pages however long the logs and the account's history grow (R48)", POSTGRES, async () => {
+  const measure = async () => {
+    const write = (await issueStatements()).vault.find(({ text }) => text.includes('issue_token'))!;
+    return { rows: write.rows, pages: await vaultPool.pages(write, freshIssue) };
+  };
+  const before = await measure();
+  await db.owner.execute(sql`
+    INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
+    SELECT gen_random_uuid(), 'service', sha256(convert_to('m' || g, 'UTF8')), sha256(convert_to('i' || g, 'UTF8')), 'x', 0, ${`token:${SERVICE}`}, 'admin@acme.example',
+           now() - (g || ' minutes')::interval - interval '1 hour', now() - (g || ' minutes')::interval
+      FROM generate_series(1, 20000) g`);
+  await db.owner.execute(sql`
+    INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT -1000000 - g, c.at - g, gen_random_uuid()::text, gen_random_uuid(), c.actor, c.payload, c.seal, c.mac
+      FROM (SELECT at, actor, payload, seal, mac FROM log_changes ORDER BY number DESC LIMIT 1) c CROSS JOIN generate_series(1, 20000) g`);
+  await db.owner.execute(sql`VACUUM (ANALYZE, PARALLEL 0)`);
+  const grown = await measure();
+  assert.equal(grown.rows, before.rows);
+  assert.ok(grown.pages <= 2 * before.pages + 16, `issue_token read ${grown.pages} pages once the instance grew, ${before.pages} before`);
+});

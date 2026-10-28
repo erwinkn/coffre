@@ -18,7 +18,7 @@ import { credential } from '@coffre/client/credential';
 import { replayStored } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
 
-import { clientFor, contextFor, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, contextFor, issuesLogged, LOG, usesLogged } from './api-fixture.ts';
 import { callRaw, connect, db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { credentials, environments } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
@@ -299,7 +299,8 @@ test('a handle stands in for its environment and reaches nothing but the proxy; 
   assert.match(made.token, /^coffre_use_[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(made.scope, { 'market/dev': 'viewer' });
   assert.ok(Math.abs(Date.parse(made.expiresAt) - Date.now() - 12 * 3_600_000) < 60_000, 'twelve hours unless told');
-  const [created] = (await entries('token.create')).filter((entry) => entry.metadata.kind === 'handle');
+  // Its record: 0.14's entry, or with 0.15's log the vault's change (T149, D147).
+  const [created] = (await issuesLogged(db.owner)).filter((entry) => entry.kind === 'handle');
   assert.equal(created!.actor, `user:${DEV}`);
 
   // Not the API, not a plugin's API: a handle is no bearer token.

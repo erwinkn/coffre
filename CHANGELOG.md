@@ -18,6 +18,19 @@
   records it (D147). A sign-in that waits over a second for its binding is
   refused at once, 429. `docs/design/credential-lifecycle.md`;
   `formal/Lifecycle.tla`.
+- **0.15's vault issues tokens itself, and weighs who may, behind its
+  switch.** A service token, a personal token or a handle was the app's
+  transaction under 0.14's head, and the vault sealed whatever row the app
+  proposed. The vault now reads the issuer, the account and the credential
+  the request came in on, weighs the issue with `@coffre/core/access`'s
+  rules (an Owner of its project alone gives sensitive reads, R32), and
+  writes the token in one statement, `issue_token` (migration 0036), which
+  holds those rows as read under their locks: a demotion that commits
+  meanwhile has it weighed again. No head, no fence, no 0.14 entry (D147).
+  A service token's issue at 20 ms a round trip took 360 ms alone and
+  2,839 / 5,433 ms (p50 / p99) with 30 at once; it takes 233 and
+  297 / 634, and the uses beside no longer wait on it (p99 43 ms before,
+  25 now, as alone). `docs/design/credential-lifecycle.md`, section 3.
 - **A new database holds its first days of uses.** With 0.15's log on, a
   use is stored in a partition of its day, which the checkpointer made
   ahead once it ran; a use that came first, on a database just migrated

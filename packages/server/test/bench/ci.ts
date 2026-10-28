@@ -29,6 +29,9 @@
 // keys (7 by default, the reveal's), and `--use-cold <n>` makes n uses a second more, each on a new connection of its
 // own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
 // the cap's window in minutes (1 by default; its rows move on every tenth of it), its count a million.
+// `--issue` makes each job a service token's issue by the Owner instead (T149, PR 2), the vault weighing it: what a burst
+// of issues costs beside the uses. `--legacy` hides from the app that the vault issues tokens and signs in (`about()`
+// says neither): the app's own transactions under 0.14's head, as before T149, to compare with.
 // `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own: a binding
 // takes at most 60 sign-ins a minute, so 100 at once are two bindings' (with 0.15's log, each serializes on its row).
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
@@ -82,6 +85,8 @@ const { values } = parseArgs({
     keys: { type: 'string', default: '7' },
     window: { type: 'string', default: '1' },
     'signin-only': { type: 'boolean', default: false },
+    issue: { type: 'boolean', default: false },
+    legacy: { type: 'boolean', default: false },
     proxy: { type: 'string', default: '0' },
     threads: { type: 'string', default: '4' },
     'proxy-cache': { type: 'string', default: '0' },
@@ -95,6 +100,7 @@ const ROUNDS = Number(values.rounds);
 const JOBS = values.jobs.split(',').map(Number);
 const USES = Number(values.uses);
 const SIGNIN_ONLY = values['signin-only'];
+const ISSUE = values.issue;
 const PROXY = Number(values.proxy);
 /**
  * The Postgres container's CPU so far, in µs, when `--cgroup` names its cgroup: whole, and by login, each of its
@@ -255,7 +261,11 @@ try {
       if (instance.hot !== null) instance.hot.cost = cost;
       cost.vaultCalls += 1;
       try {
-        const answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
+        let answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
+        if (name === 'about' && values.legacy) {
+          const { credentials: _, issues: __, ...before } = answered as Record<string, unknown>;
+          answered = before;
+        }
         if (name === 'about') about = answered;
         return answered;
       } finally {
@@ -292,6 +302,8 @@ try {
   };
   /** `jobs` sign-ins, job i through binding i mod `--bindings`, each binding with them left. */
   const room = async (jobs: number) => {
+    // An issue signs nothing in through a binding.
+    if (ISSUE) return;
     for (let n = 0; n < BINDINGS; n += 1) {
       const share = Math.ceil((jobs - n) / BINDINGS);
       if (share > EXCHANGES_PER_BINDING_MINUTE) throw new Error(`a binding takes at most ${EXCHANGES_PER_BINDING_MINUTE} sign-ins a minute: run at most that many jobs a binding at once`);
@@ -321,7 +333,24 @@ try {
     }
   };
   /** One CI job: its sign-in, its list and its reveal, one after the other; or, with `--signin-only`, its sign-in. */
+  const owner = await contextFor(deps, ROOT);
+  /** A service token's issue by the Owner, on a runtime and a connection of its own, as `request` makes one. */
+  const issueOne = async (): Promise<{ ms: number; cost: Cost; body: unknown }> => {
+    const cost = newCost();
+    const pool = new TimedPool(new HyperdrivePool(farApp.url), 'app');
+    await pool.client.unsafe('select 1');
+    pool.cost = cost;
+    const runtime = createRuntime(config, createDatabase(pool.client), vaultFor(cost), transport);
+    const started = performance.now();
+    try {
+      const body = await runtime.signin!.issueServiceToken(owner, SERVICE, { label: 'bench', expiresInDays: 1 });
+      return { ms: performance.now() - started, cost, body };
+    } finally {
+      await pool.end();
+    }
+  };
   const job = async (n = 0) => {
+    if (ISSUE) return { issue: await issueOne() };
     const oidc = await request(() => new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(n % BINDINGS) }) }));
     if (SIGNIN_ONLY) return { oidc };
     const { token: credential } = oidc.body as { token: string };
@@ -331,7 +360,9 @@ try {
     return { oidc, list, reveal };
   };
 
-  console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}`);
+  console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: ${ISSUE
+    ? `a service token's issue to ${MEMBER} by ${ROOT}${values.legacy ? ', as the app issued it before T149' : ''}`
+    : `sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}`}`);
   // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day.
   await room(1);
   await job();
@@ -421,12 +452,16 @@ try {
       await usesIn(null);
       continue;
     }
-    const phases = { oidc: [] as { ms: number; cost: Cost }[], list: [] as { ms: number; cost: Cost }[], reveal: [] as { ms: number; cost: Cost }[] };
+    const phases = { oidc: [] as { ms: number; cost: Cost }[], issue: [] as { ms: number; cost: Cost }[], list: [] as { ms: number; cost: Cost }[], reveal: [] as { ms: number; cost: Cost }[] };
     for (let round = 0; round < ROUNDS; round += 1) {
       await room(jobs);
       await usesIn(`${jobs} jobs`);
       for (const done of await Promise.all(Array.from({ length: jobs }, (_, n) => job(n)))) {
-        for (const phase of ['oidc', 'list', 'reveal'] as const) if (done[phase] !== undefined) phases[phase].push(done[phase]);
+        const ran = done as { [K in keyof typeof phases]?: { ms: number; cost: Cost } };
+        for (const phase of ['oidc', 'issue', 'list', 'reveal'] as const) {
+          const run = ran[phase];
+          if (run !== undefined) phases[phase].push(run);
+        }
       }
       await usesIn(null);
     }
