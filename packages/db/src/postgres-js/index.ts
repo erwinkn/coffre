@@ -170,30 +170,32 @@ export default function postgres(given: Options): Sql {
     return (text, args = [], { simple = args.length === 0 } = {}) => new Query(text, args, handler, { simple }, Boolean(options.debug)) as never;
   }
 
-  async function reserve(): Promise<ReservedSql> {
+  /** A connection of the pool's own, held until given back: `reserve`'s, and a transaction's. */
+  async function hold(): Promise<Connection> {
     // Coffre: an ending client opens no connection again (onclose, below), not one to reserve either.
     if (ending) throw Errors.connection('CONNECTION_ENDED', options);
-    const queue = new Queue<Query>();
     // Coffre: the connection idle the shortest (queue.ts, pop), as for a query below.
     const c = open.length
       ? open.pop()!
       : await new Promise<Connection>((resolve, reject) => {
+        // Coffre: what a connection opens for, given it once open (connection.ts, ReadyForQuery), or what waits for
+        // one, never both: upstream did both, and a reservation taken from the queue to open a connection lost its.
         const query: Reservation = { reserve: resolve, reject };
-        queries.push(query);
         if (closed.length) connect(closed.shift()!, query);
+        else queries.push(query);
       });
+    return move(c, reserved);
+  }
 
-    move(c, reserved);
-    c.reserved = { next: () => (queue.length ? c.execute(queue.shift()!) : move(c, reserved)), untilReleased: true };
+  async function reserve(): Promise<ReservedSql> {
+    const queue = new Queue<Query>();
+    const c = await hold();
+    c.reserved = { next: () => (queue.length ? c.execute(queue.shift()!) : move(c, reserved)) };
 
     return {
       unsafe: unsafeOn(onReserved),
-      release: () => {
-        c.reserved = null;
-        // Coffre: released once the client is ending, the connection ends, which end() waits for; upstream gave it back.
-        if (ending) c.terminate();
-        else onopen(c);
-      },
+      // Coffre: given back once the client is ending, the connection closes, which end() waits for (Connection.release).
+      release: () => c.release(),
     };
 
     /** A statement on the connection held: sent, or queued until the connection can take more. */
@@ -207,20 +209,65 @@ export default function postgres(given: Options): Sql {
     const [mode, fn] = args.length === 1 ? ['', args[0]] : args;
     const queries = new Queue<Query>();
     let savepoints = 0;
-    let connection!: Connection;
+    /** The transaction's first statement, which carries its BEGIN (`toBuffer`, connection.ts), once asked. */
+    let first: Query | null = null;
+    /** Every statement of the transaction's asked: it ends once each has answered. */
+    const asked = new Set<Query>();
+    /** Its end is decided, COMMIT or ROLLBACK: what its work asks now is refused, unsent. */
+    let decided = false;
+    /** Asked of it once its end was decided, and refused, before its COMMIT went: its work is not all done, it rolls back. */
+    let unfinished: Error | null = null;
+    /** Its COMMIT or ROLLBACK has gone: what is refused now changes nothing. */
+    let closing = false;
+    /** Why it failed, a savepoint's statements included: what a COMMIT Postgres answered with ROLLBACK says. */
+    let failure: unknown;
+    /**
+     * Why nothing more of the transaction is sent, which would run outside it: its BEGIN failed, its connection closed,
+     * or it has ended, and its connection is the pool's again (what its work left running may still ask).
+     */
+    let stopped: Error | null = null;
+    const stop = (error: Error) => {
+      stopped ??= error;
+      while (queries.length) queries.shift()!.reject(stopped);
+    };
 
-    await new Query('begin ' + mode.replace(/[^a-z ]/gi, ''), [], pooled, { simple: true, onexecute }, Boolean(options.debug)).execute();
-    return await Promise.race([
-      scope(connection, fn),
-      new Promise<never>((_, reject) => (connection.onclose = reject)),
-    ]);
+    // Coffre: the transaction holds its connection from its first statement, BEGIN with it, until it has ended, and
+    // gives it back then. Upstream sent BEGIN alone, waited for it, and gave the connection back once Postgres said it
+    // was idle, which a BEGIN that failed would also have said, its transaction still running.
+    const c = await hold();
+    const mine: Reserved = {
+      next: () => {
+        if (first !== null && !first.began) {
+          stop(Errors.generic('TRANSACTION_NOT_BEGUN', 'The transaction did not begin, so its statements were not sent'));
+          return void move(c, reserved);
+        }
+        // What waited for the BEGIN goes at once, as many as the connection pipelines; upstream sent one an answer.
+        move(c, reserved);
+        while (queries.length) if (!c.execute(queries.shift()!)) return void move(c, full);
+      },
+    };
+    c.reserved = mine;
+    try {
+      return await Promise.race([
+        scope(fn),
+        new Promise<never>((_, reject) => (c.onclose = (error) => {
+          stop(error);
+          reject(error);
+        })),
+      ]);
+    } finally {
+      stop(Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent'));
+      c.onclose = null;
+      // Closed meanwhile, the connection is the pool's again already.
+      if (c.reserved === mine) c.release();
+    }
 
-    async function scope<R>(c: Connection, fn: (sql: TransactionSql) => R | Promise<R>, name?: string): Promise<Settled<R>> {
+    async function scope<R>(fn: (sql: TransactionSql) => R | Promise<R>, name?: string): Promise<Settled<R>> {
       let uncaughtError: unknown;
       let result: Settled<R>;
       const sql: TransactionSql = {
         unsafe: unsafeOn(inTransaction),
-        savepoint: (fn) => scope(c, fn, 's' + savepoints++),
+        savepoint: (fn) => scope(fn, 's' + savepoints++),
       };
       // The transaction's own statements, sent as the simple protocol's, as a statement with no parameters is.
       const own = (text: string) => sql.unsafe(text);
@@ -231,29 +278,79 @@ export default function postgres(given: Options): Sql {
           const x = fn(sql);
           Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(resolve as (value: unknown) => void, reject);
         });
-
+        if (!name) await settle();
         if (uncaughtError) throw uncaughtError;
+        if (!name && unfinished) throw unfinished;
       } catch (e) {
-        await own(name ? 'rollback to ' + quote(name) : 'rollback');
-        throw (e instanceof PostgresError && e.code === '25P02' && uncaughtError) || e;
+        if (!name) await settle();
+        // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed; nor one whose
+        // connection closed, which Postgres rolled back.
+        if (!stopped && (name || first?.began)) await (name ? own('rollback to ' + quote(name)) : last('rollback'));
+        // "Current transaction is aborted" says nothing of why: what failed first, unwaited, or in a savepoint, does.
+        if (aborted(e)) throw (uncaughtError !== undefined && !aborted(uncaughtError) ? uncaughtError : failure) ?? e;
+        throw e;
       }
 
-      if (!name) await own('commit');
+      if (!name && first !== null) {
+        // Coffre: Postgres answers the COMMIT of a transaction a statement of which failed, unwaited, in a savepoint
+        // its work had left, with ROLLBACK, not an error: the transaction fails. Upstream resolved.
+        const committed = (await last('commit')) as unknown as ResultMeta;
+        if (committed.command === 'ROLLBACK') {
+          throw failure ?? Errors.generic('TRANSACTION_ROLLED_BACK', 'Postgres rolled the transaction back at its COMMIT');
+        }
+      }
 
       return result;
 
       /** A statement of the transaction's: one that fails and is not waited for fails the transaction all the same. */
       function inTransaction(q: Query): void {
-        q.catch((e: unknown) => uncaughtError || (uncaughtError = e));
-        if (c.queue === full) queries.push(q);
-        else if (!c.execute(q)) move(c, full);
+        // Coffre: refused once the end is decided; before the COMMIT goes, the transaction's work is not all done, and it
+        // rolls back rather than commit part of it.
+        if (decided) {
+          const refused = stopped ?? Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent');
+          if (!closing) unfinished ??= Errors.generic('TRANSACTION_UNFINISHED', 'The transaction\'s work asked a statement once it had settled, so the transaction rolled back');
+          q.catch(() => {});
+          return q.reject(refused);
+        }
+        q.catch((e: unknown) => {
+          uncaughtError ||= e;
+          // The latest error of Postgres's own: after a savepoint rolled back to, the one that aborted it again.
+          if (e instanceof PostgresError && !aborted(e)) failure = e;
+          else failure ??= e;
+        });
+        asked.add(q);
+        send(q);
       }
     }
 
-    function onexecute(c: Connection): void {
-      connection = c;
-      move(c, reserved);
-      c.reserved = { next: () => (queries.length ? c.execute(queries.shift()!) : move(c, reserved)), untilReleased: false };
+    /**
+     * Coffre: the end decided, nothing more of the work's is sent, and the transaction ends once what it asked has
+     * answered, with a ROLLBACK if any of it failed. Upstream sent the COMMIT at once: what the work asked after it ran
+     * outside the transaction, in autocommit, and a statement that failed unwaited left a COMMIT that Postgres
+     * answered with ROLLBACK, which upstream took for success.
+     */
+    async function settle(): Promise<void> {
+      decided = true;
+      await Promise.allSettled(asked);
+    }
+
+    /** The transaction's COMMIT or ROLLBACK, past the door that settle closed. */
+    function last(text: string): Query {
+      closing = true;
+      return new Query(text, [], send, { simple: true }, Boolean(options.debug));
+    }
+
+    /** `q` on the transaction's connection: sent, or queued until the connection can take more. */
+    function send(q: Query): void {
+      if (stopped) return q.reject(stopped);
+      if (first === null) {
+        first = q;
+        q.begin = 'begin ' + mode.replace(/[^a-z ]/gi, '');
+      }
+      // Nothing follows the BEGIN until Postgres has answered it, whatever execute says: a statement that failed to
+      // be written, its BEGIN with it, has the next wait all the same, to be refused.
+      if (c.queue === full) queries.push(q);
+      else if (!c.execute(q) || q === first) move(c, full);
     }
   }
 
@@ -321,7 +418,8 @@ export default function postgres(given: Options): Sql {
 
     while (ready && queries.length && max-- > 0) {
       const query = queries.shift()!;
-      if ('reserve' in query) return query.reserve(c);
+      // Out of the pool's reach from now: none of its statements takes it before its holder resumes.
+      if ('reserve' in query) return void query.reserve(move(c, reserved));
 
       ready = c.execute(query);
     }
@@ -347,6 +445,9 @@ export default function postgres(given: Options): Sql {
     if (queries.length) connect(c, queries.shift()!);
   }
 }
+
+/** Postgres's "current transaction is aborted": a statement after one that failed. */
+const aborted = (error: unknown) => error instanceof PostgresError && error.code === '25P02';
 
 /** `options`, each one not given at its default. */
 function settle(options: Options): Settings {

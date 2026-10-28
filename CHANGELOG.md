@@ -38,7 +38,7 @@
   it (no COPY, LISTEN/NOTIFY, cursors or tagged template). Deployments
   install nothing for it. Connection URLs are read as before, TLS included
   (`sslmode`, `sslrootcert=system`); a URL names its user. It differs from
-  upstream in eight places:
+  upstream in nine places:
   - a statement's values go with it, as node-postgres sends them: upstream
     asked the server for their types first, a round trip more for every
     statement with parameters, so each statement is still one round trip,
@@ -46,9 +46,20 @@
   - Node's pool takes the connection idle the shortest, as node-postgres's
     does: upstream cycled through all of them, and Postgres spent ~8% more
     CPU per use at a pool of 16;
-  - a transaction queued behind as many statements as a connection
-    pipelines still learns its connection, which upstream left inside a
-    transaction no one would end;
+  - a transaction's BEGIN goes with its first statement, under one Sync,
+    a round trip less per transaction (a use, a reveal, a change); a BEGIN
+    that fails has Postgres skip that statement, and nothing else of the
+    transaction is sent, so none of it runs outside it. Upstream sent BEGIN
+    alone and waited; and a transaction queued behind as many statements
+    as a connection pipelines was left without its connection, inside a
+    transaction no one would end: a transaction now waits for a connection
+    of its own. A transaction's end is decided once its work has settled:
+    what its work asks from then on, or once its connection closed, is
+    refused, not sent behind the COMMIT or ROLLBACK where it would run
+    outside it, and it ends once what it asked has answered, rolling back
+    if any of it failed, or if its work asked more once settled, rather
+    than commit part of it; and a COMMIT that Postgres answers with
+    ROLLBACK fails it;
   - a client whose connection was cut under a query, or as it opened,
     closes: upstream waited for the query for ever; and the next query on
     that connection answers its own rows, where upstream gave it the dead
@@ -58,7 +69,11 @@
   - a client asked to end opens no connection again, for a waiting query or
     a `reserve()`;
   - a `reserve()` that opens its connection gets it: without `fetch_types`,
-    upstream never gave it;
+    upstream never gave it, nor, after a connection closed, to the
+    `reserve()` or transaction that opened it again;
+  - a statement the client cannot write (too many parameters) fails alone,
+    where upstream failed the one before it and hung, its transaction with
+    it;
   - an opening that cannot be finished (TLS with a key it cannot read, a
     sign-in's hash or a server's SCRAM message, a sign-in the client has
     not, such as GSSAPI, a `socket` factory that throws) fails the query

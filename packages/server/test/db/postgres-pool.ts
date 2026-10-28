@@ -28,7 +28,9 @@ const TRANSACTION = /^\s*(begin|commit|rollback|savepoint|release\s+savepoint|pr
  * COMMIT or ROLLBACK, and its savepoints, postgres.js sends itself: a
  * postgres.js client's `debug` hook hears them as it sends them, a COMMIT
  * that fails included. A client without one (`HyperdrivePool`, which makes
- * one per call) has them inferred from how its transactions end.
+ * one per call) has them inferred: BEGIN with a transaction's first
+ * statement, which carries it, and its end once it has one; a transaction
+ * that asks nothing sends nothing.
  */
 export function watched<C extends Client>(client: C, heard: (sent: Sent) => void): C {
   const statement = (text: string) => heard({ text, values: [], rows: 0, count: 0, held: true, ms: 0 });
@@ -41,13 +43,15 @@ export function watched<C extends Client>(client: C, heard: (sent: Sent) => void
       if (TRANSACTION.test(text)) statement(text.trim().replace(/\s+/g, ' '));
     };
   }
-  const watch = <T extends object>(target: T, held: boolean): T =>
+  /** `first`: told as the transaction it watches asks its first statement, which carries its BEGIN. */
+  const watch = <T extends object>(target: T, held: boolean, first?: () => void): T =>
     new Proxy(target, {
       get(on, key) {
         const value: unknown = Reflect.get(on, key, on);
         if (typeof value !== 'function') return value;
         if (key === 'unsafe') {
           return (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+            first?.();
             const query = (value as (...args: unknown[]) => Answer).call(on, text, values, ...rest);
             // Heard through the hook, as postgres.js sends it.
             if (hooked && TRANSACTION.test(text)) return query;
@@ -87,17 +91,29 @@ export function watched<C extends Client>(client: C, heard: (sent: Sent) => void
         if (key === 'begin' || key === 'savepoint') {
           return (...args: unknown[]) => {
             const work = args.pop() as (tx: object) => unknown;
-            const run = (value as (...beginArgs: unknown[]) => Promise<unknown>).call(on, ...args, (tx: object) => work(watch(tx, true)));
-            if (hooked) return run;
             const options = typeof args[0] === 'string' ? args[0] : '';
-            statement(key === 'begin' ? `begin ${options}`.trim() : 'savepoint');
+            let asked = false;
+            // A client with the hook hears its BEGIN as sent: none is inferred.
+            const begun = hooked ? undefined : key === 'begin'
+              ? () => {
+                if (asked) return;
+                asked = true;
+                statement(`begin ${options}`.trim());
+              }
+              : first;
+            if (!hooked && key === 'savepoint') {
+              begun?.();
+              statement('savepoint');
+            }
+            const run = (value as (...beginArgs: unknown[]) => Promise<unknown>).call(on, ...args, (tx: object) => work(watch(tx, true, begun)));
+            if (hooked) return run;
             return run.then(
               (result) => {
-                if (key === 'begin') statement('commit');
+                if (key === 'begin' && asked) statement('commit');
                 return result;
               },
               (error: unknown) => {
-                statement(key === 'begin' ? 'rollback' : 'rollback to savepoint');
+                if (key === 'savepoint' || asked) statement(key === 'begin' ? 'rollback' : 'rollback to savepoint');
                 throw error;
               },
             );
