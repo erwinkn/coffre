@@ -273,6 +273,29 @@ REMOVALS=(
   "Migration015Marker OldWriteMarksRow AllowedOnlyWhenGranted"
   # … and a writer who clears it (MaxClears=1) breaks it with every protection on: why PR 5 keeps the probe.
   "Migration015Marker MaxClears=1 AllowedOnlyWhenGranted"
+  # Who owns a credential's life (Lifecycle.tla, T149): A, the vault in one statement, its locks in it; B, the app's
+  # transaction under 0.14's head, the vault sealing what it proposes. Each check needs its lock, in either.
+  "LifecycleIssueA IssuerLocked SensitiveOnlyFromOwners"
+  "LifecycleIssueA IssuerLocked IssuedByLiveCredential"
+  "LifecycleIssueA IssueOffFence UsesNeverWaitOnIssues"
+  "LifecycleIssueA RevokeTakesFence RevokeOrdersUses"
+  "LifecycleIssueB IssuerLocked SensitiveOnlyFromOwners"
+  "LifecycleIssueB HeadInB SensitiveOnlyFromOwners"
+  "LifecycleIssueB HeadInB IssuedByLiveCredential"
+  "LifecycleIssueB IssueOffFence UsesNeverWaitOnIssues"
+  "LifecycleIssueB RevokeTakesFence RevokeOrdersUses"
+  "LifecycleSignInA RateLocked RateHeld"
+  "LifecycleSignInA MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"
+  "LifecycleSignInA IssueOffFence UsesNeverWaitOnIssues"
+  "LifecycleSignInB RateLocked RateHeld"
+  "LifecycleSignInB HeadInB RateHeld"
+  "LifecycleSignInB MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"
+  "LifecycleSignInB HeadInB+UseChecksGeneration AllowedAtCurrentGeneration"
+  # The same use in both: what a database writer puts back, forges or edits serves nothing while the use checks seals.
+  "LifecycleForgeA SealChecked AllowedOnSealed"
+  "LifecycleForgeB SealChecked AllowedOnSealed"
+  # A compromised app's claims: the vault weighs the issuer itself in A.
+  "LifecycleCompromisedA IssuerLocked SensitiveOnlyFromOwners"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -287,6 +310,13 @@ EXPECTED=(
   # and then deleted, once the cut is announced (Seal.tla, W229).
   "SealRetention BelowCutKept"
   "SealRetention ReplayAcrossCutSeen"
+  # B (Lifecycle.tla): a sign-in queues on 0.14's head, and holds it, a revoke the fence, across round trips to the app;
+  # and a compromised app has the vault seal any token it proposes. A holds each of these.
+  "LifecycleSignInB SignInsNeverWaitOnHead"
+  "LifecycleSignInB IssuesHoldNoLockAtApp"
+  "LifecycleIssueB UsesWaitOnlyOnDbWork"
+  "LifecycleCompromisedB SensitiveOnlyFromOwners"
+  "LifecycleCompromisedB IssuedByLiveCredential"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
