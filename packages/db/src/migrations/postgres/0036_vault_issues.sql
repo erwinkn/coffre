@@ -6,7 +6,7 @@
 -- - `policy`: the policy moved since (as `policyStill`);
 -- - `retired`: the app signed the row under a key it rotated from (as `sign_in`);
 -- - `expired`: the token's end is past.
--- Locks, in the order every writer takes them (0026): the members' rows shared, by principal as `lockMembers` takes them (a demotion or a removal waits for the issue, or the issue sees it), then the credential's row shared (a revoke of it waits, or the issue sees it), each compared in a statement of its own once had (a recheck under the lock would mix the new row with the snapshot's older changes), then the issue lock shared, its number under it (IssueOffFence: never the fence, so no use waits on an issue, R58). The policy is read without the fence: a change that commits while this runs leaves a token its use holds to its account's rights as they are then, the policy's included, never to more. No 0.14 head, no 0.14 entry: the change records the issue (D147).
+-- Locks, in the order every writer takes them (0026): the members' rows shared, by principal as `lockMembers` takes them (a demotion or a removal waits for the issue, or the issue sees it), then the credential's row shared (a revoke of it waits, or the issue sees it), each compared in a statement of its own once had (a recheck under the lock would mix the new row with the snapshot's older changes), then the issue lock shared, the policy compared and the number taken under it (IssueOffFence: never the fence, so no use waits on an issue, R58). The policy is compared under the issue lock, shared, which a policy change takes exclusive (IssuePolicyHeld; review r3): ordered, though without the fence. No 0.14 head, no 0.14 entry: the change records the issue (D147).
 CREATE FUNCTION issue_token(
     p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea,
     p_principal text, p_generation integer, p_principal_seq bigint, p_actor_generation integer, p_actor_seq bigint,
@@ -41,6 +41,10 @@ BEGIN
             RETURN json_build_object('state', 'ended');
         END IF;
     END IF;
+    -- IssuePolicyHeld: the issue lock shared before the policy is compared, and the number under it. A policy change, or a
+    -- write that moves a protected environment's slug, takes it exclusive before the fence (`holdIssues`): it commits
+    -- before this compares, and is seen, or waits for this issue's commit.
+    PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
     IF (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1)
             IS DISTINCT FROM p_policy_seq
         OR EXISTS (
@@ -60,7 +64,6 @@ BEGIN
                                     expires_at, revoked_at, seal)
         VALUES (p_id, p_kind, p_auth_mac, p_token_hash, p_token_hint, p_generation, p_principal, NULL, p_scope, p_places, p_label, p_created_by,
                 timestamptz 'epoch' + p_expires * interval '1 millisecond', NULL, p_seal);
-    PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
     INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
         VALUES (nextval('public.log_number'), p_at, p_request, public.log_object('credential', p_id::text), p_actor, p_payload, p_seal, p_mac)
         RETURNING number INTO n;

@@ -152,6 +152,12 @@
 (*   - BarrierIssueFirst: the barrier takes the issue lock before the      *)
 (*     fence. Without, it holds the fence and waits for an issue that      *)
 (*     waits for the fence: a cycle (and every use waits meanwhile).       *)
+(*   - PolicyIssueFirst: a policy change (Policies; T149, review r3) takes *)
+(*     the issue lock exclusive, after 0.14's head and before the fence,   *)
+(*     so that an issue checks the policy under the issue lock shared and  *)
+(*     the two are ordered (Lifecycle.tla's IssuePolicyHeld). Without, it  *)
+(*     holds the fence and waits for the issue lock, which the barrier     *)
+(*     holds, waiting for the fence: a cycle.                              *)
 (*                                                                         *)
 (* "Every 0.14 write ends up in the new log" is checked as an invariant at *)
 (* each tick (EveryOldWriteAdopted: what 0.14 had written when a tick ran, *)
@@ -178,10 +184,11 @@ CONSTANTS
     NewIssuers,      \* 0.15 sign-ins, each issuing once: head, issue lock (for the locks only)
     Mixed,           \* 0.15 sign-ins that also revoke the account's earlier sessions, each once (for the locks only)
     Barriers,        \* the checkpointer's barrier, once each (for the locks only)
+    Policies,        \* 0.15 policy changes, each once: head, issue lock exclusive, fence (for the locks only)
     CutoverHeadLock, CutoverFence, Marker, VerifyChain, VerifyRows,
     DualFence, ChangeHeadFirst, RowFirst, OldWritesFence,
     Adopt, AdoptRepeats, AdoptVerifies, AdoptSealsEntry, AdoptAfterSeal, UsesSeeOldWrites, OldWriteMarksRow,
-    AppHeadFirst, ExchangeOnlyIssues, IssueBeforeFence, BarrierIssueFirst
+    AppHeadFirst, ExchangeOnlyIssues, IssueBeforeFence, BarrierIssueFirst, PolicyIssueFirst
 
 None == "none"
 
@@ -209,7 +216,7 @@ VARIABLES
     decisions, \* ghost: each use's outcome, old and new
     ix,        \* the issue lock held exclusive: the barrier, or None
     is,        \* ... held shared
-    ni,        \* each 0.15 sign-in (NewIssuers, Mixed)
+    ni,        \* each 0.15 sign-in (NewIssuers, Mixed), and each policy change (Policies)
     br,        \* each barrier
     exchanged  \* ghost: 0.14 token.exchange transactions that changed the object
 
@@ -294,7 +301,8 @@ ChangeLocks ==
 \* 0.14 entries, takes the fence, and `app_change` the issue lock: with IssueBeforeFence, the issue
 \* lock first, as both do.
 IssuerLocks(p) ==
-    IF p \in Mixed THEN IF IssueBeforeFence THEN <<"head", "issue", "fence">> ELSE <<"head", "fence", "issue">>
+    IF p \in Policies THEN IF PolicyIssueFirst THEN <<"head", "issueX", "fence">> ELSE <<"head", "fence", "issueX">>
+    ELSE IF p \in Mixed THEN IF IssueBeforeFence THEN <<"head", "issue", "fence">> ELSE <<"head", "fence", "issue">>
     ELSE <<"head", "issue">>
 \* The barrier's: the issue lock exclusive, then the fence; without BarrierIssueFirst, the other way.
 BarrierLocks == IF BarrierIssueFirst THEN <<"issueX", "fence">> ELSE <<"fence", "issueX">>
@@ -334,7 +342,7 @@ Init ==
     /\ decisions = {}
     /\ ix = None
     /\ is = {}
-    /\ ni = [p \in NewIssuers \cup Mixed |-> [pc |-> "idle", got |-> 0]]
+    /\ ni = [p \in NewIssuers \cup Mixed \cup Policies |-> [pc |-> "idle", got |-> 0]]
     /\ br = [b \in Barriers |-> [pc |-> "idle", got |-> 0]]
     /\ exchanged = 0
 
@@ -693,7 +701,7 @@ ForgeEntry ==
 Next ==
     \/ \E x \in Olds : OldUseRead(x) \/ OldUseCommit(x) \/ OldWriteRow(x) \/ OldWriteHead(x) \/ OldWriteCommit(x)
                       \/ OldExchangeHead(x) \/ OldExchangeCommit(x)
-    \/ \E p \in NewIssuers \cup Mixed : IssuerLock(p) \/ IssuerCommit(p)
+    \/ \E p \in NewIssuers \cup Mixed \cup Policies : IssuerLock(p) \/ IssuerCommit(p)
     \/ \E b \in Barriers : BarrierLock(b) \/ BarrierClose(b)
     \/ \E v \in Vaults : VaultStart(v) \/ VaultLock(v) \/ VaultVerify(v) \/ VaultSeal(v)
     \/ \E x \in NewUsers : NewUseLock(x) \/ NewUseRun(x) \/ NewUseCommit(x)
@@ -763,13 +771,13 @@ Wants(p) ==
     CASE p \in Olds /\ o[p].pc = "read" -> "head"
       [] p \in Olds /\ o[p].pc = "rowed" -> OldSecond(o[p].m)
       [] p \in Olds /\ o[p].pc = "headed" /\ OldWritesFence -> IF IssueBeforeFence /\ ix /= None THEN "issue" ELSE "fence"
-      [] p \in NewIssuers \cup Mixed /\ ni[p].pc = "locking" -> IssuerLocks(p)[ni[p].got + 1]
+      [] p \in NewIssuers \cup Mixed \cup Policies /\ ni[p].pc = "locking" -> IssuerLocks(p)[ni[p].got + 1]
       [] p \in Barriers /\ br[p].pc = "waiting" -> BarrierLocks[2]
       [] p \in Vaults /\ vs[p].pc = "locking" -> CutoverLocks[vs[p].got + 1]
       [] p \in Vaults /\ vs[p].pc = "sealing" -> SealLocks[vs[p].got + 1]
       [] p \in NewChangers /\ nc[p].pc = "started" /\ nc[p].got > 0 -> ChangeLocks[nc[p].got + 1]
       [] OTHER -> None
-Waiters == Olds \cup Vaults \cup NewChangers \cup NewIssuers \cup Mixed \cup Barriers
+Waiters == Olds \cup Vaults \cup NewChangers \cup NewIssuers \cup Mixed \cup Barriers \cup Policies
 Blocks(p, q) == p /= q /\ Wants(p) /= None /\ Conflicts(p, q, Wants(p))
 NoWaitCycle ==
     ~\E p, q \in Waiters :

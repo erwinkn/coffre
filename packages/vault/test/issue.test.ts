@@ -232,7 +232,7 @@ test("an issue's write holds the credential it came in on to the end the vault a
     await holder.unsafe(`SELECT 1 FROM credentials WHERE id = '${token.credential.id}' FOR UPDATE`);
     await holder.unsafe(`UPDATE credentials SET expires_at = expires_at + interval '1 day' WHERE id = '${token.credential.id}'`);
     const issuing = w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken));
-    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
     for (let tries = 0; (await waits()) === 0; tries += 1) {
       assert.ok(tries < 200, 'the write waits on the row');
       await sleep(10);
@@ -289,7 +289,7 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
     await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
     const issuing = w.vault.issueToken!(byAdmin());
     // Asked on a connection of its own: in the holder's transaction, `pg_stat_activity` stays as it first read it.
-    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
     for (let tries = 0; (await waits()) === 0; tries += 1) {
       assert.ok(tries < 200, 'the write waits on the row');
       await sleep(10);
@@ -312,6 +312,34 @@ test("an issue the app weighed on its issuer's access as it was is refused, for 
   const at = (seq: bigint) => asked(w, (input) => ({ ...input, actor: ADMIN, actorAccess: seq.toString(), credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
   assert.equal(((await w.vault.issueToken!(at(accessSeq - 1n))) as { refused?: string }).refused, 'access');
   assert.ok((await w.vault.issueToken!(at(accessSeq))).ok);
+});
+
+test("a policy change waits for the issues in flight, which hold the issue lock shared, before the fence: ordered, and no use waits on them (IssuePolicyHeld, PolicyIssueFirst; review r3)", postgresOnly('the issue lock is an advisory lock'), async () => {
+  const w = await world();
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // An issue in flight: the issue lock shared, as `issue_token` holds it from its policy check to its commit.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 1)');
+    let changed = false;
+    const changing = w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.environment], protected: true } })
+      .then((outcome) => ((changed = true), outcome));
+    await sleep(300);
+    assert.equal(changed, false, 'the change waits for the issue');
+    // Not on the fence meanwhile: a use's shared fence is free.
+    const [fence] = await db.owner.execute<{ free: boolean }>(sql`SELECT NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 1668244070 AND objid = 0 AND granted) AS free`);
+    assert.equal(fence!.free, true, 'it holds no fence while it waits');
+    await holder.unsafe('COMMIT');
+    assert.ok((await changing).ok);
+  } finally {
+    await holder.end();
+  }
+});
+
+test("`issue_token` compares the policy only once it holds the issue lock shared (IssuePolicyHeld)", postgresOnly('a function of 0036'), async () => {
+  const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef('issue_token'::regproc) AS body`);
+  const lock = body.indexOf('pg_advisory_xact_lock_shared(1668244070, 1)');
+  assert.ok(lock > 0 && lock < body.indexOf("'policy.change'") && body.indexOf("'policy.change'") < body.indexOf('INSERT INTO public.log_changes'));
 });
 
 test('an issue takes the issue lock, never the fence: it commits while a change holds the fence exclusive (IssueOffFence, R58)', postgresOnly('the fence is an advisory lock'), async () => {

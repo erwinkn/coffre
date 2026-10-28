@@ -152,6 +152,22 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
 }
 
 /**
+ * Take the issue lock exclusive (migration 0026's, `1668244070, 1`): every
+ * issue in flight, a sign-in or a token's, ends first, and none starts
+ * until this transaction does. A write that moves what an issue's policy
+ * check compares (`issue_token`: the policy, a protected environment's
+ * slug) takes it, after its own rows and before the fence its append's
+ * trigger takes, as the checkpointer's barrier does: so the issue is
+ * ordered against it, and no use waits behind an issue (formal/Lifecycle.tla's
+ * IssuePolicyHeld, Migration015.tla's PolicyIssueFirst; T149, review r3).
+ * SQLite's transactions hold the whole file.
+ */
+export async function holdIssues(tx: Transaction): Promise<void> {
+  if (engineOf(tx) === 'sqlite') return;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244070, 1)`);
+}
+
+/**
  * Lock the log's head if no one holds it, without waiting: whether it is
  * held now. For work any caller may do, of which one at a time is enough,
  * which a request that finds the head taken leaves to the one that has it.

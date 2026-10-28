@@ -129,7 +129,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -2610,6 +2610,9 @@ class VaultService implements Vault {
       // The policy now, and the newest change, which it is as of: this one's, when it changed anything.
       const answer = { policy: livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId)), next, d.at), seq: newest === null ? null : Number(newest) };
       if (!readable || JSON.stringify(next) !== JSON.stringify(edits)) {
+        // With 0.15's log, ordered against the vault's issues in flight, which check the policy under the issue lock shared:
+        // exclusive, its rows written, before its append's trigger takes the fence (`holdIssues`).
+        if (this.#prepared.log015 !== null) await holdIssues(d.tx);
         const made = entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) });
         d.log.push(made);
         for (const { ref, op } of changes) d.changes?.stage(ref, op, actor);
@@ -3225,7 +3228,9 @@ class VaultService implements Vault {
     if (subject.status !== 'active' || principalRow === undefined || principalRow.generation !== input.generation) {
       return refuse(principal === actor ? 'ended' : 'gone');
     }
-    // Each place by its environment's slug, which scopes match: one deleted, or of another project, is no place.
+    // Each place by its environment's slug, which scopes match: one deleted, or of another project, is no place. Its row is
+    // not held to its object's seal here, nor in `#account` or `access`: T159, a 0.15 ship gate, checks them for all three.
+    // The protected ones' slugs are held to the policy under the issue lock (`issue_token`).
     const places = scope.map((grant) => {
       if (grant.environmentId == null) return { projectId: grant.projectId! };
       const environment = reads.environments.get(grant.environmentId);

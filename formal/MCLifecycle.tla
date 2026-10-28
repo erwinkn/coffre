@@ -32,6 +32,11 @@ UnbindOps == [p \in UnbindProcs |-> CASE p = "s1" -> {[tok |-> "j1", b |-> "b", 
 RevokeProcs == {"rev", "admin", "u1"}
 RevokeOps == [p \in RevokeProcs |-> CASE p = "rev" -> {"cS"} [] p = "admin" -> {"unmanage"} [] OTHER -> {}]
 
+\* Ada gives svc a token while an Owner's policy change takes that right
+\* from her role, her member row untouched; a use meanwhile (review r3).
+PolicyProcs == {"ada", "pol", "u1"}
+PolicyOps == [p \in PolicyProcs |-> {}]
+
 \* A database writer puts back, forges, edits or moves a row while svc is
 \* removed or its token revoked; two uses.
 ForgeProcs == {"writer", "admin", "rev", "u1", "u2"}

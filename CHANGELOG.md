@@ -26,7 +26,11 @@
   rules (an Owner of its project alone gives sensitive reads, R32), and
   writes the token in one statement, `issue_token` (migration 0036), which
   holds those rows as read under their locks: a demotion that commits
-  meanwhile has it weighed again. No head, no fence, no 0.14 entry (D147).
+  meanwhile has it weighed again. A policy change, or a rename or deletion
+  of an environment, takes the issue lock exclusive before the fence, and
+  the issue compares the policy under it shared: the two are ordered, and
+  no use waits on either's issue lock. No head, no fence, no 0.14 entry
+  (D147).
   A service token's issue at 20 ms a round trip took 360 ms alone and
   2,839 / 5,433 ms (p50 / p99) with 30 at once; it takes 233 and
   297 / 634, and the uses beside no longer wait on it (p99 43 ms before,

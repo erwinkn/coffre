@@ -2,7 +2,7 @@ import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import type { CredentialColumns, EnvironmentColumns, ObjectChange, PreparedChange, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Transaction } from '@coffre/db';
-import { appChanges, isStaleChange } from '@coffre/db/log';
+import { appChanges, holdIssues, isStaleChange } from '@coffre/db/log';
 
 import { authMac } from '../auth-rows.ts';
 import type { CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
@@ -177,6 +177,10 @@ export class AppChanges {
   async commit(tx: Transaction, append?: (calls: readonly PreparedChange[]) => Promise<(bigint | null)[]>): Promise<void> {
     const only = this.#only;
     const calls = this.#dropped ? [] : only === null ? this.#calls : this.#calls.filter((call) => only.has(call.id));
+    // An environment's slug moved (a rename, a deletion's tombstone): what the vault's issue compares of the policy. The
+    // issue lock exclusive, its rows written and before the fence its append takes, orders the issue against it (`holdIssues`).
+    if (calls.length > 0 && this.#changes.some((change) => change.kind === 'environment' && change.before !== null
+      && change.before.columns.slug !== change.after.slug && (only === null || only.has(change.id)))) await holdIssues(tx);
     let numbers: (bigint | null)[];
     try {
       numbers = append === undefined ? await appChanges(tx, calls) : await append(calls);

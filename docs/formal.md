@@ -1440,6 +1440,7 @@ The cutover from 0.14 (the plan's PR 9).
 | a row marker in place of that read (Migration015Marker) | `AllowedOnlyWhenGranted`, and it fails as soon as the writer clears it |
 | whatever takes the fence in a transaction that may issue too takes the issue lock first (IssueBeforeFence: the trigger, `app_change`) | `NoWaitCycle`: a sign-in holding the fence waits for the issue lock, which the barrier holds while it waits for the fence |
 | the barrier takes the issue lock before the fence (BarrierIssueFirst) | `NoWaitCycle` |
+| a policy change takes the issue lock exclusive after 0.14's head and before the fence (PolicyIssueFirst; Migration015Policy, T149) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
 | 0.14's `token.exchange`, which the trigger no longer fences, writes no decision input (ExchangeOnlyIssues; the suites hold the code to it: `decisionInputs`) | `ExchangeChangesNoInput`, `NothingAllowedAfterAnswer` |
 
 `BarrierAvoidsHead` holds in Migration015Issue: the barrier never holds 0.14's
@@ -1460,7 +1461,9 @@ transaction), a database writer holding no key, and the app's code turned
 hostile. A sign-in and a revoke are one statement each; an issue is two, a
 read and a write that goes ahead only while what the read decided on still
 stands, holding nothing between. MCLifecycle.tla's scenarios:
-`LifecycleIssue`, `LifecycleSignIn`, `LifecycleReplay` (one ID token
+`LifecycleIssue`, `LifecyclePolicy` (an issue while an Owner's policy
+change takes the right from the issuer's role), `LifecycleSignIn`,
+`LifecycleReplay` (one ID token
 presented twice), `LifecycleUnbind`, `LifecycleRevoke` (a manager's revoke
 while an admin takes the right away), `LifecycleForge` and
 `LifecycleCompromised`.
@@ -1472,6 +1475,8 @@ while an admin takes the right away), `LifecycleForge` and
 | an issue or a sign-in takes the issue lock, never the fence (IssueOffFence) | `UsesNeverWaitOnIssues` |
 | an issue's write holds the issuer's row and credential shared (IssuerLocked) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; with the app compromised too |
 | an issue's write goes ahead only on the objects its read decided on (IssuerCAS) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` |
+| an issue compares the policy under the issue lock shared, which a policy change takes exclusive (IssuePolicyHeld) | `SensitiveOnlyFromOwners`: a change narrowing the issuer's role, her row untouched, commits between the check and the number |
+| a policy change takes the issue lock before the fence (PolicyIssueFirst) | `UsesNeverWaitOnIssues`: it holds the fence while it waits for an issue, and a use waits behind it |
 | a sign-in holds its binding's row exclusive (BindingLocked) | `RateHeld`; `EndedBindingEndsCredentials` |
 | an unbind sweeps once it holds the binding's row (SweepAfterLock) | `EndedBindingEndsCredentials` |
 | the ID token spent by a unique insert (SpentChecked) | `SpentOnce` |

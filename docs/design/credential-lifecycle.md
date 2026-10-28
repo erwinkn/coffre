@@ -141,9 +141,10 @@ as the app weighed it and the policy it weighed on. The vault:
    credential's row `FOR SHARE`, then live, the issuer's, its seal as read
    and its object's newest, its end the one the vault authenticated and
    still ahead (a seal compares bytes, never the columns it was made of;
-   review r3); the policy still the newest; the app's key not
-   one it rotated from; then the insert, and the change numbered under the
-   issue lock (IssueOffFence);
+   review r3); the issue lock shared, then the policy still the newest
+   under it (IssuePolicyHeld); the app's key not one it rotated from; then
+   the insert, and the change numbered under the issue lock
+   (IssueOffFence);
 5. waits for the seal (R51) and answers.
 
 Nothing is held between the read and the write, so no lock waits on the
@@ -180,9 +181,9 @@ every protection on; each protection removed breaks the invariant beside it
 |---|---|---|
 | `RevokeOrdersUses`, `NothingAfterRevokeAnswered` | no use allowed is numbered after a revoke; none begun after its answer serves | RevokeTakesFence |
 | `RevokesOnStandingRight` | a revoke by a right the policy gives is numbered before that right is taken away | RevokePolicyHeld |
-| `UsesNeverWaitOnIssues` (R58) | a use never waits on an issue or a sign-in | IssueOffFence |
 | `SignInsTakeNoHead` (R44), `IssuesHoldNoLockBetween` | no sign-in takes 0.14's head; an issue holds nothing between its two statements | (by construction) |
-| `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` | rights never widen: a token is numbered before its issuer's demotion and her credential's revoke | IssuerLocked, IssuerCAS (each) |
+| `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` | rights never widen: a token is numbered before its issuer's demotion, a policy change that takes the right from her role, and her credential's revoke | IssuerLocked, IssuerCAS (each); IssuePolicyHeld (the policy change) |
+| `UsesNeverWaitOnIssues`, `UsesTakeNoIssueLock` (R58) | a use never waits on an issue, nor behind a change that waits for one, and never takes the issue lock | IssueOffFence; PolicyIssueFirst |
 | `RateHeld`, `SpentOnce` | a binding's rate holds; an ID token buys one credential | BindingLocked; SpentChecked |
 | `AllowedAtCurrentGeneration` | removed, an account's credentials end | MemberLocked and UseChecksGeneration (each covers the other) |
 | `EndedBindingEndsCredentials` | unbound, a binding's credentials serve nothing after | BindingLocked; SweepAfterLock |
@@ -190,7 +191,7 @@ every protection on; each protection removed breaks the invariant beside it
 | `AllowedAsPresented` | a use serves the credential whose token was presented | HashSealed and AppChecksMac (each suffices) |
 | `SignInsOnValidTokens` | the app's code, hostile, mints no run's credential | VaultVerifiesToken; BindingSealed |
 
-Scenarios: `LifecycleIssue`, `LifecycleSignIn`, `LifecycleReplay`,
+Scenarios: `LifecycleIssue`, `LifecyclePolicy`, `LifecycleSignIn`, `LifecycleReplay`,
 `LifecycleUnbind`, `LifecycleRevoke`, `LifecycleForge`, `LifecycleCompromised`, each a few
 seconds. `docs/formal.md` says what each abstracts.
 
@@ -223,7 +224,7 @@ Two results drove the design:
 | the app's key checked in the statement, not under the fence | the fence, or nothing | a credential the app signed under a key it rotated from is refused, as 0.14 refuses its entry. A rotation that commits during the statement leaves a row its new key refuses at once: a dead credential, never a live one, and R41's rotation signs every session out anyway. The model leaves this out for that reason: no outcome of it widens anything |
 | an issue is one call, a read and one write, holding nothing between (PR 2) | one statement, as D146 asked | the vault weighs the issuer's rights, which it has to read and check first: the app's `Access` answer carries no MAC the vault could take back. The write holds what the read decided on (IssuerLocked, IssuerCAS), which the model shows enough. **For Erwin: a deviation from D146** |
 | a row moved under the write: the vault reads and weighs again, up to three times, then `moved` (409) | answering `moved` at once, for the app to ask again | the vault reads everything it weighs, so it can weigh again itself, as the model's IssueCheck does; the app reads nothing more |
-| an issue reads the policy without the fence | taking the fence, as a revoke does (RevokePolicyHeld) | a use waits on the fence (R58). **Open (review r3, P1):** the argument that a use is weighed on the account's rights does not hold when a policy change narrows the issuer alone (Developer loses `secret.read`; the account's own Viewer grant still reads). The issue can be numbered after a change that took the issuer's right away. Section 7 has the options |
+| an issue compares the policy under the issue lock shared, which a policy change, or a write that moves an environment's slug, takes exclusive after its rows and before the fence (`holdIssues`; IssuePolicyHeld, PolicyIssueFirst) | the fence, as a revoke takes it (RevokePolicyHeld); or nothing, which PR 2 first did | a use waits on the fence, and never on the issue lock (R58). With no lock, a policy change that narrows the issuer alone (Developer loses `secret.read`; the account's own Viewer grant still reads) could commit between the issue's check and its number (review r3): a use's check of the account does not catch it. The change waits for the issues in flight, a few ms each; an issue behind a change waits for it, bounded by `lock_timeout` |
 | the app still weighs the scope, and names the issuer's access it weighed on; the vault refuses `access` when it moved | the vault alone | the app's scope reads what the vault does not hold (sensitive values, references); a demotion between the two is refused, 409, as `issuerStill` did |
 
 ## 6. Numbers
@@ -289,20 +290,9 @@ shares with the other issues.
   issued caused (`withCredentials` reads `token.exchange` and
   `personalTokensOf` `token.create`). T156 reads them from the changes,
   whose payloads carry both.
-- **PR 2, open after review r3 (for the lead):**
-  - *An issue ordered against a policy change.* `issue_token` checks the
-    policy without a lock, so a change that narrows the issuer can commit
-    in between. Proposed: the issue takes the issue lock shared before its
-    policy check, and a policy change (and an environment's rename or
-    deletion, which the protected slugs follow) takes it exclusive before
-    the fence, as the barrier does (BarrierIssueFirst). Uses still wait on
-    no issue. It changes the lock protocol the 0.14 entries' trigger shares,
-    so `Lifecycle.tla` first (an IssuePolicyHeld protection beside
-    RevokePolicyHeld), then `HotPathOne.tla`'s NoWaitCycle.
-  - *Environment rows the issue decides on.* Their project, slug and
-    tombstone come unauthenticated, as in the vault's `access` and
-    `#account` today. Proposed: check each one's object seal (its newest
-    change's) and hold the rows `FOR SHARE` in the statement; or a task of
-    its own, since `access` shares the gap.
+- **Environment rows an issue decides on** (T159, a 0.15 ship gate): their
+  project, slug and tombstone are read without their objects' seals, as in
+  the vault's `access` and `#account`. T159 checks them for all three. The
+  protected ones' slugs are held to the policy under the issue lock.
 - **Still the app's, with `prepare`:** browser and device sign-ins, renewal,
   a member's removal sweep, unbinding, the key rotation's sign-outs.
