@@ -81,10 +81,12 @@ whatever the libc, so the old data would have mounted fine; the volume is
 named for the image (`coffre-pgdata-v16-debian`) anyway, so that a recreated
 container starts a cluster of its own. A container already running keeps its
 image, and `pnpm db:up` (`ensure-postgres.sh`) reuses it, saying so. To move
-one to Debian, once, when no checkout is using it:
+one to Debian, once, when this is on `main`, the checkouts sharing it have
+rebased (one still on the old compose file recreates it back as Alpine, on
+the old volume) and none is using it:
 `COMPOSE_PROJECT_NAME=coffre docker compose up -d --force-recreate postgres`.
 It starts on the fresh volume and `pnpm dev` reseeds; `docker volume rm
-coffre_coffre-pgdata-v16` reclaims the old one. A Postgres of your own
+<project>_coffre-pgdata-v16` reclaims the old one, after the rebases too. A Postgres of your own
 (above) is cheaper to recreate.
 
 `scripts/ensure-postgres.sh` reuses a healthy or initializing container and
