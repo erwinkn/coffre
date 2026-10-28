@@ -19,7 +19,9 @@ after(() => db.close());
 
 test('a new database holds the days the checkpointer would make around now', { skip: ENGINE === 'postgres' ? false : 'SQLite does not partition' }, async () => {
   const made = await logStore(db.vault).days();
-  for (const day of daysAround(Date.now())) assert.ok(made.includes(day), `${day} is made by the migrations: ${made.join()}`);
+  // The template was migrated some time ago, perhaps before a midnight: of daysAround's five, the middle three are the
+  // days it holds whenever in the last day it was.
+  for (const day of daysAround(Date.now()).slice(1, 4)) assert.ok(made.includes(day), `${day} is made by the migrations: ${made.join()}`);
 });
 
 test('a use on a freshly migrated database, before any checkpointer tick', async () => {
