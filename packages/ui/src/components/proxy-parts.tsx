@@ -252,6 +252,10 @@ export function KindTag({ kind }: { kind: ItemKind }) {
 export const scopeInWords = (credential: ProxyCredential) =>
   credential.environments === null ? 'code · every environment' : `code · ${credential.environments.join(', ')} only`;
 
+/** What a code item's lock says: that the code defines it, and where it serves. */
+export const lockedByCodeInWords = (credential: ProxyCredential) =>
+  `Defined in code, ${credential.environments === null ? 'for every environment' : `for ${credential.environments.join(', ')} only`}. Change it there: its name hides any of this environment's own.`;
+
 /** Fields folded into one: text, selects and buttons inside its border, which focus lights as a whole. */
 export function Fold({ invalid, className, children }: { invalid?: boolean; className?: string; children: ReactNode }) {
   return <div className={`fold${invalid === true ? ' is-invalid' : ''}${className === undefined ? '' : ` ${className}`}`}>{children}</div>;
@@ -446,11 +450,13 @@ export function TransportSelect({
 /** Methods, as a menu at the start of an allow entry: none picked takes any. */
 export function MethodsMenu({ methods, disabled, onChange }: { methods: string[]; disabled: boolean; onChange: (methods: string[]) => void }) {
   const picked = METHODS.filter((method) => methods.includes(method));
+  const all = picked.join(' ');
+  // The trigger is one width: what does not fit becomes the first method and a count.
+  const shown = picked.length === 0 ? 'Any' : all.length <= 9 ? all : `${picked[0]} +${picked.length - 1}`;
   return (
     <Menu.Root>
-      <Menu.Trigger className="fold-select fold-lead fold-menu" aria-label="Methods" disabled={disabled}>
-        {picked.length === 0 ? 'Any' : picked.join(' ')}
-        <ChevronDown size={12} />
+      <Menu.Trigger className="fold-select fold-lead fold-kind fold-menu" aria-label="Methods" title={all === '' ? undefined : all} disabled={disabled}>
+        <span className="fold-menu-text">{shown}</span>
       </Menu.Trigger>
       <MenuPopup align="start">
         {METHODS.map((method) => (
@@ -632,7 +638,7 @@ export function CopyFromEnvironment({
     <Modal open onOpenChange={(open) => !open && onClose()} wide title="Copy from environment">
       <div className="form">
         <select
-          className="select"
+          className="select proxy-select"
           style={{ width: '14rem' }}
           aria-label="From"
           value={source}

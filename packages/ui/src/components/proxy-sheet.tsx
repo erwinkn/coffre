@@ -32,7 +32,7 @@ import {
 import type { SecretKey } from '../shared/models';
 import { ArrowRight, Lock, Plus, RotateBack, Trash, X } from './icons';
 import { CopyButton, EmptyState, Toggletip } from './ui';
-import { Fold, KeySelect, KindTag, MethodsMenu, Needs016, Note, NumberInput, scopeInWords, TemplateInput, TransportSelect, type Edits, type Row } from './proxy-parts';
+import { Fold, KeySelect, KindTag, lockedByCodeInWords, MethodsMenu, Needs016, Note, NumberInput, scopeInWords, TemplateInput, TransportSelect, type Edits, type Row } from './proxy-parts';
 
 export function ProxySheet({
   edits,
@@ -40,12 +40,15 @@ export function ProxySheet({
   keys,
   selected,
   onSelect,
+  footer,
 }: {
   edits: Edits;
   config: ProxyConfig;
   keys: readonly SecretKey[];
   selected: string | null;
   onSelect: (id: string) => void;
+  /** What sits at the foot of the list, however tall the panel beside it grows: adding an item. */
+  footer: ReactNode;
 }) {
   const rows = edits.rows;
   const row = rows.find((one) => one.id === selected) ?? rows[0];
@@ -53,6 +56,7 @@ export function ProxySheet({
     return (
       <section className="card card-wide" aria-label="Proxy">
         <EmptyState title="Nothing here yet" />
+        <div className="proxy-list-foot">{footer}</div>
       </section>
     );
   }
@@ -82,6 +86,7 @@ export function ProxySheet({
             );
           })}
         </ul>
+        <div className="proxy-list-foot">{footer}</div>
       </section>
       <Panel key={row.id} row={row} edits={edits} config={config} keys={keys} />
     </div>
@@ -125,15 +130,13 @@ function Panel({ row, edits, config, keys }: PanelProps) {
           {definition.name || '…'}
         </h2>
         {credential?.source === 'code' && (
-          <Toggletip label="The code defines it: change it there. Its name hides any of this environment's own.">
-            <button type="button" className="tag tag-outline tag-button">
-              <Lock size={11} />
-              {scopeInWords(credential)}
+          <Toggletip label={lockedByCodeInWords(credential)}>
+            <button type="button" className="btn btn-quiet btn-sm btn-icon" aria-label={scopeInWords(credential)}>
+              <Lock size={14} />
             </button>
           </Toggletip>
         )}
         <span className="proxy-sheet-actions">
-          <CopyButton value={codeOf(definition)} label="Copy as code" />
           {row.state === 'deleted' ? (
             <button className="btn btn-sm" type="button" onClick={() => edits.restore(row)}>
               <RotateBack size={14} />
@@ -163,7 +166,12 @@ function Panel({ row, edits, config, keys }: PanelProps) {
       {definition.kind === 'route' && <Preview route={definition} keys={keys} useUrl={config.useUrl} />}
       <details className="proxy-as-code">
         <summary>As code</summary>
-        <pre className="mono">{codeOf(definition)}</pre>
+        <div className="proxy-code">
+          <pre className="mono">{codeOf(definition)}</pre>
+          <span className="proxy-code-copy">
+            <CopyButton value={codeOf(definition)} label="Copy as code" />
+          </span>
+        </div>
       </details>
     </section>
   );
@@ -325,7 +333,7 @@ const KINDS: InjectKind[] = ['header', 'query', 'form', 'json', 'basic', 'sigv4'
 
 function InjectRule({ rule, keys, disabled, invalid, onChange }: { rule: ProxyInject; keys: readonly SecretKey[]; disabled: boolean; invalid: boolean; onChange: (rule: ProxyInject) => void }) {
   const kind = (
-    <select className="fold-select fold-lead" aria-label="Sends as" value={rule.kind} disabled={disabled} onChange={(event) => onChange(blankInject(event.target.value as InjectKind))}>
+    <select className="fold-select fold-lead fold-kind" aria-label="Sends as" value={rule.kind} disabled={disabled} onChange={(event) => onChange(blankInject(event.target.value as InjectKind))}>
       {KINDS.map((one) => (
         <option key={one} value={one}>
           {INJECT_LABELS[one]}

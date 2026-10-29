@@ -5591,16 +5591,40 @@ a.menu-item:hover {
 
 /* Selects, names and short fields as wide as what they hold. */
 .fold-select,
-.fold-name,
 .fold-short {
   field-sizing: content;
 }
 
 .fold-select {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 4rem;
   max-width: 14rem;
   color: var(--ink-2);
   cursor: pointer;
+}
+
+/* Every select of the Proxy page, folded or alone, is drawn here: the text a
+   comfortable step from the left border, and the caret as far from the right. */
+select.fold-select,
+select.proxy-select,
+button.fold-menu {
+  appearance: none;
+  padding: 0 1.75rem 0 0.75rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position:
+    calc(100% - 1.05rem) 52%,
+    calc(100% - 0.75rem) 52%;
+  background-size:
+    0.3rem 0.3rem,
+    0.3rem 0.3rem;
+  background-repeat: no-repeat;
+}
+
+/* A control that starts a line, as wide on every line: the method menu and the kind of what a rule sends. */
+.fold-kind {
+  flex: none;
+  width: 7rem;
+  field-sizing: fixed;
 }
 
 /* The control a field starts with, or ends with, set apart from the rest by a rule. */
@@ -5616,12 +5640,20 @@ a.menu-item:hover {
   border-left: 0;
 }
 
+/* The method menu's trigger: a select's look, over a button. */
 .fold-menu {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
   font-family: var(--font-mono);
   font-size: 0.75rem;
+  text-align: left;
+}
+
+.fold-menu-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fold-text {
@@ -5638,9 +5670,10 @@ a.menu-item:hover {
   padding-left: 0.125rem;
 }
 
+/* A name is one width on every line, so the values after them start at one x. */
 .fold-name {
   flex: none;
-  min-width: 3rem;
+  width: 11rem;
 }
 
 .fold-short {
@@ -5671,13 +5704,12 @@ a.menu-item:hover {
   background: var(--subtle);
 }
 
-.proxy-sheet .select:disabled {
+/* A select nothing may change shows no caret, and its text no room for one. */
+.proxy-sheet :is(select, button.fold-menu):disabled {
+  padding-right: 0.75rem;
   background-image: none;
 }
 
-.proxy-sheet .fold-select:disabled {
-  appearance: none;
-}
 
 /* A template's input: its text drawn by the mirror under it, each {KEY} marked. */
 .tpl {
@@ -5819,7 +5851,27 @@ a.menu-item:hover {
   margin: 0;
 }
 
+/* The list is one height whatever the panel beside it holds, and follows the
+   page as it scrolls: its items scroll inside, and adding stays at its foot. */
+.proxy-list {
+  position: sticky;
+  top: 1rem;
+  display: flex;
+  flex-direction: column;
+  height: min(40rem, calc(100vh - 12rem));
+  min-height: 16rem;
+}
+
+.proxy-list-foot {
+  flex: none;
+  padding: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
 .proxy-list ul {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   margin: 0;
   padding: 0.25rem;
   list-style: none;
@@ -6102,9 +6154,20 @@ a.menu-item:hover {
   cursor: pointer;
 }
 
+.proxy-code {
+  position: relative;
+  margin-top: 0.5rem;
+}
+
+.proxy-code-copy {
+  position: absolute;
+  top: 0.375rem;
+  right: 0.375rem;
+}
+
 .proxy-as-code pre {
-  margin: 0.5rem 0 0;
-  padding: 0.75rem;
+  margin: 0;
+  padding: 0.75rem 2.5rem 0.75rem 0.75rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--canvas);

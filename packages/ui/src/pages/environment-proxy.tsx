@@ -73,12 +73,16 @@ function ProxyPage({ store, place, config, keys, canEdit }: { store: ProxyStore;
       <PageHeader tile={project} title={environment} aside={inProject !== undefined && <Protection project={project} environment={inProject} />} />
       <EnvironmentTabs project={project} environment={environment} />
 
-      <ProxySheet edits={edits} config={config} keys={keys} selected={selected} onSelect={setSelected} />
+      <ProxySheet
+        edits={edits}
+        config={config}
+        keys={keys}
+        selected={selected}
+        onSelect={setSelected}
+        footer={<AddItem canEdit={canEdit} project={project} onAdd={(kind) => setSelected(edits.add([blankDefinition(kind)])[0]!)} onCopy={() => setCopying(true)} />}
+      />
 
       <PendingBar edits={edits} />
-      <div className="table-actions">
-        <AddItem canEdit={canEdit} project={project} onAdd={(kind) => setSelected(edits.add([blankDefinition(kind)])[0]!)} onCopy={() => setCopying(true)} />
-      </div>
 
       <ReviewDialog edits={edits} place={place} />
       {copying && <CopyFromEnvironment store={store} place={place} config={config} keys={keys} canEdit={canEdit} edits={edits} onClose={() => setCopying(false)} />}
