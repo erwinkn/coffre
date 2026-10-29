@@ -74,7 +74,8 @@ async function idle(server: ReturnType<typeof coffre>) {
   const deadline = performance.now() + 10_000;
   for (;;) {
     await settle(20);
-    if (server.state.busy === 0 || performance.now() > deadline) return;
+    if (server.state.busy === 0) return;
+    assert.ok(performance.now() < deadline, 'the client was still busy after 10 seconds');
   }
 }
 
