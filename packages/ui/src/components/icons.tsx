@@ -16,6 +16,7 @@ import {
   Eye as EyeGlyph,
   EyeOff as EyeOffGlyph,
   Folder as FolderGlyph,
+  GitFork,
   Hash as HashGlyph,
   History as HistoryGlyph,
   Inbox as InboxGlyph,
@@ -143,6 +144,7 @@ function lucide(Glyph: LucideIcon) {
 
 // Places
 export const Folder = lucide(FolderGlyph);
+export const Fork = lucide(GitFork);
 export const Layers = lucide(LayersGlyph);
 export const Users = lucide(UsersGlyph);
 export const User = lucide(UserGlyph);

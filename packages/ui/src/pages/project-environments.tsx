@@ -6,15 +6,14 @@ import { useShell } from '../lib/use-shell';
 import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
-import { archiveEnvironment, createEnvironment, environmentId, renameEnvironment } from '../lib/changes';
+import { environmentId } from '../lib/changes';
 import { affects, keys, queries } from '../lib/queries';
-import { useChange, useChangeStatus } from '../lib/use-change';
+import { useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
 import type { GrantRow, ProjectSummary } from '../shared/models';
-import { ArchiveBlocked, archiveBlockers } from '../components/references';
-import { hasEnvironmentDetails, isActiveAccessibleEnvironment, type ProjectEnvironment } from '../lib/project-environments';
-import { environmentSlugProblem } from '../lib/validation';
-import { ConfirmDialog, EmptyState, ErrorLine, MenuPopup, Modal, Notice, Timestamp } from '../components/ui';
+import { ArchiveEnvironment, NewEnvironment, RenameEnvironment } from '../components/environment-actions';
+import { hasEnvironmentDetails, type ProjectEnvironment } from '../lib/project-environments';
+import { ConfirmDialog, EmptyState, ErrorLine, MenuPopup, Timestamp } from '../components/ui';
 import { Card } from '../components/page';
 import { useAction } from '../lib/use-action';
 import { DeletePlaceDialog } from '../components/delete-place';
@@ -105,12 +104,7 @@ function EnvironmentsPanel({
 
       {canManage && (
         <div className="table-actions">
-          <NewEnvironment
-            project={project.slug}
-            // Your personal config is nobody's source: its values are yours alone.
-            sources={current.filter((environment) => isActiveAccessibleEnvironment(environment) && !environment.personal).map((environment) => environment.slug)}
-            guarded={current.filter((environment) => environment.protected).map((environment) => environment.slug)}
-          />
+          <AddEnvironment project={project.slug} />
         </div>
       )}
 
@@ -186,16 +180,6 @@ function EnvironmentCard({
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const { capabilities } = useShell();
-  const [slug, setSlug] = useState(environment.slug);
-  const coffre = useCoffre();
-  const rename = useChange(renameEnvironment(coffre, project));
-  const archive = useChange(archiveEnvironment(coffre, project));
-  // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
-  const place = `${project}/${environment.slug}`;
-  const archiving = confirming && environment.details?.archivedAt == null;
-  const { data: lent } = useQuery({ ...queries.references(coffre, place), enabled: archiving });
-  const blockers = archiving && lent?.ok === true ? archiveBlockers(place, lent.references) : [];
-  const asking = archiving && lent === undefined;
   const { status, dismiss } = useChangeStatus(keys.projects);
   const state = status(environmentId(project, environment.slug));
   const pending = state.state === 'pending';
@@ -206,12 +190,9 @@ function EnvironmentCard({
   const manageable = isAdmin && details !== null;
   // Deleting is for those who run the instance, and only once the environment is archived.
   const deletable = manageable && isArchived && capabilities.runsInstance;
-  const slugError = slug === '' ? null : environmentSlugProblem(slug);
   const lastChange = useLastChange(project, environment.slug, opens);
   // A personal config is its owner's alone: no grant reaches it, so none is shown on its card.
   const holders = environment.personal === true ? [] : holdersOf(grants, environment.slug);
-  // Scopes match environments by slug: a new one is said to move them before the rename is saved.
-  const reslugged = slug !== environment.slug && slug !== '' && slugError === null;
 
   return (
     <div
@@ -296,10 +277,7 @@ function EnvironmentCard({
           <MenuPopup align="end">
             <Menu.Item
               className="menu-item"
-              onClick={() => {
-                setSlug(environment.slug);
-                setRenaming(true);
-              }}
+              onClick={() => setRenaming(true)}
             >
               <Pencil size={14} />
               Rename
@@ -324,105 +302,8 @@ function EnvironmentCard({
 
       {manageable && (
         <>
-          <Modal
-            open={renaming}
-            onOpenChange={setRenaming}
-            title={
-              <>
-                Rename{' '}
-                <span className="mono">
-                  {project}/{environment.slug}
-                </span>
-              </>
-            }
-          >
-            <form
-              className="form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                // Shown on the card at once; the card says if the server refuses.
-                rename({ from: environment.slug, slug });
-                setRenaming(false);
-              }}
-            >
-              <label className="field">
-                <span className="label">Slug</span>
-                <input
-                  className="input input-mono"
-                  autoFocus
-                  spellCheck={false}
-                  value={slug}
-                  aria-invalid={slugError !== null}
-                  onChange={(event) => setSlug(event.target.value)}
-                />
-                <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
-                  {slugError ??
-                    `Anything running coffre run ${project}/${environment.slug} will need the new path.`}
-                </span>
-              </label>
-              {reslugged && (
-                <Notice tone="info">
-                  Instance roles scoped to <span className="mono">{environment.slug}</span> stop reaching it; those scoped
-                  to <span className="mono">{slug}</span> start.
-                </Notice>
-              )}
-
-              <div className="dialog-actions">
-                <button className="btn" type="button" onClick={() => setRenaming(false)}>
-                  Cancel
-                </button>
-                <button
-                  className="btn btn-primary"
-                  type="submit"
-                  disabled={slug === environment.slug || slug === '' || slugError !== null}
-                >
-                  Save
-                </button>
-              </div>
-            </form>
-          </Modal>
-
-          <ConfirmDialog
-            open={confirming}
-            onOpenChange={setConfirming}
-            title={
-              <>
-                {isArchived ? 'Restore' : 'Archive'}{' '}
-                <span className="mono">
-                  {project}/{environment.slug}
-                </span>
-                ?
-              </>
-            }
-            body={
-              secretCount === null ? (
-                <>
-                  This changes whether the environment serves its secrets. Values and history
-                  stay stored.
-                </>
-              ) : isArchived ? (
-                <>
-                  It serves its {secretCount} secret{secretCount === 1 ? '' : 's'} again, to
-                  everyone with a grant on it.
-                </>
-              ) : (
-                <>
-                  Its {secretCount} secret{secretCount === 1 ? '' : 's'} stop being served, so
-                  anything running <code>coffre run</code> against{' '}
-                  <span className="mono">
-                    {project}/{environment.slug}
-                  </span>{' '}
-                  loses them at its next start. Values and history survive, and restoring is
-                  one click.
-                </>
-              )
-            }
-            detail={<ArchiveBlocked references={blockers} />}
-            confirmLabel={isArchived ? 'Restore environment' : 'Archive environment'}
-            confirmDisabled={asking || blockers.length > 0}
-            destructive={!isArchived}
-            onConfirm={() => archive({ slug: environment.slug, archived: !isArchived })}
-          />
+          <RenameEnvironment project={project} environment={environment.slug} open={renaming} onOpenChange={setRenaming} />
+          <ArchiveEnvironment project={project} environment={environment} open={confirming} onOpenChange={setConfirming} />
         </>
       )}
 
@@ -496,148 +377,16 @@ function PersonalConfigs({ project }: { project: string }) {
   );
 }
 
-/**
- * A new environment, empty, or forked from one you can read: inheriting
- * its keys live (docs/design/forking.md), or each of them copied, value and
- * folder, without history, or a reference to it. Copying is a read, and
- * logged as one; inheriting reads nothing until the fork is read.
- */
-function NewEnvironment({
-  project,
-  sources,
-  guarded,
-}: {
-  project: string;
-  sources: string[];
-  /** The protected ones: a fork of one is protected too. */
-  guarded: string[];
-}) {
+/** Add environment, and the dialog it opens. */
+function AddEnvironment({ project }: { project: string }) {
   const [open, setOpen] = useState(false);
-  const [slug, setSlug] = useState('');
-  // '' for empty, 'inherit:prod' for a fork that inherits, 'copy:prod' for a copy, 'ref:prod' for references to prod.
-  const [start, setStart] = useState('');
-  const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['inherit' | 'copy' | 'ref', string]);
-  const coffre = useCoffre();
-  // A fork as references copies the keys whose source you read only through their parent: said before you confirm.
-  const { data: parent } = useQuery({ ...queries.secrets(coffre, { project, environment: from }), enabled: how === 'ref' });
-  const copied = how === 'ref' && parent?.ok === true
-    ? parent.keys.filter((key) => !key.archived && key.reference !== null && !key.reference.canOpenSource).map((key) => key.key)
-    : [];
-  const create = useChange(createEnvironment(coffre, project));
-  const slugError = slug === '' ? null : environmentSlugProblem(slug);
-
-  function close() {
-    setOpen(false);
-  }
-
   return (
     <>
       <button className="btn btn-primary" onClick={() => setOpen(true)}>
         <Plus size={14} />
         Add environment
       </button>
-
-      <Modal
-        open={open}
-        onOpenChange={(next) => (next ? setOpen(true) : close())}
-        title={
-          <>
-            New environment in <span className="mono">{project}</span>
-          </>
-        }
-      >
-        <form
-          className="form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            // Listed at once, as saving; the list says if the server refuses.
-            create({ slug, ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}), ...(how === 'inherit' ? { inherit: true } : {}) });
-            setSlug('');
-            setStart('');
-            close();
-          }}
-        >
-          <label className="field">
-            <span className="label">Slug</span>
-            <input
-              className="input input-mono"
-              autoFocus
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="staging"
-              value={slug}
-              aria-invalid={slugError !== null}
-              onChange={(event) => setSlug(event.target.value)}
-            />
-            <span className={`hint${slugError !== null ? ' edit-note-error' : ''}`}>
-              {slugError ?? (
-                <>
-                  The CLI will address it as{' '}
-                  <span className="mono">
-                    {project}/{slug === '' ? 'staging' : slug}
-                  </span>
-                  .
-                </>
-              )}
-            </span>
-          </label>
-          {sources.length > 0 && (
-            <label className="field">
-              <span className="label">Start from</span>
-              <select className="select" value={start} onChange={(event) => setStart(event.target.value)}>
-                <option value="">Empty</option>
-                {sources.map((source) => (
-                  <option key={`inherit:${source}`} value={`inherit:${source}`}>
-                    Inheriting from {source}
-                  </option>
-                ))}
-                {sources.map((source) => (
-                  <option key={`copy:${source}`} value={`copy:${source}`}>
-                    A copy of {source}
-                  </option>
-                ))}
-                {sources.map((source) => (
-                  <option key={`ref:${source}`} value={`ref:${source}`}>
-                    References to {source}
-                  </option>
-                ))}
-              </select>
-              <span className="hint">
-                {how === ''
-                  ? 'No secrets yet.'
-                  : how === 'inherit'
-                    ? `Keeps reading ${from}'s keys, live, except those you set or remove here. Whoever reads ${slug === '' ? 'the new environment' : slug} needs read on ${from} too, for those.`
-                    : how === 'copy'
-                    ? `Each of ${from}'s keys, with its current value and folder, without history.`
-                    : `Each key follows ${from}'s until it gets a value of its own. Whoever can read ${slug === '' ? 'the new environment' : slug} will read ${from}'s values through them, even without access to ${from}.`}
-              </span>
-              {from !== '' && guarded.includes(from) && (
-                <span className="hint">
-                  <span className="mono">{from}</span> is protected, so the new environment is too, from its first moment.
-                </span>
-              )}
-              {copied.length > 0 && (
-                <span className="hint">
-                  Copied instead, since you read their source only through {from}: <span className="mono">{copied.join(', ')}</span>.
-                </span>
-              )}
-            </label>
-          )}
-
-          <div className="dialog-actions">
-            <button className="btn" type="button" onClick={close}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              type="submit"
-              disabled={slug === '' || slugError !== null}
-            >
-              Add environment
-            </button>
-          </div>
-        </form>
-      </Modal>
+      <NewEnvironment project={project} open={open} onOpenChange={setOpen} />
     </>
   );
 }

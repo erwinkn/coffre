@@ -47,17 +47,22 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
     ],
   },
   'PUT /projects/:project/:environment': {
-    ui: [{ does: 'a project › Environments › Add environment, empty, inheriting, a copy or references', in: 'pages/project-environments.tsx', call: 'environments.create' }],
+    ui: [
+      { does: 'a project › Environments › Add environment, empty, inheriting, a copy or references', in: 'components/environment-actions.tsx', call: 'environments.create' },
+      { does: "an environment › ⋯ › Fork…, the same dialog, inheriting from it", in: 'components/environment-actions.tsx', call: 'environments.create' },
+      { does: "an environment › ⋯ › My own dev › Make my own dev", in: 'pages/environment.tsx', call: 'environments.create' },
+    ],
   },
   'PATCH /projects/:project/:environment': {
     ui: [
-      { does: "an environment's card › ⋯ › Rename, Archive…, Restore", in: 'pages/project-environments.tsx', call: 'environments.update' },
-      { does: "an environment's card › ⋯ › Protect…, and for an Owner of its project Unprotect…", in: 'pages/project-environments.tsx', call: 'environments.protect' },
+      { does: "an environment's card, or an environment › ⋯ › Rename…, Archive…; an archived card › Restore", in: 'components/environment-actions.tsx', call: 'environments.update' },
+      { does: "an environment's card › its Protect… tag, or an environment › ⋯ › Protect…; for an Owner of its project Unprotect…", in: 'components/protected.tsx', call: 'environments.protect' },
     ],
   },
   'DELETE /projects/:project/:environment': {
     ui: [
       { does: "an archived environment's card › ⋯ › Delete…, its path typed out", in: 'components/delete-place.tsx', call: 'environments.delete' },
+      { does: 'your own dev, `dev@me` › ⋯ › Delete…', in: 'pages/environment.tsx', call: 'environments.delete' },
       { does: 'the same dialog: what deleting would erase and revoke', in: 'lib/queries.ts', call: 'environments.previewDelete' },
     ],
   },
@@ -79,14 +84,14 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /secrets/:project/:environment': { ui: [{ does: 'an environment: its secrets', in: 'pages/environment.tsx', call: 'secrets.list' }] },
   'PATCH /secrets/:project/:environment': {
     ui: [
-      { does: 'an environment › Add secret, Edit, then Save', in: 'pages/environment.tsx', call: 'secrets.set' },
+      { does: 'an environment › Add secret, Edit, then Save under the table', in: 'pages/environment.tsx', call: 'secrets.set' },
       { does: 'an environment › Import .env, after its plan', in: 'pages/environment.tsx', call: 'secrets.set' },
       { does: 'a secret › ⋯ › Who sees it, stricter: at once, its value kept', in: 'pages/environment.tsx', call: 'secrets.set' },
     ],
   },
   'PATCH /secrets/:project/:environment/:key': {
     ui: [
-      { does: "a secret › Edit: its name, then Save", in: 'pages/environment.tsx', call: 'secrets.rename' },
+      { does: "a secret › Edit: its name, then Save under the table", in: 'pages/environment.tsx', call: 'secrets.rename' },
       { does: 'a secret › ⋯ › Archive; an archived one › ⋯ › Restore', in: 'pages/environment.tsx', call: 'secrets.update' },
       { does: "a fork › an override › ⋯ › Reset to its parent; a reset one › ⋯ › Use its own value again; Undo after either", in: 'lib/changes.ts', call: 'secrets.inherit' },
     ],
