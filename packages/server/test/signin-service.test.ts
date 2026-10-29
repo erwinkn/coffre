@@ -551,31 +551,33 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   await signin.completeSignin(profile('github', '9001', ['stranger@example.com']), meta());
   await signin.signOut(kept.credential.token, { requestId: randomUUID(), sourceIp: IP });
 
+  // Asked as every client of this release asks it (`sealed`): with 0.15's log, the sign-out is the vault's change (T149,
+  // D147), which the page lists in 0.14's entry's place, and counts where it hides it (T164).
   const audit = clientFor(deps, ROOT).audit;
-  const all = (await audit.list({ detail: '1' })).entries;
-  // With 0.15's log, the sign-out is the vault's change (T149, D147), which 0.15's page shows (T156).
-  const signedOut = LOG === '0.14' ? ['sign_out allow true'] : [];
-  assert.deepEqual(all.slice(0, 3 + signedOut.length).map((entry) => `${entry.action} ${entry.decision} ${entry.detail}`), [
-    ...signedOut,
-    'sign_in deny true',
-    'sign_in allow true',
-    'account.link allow true',
+  const all = (await audit.list({ detail: '1', sealed: '1' })).entries;
+  assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.log} ${entry.action} ${entry.decision} ${entry.detail}`), [
+    `${LOG} sign_out allow true`,
+    '0.14 sign_in deny true',
+    '0.14 sign_in allow true',
+    '0.14 account.link allow true',
   ]);
   // Left out by default: what is shown is the rest, the members admitted above.
-  const shown = (await audit.list()).entries;
+  const shown = (await audit.list({ sealed: '1' })).entries;
   assert.ok(shown.length > 0);
   assert.deepEqual(shown.map((entry) => entry.seq), all.filter((entry) => !entry.detail).map((entry) => entry.seq));
-  // Filtered by the query, so a page of one is not an empty page.
-  const first = await audit.list({ limit: 1 });
+  // Filtered by the query, so a page of one is not an empty page. Counted when asked (`hidden`), as no page of
+  // coffre's own asks, and not otherwise (T164).
+  assert.equal((await audit.list({ limit: 1, sealed: '1' })).hidden, undefined);
+  const first = await audit.list({ limit: 1, sealed: '1', hidden: '1' });
   assert.deepEqual(first.entries.map((entry) => entry.seq), [shown[0].seq]);
   // Each page says what it left out of its stretch of the log, and the
-  // stretches tile it: the sign-ins, newer than every entry shown, are the
-  // first page's, and the next page's has none.
-  const hidden = [{ action: 'sign_in', count: 2 }, { action: 'account.link', count: 1 }, ...(LOG === '0.14' ? [{ action: 'sign_out', count: 1 }] : [])];
+  // stretches tile it: the sign-ins and the sign-out, newer than every entry
+  // shown, are the first page's, and the next page's has none.
+  const hidden = [{ action: 'sign_in', count: 2 }, { action: 'account.link', count: 1 }, { action: 'sign_out', count: 1 }];
   assert.deepEqual(first.hidden, hidden);
-  assert.deepEqual((await audit.list({ limit: 1, before: first.entries[0].seq })).hidden, []);
-  assert.deepEqual((await audit.list()).hidden, hidden);
-  assert.equal((await audit.list({ detail: '1' })).hidden, undefined);
+  assert.deepEqual((await audit.list({ limit: 1, before: first.next!, hidden: '1' })).hidden, []);
+  assert.deepEqual((await audit.list({ sealed: '1', hidden: '1' })).hidden, hidden);
+  assert.equal((await audit.list({ detail: '1', sealed: '1', hidden: '1' })).hidden, undefined);
   // And the chain still covers what the list left out.
   assert.equal((await audit.verify()).ok, true);
 });
@@ -645,6 +647,13 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
       { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: token.id },
     ]);
   }
+  // The audit page shows each as 0.14's entry put it, under either log: with 0.15's log, the change in its place (T164).
+  const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1', decision: 'allow' })).entries.filter((entry) => entry.action === 'token.revoke');
+  assert.deepEqual(shown.reverse().map(({ log, actorId, metadata }) => [log, actorId, metadata.targetCredentialId, metadata.kind, metadata.principalType, metadata.principalId]), [
+    [LOG, DEV, devOther.credential.id, 'browser', 'user', DEV],
+    [LOG, LEAD, devSession.credential.id, 'browser', 'user', DEV],
+    [LOG, ROOT, token.id, 'service', 'service', SERVICE],
+  ]);
 });
 
 // --- linking and unlinking --------------------------------------------------------
@@ -830,20 +839,8 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.equal(row.createdBy, LEAD);
   assert.equal(row.label, 'deploys');
 
-  // With 0.15's log, the vault issues them (T149), and its changes record who issued which (D147).
-  if (LOG === '0.15') {
-    assert.deepEqual((await issuesLogged(db.owner)).map(({ actor, kind, targetCredentialId }) => [actor, kind, targetCredentialId]), [
-      [`user:${LEAD}`, 'service', issued.id],
-      [`user:${ROOT}`, 'service', byRoot.id],
-    ]);
-    return;
-  }
-  const rows = await auditRows();
-  assert.deepEqual(rows.map((r) => `${r.action} ${r.decision} ${r.actorId}`), [
-    `token.create allow ${LEAD}`,
-    `token.create allow ${ROOT}`,
-  ]);
-  assert.deepEqual(rows[0].metadata, {
+  // As the log has them, 0.14's entry: with 0.15's log, the vault issues them (T149), and its changes record who issued which (D147).
+  const created = {
     kind: 'service',
     principalType: 'service',
     principalId: SERVICE,
@@ -851,7 +848,24 @@ test('owners issue service tokens that verify as the service', async () => {
     targetCredentialId: issued.id,
     expiresAt: issued.expiresAt,
     scope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }],
-  });
+  };
+  if (LOG === '0.15') {
+    assert.deepEqual((await issuesLogged(db.owner)).map(({ actor, kind, targetCredentialId }) => [actor, kind, targetCredentialId]), [
+      [`user:${LEAD}`, 'service', issued.id],
+      [`user:${ROOT}`, 'service', byRoot.id],
+    ]);
+  } else {
+    const rows = await auditRows();
+    assert.deepEqual(rows.map((r) => `${r.action} ${r.decision} ${r.actorId}`), [
+      `token.create allow ${LEAD}`,
+      `token.create allow ${ROOT}`,
+    ]);
+    assert.deepEqual(rows[0].metadata, created);
+  }
+  // The audit page shows it as 0.14's entry put it, under either log: with 0.15's log, the change in its place (T164).
+  const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1' })).entries.filter((entry) => entry.action === 'token.create');
+  assert.deepEqual(shown.map((entry) => [entry.log, entry.actorId, entry.detail]), [[LOG, ROOT, true], [LOG, LEAD, true]]);
+  assert.deepEqual(Object.fromEntries(Object.keys(created).map((name) => [name, shown[1]!.metadata[name]])), created);
 
   // A service's tokens do not show up as anyone's sessions.
   assert.deepEqual(await signin.listSessions(lead, null), []);

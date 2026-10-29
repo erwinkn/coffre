@@ -170,6 +170,14 @@ test('a tab sends nobody away on a stale no: a service account added back opens 
   assert.equal(await tabOpens(shows), true);
 });
 
+test("the audit page asks for 0.15's sealed log too, and never for the counts of what it hides, so it shows what it holds (T164)", async () => {
+  const asked: unknown[] = [];
+  const client = { audit: { list: async (query: unknown) => (asked.push(query), { entries: [] }) } } as unknown as CoffreClient;
+  for (const search of [{}, { detail: '1' as const }, { actorId: 'ada@acme.example' }]) await queries.auditEntries(client, search).queryFn!({} as never);
+  assert.equal(asked.length, 3);
+  for (const query of asked as Record<string, unknown>[]) assert.deepEqual([query.sealed, 'hidden' in query], ['1', false]);
+});
+
 test('the audit log is read on every visit, and its verification once with the page', () => {
   const { client } = fakeClient();
   assert.equal(queries.auditEntries(client, {}).staleTime, 0);

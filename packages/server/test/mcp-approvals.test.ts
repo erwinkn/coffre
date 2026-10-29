@@ -12,7 +12,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { decideApproval } from '../src/db/queries.ts';
 import { callDigest } from '../src/mcp/approvals.ts';
 import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
-import { clientFor, holdSomething } from './api-fixture.ts';
+import { clientFor, holdSomething, LOG } from './api-fixture.ts';
 import { auditLog, credentials, mcpApprovals, mcpConnections } from './db/tables.ts';
 import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
@@ -233,6 +233,22 @@ test('a token issued through an approval is shown on the page, once, and never t
   assert.equal(result.body.result!.structuredContent!.status, 'approved');
   assert.equal(JSON.stringify(result.body).includes(issued), false);
   assert.equal(JSON.stringify(await approvalRows()).includes(issued), false);
+
+  // Revoked through an approval too. On the audit page, under either log, each says what 0.14's entry said: the app,
+  // its connection and the approval it went through, not the session that approved it (T164, review r1 of W261).
+  const [{ id: tokenId }] = await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
+  const revoking = idOf(await callRaw(token, 'revoke_service_token', { service: 'ci-deploy', id: tokenId! }));
+  assert.equal((await decide(revoking, true)).body.status, 'approved');
+  const listed = (await clientFor(deps, ROOT).audit.list({ actor: `user:${DEV}`, detail: '1', sealed: '1' })).entries;
+  const [issue, revoke] = ['token.create', 'token.revoke'].map((action) => listed.find((entry) => entry.action === action && entry.decision === 'allow')!);
+  const [connection] = await db.owner.select({ id: mcpConnections.id, clientId: mcpConnections.clientId, clientName: mcpConnections.clientName }).from(mcpConnections);
+  for (const [entry, approval] of [[issue!, id], [revoke!, revoking]] as const) {
+    assert.equal(entry.log, LOG);
+    assert.equal(entry.metadata.credentialId, connection!.id);
+    assert.deepEqual(entry.metadata.via, { connectionId: connection!.id, clientId: connection!.clientId, clientName: connection!.clientName, approvalId: approval });
+  }
+  assert.equal(issue!.metadata.targetCredentialId, tokenId);
+  assert.equal(revoke!.metadata.targetCredentialId, tokenId);
 });
 
 test('a token or a binding reaches what the page said: an account given more since is refused on Approve, and no token is made', async () => {

@@ -1074,7 +1074,8 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
   }
   const named = (entries: { log: string; seq: number }[]) => entries.map((entry) => `${entry.log}:${entry.seq}`);
   for (const query of [{}, { detail: '1' as const }, { actor: SERVICE }]) {
-    const whole = await root.audit.list({ ...query, sealed: '1', limit: 500 });
+    // Counted too (`hidden`), as a caller that asks for it pages.
+    const whole = await root.audit.list({ ...query, sealed: '1', hidden: '1', limit: 500 });
     assert.deepEqual([whole.more, whole.next], [false, null]);
     assert.equal(whole.entries.filter((entry) => entry.action === 'token.exchange').length, 6);
     for (const [i, entry] of whole.entries.entries()) {
@@ -1085,7 +1086,7 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
       const hidden = new Map<string, number>();
       let before: string | undefined;
       do {
-        const page = await root.audit.list({ ...query, sealed: '1', limit, ...(before === undefined ? {} : { before }) });
+        const page = await root.audit.list({ ...query, sealed: '1', hidden: '1', limit, ...(before === undefined ? {} : { before }) });
         assert.ok(page.entries.length <= limit);
         assert.equal(page.more, page.next !== null);
         paged.push(...page.entries);

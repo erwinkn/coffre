@@ -288,6 +288,13 @@
       "when": 1793302884510,
       "tag": "0042_sign_in_index",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1793306932805,
+      "tag": "0043_issue_revoke_index",
+      "breakpoints": true
     }
   ]
 }

@@ -383,7 +383,7 @@ Two results drove the design:
 | the vault's own scope rule (`sealedSessionScope`, `storedScope`, `readScope`) moved to `@coffre/core/access` | the vault trusting the app's scope | one rule on both sides; the app's scope must equal the vault's, or the call fails |
 | `validUntil`, the proof's own times, held to in the statement | trusting the app's check before the call | 0.14 checked the token's times again after its wait under the head; the vault does the same, by the database's clock. PR 3 computes it itself |
 | `lock_timeout = '1s'` on both functions, refused as busy | `NOWAIT` (review r1) | R44: overload refused fast. The binding's row lock is what holds its rate (BindingLocked); `NOWAIT` would refuse every sign-in of a burst on one binding but the first, which R44 asks to serve. Each holder keeps the row for its statement's work, a few ms, and a backend waits only behind those; one second bounds the rare long holder (an unbind's transaction) |
-| no 0.14 `token.exchange` entry (D147), and, extending it, no 0.14 `token.revoke` or `sign_out` allow entry: the change records it | the app appending 0.14's entry after the call | the same reason as D147; the change carries who, the binding, the proof, the issuer, the run, a session's key and end, and for a revoke why, the credential it came in on, and whose credential of what kind. Refusals are still 0.14 entries. **For Erwin: reversible** |
+| no 0.14 `token.exchange` entry (D147), and, extending it, no 0.14 `token.revoke` or `sign_out` allow entry: the change records it | the app appending 0.14's entry after the call | the same reason as D147; the change carries who, the binding, the proof, the issuer, the run, a session's key and end, and for a revoke why, the credential it came in on, and whose credential of what kind; an issue's and a revoke's also whose act it was as 0.14's entry named it, a run's credential, a personal token or an MCP app and its approval (`trace`, T164). Refusals are still 0.14 entries. **For Erwin: reversible** |
 | seal the token hash in the credential's object (option (a)), in PR 3 | the app's MAC check alone (option (b)) | with W242's B1 the vault finds a use's credential by its hash, so the hash is a decision input (R53). The model shows each stops a writer who moves a hash; only (a) holds when the app's check does not run. It lands after B1 |
 | a workload proof with a `commit` keeps the old path | moving the enrollment's capacity into SQL | no such proof is registered yet |
 | every sign-in through a binding goes through the vault, one 0.4 made sealed first | the old path for those | a binding's rate is counted under its row; a sign-in that counted it under the head beside one under the row could pass it by one (review r2) |
@@ -461,10 +461,9 @@ shares with the other issues.
   vault taking the raw bearer token and hashing it itself. Not decided.
 - **The audit pages under the switch** list sign-ins from their changes,
   and show the run beside the entries a run's credential caused (T156,
-  0.15-plan.md, "As built: T156"). They still show no revoke, sign-out or
-  token issue of the vault's, and no label beside the entries caused by a
-  personal token the vault issued (`personalTokensOf` reads `token.create`).
-  A task of its own reads those from the changes.
+  0.15-plan.md, "As built: T156"); and the vault's token issues, revokes
+  and sign-outs, as detail, with the label beside the entries a personal
+  token the vault issued caused (T164, "As built: T164").
 - **Environment rows an issue decides on** (T159, a 0.15 ship gate): their
   project, slug and tombstone are read without their objects' seals, as in
   the vault's `access` and `#account`. T159 checks them for all three. The

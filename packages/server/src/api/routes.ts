@@ -726,8 +726,12 @@ export const routes = {
       decision: z.enum(['allow', 'deny']).optional(),
       // `?detail=1` includes sign-ins and technical steps, `DETAIL_ACTIONS`.
       detail: z.enum(['1', 'true']).optional(),
-      // `?sealed=1` lists what 0.15's sealed log alone records too, sign-ins through trust bindings, paged by `next`.
+      // `?sealed=1` lists what 0.15's sealed log alone records too, sign-ins through trust bindings and tokens' issues,
+      // revokes and sign-outs, paged by `next`.
       sealed: z.enum(['1', 'true']).optional(),
+      // With `sealed`, `?hidden=1` counts what the page leaves out (`hidden`); a caller that asks follows `next`, as a
+      // page counts no more than `HIDDEN_COUNTED` of 0.15's records and may show nothing.
+      hidden: z.enum(['1', 'true']).optional(),
       // A page's `next`, where it stopped in 0.14's log and 0.15's (`-`: nothing older); or a seq, 0.14's log alone.
       before: z.union([z.coerce.number().int().positive(), z.string().regex(AUDIT_NEXT)]).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
@@ -737,6 +741,7 @@ export const routes = {
         ...input,
         detail: input.detail !== undefined,
         sealed: input.sealed !== undefined,
+        hidden: input.hidden !== undefined,
         path: input.path === undefined ? undefined : parsePath(input.path),
       }),
   }),

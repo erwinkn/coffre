@@ -909,6 +909,17 @@ One operation id ties together everything one action did. Sign-ins, tokens,
 the vault's key operations and the heartbeat are detail: in the log and its
 chain, but left out of `GET /api/audit` unless `detail=1`.
 
+With `sealed=1`, which every client of 0.15 sends, a page lists what 0.15's
+log alone records too (sign-ins through trust bindings, and the tokens'
+issues, revokes and sign-outs), merged by time, and pages by `next`, which
+it sends back as `before`. Such a page counts what it leaves out only when
+asked, `hidden=1`: each detail action, over the page's stretch of each
+log, every one on exactly one page. It counts no more than 1,000 of 0.15's
+records, and where more lie above the next entry it would show, it stops
+there: a page may then show nothing, its `next` still set. A caller that
+asks for counts follows `next` until it is null. Without `sealed`, a page
+is 0.14's log alone and says what it left out, as before 0.15.
+
 ### What the vault stops
 
 - **A permission bug in the app.** An endpoint checks the project but forgets

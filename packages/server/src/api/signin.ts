@@ -51,7 +51,7 @@ import {
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
-import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
@@ -89,7 +89,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via' | 'render'>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance'>>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -670,6 +670,7 @@ export class SigninService {
     const outcome = await this.#deps.vault.issueToken!({
       actor: formatMember(ctx.caller.principal),
       via: ctx.credentialId,
+      trace: traceOf(ctx),
       principal: principalOf(principal),
       generation: options.generation,
       actorAccess: held.accessSeq?.toString() ?? null,
@@ -854,7 +855,9 @@ export class SigninService {
         const [row] = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
         if (row === undefined) return;
         if (row.seal === null) break;
-        if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id, caller: null })) return;
+        // A run's credential signing itself out is the run's act, a personal token's the token's, as 0.14's entry says.
+        const trace = issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id, mcp: null } : null;
+        if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id, trace, caller: null })) return;
         if (tries === 2) throw new ObjectMoved();
       }
     }
@@ -966,7 +969,7 @@ export class SigninService {
         if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
         if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
         if (row.seal === null) return null;
-        if (await revokedByVault(vault, chainKey, row, { actor: formatMember(principal), revokedBy: principal.id, reason: 'revoke', via: ctx.credentialId, caller: ctx.caller })) return { revoked: true as const };
+        if (await revokedByVault(vault, chainKey, row, { actor: formatMember(principal), revokedBy: principal.id, reason: 'revoke', via: ctx.credentialId, trace: traceOf(ctx), caller: ctx.caller })) return { revoked: true as const };
       }
       throw new ObjectMoved();
     });

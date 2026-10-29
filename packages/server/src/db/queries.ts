@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, settingsFrom, type Checkpoint, type EnvironmentColumns,
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { logObject, newestSeqQuery, newestVaultSeq, withinBytes } from '@coffre/db/log';
+import { logObject, newestSeqQuery, newestVaultSeq, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1546,46 +1546,65 @@ export async function exchangeStill(
 }
 
 /**
- * The sign-ins that issued these credentials, by credential ID: each one's
- * place in its log and the run its issuer asserted. 0.14's `token.exchange`
- * entry, through `audit_log_exchange_idx`, whose expression this repeats;
- * or, with 0.15's log, the credential's sign-in change (D147). A sign-in
- * makes its credential, so it is the object's first change: one probe of
- * `log_changes_object_idx` each, however many renewals and revokes came
- * after (R48). One statement.
+ * How a credential came to be, for the entries written on it: through a
+ * trust binding, the sign-in, its place in its log and the run its issuer
+ * asserted; or, a personal token, its label, as its issue recorded it.
  */
-export async function exchangesOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { seq: bigint; log: '0.14' | '0.15'; run: Record<string, unknown> }>> {
+export type CredentialOrigin =
+  | { kind: 'signIn'; seq: bigint; log: '0.14' | '0.15'; run: Record<string, unknown> }
+  | { kind: 'personal'; label: string };
+
+/**
+ * How these credentials came to be, by credential ID (`CredentialOrigin`),
+ * where the log says. 0.14's `token.exchange` and `token.create` entries,
+ * through `audit_log_exchange_idx` and `audit_log_token_create_idx`, whose
+ * expressions this repeats; or, with 0.15's log, the credential's sign-in
+ * or issue change (D147). Either makes its credential, so it is the
+ * object's first change: one probe of `log_changes_object_idx` each,
+ * however many renewals and revokes came after (R48). One statement.
+ */
+export async function originsOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, CredentialOrigin>> {
   if (credentialIds.length === 0) return new Map();
   const { auditLog, logChanges } = tablesOf(db);
-  const postgres = dialect.engineOf(db) === 'postgres';
-  const credentialId = postgres
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'credentialId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.credentialId')`;
+  const engine = dialect.engineOf(db);
+  const metadata = (field: string) => engine === 'postgres'
+    ? sql<string>`((${auditLog.metadata})::jsonb ->> ${sql.raw(`'${field}'`)})`
+    : sql<string>`json_extract(${auditLog.metadata}, ${sql.raw(`'$.${field}'`)})`;
+  const entries = (action: 'token.exchange' | 'token.create', id: SQL<string>) => sql`
+    SELECT ${id} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log, ${sql.raw(`'${action}'`)} AS action FROM ${auditLog}
+     WHERE ${and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'allow'), inArray(id, [...credentialIds]))}`;
   const objects = new Map(credentialIds.map((id) => [logObject('credential', id), id]));
   // A plain read, `SELECT …`, which a page's other reads may go with (`groupReads`).
-  const rows = await dialect.rowsOf<{ credential: string; seq: string | number | bigint; record: string; log: '0.14' | '0.15' }>(db, sql`
-    SELECT ${credentialId} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log FROM ${auditLog}
-     WHERE ${and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.exchange'), eq(auditLog.decision, 'allow'), inArray(credentialId, [...credentialIds]))}
+  const rows = await dialect.rowsOf<{ credential: string; seq: string | number | bigint; record: string; log: '0.14' | '0.15'; action: string | null }>(db, sql`
+    ${entries('token.exchange', metadata('credentialId'))}
     UNION ALL
-    SELECT ${postgres ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15' FROM ${logChanges}
+    ${entries('token.create', metadata('targetCredentialId'))}
+    UNION ALL
+    SELECT ${engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15', NULL FROM ${logChanges}
      WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => sql`(SELECT min(${logChanges.number}) FROM ${logChanges} WHERE ${logChanges.object} = ${object})`), sql`, `)})
-       AND ${isSignIn(db)}`);
-  return new Map(rows.flatMap((row) => {
-    const record = JSON.parse(row.record) as { run?: unknown; signIn?: { run?: unknown } };
-    const run = row.log === '0.14' ? record.run : record.signIn?.run;
+       AND ${recorded(engine, logChanges.payload, 'signIn', 'issue')}`);
+  return new Map(rows.flatMap((row): [string, CredentialOrigin][] => {
     const id = row.log === '0.14' ? row.credential : objects.get(row.credential);
     if (id === undefined) return [];
-    return [[id, { seq: BigInt(row.seq), log: row.log, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {} }]];
+    const record = JSON.parse(row.record) as { run?: unknown; kind?: unknown; label?: unknown; signIn?: { run?: unknown }; issue?: { kind?: unknown; label?: unknown } };
+    const signIn = row.log === '0.14' ? (row.action === 'token.exchange' ? record : undefined) : record.signIn;
+    if (signIn !== undefined) {
+      const { run } = signIn;
+      return [[id, { kind: 'signIn', seq: BigInt(row.seq), log: row.log, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {} }]];
+    }
+    const { kind, label } = (row.log === '0.14' ? record : record.issue) ?? {};
+    return kind === 'personal' && typeof label === 'string' ? [[id, { kind: 'personal', label }]] : [];
   }));
 }
 
 /**
- * A sign-in through a trust binding, as 0.15's log records it (D147): its
- * change's row. The payload names the credential it made (`ref`), its
- * generation and end, and the sign-in itself, `signIn`: the binding, the
- * proof, the issuer, the run, and a workload's key and hard end.
+ * A change of 0.15's log that records what 0.14 logged as an entry, which
+ * 0.15 writes none of (D147): a sign-in through a trust binding (T156); a
+ * token the vault issued; a credential it revoked by request, or that signed
+ * itself out (T164). Its row: the payload names the object, and holds its
+ * record (`RECORDS`).
  */
-export type SignInChange = {
+export type RecordedChange = {
   number: bigint;
   /** Milliseconds since the epoch, the vault's clock. */
   at: number;
@@ -1594,62 +1613,145 @@ export type SignInChange = {
 };
 
 /**
- * Only a sign-in's change holds a `signIn` object: the condition of
- * `log_changes_sign_in_idx` and `log_changes_sign_in_actor_idx`, which a read
- * repeats, word for word and with no parameter, to take them.
+ * Where a page of those changes goes on from, below: a change, by its `at`,
+ * then its number, as they are listed; or a time alone, without a number,
+ * every change asked at it or before.
  */
-function isSignIn(db: Queryable): SQL {
+export type ChangePoint = { at: number; number?: bigint };
+
+/** The changes below `point`, as `ChangePoint` says. */
+function below(db: Queryable, point: ChangePoint): SQL {
   const { logChanges } = tablesOf(db);
-  return dialect.engineOf(db) === 'postgres'
-    ? sql`strpos(${logChanges.payload}, ${sql.raw(SIGNED_IN)}) > 0`
-    : sql`instr(${logChanges.payload}, ${sql.raw(SIGNED_IN)}) > 0`;
+  return point.number === undefined
+    ? sql`${logChanges.at} <= ${point.at}`
+    : sql`(${logChanges.at}, ${logChanges.number}) < (${point.at}, ${point.number})`;
 }
 
-const SIGNED_IN = `'"signIn":{'`;
+/** The changes at `point` or above it: none of those below it. */
+function notBelow(db: Queryable, point: ChangePoint): SQL {
+  const { logChanges } = tablesOf(db);
+  return point.number === undefined
+    ? sql`${logChanges.at} > ${point.at}`
+    : sql`(${logChanges.at}, ${logChanges.number}) >= (${point.at}, ${point.number})`;
+}
+
+/** Whether an actor's name is a member's, a person's (`user:`) or a service's (`token:`), whom 0.15's records name. */
+export function isMember(name: string): boolean {
+  return name.startsWith('user:') || name.startsWith('token:');
+}
+
+/** Whether an actor's name is a service's, whom a sign-in names. */
+function isService(name: string): boolean {
+  return name.startsWith('token:');
+}
+
+/** The actors a list of 0.15's records is held to, of those asked: those `kind` takes; undefined for every one. */
+function recordActors(actors: readonly string[] | undefined, kind: (name: string) => boolean): (string | undefined)[] {
+  return actors === undefined ? [undefined] : actors.filter(kind);
+}
 
 /**
- * The sign-ins through trust bindings 0.15's log holds, newest first by
- * when the vault asked, `at`, then by number: a sign-in that waited for a
- * lock takes its number after one that asked later. Up to `limit`, below
- * `before`, of one service if `actor` names it. One read, of as many index
- * entries as it returns, however many other changes the log holds (R48):
- * every service's, or one's.
+ * The changes 0.15's log records in place of 0.14's entries, newest first by
+ * when the vault asked, `at`, then by number: one that waited for a lock
+ * takes its number after one that asked later. The sign-ins; and, with
+ * `detail`, the token issues, revokes and sign-outs, which 0.14 shows only
+ * when asked. Up to `limit`, below `before`, of the members `actors` names
+ * if it does: a sign-in's is a service, the rest's anyone's. One read, of
+ * each index's entries, each member's, as many as it returns at most,
+ * however many other changes the log holds (R48).
  */
-export async function signInPage(db: Queryable, filter: { actor?: string; before?: { at: number; number: bigint }; limit: number }): Promise<{ rows: SignInChange[]; more: boolean }> {
+export async function sealedPage(
+  db: Queryable,
+  filter: { actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number },
+): Promise<{ rows: RecordedChange[]; more: boolean }> {
+  const reads = recordActors(filter.actors, isService).map((actor) => ({ records: SIGN_INS, actor }));
+  if (filter.detail) reads.push(...recordActors(filter.actors, isMember).map((actor) => ({ records: HIDDEN, actor })));
+  if (reads.length === 0) return { rows: [], more: false };
   const { logChanges } = tablesOf(db);
-  const { before } = filter;
-  const rows = await db
-    .select({ number: logChanges.number, at: logChanges.at, actor: logChanges.actor, payload: logChanges.payload })
+  const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload"`;
+  const rows = await dialect.rowsOf<{ number: string | number | bigint; at: string | number; actor: string; payload: string }>(
+    db,
+    newest(db, reads, columns, filter.before, filter.limit + 1),
+  );
+  return {
+    rows: rows.slice(0, filter.limit).map((row) => ({ number: BigInt(row.number), at: Number(row.at), actor: row.actor, payload: row.payload })),
+    more: rows.length > filter.limit,
+  };
+}
+
+/** The records a page shows, the sign-ins; and those it leaves out unless asked for its detail, the token issues, revokes and sign-outs. */
+const SIGN_INS: ChangeRecord[] = ['signIn'];
+const HIDDEN: ChangeRecord[] = ['issue', 'revoke', 'signOut'];
+
+/**
+ * The newest of the changes `reads` asks for, below `before`, `take` of
+ * them past the first `skip`: each index, each member's, read on its own
+ * and newest first, no further than that, then the newest of them all. One
+ * statement, of as many index entries as it reads, each read's at most.
+ */
+function newest(db: Queryable, reads: { records: ChangeRecord[]; actor: string | undefined }[], columns: SQL, before: ChangePoint | undefined, take: number, skip = 0): SQL {
+  const { logChanges } = tablesOf(db);
+  const engine = dialect.engineOf(db);
+  const each = reads.map(({ records, actor }, i) => sql`SELECT * FROM (
+    SELECT ${columns} FROM ${logChanges}
+     WHERE ${and(recorded(engine, logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor), before === undefined ? undefined : below(db, before))}
+     ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
+  return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
+}
+
+/**
+ * The most token issues, revokes and sign-outs a page that hides them
+ * counts past where it stopped showing entries: a page whose stretch holds
+ * more ends its stretch there, and the pages after count the rest
+ * (`sealedReach`). However much of a member's history is nothing but
+ * those (a person who only ever made handles), a page counts no more than
+ * this beyond what it shows (R48).
+ */
+export const HIDDEN_COUNTED = 1000;
+
+/**
+ * How far below `before` a page may count the token issues, revokes and
+ * sign-outs of the members `actors` names: the `HIDDEN_COUNTED`-th newest,
+ * which the count takes in; null when fewer are left. One read of as many
+ * index entries, each member's, from the indexes alone.
+ */
+export async function sealedReach(db: Queryable, filter: { actors?: readonly string[]; before?: ChangePoint }): Promise<ChangePoint | null> {
+  const reads = recordActors(filter.actors, isMember).map((actor) => ({ records: HIDDEN, actor }));
+  if (reads.length === 0) return null;
+  const { logChanges } = tablesOf(db);
+  const [row] = await dialect.rowsOf<{ number: string | number | bigint; at: string | number }>(
+    db,
+    newest(db, reads, sql`${logChanges.number} AS "number", ${logChanges.at} AS "at"`, filter.before, 1, HIDDEN_COUNTED - 1),
+  );
+  return row === undefined ? null : { at: Number(row.at), number: BigInt(row.number) };
+}
+
+/**
+ * The token issues, revokes and sign-outs 0.15's log records, of the
+ * members `actors` names if it does, at `from` or above it and below
+ * `before`, by the action 0.14 logged each as: what a page that hides them
+ * counts over its stretch. One grouped count, of as many index entries as
+ * the stretch holds.
+ */
+export async function sealedHidden(
+  db: Queryable,
+  filter: { actors?: readonly string[]; from?: ChangePoint; before?: ChangePoint },
+): Promise<{ action: string; count: number }[]> {
+  const { logChanges } = tablesOf(db);
+  const engine = dialect.engineOf(db);
+  const actors = filter.actors?.filter(isMember);
+  if (actors?.length === 0) return [];
+  const action = sql<string>`CASE WHEN ${recorded(engine, logChanges.payload, 'issue')} THEN 'token.create' WHEN ${recorded(engine, logChanges.payload, 'signOut')} THEN 'sign_out' ELSE 'token.revoke' END`;
+  return db
+    .select({ action, count: count() })
     .from(logChanges)
     .where(and(
-      isSignIn(db),
-      filter.actor === undefined ? undefined : eq(logChanges.actor, filter.actor),
-      before === undefined ? undefined : sql`(${logChanges.at}, ${logChanges.number}) < (${before.at}, ${before.number})`,
+      recorded(engine, logChanges.payload, ...HIDDEN),
+      actors === undefined ? undefined : inArray(logChanges.actor, actors),
+      filter.from === undefined ? undefined : notBelow(db, filter.from),
+      filter.before === undefined ? undefined : below(db, filter.before),
     ))
-    .orderBy(desc(logChanges.at), desc(logChanges.number))
-    .limit(filter.limit + 1);
-  return { rows: rows.slice(0, filter.limit), more: rows.length > filter.limit };
-}
-
-/**
- * The personal tokens these credentials are, by credential ID: each one's
- * label, as its `token.create` entry logged it. One read through
- * `audit_log_token_create_idx`, whose expression this repeats.
- */
-export async function personalTokensOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { label: string }>> {
-  if (credentialIds.length === 0) return new Map();
-  const { auditLog } = tablesOf(db);
-  const credentialId = dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'targetCredentialId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.targetCredentialId')`;
-  const rows = await db
-    .select({ credentialId, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'), inArray(credentialId, [...credentialIds])));
-  return new Map(rows.flatMap((row) => {
-    const { kind, label } = JSON.parse(row.metadata) as { kind?: unknown; label?: unknown };
-    return kind === 'personal' && typeof label === 'string' ? [[row.credentialId, { label }]] : [];
-  }));
+    .groupBy(action);
 }
 
 /**

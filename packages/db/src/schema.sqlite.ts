@@ -15,6 +15,7 @@ import {
 } from 'drizzle-orm/sqlite-core';
 
 import { ACTIVE_SUBJECT } from './active-subject.ts';
+import { recorded } from './change-records.ts';
 
 /**
  * The schema in schema.ts, for SQLite (through libsql). Same tables,
@@ -918,8 +919,11 @@ export const logChanges = sqliteTable(
     check('log_changes_mac_check', sql`octet_length(${table.mac}) = 16`),
     index('log_changes_object_idx').on(table.object, table.number),
     // The sign-ins through trust bindings (schema.ts).
-    index('log_changes_sign_in_idx').on(table.at, table.number).where(sql`instr(${table.payload}, '"signIn":{') > 0`),
-    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(sql`instr(${table.payload}, '"signIn":{') > 0`),
+    index('log_changes_sign_in_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'signIn')),
+    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'signIn')),
+    // The vault's token issues, revokes and sign-outs (schema.ts).
+    index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'issue', 'revoke', 'signOut')),
+    index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'issue', 'revoke', 'signOut')),
   ],
 );
 

@@ -1,6 +1,6 @@
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
-import type { Refusal as VaultRefusal, Through, Vault } from '@coffre/core/vault';
+import type { Refusal as VaultRefusal, RequestTrace, Through, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
@@ -105,19 +105,32 @@ type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenan
  * connection, and `via` names it and its client, for "ada via Claude".
  */
 function traced(ctx: Writer, metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-  if (ctx.provenance == null) return metadata;
-  const via =
-    ctx.via == null
-      ? {}
-      : {
-          via: {
-            connectionId: ctx.via.connectionId,
-            clientId: ctx.via.clientId,
-            clientName: ctx.via.clientName,
-            ...(ctx.via.approvalId === undefined ? {} : { approvalId: ctx.via.approvalId }),
-          },
-        };
-  return { ...metadata, ...via, credentialId: ctx.provenance };
+  const trace = traceOf(ctx);
+  return trace === null ? metadata : { ...metadata, ...traceFields(trace) };
+}
+
+/**
+ * Whose act a request is, as its entries name it (`traced`): the credential
+ * or connection it came in on, when a trust binding or a person issued it,
+ * or an app connected through MCP; through MCP, the app and the approval.
+ * Null for a request on a session of its person's own. The vault's records
+ * of 0.15's log keep it, where 0.14's entry would have (T164).
+ */
+export function traceOf(ctx: Pick<Writer, 'provenance' | 'via'>): RequestTrace | null {
+  if (ctx.provenance == null) return null;
+  const { via } = ctx;
+  return {
+    credentialId: ctx.provenance,
+    mcp: via == null ? null : { connectionId: via.connectionId, clientId: via.clientId, clientName: via.clientName, approvalId: via.approvalId ?? null },
+  };
+}
+
+/** A trace as an entry's metadata says it: `via`, through MCP, and `credentialId`, written last. */
+export function traceFields({ credentialId, mcp }: RequestTrace): Record<string, unknown> {
+  const via = mcp === null ? {} : {
+    via: { connectionId: mcp.connectionId, clientId: mcp.clientId, clientName: mcp.clientName, ...(mcp.approvalId === null ? {} : { approvalId: mcp.approvalId }) },
+  };
+  return { ...via, credentialId };
 }
 
 export function allowed(
