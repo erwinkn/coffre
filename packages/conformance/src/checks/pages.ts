@@ -99,6 +99,9 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     ...PAGES,
     ['/settings', 'Settings', 'General'],
     ['/settings?tab=roles', 'Settings', 'Roles'],
+    // Its global view, and the old Instance roles tab's URL, which lands there: the same tab lit.
+    ['/settings?tab=roles&roles=global', 'Settings', 'Roles'],
+    ['/settings?tab=instance-roles', 'Settings', 'Roles'],
     ['/settings?tab=keys', 'Settings', 'Keys'],
     [person, admin.email, 'Access'],
     [`${person}/apps`, admin.email, 'Connected apps'],

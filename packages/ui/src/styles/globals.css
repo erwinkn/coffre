@@ -4831,6 +4831,14 @@ a.menu-item:hover {
   margin-bottom: 0.75rem;
 }
 
+/* Under the view switch: what the view is, in a line. */
+.roles-desc {
+  max-width: var(--card-max);
+  margin: -0.25rem 0 0.75rem;
+  color: var(--ink-3);
+  font-size: 0.875rem;
+}
+
 /* The grid: a row per permission, its two columns of boxes centred under their heads. */
 .role-grid-wrap {
   position: relative;

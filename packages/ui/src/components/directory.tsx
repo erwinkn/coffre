@@ -93,7 +93,7 @@ export function DirectoryTable({
                     <th className="col-role">
                       <span className="th">
                         <ShieldCheck size={14} />
-                        Role
+                        Global role
                       </span>
                     </th>
                   ) : (
@@ -141,7 +141,7 @@ export function DirectoryTable({
                           />
                         </td>
                         {users ? (
-                          <td className="col-role" data-label="Role">
+                          <td className="col-role" data-label="Global role">
                             <InstanceRole principal={principal} />
                           </td>
                         ) : (
@@ -318,7 +318,7 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
 }
 
 /**
- * Change role and Remove, behind one menu, for those who run the instance;
+ * Change global role and Remove, behind one menu, for those who run the instance;
  * Remove, for a service account you manage. Nobody changes their own role
  * but an Owner of the whole instance, who alone changes or removes an
  * Owner: to anyone else, an Owner's row says so instead. Nobody changes or
@@ -386,7 +386,7 @@ export function PrincipalActions({
                 }}
               >
                 <Pencil size={14} />
-                Change role
+                Change global role
               </Menu.Item>
               <Menu.Separator className="menu-sep" />
             </>
@@ -407,7 +407,7 @@ export function PrincipalActions({
           onOpenChange={setEditing}
           title={
             <>
-              Role of <span className="mono">{principal.principalId}</span>
+              Global role of <span className="mono">{principal.principalId}</span>
             </>
           }
         >

@@ -288,6 +288,8 @@ export const serviceAccountActivity = {
  */
 export const settings = {
   validateSearch: (search: Record<string, unknown>): SettingsSearch => {
+    // The old Instance roles tab, a link someone shared.
+    if (search.tab === 'instance-roles') return { tab: 'roles', roles: 'global' };
     const tab = SETTINGS_TABS.find((each) => each === search.tab);
     return { tab, roles: tab === 'roles' && search.roles === 'global' ? 'global' : undefined };
   },
