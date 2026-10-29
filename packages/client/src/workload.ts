@@ -19,7 +19,8 @@
  *     or its session awaits approval (10), and after a spent projected token,
  *     once the kubelet writes the next;
  *   - renewal at half-life, every 30 seconds for an enrollment session, whose
- *     expiry is its liveness; a fresh proof, with the same key, before the
+ *     expiry is its liveness, and none for a session already at its hard end
+ *     (a projected token's), which only a new proof outlives; a fresh proof, with the same key, before the
  *     session's hard end, `notAfter`; and a new session whenever the old one
  *     is lost (revoked, frozen, expired while the process slept);
  *   - each request under `<url>/use/` signed whole (method, URL, query, the
@@ -241,10 +242,16 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
     (timers[which] as { unref?: () => void }).unref?.();
   };
 
-  /** Renew at half-life, or every 30 seconds for an enrollment; prove again at 90% of the way to `notAfter`. */
-  const plan = (held: Session) => {
+  /** Renew at half-life, or every 30 seconds for an enrollment, while the session's end can still move: one already at its hard end, as a projected token's is, only the next proof replaces. */
+  const planRenewal = (held: Session) => {
+    if (held.expiresAt >= held.notAfter) return clearTimeout(timers.renew);
     const now = Date.now();
     at('renew', enrolled ? now + ENROLLMENT_RENEW_MS : now + Math.max(1000, (held.expiresAt - now) / 2), renew);
+  };
+
+  /** Renew as `planRenewal` says; prove again at 90% of the way to `notAfter`. */
+  const plan = (held: Session) => {
+    planRenewal(held);
     // An enrollment's `notAfter` is its code's end, which no new proof passes. A projected token's next is written at 80% of its life.
     if (!enrolled) at('prove', held.notAfter - (held.notAfter - held.issuedAt) / 10, () => prove().catch(() => undefined));
   };
@@ -293,7 +300,7 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
         const { response, body } = await api('/api/auth/workload/renew', held.token);
         if (response.ok && typeof body?.expiresAt === 'string') {
           held.expiresAt = Date.parse(body.expiresAt);
-          if (session === held) at('renew', enrolled ? Date.now() + ENROLLMENT_RENEW_MS : Date.now() + Math.max(1000, (held.expiresAt - Date.now()) / 2), renew);
+          if (session === held) planRenewal(held);
           return;
         }
         // Asked for a nonce once more, it says nothing of the session: tried again soon, as when coffre is out of reach.
