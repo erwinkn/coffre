@@ -15,7 +15,7 @@ Three pull requests, each leaving `main` shippable, all in 0.15:
 | 1 (T149, W250) | sign-in through a trust binding (`POST /api/auth/oidc` and a workload's `POST /api/workloads/session`), revoke and sign-out, by the vault; the spec | BindingLocked, MemberLocked, SpentChecked, IssueOffFence, RevokeTakesFence, RevokePolicyHeld, SweepAfterLock (as built already) |
 | 2 (T149, W250) | a service token, a personal token and a handle, issued by the vault, which weighs the issuer's rights itself | IssuerLocked, IssuerCAS |
 | 3a (T149, W250) | a service's trust bindings made and ended by the vault, which weighs who binds as it weighs a service token's issue; a sign-in through none it did not seal | BindingSealed; IssuerLocked, IssuerCAS, IssuePolicyHeld for a bind |
-| 3b | the vault verifies the CI run's ID token (D148), against the sealed binding's keys | VaultVerifiesToken |
+| 3b (T149, W250, W254) | the vault verifies the run's ID token (D148) where its sealed binding carries the keys, against them and its sealed audience; it fetches nothing (no egress) | VaultVerifiesToken, AudienceSealed; Fetched, the gap |
 | 3c | each credential's token hash sealed, after W242's B1 | HashSealed |
 
 ## 1. Before: CI sign-in as 0.15 had it
@@ -234,6 +234,92 @@ at 20 ms a round trip, beside 1,000 uses a second: 65 ms alone, 72 / 180 ms
 (p50 / p99) with 10 at once, 128 / 264 ms with 30; PR 1 measured 64,
 83 / 211 and 127 / 303. Uses beside stay at 25 ms p99.
 
+## 4b. The ID token, verified by the vault where it holds the keys (PR 3b)
+
+Sealed bindings left one hole: the vault took the app's word that the run's
+ID token held, so the app's code, turned hostile, could sign in as any
+service with a sealed binding, with no token at all. The vault asks no
+issuer for anything (Erwin, 2026-10-29: no egress, which replaces D148 for
+any issuer whose keys must be fetched; its only outbound connections are
+Postgres and a remote KEK a deployment chose, AWS KMS), so where it closes that hole depends on where
+the binding's keys come from, which its seal says (`jwks_uri`):
+
+- **Keys uploaded with the binding** (a Kubernetes cluster's,
+  `sha256:<digest>`): the sign-in carries the token (`SignInInput.idToken`),
+  and the vault verifies it itself on the binding it sealed (`#proven`,
+  `verifyRunToken` in `@coffre/core/identity`). The keys are the set whose
+  digest the seal covers; a set the app forged is refused, `keys`, 401
+  "bind it again". A key the set lacks is refused, `unknown_key`, with its
+  alert, never looked for. The audience, times, claims and the profile's
+  rules (for Kubernetes, `sub` and the service account's UID pinned, and
+  the two agreeing) are held as the app holds them, and what the credential
+  is held to (the token's spend, its `exp` and its `iat`'s hour, a session's
+  hard end, the run recorded) comes of the token, not the app. A
+  compromised app mints nothing through such a binding without a genuine
+  token its issuer signed for this instance. What it can do with one it
+  receives depends on whether the token names the session's key:
+  - a token that names it (`<origin>#jkt=<thumbprint>`, the key-naming
+    platforms', GitHub's among them) is useless to any other key;
+  - a token that names none (a CI run's; a Kubernetes cluster's, whose
+    audience is the instance's; Azure's, whose audience is fixed) the app
+    can spend for itself, a run's credential it keeps or a session bound
+    to a key of its own, as the DPoP proof that picks that key is whoever
+    sends it: once, as such tokens are spent once, the run's or the pod's
+    own sign-in then failing; for Azure, whose tokens its platform hands
+    out again (`REPEATING_PROFILES`), as often as the binding's rate
+    allows, until the token's `exp`.
+
+  Only a key-naming audience would close that, and none of these lets its
+  caller name the key: a projected token cannot carry a per-pod
+  thumbprint, and a CI run's credential is a bearer's (Fable and review r4
+  on PR 3b).
+- **Keys the issuer publishes** (GitHub, GitLab, generic OIDC, and every
+  other platform's ID token unless its keys were uploaded): the app
+  verifies the token, as in 0.14, and the vault takes its word for it, as
+  it does for a proof that is no ID token (an AWS signed request; 0.16
+  moves that one into the vault). The sign-in carries no token. Everything
+  else the vault still decides itself, in the same one call: the binding
+  is one it sealed and not ended, the account's standing and generation,
+  the scope the binding seals, its rate, the token spent once (by the hash
+  the app names).
+
+So the boundary, plainly: **a compromised app can mint CI credentials and
+sessions for an account bound to GitHub, GitLab, a generic OIDC issuer or
+AWS, within its bindings' limits** (the scope each seals, 60 sign-ins a
+minute each), and for no account the vault never bound. Through a binding
+of uploaded keys, which the vault verifies, it mints nothing without a
+genuine token for this instance; one it receives that names no key it can
+spend for itself: once (a CI run's, a Kubernetes pod's), and, for Azure's
+repeating tokens, within the binding's rate until the token expires. The vault itself makes
+no call to an issuer: a Node deployment's vault reaches Postgres and, if
+its KEK is remote (AWS KMS), that KEK, nothing else.
+
+What stays sealed, whoever verifies:
+
+- **The audience** (AudienceSealed). The binding's object carries `origin`,
+  the instance's public URL when it was made, which its row keeps
+  (migration 0040), so that a binding made before the instance moved to
+  another URL is still named as sealed, and ended with what it issued; it
+  takes no token for the new URL (bind again; the app refuses it,
+  `audience`). The vault verifies a token of uploaded keys against that
+  origin: a CI run's names exactly it, a workload's its profile's audience
+  on it (Azure's fixed one, or, where the platform lets its caller pick,
+  `<origin>#jkt=<thumbprint>` or `?jkt=`). A token for several audiences is
+  refused, as before.
+- **The session's key.** A workload's DPoP proof goes to the vault, which
+  verifies it itself (for `<origin>/api/auth/workload`, within a minute)
+  and binds the session to its key, never one the app names, whoever
+  verifies the token.
+
+**Fetching keys** stays the app's, as in 0.14: its transport and cache in
+`packages/server/src/workloads`, unchanged by this PR. Never on `/use`: only
+a sign-in verifies a token.
+
+**For T160's cutover.** Each adopted 0.14 binding is sealed with the
+deployment's public URL as its `origin`, written to its row's column too
+(one PR 3a made has none, and is named on the public URL): a bearer binding's audience is that
+URL, a workload's `policy.audience ?? origin` (or the key-naming forms on it).
+
 ## 5. The model: `formal/Lifecycle.tla`
 
 W246's model compared both placements. It now models the vault's alone, and
@@ -254,7 +340,8 @@ every protection on; each protection removed breaks the invariant beside it
 | `EndedBindingEndsCredentials` | unbound, a binding's credentials serve nothing after | BindingLocked; SweepAfterLock |
 | `AllowedOnSealed` | a row a writer put back, forged or edited serves nothing | SealChecked |
 | `AllowedAsPresented` | a use serves the credential whose token was presented | HashSealed and AppChecksMac (each suffices) |
-| `SignInsOnValidTokens` | the app's code, hostile, mints no run's credential | VaultVerifiesToken; BindingSealed |
+| `SignInsOnValidTokens` | the app's code, hostile, mints no run's credential through a binding whose keys the vault holds | VaultVerifiesToken; AudienceSealed; BindingSealed |
+| `EverySignInOnValidToken` | ... nor through one of keys its issuer publishes | none: `LifecycleFetched` breaks it with every protection on (the gap no egress accepts) |
 
 Scenarios: `LifecycleIssue`, `LifecyclePolicy`, `LifecycleBind` (Ada binds svc's CI
 through the vault while she is demoted), `LifecycleSignIn`, `LifecycleReplay`,
@@ -275,6 +362,17 @@ Two results drove the design:
   sealed when a manager makes it, and the sign-in takes only a sealed one.
   The model's bind is an issue that commits a binding (its maker held as an
   issuer is), and its unbind is the vault's statement, no 0.14 head.
+- **The audience is a decision input too (PR 3b).** With the vault
+  verifying the token but taking the audience the app names, the hostile
+  app replays a token a run asked for another instance (`x`, for "other"),
+  naming that audience. TLC breaks `SignInsOnValidTokens` that way, so the
+  audience is the sealed binding's (AudienceSealed).
+- **Fetched keys are the app's word (no egress).** `Fetched` names the bindings
+  whose issuer publishes its keys, whose tokens the vault does not verify.
+  With b among them (`LifecycleFetched`), the hostile app signs a run in
+  through b with a token nobody signed: TLC finds `EverySignInOnValidToken`
+  broken with every protection on, the gap the design accepts, while
+  BindingSealed still keeps it from a binding of its own making.
 
 ## 6. Decisions
 
@@ -322,8 +420,15 @@ answers once. And an isolate takes 32 sign-ins at once (then 429, at once):
 W246's level of 60 hung there, its error swallowed. The bench raises that
 limit (`exchangeLimit`), its one process standing in for the isolates a burst
 spreads over, which share only the database; their CPU is this process's, so
-these numbers are, if anything, high. A cold JWKS fetch is unchanged by this
-PR (the app's, as before); the vault's own comes with PR 3.
+these numbers are, if anything, high.
+
+**The vault's check of the ID token (PR 3b).** A sign-in through a binding
+of keys its issuer publishes costs what PR 3a's did: the same one app
+statement and one vault statement, and no check of the token in the vault.
+Through one of uploaded keys, the vault adds one signature check and a
+SHA-256 of the key set, CPU alone, and no round trip. Not measured again
+here; the earlier measurement, with the vault also fetching keys, is in this
+PR's history.
 
 **Token issue (PR 2).** The same rig, 5 rounds a level, a service token's
 issue by the Owner (`ci.ts --log 0.15 --issue --uses 1000 --rtt 20`).
@@ -350,8 +455,10 @@ shares with the other issues.
 
 - **A hostile app.** In 0.15 the app names the caller to the vault, so it can
   act as anyone whose credential hash it reads. PR 3 stops it minting run
-  credentials from nothing; closing the rest means the vault taking the raw
-  bearer token and hashing it itself. Not decided.
+  credentials from nothing through a binding of uploaded keys, but not
+  through one whose issuer publishes them, nor an AWS binding's, whose
+  proofs the app verifies (section 4b). Closing the rest means the
+  vault taking the raw bearer token and hashing it itself. Not decided.
 - **The 0.14 audit page under the switch** shows no sign-in, revoke,
   sign-out or token issue of the vault's, no run beside the entries a run's
   credential caused, and no label beside those a personal token the vault

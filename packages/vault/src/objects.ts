@@ -42,7 +42,7 @@ export function credentialObject(row: CredentialColumns): CredentialInput {
 export function bindingObject(row: BindingColumns): BindingInput {
   return {
     kind: 'binding', id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer,
-    jwksUri: row.jwksUri, claims: row.claims, scope: scopeOf(row.scope), policy: row.policy, revoked: row.revoked,
+    origin: row.origin, jwksUri: row.jwksUri, claims: row.claims, scope: scopeOf(row.scope), policy: row.policy, revoked: row.revoked,
   };
 }
 

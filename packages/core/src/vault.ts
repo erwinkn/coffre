@@ -482,6 +482,20 @@ export type SignInInput = {
   validUntil: number | null;
   /** What the change records of the sign-in besides (D147): the proof, its issuer, and the run's claims. */
   record: { proof: string; issuer: string; run: Record<string, string | number> };
+  /**
+   * The run's ID token, for the vault to verify itself (D148, PR 3b), when
+   * its sealed binding carries the issuer's keys (its `jwksUri` their
+   * digest, as a Kubernetes cluster's does), with those keys as its row
+   * keeps them; the vault then takes `spent`, `validUntil` and `record.run`
+   * from the token, not from the app. Null for a binding of keys its issuer
+   * publishes, which the vault does not fetch (it asks no issuer anything),
+   * and for a proof that is no ID token (an AWS signed request):
+   * the app verifies those, so a compromised app could sign a run in
+   * through such a binding, within its limits.
+   */
+  idToken: { token: string; jwks: string } | null;
+  /** A workload's DPoP proof, whose key the session is bound to, which the vault verifies; null for a CI run's sign-in. */
+  dpop: string | null;
 };
 
 /**
@@ -496,6 +510,13 @@ export type BindingColumns = {
   generation: number;
   profile: string;
   issuer: string;
+  /**
+   * The instance's public URL it was made on (PR 3b): its base audience, as
+   * a token for it must name it (`expectedAudiences`), and where a workload's
+   * DPoP proof is signed for. No column: the app names it, and the seal
+   * holds it, so a binding of another URL's is none of this instance's.
+   */
+  origin: string;
   jwksUri: string;
   claims: string;
   scope: string | null;
@@ -580,9 +601,18 @@ export type SignInCredential = {
  * rotated from.
  */
 /** Why a sign-in made nothing; `unsealed`: its binding is none the vault sealed (one 0.14 made, or a row not its object), which signs nobody in (PR 3a). */
-export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed';
+export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed' | 'proof';
 
-export type SignInOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: SignInRefusal };
+/**
+ * A sign-in's answer. `proof`: the vault's check of the token or the DPoP
+ * proof refused it, `reason` saying why as the app's refusals do
+ * (`ExchangeReason`), and a key the binding's uploaded set lacks naming
+ * it (`kid`).
+ */
+export type SignInOutcome =
+  | { ok: true; number: string; witnessed: boolean | null }
+  | { ok: false; refused: Exclude<SignInRefusal, 'proof'> }
+  | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null };
 
 /** A token the vault issues (`Vault.issueToken`). Times in ms since the epoch, bytes in base64. */
 export type IssueTokenInput = {

@@ -24,6 +24,8 @@ import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestData
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
 const ISSUER = 'https://token.actions.githubusercontent.com';
+/** The instance's public URL its bindings are made on, which their seals cover (PR 3b). */
+const ORIGIN = 'https://secrets.acme.example';
 /** The app's log key's id, as its MACs name it (`appLogKey`). */
 const APP_KEY = 'app:0123456789abcdef';
 
@@ -49,7 +51,7 @@ async function bindingOf(id: string): Promise<SignInInput['binding']> {
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
   return {
     columns: {
-      id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, jwksUri: row!.jwksUri, claims: row!.claims,
+      id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, origin: ORIGIN, jwksUri: row!.jwksUri, claims: row!.claims,
       scope: row!.scope, policy: row!.policy, revoked: row!.revokedAt !== null,
     },
     seal: row!.seal === null ? null : Buffer.from(row!.seal).toString('base64'),
@@ -70,7 +72,7 @@ async function world() {
   const made = await vault.changeBindings!({
     actor: ROOT, via: null, actorAccess: null, connection: null, reason: 'replaced', ends: [], live: [], reads: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
     make: {
-      id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
+      id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
       scope, policy: null, revoked: false, jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
     },
     policy: { seq: null, protected: [] }, appKey: APP_KEY,
@@ -95,6 +97,9 @@ function asked(w: World, change: (input: SignInInput) => SignInInput = (input) =
     spent: randomBytes(32).toString('base64'),
     validUntil: now + 60_000,
     record: { proof: 'oidc', issuer: ISSUER, run: { run_id: '7001' } },
+    // Keys its issuer publishes: the app verified the token, as the vault fetches nothing.
+    idToken: null,
+    dpop: null,
   });
 }
 
@@ -236,7 +241,8 @@ test('what the vault decides is the binding\'s: a scope the app names otherwise,
   const w = await world();
   await assert.rejects(w.vault.signIn!(asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: '[]' } }))), /reaches what its binding does/);
   await assert.rejects(w.vault.signIn!(asked(w, (input) => ({ ...input, credential: { ...input.credential, jkt: 'thumbprint' } }))), /bound to no key/);
-  await assert.rejects(w.vault.signIn!(asked(w, (input) => ({ ...input, principal: ROOT }))), /service account/);
+  // As another account than its binding's: no binding the vault sealed for it.
+  assert.deepEqual(await w.vault.signIn!(asked(w, (input) => ({ ...input, principal: ROOT }))), { ok: false, refused: 'unsealed' });
   assert.deepEqual((await written()).credentials, 0);
 });
 

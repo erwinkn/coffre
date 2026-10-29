@@ -1,3 +1,4 @@
+import { EXCHANGE_SKEW_SECONDS, RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, WORKLOAD_SIGN_IN_PATH, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
@@ -138,8 +139,8 @@ import { appendEntries, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
-import { bindingsCall, changeBindings, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
-import { credentialObject } from './objects.ts';
+import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
+import { bindingObject, credentialObject } from './objects.ts';
 import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
@@ -156,6 +157,7 @@ import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
+
 
 export type VaultOptions = {
   /**
@@ -3126,8 +3128,12 @@ class VaultService implements Vault {
   /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): one statement, then the seal wait (R51). */
   async signIn(input: SignInInput): Promise<SignInOutcome> {
     const log015 = this.#log015();
-    const answer = await signIn(this.#db, log015, Date.now() + this.#prepared.options.clockOffset(), input);
-    if (answer.number == null) return { ok: false, refused: answer.state as SignInRefusal };
+    const at = Date.now() + this.#prepared.options.clockOffset();
+    // The proof, verified here on the sealed binding (D148): what the credential is held to comes of the token, not the app.
+    const proven = await this.#proven(log015, input, at);
+    if ('refused' in proven) return proven;
+    const answer = await signIn(this.#db, log015, at, proven);
+    if (answer.number == null) return { ok: false, refused: answer.state as Exclude<SignInRefusal, 'proof'> };
     const sealed = await log015.sealThrough(BigInt(answer.number));
     return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
   }
@@ -3159,6 +3165,68 @@ class VaultService implements Vault {
     if (answer.number == null) throw new Error('revoke_credential answered neither a change nor why it made none');
     const sealed = await log015.sealThrough(BigInt(answer.number));
     return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
+  }
+
+  /**
+   * What of a sign-in the vault checks itself (D148, PR 3b; formal/Lifecycle.tla's
+   * VaultVerifiesToken, AudienceSealed, Fetched), asking no one: only on a
+   * binding whose seal is its own (BindingSealed: the issuer, keys, audience
+   * and claims it trusts are the ones a manager made it with); a workload's
+   * DPoP proof, whose key's thumbprint names the session's key, the
+   * credential's `jkt` and, where its platform lets the caller choose the
+   * token's audience, that audience, never the app's; and, when the sealed
+   * binding carries its issuer's keys, the token, on those keys
+   * (`verifyRunToken`), the sign-in's spend, times and run then taken from
+   * it. A binding of keys its issuer publishes, which the vault does not
+   * fetch, and a proof that is no ID token (an AWS signed request) take the
+   * app's word for the token, as their binding's seal says.
+   */
+  async #proven(log015: NonNullable<PreparedVault['log015']>, input: SignInInput, at: number): Promise<SignInInput | { ok: false; refused: 'unsealed' } | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null }> {
+    const binding = checkBinding(input?.binding?.columns);
+    const seal = typeof input.binding.seal === 'string' ? Buffer.from(input.binding.seal, 'base64') : null;
+    if (seal === null || binding.revoked || binding.principal !== input.principal || !sealedObject(log015.seals, { kind: 'binding', id: binding.id }, bindingObject(binding), seal)) {
+      return { ok: false, refused: 'unsealed' };
+    }
+    const refuse = (reason: string, message: string, kid: string | null = null) => ({ ok: false as const, refused: 'proof' as const, reason, message, kid });
+    const { idToken, dpop } = input;
+    if ((idToken !== null && (typeof idToken?.token !== 'string' || typeof idToken.jwks !== 'string')) || (dpop !== null && typeof dpop !== 'string')) {
+      throw new Error('a sign-in names the run\'s ID token and its binding\'s uploaded keys, or neither, and a DPoP proof or none');
+    }
+    const workload = input.credential.kind === 'workload';
+    // A workload's key: the one its DPoP proof is signed by, for this instance's sign-in, by the binding's own origin.
+    let jkt: string | null = null;
+    if (workload) {
+      if (dpop === null) return refuse('dpop', 'a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in');
+      const proof = await verifyProof(dpop, { method: 'POST', url: `${new URL(binding.origin).origin}${WORKLOAD_SIGN_IN_PATH}`, skewSeconds: EXCHANGE_SKEW_SECONDS, now: at });
+      if (!proof.ok) return refuse('dpop', `the DPoP proof does not hold: ${proof.message}`);
+      jkt = proof.jkt;
+      if (input.credential.jkt !== jkt) return refuse('dpop', 'the session is bound to the key its DPoP proof is signed by, no other');
+    } else if (dpop !== null) {
+      return refuse('malformed', 'a CI run\'s sign-in takes no DPoP proof');
+    }
+    // The token the vault verifies itself only on keys its binding's seal digests: it fetches none (Lifecycle.tla's Fetched).
+    if (!binding.jwksUri.startsWith(UPLOADED_KEYS)) {
+      if (idToken !== null) return refuse('malformed', 'a binding of keys its issuer publishes takes the app\'s word for its token, which the vault does not verify');
+      return input;
+    }
+    if (idToken === null) return refuse('malformed', 'a sign-in through a binding of uploaded keys comes with its token, for the vault to verify');
+    let proven: RunProof;
+    try {
+      const run = { profile: binding.profile as WorkloadProfile, issuer: binding.issuer, origin: binding.origin, jwksUri: binding.jwksUri, jwks: idToken.jwks, claims: binding.claims, policy: binding.policy };
+      proven = await verifyRunToken(idToken.token, run, { now: new Date(at), workload: jkt === null ? null : { jkt } });
+    } catch (error) {
+      if (error instanceof RunProofRefused) return refuse(error.reason, error.message, error.kid);
+      throw error;
+    }
+    if (workload && proven.notAfter !== null && input.credential.notAfter !== null && input.credential.notAfter > proven.notAfter) {
+      return refuse('expired', 'the session ends no later than the token it was signed in with');
+    }
+    return {
+      ...input,
+      spent: proven.spent === null ? null : proven.spent.toString('base64'),
+      validUntil: proven.validUntil,
+      record: { ...input.record, issuer: binding.issuer, run: proven.run },
+    };
   }
 
   /**

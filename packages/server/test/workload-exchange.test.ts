@@ -624,6 +624,35 @@ test('removing a binding revokes only what is live: its expired history costs no
   }
 });
 
+test("a binding made on another public URL is still the vault's to end, with what it issued, and takes no token for this one (PR 3b: its row keeps the origin its seal covers)", {
+  skip: LOG === '0.15' ? false : "0.14's bindings carry no origin",
+}, async () => {
+  const { body } = await trade(token(rsa));
+  assert.ok(body.token, JSON.stringify(body));
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  assert.equal(row!.origin, ORIGIN, 'the instance it was made on, as sealed');
+  // The instance moves to another URL.
+  const MOVED = 'https://moved.acme.example';
+  const moved = createRuntime({ ...config, publicUrl: MOVED }, deps.db, deps.vault, transport);
+  const refused = await answer(
+    new Request(`${MOVED}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(rsa, { aud: MOVED }) }) }),
+    moved, ui, IP,
+  );
+  assert.equal(refused.status, 401);
+  assert.equal(((await refused.json()) as { reason: string }).reason, 'audience', "a token for the new URL is none of a binding made on the old");
+  // Bound again on the new URL, the old one still live beside it: the old shadows nothing (review r1).
+  const again = await moved.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: 'deploys', replaces: [] }, { dryRun: false });
+  assert.ok('binding' in again);
+  const signedIn = await answer(
+    new Request(`${MOVED}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(rsa, { aud: MOVED }) }) }),
+    moved, ui, IP,
+  );
+  assert.equal(signedIn.status, 200, await signedIn.clone().text());
+  await moved.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  assert.ok((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.revokedAt !== null, 'ended');
+  assert.equal(await caller(body.token!), 401, 'with the run it issued');
+});
+
 test("a revocation is its caller's act: the credential it ends is its target, never the entry's run", async () => {
   /** A run's credential, by its run_id: the token, and its ID from the exchange's entry. */
   const runOf = async (runId: string) => {

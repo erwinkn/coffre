@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { differingClaims, PROFILE_URNS, SESSION_MS } from '@coffre/core/identity';
 
-import { ExchangeRefused, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
+import { ExchangeRefused, madeElsewhere, madeHere, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
 import { liveBindings, memberStanding, type BindingRow } from '../db/queries.ts';
 import { capped, FETCH_DEADLINE_MS, FetchRefused, USER_AGENT } from './transport.ts';
 
@@ -284,8 +284,11 @@ export function awsProof(options: AwsProofOptions = {}): ProofKind {
     async verify(input: unknown, ctx: ProofContext): Promise<MatchedProof | ExchangeRefused> {
       const request = checkAwsRequest(input, { publicUrl: ctx.publicUrl, jkt: ctx.jkt, now: now() });
       if (request instanceof ExchangeRefused) return request;
-      const bindings = await awsBindings(ctx);
-      if (bindings.length === 0) return new ExchangeRefused('no_match', `${ctx.service.slice('token:'.length)} has no aws binding`);
+      const live = await awsBindings(ctx);
+      if (live.length === 0) return new ExchangeRefused('no_match', `${ctx.service.slice('token:'.length)} has no aws binding`);
+      // Those made on this instance's URL: one made on another shadows none that was (review r2).
+      const bindings = live.filter((binding) => madeHere(binding, ctx.publicUrl));
+      if (bindings.length === 0) return madeElsewhere(live[live.length - 1]!, ctx.publicUrl);
       let identity: AwsIdentity | ExchangeRefused;
       try {
         const answer = readStsAnswer(await sts(request));

@@ -7,7 +7,6 @@ import {
   addressWithin,
   BindingInvalid,
   canonicalClaims,
-  claimAt,
   checkBinding,
   checkFetchUrl,
   checkPolicy,
@@ -28,6 +27,9 @@ import {
   MAX_TOKEN_AGE_SECONDS,
   OIDC_PROFILES,
   POLICY_DEFAULTS,
+  runClaims,
+  soleAudience,
+  UPLOADED_KEYS,
   POLICY_FIELDS,
   policyText,
   REPEATING_PROFILES,
@@ -46,7 +48,7 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
-import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInRefusal, Vault } from '@coffre/core/vault';
+import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInOutcome, SignInRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
@@ -288,12 +290,6 @@ export type ProofKind = {
 // How long a session lives past each renewal, and a run's credential: @coffre/core, where the vault reads them too.
 export { EXCHANGED_CREDENTIAL_MS, SESSION_MS } from '@coffre/core/identity';
 
-/** The audience a token names, alone; null for none, or several. */
-function soleAudience(aud: unknown): string | null {
-  if (typeof aud === 'string') return aud;
-  return Array.isArray(aud) && aud.length === 1 && typeof aud[0] === 'string' ? aud[0] : null;
-}
-
 /**
  * `oidc`: a platform's ID token (section 4.2), matched against the
  * service's bindings of the ID-token profiles that carry a policy, by the
@@ -320,8 +316,11 @@ const OIDC: ProofKind = {
     const issuer = decoded.claims.iss;
     const unbound = new ExchangeRefused('no_match', `no workload binding of ${shownMember(ctx.service)} trusts tokens from ${issuer}`);
     // The bindings first, so that a token none can take costs this one read.
-    const candidates = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
-    if (candidates.length === 0) return unbound;
+    const loaded = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
+    if (loaded.length === 0) return unbound;
+    // Those made on this instance's URL: one made on another shadows none that was (review r1).
+    const candidates = loaded.filter((binding) => madeHere(binding, ctx.publicUrl));
+    if (candidates.length === 0) return madeElsewhere(loaded[loaded.length - 1]!, ctx.publicUrl);
     const accepted = (binding: BindingRow) => expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
     // The audience the token names, if a binding takes it; else the instance's, which verifying it then refuses.
     const named = soleAudience(decoded.claims.aud);
@@ -395,6 +394,9 @@ export function proofOf(profile: string): { name: ProofName; kind: ProofKind } |
 /** What a workload sends to sign in (section 4.1): the service, `token:<name>` or its name, and one proof by its kind. */
 export type SessionRequest = { service: string; proof: Readonly<Record<string, unknown>> };
 
+/** A sign-in's request beside its body: its DPoP header, verified (`jkt`, its key's thumbprint), which the vault verifies again. */
+export type SignInMeta = { requestId: string; sourceIp: string | null; jkt: string; dpop: string };
+
 /** A session made: its token, sent with the key's proof; its expiry and hard end; the environments it reaches, by path. */
 export type SessionIssued = { token: string; tokenType: 'DPoP'; expiresAt: string; notAfter: string; places: string[] };
 
@@ -410,22 +412,6 @@ export const EXCHANGES_PER_BINDING_MINUTE = 60;
  */
 export const exchangeLimit = { inFlight: 32 };
 let inFlight = 0;
-
-/**
- * The claims of the run a credential was issued for, as the issuer
- * asserted them: in the exchange's entry, so that a read leads back to
- * its run. What the issuer says, not proof of which run sent the request.
- */
-const RUN_CLAIMS = [
-  'sub', 'jti', 'actor', 'event_name', 'ref', 'base_ref', 'head_ref', 'sha', 'repository', 'repository_id', 'run_id', 'run_attempt',
-  'workflow_ref', 'job_workflow_ref', 'job_workflow_sha', 'environment',
-  'project_path', 'project_id', 'namespace_id', 'pipeline_id', 'pipeline_source', 'job_id',
-  'kubernetes.io.pod.name',
-] as const;
-const MAX_RUN_CLAIM = 256;
-
-/** A binding's `jwks_uri` when it carries its issuer's keys: the SHA-256 of those keys (`UploadedKeys`), where a fetched set's URL would be. */
-const UPLOADED = 'sha256:';
 
 /** Refusals logged, by reason and service, once a minute each. */
 const refusalsLogged = new Map<string, number>();
@@ -631,7 +617,7 @@ export class WorkloadService {
           ? policy.issuer
           : uploaded === null
             ? await discoverKeys(this.#deps.transport, policy.issuer, { allowLoopback: this.#deps.config.allowLoopback })
-            : `${UPLOADED}${uploaded.digest}`;
+            : `${UPLOADED_KEYS}${uploaded.digest}`;
       } catch (error) {
         if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${policy.issuer}: ${error.message}`);
         throw error;
@@ -647,7 +633,7 @@ export class WorkloadService {
           return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ ...row, why: 'keys_moved' }] : [];
         });
         // Keys uploaded, on either side, are no move of the issuer's: the bindings that would go are still good.
-        if (replaces.some((row) => row.why === 'keys_moved' && (row.jwksUri.startsWith(UPLOADED) || jwksUri.startsWith(UPLOADED)))) {
+        if (replaces.some((row) => row.why === 'keys_moved' && (row.jwksUri.startsWith(UPLOADED_KEYS) || jwksUri.startsWith(UPLOADED_KEYS)))) {
           throw conflict(
             `${shownMember(member)}'s other bindings on ${policy.issuer} verify with other keys: replace their keys with these first, or replace those bindings with this one`,
           );
@@ -800,7 +786,7 @@ export class WorkloadService {
     const member = `token:${serviceId}`;
     const details = { principalType: 'service', principalId: serviceId, issuer: input.issuer };
     const uploaded = await keysOf(input.jwks);
-    const jwksUri = `${UPLOADED}${uploaded.digest}`;
+    const jwksUri = `${UPLOADED_KEYS}${uploaded.digest}`;
     return withRefusals(this.#deps, async () => {
       // The issuer as the vault answers now, held to under the head (`issuerStill`), as in `bind`.
       const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
@@ -1072,7 +1058,7 @@ export class WorkloadService {
     caller: Caller,
     accessSeq: bigint | null,
     member: string,
-    make: Parameters<typeof madeBinding>[1] | null,
+    make: Parameters<typeof madeBinding>[2] | null,
     beside: { live: readonly string[]; reads: readonly ResolvedRead[] } | null,
     ends: readonly BindingRow[],
     reason: ChangeBindingsInput['reason'],
@@ -1084,14 +1070,14 @@ export class WorkloadService {
     const sealedEnds: EndedBinding[] = [];
     for (const row of ends) {
       // Every one the statement counts, MAC or not (Fable on PR 3a): one the app's check passes over would refuse the end.
-      sealedEnds.push(endedBinding(chainKey, row, await issuedCredentials(db, member, row.id, at), at));
+      sealedEnds.push(endedBinding(chainKey, this.#deps.publicUrl, row, await issuedCredentials(db, member, row.id, at), at));
     }
     const action = make === null ? 'token.unbind' : 'token.bind';
     const outcome = await vault.changeBindings!({
       actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
       // Through an MCP connection, held to it as `credentialStill` holds a write to it (review r3).
       connection: ctx.via?.connectionId == null ? null : { id: ctx.via.connectionId, generation: ctx.caller.generation },
-      make: make === null ? null : madeBinding(chainKey, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
+      make: make === null ? null : madeBinding(chainKey, this.#deps.publicUrl, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
       // The account's live bindings it was weighed beside, but those 0.14 made and ended just now; the keys it reads, by name.
       live: make === null ? null : [...(beside?.live ?? [])],
       reads: (beside?.reads ?? []).flatMap((read) => (read.keys === '*' ? [] : read.keys.map(({ id, key }) => ({ id, key })))),
@@ -1209,8 +1195,11 @@ export class WorkloadService {
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
     // The bindings first, so that a token none can take costs this one read.
-    const { bindings: candidates, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
-    if (candidates.length === 0 || spent === null) throw unbound();
+    const { bindings: loaded, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
+    if (loaded.length === 0 || spent === null) throw unbound();
+    // Those made on this instance's URL: one made on another shadows none that was (review r1).
+    const candidates = loaded.filter((binding) => madeHere(binding, this.#deps.publicUrl));
+    if (candidates.length === 0) throw madeElsewhere(loaded[loaded.length - 1]!, this.#deps.publicUrl);
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
     const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };
@@ -1250,7 +1239,7 @@ export class WorkloadService {
    * ends its proof gave; it expires `lifetimeMs` after it is made, and at
    * each renewal. One its binding has wait for approval is answered 202.
    */
-  async signIn(request: SessionRequest, meta: { requestId: string; sourceIp: string | null; jkt: string }): Promise<SessionIssued | SessionPending> {
+  async signIn(request: SessionRequest, meta: SignInMeta): Promise<SessionIssued | SessionPending> {
     if (inFlight >= exchangeLimit.inFlight) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
     inFlight++;
     try {
@@ -1263,7 +1252,7 @@ export class WorkloadService {
     }
   }
 
-  async #signIn(request: SessionRequest, meta: { requestId: string; sourceIp: string | null; jkt: string }): Promise<SessionIssued | SessionPending> {
+  async #signIn(request: SessionRequest, meta: SignInMeta): Promise<SessionIssued | SessionPending> {
     const { db, chainKey, vault, config, publicUrl, transport } = this.#deps;
     const names = Object.keys(request.proof);
     const name = names[0] as ProofName;
@@ -1285,7 +1274,9 @@ export class WorkloadService {
     }
     // With 0.15's log, the vault makes the session (T149): it spends the token, and weighs the account, the binding, its
     // freezes and its rate, in one call. A proof that decides in the transaction (`commit`) makes it as below.
-    if (kind.commit === undefined && (await vaultMakesCredentials(vault))) return this.#signInByVault(vault as CredentialsVault, { member, name, kind, verified, policy }, meta, ctx);
+    if (kind.commit === undefined && (await vaultMakesCredentials(vault))) {
+      return this.#signInByVault(vault as CredentialsVault, { member, name, kind, verified, policy, given: request.proof[name] }, meta, ctx);
+    }
     const spent = verified.spentKey;
     if (spent !== undefined && (await tokenConsumed(db, spent))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your platform for a fresh one');
     const standing = await vault.access(member);
@@ -1395,12 +1386,13 @@ export class WorkloadService {
    */
   async #signInByVault(
     vault: CredentialsVault,
-    proof: { member: string; name: ProofName; kind: ProofKind; verified: MatchedProof; policy: BindingPolicy },
-    meta: { requestId: string; sourceIp: string | null; jkt: string },
+    proof: { member: string; name: ProofName; kind: ProofKind; verified: MatchedProof; policy: BindingPolicy; given: unknown },
+    meta: SignInMeta,
     ctx: ProofContext,
   ): Promise<SessionIssued> {
-    const { member, name, kind, verified, policy } = proof;
+    const { member, name, kind, verified, policy, given } = proof;
     const { binding } = verified;
+    if (!madeHere(binding, this.#deps.publicUrl)) throw madeElsewhere(binding, this.#deps.publicUrl);
     const known = await places(this.#deps.db);
     const now = Date.now();
     const { notAfter, expiresAt } = sessionEnds(kind, verified, policy, {}, now);
@@ -1416,15 +1408,21 @@ export class WorkloadService {
     });
     const outcome = await vault.signIn({
       principal: member,
-      binding: sealedBinding(binding),
+      binding: sealedBinding(binding, this.#deps.publicUrl),
       credential: signedInCredential(row),
       appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: verified.spentKey?.toString('base64') ?? null,
       // Its proof's end is the session's hard end, held to in the statement.
       validUntil: null,
       record: { proof: name, issuer: binding.issuer, run: runClaims(verified.claims) },
+      // The session's key, by the DPoP proof it signed, and the token where its binding carries its issuer's keys: the
+      // vault's to verify (D148, PR 3b). A token of keys its issuer publishes, and a proof that is no ID token (an AWS
+      // signed request), are the app's alone, so a compromised app could make sessions of such a binding's.
+      idToken: vaultVerifies(binding) ? { token: given as string, jwks: binding.jwks! } : null,
+      dpop: meta.dpop,
     });
     if (!outcome.ok) {
+      if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
       throw signInRefusal(outcome.refused, {
         unbound: `no workload binding of ${shownMember(member)} takes this proof`,
         frozen: `${shownMember(member)} is frozen: a manager stopped its use, and no session is made until they lift it`,
@@ -1500,7 +1498,7 @@ export class WorkloadService {
     // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. Every sign-in through a binding goes there, so
     // that each one's rate is counted under its row: one 0.4 made, its scope unsealed, is sealed first, and read again.
     const byVault = await vaultMakesCredentials(vault);
-    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, decoded);
+    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, request.token, decoded);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
@@ -1510,7 +1508,7 @@ export class WorkloadService {
     if (byVault) {
       const sealed = await findBinding(db, chainKey, member, binding.id);
       if (sealed === null || unsealedScope(sealed.scope)) throw unbound();
-      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, decoded);
+      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, request.token, decoded);
     }
 
     const service = member.slice('token:'.length);
@@ -1562,16 +1560,21 @@ export class WorkloadService {
    * generation, the binding's rate and the token spent once are weighed in
    * its statement, on their rows, under their locks (formal/Lifecycle.tla's
    * BindingLocked, MemberLocked, SpentChecked); no 0.14 head, and no
-   * `token.exchange` entry: its change records the run (D147).
+   * `token.exchange` entry: its change records the run (D147). Through a
+   * binding of uploaded keys, the token goes with it, and the vault verifies
+   * it again on the binding it sealed (D148, PR 3b): what decides is its
+   * check, the app's a filter. Of keys its issuer publishes, the app's
+   * check decides: the vault fetches nothing.
    */
-  async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, decoded: DecodedToken): Promise<Exchanged> {
+  async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, token: string, decoded: DecodedToken): Promise<Exchanged> {
     const issuer = decoded.claims.iss;
+    if (!madeHere(binding, this.#deps.publicUrl)) throw madeElsewhere(binding, this.#deps.publicUrl);
     const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
       generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS), stored: binding.scope,
     });
     const outcome = await vault.signIn({
       principal: member,
-      binding: sealedBinding(binding),
+      binding: sealedBinding(binding, this.#deps.publicUrl),
       credential: signedInCredential({ ...row, kind: 'service' }),
       appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: decoded.signingInputHash.toString('base64'),
@@ -1579,8 +1582,11 @@ export class WorkloadService {
       // Whole ms, down: a token's times may be fractional seconds, which the checks before took.
       validUntil: Math.floor(Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000)),
       record: { proof: 'oidc', issuer, run: runClaims(claims) },
+      idToken: vaultVerifies(binding) ? { token, jwks: binding.jwks! } : null,
+      dpop: null,
     });
     if (!outcome.ok) {
+      if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
       // Past its times by the statement: which of them, as the commit under the head says it.
       const issued = outcome.refused === 'expired' ? issuedRefusal(decoded.claims.iat, Date.now() / 1000) : null;
       if (issued !== null) throw refused(issued);
@@ -1622,7 +1628,7 @@ function signedInCredential(row: {
 }
 
 /** A sign-in the vault refused, as the workload's owner reads it: today's codes and words, each path its own. */
-function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired' | 'unsealed'>, string> & { frozen?: string }): ExchangeRefused {
+function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired' | 'unsealed' | 'proof'>, string> & { frozen?: string }): ExchangeRefused {
   switch (refused) {
     // An instance under an app key the log moved on from, as for the seconds a deploy takes: 503, as its append would answer.
     case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
@@ -1634,6 +1640,52 @@ function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefus
     // Made before the vault sealed bindings, or changed around it: a manager binds it again (PR 3a).
     case 'unsealed': return new ExchangeRefused('unsealed', 'this binding is none the vault sealed, made before it sealed them or changed since: bind it again');
   }
+}
+
+/**
+ * Whether the vault verifies a sign-in's token through this binding itself
+ * (PR 3b): when it carries its issuer's keys, uploaded with it, which its
+ * seal digests. The vault asks no issuer for keys, so the tokens
+ * of an issuer that publishes its keys are the app's to verify.
+ */
+function vaultVerifies(binding: BindingRow): boolean {
+  return binding.jwksUri.startsWith(UPLOADED_KEYS) && binding.jwks !== null;
+}
+
+/**
+ * Whether a binding was made on this instance's public URL, as its row's
+ * sealed origin says, or before the column (PR 3b). One made on another
+ * takes no token for this one: its runs ask for the URL it was made on.
+ * Matching skips it, in every proof's flow, so that it shadows no binding
+ * made here (reviews r1, r2). The column is not under the row's MAC: what
+ * holds it is the vault's seal, which refuses a binding whose origin moved
+ * (`unsealed`), so this filter only picks among bindings, never admits one.
+ */
+export function madeHere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): boolean {
+  return binding.origin === null || binding.origin === publicUrl;
+}
+
+/** The refusal of a token none of whose bindings was made on this instance's URL. */
+export function madeElsewhere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): ExchangeRefused {
+  return new ExchangeRefused('audience', `the binding was made on ${binding.origin}, and takes no token for ${publicUrl}: bind it again here`);
+}
+
+/** The reasons the vault's check of a proof gives that the app's own gives too (`verifyRunToken`, PR 3b). */
+const PROOF_REASONS: ReadonlySet<string> = new Set<ExchangeReason>([
+  'malformed', 'no_match', 'signature', 'unknown_key', 'expired', 'too_old', 'too_long', 'not_yet_valid', 'audience', 'dpop',
+]);
+
+/**
+ * A proof the vault refused, as the app's own check words it: a key a
+ * service's uploaded keys lack alerts (`UnknownKey`), and keys that are not
+ * the ones its binding's seal digests, a row changed around the vault, are
+ * a binding to make again.
+ */
+function proofRefusal(outcome: Extract<SignInOutcome, { refused: 'proof' }>, member: string, binding: BindingRow): ExchangeRefused {
+  const { reason, message, kid } = outcome;
+  if (reason === 'unknown_key' && binding.jwks !== null) return new UnknownKey(member, binding, binding.issuer, kid);
+  if (reason === 'keys') return new ExchangeRefused('unsealed', `${message}: bind it again`);
+  return new ExchangeRefused(PROOF_REASONS.has(reason) ? (reason as ExchangeReason) : 'malformed', message);
 }
 
 /** An uploaded key set, checked (`uploadedKeys`), or a 400 saying what is wrong with it. */
@@ -1675,17 +1727,6 @@ function matching(bindings: BindingRow[], claims: Record<string, unknown>, membe
     if (closest === null || differ.length < closest.length) closest = differ;
   }
   throw new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts these claims: ${(closest ?? []).join(', ')} differ`);
-}
-
-/** The run's claims, as the issuer stated them: those that say which run, each bounded. */
-function runClaims(claims: Record<string, unknown>): Record<string, string | number> {
-  const run: Record<string, string | number> = {};
-  for (const name of RUN_CLAIMS) {
-    const value = claimAt(claims, name);
-    if (typeof value === 'string') run[name] = value.slice(0, MAX_RUN_CLAIM);
-    else if (typeof value === 'number' && Number.isFinite(value)) run[name] = value;
-  }
-  return run;
 }
 
 /** One line per reason and service a minute, in this isolate: enough to see a refusal, not a flood. An unknown key's names its issuer and key. */
@@ -1833,7 +1874,7 @@ export function environmentsOf(scope: CredentialScope, known: readonly PlaceRow[
 }
 
 /** A binding as an owner sees it: its policy shown as the caller names it (`namedPolicy`, `shownPolicy`). */
-function view(row: BindingRow, scope: ScopeByPath | null, policy: PolicyView | null): BindingView {
+function view(row: Omit<BindingRow, 'origin'>, scope: ScopeByPath | null, policy: PolicyView | null): BindingView {
   return {
     id: row.id,
     profile: row.profile as WorkloadProfile,

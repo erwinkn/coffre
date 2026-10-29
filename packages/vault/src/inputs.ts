@@ -85,6 +85,8 @@ export type BindingInput = {
   generation: number;
   profile: string;
   issuer: string;
+  /** The instance's public URL it was made on: its base audience (PR 3b). */
+  origin: string;
   jwksUri: string;
   claims: string;
   scope: CredentialScope | null;

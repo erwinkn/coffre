@@ -679,6 +679,11 @@ export const EXCHANGED_CREDENTIAL_MS = 5 * 60 * 1000;
 /** How long a session lives past each renewal, unless its proof says less: an hour (section 5.4). The vault holds a sign-in to it. */
 export const SESSION_MS = 60 * 60 * 1000;
 
+/** A workload's sign-in route, whose URL on the instance its DPoP proof signs: the app's route, and what the vault checks the proof for (PR 3b). */
+export const WORKLOAD_SIGN_IN_PATH = '/api/auth/workload';
+/** How far a sign-in's DPoP proof's `iat` may be from now: it carries no nonce, so its clock bounds it (section 4.1). The app and the vault alike. */
+export const EXCHANGE_SKEW_SECONDS = 60;
+
 /** What a field left out of a policy means. */
 export const POLICY_DEFAULTS = {
   keyAudience: false,

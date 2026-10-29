@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **0.15's vault verifies a run's ID token itself where its binding carries
+  the keys, behind its switch.** A sealed binding still took the app's word
+  that the token held, so the app's code turned hostile could sign a run in
+  with no token at all. Through a binding whose issuer's keys were uploaded
+  with it (a Kubernetes cluster's), a sign-in now carries the token, and the
+  vault verifies it on the binding it sealed: those keys (the set its seal
+  digests; a key they lack is refused, never looked for), its audience (the
+  instance's public URL the binding was made on, sealed with it), times,
+  claims and profile rules; what the credential is held to comes of the
+  token. A compromised app mints nothing there without a genuine token for
+  this instance, though one it receives that names no key it can still
+  spend for itself: once (a CI run's, a Kubernetes pod's), and, for Azure's
+  repeating tokens, within the binding's rate until the token expires. The
+  vault asks no issuer for keys (it reaches only Postgres and a
+  remote KEK, if configured), so a binding of keys
+  its issuer publishes (GitHub, GitLab, generic OIDC) takes the app's word
+  for its token, as an AWS binding's signed request does: a compromised app
+  could still sign runs in through those, within each binding's scope and
+  rate, never through one the vault did not seal. A workload's DPoP proof
+  is the vault's to verify in every case, and a binding made on another
+  public URL takes no token for this one (bind it again).
+  `docs/design/credential-lifecycle.md`, section 4b; `formal/Lifecycle.tla`'s
+  AudienceSealed and Fetched.
 - **0.15's sign-in through a trust binding, a revoke and a sign-out are
   each one vault call, behind its switch.** A CI run's sign-in was 8 app
   statements, 6 of them holding 0.14's head, which every app write waits
