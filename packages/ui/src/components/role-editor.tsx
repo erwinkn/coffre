@@ -22,36 +22,23 @@ import {
   type Columns,
 } from '../lib/roles';
 import { useAction } from '../lib/use-action';
-import { Card } from './page';
 import { Check, Lock, Pencil, Plus, RotateBack, Trash } from './icons';
 import { ConfirmDialog, ErrorLine, Modal, Notice, Spinner } from './ui';
 
-// Settings › Roles (docs/design/roles.md): what each role holds, in two
-// columns, an environment's and a protected one's, which a person holds
-// there; a service account holds the first everywhere. Any member reads
+// Settings › Roles and Instance roles (docs/design/roles.md): what each role
+// can do, in two columns, an environment's and a protected one's, which a
+// person holds there; a service account holds the first everywhere. Any member reads
 // them; an Owner of the whole instance edits them, each change weighed
 // first (`?dryRun=1`) and said in words before it is confirmed.
 
-type Kind = 'role' | 'instance-role';
+export type Kind = 'role' | 'instance-role';
 
-/** The instance's roles and instance roles, each a card of rows that open its editor. */
-export function RolesSettings() {
+/** The instance's roles, or its instance roles: a card each, which opens its editor. */
+export function RolesSettings({ kind }: { kind: Kind }) {
   const { data } = useSuspenseQuery(queries.roles(useCoffre()));
-  if (!data.ok) {
-    return (
-      <Card labelledBy="roles" title="Roles">
-        <div className="card-row">
-          <ErrorLine error={`The roles could not be read. ${data.error}`} />
-        </div>
-      </Card>
-    );
-  }
-  return (
-    <>
-      <RoleList kind="role" roles={data.roles} editable={data.editable} />
-      <RoleList kind="instance-role" roles={data.instanceRoles} editable={data.editable} />
-    </>
-  );
+  if (!data.ok) return <ErrorLine error={`The roles could not be read. ${data.error}`} />;
+  // Keyed by kind: an editor open on one tab, its draft included, never outlives it into the other's role of the same id.
+  return <RoleList key={kind} kind={kind} roles={kind === 'role' ? data.roles : data.instanceRoles} editable={data.editable} />;
 }
 
 function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; editable: boolean }) {
@@ -60,51 +47,41 @@ function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; ed
   const project = kind === 'role';
   const opened = open === null || 'making' in open ? null : roles.find((role) => role.id === open.role);
   return (
-    <Card
-      labelledBy={project ? 'roles' : 'instance-roles'}
-      title={project ? 'Roles' : 'Instance roles'}
-      description={
-        <>
-          {project
-            ? 'What a grant gives, on a project or one of its environments. In a protected environment a person holds the second column; a service account always holds the first.'
-            : 'What a person holds, by their instance role, in every project its scope takes in, before any grant adds to it.'}
-          {!editable && ' Only an Owner of the whole instance edits them.'}
-        </>
-      }
-      actions={
-        project && editable && (
+    <>
+      {project && editable && (
+        <div className="section-actions">
           <button className="btn" type="button" onClick={() => setOpen({ making: true })}>
             <Plus size={14} />
             New role
           </button>
-        )
-      }
-    >
-      <ul className="role-list" aria-label={project ? 'Roles' : 'Instance roles'}>
+        </div>
+      )}
+      <ul className="role-cards" aria-label={project ? 'Roles' : 'Instance roles'}>
         {roles.map((role) => (
-          <li key={role.id} className="card-row role-row">
-            <div className="role-row-text">
-              <p className="card-row-title role-row-title">
+          <li key={role.id} className="role-card">
+            <div className="role-card-head">
+              <p className="role-card-title">
                 {role.name}
                 <RoleBadges role={role} />
               </p>
-              {role.description !== '' && <p className="card-row-desc">{role.description}</p>}
-              <dl className="role-columns">
-                <div>
-                  <dt>Holds</dt>
-                  <dd>{columnInWords(role.permissions)}</dd>
-                </div>
-                <div>
-                  <dt>
-                    <Lock size={12} />
-                    In protected environments
-                  </dt>
-                  <dd>{columnInWords(role.protected)}</dd>
-                </div>
-              </dl>
+              <span className="role-card-count">{held(kind, role.grants)}</span>
             </div>
-            <div className="role-row-side">
-              <span className="role-row-count">{held(kind, role.grants)}</span>
+            {/* A built-in role's own words would go stale as an Owner edits what it can; a custom one's are its maker's. */}
+            {!role.builtin && role.description !== '' && <p className="role-card-desc">{role.description}</p>}
+            <dl className="role-columns">
+              <div>
+                <dt>Can</dt>
+                <dd>{columnInWords(role.permissions)}</dd>
+              </div>
+              <div>
+                <dt>
+                  <Lock size={12} />
+                  In protected environments
+                </dt>
+                <dd>{columnInWords(role.protected)}</dd>
+              </div>
+            </dl>
+            <div className="role-card-foot">
               <button
                 className="btn btn-sm"
                 type="button"
@@ -129,7 +106,7 @@ function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; ed
           onClose={() => setOpen(null)}
         />
       )}
-    </Card>
+    </>
   );
 }
 

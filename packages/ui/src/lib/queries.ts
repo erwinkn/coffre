@@ -125,6 +125,10 @@ export type ProjectsResult = Awaited<ReturnType<typeof readProjects>>;
 
 export type AuditSearch = { decision?: 'deny'; actorId?: string; detail?: '1' };
 
+/** Settings' tabs past the first, General, by their `?tab=`. */
+export const SETTINGS_TABS = ['roles', 'instance-roles', 'keys'] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
+
 export const AUDIT_PAGE_SIZE = 200;
 
 export const queries = {
@@ -613,14 +617,16 @@ export async function loadDirectory(queryClient: QueryClient, client: CoffreClie
 }
 
 /** The instance's settings: the directory's counts, where people set up service accounts, and what its keys are checked against. */
-export async function loadSettings(queryClient: QueryClient, client: CoffreClient) {
-  const shell = await loadShell(queryClient, client);
-  await Promise.all([
-    loadDirectory(queryClient, client),
-    queryClient.fetchQuery(queries.settings(client, shell.capabilities.runsInstance)),
-    queryClient.fetchQuery(queries.auditKeys(client, shell.capabilities.runsInstance)),
-    queryClient.fetchQuery(queries.roles(client)),
-  ]);
+/** What a tab of Settings reads, its own alone: General the directory and the instance's settings, both roles tabs the roles, Keys the key checks. */
+export async function loadSettings(queryClient: QueryClient, client: CoffreClient, tab: SettingsTab | undefined) {
+  const { capabilities } = await loadShell(queryClient, client);
+  if (tab === undefined) {
+    await Promise.all([loadDirectory(queryClient, client), queryClient.fetchQuery(queries.settings(client, capabilities.runsInstance))]);
+  } else if (tab === 'keys') {
+    await queryClient.fetchQuery(queries.auditKeys(client, capabilities.runsInstance));
+  } else {
+    await queryClient.fetchQuery(queries.roles(client));
+  }
 }
 
 /** Whether the Service accounts page lists anyone: to admins and owners, and to whoever sets one up, those they manage. */
