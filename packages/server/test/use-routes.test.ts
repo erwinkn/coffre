@@ -101,8 +101,8 @@ async function instance(log: '0.14' | '0.15', inFlight?: number): Promise<void> 
     checkpointer = await runCheckpointer({ database: await openVaultDatabase(), seed: signingKey, memory: join(scratch, `memory-${(made += 1)}`), intervalMs: 3_600_000 });
   }
   const vault = log === '0.15'
-    ? testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer!.sealThrough, ...(inFlight === undefined ? {} : { uses: { inFlight } }) }, transport)
-    : testVault([ROOT], {}, { kek }, {}, {}, transport);
+    ? testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer!.sealThrough, ...(inFlight === undefined ? {} : { uses: { inFlight } }) })
+    : testVault([ROOT], {}, { kek }, {}, {});
   deps = testDeps(db.runtime, [ROOT], { vault });
   const config = resolveConfig({
     publicUrl: ORIGIN,

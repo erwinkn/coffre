@@ -2,25 +2,24 @@
 
 ## Unreleased
 
-- **0.15's vault verifies a run's ID token itself, behind its switch.** A
-  sealed binding still took the app's word that the token held, so the
-  app's code turned hostile could sign a run in with no token at all. A
-  sign-in now carries the token, and the vault verifies it on the binding it
-  sealed: its keys (fetched, or the uploaded set its seal digests), its
-  audience (the instance's public URL the binding was made on, sealed with
-  it; for a platform whose caller picks it, that URL naming the key whose
-  DPoP proof the vault checks), times, claims and profile rules. What the
-  credential is held to comes of the token. An AWS binding's signed request
-  stays the app's to verify in 0.15, the one case where a compromised app
-  could still mint a session; 0.16 moves it. Warm, a sign-in costs what it
-  did; with both sides' key caches cold, one fetch more.
+- **0.15's vault verifies a run's ID token itself where its binding carries
+  the keys, behind its switch.** A sealed binding still took the app's word
+  that the token held, so the app's code turned hostile could sign a run in
+  with no token at all. Through a binding whose issuer's keys were uploaded
+  with it (a Kubernetes cluster's), a sign-in now carries the token, and the
+  vault verifies it on the binding it sealed: those keys (the set its seal
+  digests; a key they lack is refused, never looked for), its audience (the
+  instance's public URL the binding was made on, sealed with it), times,
+  claims and profile rules; what the credential is held to comes of the
+  token. The vault opens no connection but Postgres, so a binding of keys
+  its issuer publishes (GitHub, GitLab, generic OIDC) takes the app's word
+  for its token, as an AWS binding's signed request does: a compromised app
+  could still sign runs in through those, within each binding's scope and
+  rate, never through one the vault did not seal. A workload's DPoP proof
+  is the vault's to verify in every case, and a binding made on another
+  public URL takes no token for this one (bind it again).
   `docs/design/credential-lifecycle.md`, section 4b; `formal/Lifecycle.tla`'s
-  AudienceSealed.
-  **Upgrading, on Node:** under the switch, the vault's process fetches the
-  issuers' keys too, so it needs outbound HTTPS to each issuer a binding
-  trusts (`token.actions.githubusercontent.com` for GitHub), as the app's
-  has. It reaches public addresses only, checked as it connects, within 3
-  seconds (`docs/deploy.md`, "CI runs without a stored token").
+  AudienceSealed and Fetched.
 - **0.15's sign-in through a trust binding, a revoke and a sign-out are
   each one vault call, behind its switch.** A CI run's sign-in was 8 app
   statements, 6 of them holding 0.14's head, which every app write waits

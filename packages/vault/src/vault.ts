@@ -1,5 +1,4 @@
-import { fetchTransport, type WorkloadTransport } from '@coffre/core/fetch';
-import { BindingInvalid, checkFetchUrl, PROFILE_URNS, RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
+import { RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
@@ -159,8 +158,6 @@ import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
-/** How long the vault waits for an issuer's keys: a sign-in's fetch, never a use's. */
-export const ISSUER_DEADLINE_MS = 3_000;
 /** A workload's sign-in, whose URL its DPoP proof signs, on the binding's origin (`exchangeWorkloadSession`). */
 const WORKLOAD_SIGN_IN_PATH = '/api/auth/workload';
 /** Seconds a sign-in's DPoP proof's `iat` may be from now (the route's `EXCHANGE_SKEW_SECONDS`). */
@@ -204,14 +201,6 @@ export type VaultOptions = {
    * default the hot path's pool, `connections`, and how long a cover holds.
    */
   uses?: Partial<UseLimits> & { connections?: number };
-  /**
-   * How the vault asks an issuer for its keys, to verify a run's ID token
-   * itself (D148, PR 3b): never on `/use`, only a sign-in's. `fetchTransport`
-   * by default, with a 3 s deadline; on Node, `localVault` and `serveVault`
-   * give it `nodeTransport`'s resolver, which admits public addresses alone,
-   * at connect time. For tests, which play the issuer.
-   */
-  issuers?: { transport?: WorkloadTransport };
 };
 
 
@@ -233,10 +222,7 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses' | 'issuers'>> & {
-    walks: Walks;
-    issuers: { transport: WorkloadTransport };
-  };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
@@ -277,10 +263,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
   return {
     config,
     ...(await keysOf(config.signingKeys)),
-    options: {
-      keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks },
-      issuers: { transport: options.issuers?.transport ?? fetchTransport(fetch, { deadlineMs: ISSUER_DEADLINE_MS }) },
-    },
+    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
     limited: false,
     verifier: null,
@@ -3189,16 +3172,18 @@ class VaultService implements Vault {
   }
 
   /**
-   * A sign-in's proof, verified by the vault (D148, PR 3b; formal/Lifecycle.tla's
-   * VaultVerifiesToken, AudienceSealed): only on a binding whose seal is its
-   * own (BindingSealed: the issuer, keys, audience and claims it trusts are
-   * the ones a manager made it with), the token against those keys
-   * (`verifyRunToken`), and a workload's DPoP proof, whose key's thumbprint
-   * names the session's key: the token's audience where its platform lets
-   * the caller choose it, and the credential's `jkt`, never the app's. The
-   * sign-in as asked, its spend, times and run taken from the token. A
-   * proof that is no ID token (an AWS signed request, Cloudflare's, an
-   * enrollment code) the app verifies: only on a binding of such a profile.
+   * What of a sign-in the vault checks itself (D148, PR 3b; formal/Lifecycle.tla's
+   * VaultVerifiesToken, AudienceSealed, Fetched), asking no one: only on a
+   * binding whose seal is its own (BindingSealed: the issuer, keys, audience
+   * and claims it trusts are the ones a manager made it with); a workload's
+   * DPoP proof, whose key's thumbprint names the session's key, the
+   * credential's `jkt` and, where its platform lets the caller choose the
+   * token's audience, that audience, never the app's; and, when the sealed
+   * binding carries its issuer's keys, the token, on those keys
+   * (`verifyRunToken`), the sign-in's spend, times and run then taken from
+   * it. A binding of keys its issuer publishes, which the vault does not
+   * fetch, and a proof that is no ID token (an AWS signed request) take the
+   * app's word for the token, as their binding's seal says.
    */
   async #proven(log015: NonNullable<PreparedVault['log015']>, input: SignInInput, at: number): Promise<SignInInput | { ok: false; refused: 'unsealed' } | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null }> {
     const binding = checkBinding(input?.binding?.columns);
@@ -3206,16 +3191,11 @@ class VaultService implements Vault {
     if (seal === null || binding.revoked || binding.principal !== input.principal || !sealedObject(log015.seals, { kind: 'binding', id: binding.id }, bindingObject(binding), seal)) {
       return { ok: false, refused: 'unsealed' };
     }
-    const profile = binding.profile as WorkloadProfile;
-    const tokenless = Object.hasOwn(PROFILE_URNS, profile);
     const refuse = (reason: string, message: string, kid: string | null = null) => ({ ok: false as const, refused: 'proof' as const, reason, message, kid });
-    if (input.proof == null) {
-      if (!tokenless) return refuse('malformed', 'a sign-in through a binding of ID tokens comes with its token, for the vault to verify');
-      return input;
+    const { idToken, dpop } = input;
+    if ((idToken !== null && (typeof idToken?.token !== 'string' || typeof idToken.jwks !== 'string')) || (dpop !== null && typeof dpop !== 'string')) {
+      throw new Error('a sign-in names the run\'s ID token and its binding\'s uploaded keys, or neither, and a DPoP proof or none');
     }
-    if (tokenless) return refuse('malformed', 'a binding whose proof is no ID token takes none');
-    const { token, jwks, dpop } = input.proof;
-    if (typeof token !== 'string' || (jwks !== null && typeof jwks !== 'string') || (dpop !== null && typeof dpop !== 'string')) throw new Error('a proof is the run\'s ID token, its binding\'s uploaded keys or none, and a DPoP proof or none');
     const workload = input.credential.kind === 'workload';
     // A workload's key: the one its DPoP proof is signed by, for this instance's sign-in, by the binding's own origin.
     let jkt: string | null = null;
@@ -3228,21 +3208,16 @@ class VaultService implements Vault {
     } else if (dpop !== null) {
       return refuse('malformed', 'a CI run\'s sign-in takes no DPoP proof');
     }
-    // Keys fetched only from where a binding may name them (`checkFetchUrl`): a public host over HTTPS, never an address.
-    // Plain HTTP to loopback only for an instance on loopback itself, by its sealed origin: the dev IdP's, for `pnpm dev`.
+    // The token the vault verifies itself only on keys its binding's seal digests: it fetches none (Lifecycle.tla's Fetched).
     if (!binding.jwksUri.startsWith(UPLOADED_KEYS)) {
-      try {
-        checkFetchUrl(binding.jwksUri, "the binding's jwks_uri", { allowLoopback: loopback(binding.origin), path: true, query: true });
-      } catch (error) {
-        if (!(error instanceof BindingInvalid)) throw error;
-        return refuse('issuer_unavailable', `the vault does not fetch keys there: ${error.message}`);
-      }
+      if (idToken !== null) return refuse('malformed', 'a binding of keys its issuer publishes takes the app\'s word for its token, which the vault does not verify');
+      return input;
     }
+    if (idToken === null) return refuse('malformed', 'a sign-in through a binding of uploaded keys comes with its token, for the vault to verify');
     let proven: RunProof;
     try {
-      proven = await verifyRunToken(token, { profile, issuer: binding.issuer, origin: binding.origin, jwksUri: binding.jwksUri, jwks, claims: binding.claims, policy: binding.policy }, {
-        transport: this.#prepared.options.issuers.transport, now: new Date(at), workload: jkt === null ? null : { jkt },
-      });
+      const run = { profile: binding.profile as WorkloadProfile, issuer: binding.issuer, origin: binding.origin, jwksUri: binding.jwksUri, jwks: idToken.jwks, claims: binding.claims, policy: binding.policy };
+      proven = await verifyRunToken(idToken.token, run, { now: new Date(at), workload: jkt === null ? null : { jkt } });
     } catch (error) {
       if (error instanceof RunProofRefused) return refuse(error.reason, error.message, error.kid);
       throw error;
@@ -4156,10 +4131,4 @@ function serialisable(wrapped: { kekProvider: string; kekId: string; kekVersion:
  */
 function base64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
-}
-
-/** Whether an instance's public URL is on this machine: `pnpm dev`'s, conformance's, as `allowLoopbackIssuersForDevelopment` requires. */
-function loopback(origin: string): boolean {
-  const { hostname } = new URL(origin);
-  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
 }

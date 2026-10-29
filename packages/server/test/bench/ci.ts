@@ -34,16 +34,12 @@
 // says neither): the app's own transactions under 0.14's head, as before T149, to compare with.
 // `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own: a binding
 // takes at most 60 sign-ins a minute, so 100 at once are two bindings' (with 0.15's log, each serializes on its row).
-// With 0.15's log the vault verifies each run's ID token again, on its sealed binding (PR 3b): `--keys-ms <ms>` is what a
-// fetch of the issuer's keys takes, and `--keys-cold` forgets every key set before each sign-in and again before its
-// vault call (one process, one cache), so that the app and the vault each fetch them, as a new isolate of each does;
-// warm, by default, both verify on keys they hold.
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
 //     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable]
-//     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope] [--keys-ms 50] [--keys-cold]
+//     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,7 +60,7 @@ import { resolveConfig } from '../../src/config.ts';
 import { EXCHANGES_PER_BINDING_MINUTE, exchangeLimit } from '../../src/api/workloads.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
-import { FetchRefused, forgetKeys, type WorkloadTransport } from '@coffre/core/fetch';
+import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transport.ts';
 import { auditWatch } from '../../src/plugins/audit-watch.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
@@ -97,8 +93,6 @@ const { values } = parseArgs({
     'proxy-stable': { type: 'boolean', default: false },
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
-    'keys-ms': { type: 'string', default: '0' },
-    'keys-cold': { type: 'boolean', default: false },
   },
 });
 const RTT = Number(values.rtt);
@@ -106,8 +100,6 @@ const ROUNDS = Number(values.rounds);
 const JOBS = values.jobs.split(',').map(Number);
 const USES = Number(values.uses);
 const SIGNIN_ONLY = values['signin-only'];
-const KEYS_MS = Number(values['keys-ms']);
-const KEYS_COLD = values['keys-cold'];
 const ISSUE = values.issue;
 const PROXY = Number(values.proxy);
 /**
@@ -238,11 +230,8 @@ try {
     const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/dev', iat: now - 5, exp: now + 295, jti: crypto.randomUUID(), run_id: '7001', sha: 'f'.repeat(40), repository: 'acme/market', ...claimsOf(workflow) })}`;
     return `${input}.${signWith('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
   };
-  let fetches = 0;
   const transport: WorkloadTransport = {
     json: async (url) => {
-      fetches += 1;
-      if (KEYS_MS > 0) await new Promise((resolve) => setTimeout(resolve, KEYS_MS));
       const published = new Map<string, unknown>([[`${ISSUER}/.well-known/openid-configuration`, { issuer: ISSUER, jwks_uri: KEYS }], [KEYS, { keys: [jwk] }]]);
       if (!published.has(url.href)) throw new FetchRefused(url, 'answered 404');
       return published.get(url.href);
@@ -265,14 +254,12 @@ try {
         const vault = await localVault({
           database: createDatabase(pool.client), ...(hot === null ? {} : { hotDatabase: createDatabase(hot.client) }),
           kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: BULK,
-        }, { ...log, issuers: { transport } });
+        }, log);
         return { pool, hot, vault };
       })();
       instance.pool.cost = cost;
       if (instance.hot !== null) instance.hot.cost = cost;
       cost.vaultCalls += 1;
-      // A vault's isolate of its own, whose keys are not the app's: the app's fetch, in this process's one cache, forgotten.
-      if (KEYS_COLD && name === 'signIn') forgetKeys();
       try {
         let answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
         if (name === 'about' && values.legacy) {
@@ -364,7 +351,6 @@ try {
   };
   const job = async (n = 0) => {
     if (ISSUE) return { issue: await issueOne() };
-    if (KEYS_COLD) forgetKeys();
     const oidc = await request(() => new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(n % BINDINGS) }) }));
     if (SIGNIN_ONLY) return { oidc };
     const { token: credential } = oidc.body as { token: string };
@@ -376,7 +362,7 @@ try {
 
   console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: ${ISSUE
     ? `a service token's issue to ${MEMBER} by ${ROOT}${values.legacy ? ', as the app issued it before T149' : ''}`
-    : `sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}; the issuer's keys ${KEYS_COLD ? 'fetched for each' : 'held'}, a fetch ${KEYS_MS} ms`}`);
+    : `sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}`}`);
   // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day.
   await room(1);
   await job();
@@ -466,7 +452,6 @@ try {
       await usesIn(null);
       continue;
     }
-    const fetched = fetches;
     const phases = { oidc: [] as { ms: number; cost: Cost }[], issue: [] as { ms: number; cost: Cost }[], list: [] as { ms: number; cost: Cost }[], reveal: [] as { ms: number; cost: Cost }[] };
     for (let round = 0; round < ROUNDS; round += 1) {
       await room(jobs);
@@ -488,8 +473,7 @@ try {
       for (const run of runs) for (const [what, waited] of run.cost.waits) waits.set(what, (waits.get(what) ?? 0) + waited);
       console.log(
         `${String(jobs).padStart(2)} jobs ${phase.padEnd(6)} p50 ${percentile(ms, 50).toFixed(0).padStart(5)} ms  p99 ${percentile(ms, 99).toFixed(0).padStart(5)} ms  ` +
-          `statements app ${mean((c) => c.app)} vault ${mean((c) => c.vault)} (${mean((c) => c.vaultCalls)} calls)  waited ${mean((c) => c.waitedMs)} ms` +
-          (phase === 'oidc' ? `  key fetches ${((fetches - fetched) / runs.length).toFixed(1)}` : ''),
+          `statements app ${mean((c) => c.app)} vault ${mean((c) => c.vault)} (${mean((c) => c.vaultCalls)} calls)  waited ${mean((c) => c.waitedMs)} ms`,
       );
       for (const [what, waited] of [...waits].sort((a, b) => b[1] - a[1]).slice(0, 3)) console.log(`         ${(waited / runs.length).toFixed(0).padStart(5)} ms/run  ${what}`);
     }

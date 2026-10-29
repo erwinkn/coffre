@@ -8,7 +8,6 @@ import { tablesOf, type Database } from '@coffre/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
-import { FetchRefused, type WorkloadTransport } from '@coffre/core/fetch';
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
@@ -231,17 +230,12 @@ export function hotDatabaseUrl(): string {
 /** A checkpointer that seals everything at once: what a change waits on, in a test with no tree. */
 export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => ({}) as Awaited<ReturnType<NonNullable<VaultOptions['sealThrough']>>>;
 
-/** Where a test vault asks an issuer for its keys unless told: nowhere, so that a test that forgot its issuer fails, never the network. */
-const NO_ISSUER: WorkloadTransport = { json: async (url) => { throw new FetchRefused(url, 'no issuer in this test: give the vault the app\'s transport'); } };
-
 export function testVault(
   owners: readonly string[],
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
   log: Pick<VaultOptions, 'log' | 'sealThrough' | 'uses'> = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
-  /** The test's issuers, as the app's runtime reaches them: the vault verifies a run's ID token itself (PR 3b). */
-  issuers: WorkloadTransport = NO_ISSUER,
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -257,7 +251,7 @@ export function testVault(
         ...(log.log === '0.15' ? { hotDatabase: hotDatabaseUrl() } : {}),
         ...config,
       },
-      { clockOffset: () => offset, walks, ...log, issuers: { transport: issuers } },
+      { clockOffset: () => offset, walks, ...log },
     );
     const [first, ...others] = owners.map((email) => `user:${email}`);
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
@@ -388,11 +382,11 @@ export function testAnchor(): AnchorStore {
   return { read: () => store.read(), write: (prev, next) => store.write(prev, next) };
 }
 
-/** Deps for a fresh instance with these Owners (`testVault`, asking `issuers` for keys), over the restricted role. */
-export function testDeps(db: Database, owners: readonly string[], { issuers, ...extra }: Partial<FixtureDeps> & { issuers?: WorkloadTransport } = {}): FixtureDeps {
+/** Deps for a fresh instance with these Owners (`testVault`), over the restricted role. */
+export function testDeps(db: Database, owners: readonly string[], extra: Partial<FixtureDeps> = {}): FixtureDeps {
   return {
     db,
-    vault: testVault(owners, undefined, undefined, undefined, undefined, issuers),
+    vault: testVault(owners),
     chainKey: randomBytes(32),
     anchor: testAnchor(),
     ...extra,

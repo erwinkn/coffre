@@ -19,14 +19,14 @@ import { loggedChange, type ChangeKeys } from '../src/changes.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
-import { forgetKeys } from '@coffre/core/fetch';
-
-import { ISSUER, ORIGIN, testIssuer } from './issuer.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
 const CI = 'token:ci';
+const ISSUER = 'https://token.actions.githubusercontent.com';
+/** The instance's public URL its bindings are made on, which their seals cover (PR 3b). */
+const ORIGIN = 'https://secrets.acme.example';
 const APP_KEY = 'app:0123456789abcdef';
 
 let db: TestDatabase;
@@ -34,10 +34,7 @@ before(async () => {
   db = await openTestDatabase();
 });
 after(() => db.close());
-beforeEach(async () => {
-  forgetKeys();
-  await emptyDatabase(db.owner);
-});
+beforeEach(() => emptyDatabase(db.owner));
 
 function configure(): ResolvedVaultConfig {
   return {
@@ -51,15 +48,14 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project. */
 async function world() {
   const config = configure();
-  const issuer = testIssuer();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, issuers: { transport: issuer.transport } });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
   const keys: ChangeKeys = { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
-  return { vault, project, keys, issuer };
+  return { vault, project, keys };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -108,7 +104,8 @@ async function signIn(w: World, id: string): Promise<{ outcome: Awaited<ReturnTy
       places: null, expiresAt: now + 5 * 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
     appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: { run_id: '7001' } },
-    proof: { token: w.issuer.token(), jwks: null, dpop: null },
+    // Keys its issuer publishes: the app verified the token, as the vault fetches nothing.
+    idToken: null, dpop: null,
   });
   return { outcome, credential };
 }
@@ -180,8 +177,7 @@ test('a binding 0.14 made, which the log never held, or one whose row was edited
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'x', label: null, scope: sealedAs.columns.scope,
       places: null, expiresAt: now + 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
-    appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} },
-    proof: { token: w.issuer.token(), jwks: null, dpop: null },
+    appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} }, idToken: null, dpop: null,
   });
   assert.deepEqual(asSealed, { ok: false, refused: 'unbound' });
 });
@@ -429,8 +425,7 @@ test("a binding's row put back after its end, its old seal and all, signs nobody
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'x', label: null, scope: before.columns.scope,
       places: null, expiresAt: now + 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
-    appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} },
-    proof: { token: w.issuer.token(), jwks: null, dpop: null },
+    appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} }, idToken: null, dpop: null,
   });
   assert.deepEqual(outcome, { ok: false, refused: 'unbound' });
   assert.equal((await db.owner.select().from(credentials)).length, none, 'nothing written');

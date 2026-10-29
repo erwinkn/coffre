@@ -315,6 +315,8 @@ REMOVALS=(
   "LifecycleCompromised BindingSealed SignInsOnValidTokens"
   # The vault holds the token's audience to the sealed binding's, never to one the app names (PR 3b).
   "LifecycleCompromised AudienceSealed SignInsOnValidTokens"
+  # A binding of fetched keys, whose tokens the app verifies: the vault still takes only one it sealed.
+  "LifecycleFetched BindingSealed SignInsOnValidTokens"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -329,6 +331,9 @@ EXPECTED=(
   # and then deleted, once the cut is announced (Seal.tla, W229).
   "SealRetention BelowCutKept"
   "SealRetention ReplayAcrossCutSeen"
+  # The vault opens no connection but Postgres: a binding of keys its issuer publishes takes the app's word for its
+  # tokens, so a compromised app signs a run in through it with a token nobody signed (Lifecycle.tla's Fetched).
+  "LifecycleFetched EverySignInOnValidToken"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

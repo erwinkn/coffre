@@ -27,7 +27,6 @@ import {
   MAX_TOKEN_AGE_SECONDS,
   OIDC_PROFILES,
   POLICY_DEFAULTS,
-  PROFILE_URNS,
   runClaims,
   soleAudience,
   UPLOADED_KEYS,
@@ -1387,6 +1386,7 @@ export class WorkloadService {
   ): Promise<SessionIssued> {
     const { member, name, kind, verified, policy, given } = proof;
     const { binding } = verified;
+    madeHere(binding, this.#deps.publicUrl);
     const known = await places(this.#deps.db);
     const now = Date.now();
     const { notAfter, expiresAt } = sessionEnds(kind, verified, policy, {}, now);
@@ -1409,10 +1409,11 @@ export class WorkloadService {
       // Its proof's end is the session's hard end, held to in the statement.
       validUntil: null,
       record: { proof: name, issuer: binding.issuer, run: runClaims(verified.claims) },
-      // An ID token, verified again by the vault on the binding it sealed, the session's key by the DPoP proof it signed
-      // (D148, PR 3b). A proof that is no ID token is the app's alone to verify in 0.15: an AWS signed request (0.16 moves
-      // it into the vault), so a compromised app could still make sessions of an AWS binding's.
-      proof: Object.hasOwn(PROFILE_URNS, binding.profile) ? null : { token: given as string, jwks: binding.jwks, dpop: meta.dpop },
+      // The session's key, by the DPoP proof it signed, and the token where its binding carries its issuer's keys: the
+      // vault's to verify (D148, PR 3b). A token of keys its issuer publishes, and a proof that is no ID token (an AWS
+      // signed request), are the app's alone, so a compromised app could make sessions of such a binding's.
+      idToken: vaultVerifies(binding) ? { token: given as string, jwks: binding.jwks! } : null,
+      dpop: meta.dpop,
     });
     if (!outcome.ok) {
       if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
@@ -1553,13 +1554,15 @@ export class WorkloadService {
    * generation, the binding's rate and the token spent once are weighed in
    * its statement, on their rows, under their locks (formal/Lifecycle.tla's
    * BindingLocked, MemberLocked, SpentChecked); no 0.14 head, and no
-   * `token.exchange` entry: its change records the run (D147). The token
-   * goes with it, and the vault verifies it again on the binding it sealed
-   * (D148, PR 3b): what decides is its check, the app's a filter that keeps
-   * a token no binding takes from costing the vault a call.
+   * `token.exchange` entry: its change records the run (D147). Through a
+   * binding of uploaded keys, the token goes with it, and the vault verifies
+   * it again on the binding it sealed (D148, PR 3b): what decides is its
+   * check, the app's a filter. Of keys its issuer publishes, the app's
+   * check decides: the vault fetches nothing.
    */
   async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, token: string, decoded: DecodedToken): Promise<Exchanged> {
     const issuer = decoded.claims.iss;
+    madeHere(binding, this.#deps.publicUrl);
     const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
       generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS), stored: binding.scope,
     });
@@ -1573,7 +1576,8 @@ export class WorkloadService {
       // Whole ms, down: a token's times may be fractional seconds, which the checks before took.
       validUntil: Math.floor(Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000)),
       record: { proof: 'oidc', issuer, run: runClaims(claims) },
-      proof: { token, jwks: binding.jwks, dpop: null },
+      idToken: vaultVerifies(binding) ? { token, jwks: binding.jwks! } : null,
+      dpop: null,
     });
     if (!outcome.ok) {
       if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
@@ -1632,20 +1636,40 @@ function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<E
   }
 }
 
+/**
+ * Whether the vault verifies a sign-in's token through this binding itself
+ * (PR 3b): when it carries its issuer's keys, uploaded with it, which its
+ * seal digests. The vault opens no connection but Postgres, so the tokens
+ * of an issuer that publishes its keys are the app's to verify.
+ */
+function vaultVerifies(binding: BindingRow): boolean {
+  return binding.jwksUri.startsWith(UPLOADED_KEYS) && binding.jwks !== null;
+}
+
+/**
+ * A binding made on another public URL than this instance's, as its row's
+ * sealed origin says, takes no token for this one (PR 3b): its runs ask
+ * for the URL it was made on. Null for one made before the column.
+ */
+function madeHere(binding: BindingRow, publicUrl: string): void {
+  if (binding.origin !== null && binding.origin !== publicUrl) {
+    throw new ExchangeRefused('audience', `the binding was made on ${binding.origin}, and takes no token for ${publicUrl}: bind it again here`);
+  }
+}
+
 /** The reasons the vault's check of a proof gives that the app's own gives too (`verifyRunToken`, PR 3b). */
 const PROOF_REASONS: ReadonlySet<string> = new Set<ExchangeReason>([
-  'malformed', 'no_match', 'signature', 'unknown_key', 'expired', 'too_old', 'too_long', 'not_yet_valid', 'audience', 'issuer_unavailable', 'dpop',
+  'malformed', 'no_match', 'signature', 'unknown_key', 'expired', 'too_old', 'too_long', 'not_yet_valid', 'audience', 'dpop',
 ]);
 
 /**
- * A proof the vault refused, as the app's own check words it: an issuer it
- * cannot ask is 503 for a minute, a key a service's uploaded keys lack
- * alerts (`UnknownKey`), and keys that are not the ones its binding's seal
- * digests, a row changed around the vault, are a binding to make again.
+ * A proof the vault refused, as the app's own check words it: a key a
+ * service's uploaded keys lack alerts (`UnknownKey`), and keys that are not
+ * the ones its binding's seal digests, a row changed around the vault, are
+ * a binding to make again.
  */
 function proofRefusal(outcome: Extract<SignInOutcome, { refused: 'proof' }>, member: string, binding: BindingRow): ExchangeRefused {
   const { reason, message, kid } = outcome;
-  if (reason === 'issuer_unavailable') return new ExchangeRefused('issuer_unavailable', message, 503, '60');
   if (reason === 'unknown_key' && binding.jwks !== null) return new UnknownKey(member, binding, binding.issuer, kid);
   if (reason === 'keys') return new ExchangeRefused('unsealed', `${message}: bind it again`);
   return new ExchangeRefused(PROOF_REASONS.has(reason) ? (reason as ExchangeReason) : 'malformed', message);

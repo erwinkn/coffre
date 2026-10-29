@@ -483,16 +483,19 @@ export type SignInInput = {
   /** What the change records of the sign-in besides (D147): the proof, its issuer, and the run's claims. */
   record: { proof: string; issuer: string; run: Record<string, string | number> };
   /**
-   * The proof itself, which the vault verifies (D148, PR 3b): the run's ID
-   * token, the keys uploaded with its binding as its row keeps them (null
-   * for keys its issuer publishes, which the vault fetches), and a
-   * workload's DPoP proof, whose key the session is bound to. With it, the
-   * vault takes `spent`, `validUntil` and `record.run` from the token, not
-   * from the app. Null for a proof that is no ID token (an AWS signed
-   * request, Cloudflare's, an enrollment code): the app's to verify in
-   * 0.15, the one case where a compromised app could still sign a run in.
+   * The run's ID token, for the vault to verify itself (D148, PR 3b), when
+   * its sealed binding carries the issuer's keys (its `jwksUri` their
+   * digest, as a Kubernetes cluster's does), with those keys as its row
+   * keeps them; the vault then takes `spent`, `validUntil` and `record.run`
+   * from the token, not from the app. Null for a binding of keys its issuer
+   * publishes, which the vault does not fetch (it opens no connection but
+   * Postgres), and for a proof that is no ID token (an AWS signed request):
+   * the app verifies those, so a compromised app could sign a run in
+   * through such a binding, within its limits.
    */
-  proof: { token: string; jwks: string | null; dpop: string | null } | null;
+  idToken: { token: string; jwks: string } | null;
+  /** A workload's DPoP proof, whose key the session is bound to, which the vault verifies; null for a CI run's sign-in. */
+  dpop: string | null;
 };
 
 /**
@@ -601,10 +604,10 @@ export type SignInCredential = {
 export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed' | 'proof';
 
 /**
- * A sign-in's answer. `proof`: the vault's check of the proof refused it,
- * `reason` saying why as the app's refusals do (`ExchangeReason`): an
- * unknown key names it (`kid`), and `issuer_unavailable` means its keys
- * could not be fetched, or will not be for a minute.
+ * A sign-in's answer. `proof`: the vault's check of the token or the DPoP
+ * proof refused it, `reason` saying why as the app's refusals do
+ * (`ExchangeReason`), and a key the binding's uploaded set lacks naming
+ * it (`kid`).
  */
 export type SignInOutcome =
   | { ok: true; number: string; witnessed: boolean | null }

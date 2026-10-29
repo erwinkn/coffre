@@ -51,7 +51,13 @@ EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS
     Procs,          \* the processes of the scenario (MCLifecycle.tla)
     Ops,            \* Ops[p]: what process p may do, one of them
-    Rate            \* how many credentials the binding makes a window
+    Rate,           \* how many credentials the binding makes a window
+    \* The bindings whose issuer publishes its keys, which the vault does not
+    \* fetch (it opens no connection but Postgres): the app verifies their
+    \* tokens, and the vault takes its word. A binding of keys uploaded with
+    \* it (a Kubernetes cluster's), its seal digesting them, is the vault's
+    \* to verify. Which keys a binding trusts is in its seal.
+    Fetched
 
 CONSTANTS
     \* A revoke takes the fence exclusive, which every use takes shared:
@@ -109,7 +115,7 @@ CONSTANTS
     \* does not. A compromised app checks nothing.
     AppChecksMac,
     \* The vault verifies the CI run's ID token itself (D148), against the
-    \* binding's keys.
+    \* binding's keys, when it holds them (not in Fetched).
     VaultVerifiesToken,
     \* ... and holds its audience to the one the sealed binding names, not to
     \* one the app names: a token its issuer signed for another audience (an
@@ -376,10 +382,10 @@ IssueCommit(p) ==
        THEN \* A binding of svc's that signs its runs in to sensitive reads: written, and sealed, by the vault.
             /\ bindings' = bindings \cup {"b3"}
             /\ bsealed' = bsealed \cup {"b3"}
-            /\ given' = given \cup {[kind |-> "binding", via |-> "cA", n |-> l[p].n, sens |-> TRUE, tok |-> None]}
+            /\ given' = given \cup {[kind |-> "binding", via |-> "cA", n |-> l[p].n, sens |-> TRUE, tok |-> None, b |-> None]}
             /\ UNCHANGED <<rows, sealed, history, handed>>
        ELSE /\ Write(IssuedBy[p], Row("svc", Sens, l[p].gen, None, IssuedBy[p]))
-            /\ given' = given \cup {[kind |-> "token", via |-> "cA", n |-> l[p].n, sens |-> TRUE, tok |-> None]}
+            /\ given' = given \cup {[kind |-> "token", via |-> "cA", n |-> l[p].n, sens |-> TRUE, tok |-> None, b |-> None]}
             /\ handed' = handed \cup {IssuedBy[p]}
             /\ UNCHANGED <<bindings, bsealed>>
     /\ Done(p)
@@ -420,7 +426,7 @@ SignInBody(s) ==
            tok == l[s].tok
            ok == /\ b = "b" => unbound = 0
                  /\ BindingSealed => b \in bsealed
-                 /\ VaultVerifiesToken => tok \in SignedBy[b] /\ AudOf(tok) = (IF AudienceSealed THEN "us" ELSE l[s].aud)
+                 /\ VaultVerifiesToken /\ b \notin Fetched => tok \in SignedBy[b] /\ AudOf(tok) = (IF AudienceSealed THEN "us" ELSE l[s].aud)
                  /\ status = "active" /\ gen = 0
                  /\ Cardinality({g \in given : g.kind = "signin"}) < Rate
                  /\ SpentChecked => tok \notin spent
@@ -435,7 +441,7 @@ SignInBody(s) ==
 SignInCommit(s) ==
     /\ pc[s] = "commit"
     /\ Write(IssuedBy[s], Row("svc", Sens, l[s].gen, l[s].b, IssuedBy[s]))
-    /\ given' = given \cup {[kind |-> "signin", via |-> None, n |-> l[s].n, sens |-> FALSE, tok |-> l[s].tok]}
+    /\ given' = given \cup {[kind |-> "signin", via |-> None, n |-> l[s].n, sens |-> FALSE, tok |-> l[s].tok, b |-> l[s].b]}
     /\ handed' = handed \cup {IssuedBy[s]}
     /\ Done(s)
     /\ UNCHANGED <<owner, status, gen, next, bindings, bsealed, unbound, spent, op, l, answered, revs, dems, used>>
@@ -746,8 +752,15 @@ SpentOnce ==
     \A g, h \in given : (g.kind = "signin" /\ h.kind = "signin" /\ g.tok = h.tok) => g = h
 
 \* A run's credential comes only of an ID token its binding's issuer signed:
-\* never of one nobody signed, nor through a binding the app made up (D148).
+\* never of one nobody signed, nor through a binding the app made up (D148),
+\* through every binding whose keys the vault holds.
 SignInsOnValidTokens ==
+    \A g \in given : g.kind = "signin" /\ g.b \notin Fetched => g.tok \in Valid
+
+\* ... and through every binding: what one of fetched keys does not give,
+\* its token the app's to verify (LifecycleFetched, which TLC must find
+\* broken: a compromised app signs a run in with a token nobody signed).
+EverySignInOnValidToken ==
     \A g \in given : g.kind = "signin" => g.tok \in Valid
 
 \* Unbound, a binding's credentials end: none serves a use numbered after.

@@ -19,14 +19,13 @@ import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { credentialObject } from '../src/objects.ts';
-import { forgetKeys } from '@coffre/core/fetch';
-
-import { ISSUER, ORIGIN, testIssuer } from './issuer.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
-
+const ISSUER = 'https://token.actions.githubusercontent.com';
+/** The instance's public URL its bindings are made on, which their seals cover (PR 3b). */
+const ORIGIN = 'https://secrets.acme.example';
 /** The app's log key's id, as its MACs name it (`appLogKey`). */
 const APP_KEY = 'app:0123456789abcdef';
 
@@ -35,11 +34,7 @@ before(async () => {
   db = await openTestDatabase();
 });
 after(() => db.close());
-beforeEach(async () => {
-  // Each test's issuer has keys of its own, under the one URL.
-  forgetKeys();
-  await emptyDatabase(db.owner);
-});
+beforeEach(() => emptyDatabase(db.owner));
 
 function configure(): ResolvedVaultConfig {
   return {
@@ -66,8 +61,7 @@ async function bindingOf(id: string): Promise<SignInInput['binding']> {
 /** A vault keeping 0.15's log, the service account CI a viewer of a project, and a binding of CI's the Owner made: what a CI run signs in through. */
 async function world() {
   const config = configure();
-  const issuer = testIssuer();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, issuers: { transport: issuer.transport } });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, principal: CI })).ok);
@@ -84,7 +78,7 @@ async function world() {
     policy: { seq: null, protected: [] }, appKey: APP_KEY,
   });
   assert.ok(made.ok, JSON.stringify(made));
-  return { vault, keys, binding, scope, project, issuer, sealed: await bindingOf(binding) };
+  return { vault, keys, binding, scope, project, sealed: await bindingOf(binding) };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -103,7 +97,9 @@ function asked(w: World, change: (input: SignInInput) => SignInInput = (input) =
     spent: randomBytes(32).toString('base64'),
     validUntil: now + 60_000,
     record: { proof: 'oidc', issuer: ISSUER, run: { run_id: '7001' } },
-    proof: { token: w.issuer.token(), jwks: null, dpop: null },
+    // Keys its issuer publishes: the app verified the token, as the vault fetches nothing.
+    idToken: null,
+    dpop: null,
   });
 }
 
@@ -158,11 +154,7 @@ test('a sign-in through a binding is one change of the log, its row the object i
   assert.equal(String(change!.number), outcome.number);
   const payload = JSON.parse(change!.payload) as { op: string; signIn: unknown };
   assert.equal(payload.op, 'credential.issue');
-  // The run as its token says it, which the vault verified (D148), whatever the app's record named: here, only run_id.
-  const run = (payload.signIn as { run: Record<string, unknown> }).run;
-  assert.deepEqual({ ...(payload.signIn as object), run: undefined }, { binding: w.binding, proof: 'oidc', issuer: ISSUER, run: undefined });
-  assert.equal(run.run_id, '7001');
-  assert.equal(run.sub, 'repo:acme/market:ref:refs/heads/dev', "the token's sub, which the app's record did not name");
+  assert.deepEqual(payload.signIn, { binding: w.binding, proof: 'oidc', issuer: ISSUER, run: { run_id: '7001' } });
   assert.equal((await db.owner.select({ n: count() }).from(auditLog))[0]!.n, entries, 'no 0.14 entry');
   const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, w.binding));
   assert.notEqual(binding!.lastUsedAt, null, "the binding's last use stamped");
@@ -213,7 +205,7 @@ test("an ID token is spent once (SpentChecked): presented again, it buys nothing
   const first = asked(w);
   assert.ok((await w.vault.signIn!(first)).ok);
   const after = await written();
-  assert.deepEqual(await w.vault.signIn!(asked(w, (input) => ({ ...input, proof: first.proof }))), { ok: false, refused: 'replayed' });
+  assert.deepEqual(await w.vault.signIn!(asked(w, (input) => ({ ...input, spent: first.spent }))), { ok: false, refused: 'replayed' });
   assert.deepEqual(await written(), after);
 });
 
@@ -239,11 +231,7 @@ test("the proof's times and the credential's end are held to by the database's c
     assert.deepEqual(await w.vault.signIn!(input), { ok: false, refused: 'expired' });
     assert.deepEqual(await written(), none);
   };
-  // A token past its `exp`: the vault's own check of it refuses it before any statement.
-  const now = Math.floor(Date.now() / 1000);
-  const late = await w.vault.signIn!(asked(w, (input) => ({ ...input, proof: { ...input.proof!, token: w.issuer.token({ iat: now - 400, exp: now - 60 }) } })));
-  assert.equal(!late.ok && late.refused === 'proof' && late.reason, 'expired');
-  assert.deepEqual(await written(), none);
+  await expired(asked(w, (input) => ({ ...input, validUntil: Date.now() - 1 })));
   await expired(asked(w, (input) => ({ ...input, credential: { ...input.credential, expiresAt: Date.now() - 1 } })));
   // A CI run's credential lives five minutes, a minute's slack for the Worker's clock.
   await expired(asked(w, (input) => ({ ...input, credential: { ...input.credential, expiresAt: Date.now() + 7 * 60_000 } })));

@@ -1,8 +1,7 @@
-// A CI platform's issuer for the vault's tests (T149, PR 3b): its keys, which it publishes at `KEYS` through a transport
-// the vault is given in place of the network, counting each fetch, and the ID tokens it signs for a run.
+// A CI platform's issuer for the vault's tests (T149, PR 3b): its key, which a binding names by `KEYS` or carries
+// uploaded, and the ID tokens it signs for a run.
 import { generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
 
-import { FetchRefused, type WorkloadTransport } from '@coffre/core/fetch';
 import { thumbprint, type PublicJwk } from '@coffre/core/identity';
 
 export const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -11,9 +10,6 @@ export const KEYS = `${ISSUER}/.well-known/jwks`;
 export const ORIGIN = 'https://secrets.acme.example';
 
 export type TestIssuer = {
-  transport: WorkloadTransport;
-  /** How many times the vault asked for the keys. */
-  fetches: () => number;
   /** A run's ID token: `claims` over a CI run's own, the header's `kid` the issuer's unless `kid` says otherwise. */
   token: (claims?: Record<string, unknown>, options?: { kid?: string; key?: KeyObject }) => string;
   jwk: Record<string, unknown>;
@@ -21,21 +17,12 @@ export type TestIssuer = {
 
 const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
-/** An issuer publishing one RSA key, `rs-1`, at `KEYS`. */
+/** An issuer of one RSA key, `rs-1`. */
 export function testIssuer(): TestIssuer {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };
-  let fetches = 0;
   return {
     jwk,
-    fetches: () => fetches,
-    transport: {
-      json: async (url) => {
-        fetches += 1;
-        if (url.href !== KEYS) throw new FetchRefused(url, 'answered 404');
-        return { keys: [jwk] };
-      },
-    },
     token: (claims = {}, options = {}) => {
       const now = Math.floor(Date.now() / 1000);
       const input = `${part({ alg: 'RS256', kid: options.kid ?? 'rs-1', typ: 'JWT' })}.${part({

@@ -81,7 +81,7 @@ after(async () => {
 beforeEach(async () => {
   await resetDatabase(db.owner);
   open = true;
-  deps = testDeps(db.runtime, [ROOT], { issuers: transport });
+  deps = testDeps(db.runtime, [ROOT]);
   const limiter = { limit: async () => ({ success: open }) };
   const config = resolveConfig({
     publicUrl: ORIGIN,

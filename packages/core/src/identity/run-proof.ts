@@ -1,5 +1,3 @@
-import { verifyWithKeys, IssuerUnavailable } from '../fetch/keys.ts';
-import type { WorkloadTransport } from '../fetch/transport.ts';
 import { expectedAudiences, PROFILE_RULES } from './profile-rules.ts';
 import { CLOCK_TOLERANCE_SECONDS, decodeWorkloadToken, MAX_TOKEN_AGE_SECONDS, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from './workload-token.ts';
 import { claimAt, differingClaims, REPEATING_PROFILES, type BindingClaims, type BindingPolicy, type WorkloadProfile } from './workloads.ts';
@@ -39,16 +37,17 @@ export function soleAudience(aud: unknown): string | null {
 
 /**
  * A binding as the vault weighs a sign-in through it (T149, PR 3b): its
- * sealed object's columns, the instance it was made on (`origin`), and,
- * for keys uploaded with it, those keys as its row keeps them, which must
- * be the ones its `jwksUri` digests.
+ * sealed object's columns, the instance it was made on (`origin`), and the
+ * keys uploaded with it as its row keeps them, which must be the ones its
+ * `jwksUri` digests. Only such a binding's: the vault fetches nothing, so
+ * the tokens of an issuer that publishes its keys are the app's to verify.
  */
 export type RunBinding = {
   profile: WorkloadProfile;
   issuer: string;
   origin: string;
   jwksUri: string;
-  jwks: string | null;
+  jwks: string;
   claims: string;
   policy: string | null;
 };
@@ -85,19 +84,18 @@ function shownKid(header: Record<string, unknown>): string | null {
 
 /**
  * Verify a CI run's or a workload's ID token against one binding, sealed
- * (D148): the vault's own check, which no app can steer. The binding's
- * keys (fetched by `transport`, settled values only, an unknown `kid`
- * fetched again once a minute at most, `verifyWithKeys`; or uploaded,
- * held to the digest its seal covers), its issuer, its audience (the
- * instance it was made on, or, for a platform whose caller names the
- * session's key, that key: `jkt`, from the DPoP proof the vault verified,
- * never from the app), the token's times, the binding's claims and its
- * profile's rules. Throws `RunProofRefused`.
+ * (D148), whose keys were uploaded with it: the vault's own check, which
+ * no app can steer, and which asks no one. The binding's keys, held to the
+ * digest its seal covers (a key they lack is refused, never looked for),
+ * its issuer, its audience (the instance it was made on, or, for a
+ * platform whose caller names the session's key, that key: `jkt`, from the
+ * DPoP proof the vault verified, never from the app), the token's times,
+ * the binding's claims and its profile's rules. Throws `RunProofRefused`.
  */
 export async function verifyRunToken(
   token: string,
   binding: RunBinding,
-  context: { transport: WorkloadTransport; now: Date; workload: { jkt: string } | null },
+  context: { now: Date; workload: { jkt: string } | null },
 ): Promise<RunProof> {
   let decoded: ReturnType<typeof decodeWorkloadToken>;
   try {
@@ -119,19 +117,13 @@ export async function verifyRunToken(
   const expected = { issuer: binding.issuer, audience, now: context.now, ...(repeating ? { maxAge: null } : {}) };
   let claims: Record<string, unknown>;
   try {
-    if (binding.jwks === null) {
-      if (binding.jwksUri.startsWith(UPLOADED_KEYS)) throw new RunProofRefused('keys', 'the binding names keys uploaded with it, and none came');
-      claims = await verifyWithKeys(context.transport, binding.jwksUri, token, expected);
-    } else {
-      // Keys uploaded with it: the very keys its seal digests, never others the app names (a forged set).
-      const uploaded = await uploadedKeys(JSON.parse(binding.jwks) as unknown);
-      if (`${UPLOADED_KEYS}${uploaded.digest}` !== binding.jwksUri) throw new RunProofRefused('keys', 'the keys are not those the binding was made with');
-      // Nothing to fetch, and no issuer to ask whether a token still stands, so none lives past the hour.
-      claims = await verifyWorkloadToken(token, JSON.parse(uploaded.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
-    }
+    // The very keys its seal digests, never others the app names (a forged set).
+    const uploaded = await uploadedKeys(JSON.parse(binding.jwks) as unknown);
+    if (`${UPLOADED_KEYS}${uploaded.digest}` !== binding.jwksUri) throw new RunProofRefused('keys', 'the keys are not those the binding was made with');
+    // No issuer to ask whether a token still stands, so none lives past the hour.
+    claims = await verifyWorkloadToken(token, JSON.parse(uploaded.jwks) as JSONWebKeySet, { ...expected, maxLifetime: MAX_TOKEN_AGE_SECONDS });
   } catch (error) {
     if (error instanceof RunProofRefused) throw error;
-    if (error instanceof IssuerUnavailable) throw new RunProofRefused('issuer_unavailable', error.message);
     if (error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') {
       throw new RunProofRefused('unknown_key', error.message, shownKid(header));
     }

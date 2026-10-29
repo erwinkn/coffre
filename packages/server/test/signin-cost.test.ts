@@ -114,7 +114,7 @@ before(async () => {
   // The app and the vault on pools of their own that record what they run, as a deployment's; each vault call counted.
   app = new RecordingPool(TEST_RUNTIME_DATABASE_URL);
   vaultPool = new RecordingPool(TEST_VAULT_DATABASE_URL);
-  vault = await localVault({ database: createDatabase(vaultPool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow, issuers: { transport } });
+  vault = await localVault({ database: createDatabase(vaultPool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow });
   const counted = new Proxy(vault, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);

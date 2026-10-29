@@ -17,7 +17,6 @@
 import { chmodSync, existsSync, lstatSync, rmSync } from 'node:fs';
 import { Agent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
 
-import { nodeTransport } from '@coffre/core/fetch/node';
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
@@ -25,7 +24,7 @@ import { openDatabase } from '@coffre/db/connect';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { failureOf } from './failure.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
-import { ISSUER_DEADLINE_MS, type VaultOptions } from './vault.ts';
+import type { VaultOptions } from './vault.ts';
 
 export type { Vault, VaultConfig };
 export * from './index.ts';
@@ -73,9 +72,7 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
     const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
     const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
-    // An issuer's keys, for a run's sign-in, only from public addresses, checked at connect time: never the vault's own network.
-    const issuers = { transport: options.issuers?.transport ?? nodeTransport({ deadlineMs: ISSUER_DEADLINE_MS }) };
-    return await openLocalVault(db, resolved, { ...options, uses, issuers }, close, hot);
+    return await openLocalVault(db, resolved, { ...options, uses }, close, hot);
   } catch (error) {
     await close();
     throw error;
