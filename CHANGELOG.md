@@ -25,6 +25,16 @@
   public URL takes no token for this one (bind it again).
   `docs/design/credential-lifecycle.md`, section 4b; `formal/Lifecycle.tla`'s
   AudienceSealed and Fetched.
+
+- **A database no longer builds Drizzle's relational queries.** Coffre
+  runs none (`db.query.*`), yet Drizzle worked out the schema's relations
+  once per isolate and made a query builder per table for every database,
+  which the app and the vault each open per request on Workers. That was
+  3.5 ms of a process's first `createDatabase` (now 0.3 ms) and 0.05 ms of
+  each later one (now 0.003 ms); on Cloudflare a cold request costs 4 to
+  11 ms less CPU. `db.query` is empty, in type too, so a relational query
+  fails the typecheck. The two unused relations are gone from the schemas.
+
 - **0.15's sign-in through a trust binding, a revoke and a sign-out are
   each one vault call, behind its switch.** A CI run's sign-in was 8 app
   statements, 6 of them holding 0.14's head, which every app write waits

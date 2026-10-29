@@ -14,8 +14,7 @@ import {
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
-import { asPostgres } from './portable.ts';
-import { ACTIVE_SUBJECT, relationsOf } from './relations.ts';
+import { ACTIVE_SUBJECT } from './active-subject.ts';
 
 /**
  * The schema in schema.ts, for SQLite (through libsql). Same tables,
@@ -994,11 +993,4 @@ export const logTiles = sqliteTable(
     check('log_tiles_leaf_check', sql`${table.leaf} >= 0 AND ((${table.level} = 7 AND ${table.leaf} = 0) OR (${table.level} < 7 AND ${table.leaf} % (1 << (8 * (${table.level} + 1))) = 0))`),
     check('log_tiles_hashes_check', sql`octet_length(${table.hashes}) BETWEEN 32 AND 8192 AND octet_length(${table.hashes}) % 32 = 0`),
   ],
-);
-
-export const {
-  environmentsRelations,
-  secretsRelations,
-} = relationsOf(
-  asPostgres({ projects, environments, secrets, secretVersions }),
 );
