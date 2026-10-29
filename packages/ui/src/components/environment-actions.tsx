@@ -180,14 +180,17 @@ export function NewEnvironment({
   const sources = environments.filter((environment) => isActiveAccessibleEnvironment(environment) && !environment.personal).map((environment) => environment.slug);
   // The protected ones: a fork of one is protected too.
   const guarded = environments.filter((environment) => environment.protected).map((environment) => environment.slug);
-  const [slug, setSlug] = useState('');
   // '' for empty, 'inherit:prod' for a fork that inherits, 'copy:prod' for a copy, 'ref:prod' for references to prod.
-  const [start, setStart] = useState('');
-  useEffect(() => {
-    if (!open) return;
+  const initial = forked === undefined ? '' : `inherit:${forked}`;
+  const [slug, setSlug] = useState('');
+  const [start, setStart] = useState(initial);
+  // Set back as it closes, not as it opens: opened again, it never starts, even for a render, from the last choice,
+  // whose source it would read.
+  const close = () => {
     setSlug('');
-    setStart(forked === undefined ? '' : `inherit:${forked}`);
-  }, [open, forked]);
+    setStart(initial);
+    onOpenChange(false);
+  };
   const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['inherit' | 'copy' | 'ref', string]);
   const coffre = useCoffre();
   // A fork as references copies the keys whose source you read only through their parent: said before you confirm,
@@ -202,7 +205,7 @@ export function NewEnvironment({
   return (
     <Modal
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={(next) => (next ? onOpenChange(true) : close())}
       title={
         forked === undefined ? (
           <>
@@ -225,7 +228,7 @@ export function NewEnvironment({
             { slug: made, ...(from === '' ? {} : { from }), ...(how === 'ref' ? { references: true } : {}), ...(how === 'inherit' ? { inherit: true } : {}) },
             { onSuccess: () => onCreated?.(made) },
           );
-          onOpenChange(false);
+          close();
         }}
       >
         <label className="field">
@@ -296,7 +299,7 @@ export function NewEnvironment({
         )}
 
         <div className="dialog-actions">
-          <button className="btn" type="button" onClick={() => onOpenChange(false)}>
+          <button className="btn" type="button" onClick={close}>
             Cancel
           </button>
           <button className="btn btn-primary" type="submit" disabled={slug === '' || slugError !== null}>
