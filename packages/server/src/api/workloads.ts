@@ -1657,7 +1657,9 @@ function vaultVerifies(binding: BindingRow): boolean {
  * sealed origin says, or before the column (PR 3b). One made on another
  * takes no token for this one: its runs ask for the URL it was made on.
  * Matching skips it, in every proof's flow, so that it shadows no binding
- * made here (reviews r1, r2).
+ * made here (reviews r1, r2). The column is not under the row's MAC: what
+ * holds it is the vault's seal, which refuses a binding whose origin moved
+ * (`unsealed`), so this filter only picks among bindings, never admits one.
  */
 export function madeHere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): boolean {
   return binding.origin === null || binding.origin === publicUrl;

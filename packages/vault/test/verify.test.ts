@@ -202,6 +202,8 @@ test("the audience is the one sealed into the binding: an origin the app names o
   assert.equal(said(await signIn(w, ci, token(w.issuer, ci, { aud: 'https://other.example' }))), 'proof:audience');
   assert.equal(said(await signIn(w, ci, token(w.issuer, ci, { aud: [ORIGIN, 'https://other.example'] }))), 'proof:audience', "for several parties, no single one's");
   assert.equal(said(await signIn(w, ci, token(w.issuer, ci, { aud: [ORIGIN] }))), 'ok', 'one audience in an array is that audience');
+  // An origin that is no http(s) URL is no binding's: refused where it enters, never parsed at sign-in.
+  await assert.rejects(signIn(w, ci, null, { binding: { ...binding, columns: { ...binding.columns, origin: 'secrets.acme.example' } } }), /origin \(an http\(s\) URL\)/);
   assert.equal(await credentials(), 1);
 });
 

@@ -13,6 +13,7 @@ import {
   startDevice,
   startSignin,
 } from './auth-routes.ts';
+import { WORKLOAD_SIGN_IN_PATH } from '@coffre/core/identity';
 import { preferencesIn, type Preferences } from '@coffre/core/pages';
 import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
@@ -48,7 +49,7 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/api/auth/oidc': { method: 'POST', handler: exchangeWorkloadToken },
   // A workload's key-bound session (docs/design/workload-access.md): its sign-in, renewal, and a child with less.
-  '/api/auth/workload': { method: 'POST', handler: exchangeWorkloadSession },
+  [WORKLOAD_SIGN_IN_PATH]: { method: 'POST', handler: exchangeWorkloadSession },
   '/api/auth/workload/renew': { method: 'POST', handler: renewWorkloadSession },
   '/api/auth/workload/narrow': { method: 'POST', handler: narrowWorkload },
   // MCP clients' OAuth (docs/design/mcp.md, section 4), and the endpoint its tokens are for.

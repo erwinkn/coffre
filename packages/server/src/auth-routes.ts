@@ -1,4 +1,4 @@
-import { SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
+import { EXCHANGE_SKEW_SECONDS, SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -193,8 +193,6 @@ const sessionBody = z.object({
   proof: z.record(z.string().max(32), z.unknown()).refine((proof) => Object.keys(proof).length === 1, 'a proof names one kind: { "oidc": "<token>" }'),
 }).strict();
 
-/** How far a sign-in's proof's `iat` may be from now: it carries no nonce, so its clock bounds it (section 4.1). */
-const EXCHANGE_SKEW_SECONDS = 60;
 
 /**
  * POST /api/auth/workload: a workload's proof, an ID token, a signed

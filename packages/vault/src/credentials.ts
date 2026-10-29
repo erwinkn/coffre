@@ -165,11 +165,21 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
 export function checkBinding(columns: BindingColumns | undefined): BindingColumns {
   const c = columns ?? ({} as BindingColumns);
   const text = (value: unknown) => typeof value === 'string';
-  if (!text(c.id) || !UUID.test(c.id) || !text(c.principal) || !Number.isInteger(c.generation) || !text(c.profile) || !text(c.issuer) || !text(c.origin) || !text(c.jwksUri)
+  if (!text(c.id) || !UUID.test(c.id) || !text(c.principal) || !Number.isInteger(c.generation) || !text(c.profile) || !text(c.issuer) || !text(c.origin) || !webUrl(c.origin) || !text(c.jwksUri)
     || !text(c.claims) || (c.scope !== null && !text(c.scope)) || (c.policy !== null && !text(c.policy)) || typeof c.revoked !== 'boolean') {
-    throw new Error('a binding is named by its columns as its row keeps them: id, account, generation, profile, issuer, keys, claims, scope, policy, revoked');
+    throw new Error('a binding is named by its columns as its row keeps them: id, account, generation, profile, issuer, origin (an http(s) URL), keys, claims, scope, policy, revoked');
   }
   return c;
+}
+
+/** An instance's public URL, http or https, as a binding's `origin` must be: checked where it enters, so a sign-in never parses a bad one (Fable on PR 3b). */
+function webUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'https:' || protocol === 'http:';
+  } catch {
+    return false;
+  }
 }
 
 /** A sign-in the vault refuses before any statement: its own check of the times. */

@@ -1,4 +1,4 @@
-import { RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
+import { EXCHANGE_SKEW_SECONDS, RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, WORKLOAD_SIGN_IN_PATH, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
@@ -158,10 +158,6 @@ import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, type UseLimits } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
-/** A workload's sign-in, whose URL its DPoP proof signs, on the binding's origin (`exchangeWorkloadSession`). */
-const WORKLOAD_SIGN_IN_PATH = '/api/auth/workload';
-/** Seconds a sign-in's DPoP proof's `iat` may be from now (the route's `EXCHANGE_SKEW_SECONDS`). */
-const EXCHANGE_SKEW_SECONDS = 60;
 
 export type VaultOptions = {
   /**
