@@ -29,12 +29,30 @@
 (*                                                                         *)
 (* The cutover, at a 0.15 vault's start: if the marker (the `cutover`      *)
 (* entry) is there, nothing. Else it takes every member's row, 0.14's     *)
-(* head, then the fence, looks for the marker again, verifies 0.14's       *)
-(* chain to its head, checks the row as 0.14 would, and writes `genesis`   *)
-(* (sealing the row) and                                                   *)
-(* `cutover` (naming the head). Old isolates keep writing; each later      *)
+(* head, the issue lock, then the fence, looks for the marker again,       *)
+(* verifies 0.14's chain to its head, checks the row as 0.14 would, and    *)
+(* writes `genesis` (sealing the row) and `cutover` (naming the head, and  *)
+(* sealing the place below). A row 0.14 would not accept gets no genesis:  *)
+(* its object stays the log's to refuse (`stale`), never sealed. Old       *)
+(* isolates keep writing; each later                                       *)
 (* write leaves a row no 0.15 entry sealed, which the checkpointer's tick  *)
 (* adopts: an `adopt` entry citing each 0.14 write after the anchor.      *)
+(*                                                                         *)
+(* An app's row (AppObject: a credential, a binding) carries 0.14's MAC   *)
+(* under the app's key, which the vault never holds: the app checks it, as *)
+(* 0.14 does, before it asks for the cutover (`vouched`), and the vault    *)
+(* holds the row to what was vouched for under its locks.                  *)
+(*                                                                         *)
+(* The place a use is in (an environment). 0.14 may delete its project     *)
+(* before the cutover (Deletes): its chain holds an authentic             *)
+(* `project.delete`, and it tombstones the project's slug, never its       *)
+(* environments' (0.15 tombstones each, `<slug>~deleted`). The writer may  *)
+(* rename either slug, either way (MaxRenames). The cutover seals the      *)
+(* place, deleted or not, and gives a deleted project's environment its    *)
+(* tombstone; a 0.15 use in a place sealed deleted, or whose row is not    *)
+(* its seal's, is refused. (A late deletion, after the cutover, erases its *)
+(* keys' versions: their rows leave their seals, `stale`, until adopted;   *)
+(* not modelled here.)                                                     *)
 (*                                                                         *)
 (* A database writer without the keys may put back an older row or write  *)
 (* one of its own (MaxTampers), or forge a 0.14 entry and the row it names *)
@@ -51,12 +69,33 @@
 (*                    waiting;                                             *)
 (*   CutoverHeadLock  the cutover holds 0.14's head lock;                  *)
 (*   CutoverFence     ... and the 0.15 fence exclusive;                    *)
+(*   CutoverIssueFirst ... and the issue lock, shared, before the fence    *)
+(*                    (T132). Its transaction appends a 0.14 entry of its  *)
+(*                    own (`log.cutover`), which the trigger fences: the   *)
+(*                    issue lock, then the fence. Without, it holds the    *)
+(*                    fence and waits for the issue lock, which the        *)
+(*                    barrier holds, waiting for the fence: a cycle;       *)
 (*   Marker           ... and under them, does nothing if the marker is    *)
 (*                    there;                                               *)
 (*   VerifyChain      ... verifies every 0.14 entry up to the head it      *)
 (*                    anchors;                                             *)
 (*   VerifyRows       ... and seals the row only if 0.14 would accept it   *)
 (*                    (its MAC, and it names the newest authentic write);  *)
+(*                    an app's row, if the app vouched for it so;          *)
+(*   VouchedHeld      ... and an app's row only as it was vouched for: the *)
+(*                    app checks it before the locks, against 0.14's head  *)
+(*                    then; the vault holds the row to it, and the chain   *)
+(*                    to that head, under them (else it asks again).       *)
+(*                    Without, a writer's row put there between the two is *)
+(*                    sealed, or the vouched row put back over a revoke;   *)
+(*   DeletedFromChain ... and whether the place was deleted from 0.14's    *)
+(*                    chain (its authentic `project.delete`), not its      *)
+(*                    rows, refusing a mismatch either way (a tombstone    *)
+(*                    with no entry, an entry with no tombstone). Without, *)
+(*                    from the slugs, as 0.14 reads them: a writer who     *)
+(*                    renames a deleted project back has its environment   *)
+(*                    sealed live; one who tombstones a live one, sealed   *)
+(*                    deleted;                                             *)
 (*   DualFence        a 0.15 change also takes 0.14's head and advances    *)
 (*                    0.14's fence (a mirror entry, the row's access_seq   *)
 (*                    and MAC), until 0.16;                                *)
@@ -185,7 +224,9 @@ CONSTANTS
     Mixed,           \* 0.15 sign-ins that also revoke the account's earlier sessions, each once (for the locks only)
     Barriers,        \* the checkpointer's barrier, once each (for the locks only)
     Policies,        \* 0.15 policy changes, each once: head, issue lock exclusive, fence (for the locks only)
-    CutoverHeadLock, CutoverFence, Marker, VerifyChain, VerifyRows,
+    Deletes,         \* 0.14 may delete the place's project before the cutover
+    MaxRenames,      \* slugs the database writer renames (the project's or the environment's, either way)
+    CutoverHeadLock, CutoverFence, CutoverIssueFirst, Marker, VerifyChain, VerifyRows, VouchedHeld, DeletedFromChain,
     DualFence, ChangeHeadFirst, RowFirst, OldWritesFence,
     Adopt, AdoptRepeats, AdoptVerifies, AdoptSealsEntry, AdoptAfterSeal, UsesSeeOldWrites, OldWriteMarksRow,
     AppHeadFirst, ExchangeOnlyIssues, IssueBeforeFence, BarrierIssueFirst, PolicyIssueFirst
@@ -218,11 +259,13 @@ VARIABLES
     is,        \* ... held shared
     ni,        \* each 0.15 sign-in (NewIssuers, Mixed), and each policy change (Policies)
     br,        \* each barrier
-    exchanged  \* ghost: 0.14 token.exchange transactions that changed the object
+    exchanged, \* ghost: 0.14 token.exchange transactions that changed the object
+    del        \* the place: whether 0.14's chain holds an authentic `project.delete` of its project (entry), and whether
+               \* the project's slug (proj) and the environment's own (env) are tombstones
 
-issueVars == <<ix, is, ni, br, exchanged>>
+issueVars == <<ix, is, ni, br, exchanged, del>>
 vars == <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
-          truth, committed, answered, decisions, ix, is, ni, br, exchanged>>
+          truth, committed, answered, decisions, ix, is, ni, br, exchanged, del>>
 
 -----------------------------------------------------------------------------
 (* Helpers. *)
@@ -286,8 +329,11 @@ Release(p) ==
 \* AppHeadFirst, else the row first, as for a member.
 Rows == IF AppObject THEN <<"other">> ELSE <<"obj", "other">>
 AppRows == IF AppObject THEN <<"obj">> ELSE <<>>
+\* The cutover's own 0.14 entry (`log.cutover`), appended under the fence, has the trigger ask for the issue lock: before
+\* the fence with CutoverIssueFirst (held already), after it without (T132).
 CutoverLocks == (IF RowFirst THEN Rows ELSE <<>>) \o (IF CutoverHeadLock THEN <<"head">> ELSE <<>>)
-                \o (IF CutoverFence THEN <<"fence">> ELSE <<>>)
+                \o (IF CutoverIssueFirst THEN <<"issue">> ELSE <<>>) \o (IF CutoverFence THEN <<"fence">> ELSE <<>>)
+                \o (IF CutoverIssueFirst THEN <<>> ELSE <<"issue">>)
 SealLocks == (IF RowFirst THEN <<>> ELSE Rows) \o AppRows
 \* With DualFence, its 0.14 entry's trigger takes the issue lock, shared, before the fence (0026), after
 \* the head the append holds.
@@ -311,15 +357,22 @@ BarrierLocks == IF BarrierIssueFirst THEN <<"issueX", "fence">> ELSE <<"fence", 
 OldFirst(m) == IF AppObject /\ m = "obj" THEN "head" ELSE m
 OldSecond(m) == IF AppObject /\ m = "obj" THEN m ELSE "head"
 
-Entry(seq, kind, seals, content, cites) == [seq |-> seq, kind |-> kind, seals |-> seals, content |-> content, cites |-> cites]
+Entry(seq, kind, seals, content, cites) == [seq |-> seq, kind |-> kind, seals |-> seals, content |-> content, cites |-> cites, deleted |-> FALSE]
+\* The cutover's entry, which also seals the place: deleted or not.
+CutoverEntry(seq, cites, deleted) == [Entry(seq, "cutover", FALSE, [v |-> FALSE, aseq |-> 0], cites) EXCEPT !.deleted = deleted]
 NoContent == [v |-> FALSE, aseq |-> 0]
 Truth0 == [v |-> TRUE, by |-> "0.14"]
+Row0 == [v |-> TRUE, aseq |-> 0, mac14 |-> TRUE, mark |-> 0]
+\* What the app vouched for, before the cutover's locks: the app's row as it read it, if 0.14 accepts it (AppObject).
+\* And the 0.14 head it checked against: what the vault holds the chain to, so that a write since, its row then put
+\* back as vouched for, is seen.
+NoVouch == [ok |-> FALSE, row |-> Row0, head |-> 0]
 
 Answer == answered' = IF answered > committed' THEN answered ELSE committed'
 
 Init ==
     /\ oldLog = <<>>
-    /\ row = [v |-> TRUE, aseq |-> 0, mac14 |-> TRUE, mark |-> 0]
+    /\ row = Row0
     /\ fence14 = 0
     /\ rx = [m \in Members |-> None]
     /\ rs = {}
@@ -329,12 +382,12 @@ Init ==
     /\ newLog = {}
     /\ nextSeq = 1
     /\ o = [x \in Olds |-> [pc |-> "idle", n |-> 0, v |-> FALSE, m |-> "obj", fence |-> 0, allow |-> FALSE, seen |-> 0, truth |-> Truth0]]
-    /\ vs = [v \in Vaults |-> [pc |-> "idle", anchor |-> 0, got |-> 0]]
-    /\ nu = [x \in NewUsers |-> [pc |-> "idle", n |-> 0, seq |-> 0, allow |-> FALSE, read |-> NoContent, seen |-> 0, truth |-> Truth0]]
+    /\ vs = [v \in Vaults |-> [pc |-> "idle", anchor |-> 0, got |-> 0, vouched |-> NoVouch]]
+    /\ nu = [x \in NewUsers |-> [pc |-> "idle", n |-> 0, seq |-> 0, allow |-> FALSE, read |-> NoContent, seen |-> 0, truth |-> Truth0, deleted |-> FALSE]]
     /\ nc = [h \in NewChangers |-> [pc |-> "idle", n |-> 0, read |-> NoContent, v |-> FALSE, got |-> 0]]
     /\ ticks = 0
     /\ lastTick = 0
-    /\ tampers = [rows |-> 0, clears |-> 0, drops |-> 0]
+    /\ tampers = [rows |-> 0, clears |-> 0, drops |-> 0, renames |-> 0]
     /\ forges = 0
     /\ truth = Truth0
     /\ committed = 0
@@ -345,6 +398,7 @@ Init ==
     /\ ni = [p \in NewIssuers \cup Mixed \cup Policies |-> [pc |-> "idle", got |-> 0]]
     /\ br = [b \in Barriers |-> [pc |-> "idle", got |-> 0]]
     /\ exchanged = 0
+    /\ del = [entry |-> FALSE, proj |-> FALSE, env |-> FALSE]
 
 -----------------------------------------------------------------------------
 (* 0.14, on old isolates. *)
@@ -369,7 +423,7 @@ OldUseCommit(x) ==
     /\ head = None
     /\ rs' = rs \ {x}
     /\ decisions' = decisions \cup {[ver |-> "0.14", allow |-> o[x].allow /\ fence14 = o[x].fence, seen |-> o[x].seen,
-                                     answeredAt |-> answered, truth |-> o[x].truth, read |-> NoContent, seq |-> 0]}
+                                     answeredAt |-> answered, truth |-> o[x].truth, read |-> NoContent, seq |-> 0, deleted |-> FALSE]}
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<rx, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered, issueVars>>
@@ -383,7 +437,7 @@ OldWriteRow(x) ==
           /\ Take(x, OldFirst(m))
           /\ \E v \in BOOLEAN : o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "rowed", !.v = v, !.m = m]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, br, exchanged>>
+                   truth, committed, answered, decisions, ni, br, exchanged, del>>
 
 \* Then its second: the head; the row, for the app's.
 OldWriteHead(x) ==
@@ -391,7 +445,7 @@ OldWriteHead(x) ==
     /\ Take(x, OldSecond(o[x].m))
     /\ o' = [o EXCEPT ![x].pc = "headed"]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, br, exchanged>>
+                   truth, committed, answered, decisions, ni, br, exchanged, del>>
 
 \* Its append (an access entry: with the trigger, once the fence is free; with OldWriteMarksRow,
 \* the trigger also marks the row with the entry's number), its row, its fence; commit and answer.
@@ -407,10 +461,10 @@ OldWriteCommit(x) ==
             /\ truth' = [v |-> o[x].v, by |-> "0.14"]
             /\ committed' = committed + 1
             /\ Answer
-       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered, ni, br, exchanged>>
+       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered, ni, br, exchanged, del>>
     /\ Release(x)
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
-    /\ UNCHANGED << newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions, ni, br, exchanged>>
+    /\ UNCHANGED << newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions, ni, br, exchanged, del>>
 
 \* 0.14's token.exchange (Exchanges): under the head (`audited()`), the token spent, a new
 \* credential issued, the binding's last use stamped, `token.exchange` appended. The trigger lets
@@ -423,7 +477,7 @@ OldExchangeHead(x) ==
     /\ Take(x, "head")
     /\ \E v \in BOOLEAN : o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "exchanging", !.v = v]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, br, exchanged>>
+                   truth, committed, answered, decisions, ni, br, exchanged, del>>
 
 OldExchangeCommit(x) ==
     /\ o[x].pc = "exchanging"
@@ -435,10 +489,10 @@ OldExchangeCommit(x) ==
             /\ committed' = committed + 1
             /\ exchanged' = exchanged + 1
             /\ Answer
-       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered, exchanged>>
+       ELSE UNCHANGED <<oldLog, row, fence14, truth, committed, answered, exchanged, del>>
     /\ Release(x)
     /\ o' = [o EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
-    /\ UNCHANGED <<newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions, ni, br>>
+    /\ UNCHANGED <<newLog, nextSeq, vs, nu, nc, ticks, lastTick, tampers, forges, decisions, ni, br, del>>
 
 -----------------------------------------------------------------------------
 (* 0.15 sign-ins, and the checkpointer's barrier: for the locks. *)
@@ -451,7 +505,7 @@ IssuerLock(p) ==
     /\ Take(p, IssuerLocks(p)[ni[p].got + 1])
     /\ ni' = [ni EXCEPT ![p] = [pc |-> IF @.got + 1 = Len(IssuerLocks(p)) THEN "locked" ELSE "locking", got |-> @.got + 1]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, br, exchanged>>
+                   truth, committed, answered, decisions, br, exchanged, del>>
 
 IssuerCommit(p) ==
     /\ ni[p].pc = "locked"
@@ -460,17 +514,17 @@ IssuerCommit(p) ==
     /\ Release(p)
     /\ ni' = [ni EXCEPT ![p].pc = "done"]
     /\ UNCHANGED <<oldLog, row, fence14, o, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, br, exchanged>>
+                   truth, committed, answered, decisions, br, exchanged, del>>
 
 \* The barrier: its first lock, held while it waits for the second; with the second, it closes its
-\* numbers and lets both go, in one statement.
+\* numbers and lets both go, in one statement. The checkpointer ticks whether or not a vault has cut
+\* over yet: its barrier may meet a cutover in flight.
 BarrierLock(b) ==
     /\ br[b].pc = "idle"
-    /\ Started
     /\ Take(b, BarrierLocks[1])
     /\ br' = [br EXCEPT ![b] = [pc |-> "waiting", got |-> 1]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, exchanged>>
+                   truth, committed, answered, decisions, ni, exchanged, del>>
 
 BarrierClose(b) ==
     /\ br[b].pc = "waiting"
@@ -478,15 +532,18 @@ BarrierClose(b) ==
     /\ Release(b)
     /\ br' = [br EXCEPT ![b] = [pc |-> "done", got |-> 0]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, exchanged>>
+                   truth, committed, answered, decisions, ni, exchanged, del>>
 
 -----------------------------------------------------------------------------
 (* A 0.15 vault's start: the cutover. *)
 
 \* The marker seen without any lock: nothing to do. Else, to the locks.
+\* With AppObject, the app first checks its row as 0.14 does (its MAC, under the app's key, and the newest authentic
+\* write), and vouches for it as read.
 VaultStart(v) ==
     /\ vs[v].pc = "idle"
-    /\ vs' = [vs EXCEPT ![v].pc = IF Cutovers /= {} THEN "started" ELSE IF CutoverLocks = <<>> THEN "locked" ELSE "locking"]
+    /\ vs' = [vs EXCEPT ![v].pc = IF Cutovers /= {} THEN "started" ELSE IF CutoverLocks = <<>> THEN "locked" ELSE "locking",
+                         ![v].vouched = [ok |-> AppObject /\ Genuine14(row), row |-> row, head |-> Len(oldLog)]]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, nu, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered, decisions, issueVars>>
 
@@ -500,7 +557,7 @@ VaultLock(v) ==
                                                !.pc = IF vs[v].got + 1 < Len(ls) THEN @
                                                       ELSE IF @ = "locking" THEN "locked" ELSE "sealready"]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, br, exchanged>>
+                   truth, committed, answered, decisions, ni, br, exchanged, del>>
 
 \* The marker again, under the locks; then 0.14's head, and its chain verified up to it.
 VaultVerify(v) ==
@@ -511,22 +568,37 @@ VaultVerify(v) ==
        ELSE IF VerifyChain /\ \E i \in 1..Len(oldLog) : ~oldLog[i].mac
        THEN /\ vs' = [vs EXCEPT ![v].pc = "refused"]
             /\ Release(v)
-       ELSE /\ vs' = [vs EXCEPT ![v] = [pc |-> IF SealLocks = <<>> THEN "sealready" ELSE "sealing", anchor |-> Len(oldLog), got |-> 0]]
+       ELSE /\ vs' = [vs EXCEPT ![v] = [@ EXCEPT !.pc = IF SealLocks = <<>> THEN "sealready" ELSE "sealing", !.anchor = Len(oldLog), !.got = 0]]
             /\ UNCHANGED <<rx, rs, head, fx, fs, ix, is>>
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, nu, nc, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, br, exchanged>>
+                   truth, committed, answered, decisions, ni, br, exchanged, del>>
 
-\* A statement of its own: the row, checked as 0.14 would against the chain it verified; `genesis`
-\* sealing it, `cutover` naming the head; the commit lets the locks go.
+\* A statement of its own: the row, checked as 0.14 would against the chain it verified (a member's), or as the app
+\* vouched for it (an app's); `genesis` sealing it, unless 0.14 would not accept it: then its object stays unsealed,
+\* refused `stale` to every use and change. With VouchedHeld, an app's row other than the one vouched for, or a 0.14
+\* write since the head it was checked against (its row perhaps put back as vouched for), sends the cutover back to
+\* its start, to be vouched for again. Then the place: deleted as 0.14's chain says
+\* (DeletedFromChain; a tombstone without its entry, or an entry without its tombstone, refuses the cutover), or as
+\* its slugs say; a deleted project's environment is given its tombstone. `cutover` names the head and seals the
+\* place. The commit lets the locks go.
 VaultSeal(v) ==
     /\ vs[v].pc = "sealready"
-    /\ IF VerifyRows /\ ~(row.mac14 /\ row.aseq = NewestGenuine(vs[v].anchor))
-       THEN /\ vs' = [vs EXCEPT ![v].pc = "refused"]
-            /\ UNCHANGED <<newLog, nextSeq, ni, br, exchanged>>
-       ELSE /\ newLog' = newLog \cup {Entry(nextSeq, "genesis", TRUE, Content(row), vs[v].anchor),
-                                      Entry(nextSeq + 1, "cutover", FALSE, NoContent, vs[v].anchor)}
-            /\ nextSeq' = nextSeq + 2
-            /\ vs' = [vs EXCEPT ![v].pc = "started"]
+    /\ LET vouched == vs[v].vouched
+           moved == AppObject /\ VouchedHeld /\ (row /= vouched.row \/ Len(oldLog) /= vouched.head)
+           genuine == IF AppObject THEN vouched.ok ELSE row.mac14 /\ row.aseq = NewestGenuine(vs[v].anchor)
+           mismatch == DeletedFromChain /\ (del.entry /= del.proj \/ (del.env /\ ~del.entry))
+           deleted == IF DeletedFromChain THEN del.entry ELSE del.proj \/ del.env
+           genesis == IF ~VerifyRows \/ genuine THEN {Entry(nextSeq, "genesis", TRUE, Content(row), vs[v].anchor)} ELSE {}
+       IN IF moved
+          THEN /\ vs' = [vs EXCEPT ![v] = [pc |-> "idle", anchor |-> 0, got |-> 0, vouched |-> NoVouch]]
+               /\ UNCHANGED <<newLog, nextSeq, del>>
+          ELSE IF mismatch
+          THEN /\ vs' = [vs EXCEPT ![v].pc = "refused"]
+               /\ UNCHANGED <<newLog, nextSeq, del>>
+          ELSE /\ newLog' = newLog \cup genesis \cup {CutoverEntry(nextSeq + Cardinality(genesis), vs[v].anchor, deleted)}
+               /\ nextSeq' = nextSeq + Cardinality(genesis) + 1
+               /\ del' = [del EXCEPT !.env = deleted]
+               /\ vs' = [vs EXCEPT ![v].pc = "started"]
     /\ Release(v)
     /\ UNCHANGED <<oldLog, row, fence14, o, nu, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered, decisions, ni, br, exchanged>>
@@ -549,15 +621,19 @@ NewUseLock(x) ==
 Accounted ==
     LET i == NewestGenuine(Len(oldLog)) IN i <= Anchor \/ oldLog[i].mirror \/ i \in Cited
 
-\* One statement: the row and the newest seal; `stale` unless the row is it; its number.
+\* The place as the cutover sealed it: its environment's row must be its seal's, and not deleted.
+PlaceLive == \E k \in Cutovers : ~k.deleted /\ del.env = k.deleted
+
+\* One statement: the row and the newest seal; `stale` unless the row is it; the place; its number.
 NewUseRun(x) ==
     /\ nu[x].pc = "locked"
     /\ LET s == SealBelow(nextSeq)
            ok == /\ s.some /\ s.content = Content(row)
                  /\ UsesSeeOldWrites => Accounted
                  /\ OldWriteMarksRow => row.mark <= s.content.aseq
+                 /\ PlaceLive
        IN nu' = [nu EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seq = nextSeq, !.allow = ok /\ row.v,
-                                             !.read = Content(row), !.seen = committed, !.truth = truth]]
+                                             !.read = Content(row), !.seen = committed, !.truth = truth, !.deleted = del.entry]]
     /\ nextSeq' = nextSeq + 1
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, o, vs, nc, ticks, lastTick, tampers, forges,
                    truth, committed, answered, decisions, issueVars>>
@@ -567,7 +643,7 @@ NewUseCommit(x) ==
     /\ nu[x].pc = "ran"
     /\ newLog' = newLog \cup {Entry(nu[x].seq, "use", FALSE, NoContent, 0)}
     /\ decisions' = decisions \cup {[ver |-> "0.15", allow |-> nu[x].allow, seen |-> nu[x].seen, answeredAt |-> answered,
-                                     truth |-> nu[x].truth, read |-> nu[x].read, seq |-> nu[x].seq]}
+                                     truth |-> nu[x].truth, read |-> nu[x].read, seq |-> nu[x].seq, deleted |-> nu[x].deleted]}
     /\ fs' = fs \ {x}
     /\ nu' = [nu EXCEPT ![x] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, nextSeq, o, vs, nc, ticks, lastTick, tampers, forges,
@@ -593,7 +669,7 @@ NewChangeLock(h) ==
     /\ nc' = [nc EXCEPT ![h] = [@ EXCEPT !.got = IF @ + 1 = Len(ChangeLocks) THEN 0 ELSE @ + 1,
                                            !.pc = IF nc[h].got + 1 = Len(ChangeLocks) THEN "locked" ELSE "started"]]
     /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, o, vs, nu, ticks, lastTick, tampers, forges,
-                   truth, committed, answered, decisions, ni, br, exchanged>>
+                   truth, committed, answered, decisions, ni, br, exchanged, del>>
 
 \* The CAS (the row is still the one it read, else it reads again); the write, sealed by its
 \* entry. With DualFence, also 0.14's: a mirror entry, the row naming it under 0.14's MAC, the
@@ -602,7 +678,7 @@ NewChangeRun(h) ==
     /\ nc[h].pc = "locked"
     /\ IF Content(row) /= nc[h].read
        THEN /\ nc' = [nc EXCEPT ![h].pc = "idle"]
-            /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, truth, committed, ni, br, exchanged>>
+            /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, truth, committed, ni, br, exchanged, del>>
        ELSE LET aseq == IF DualFence THEN Len(oldLog) + 1 ELSE row.aseq
                 new == [v |-> nc[h].v, aseq |-> aseq, mac14 |-> DualFence, mark |-> row.mark]
             IN /\ oldLog' = IF DualFence THEN Append(oldLog, [v |-> nc[h].v, mac |-> TRUE, mirror |-> TRUE]) ELSE oldLog
@@ -614,7 +690,7 @@ NewChangeRun(h) ==
                /\ committed' = committed + 1
                /\ nc' = [nc EXCEPT ![h].pc = "committed"]
     /\ Release(h)
-    /\ UNCHANGED << o, vs, nu, ticks, lastTick, tampers, forges, answered, decisions, ni, br, exchanged>>
+    /\ UNCHANGED << o, vs, nu, ticks, lastTick, tampers, forges, answered, decisions, ni, br, exchanged, del>>
 
 NewChangeAnswer(h) ==
     /\ nc[h].pc = "committed"
@@ -696,6 +772,28 @@ ForgeEntry ==
     /\ UNCHANGED <<rx, rs, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers,
                    truth, committed, answered, decisions, issueVars>>
 
+\* It renames a slug, either way: the project's (a deleted one back, or a live one to a tombstone), or the
+\* environment's own. No MAC covers either, in 0.14 or 0.15; 0.15's seal covers the environment's.
+RenameSlug ==
+    /\ tampers.renames < MaxRenames
+    /\ \E part \in {"proj", "env"} : del' = [del EXCEPT ![part] = ~@]
+    /\ tampers' = [tampers EXCEPT !.renames = @ + 1]
+    /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, forges,
+                   truth, committed, answered, decisions, ix, is, ni, br, exchanged>>
+
+-----------------------------------------------------------------------------
+(* 0.14 deletes the place's project, before the cutover (Deletes), in one transaction under its head: an authentic *)
+(* `project.delete` in its chain, and the project's slug a tombstone; its environments' slugs left as they were.   *)
+
+OldDelete ==
+    /\ Deletes
+    /\ ~del.entry
+    /\ Cutovers = {}
+    /\ head = None
+    /\ del' = [del EXCEPT !.entry = TRUE, !.proj = TRUE]
+    /\ UNCHANGED <<rx, rs, oldLog, row, fence14, head, fx, fs, newLog, nextSeq, o, vs, nu, nc, ticks, lastTick, tampers, forges,
+                   truth, committed, answered, decisions, ix, is, ni, br, exchanged>>
+
 -----------------------------------------------------------------------------
 
 Next ==
@@ -706,7 +804,7 @@ Next ==
     \/ \E v \in Vaults : VaultStart(v) \/ VaultLock(v) \/ VaultVerify(v) \/ VaultSeal(v)
     \/ \E x \in NewUsers : NewUseLock(x) \/ NewUseRun(x) \/ NewUseCommit(x)
     \/ \E h \in NewChangers : NewChangeStart(h) \/ NewChangeLock(h) \/ NewChangeRun(h) \/ NewChangeAnswer(h)
-    \/ Tick \/ TamperRow \/ ForgeEntry \/ ClearMark \/ DropNewest
+    \/ Tick \/ TamperRow \/ ForgeEntry \/ ClearMark \/ DropNewest \/ RenameSlug \/ OldDelete
 
 Spec == Init /\ [][Next]_vars
 
@@ -760,6 +858,14 @@ EveryOldWriteAdopted ==
 \* No use, old or new, is allowed after a write it did not see, old or new, has answered.
 NothingAllowedAfterAnswer ==
     \A d \in decisions : d.allow => d.answeredAt <= d.seen
+
+\* No 0.15 use is allowed in a place 0.14 deleted (its chain holds the project's authentic `project.delete`).
+NoneInDeleted ==
+    \A d \in decisions : (d.ver = "0.15" /\ d.allow) => ~d.deleted
+
+\* The cutover seals the place as 0.14's chain left it: deleted exactly when the chain deleted it.
+PlaceFollowsOld ==
+    \A k \in Cutovers : k.deleted = del.entry
 
 \* No 0.14 token.exchange, which the trigger lets by unfenced, changed a decision input.
 ExchangeChangesNoInput == exchanged = 0
