@@ -277,11 +277,14 @@ name that resolves elsewhere a moment later gains nothing, and an address
 written in the URL is held to the same rule. The cache keeps settled values only, never a
 fetch under way (AGENTS.md, "What an isolate keeps"): key sets, ten minutes
 each, the 64 most recently fetched; and, apart from them, each URL asked in
-the last minute, by when its fetch began. A URL is fetched for its keys at most
-once a minute, whatever the answer, and once more for a key a fresh set
-lacks; at most 64 URLs a minute in all, each counted when its fetch begins, so tokens with random `kid`s, cycled through
-more URLs than the cache holds or finishing late, cost an issuer one fetch a
-minute (reviews r1 to r3); evicting a key set changes no wait. The one
+the last minute, by when its latest fetch began, from which its minute runs.
+In any minute, a URL is fetched for its keys at most once, whatever the
+answer, and once more for a key a fresh set lacks; at most 64 URLs in all,
+each counted when its fetch begins, so tokens with random `kid`s, cycled
+through more URLs than the cache holds or finishing late, cost an issuer one
+fetch a minute (reviews r1 to r3); a refetch at 59 s starts the URL's minute
+over, so a fetch at 60 s waits, and its place in the 64 stays taken (r5).
+Evicting a key set changes no wait. The one
 exception: first calls at once for a URL whose keys are not held fresh each
 fetch, for 10 s at most, so that none waits on another. A token naming a key
 the held set lacks has it fetched once more (the issuer may have rotated),

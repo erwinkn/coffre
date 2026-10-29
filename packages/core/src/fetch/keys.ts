@@ -22,19 +22,21 @@ export const MAX_KEY_SETS = 64;
 const held = new Map<string, Held>();
 
 /**
- * Each URL asked in the last minute: when its first fetch began, how many
- * of its first fetches are under way, and whether it was asked again for a
- * key its set lacks (`again`), or need not be (its set, just fetched, lacked
- * it already). A URL not in it is fetched only while fewer than
- * `MAX_KEY_SETS` are, and is counted when its fetch begins, before any
- * wait, so neither tokens cycled through more URLs than it holds nor
- * fetches finishing late buy more than two fetches a URL a minute and
- * `MAX_KEY_SETS` URLs in all (reviews r1 to r3); evicting a key set changes
- * no wait. The one exception: first calls at once for a URL whose keys are
- * not held fresh each fetch, for `FIRST_MS` at most, so that none waits on
- * another.
+ * Each URL asked in the last minute: when its latest fetch began (`at`, from
+ * which its minute runs, so that every fetch, a refetch's included, starts
+ * a minute of its own), when its first did (`firstAt`), how many of its
+ * first fetches are under way, and whether it was asked again for a key its
+ * set lacks (`again`), or need not be (its set, just fetched, lacked it
+ * already). A URL not in it is fetched only while fewer than `MAX_KEY_SETS`
+ * are, and is counted when its fetch begins, before any wait, so neither
+ * tokens cycled through more URLs than it holds nor fetches finishing late
+ * buy a URL more than a fetch for its keys and one for a key they lack in
+ * any minute, or more than `MAX_KEY_SETS` URLs in all (reviews r1 to r3,
+ * r5); evicting a key set changes no wait. The one exception: first calls at
+ * once for a URL whose keys are not held fresh each fetch, for `FIRST_MS`
+ * from the first at most, so that none waits on another.
  */
-const asked = new Map<string, { at: number; flying: number; again: boolean }>();
+const asked = new Map<string, { at: number; firstAt: number; flying: number; again: boolean }>();
 const FIRST_MS = 2 * FETCH_DEADLINE_MS;
 
 /**
@@ -67,21 +69,22 @@ export function keySetsHeld(): { sets: number; asked: number } {
 }
 
 /**
- * Whether `url` may be fetched now, counted as asked if so: for keys not
- * held fresh (`first`), once a minute but for first calls at once; for a
- * key a fresh set lacks, once a minute more.
+ * Whether `url` may be fetched now, counted as asked if so, its minute then
+ * starting over: for keys not held fresh (`first`), once a minute but for
+ * first calls at once; for a key a fresh set lacks, once a minute more.
  */
 function admit(url: string, now: number, first: boolean): boolean {
   for (const [other, ask] of asked) if (now - ask.at >= KEYS_COOLDOWN_MS) asked.delete(other);
   const ask = asked.get(url);
   if (ask === undefined) {
     if (asked.size >= MAX_KEY_SETS) return false;
-    asked.set(url, { at: now, flying: first ? 1 : 0, again: !first });
+    asked.set(url, { at: now, firstAt: now, flying: first ? 1 : 0, again: !first });
     return true;
   }
-  if (first ? ask.flying === 0 || now - ask.at >= FIRST_MS : ask.again) return false;
+  if (first ? ask.flying === 0 || now - ask.firstAt >= FIRST_MS : ask.again) return false;
   if (first) ask.flying += 1;
   else ask.again = true;
+  ask.at = now;
   return true;
 }
 

@@ -187,3 +187,37 @@ test('a refresh that failed just before its set expired leaves no first fetch co
   // The set expires; each call after asks nothing until the minute is over.
   for (let i = 0; i < 5; i += 1) assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1 + i), { outcome: 'unavailable', fetches: 0 });
 });
+
+test("a URL's minute runs from its latest fetch: a refetch at 59 s puts off the next fetch to a minute after it (review r5)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // At 59 s, a key the set lacks: looked for once, and the minute starts over.
+  assert.deepEqual(await verify(unknown, 59_000), { outcome: 'unavailable', fetches: 1 });
+  // At 60.001 s, a minute on from the first fetch but not from the refetch: nothing fetched.
+  assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 1), { outcome: 'unavailable', fetches: 0 });
+  assert.deepEqual(await verify(known, KEYS_COOLDOWN_MS + 1), { outcome: VERIFIED, fetches: 0 });
+  assert.deepEqual(await verify(unknown, 59_000 + KEYS_COOLDOWN_MS - 1), { outcome: 'unavailable', fetches: 0 });
+  // A minute after the refetch, the key is looked for again.
+  assert.deepEqual(await verify(unknown, 59_000 + KEYS_COOLDOWN_MS), { outcome: 'unavailable', fetches: 1 });
+});
+
+test('64 URLs asked again at 59 s keep their places: a 65th waits a minute from those refetches, not from the first fetches (review r5)', async () => {
+  let asked = 0;
+  const many: WorkloadTransport = {
+    json: async () => {
+      asked++;
+      return { keys: [known.jwk] };
+    },
+  };
+  const urls = Array.from({ length: MAX_KEY_SETS }, (_, n) => `https://issuer-${n}.example/keys`);
+  const extra = 'https://issuer-extra.example/keys';
+  const at = (url: string, by: Key, ms: number) => verifyWithKeys(many, url, token(by), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + ms) });
+  for (const url of urls) await at(url, known, 0);
+  for (const url of urls) await assert.rejects(at(url, unknown, 59_000), IssuerUnavailable);
+  assert.equal(asked, 2 * MAX_KEY_SETS, 'each fetched for its keys, then for the key they lack');
+  await assert.rejects(at(extra, known, KEYS_COOLDOWN_MS + 1), IssuerUnavailable);
+  await assert.rejects(at(extra, known, 59_000 + KEYS_COOLDOWN_MS - 1), IssuerUnavailable);
+  assert.equal(asked, 2 * MAX_KEY_SETS, 'no 65th URL within a minute of the last fetches');
+  assert.deepEqual(keySetsHeld(), { sets: MAX_KEY_SETS, asked: MAX_KEY_SETS });
+  assert.equal(await at(extra, known, 59_000 + KEYS_COOLDOWN_MS).then((claims) => claims.sub), 'repo:acme/api');
+  assert.equal(asked, 2 * MAX_KEY_SETS + 1);
+});
