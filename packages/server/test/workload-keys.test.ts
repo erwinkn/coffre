@@ -2,7 +2,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
 
-import { forgetKeys, IssuerUnavailable, KEYS_COOLDOWN_MS, KEYS_FRESH_MS, MAX_KEY_SETS, verifyWithKeys } from '../src/workloads/keys.ts';
+import { forgetKeys, IssuerUnavailable, KEYS_COOLDOWN_MS, KEYS_FRESH_MS, keySetsHeld, MAX_KEY_SETS, verifyWithKeys } from '../src/workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -114,4 +114,28 @@ test('tokens cycled through more key URLs than the cache holds cost each at most
   assert.equal(await verifyWithKeys(many, urls[0]!, token(known), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + 3_000) }).then((claims) => claims.sub), 'repo:acme/api');
   await cycle(KEYS_COOLDOWN_MS + 3_000);
   assert.ok(asked <= 2 * MAX_KEY_SETS, `a minute on, at most one each again: ${asked}`);
+});
+
+test('first fetches of more key URLs than the cache holds, all at once and finishing late, take no more places than it has: the rest wait, and the cooldowns stand', async () => {
+  let asked = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const late: WorkloadTransport = {
+    json: async () => {
+      asked++;
+      await gate;
+      return { keys: [known.jwk] };
+    },
+  };
+  const urls = Array.from({ length: MAX_KEY_SETS + 6 }, (_, n) => `https://issuer-${n}.example/keys`);
+  const all = (at: number) => urls.map((url) => verifyWithKeys(late, url, token(unknown), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + at) }));
+  const first = all(0);
+  release();
+  const settled = await Promise.allSettled(first);
+  assert.ok(settled.every((outcome) => outcome.status === 'rejected' && outcome.reason instanceof IssuerUnavailable));
+  assert.equal(asked, MAX_KEY_SETS, 'as many fetches as places; the rest were refused before asking');
+  assert.equal(keySetsHeld(), MAX_KEY_SETS);
+  await Promise.allSettled(all(1_000));
+  assert.equal(asked, MAX_KEY_SETS, 'each waits its minute: none fetched again');
+  assert.equal(keySetsHeld(), MAX_KEY_SETS);
 });

@@ -279,9 +279,10 @@ sets only, never a fetch under way (AGENTS.md, "What an isolate keeps"), ten
 minutes each; a token naming a key the set lacks has it fetched once more,
 then that URL waits a minute: tokens with random `kid`s cost an issuer one
 fetch a minute, whatever their number. A set in its wait is never the one
-evicted, and while all 64 the cache holds wait, a URL not among them is not
-fetched either, so cycling tokens through more URLs buys no more (review
-r1). They are refused meanwhile (503, try
+evicted, and a URL the cache does not hold is fetched only while there is a
+place for it, counting the first fetches under way by when they began (a
+time, never the fetch): cycling tokens through more URLs than its 64, one
+after another or all at once, buys no more (reviews r1, r2). They are refused meanwhile (503, try
 again in a minute; for uploaded keys, `unknown_key` and its alert). Never on
 `/use`: only a sign-in verifies a token.
 
