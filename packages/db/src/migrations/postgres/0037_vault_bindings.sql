@@ -202,12 +202,6 @@ BEGIN
         IF cardinality(p_live) - (SELECT count(*) FROM unnest(p_live) AS l WHERE l = ANY(p_ends)) >= p_max THEN
             RETURN json_build_object('state', 'full');
         END IF;
-        -- The keys its policy reads, by the names they were asked by: still those names (a rename meanwhile names another).
-        -- Compared, not locked: a key's writer takes the fence before its row (an end of its reference), so a share lock
-        -- here, held into this statement's fence, would be a cycle (review r3).
-        IF (SELECT count(*) FROM unnest(p_read_keys, p_read_names) AS r(id, name) JOIN public.secrets x ON x.id = r.id AND x.key = r.name) <> cardinality(p_read_keys) THEN
-            RETURN json_build_object('state', 'moved');
-        END IF;
     END IF;
     -- IssuePolicyHeld: the issue lock, shared; then, under it, the policy and the slugs this change was weighed on, and the numbers.
     PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
@@ -226,6 +220,13 @@ BEGIN
     -- What it ends is a use's input: the fence exclusive (RevokeTakesFence), after the issue lock (PolicyIssueFirst), for
     -- the statement's work only. A bind that ends nothing takes none.
     IF cardinality(p_ends) > 0 THEN PERFORM pg_advisory_xact_lock(1668244070, 0); END IF;
+    -- The keys a binding it makes reads, by the names they were asked by: still those names (a rename meanwhile names
+    -- another). Compared, not locked (a key's writer takes the fence before its row: a share lock here, held into the
+    -- fence, would be a cycle; review r3), and once the fence is had, which a rename takes too: one that committed while
+    -- this waited is seen (review r4). With no fence, one that commits after this is a rename after the bind.
+    IF p_make AND (SELECT count(*) FROM unnest(p_read_keys, p_read_names) AS r(id, name) JOIN public.secrets x ON x.id = r.id AND x.key = r.name) <> cardinality(p_read_keys) THEN
+        RETURN json_build_object('state', 'moved');
+    END IF;
     -- ChangeChecksSeal: each row it ends is its object's newest change's; one put back is stale. A row with no seal is one
     -- the log never held, or none at all once a seal it had was cleared around the vault: that one is stale too, so the
     -- log's binding is never ended with no change of it (review r2).
@@ -236,6 +237,11 @@ BEGIN
         RETURN json_build_object('state', 'stale');
     END IF;
     IF p_make THEN
+        -- Again, now that no lock is left to wait for: a make of the same id that committed meanwhile, its row deleted since,
+        -- is seen; one not yet committed holds the id's key, which this insert then waits for and fails on (review r4).
+        IF EXISTS (SELECT 1 FROM public.log_changes l WHERE l.object = public.log_object('binding', p_id::text)) THEN
+            RETURN json_build_object('state', 'stale');
+        END IF;
         INSERT INTO public.service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, jwks, claims, scope, policy, label, created_by, created_at, seal)
             VALUES (p_id, p_auth_mac, p_principal, p_generation, p_profile, p_issuer, p_jwks_uri, p_jwks, p_claims, p_scope, p_policy, p_label, p_created_by,
                     timestamptz 'epoch' + p_created_at * interval '1 millisecond', p_seal);

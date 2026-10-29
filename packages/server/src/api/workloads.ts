@@ -819,7 +819,10 @@ export class WorkloadService {
         }
         return on;
       };
-      const replaced = replacing(await this.#sealedBindings(member, standing.generation, options));
+      // With 0.15's log, each binding is replaced on its own (below): those already on the new keys, which a request that
+      // stopped part way left, are done, and its preview says so too (review r4).
+      const binds015 = await vaultBinds(this.#deps.vault);
+      const replaced = replacing(await this.#sealedBindings(member, standing.generation, options)).filter((row) => !binds015 || row.jwksUri !== jwksUri);
       // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
       const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
       for (const row of replaced) {
@@ -832,11 +835,11 @@ export class WorkloadService {
       const shown = await this.#shownPolicies(replaced);
       // With 0.15's log, each replaced by the vault, one call each, in the order of those they replace (PR 3a); each read
       // and retried on its own, so that one that moved is asked again without undoing those done (review r1).
-      if (await vaultBinds(this.#deps.vault)) {
+      if (binds015) {
         const bindings: BindingView[] = [];
         const now = Date.now();
         // Those not yet on the new keys: a request again after one that stopped part way finishes what it left (review r3).
-        const unfinished = replaced.filter((row) => row.jwksUri !== jwksUri);
+        const unfinished = replaced;
         for (const [i, planned] of unfinished.entries()) {
           bindings.push(await retrying(async () => {
             const live = await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation);

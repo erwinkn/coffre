@@ -350,4 +350,55 @@ test("a bind through an MCP connection goes ahead only while it is connected; an
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
   await db.owner.delete(serviceBindings).where(eq(serviceBindings.id, made.id));
   assert.deepEqual(await w.vault.changeBindings!(change({ make: { ...binding(w), id: made.id }, reason: 'replaced' })), { ok: false, refused: 'stale' });
+  // The database's reset empties neither table.
+  await db.owner.delete(mcpConnections);
+  await db.owner.delete(oauthClients);
+});
+
+test("a key a replacing bind reads, renamed while it waits for the fence, has it read again: the names compared once the fence is had (review r4)", postgresOnly('the fence is an advisory lock'), async () => {
+  const w = await world();
+  const { secrets } = tablesOf(db.owner);
+  const environment = await newEnvironment(db.owner, w.project);
+  const key = randomUUID();
+  await db.owner.insert(secrets).values({ id: key, projectId: w.project, environmentId: environment, key: 'API_KEY' });
+  const old = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: old, reason: 'replaced' }))).ok);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A rename under way: the fence held, as its append takes it, the name changed, not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
+    await holder.unsafe(`UPDATE secrets SET key = 'RENAMED' WHERE id = '${key}'`);
+    const replacing = w.vault.changeBindings!(change({ make: binding(w), live: [old.id], ends: [await ending(old.id)], reads: [{ id: key, key: 'API_KEY' }], reason: 'replaced' }));
+    await sleep(200);
+    await holder.unsafe('COMMIT');
+    assert.deepEqual(await replacing, { ok: false, refused: 'moved' });
+  } finally {
+    await holder.end();
+  }
+});
+
+test("one new binding id asked for two accounts at once, the first's row deleted once it committed: the second is no second make of it (review r4)", postgresOnly('row locks'), async () => {
+  const w = await world();
+  const OTHER = 'token:other';
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: OTHER })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, caller: 'person', principal: OTHER, changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
+  // OTHER's binding, which the second call ends: held, so the second waits there once past its first look at the id.
+  const others = { ...binding(w), principal: OTHER };
+  assert.ok((await w.vault.changeBindings!(change({ make: others, reason: 'replaced' }))).ok);
+  const id = randomUUID();
+  const holder = postgresSession(OWNER_URL);
+  try {
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM service_bindings WHERE id = '${others.id}' FOR UPDATE`);
+    const second = w.vault.changeBindings!(change({ make: { ...binding(w), id, principal: OTHER }, live: [others.id], ends: [await ending(others.id)], reason: 'replaced' }));
+    await sleep(200);
+    assert.ok((await w.vault.changeBindings!(change({ make: { ...binding(w), id }, reason: 'replaced' }))).ok, "CI's, first");
+    const { serviceBindings } = tablesOf(db.owner);
+    await db.owner.delete(serviceBindings).where(eq(serviceBindings.id, id));
+    await holder.unsafe('COMMIT');
+    assert.deepEqual(await second, { ok: false, refused: 'stale' });
+  } finally {
+    await holder.end();
+  }
 });
