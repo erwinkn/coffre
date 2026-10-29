@@ -1,0 +1,3 @@
+# Built by `pnpm build:action` and held to the sources by `pnpm check:action`:
+# GitHub folds its diff, which repeats the sources'.
+action/coffre.mjs linguist-generated=true

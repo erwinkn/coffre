@@ -13,7 +13,7 @@ on:
       - 'packages/db/**'
       - 'packages/conformance/**'
       - 'examples/node/**'
-      - 'scripts/action-pin*'
+      - 'scripts/action.test.mjs'
       - 'scripts/bump.mjs'
       - 'scripts/check-pins.mjs'
 
@@ -39,20 +39,21 @@ jobs:
           echo "version=$(node --version)" >> "$GITHUB_OUTPUT"
           node --version
       - uses: ./.github/actions/prepare
+      # The Action runs its own coffre.mjs: this revision's, or the test
+      # would hold an older CLI to the checks below.
+      - name: Hold the Action's CLI to this revision's sources
+        run: pnpm check:action
       - name: Keep the Node 24 binary for test tooling
         id: tooling
         run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
       - name: Install this revision's packed CLI
-        # npx uses a local package when its name and version match exactly.
-        # Test the candidate tarball, including before it is published.
+        # For the other commands, below, on the caller's Node: the tarball
+        # npm publishes, before it is published.
         run: |
           mkdir -p "$RUNNER_TEMP/coffre-action-consumer"
           pnpm --filter @coffre/cli pack --pack-destination "$RUNNER_TEMP/coffre-action-consumer"
           version=$(node -p 'JSON.parse(require("fs").readFileSync("packages/cli/package.json")).version')
           npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coffre-action-consumer" "$RUNNER_TEMP/coffre-action-consumer/coffre-cli-$version.tgz"
-          mkdir -p node_modules/@coffre
-          ln -s "$RUNNER_TEMP/coffre-action-consumer/node_modules/@coffre/cli" node_modules/@coffre/cli
-          ln -s ../@coffre/cli/dist/main.js node_modules/.bin/coffre
       - name: Boot and seed a real coffre deployment
         run: |
           node --conditions=coffre:source packages/conformance/scripts/action-test.ts serve "$RUNNER_TEMP/coffre-action-ready" > "$RUNNER_TEMP/coffre-action-fixture.log" 2>&1 &
@@ -103,8 +104,6 @@ jobs:
         id: incomplete
         continue-on-error: true
         uses: ./action
-        env:
-          npm_config_offline: 'true'
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -115,8 +114,6 @@ jobs:
         id: unnamed
         continue-on-error: true
         uses: ./action
-        env:
-          npm_config_offline: 'true'
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -125,8 +122,6 @@ jobs:
         id: typo
         continue-on-error: true
         uses: ./action
-        env:
-          npm_config_offline: 'true'
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -136,19 +131,49 @@ jobs:
         id: prefix
         continue-on-error: true
         uses: ./action
-        env:
-          npm_config_offline: 'true'
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/ci action-test/deploy
           keys: UNNAMED_SECRET NOWHERE_*
+      # TIMING (W266, removed before merge)
+      - name: 'Timing, export only: v0.14.5 (npx)'
+        uses: erwinkn/coffre/action@4f8fba1a7b2f49b015e73265c6cebabe84c665ec
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci
+          keys: ACTION_TEST_*
+      - name: 'Timing, require-complete and two environments: v0.14.5 (npx)'
+        uses: erwinkn/coffre/action@4f8fba1a7b2f49b015e73265c6cebabe84c665ec
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci action-test/deploy
+          keys: |
+            ACTION_TEST_*
+            GITHUB_TOKEN
+          require-complete: true
+      # TIMING (W266, removed before merge)
+      - name: 'Timing, export only: this revision'
+        uses: ./action
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci
+          keys: ACTION_TEST_*
+      - name: 'Timing, require-complete and two environments: this revision'
+        uses: ./action
+        with:
+          url: ${{ env.ACTION_TEST_URL }}
+          token: ${{ env.ACTION_TEST_TOKEN }}
+          environment: action-test/ci action-test/deploy
+          keys: |
+            ACTION_TEST_*
+            GITHUB_TOKEN
+          require-complete: true
       - name: Load secrets through the Action
         uses: ./action
-        env:
-          # A missing local candidate must fail instead of testing npm's
-          # already-published package at the same version.
-          npm_config_offline: 'true'
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}

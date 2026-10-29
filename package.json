@@ -29,6 +29,8 @@
     "test:image": "./scripts/test-image.sh",
     "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
+    "build:action": "pnpm --dir packages/cli run build:action",
+    "check:action": "pnpm --dir packages/cli run check:action",
     "bump": "node scripts/bump.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "check:docs": "node scripts/check-docs.mjs",

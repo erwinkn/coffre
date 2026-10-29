@@ -45,6 +45,7 @@ jobs:
           pnpm lint
           pnpm typecheck
           pnpm check:pins
+          pnpm check:action
           pnpm check:contrast
           pnpm check:docs
 

@@ -5,7 +5,7 @@
 //   pnpm bump 0.2.0
 //
 // It edits package.json files, the examples' pnpm with them, their specifiers
-// in pnpm-lock.yaml, the Action's CLI pin, and the release notes, whose
+// in pnpm-lock.yaml, and the release notes, whose
 // `## Unreleased` it heads with the version and today's date (UTC), under a
 // new, empty one: exactly what the version-only gate accepts, so a release is
 // this, a commit and a PR. Building, tagging and publishing are separate
@@ -15,7 +15,6 @@ import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { bumpPins, pinPackageManager } from '../packages/cli/src/deployment.ts';
-import { bumpAction } from './action-pin.mjs';
 import { headChangelog } from './changelog.mjs';
 import { bumpLockfile } from './lockfile.mjs';
 
@@ -31,10 +30,8 @@ const manifests = (dir) =>
         .map((entry) => join(dir, entry, 'package.json'))
         .filter((manifest) => existsSync(join(root, manifest)));
 
-// Validate before editing any manifest, so a malformed Action or lockfile
-// cannot leave half of a release bumped.
-const actionPath = join(root, 'action/action.yml');
-const action = bumpAction(readFileSync(actionPath, 'utf8'), version);
+// Validate before editing any manifest, so a malformed lockfile cannot leave
+// half of a release bumped.
 const before = JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')).version;
 const pins = new Set();
 for (const manifest of manifests('examples')) {
@@ -70,12 +67,11 @@ for (const example of readdirSync(join(root, 'examples'))) {
     pinPackageManager(dir, pnpm);
 }
 writeFileSync(lockfilePath, lockfile);
-writeFileSync(actionPath, action);
 const changelogPath = join(root, 'CHANGELOG.md');
 const notes = existsSync(changelogPath) ? readFileSync(changelogPath, 'utf8') : '';
 const headed = headChangelog(notes, version, new Date().toISOString().slice(0, 10));
 if (headed !== notes) writeFileSync(changelogPath, headed);
-const moved = headed !== notes ? 'the lockfile, the Action and the release notes' : 'the lockfile and the Action';
+const moved = headed !== notes ? 'the lockfile and the release notes' : 'the lockfile';
 console.log(`coffre ${version}: every package, both examples, ${moved}.`);
 
 // For the release notes: whatever a published package pins that is younger

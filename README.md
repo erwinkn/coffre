@@ -578,7 +578,8 @@ scripts/              what dev, tests and CI share
 ```
 
 The eight packages are released together at one version, and each imports
-the others by name only. The GitHub Action's CLI pin moves with them.
+the others by name only. The GitHub Action runs the CLI as one file of its
+own, `action/coffre.mjs`, built from the sources at the same commit.
 
 ## Supply chain and releases
 
@@ -616,6 +617,13 @@ the commit and run that built it. It then publishes the CLI's image,
 --ref main -f version=<version>` publishes the image alone, for a version
 npm already has. The package is public, as this repository is: anyone
 pulls it without signing in.
+
+**The Action's CLI.** `action/coffre.mjs` is the CLI, bundled into one file
+(`packages/cli/scripts/action.ts`), unminified, so that its diff reads as
+the sources' does. A change to the CLI or to what it bundles rebuilds it in
+the same PR: `pnpm build`, then `pnpm build:action`. Validate's
+`pnpm check:action` fails when the file is not what the sources build. It
+names no version, so a bump leaves it as it is.
 
 ## Not in scope
 

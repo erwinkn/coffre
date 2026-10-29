@@ -17,6 +17,19 @@
   has the menu its page has: Rename…, Protect… or Unprotect…, Fork…, My
   own dev, Archive… or Restore…, and Delete… once archived; its
   protection is a lock, and only while it is on.
+- **The GitHub Action runs its own CLI, without npx.** Each `coffre` the
+  step ran started through `npx -y @coffre/cli@<version>`, about 0.6 s with
+  npm's cache warm and more with it cold, before its first request; a step
+  with `require-complete` runs one per environment, and one more for a
+  token's login. The Action now runs `action/coffre.mjs`, the CLI bundled
+  into one file from the sources at the same commit, with the job's Node:
+  a workflow that pins the Action's SHA pins the code that runs, which no
+  registry answers for at run time, and the job's `.npmrc` and `devEngines`
+  no longer reach it. Its inputs, checks, messages, masking and throwaway
+  home are as they were; npx is no longer needed beside Node 20 or newer.
+  Validate's `pnpm check:action` holds the file to the sources, which a
+  change to the CLI rebuilds with `pnpm build:action`; it names no version,
+  so `pnpm bump` no longer edits the Action.
 - **A workload client stops renewing a session already at its hard end.**
   A Kubernetes session ends where its projected token does, so each
   renewal found nothing to move, answered the same expiry (after a 401

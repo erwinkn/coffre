@@ -195,8 +195,11 @@ route takes such a caller (`docs/architecture.md`, "The API").
 **Tests / checks.**
 `Validate` runs the full CI suite except for a proven, synchronized version
 bump. `scripts/version-only.mjs` compares Git objects and rejects any edit
-beyond package versions, example pins, their lockfile specifiers, the
-Action's literal CLI pin and the release notes' heading for the new version.
+beyond package versions, example pins, their lockfile specifiers and the
+release notes' heading for the new version. The Action names no version: its
+CLI, `action/coffre.mjs`, is this checkout's, which a change to the CLI or
+anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
+`pnpm check:action` holds it to what the sources build.
 The detector and gate tests run even on that fast path. Parse errors or an
 unsupported diff select full validation.
 

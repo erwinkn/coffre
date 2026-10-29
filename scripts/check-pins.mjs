@@ -11,7 +11,6 @@
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { actionPin } from './action-pin.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -32,13 +31,6 @@ const read = (manifest) => JSON.parse(readFileSync(join(root, manifest), 'utf8')
 
 // The one version every package carries: the CLI's, which `init` writes.
 const version = read('packages/cli/package.json').version;
-
-try {
-    const pin = actionPin(readFileSync(join(root, 'action/action.yml'), 'utf8'));
-    if (pin !== version) problems.push(`action/action.yml: CLI ${pin} is not ${version}, the packages' version`);
-} catch (error) {
-    problems.push(error.message);
-}
 
 // The one pnpm: the workspace's, which the examples pin too, so that a
 // deployment `init` writes installs with it everywhere, Workers Builds and
@@ -114,4 +106,4 @@ if (problems.length > 0) {
     process.exit(1);
 }
 
-console.log(`Dependency pinning check passed (${manifests.length} manifests and the Action, all exact; coffre ${version} throughout).`);
+console.log(`Dependency pinning check passed (${manifests.length} manifests, all exact; coffre ${version} throughout).`);
