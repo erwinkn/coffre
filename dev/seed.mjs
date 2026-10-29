@@ -111,12 +111,24 @@ const values = {
         REDIS_URL: 'redis://127.0.0.1:6379/0',
         STRIPE_SECRET_KEY: 'sk_test_51LocalDevOnlyNotARealKey',
         JWT_SIGNING_SECRET: 'dev-signing-secret-not-for-prod',
+        // What the proxy page's prototype credentials name (dev/deployment/app/src/proxy-prototype.ts).
+        OPENAI_API_KEY: 'sk-proj-LocalDevOnlyNotARealKey',
+        AWS_ACCESS_KEY_ID: 'AKIALOCALDEVONLY0000',
+        AWS_SECRET_ACCESS_KEY: 'local-dev-only-not-a-real-aws-secret',
+        SCHUMAN_API_KEY: 'schuman-local-dev-only',
+        MAPS_API_KEY: 'AIzaLocalDevOnlyNotARealKey',
     },
     prod: {
         DATABASE_URL: 'postgres://10.0.0.5:5432/market_prod',
         REDIS_URL: 'redis://10.0.0.6:6379/0',
-        STRIPE_SECRET_KEY: 'sk_live_51LocalDevOnlyNotARealKey',
+        // Sensitive: the proxy page's prototype shows where a definition sending it may no longer point.
+        STRIPE_SECRET_KEY: { value: 'sk_live_51LocalDevOnlyNotARealKey', sensitivity: 'sensitive' },
         JWT_SIGNING_SECRET: 'prod-signing-secret-not-for-prod',
+        OPENAI_API_KEY: 'sk-proj-LocalProdOnlyNotARealKey',
+        AWS_ACCESS_KEY_ID: 'AKIALOCALPRODONLY000',
+        AWS_SECRET_ACCESS_KEY: { value: 'local-prod-only-not-a-real-aws-secret', sensitivity: 'sensitive' },
+        SCHUMAN_API_KEY: 'schuman-local-prod-only',
+        MAPS_API_KEY: 'AIzaLocalProdOnlyNotARealKey',
     },
 };
 

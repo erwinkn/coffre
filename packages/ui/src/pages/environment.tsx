@@ -55,6 +55,7 @@ import {
   Tip,
 } from '../components/ui';
 import { Card, ClosedDoor, PageHeader } from '../components/page';
+import { EnvironmentTabs } from '../components/environment-tabs';
 import { Protection } from '../components/protected';
 import { SecretReadOnly } from '../components/affordances';
 import { GenerateValue, type GeneratedUse } from '../components/generate-value';
@@ -577,6 +578,9 @@ function EnvironmentLedger({
           </span>
         )}
       />
+
+      {/* A personal config has no proxy definitions of its own: it uses its base's. */}
+      {!personal && <EnvironmentTabs project={project} environment={environment} />}
 
       {(active.length > 0 || drafts.length > 0) && (
         <div className="toolbar">

@@ -17,6 +17,7 @@ export {
   audit,
   deviceLogin,
   environment,
+  environmentProxy,
   home,
   login,
   oauthAuthorize,
@@ -42,3 +43,18 @@ export {
   users,
   type CoffreContext,
 } from './options.ts';
+// The Proxy tab's prototype (W260, DO NOT MERGE): what a deployment's store gives it, and checks.
+export {
+  definitionProblems,
+  definitionOf,
+  keysOf,
+  type ProxyChange,
+  type ProxyConfig,
+  type ProxyCredential,
+  type ProxyDefinition,
+  type ProxyEgress,
+  type ProxyPlace,
+  type ProxyStore,
+} from './lib/proxy-prototype.ts';
+/** The visitor's API client, as the store's server functions call it. */
+export type { CoffreClient } from '@coffre/client';

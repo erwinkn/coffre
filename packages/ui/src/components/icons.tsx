@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Activity as ActivityGlyph,
   ArrowRight as ArrowRightGlyph,
+  ArrowLeftRight,
   Archive as ArchiveGlyph,
   Ban,
   Check as CheckGlyph,
@@ -12,6 +13,7 @@ import {
   CircleCheck,
   Clock as ClockGlyph,
   Copy as CopyGlyph,
+  CopyPlus,
   Ellipsis,
   Eye as EyeGlyph,
   EyeOff as EyeOffGlyph,
@@ -144,6 +146,8 @@ function lucide(Glyph: LucideIcon) {
 // Places
 export const Folder = lucide(FolderGlyph);
 export const Layers = lucide(LayersGlyph);
+/** An environment's credential proxy: requests in, sent on with its keys. */
+export const Relay = lucide(ArrowLeftRight);
 export const Users = lucide(UsersGlyph);
 export const User = lucide(UserGlyph);
 /** Your own settings, so they never share the instance's gear. */
@@ -156,6 +160,7 @@ export const Settings = lucide(SettingsGlyph);
 export const Eye = lucide(EyeGlyph);
 export const EyeOff = lucide(EyeOffGlyph);
 export const Copy = lucide(CopyGlyph);
+export const CopyFrom = lucide(CopyPlus);
 export const Generate = lucide(WandSparkles);
 export const Shuffle = lucide(ShuffleGlyph);
 export const Pencil = lucide(PencilGlyph);

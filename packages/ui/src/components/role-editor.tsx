@@ -372,7 +372,7 @@ function RoleEditor({
         )}
         {!editable && role !== null && role.description !== '' && <p className="dialog-body">{role.description}</p>}
 
-        <RoleGrid name={label} columns={draft} editable={editable} onChange={set} />
+        <RoleGrid name={label} columns={draft} editable={editable} onChange={set} proxyEdit={role?.id === 'owner'} />
 
         {editable && (
           <p className="hint">
@@ -498,11 +498,14 @@ function RoleGrid({
   columns,
   editable,
   onChange,
+  proxyEdit,
 }: {
   name: string;
   columns: Columns;
   editable: boolean;
   onChange: (permission: Permission, column: Column, on: boolean) => void;
+  /** The Proxy tab's prototype (W260): whether this role holds `proxy.edit`, a mock only Owners hold, shown and never edited. */
+  proxyEdit: boolean;
 }) {
   const cell = (permission: Permission, column: Column) => {
     const on = (column === 'normal' ? columns.permissions : columns.protected).includes(permission);
@@ -567,7 +570,30 @@ function RoleGrid({
             </th>
           </tr>
         </thead>
-        <tbody>{values.map(row)}</tbody>
+        <tbody>
+          {values.map(row)}
+          <tr className="role-grid-mock">
+            <th scope="row">
+              Edit proxy definitions
+              <span className="role-grid-note">proxy.edit, a prototype: Owners only, for now</span>
+            </th>
+            {[0, 1].map((column) => (
+              <td key={column}>
+                {proxyEdit ? (
+                  <span className="role-grid-yes" title={`${name}: Edit proxy definitions`}>
+                    <Check size={15} />
+                    <span className="visually-hidden">yes</span>
+                  </span>
+                ) : (
+                  <span className="role-grid-no">
+                    <span aria-hidden>–</span>
+                    <span className="visually-hidden">no</span>
+                  </span>
+                )}
+              </td>
+            ))}
+          </tr>
+        </tbody>
         <tbody>
           <tr className="role-grid-group">
             <th scope="rowgroup" colSpan={3}>
