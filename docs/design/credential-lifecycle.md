@@ -255,13 +255,24 @@ the binding's keys come from, which its seal says (`jwks_uri`):
   the two agreeing) are held as the app holds them, and what the credential
   is held to (the token's spend, its `exp` and its `iat`'s hour, a session's
   hard end, the run recorded) comes of the token, not the app. A
-  compromised app mints nothing through such a binding without a token the
-  cluster signed for this instance. A genuine token it receives, it can
-  still spend once, for a session bound to a key of its own, the pod's own
-  sign-in then failing: a Kubernetes token names no key (its audience is
-  the instance's), so the DPoP proof that picks the session's key is
-  whoever sends it. Only a key-naming audience would close that, and a
-  projected token cannot carry a per-pod thumbprint (Fable on PR 3b).
+  compromised app mints nothing through such a binding without a genuine
+  token its issuer signed for this instance. What it can do with one it
+  receives depends on whether the token names the session's key:
+  - a token that names it (`<origin>#jkt=<thumbprint>`, the key-naming
+    platforms', GitHub's among them) is useless to any other key;
+  - a token that names none (a CI run's; a Kubernetes cluster's, whose
+    audience is the instance's; Azure's, whose audience is fixed) the app
+    can spend for itself, a run's credential it keeps or a session bound
+    to a key of its own, as the DPoP proof that picks that key is whoever
+    sends it: once, as such tokens are spent once, the run's or the pod's
+    own sign-in then failing; for Azure, whose tokens its platform hands
+    out again (`REPEATING_PROFILES`), as often as the binding's rate
+    allows, until the token's `exp`.
+
+  Only a key-naming audience would close that, and none of these lets its
+  caller name the key: a projected token cannot carry a per-pod
+  thumbprint, and a CI run's credential is a bearer's (Fable and review r4
+  on PR 3b).
 - **Keys the issuer publishes** (GitHub, GitLab, generic OIDC, and every
   other platform's ID token unless its keys were uploaded): the app
   verifies the token, as in 0.14, and the vault takes its word for it, as
@@ -275,10 +286,11 @@ the binding's keys come from, which its seal says (`jwks_uri`):
 So the boundary, plainly: **a compromised app can mint CI credentials and
 sessions for an account bound to GitHub, GitLab, a generic OIDC issuer or
 AWS, within its bindings' limits** (the scope each seals, 60 sign-ins a
-minute each), and for no account the vault never bound. Through a
-Kubernetes binding of uploaded keys, which the vault verifies, it mints
-nothing without a genuine token for this instance, and spends each one it
-sees at most once, for a key of its own. The vault itself makes
+minute each), and for no account the vault never bound. Through a binding
+of uploaded keys, which the vault verifies, it mints nothing without a
+genuine token for this instance; one it receives that names no key it can
+spend for itself: once (a CI run's, a Kubernetes pod's), and, for Azure's
+repeating tokens, within the binding's rate until the token expires. The vault itself makes
 no call to an issuer: a Node deployment's vault reaches Postgres and, if
 its KEK is remote (AWS KMS), that KEK, nothing else.
 

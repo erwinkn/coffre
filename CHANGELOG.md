@@ -11,9 +11,10 @@
   digests; a key they lack is refused, never looked for), its audience (the
   instance's public URL the binding was made on, sealed with it), times,
   claims and profile rules; what the credential is held to comes of the
-  token. A compromised app mints nothing there without a token the cluster
-  signed for this instance, though a genuine one it receives it can still
-  spend once, for a key of its own (a Kubernetes token names no key). The
+  token. A compromised app mints nothing there without a genuine token for
+  this instance, though one it receives that names no key it can still
+  spend for itself: once (a CI run's, a Kubernetes pod's), and, for Azure's
+  repeating tokens, within the binding's rate until the token expires. The
   vault asks no issuer for keys (it reaches only Postgres and a
   remote KEK, if configured), so a binding of keys
   its issuer publishes (GitHub, GitLab, generic OIDC) takes the app's word
