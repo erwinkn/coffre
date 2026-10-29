@@ -1107,6 +1107,22 @@ test("with 0.15's log, replacing keys asks each binding's change on its own: one
   assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer).length, 2);
 });
 
+test("with 0.15's log, a binding made on the issuer while keys are replaced is no part of it: a conflict, not a success that leaves it on the old keys (PR 3a, review r2)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
+}, async (t) => {
+  const first = await bindCluster([rsa]);
+  assert.ok('binding' in first);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    calls += 1;
+    // Once the replacement is planned, before its first change: another binding on the issuer, on the old keys.
+    if (calls === 1) assert.ok('binding' in await bindCluster([rsa], { sub: 'system:serviceaccount:ci:late' }));
+    return change(input);
+  });
+  await assert.rejects(replaceKeys([rsa, ec]), { status: 409, message: /changed while their keys were replaced/ });
+});
+
 test("replacing an issuer's keys replaces each binding on it, the same but for them; a set of old and new takes both while it rotates", async () => {
   const first = await bindCluster([rsa]);
   const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });

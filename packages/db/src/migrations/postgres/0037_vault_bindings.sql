@@ -133,7 +133,8 @@ DECLARE
 BEGIN
     IF p_make = (p_id IS NULL) OR (NOT p_make AND cardinality(p_ends) = 0) OR cardinality(p_creds) <> cardinality(p_cred_binding)
        OR p_make = (p_live IS NULL) OR cardinality(p_read_keys) <> cardinality(p_read_names)
-       OR cardinality(p_change_request) <> (CASE WHEN p_make THEN 1 ELSE 0 END) + cardinality(p_ends) + (SELECT count(*) FROM unnest(p_cred_seal) AS s WHERE s IS NOT NULL) THEN
+       OR cardinality(p_change_request) <> (CASE WHEN p_make THEN 1 ELSE 0 END) + (SELECT count(*) FROM unnest(p_end_seal) AS s WHERE s IS NOT NULL)
+                                          + (SELECT count(*) FROM unnest(p_cred_seal) AS s WHERE s IS NOT NULL) THEN
         RAISE EXCEPTION 'a change of bindings makes one, ends some, or both, with a change for each object' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     IF p_make THEN
@@ -164,7 +165,7 @@ BEGIN
     -- never left live.
     PERFORM 1 FROM public.service_bindings b WHERE b.id = ANY(p_ends) ORDER BY b.id FOR UPDATE;
     IF (SELECT count(*) FROM unnest(p_ends, p_end_mac_from, p_end_seal_from) AS e(id, mac, seal)
-          JOIN public.service_bindings b ON b.id = e.id AND b.principal = p_principal AND b.revoked_at IS NULL AND b.auth_mac = e.mac AND b.seal = e.seal)
+          JOIN public.service_bindings b ON b.id = e.id AND b.principal = p_principal AND b.revoked_at IS NULL AND b.auth_mac = e.mac AND b.seal IS NOT DISTINCT FROM e.seal)
        <> cardinality(p_ends) THEN
         RETURN json_build_object('state', 'moved');
     END IF;
@@ -214,7 +215,9 @@ BEGIN
     -- What it ends is a use's input: the fence exclusive (RevokeTakesFence), after the issue lock (PolicyIssueFirst), for
     -- the statement's work only. A bind that ends nothing takes none.
     IF cardinality(p_ends) > 0 THEN PERFORM pg_advisory_xact_lock(1668244070, 0); END IF;
-    -- ChangeChecksSeal: each row it ends is its object's newest change's; one put back is stale.
+    -- ChangeChecksSeal: each row it ends is its object's newest change's; one put back is stale. A row with no seal is one
+    -- the log never held, or none at all once a seal it had was cleared around the vault: that one is stale too, so the
+    -- log's binding is never ended with no change of it (review r2).
     IF EXISTS (SELECT 1 FROM unnest(p_ends, p_end_seal_from) AS e(id, seal)
                 WHERE e.seal IS DISTINCT FROM (SELECT l.seal FROM public.log_changes l WHERE l.object = public.log_object('binding', e.id::text) ORDER BY l.number DESC LIMIT 1))
        OR EXISTS (SELECT 1 FROM unnest(p_creds, p_cred_seal_from) AS x(id, seal)
@@ -236,7 +239,8 @@ BEGIN
             VALUES (nextval('public.log_number'), p_at, p_change_request[i], p_change_object[i], p_actor, p_change_payload[i], p_change_seal[i], p_change_mac[i])
             RETURNING number INTO n;
     END LOOP;
-    RETURN json_build_object('number', n::text);
+    -- Only rows the log never held, ended: no change, nothing to seal.
+    RETURN json_build_object('number', coalesce(n::text, '0'));
 END
 $$;
 

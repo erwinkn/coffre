@@ -375,16 +375,15 @@ export function madeBinding(chainKey: Buffer, row: Omit<BindingRow, 'authMac' | 
 
 /**
  * A binding the vault ends (`changeBindings`), with the live credentials it
- * issued, each as read with its seal (none for one 0.14 made, or written
- * around the vault, which the vault ends too) and MAC, and the app's MAC
- * over it revoked at `at`; null when the binding is 0.14's, which the log
- * never held, and the app ends as before. A binding the log holds is always
- * the vault's to end (review r1): left to the app, its object would stand.
+ * issued, each as read with its seal and MAC (no seal for one 0.14 made, or
+ * written around the vault), and the app's MAC over it revoked at `at`.
+ * Under the switch the vault ends every binding, its own and 0.14's: one
+ * left to the app could be a binding of the log's whose seal a writer
+ * cleared, and its object would stand past its end (reviews r1, r2).
  */
-export function endedBinding(chainKey: Buffer, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding | null {
-  if (row.seal === null) return null;
+export function endedBinding(chainKey: Buffer, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding {
   return {
-    before: { columns: sealedBinding(row).columns, seal: Buffer.from(row.seal).toString('base64') },
+    before: sealedBinding(row) as EndedBinding['before'],
     authMacFrom: Buffer.from(row.authMac).toString('base64'),
     authMac: authMac(chainKey, 'service_bindings', { ...row, revokedAt: at }).toString('base64'),
     credentials: credentials.map((credential) => ({

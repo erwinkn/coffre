@@ -3331,6 +3331,8 @@ class VaultService implements Vault {
     if ('refused' in call) return { ok: false, refused: call.refused };
     const answer = await changeBindings(this.#db, call);
     if (answer.number == null) return { ok: false, refused: answer.state as ChangeBindingsRefusal };
+    // Only rows the log never held were ended: no change of the log's to wait for.
+    if (answer.number === '0') return { ok: true, number: '0', witnessed: null };
     const sealedAt = await log015.sealThrough(BigInt(answer.number));
     return { ok: true, number: answer.number, witnessed: sealedAt.witnessed ?? null };
   }

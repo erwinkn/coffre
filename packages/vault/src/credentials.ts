@@ -469,7 +469,8 @@ export type BindingsCall = {
   principal: string;
   /** The binding made, its seal; and its maker's standing as read (`IssueRead`): null for an unbind. */
   make: { row: MadeBinding; authMac: Buffer; seal: Buffer; read: IssueRead; via: string | null } | null;
-  ends: { id: string; macFrom: Buffer; sealFrom: Buffer; authMac: Buffer; seal: Buffer }[];
+  /** A binding with no seal (`sealFrom` null) is ended with no change, its `seal` null. */
+  ends: { id: string; macFrom: Buffer; sealFrom: Buffer | null; authMac: Buffer; seal: Buffer | null }[];
   /** A credential with no seal (`sealFrom` null) is ended with no change, its `seal` null. */
   credentials: { id: string; binding: string; macFrom: Buffer; sealFrom: Buffer | null; authMac: Buffer; seal: Buffer | null }[];
   live: string[] | null;
@@ -506,7 +507,7 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
     }
   }
   for (const end of ends) {
-    if (!named(end?.before) || !isBase64(end.authMacFrom, 32) || !isBase64(end.authMac, 32) || !Array.isArray(end.credentials)) {
+    if (end?.before === undefined || (end.before.seal !== null && !isBase64(end.before.seal, 16)) || !isBase64(end.authMacFrom, 32) || !isBase64(end.authMac, 32) || !Array.isArray(end.credentials)) {
       throw new Error('a binding ended is named as read, with its seal, the app\'s MACs before and after, and the credentials it issued');
     }
     checkBinding(end.before.columns);
@@ -553,13 +554,18 @@ export function bindingsCall(
   for (const end of ends) {
     const { columns } = end.before;
     const ref: Ref = { kind: 'binding', id: columns.id };
-    const sealFrom = Buffer.from(end.before.seal, 'base64');
-    const before = bindingObject(columns);
     if (columns.principal !== principal || columns.revoked) return { refused: 'tampered' };
-    if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
-    const seal = sealOf(keys.seals[0]!, ref, applyOp(before, ref, { op: 'binding.revoke' })!);
-    change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' })), unbind: { by: actor, reason, replacedBy: make?.id ?? null } }), seal);
-    ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
+    if (end.before.seal === null) {
+      // One 0.14 made, which the log never held: its row ended, with no change; the statement holds it to having none (review r2).
+      ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: null, authMac: Buffer.from(end.authMac, 'base64'), seal: null });
+    } else {
+      const sealFrom = Buffer.from(end.before.seal, 'base64');
+      const before = bindingObject(columns);
+      if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
+      const seal = sealOf(keys.seals[0]!, ref, applyOp(before, ref, { op: 'binding.revoke' })!);
+      change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' })), unbind: { by: actor, reason, replacedBy: make?.id ?? null } }), seal);
+      ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
+    }
     for (const credential of end.credentials) {
       const cref: Ref = { kind: 'credential', id: credential.before.columns.id };
       if (credential.before.columns.principal !== principal || credential.before.columns.revoked) return { refused: 'tampered' };

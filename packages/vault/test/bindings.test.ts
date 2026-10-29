@@ -315,3 +315,19 @@ test("the log of a bind, a sign-in through it and its unbind replays to the rows
   const binding_ = replayed.rows.get(objectKey({ kind: 'binding', id: made.id }));
   assert.equal((binding_?.row as { revoked?: boolean } | undefined)?.revoked, true, 'the replay ends it too');
 });
+
+test("a binding 0.14 made is ended by the vault with no change; one of the log's whose seal a writer cleared is stale, never ended with no change (review r2)", async () => {
+  const w = await world();
+  const { serviceBindings } = tablesOf(db.owner);
+  const old = binding(w);
+  await db.owner.insert(serviceBindings).values({ ...old, authMac: Buffer.from(old.authMac, 'base64'), createdAt: new Date(old.createdAt), revoked: undefined } as never);
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(old.id)] }))).ok);
+  assert.deepEqual(await ops({ kind: 'binding', id: old.id }), [], 'the log holds no object of it');
+  assert.equal((await read(old.id)).columns.revoked, true);
+  // The log's binding, its seal cleared around the vault: no end of it with no change.
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, live: [], reason: 'replaced' }))).ok);
+  await db.owner.update(serviceBindings).set({ seal: null }).where(eq(serviceBindings.id, made.id));
+  assert.deepEqual(await w.vault.changeBindings!(change({ ends: [await ending(made.id)] })), { ok: false, refused: 'stale' });
+  assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make']);
+});

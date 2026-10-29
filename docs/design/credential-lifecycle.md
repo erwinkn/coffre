@@ -212,8 +212,10 @@ binding's newest change, so a row put back after its end is none.
 A binding 0.14 made, which the log never held, signs nobody in under the
 switch (fail closed): 0.15 is unreleased, nobody runs it, and a fallback to
 the app's own check would be the hole sealed bindings close. Plan PR 9's
-cutover can adopt them; until then a manager binds again. Ending one goes
-the app's way, as before.
+cutover can adopt them; until then a manager binds again. Ending one is the
+vault's too, its row revoked with no change: the statement holds a row with
+no seal to having no change in the log, so a binding of the log's whose
+seal a writer cleared is `stale`, never ended quietly (review r2).
 
 Bindings keep 0.14's `token.bind` and `token.unbind` entries, written once
 the vault's change has committed, following through on its decision. The

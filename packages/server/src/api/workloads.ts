@@ -838,8 +838,11 @@ export class WorkloadService {
         for (const [i, planned] of replaced.entries()) {
           bindings.push(await retrying(async () => {
             const live = await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation);
-            const old = live.find((row) => row.id === planned.id);
-            if (old === undefined) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
+            // Those on the issuer with other keys are those planned and not yet done: one made or ended meanwhile is no
+            // part of this replacement, as 0.14's transaction held the whole set (review r2).
+            const pending = live.filter((row) => row.issuer === input.issuer && row.jwksUri !== jwksUri).map((row) => row.id);
+            if (pending.join() !== replaced.slice(i).map((row) => row.id).join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
+            const old = live.find((row) => row.id === planned.id)!;
             const { scope, byPath } = scopes.get(old.id)!;
             const row = {
               id: randomUUID(), principal: member, generation: standing.generation, profile: old.profile, issuer: old.issuer, jwksUri, jwks: uploaded.jwks,
@@ -1050,8 +1053,7 @@ export class WorkloadService {
    * With 0.15's log, a service's bindings changed by the vault itself (T149,
    * PR 3a): `make` made, weighed there as a service token's issue is, and
    * `ends` ended with every live credential each issued, in one statement
-   * (`Vault.changeBindings`). One of `ends` that 0.14 made, which the log
-   * never held, is ended as before first (`#unbindByApp`). Then 0.14's
+   * (`Vault.changeBindings`), whichever made them: 0.14 too. Then 0.14's
    * entries, `entries`, follow through on the vault's decision (`audited`
    * with no caller): its `token.unbind` is the tombstone the app's own
    * checks read (`hasTombstone`), so a binding row put back stays dead to
@@ -1074,20 +1076,14 @@ export class WorkloadService {
     const sealedEnds: EndedBinding[] = [];
     for (const row of ends) {
       const live = await liveCredentialsWhere(db, chainKey, liveCredentialsOf({ principal: member, createdBy: issuedBy(row.id), at }));
-      const ended = endedBinding(chainKey, row, live, at);
-      if (ended === null) await this.#unbindByApp(ctx, member, row.id, reason === 'unbound' ? 'removed' : reason);
-      else sealedEnds.push(ended);
+      sealedEnds.push(endedBinding(chainKey, row, live, at));
     }
-    if (make === null && sealedEnds.length === 0) return;
-    const sealedIds = new Set(sealedEnds.map(({ before }) => before.columns.id));
-    // A binding 0.14 made was ended with its own entry: only the others' follow the vault's change.
-    const following = entries.filter((entry) => entry.action !== 'token.unbind' || sealedIds.has(String((entry.metadata as { bindingId?: unknown } | undefined)?.bindingId)));
     const action = make === null ? 'token.unbind' : 'token.bind';
     const outcome = await vault.changeBindings!({
       actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
       make: make === null ? null : madeBinding(chainKey, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
       // The account's live bindings it was weighed beside, but those 0.14 made and ended just now; the keys it reads, by name.
-      live: make === null ? null : (beside?.live ?? []).filter((row) => !ends.some((ended) => ended.id === row.id && row.seal === null)).map((row) => row.id),
+      live: make === null ? null : (beside?.live ?? []).map((row) => row.id),
       reads: (beside?.reads ?? []).flatMap((read) => (read.keys === '*' ? [] : read.keys.map(({ id, key }) => ({ id, key })))),
       policy: {
         seq: caller.policySeq?.toString() ?? null,
@@ -1097,7 +1093,7 @@ export class WorkloadService {
     });
     if (outcome.ok) {
       await audited({ db, chainKey }, async (_tx, log) => {
-        log.push(...following);
+        log.push(...entries);
       });
       return;
     }
@@ -1116,25 +1112,6 @@ export class WorkloadService {
       case 'full': throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
       case 'stale': case 'tampered': throw new Error(`a binding of ${member}'s is not the log's (${outcome.refused}): a row was put back around coffre`);
     }
-  }
-
-  /** A binding ended as before 0.15's vault made them: the app's transaction, its `token.unbind` its tombstone. */
-  async #unbindByApp(ctx: Asker, member: string, bindingId: string, reason: string): Promise<void> {
-    const metadata = { bindingId, principalType: 'service', principalId: member.slice('token:'.length) };
-    await retrying(async () => {
-      const changes = await this.#revokes(formatMember(ctx.caller.principal), member, async () => [bindingId]);
-      return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
-        const row = await findBinding(tx, this.#deps.chainKey, member, bindingId);
-        const live = row !== null && row.revokedAt === null
-          && (await liveBindings(tx, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
-        const ended = live ? await this.#revoke(tx, bindingId, member, ctx.caller.principal.id, new Date()) : null;
-        if (ended === null || ended.revoked === 0) {
-          throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
-        }
-        changes?.expectRevoked(ended.credentials);
-        log.push(allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason } }));
-      }, changes);
-    });
   }
 
   /** Revoke a binding, and every credential it issued that still lives: they die with it. */

@@ -508,7 +508,8 @@ export type MadeBinding = BindingColumns & { jwks: string | null; label: string 
 
 /** A binding a change ends: as the app read it, with its seal and MAC, the app's MAC over it revoked, and the credentials it issued that are live. */
 export type EndedBinding = {
-  before: { columns: BindingColumns; seal: string };
+  /** Its seal null for one 0.14 made, which the log never held: ended all the same, its row revoked with no change. */
+  before: { columns: BindingColumns; seal: string | null };
   authMacFrom: string;
   authMac: string;
   /**
