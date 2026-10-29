@@ -8,6 +8,8 @@ import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
+export { recorded, RECORDS, type ChangeRecord } from './change-records.ts';
+
 /**
  * Appending to the audit log, the one table both the app and the vault
  * write, each under its own key (@coffre/core/audit says what an entry's MAC

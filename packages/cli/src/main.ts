@@ -1969,7 +1969,8 @@ async function audit(args: string[]): Promise<void> {
     actor: values.actor === undefined ? undefined : apiMember(values.actor),
     decision: values.denied ? 'deny' : undefined,
     detail: values.detail ? '1' : undefined,
-    // Sign-ins through trust bindings too, which 0.15's sealed log alone records; a server before 0.15 ignores it.
+    // Sign-ins through trust bindings and tokens' issues, revokes and sign-outs too, which 0.15's sealed log alone
+    // records; a server before 0.15 ignores it.
     sealed: '1',
   });
   if (values.json) {

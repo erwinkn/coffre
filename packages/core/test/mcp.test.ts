@@ -51,6 +51,9 @@ test("a client ID is a document's HTTPS URL with a path", () => {
     assert.equal(isClientIdUrl(refused, { allowLoopback: false }), false, refused);
   }
   assert.equal(isClientIdUrl('http://127.0.0.1:8081/client.json', { allowLoopback: false }), false);
+  // No longer than the vault's record of a token issued through its connection takes (Fable on T164).
+  assert.equal(isClientIdUrl(`https://claude.ai/${'c'.repeat(2048 - 'https://claude.ai/'.length)}`, { allowLoopback: false }), true);
+  assert.equal(isClientIdUrl(`https://claude.ai/${'c'.repeat(2049 - 'https://claude.ai/'.length)}`, { allowLoopback: false }), false);
   assert.equal(isClientIdUrl('http://127.0.0.1:8081/client.json', { allowLoopback: true }), true);
 });
 

@@ -1,6 +1,6 @@
 import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
-import type { BindingColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
+import type { BindingColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Transaction } from '@coffre/db';
 import { appChanges, holdIssues, isStaleChange } from '@coffre/db/log';
 
@@ -247,7 +247,7 @@ export async function revokedByVault(
   vault: Required<Pick<Vault, 'revokeCredential'>>,
   chainKey: Buffer,
   row: CredentialRow,
-  by: { actor: string; revokedBy: string; reason: 'revoke' | 'sign_out'; via: string | null; caller: Pick<Caller, 'policy' | 'policySeq'> | null },
+  by: { actor: string; revokedBy: string; reason: 'revoke' | 'sign_out'; via: string | null; trace: RequestTrace | null; caller: Pick<Caller, 'policy' | 'policySeq'> | null },
 ): Promise<boolean> {
   if (row.seal === null) throw new Error(`the credential ${row.id} is 0.14's, which the log never held: it is revoked as 0.14 revokes it`);
   const revokedAt = new Date();
@@ -260,6 +260,7 @@ export async function revokedByVault(
     revokedBy: by.revokedBy,
     reason: by.reason,
     via: by.via,
+    trace: by.trace,
     // The policy the caller's right was weighed on, which the vault holds to under the fence, as `policyStill` under 0.14's head.
     policy: by.caller === null ? null : {
       seq: by.caller.policySeq?.toString() ?? null,

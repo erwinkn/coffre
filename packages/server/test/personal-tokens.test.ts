@@ -8,9 +8,11 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
+import { logObject } from '@coffre/db/log';
 import { and, asc, eq, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { HIDDEN_COUNTED } from '../src/db/queries.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, logChanges } from './db/tables.ts';
@@ -279,15 +281,14 @@ test('every entry made with a personal token names its person and the token, the
   for (const action of ['app secret.write', 'vault key.wrap', ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
   if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
-  // With 0.15's log, the vault issues it (T149), and its change records it (D147): the 0.15 page shows it, and the token's
-  // label beside what it made (T156), where 0.14's page reads both from 0.14's entry.
+  // With 0.15's log, the vault issues it (T149), and its change records it (D147): the page lists it in 0.14's entry's
+  // place, and the token's label beside what it made, read from either (T164).
   if (LOG === '0.15') {
     assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
-    return;
   }
-  const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
+  const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
-  assert.deepEqual([create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], ['personal', 'cursor-agent', issued.id, null]);
+  assert.deepEqual([create.log, create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], [LOG, 'personal', 'cursor-agent', issued.id, null]);
   // The audit page reads 0.15's uses from plan PR 8: until then, the read it shows is 0.14's entry.
   if (LOG === '0.14') {
     const read = entries.find((entry) => entry.action === 'secret.read')!;
@@ -407,15 +408,130 @@ test("a personal token's label is shown wherever it goes, so it holds no control
   }
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
-  // With 0.15's log, the vault ends it (T149), and its change, which the 0.15 page shows (T156), names the token it ends.
-  if (LOG === '0.15') {
-    assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
-    return;
-  }
-  const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
+  // With 0.15's log, the vault ends it (T149), and its change, which the page lists in 0.14's entry's place (T164), names
+  // the token it ends.
+  if (LOG === '0.15') assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
+  const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
   const out = entries.find((entry) => entry.action === 'sign_out')!;
-  assert.deepEqual(out.token, { id: issued.id, label: 'agent' });
+  assert.deepEqual([out.log, out.metadata.targetCredentialId, out.metadata.kind, out.token], [LOG, issued.id, 'personal', { id: issued.id, label: 'agent' }]);
 });
+
+/**
+ * A person's tokens on the audit pages, a page at a time, under either log (T164): their issues, revokes and
+ * sign-outs, which 0.15's log records in place of 0.14's detail entries, are left out and counted, each on the page
+ * of its own time, between the entries the pages show, as 0.14's entries are, never all on the first, though 0.15's
+ * log holds no sign-in of a person's to page by. Asked for, they are listed among the rest. Pages tile both logs:
+ * every entry on one, every hidden one counted on one.
+ */
+test("a person's token issues, revokes and sign-outs are counted on the page of their time, and every one listed once when asked", async () => {
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 25));
+  const wrote = async (value: string) => {
+    await ada.secrets.set('market/dev', { API_KEY: value });
+    await pause();
+  };
+  await wrote('one');
+  const first = await ada.tokens.issue(ADA, { label: 'first', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  await pause();
+  await wrote('two');
+  const second = await ada.tokens.issue(ADA, { label: 'second', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  await pause();
+  await ada.tokens.revoke(ADA, second.id);
+  await pause();
+  await signin.signOut(first.token, { requestId: 'logout', sourceIp: null });
+  await pause();
+  await wrote('three');
+
+  const TOKENS = new Set(['token.create', 'token.revoke', 'sign_out']);
+  type Page = Awaited<ReturnType<CoffreClient['audit']['list']>>;
+  // Counted (`hidden`) where a test asks, as no page of coffre's own does.
+  const walk = async (query: { actor?: string; detail?: '1'; hidden?: '1' }, limit: number) => {
+    const pages: Page[] = [];
+    for (let before: string | undefined; ;) {
+      const page = await root.audit.list({ ...query, sealed: '1', limit, ...(before === undefined ? {} : { before }) });
+      assert.ok(page.entries.length <= limit);
+      assert.equal(page.more, page.next !== null);
+      pages.push(page);
+      if (page.next === null) return pages;
+      before = page.next;
+    }
+  };
+  const tokens = (page: Page) => Object.fromEntries((page.hidden ?? []).filter(({ action }) => TOKENS.has(action)).map(({ action, count }) => [action, count]));
+  // Ada's pages, a write a page, counted: none after the newest; then the second token's issue and revoke, and the
+  // first's sign-out, between the second write and the third; then the first's issue. A full page of 0.14's says there
+  // may be more, so the last is empty.
+  const activity = await walk({ actor: ADA, hidden: '1' }, 1);
+  assert.deepEqual(activity.map((page) => page.entries.map((entry) => `${entry.action} ${entry.log}`)), [['secret.write 0.14'], ['secret.write 0.14'], ['secret.write 0.14'], []]);
+  assert.deepEqual(activity.map(tokens), [{}, { 'token.create': 1, 'token.revoke': 1, sign_out: 1 }, { 'token.create': 1 }, {}]);
+
+  // Asked for, each is listed, as 0.14's entry put it.
+  const listed = (await root.audit.list({ actor: ADA, detail: '1', sealed: '1', limit: 500 })).entries.filter((entry) => TOKENS.has(entry.action));
+  assert.deepEqual(listed.map((entry) => [entry.log, entry.action, entry.actorId, entry.metadata.targetCredentialId, entry.detail]), [
+    [LOG, 'sign_out', 'ada@acme.example', first.id, true],
+    [LOG, 'token.revoke', 'ada@acme.example', second.id, true],
+    [LOG, 'token.create', 'ada@acme.example', second.id, true],
+    [LOG, 'token.create', 'ada@acme.example', first.id, true],
+  ]);
+
+  const named = (entries: Page['entries']) => entries.map((entry) => `${entry.log}:${entry.seq}`);
+  for (const query of [{}, { hidden: '1' as const }, { detail: '1' as const }, { actor: ADA }, { actor: ADA, hidden: '1' as const }, { actor: ADA, detail: '1' as const }]) {
+    const [whole] = await walk(query, 500);
+    assert.equal(whole!.next, null);
+    for (const limit of [1, 2, 5]) {
+      const pages = await walk(query, limit);
+      assert.deepEqual(named(pages.flatMap((page) => page.entries)), named(whole!.entries), `${JSON.stringify(query)}, ${limit} a page`);
+      const hidden = new Map<string, number>();
+      for (const { action, count } of pages.flatMap((page) => page.hidden ?? [])) hidden.set(action, (hidden.get(action) ?? 0) + count);
+      assert.deepEqual(hidden, new Map((whole!.hidden ?? []).map(({ action, count }) => [action, count])), `${JSON.stringify(query)}, ${limit} a page: hidden`);
+    }
+  }
+});
+
+/**
+ * Token records past what the pages show, more of them than a page counts (`HIDDEN_COUNTED`). A page that counts
+ * them (`hidden`, asked for) counts no more than that, and shows nothing older than the last it counts, though an
+ * entry it would show lies just below; the pages after count the rest, and show it, every one once. A page that does
+ * not ask, as every page of coffre's own, counts nothing and shows the entry at once. Planted as the vault writes them,
+ * as only the pages are under test (reviews r2, r3, r4 of W261): a person with nothing but their handles, and a
+ * service whose runs' sign-outs came after an old sign-in.
+ */
+test("token records are counted a page's worth at a time, and an entry below them waits for the page that reaches it", async () => {
+  const at = Date.now() - 3_600_000;
+  const row = (i: number, actor: string, record: Record<string, unknown>) => {
+    const id = crypto.randomUUID();
+    return { number: 10_000_000n + BigInt(i), at: at + i, requestId: crypto.randomUUID(), object: logObject('credential', id), actor, payload: JSON.stringify({ ...record, ref: { id, kind: 'credential' } }), mac: Buffer.alloc(16) };
+  };
+  const CI = 'token:ci';
+  const rows = [
+    // Keys in the vault's order: an issue's, a sign-in's, a revoke's.
+    ...Array.from({ length: 2 * HIDDEN_COUNTED + 500 }, (_, i) => row(i, ADA, {
+      caller: 'person', expiresAt: at + 60_000, generation: 0, issue: { by: ADA, kind: 'handle', label: `run ${i}`, via: null }, op: 'credential.issue', principal: ADA,
+    })),
+    row(5_000, CI, { caller: 'bearer', expiresAt: at + 60_000, generation: 0, op: 'credential.issue', principal: CI, signIn: { binding: 'b', issuer: 'https://issuer.example', proof: 'oidc', run: { run_id: '7' } } }),
+    ...Array.from({ length: 2 * HIDDEN_COUNTED + 500 }, (_, i) => row(5_001 + i, CI, { op: 'credential.revoke', revoke: { kind: 'service', principal: CI, reason: 'sign_out', via: null } })),
+  ].map((planted) => ({ ...planted, payload: canonicalJson(JSON.parse(planted.payload)) }));
+  for (let i = 0; i < rows.length; i += 500) await db.owner.insert(logChanges).values(rows.slice(i, i + 500));
+  const walk = async (actor: string, action: string) => {
+    const pages: { shown: string[]; counted: number }[] = [];
+    for (let before: string | undefined; ;) {
+      const page = await root.audit.list({ actor, sealed: '1', hidden: '1', limit: 50, ...(before === undefined ? {} : { before }) });
+      pages.push({ shown: page.entries.map((entry) => entry.action), counted: page.hidden?.find((hidden) => hidden.action === action)?.count ?? 0 });
+      if (page.next === null) return pages;
+      before = page.next;
+    }
+  };
+  assert.deepEqual(await walk(ADA, 'token.create'), [{ shown: [], counted: HIDDEN_COUNTED }, { shown: [], counted: HIDDEN_COUNTED }, { shown: [], counted: 500 }]);
+  assert.deepEqual(await walk(CI, 'sign_out'), [{ shown: [], counted: HIDDEN_COUNTED }, { shown: [], counted: HIDDEN_COUNTED }, { shown: ['token.exchange'], counted: 500 }]);
+  // Not asked: nothing counted, and the sign-in on the first page; Ada's first page is her last, and empty.
+  const service = await root.audit.list({ actor: CI, sealed: '1', limit: 50 });
+  assert.deepEqual([service.entries.map((entry) => entry.action), service.next, service.hidden], [['token.exchange'], null, undefined]);
+  const person = await root.audit.list({ actor: ADA, sealed: '1', limit: 50 });
+  assert.deepEqual([person.entries, person.next, person.hidden], [[], null, undefined]);
+});
+
+/** JSON with its objects' keys in order, as the vault writes a change's payload. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_, v: unknown) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
+}
 
 test("a token of a personal config's owner keeps to its scope's role there too: a viewer's reads their dev@me, and writes nothing", async () => {
   await ada.secrets.set('market/dev@me', { API_KEY: 'ada-own' });

@@ -148,6 +148,23 @@ test("an instance kept by 0.14, cut over by the app's door: its token serves thr
   assert.equal(await now.cutover(), null);
 });
 
+/**
+ * A role's name is a key of the roles' object, which the cutover seals as it is: a role named `issue` spells, in the
+ * roles' change, what a token's issue record does. The audit pages know an issue by how its payload starts too, so
+ * the roles' change is neither listed nor counted as one (T164, review r1 of W261).
+ */
+test("a custom role named `issue`, sealed by the cutover, is no token's issue on the audit pages: neither listed nor counted", async () => {
+  await old.root.roles.set('issue', { name: 'Issue', description: '', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] });
+  const now = deploy();
+  assert.equal(await now.cutover(), null);
+  const spelled = await db.owner.select({ actor: logChanges.actor }).from(logChanges).where(like(logChanges.payload, '%"issue":{%'));
+  assert.ok(spelled.length > 0, "the roles' change spells it");
+  const hidden = (await now.root.audit.list({ sealed: '1', hidden: '1', limit: 500 })).hidden ?? [];
+  assert.equal(hidden.find(({ action }) => action === 'token.create'), undefined);
+  const listed = (await now.root.audit.list({ sealed: '1', detail: '1', limit: 500 })).entries;
+  assert.deepEqual(listed.filter((entry) => entry.log === '0.15').map((entry) => entry.action), []);
+});
+
 test('a token whose row 0.14 would not take is vouched for by nobody: edited around the app, given a hard end, or put back over its revoke; each unsealed, refused, never served', async () => {
   await old.root.projects.create('market');
   await old.root.environments.create('market/dev');

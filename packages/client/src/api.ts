@@ -1124,6 +1124,7 @@ export type Api = {
       decision?: "allow" | "deny";
       detail?: "1" | "true";
       sealed?: "1" | "true";
+      hidden?: "1" | "true";
       before?: unknown;
       limit?: unknown;
     };

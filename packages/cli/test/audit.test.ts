@@ -82,3 +82,11 @@ test("audit names the CI run beside a service's entries, its sign-in in 0.15's l
   assert.match(lines[0]!, /service:ci-deploy \(acme\/api run 7001 at 3f2a9c1\)\s+secret\.read\s+market\/prod$/);
   assert.match(lines[1]!, /service:ci-deploy \(acme\/api run 7002 at 3f2a9c1\)\s+token\.exchange\s+-$/);
 });
+
+test("audit asks for 0.15's sealed log too, and never for the counts of what a page hides, so each page shows what it holds (T164)", async (t) => {
+  for (const args of [[], ['--detail'], ['--actor', 'service:ci']]) {
+    const listed = await audit(t, [entry(1, {})], args);
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.deepEqual([listed.queries[0]!.get('sealed'), listed.queries[0]!.has('hidden')], ['1', false], args.join(' '));
+  }
+});

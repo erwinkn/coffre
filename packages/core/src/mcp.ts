@@ -151,13 +151,17 @@ export type ClientMetadata = {
 
 const MAX_REDIRECTS = 10;
 const MAX_NAME = 100;
+/** The longest client ID URL: a token's issue or revoke through its connection names it in the vault's record, which takes no longer. */
+const MAX_CLIENT_ID = 2048;
 
 /**
  * Whether `value` is a Client ID Metadata Document's URL: HTTPS, with a
- * path, and nothing a document's address has no use for. On a loopback
- * instance, a loopback one too, for development and conformance.
+ * path, and nothing a document's address has no use for, no longer than
+ * `MAX_CLIENT_ID`. On a loopback instance, a loopback one too, for
+ * development and conformance.
  */
 export function isClientIdUrl(value: string, options: { allowLoopback: boolean }): boolean {
+  if (value.length > MAX_CLIENT_ID) return false;
   if (!value.startsWith('https://') && !(options.allowLoopback && value.startsWith('http://'))) return false;
   let url: URL;
   try {

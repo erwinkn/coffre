@@ -9,22 +9,25 @@ import {
   auditHashAt,
   auditHead,
   auditPage,
-  exchangesOf,
-  personalTokensOf,
+  isMember,
   latestCheckpoint,
   latestTallied,
+  originsOf,
   places,
   resolvePath,
-  signInPage,
+  sealedHidden,
+  sealedPage,
+  sealedReach,
   talliedAfter,
   talliedAt,
   type AuditFilter,
+  type ChangePoint,
+  type RecordedChange,
   type Signed,
-  type SignInChange,
 } from '../db/queries.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
-import type { ApiContext } from './context.ts';
+import { traceFields, type ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
@@ -34,8 +37,9 @@ export type AuditEntryView = {
   seq: number;
   /**
    * Which log holds it: 0.14's chain, or 0.15's sealed log, where a
-   * sign-in through a trust binding is a change, recorded there alone
-   * (D147), and numbered among its changes and uses.
+   * sign-in through a trust binding, and a token's issue, revoke or
+   * sign-out, is a change, recorded there alone (D147), and numbered among
+   * its changes and uses.
    */
   log: '0.14' | '0.15';
   /** Which component wrote it: the app, or the vault, which decides on keys and access. */
@@ -197,11 +201,20 @@ export type AuditQuery = {
   detail?: boolean;
   /**
    * Include what 0.15's sealed log alone records, merged by time: the
-   * sign-ins through trust bindings (D147). A client pages such a list by
-   * its `next`. Without it, 0.14's log alone, as before 0.15, which a
+   * sign-ins through trust bindings, and the tokens' issues, revokes and
+   * sign-outs, which are detail (D147). A client pages such a list by its
+   * `next`. Without it, 0.14's log alone, as before 0.15, which a
    * client that pages by the last entry's seq still pages whole.
    */
   sealed?: boolean;
+  /**
+   * With `sealed`, count what the page leaves out (`hidden`), which costs a
+   * read of each log's stretch: a page counts no more than `HIDDEN_COUNTED`
+   * of 0.15's records, and stops showing entries where it reaches the last
+   * it counts, so a caller that asks follows `next` though a page show
+   * nothing. Without `sealed`, a page counts, as before 0.15.
+   */
+  hidden?: boolean;
   /**
    * Entries older than this, for paging backwards: a page's `next`, which
    * names where it stopped in both logs and lists both (`sealed`); or a
@@ -218,20 +231,25 @@ export type AuditQuery = {
  * else: an entry about no place, such as a sign-in or a member's removal,
  * is the instance's, and theirs alone.
  *
- * Without `detail`, the page says what it left out: the detail entries the
- * same filters match in the page's stretch of the log, by action. A page's
+ * Without `detail`, the page says what it left out, `hidden` (asked for,
+ * with `sealed`): the detail entries the same filters match in the page's
+ * stretch of the log, by action. A page's
  * stretch runs from its oldest entry, or the log's first on the last page,
  * up to where it started, the head or `before`: pages tile the log, and
  * each hidden entry is counted on exactly one.
  *
- * With 0.15's log, a sign-in through a trust binding is its change alone
- * (D147): asked to (`sealed`), the page lists those too, where 0.14's
- * `token.exchange` would stand, for whoever reads the instance's entries,
- * merged by time. Each log is paged by its own order, so the page says
- * where it stopped in each: `next`, `<seq>:<at>.<change>`, `-` for a log
- * with nothing older, which the next page takes as `before`. A client
- * that does not ask pages 0.14's log by its seqs, as before 0.15: a page
- * that mixed both would leave it nothing consistent to page by.
+ * With 0.15's log, a sign-in through a trust binding, and a token's issue,
+ * revoke or sign-out, is its change alone (D147): asked to (`sealed`), the
+ * page lists those too, where 0.14's `token.exchange`, `token.create`,
+ * `token.revoke` and `sign_out` would stand, for whoever reads the
+ * instance's entries, merged by time; the last three are detail, and
+ * counted where hidden, over the page's stretch of that log too. Each log
+ * is paged by its own order, so the page says where it stopped in each:
+ * `next`, `<seq>:<at>.<change>`, or `<seq>:<at>` where it stopped at a
+ * time, `-` for a log with nothing older, which the next page takes as
+ * `before`. A client that does not ask pages 0.14's log by its seqs, as
+ * before 0.15: a page that mixed both would leave it nothing consistent to
+ * page by.
  *
  * A page holds `limit` entries, or fewer where they list more secrets than
  * a page holds (`auditPage`): `more` says whether to page back.
@@ -288,85 +306,152 @@ export async function listAudit(
   }
   const before = startOf(query.before);
   if (before.seq !== undefined && before.seq !== 'done') filter.beforeSeq = before.seq;
-  // Sign-ins are the instance's, of no place, and never refused; a service's alone.
-  const actor = filter.actors?.find((name) => name.startsWith('token:'));
-  const signIns = (query.sealed === true || typeof query.before === 'string') && filter.within === undefined && query.path === undefined
-    && query.decision !== 'deny' && (filter.actors === undefined || actor !== undefined);
+  // What 0.15's log alone records is the instance's, of no place, never refused, and some member's.
+  const recorded = (query.sealed === true || typeof query.before === 'string') && filter.within === undefined && query.path === undefined
+    && query.decision !== 'deny' && (filter.actors === undefined || filter.actors.some(isMember))
+    && before.change !== 'done';
+  const start = before.change === 'done' ? undefined : before.change;
+  const detail = query.detail === true;
+  // What it leaves out, counted: as before 0.15 without `sealed`; with it, when asked. No first-party page shows the
+  // counts, and one that does not ask reads nothing for them, and always fills with what it shows.
+  const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
 
-  const [old, sealed] = await Promise.all([
+  // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
+  const counting = recorded && counted;
+  const [old, sealed, reach] = await Promise.all([
     before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
-    signIns && before.change !== 'done' ? signInPage(ctx.db, { actor, before: before.change, limit: query.limit }) : { rows: [], more: false },
+    recorded ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit }) : { rows: [], more: false },
+    counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
   const page = merged(
     { read: old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` })), more: old.more },
-    { read: sealed.rows.map((row) => ({ at: row.at, entry: signInView(row), below: `${row.at}.${row.number}`, above: `${row.at}.${row.number + 1n}` })), more: sealed.more },
+    { read: sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row), below: { at: row.at, number: row.number } })), more: sealed.more },
     query.limit,
+    // Those of its own time, so it goes on in that log while 0.14's does; and no more than `HIDDEN_COUNTED` of them, so
+    // it shows nothing older than the last of those, and stops there (reviews r2, r3).
+    counting,
+    reach,
   );
-  const entries = await withCredentials(ctx, page.entries);
-  const result = { entries, more: page.next !== null, next: page.next };
-  if (query.detail === true) return result;
-  // The page's stretch of 0.14's log: from its oldest entry, or where the page before stopped when it shows none, to
-  // where it started; to the first entry when nothing older is left; nothing when the page before was the last of it.
-  const hidden = before.seq === 'done' ? [] : await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, page.oldStop === null ? undefined : BigInt(page.oldStop));
+  // Where it stopped at that last one, or took everything older than it, the pages after count the rest.
+  const change = reach !== null && (page.reached || page.change === null) ? reach : page.change;
+  const next = page.oldStop === null && change === null ? null : `${page.oldStop ?? '-'}:${change === null ? '-' : pointText(change)}`;
+  // How the entries' credentials came to be, read beside the counts: neither waits on the other.
+  const named = withCredentials(ctx, page.entries);
+  if (!counted) return { entries: await named, more: next !== null, next };
+  // The page's stretch of each log, from where it stopped there to where it started; to the first entry when nothing
+  // older is left; nothing when the page before was the last of it. 0.14's stops at its oldest entry shown, or where
+  // the page before stopped when it shows none; 0.15's at the time the page ended, or at its oldest sign-in when it
+  // ended on one, or past them at the last of its records it counts.
+  const [entries, ...counts] = await Promise.all([
+    named,
+    before.seq === 'done' ? [] : auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, page.oldStop === null ? undefined : BigInt(page.oldStop)),
+    recorded ? sealedHidden(ctx.db, { actors: filter.actors, from: change ?? undefined, before: start }) : [],
+  ]);
+  const hidden = new Map<string, number>();
+  for (const { action, count } of counts.flat()) hidden.set(action, (hidden.get(action) ?? 0) + count);
   // Most of what is hidden first.
-  hidden.sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0));
-  return { ...result, hidden };
+  return {
+    entries,
+    more: next !== null,
+    next,
+    hidden: [...hidden].map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0)),
+  };
 }
 
-/** A page's `next`: `<seq>:<at>.<change>`, each `-` for a log with nothing older. */
-export const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}\.-?[0-9]{1,19}|-)$/;
+/** A page's `next`: `<seq>:<at>.<change>`, or `<seq>:<at>` below a time, each `-` for a log with nothing older. */
+export const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}(?:\.-?[0-9]{1,19})?|-)$/;
 
 /**
  * Where a page starts in each log, from the newest (undefined), or past the
- * oldest (`done`): below a seq of 0.14's; below a change of 0.15's, by its
- * `at`, then its number, as sign-ins are listed.
+ * oldest (`done`): below a seq of 0.14's; below a point of 0.15's
+ * (`ChangePoint`), as its records are listed.
  */
-type Point = { seq?: bigint | 'done'; change?: { at: number; number: bigint } | 'done' };
+type Point = { seq?: bigint | 'done'; change?: ChangePoint | 'done' };
 
 /** `before` as a point: a page's `next`, or a seq of 0.14's log alone, as clients before 0.15 page. */
 function startOf(before: number | string | undefined): Point {
   if (before === undefined) return {};
   if (typeof before === 'number') return { seq: BigInt(before), change: 'done' };
   const [seq, change] = before.split(':') as [string, string];
-  const [at, number] = change.split('.') as [string, string];
-  return { seq: seq === '-' ? 'done' : BigInt(seq), change: change === '-' ? 'done' : { at: Number(at), number: BigInt(number) } };
+  const [at, number] = change.split('.') as [string, string | undefined];
+  return {
+    seq: seq === '-' ? 'done' : BigInt(seq),
+    change: change === '-' ? 'done' : { at: Number(at), ...(number === undefined ? {} : { number: BigInt(number) }) },
+  };
+}
+
+/** Which of two points of 0.15's log is newer, as its records are listed: a time alone is above every change asked at it. */
+function compare(a: ChangePoint, b: ChangePoint): number {
+  if (a.at !== b.at) return a.at < b.at ? -1 : 1;
+  if (a.number === b.number) return 0;
+  if (a.number === undefined || b.number === undefined) return a.number === undefined ? 1 : -1;
+  return a.number < b.number ? -1 : 1;
+}
+
+/** A point of 0.15's log as `next` names it: `<at>.<number>`, or `<at>` for a time. */
+function pointText(point: ChangePoint): string {
+  return point.number === undefined ? `${point.at}` : `${point.at}.${point.number}`;
 }
 
 /**
  * An entry as a log's page read it: when, by the clock its log orders by;
  * its view, or null for one no page shows; and where a page goes on from,
- * below it, or from it.
+ * below it.
  */
-type Read = { at: number; entry: AuditEntryView | null; below: string; above: string };
+type Read<P> = { at: number; entry: AuditEntryView | null; below: P };
 
 /**
  * The newest `limit` of two logs' entries, each read newest first, up to
  * `limit`, merged by time: none past what either has unread (`more`), which
- * could be newer. A row read that shows nothing is passed over, and the
- * page goes on past it. `next` names where it stopped in each, or null
- * when both are done; `oldStop` is where it stopped in 0.14's log, the seq
- * as text, or null when nothing older is left there.
+ * could be newer, and none older than `floor`, a point of 0.15's log
+ * (`reached` says it stopped there). A row read that shows nothing is
+ * passed over, and the page goes on past it. Where it stopped in each,
+ * null when nothing older is left there: `oldStop`, in 0.14's log, the seq
+ * as text, below the last taken, or, where it took none, from the first
+ * read, as the page before stopped; `change`, in 0.15's, below the last
+ * taken when the page ended on one of its, else below the time it ended
+ * at, which every one taken is newer than and every one left no newer.
+ * That rests on 0.14's entries being in time order as they are in seq
+ * order: each takes its time, the database's clock, under the log's head,
+ * as it takes its seq (`readUnderHead` in @coffre/db's log.ts). Were their
+ * times to come from elsewhere, a time could stand above a 0.15 record a
+ * page already took, and `next` would list it again (Fable).
+ * With `counting`, 0.15's goes on while 0.14's does, though it shows
+ * nothing more: the page after counts the records it hides of its own time.
  */
-function merged(old: { read: Read[]; more: boolean }, sealed: { read: Read[]; more: boolean }, limit: number) {
+function merged(
+  old: { read: (Read<string> & { above: string })[]; more: boolean },
+  sealed: { read: Read<ChangePoint>[]; more: boolean },
+  limit: number,
+  counting: boolean,
+  floor: ChangePoint | null,
+) {
   const entries: AuditEntryView[] = [];
   let [i, j] = [0, 0];
+  let last: Read<unknown> | undefined;
+  let reached = false;
   while (entries.length < limit) {
     const [a, b] = [old.read[i], sealed.read[j]];
     if ((a === undefined && old.more) || (b === undefined && sealed.more) || (a === undefined && b === undefined)) break;
-    const next = b === undefined || (a !== undefined && a.at >= b.at) ? old.read[i++]! : sealed.read[j++]!;
-    if (next.entry !== null) entries.push(next.entry);
+    const fromOld = b === undefined || (a !== undefined && a.at >= b.at);
+    // Where the page would stop, taking it: at its time, for 0.14's; below it, for 0.15's.
+    if (floor !== null && compare(fromOld ? { at: a!.at } : b!.below, floor) < 0) {
+      reached = true;
+      break;
+    }
+    last = fromOld ? old.read[i++]! : sealed.read[j++]!;
+    if (last.entry !== null) entries.push(last.entry);
   }
-  // Below the last taken of a log; or, where it took none, from the first read, as the page before stopped.
-  const stop = ({ read, more }: { read: Read[]; more: boolean }, taken: number) =>
-    taken < read.length || more ? (taken > 0 ? read[taken - 1]!.below : read[0]!.above) : null;
-  const [oldStop, change] = [stop(old, i), stop(sealed, j)];
-  return { entries, next: oldStop === null && change === null ? null : `${oldStop ?? '-'}:${change ?? '-'}`, oldStop };
+  const oldStop = i < old.read.length || old.more ? (i > 0 ? old.read[i - 1]!.below : old.read[0]!.above) : null;
+  const goesOn = j < sealed.read.length || sealed.more || (counting && oldStop !== null);
+  const change = !goesOn || last === undefined ? null : last === sealed.read[j - 1] ? sealed.read[j - 1]!.below : { at: last.at };
+  return { entries, oldStop, change, reached };
 }
 
 /**
  * What each entry was written on, when its request came in on a credential
  * it names: the run, for one a trust binding issued; the token, for a
- * personal token. One read of each for the page.
+ * personal token (`originsOf`). One read for the page.
  */
 async function withCredentials(ctx: ApiContext, entries: AuditEntryView[]): Promise<AuditEntryView[]> {
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -374,17 +459,14 @@ async function withCredentials(ctx: ApiContext, entries: AuditEntryView[]): Prom
     const id = entry.metadata.credentialId;
     return entry.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
   }))];
-  const [exchanges, tokens] = await Promise.all([exchangesOf(ctx.db, ids), personalTokensOf(ctx.db, ids)]);
+  const origins = await originsOf(ctx.db, ids);
   return entries.map((entry) => {
     if (entry.action === 'token.exchange') return { ...entry, run: { exchangeSeq: entry.seq, log: entry.log, claims: runClaims(entry.metadata.run) } };
     const id = typeof entry.metadata.credentialId === 'string' ? entry.metadata.credentialId : undefined;
-    const exchange = id === undefined ? undefined : exchanges.get(id);
-    const token = id === undefined ? undefined : tokens.get(id);
-    return {
-      ...entry,
-      ...(exchange === undefined ? {} : { run: { exchangeSeq: Number(exchange.seq), log: exchange.log, claims: runClaims(exchange.run) } }),
-      ...(token === undefined ? {} : { token: { id: id!, label: token.label } }),
-    };
+    const origin = id === undefined ? undefined : origins.get(id);
+    if (origin?.kind === 'signIn') return { ...entry, run: { exchangeSeq: Number(origin.seq), log: origin.log, claims: runClaims(origin.run) } };
+    if (origin?.kind === 'personal') return { ...entry, token: { id: id!, label: origin.label } };
+    return entry;
   });
 }
 
@@ -426,30 +508,42 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): 
 }
 
 /**
- * A sign-in 0.15's log records, as 0.14's `token.exchange` entry showed it
- * (D147): by the service, of the vault, which made it; the credential, the
- * binding, the account's generation, the issuer and the proof, the
- * credential's end, a workload's key and hard end, and the run (`run`).
- * None for a change whose payload is not a sign-in's, which only a database
- * writer could leave under the index's condition. No request: the change's
- * id is the vault's own, which names none.
+ * A change 0.15's log records in place of 0.14's entry (D147), shown as that
+ * entry showed it, of the vault, which made it, and numbered by its change:
+ *
+ * - a sign-in, `token.exchange`, by the service: the credential, the
+ *   binding, the account's generation, the issuer and the proof, the
+ *   credential's end, a workload's key and hard end, and the run (`run`);
+ * - a token's issue, `token.create`, by its issuer: its kind, the account
+ *   it acts as, its label, the credential, its end and its scope;
+ * - a revoke by request, `token.revoke`, by whoever asked: the credential,
+ *   its kind and its account;
+ * - a sign-out, `sign_out`, by the credential's own account: the
+ *   credential and its kind.
+ *
+ * The last three name whose act it was, as 0.14's entries did, from the
+ * record's trace (`traceOf`): `credentialId`, a run's credential, a
+ * personal token or an MCP connection, and through MCP its `via`. None for a change whose payload is none of these, which only a database
+ * writer could leave under the indexes' conditions. No request: the
+ * change's id is the vault's own, which names none.
  */
-function signInView(row: SignInChange): AuditEntryView | null {
-  const payload = JSON.parse(row.payload) as { ref?: { kind?: unknown; id?: unknown }; generation?: unknown; expiresAt?: unknown; signIn?: Record<string, unknown> };
-  const { ref, signIn } = payload;
-  if (ref?.kind !== 'credential' || typeof ref.id !== 'string' || typeof signIn !== 'object' || signIn === null || !row.actor.startsWith('token:')) return null;
+function sealedView(row: RecordedChange): AuditEntryView | null {
+  type Fields = Record<string, unknown>;
+  const payload = JSON.parse(row.payload) as Fields & { ref?: { kind?: unknown; id?: unknown }; signIn?: unknown; issue?: unknown; revoke?: unknown };
+  const { ref } = payload;
+  if (ref?.kind !== 'credential' || typeof ref.id !== 'string' || !isMember(row.actor)) return null;
+  const record = (value: unknown): Fields | null => (typeof value === 'object' && value !== null ? (value as Fields) : null);
   const time = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? new Date(value).toISOString() : null);
-  const workload = typeof signIn.jkt === 'string';
-  return {
+  const view = (action: string, metadata: Fields): AuditEntryView => ({
     seq: Number(row.number),
     log: '0.15',
     author: 'vault',
     occurredAt: new Date(row.at).toISOString(),
     ...actorParts(row.actor),
-    action: 'token.exchange',
+    action,
     decision: 'allow',
     reason: null,
-    detail: false,
+    detail: DETAIL.has(action),
     subject: null,
     project: null,
     environment: null,
@@ -461,7 +555,30 @@ function signInView(row: SignInChange): AuditEntryView | null {
     requestId: null,
     run: null,
     token: null,
-    metadata: {
+    metadata,
+  });
+  // Whose credential, as 0.14's entries named the account; and the credential the request came in on.
+  const account = (member: unknown): Fields => {
+    if (typeof member !== 'string' || !isMember(member)) return {};
+    const { actorType, actorId } = actorParts(member);
+    return { principalType: actorType, principalId: actorId };
+  };
+  // As 0.14's entry would, from the trace the record keeps (`traceFields`): one of another shape says nothing.
+  const traced = (trace: unknown): Fields => {
+    const { credentialId, mcp } = (record(trace) ?? {}) as { credentialId?: unknown; mcp?: unknown };
+    if (typeof credentialId !== 'string') return {};
+    const app = record(mcp);
+    const text = (value: unknown) => (typeof value === 'string' ? value : null);
+    const [connectionId, clientId, clientName] = [text(app?.connectionId), text(app?.clientId), text(app?.clientName)];
+    if (app === null || connectionId === null || clientId === null || clientName === null) return traceFields({ credentialId, mcp: null });
+    return traceFields({ credentialId, mcp: { connectionId, clientId, clientName, approvalId: text(app.approvalId) } });
+  };
+
+  const [signIn, issue, revoke] = [record(payload.signIn), record(payload.issue), record(payload.revoke)];
+  if (signIn !== null) {
+    if (!row.actor.startsWith('token:')) return null;
+    const workload = typeof signIn.jkt === 'string';
+    return view('token.exchange', {
       ...(workload ? { kind: 'workload' } : {}),
       credentialId: ref.id,
       bindingId: signIn.binding,
@@ -471,8 +588,22 @@ function signInView(row: SignInChange): AuditEntryView | null {
       expiresAt: time(payload.expiresAt),
       ...(workload ? { jkt: signIn.jkt, notAfter: time(signIn.notAfter) } : {}),
       run: signIn.run,
-    },
-  };
+    });
+  }
+  if (issue !== null) {
+    return view('token.create', {
+      kind: issue.kind,
+      ...account(payload.principal),
+      label: issue.label ?? null,
+      targetCredentialId: ref.id,
+      expiresAt: time(payload.expiresAt),
+      scope: payload.scope,
+      ...traced(issue.trace),
+    });
+  }
+  if (revoke?.reason === 'revoke') return view('token.revoke', { targetCredentialId: ref.id, kind: revoke.kind, ...account(revoke.principal), ...traced(revoke.trace) });
+  if (revoke?.reason === 'sign_out') return view('sign_out', { targetCredentialId: ref.id, kind: revoke.kind, ...traced(revoke.trace) });
+  return null;
 }
 
 /**

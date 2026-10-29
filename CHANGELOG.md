@@ -17,6 +17,24 @@
   My own dev and Archive…; in `dev@me`, Delete…. The protection tag there
   only shows it. Add secret's split button keeps its shape while its menu
   is open.
+- **0.15's token issues, revokes and sign-outs are on the audit pages,
+  behind its switch.** Under the switch the vault writes no `token.create`,
+  `token.revoke` or `sign_out` entry; its change is the record (D147). The
+  audit page's Everything, `coffre audit --detail` and `GET /api/audit?detail=1`
+  now list each where that entry stood, with what it said: who issued what
+  kind of token to whom, its label, end and scope; whose credential of what
+  kind was revoked, and by whom; which credential signed out. As in 0.14
+  they are detail: hidden unless asked for. With `sealed=1`, a page counts
+  what it leaves out (`hidden`) only when asked, `hidden=1`, which no page
+  of coffre's own does: each on the page of its own time, and no page more
+  than 1,000 of 0.15's records, so a caller that asks follows `next`
+  through pages that may show nothing. Without `sealed`, as before. A personal token's label shows again beside what it did, and
+  an issue or revoke approved through MCP names the app and the approval,
+  which the vault's records now keep. The
+  app reads them through two more partial indexes (migration 0043); a
+  page's `next` may now stop at a time, `<seq>:<at>`. A binding's end,
+  which revokes its credentials, still logs only its `token.unbind`, as in
+  0.14. `docs/design/0.15-plan.md`, "As built: T164".
 - **0.15's sign-ins through trust bindings are on the audit pages, behind
   its switch.** Under the switch a sign-in writes no `token.exchange`
   entry; its change is the record (D147). The audit page, a service's

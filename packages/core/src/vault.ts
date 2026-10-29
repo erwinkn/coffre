@@ -668,11 +668,26 @@ export type SignInOutcome =
   | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null };
 
 /** A token the vault issues (`Vault.issueToken`). Times in ms since the epoch, bytes in base64. */
+/**
+ * What the app's entry would name a request by, which a change's record
+ * keeps for the audit pages where 0.14's entry stood (D147, T164): the
+ * credential or MCP connection whose act it was, as an entry's
+ * `credentialId` (a run's credential, a personal token, an app connected
+ * through MCP); and, through MCP, the app and the approval, as its `via`.
+ * The app's word, which the vault records and never weighs.
+ */
+export type RequestTrace = {
+  credentialId: string;
+  mcp: { connectionId: string; clientId: string; clientName: string; approvalId: string | null } | null;
+};
+
 export type IssueTokenInput = {
   /** Who issues it, `user:…` or `token:…`: the request's caller. */
   actor: string;
   /** The credential the request came in on, by id; null for none (a request the app made itself). */
   via: string | null;
+  /** Whose act it was, for its change's record (`RequestTrace`); none for a request on no such credential. */
+  trace?: RequestTrace | null;
   /** Whom it acts as: a service account's `token:<id>`, or the actor, for a personal token or a handle. */
   principal: string;
   /** The principal's generation it is issued at. */
@@ -736,8 +751,10 @@ export type RevokeCredentialInput = {
   revokedBy: string;
   /** Why, for its change's record: a revoke, or its holder's sign-out. */
   reason: 'revoke' | 'sign_out';
-  /** The credential the request came in on, for its change's record: whose act it was (a run's, say). */
+  /** The credential the request came in on, for its change's record. */
   via: string | null;
+  /** Whose act it was, for its change's record (`RequestTrace`); none for a request on no such credential. */
+  trace?: RequestTrace | null;
   /**
    * The policy the caller's right to revoke it was weighed on, held to under
    * the fence (as `policyStill` holds a write to it under 0.14's head): the

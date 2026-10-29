@@ -22,7 +22,7 @@ import {
   type ServiceSetting,
 } from '@coffre/core/access';
 import { EXCHANGED_CREDENTIAL_MS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
-import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
+import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
@@ -221,12 +221,12 @@ function isRun(run: unknown): run is Record<string, string | number> {
  * log never held is revoked with no change, as `prepare` leaves one.
  */
 export async function revokeCredential(db: Database, keys: ChangeKeys, at: number, input: RevokeCredentialInput): Promise<Answer> {
-  const { actor, before, authMacFrom, authMac, revokedAt, revokedBy, reason, via, policy } = input ?? ({} as RevokeCredentialInput);
+  const { actor, before, authMacFrom, authMac, revokedAt, revokedBy, reason, via, trace, policy } = input ?? ({} as RevokeCredentialInput);
   const columns = before?.columns;
   if (typeof actor !== 'string' || actor.length === 0 || typeof columns?.id !== 'string' || typeof columns.principal !== 'string' || columns.revoked !== false
     || !isBase64(before.seal, 16) || !isBase64(authMacFrom, 32) || !isBase64(authMac, 32)
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || (reason !== 'revoke' && reason !== 'sign_out')
-    || (via !== null && typeof via !== 'string') || !isPolicy(policy)) {
+    || (via !== null && typeof via !== 'string') || !isTrace(trace) || !isPolicy(policy)) {
     throw new Error('a revoke names the credential as read, live, its seal, the app\'s MACs before and after, and the policy it was weighed on');
   }
   const ref: Ref = { kind: 'credential', id: columns.id };
@@ -235,8 +235,9 @@ export async function revokeCredential(db: Database, keys: ChangeKeys, at: numbe
   if (!sealed(keys.seals, ref, now, sealFrom)) throw new NotLogged(ref, 'tampered');
   const after = applyOp(now, ref, { op: 'credential.revoke' })!;
   const seal = sealOf(keys.seals[0]!, ref, after);
-  // What a revoke's record says besides (D147): why, the credential the request came in on, and whose credential of what kind it ends.
-  const payload = canonical({ ...JSON.parse(payloadOf(ref, { op: 'credential.revoke' })), revoke: { reason, via, kind: columns.kind, principal: columns.principal } });
+  // What a revoke's record says besides (D147): why, the credential the request came in on, whose act it was (T164), and
+  // whose credential of what kind it ends.
+  const payload = canonical({ ...JSON.parse(payloadOf(ref, { op: 'credential.revoke' })), revoke: { reason, via, trace: trace ?? undefined, kind: columns.kind, principal: columns.principal } });
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
   const call: RevokeCall = {
     ref, macFrom: Buffer.from(authMacFrom, 'base64'), mac: Buffer.from(authMac, 'base64'), revokedAt, revokedBy, policy,
@@ -296,7 +297,8 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
   if (typeof actor !== 'string' || !member.test(actor) || typeof principal !== 'string' || !member.test(principal) || !Number.isInteger(generation)
     || (via !== null && (typeof via !== 'string' || !UUID.test(via))) || !isPolicy(policy)
-    || (input.actorAccess !== null && (typeof input.actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(input.actorAccess))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)) {
+    || (input.actorAccess !== null && (typeof input.actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(input.actorAccess))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
+    || !isTrace(input.trace)) {
     throw new Error('an issue names its issuer, the credential it came in on, whom it acts as at which generation, the policy weighed, and the app\'s key');
   }
   if (typeof c?.id !== 'string' || !UUID.test(c.id) || (c.kind !== 'service' && c.kind !== 'personal' && c.kind !== 'handle') || !isBase64(c.tokenHash, 32)
@@ -312,6 +314,17 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A request's trace as the app names it (`RequestTrace`), or none: recorded, never weighed, so held to its shape alone. */
+function isTrace(trace: unknown): trace is RequestTrace | null | undefined {
+  if (trace === null || trace === undefined) return true;
+  const { credentialId, mcp } = trace as { credentialId?: unknown; mcp?: unknown };
+  const text = (value: unknown, longest: number) => typeof value === 'string' && value.length > 0 && value.length <= longest;
+  if (!text(credentialId, 100)) return false;
+  if (mcp === null) return true;
+  const { connectionId, clientId, clientName, approvalId } = (mcp ?? {}) as Record<string, unknown>;
+  return text(connectionId, 100) && text(clientId, 2048) && text(clientName, 1000) && (approvalId === null || text(approvalId, 100));
+}
 
 /**
  * How far past its longest a token's end may be: the app sets it by its own
@@ -449,8 +462,9 @@ export function issueCall(keys: ChangeKeys, input: IssueTokenInput, read: IssueR
   const ref: Ref = { kind: 'credential', id: c.id };
   const object = credentialObject({ id: c.id, principal: input.principal, kind: c.kind, scope: c.scope, revoked: false, expiresAt: c.expiresAt, generation: input.generation });
   const op: Op = { op: 'credential.issue', principal: input.principal, caller: object.caller, scope: object.scope, expiresAt: object.expiresAt, generation: object.generation };
-  // What the change records of the issue besides (D147): who, on which credential, which kind, its label.
-  const payload = canonical({ ...JSON.parse(payloadOf(ref, op)), issue: { by: input.actor, via: input.via, kind: c.kind, label: c.label } });
+  // What the change records of the issue besides (D147): who, on which credential, whose act it was (T164), which kind,
+  // its label.
+  const payload = canonical({ ...JSON.parse(payloadOf(ref, op)), issue: { by: input.actor, via: input.via, trace: input.trace ?? undefined, kind: c.kind, label: c.label } });
   const seal = sealOf(keys.seals[0]!, ref, object);
   const row = { at: read.at, requestId: randomUUID(), object: objectKey(ref), actor: input.actor, payload, seal };
   return {

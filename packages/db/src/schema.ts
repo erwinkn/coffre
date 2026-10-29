@@ -19,6 +19,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import { ACTIVE_SUBJECT } from './active-subject.ts';
+import { recorded } from './change-records.ts';
 
 const bytea = customType<{ data: Buffer }>({
   dataType: () => 'bytea',
@@ -1017,7 +1018,8 @@ export const logConfig = pgTable(
  * vault's, HMAC-SHA256 cut to 16 bytes, over everything but the number,
  * which the vault does not know when it asks. The vault login reads them,
  * and the app's reads the changes too, for the audit pages: a sign-in
- * through a trust binding is recorded there alone (D147, T156).
+ * through a trust binding, and the vault's token issues, revokes and
+ * sign-outs, are recorded there alone (D147, T156, T164).
  */
 export const logChanges = pgTable(
   'log_changes',
@@ -1042,9 +1044,16 @@ export const logChanges = pgTable(
     index('log_changes_object_idx').on(table.object, table.number),
     // The sign-ins through trust bindings, newest first by when the vault asked (`at`; its number comes later, after
     // any wait), every service's and one's: what the audit pages list where 0.14's `token.exchange` stood (T156). Only
-    // a sign-in's payload holds a `signIn` object; `SIGNED_IN` repeats it.
-    index('log_changes_sign_in_idx').on(table.at, table.number).where(sql`strpos(${table.payload}, '"signIn":{') > 0`),
-    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(sql`strpos(${table.payload}, '"signIn":{') > 0`),
+    // a sign-in's payload holds a `signIn` object (change-records.ts, which the reads repeat).
+    index('log_changes_sign_in_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'signIn')),
+    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'signIn')),
+    // The vault's token issues, revokes and sign-outs, ordered as the sign-ins, every member's and one's: what the audit
+    // pages list where 0.14's `token.create`, `token.revoke` and `sign_out` stood, and count while they hide them (T164).
+    // Only an issue's payload, by how it starts, holds an `issue` record, and only a revoke's these reasons
+    // (change-records.ts). A binding's end revokes its credentials with the reason `unbound`, of which 0.14 logged
+    // none: left out.
+    index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'issue', 'revoke', 'signOut')),
+    index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'issue', 'revoke', 'signOut')),
   ],
 );
 
