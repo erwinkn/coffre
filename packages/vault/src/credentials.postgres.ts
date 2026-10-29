@@ -60,6 +60,7 @@ export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promis
     ${m !== null}::boolean, ${c.principal}::text, ${b?.generation ?? null}::integer, ${r?.principal.accessSeq.toString() ?? null}::bigint,
     ${r?.actor.generation ?? null}::integer, ${r?.actor.accessSeq.toString() ?? null}::bigint,
     ${m?.via ?? null}::uuid, ${r?.via?.seal ?? null}::bytea, ${r?.via?.columns.expiresAt == null ? null : String(r.via.columns.expiresAt)}::bigint,
+    ${m?.connection?.id ?? null}::uuid, ${m?.connection?.generation ?? null}::integer,
     ${c.policy.seq}::bigint, ${array(c.policy.slugs.map(({ environmentId }) => environmentId))}::uuid[], ${array(c.policy.slugs.map(({ slug }) => slug))}::text[], ${c.appKey}::text,
     ${MAX_BINDINGS}::integer, ${c.live === null ? null : array(c.live)}::uuid[], ${array(c.reads.map((read) => read.id))}::uuid[], ${array(c.reads.map((read) => read.key))}::text[],
     ${b?.id ?? null}::uuid, ${m?.authMac ?? null}::bytea, ${b?.profile ?? null}::text, ${b?.issuer ?? null}::text, ${b?.jwksUri ?? null}::text, ${b?.jwks ?? null}::text,

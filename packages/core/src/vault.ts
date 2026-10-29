@@ -526,6 +526,8 @@ export type ChangeBindingsInput = {
   via: string | null;
   /** The issuer's access as the app weighed the scope on (`access_seq`), decimal; null when it weighed none. */
   actorAccess: string | null;
+  /** The MCP connection the request came through, at the caller's generation, held to still connected; null for none. */
+  connection: { id: string; generation: number } | null;
   /** The binding it makes; null for an unbind. Its account at its generation, as its columns name them. */
   make: MadeBinding | null;
   /** With a binding made, the account's live bindings as the app read them, by id, which it was weighed beside; else null. */

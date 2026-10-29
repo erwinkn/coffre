@@ -468,7 +468,7 @@ export type BindingsCall = {
   actor: string;
   principal: string;
   /** The binding made, its seal; and its maker's standing as read (`IssueRead`): null for an unbind. */
-  make: { row: MadeBinding; authMac: Buffer; seal: Buffer; read: IssueRead; via: string | null } | null;
+  make: { row: MadeBinding; authMac: Buffer; seal: Buffer; read: IssueRead; via: string | null; connection: ChangeBindingsInput['connection'] } | null;
   /** A binding with no seal (`sealFrom` null) is ended with no change, its `seal` null. */
   ends: { id: string; macFrom: Buffer; sealFrom: Buffer | null; authMac: Buffer; seal: Buffer | null }[];
   /** A credential with no seal (`sealFrom` null) is ended with no change, its `seal` null. */
@@ -493,7 +493,8 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || !isPolicy(policy) || policy === null
     || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
     || (make === null) !== (live === null) || (live !== null && (!Array.isArray(live) || !live.every((id) => typeof id === 'string' && UUID.test(id))))
-    || !Array.isArray(reads) || !reads.every((read) => typeof read?.id === 'string' && UUID.test(read.id) && typeof read.key === 'string')) {
+    || !Array.isArray(reads) || !reads.every((read) => typeof read?.id === 'string' && UUID.test(read.id) && typeof read.key === 'string')
+    || (input.connection !== null && (typeof input.connection?.id !== 'string' || !UUID.test(input.connection.id) || !Number.isInteger(input.connection.generation)))) {
     throw new Error('a change of bindings names who makes it, on what, the binding it makes and those beside it, those it ends, why, when, the policy weighed, and the app\'s key');
   }
   // Each object once: a binding or a credential named twice would be two changes of it, the second one the replay refuses.
@@ -546,7 +547,7 @@ export function bindingsCall(
     const seal = sealOf(keys.seals[0]!, ref, value);
     // What the change records besides (D147): who made it, on which credential, its label, and those it replaces.
     change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.make', value })), bind: { by: actor, via: input.via, label: make.label, replaces: ends.map((end) => end.before.columns.id) } }), seal);
-    made = { row: make, authMac: Buffer.from(make.authMac, 'base64'), seal, read: read!, via: input.via };
+    made = { row: make, authMac: Buffer.from(make.authMac, 'base64'), seal, read: read!, via: input.via, connection: input.connection };
   }
   const ended: BindingsCall['ends'] = [];
   const swept: BindingsCall['credentials'] = [];

@@ -132,7 +132,7 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
 
 /** `change_bindings` on SQLite, step for step, in one transaction: SQLite runs one writer at a time. */
 export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<Answer> {
-  const { auditLog, credentials, environments, logChanges, projects, secrets, serviceBindings, vaultMembers } = tablesOf(tx);
+  const { auditLog, credentials, environments, logChanges, mcpConnections, projects, secrets, serviceBindings, vaultMembers } = tablesOf(tx);
   const now = Date.now();
   const newest = async (ref: Parameters<typeof objectKey>[0]) =>
     (await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey(ref))).orderBy(desc(logChanges.number)).limit(1))[0]?.seal ?? null;
@@ -154,6 +154,13 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
         return { state: 'ended' };
       }
     }
+    // The MCP connection it came through, still connected; an id the log holds already, no binding to make (review r3).
+    if (m.connection !== null) {
+      const [connection] = await tx.select({ revokedAt: mcpConnections.revokedAt, generation: mcpConnections.generation }).from(mcpConnections).where(eq(mcpConnections.id, m.connection.id));
+      if (connection === undefined || connection.revokedAt !== null || connection.generation !== m.connection.generation) return { state: 'ended' };
+    }
+    const [made] = await tx.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: m.row.id }))).limit(1);
+    if (made !== undefined) return { state: 'stale' };
   }
   // The account's live bindings as the app read them, at most `MAX_BINDINGS` besides those it ends; the keys it reads by their names.
   if (m !== null) {

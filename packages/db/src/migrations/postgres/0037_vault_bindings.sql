@@ -107,14 +107,14 @@ $$;
 -- Locks, in the order every writer takes them:
 -- 1. the account's row, its update lock (two binds take turns over its count), then the maker's, shared (IssuerLocked);
 -- 2. the credential it came in on, shared;
--- 3. the bindings it ends and their credentials, exclusive (BindingLocked: a sign-in through one waits, or is seen); the keys a binding it makes reads, shared;
+-- 3. the MCP connection a bind came through, shared; the bindings it ends and their credentials, exclusive (BindingLocked: a sign-in through one waits, or is seen);
 -- 4. the issue lock, shared (IssuePolicyHeld, IssueOffFence);
 -- 5. when it ends any, the fence, exclusive (RevokeTakesFence), after the issue lock (PolicyIssueFirst).
 -- No 0.14 head and no 0.14 entry: its changes record it (D147).
 CREATE FUNCTION change_bindings(
     p_at bigint, p_actor text,
     p_make boolean, p_principal text, p_generation integer, p_principal_seq bigint, p_actor_generation integer, p_actor_seq bigint,
-    p_via uuid, p_via_seal bytea, p_via_end bigint,
+    p_via uuid, p_via_seal bytea, p_via_end bigint, p_connection uuid, p_connection_generation integer,
     p_policy_seq bigint, p_protected uuid[], p_slugs text[], p_app_key text, p_max integer,
     p_live uuid[], p_read_keys uuid[], p_read_names text[],
     p_id uuid, p_auth_mac bytea, p_profile text, p_issuer text, p_jwks_uri text, p_jwks text, p_claims text, p_scope text, p_policy text,
@@ -159,6 +159,16 @@ BEGIN
                 RETURN json_build_object('state', 'ended');
             END IF;
         END IF;
+        -- The MCP connection it came through, still connected at the caller's generation (as `credentialStill`): shared,
+        -- so a disconnect waits for this, or is seen (review r3).
+        IF p_connection IS NOT NULL THEN
+            PERFORM 1 FROM public.mcp_connections k WHERE k.id = p_connection AND k.revoked_at IS NULL AND k.generation = p_connection_generation FOR SHARE;
+            IF NOT FOUND THEN RETURN json_build_object('state', 'ended'); END IF;
+        END IF;
+        -- An id the log holds already is no binding to make, even once its row is gone: its object stands (review r3).
+        IF EXISTS (SELECT 1 FROM public.log_changes l WHERE l.object = public.log_object('binding', p_id::text)) THEN
+            RETURN json_build_object('state', 'stale');
+        END IF;
     END IF;
     -- The bindings it ends, then the credentials they issued: each row locked, by id, then held to its MAC and seal as
     -- read. Every live credential they issued must be named, so one that a sign-in made meanwhile is read again (`moved`),
@@ -192,8 +202,9 @@ BEGIN
         IF cardinality(p_live) - (SELECT count(*) FROM unnest(p_live) AS l WHERE l = ANY(p_ends)) >= p_max THEN
             RETURN json_build_object('state', 'full');
         END IF;
-        -- The keys its policy reads, by the names they were asked by: held, and still those names (a rename meanwhile names another).
-        PERFORM 1 FROM public.secrets x WHERE x.id = ANY(p_read_keys) ORDER BY x.id FOR SHARE;
+        -- The keys its policy reads, by the names they were asked by: still those names (a rename meanwhile names another).
+        -- Compared, not locked: a key's writer takes the fence before its row (an end of its reference), so a share lock
+        -- here, held into this statement's fence, would be a cycle (review r3).
         IF (SELECT count(*) FROM unnest(p_read_keys, p_read_names) AS r(id, name) JOIN public.secrets x ON x.id = r.id AND x.key = r.name) <> cardinality(p_read_keys) THEN
             RETURN json_build_object('state', 'moved');
         END IF;
@@ -249,6 +260,6 @@ REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, tex
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, text, text, text, text, bytea, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) TO coffre_vault;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, uuid, integer, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, uuid, integer, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) TO coffre_vault;

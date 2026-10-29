@@ -1123,6 +1123,29 @@ test("with 0.15's log, a binding made on the issuer while keys are replaced is n
   await assert.rejects(replaceKeys([rsa, ec]), { status: 409, message: /changed while their keys were replaced/ });
 });
 
+test("with 0.15's log, a replacement of keys that stopped part way is finished by asking again with the same keys (PR 3a, review r3)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
+}, async (t) => {
+  const first = await bindCluster([rsa]);
+  const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
+  assert.ok('binding' in first && 'binding' in other);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  // The vault busy for the second binding's change: the first done, the request answers 503.
+  const busy = t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    calls += 1;
+    return calls === 2 ? { ok: false as const, refused: 'busy' as const } : change(input);
+  });
+  await assert.rejects(replaceKeys([rsa, ec]), { status: 503 });
+  busy.mock.restore();
+  const done = await replaceKeys([rsa, ec]);
+  assert.ok('bindings' in done);
+  assert.deepEqual(done.replaced, [other.binding.id], 'what the first left');
+  const live = (await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer);
+  assert.equal(live.length, 2);
+  assert.ok(live.every((row) => row.jwks !== null && row.jwksUri !== first.binding.jwksUri), 'both on the new keys');
+});
+
 test("replacing an issuer's keys replaces each binding on it, the same but for them; a set of old and new takes both while it rotates", async () => {
   const first = await bindCluster([rsa]);
   const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });

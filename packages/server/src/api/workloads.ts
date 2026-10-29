@@ -835,13 +835,15 @@ export class WorkloadService {
       if (await vaultBinds(this.#deps.vault)) {
         const bindings: BindingView[] = [];
         const now = Date.now();
-        for (const [i, planned] of replaced.entries()) {
+        // Those not yet on the new keys: a request again after one that stopped part way finishes what it left (review r3).
+        const unfinished = replaced.filter((row) => row.jwksUri !== jwksUri);
+        for (const [i, planned] of unfinished.entries()) {
           bindings.push(await retrying(async () => {
             const live = await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation);
             // Those on the issuer with other keys are those planned and not yet done: one made or ended meanwhile is no
             // part of this replacement, as 0.14's transaction held the whole set (review r2).
             const pending = live.filter((row) => row.issuer === input.issuer && row.jwksUri !== jwksUri).map((row) => row.id);
-            if (pending.join() !== replaced.slice(i).map((row) => row.id).join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
+            if (pending.join() !== unfinished.slice(i).map((row) => row.id).join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
             const old = live.find((row) => row.id === planned.id)!;
             const { scope, byPath } = scopes.get(old.id)!;
             const row = {
@@ -862,7 +864,7 @@ export class WorkloadService {
             return view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, shown(old.policy));
           }));
         }
-        return { bindings, replaced: plan.replaces };
+        return { bindings, replaced: unfinished.map((row) => row.id) };
       }
 
       return retrying(async () => {
@@ -1081,6 +1083,8 @@ export class WorkloadService {
     const action = make === null ? 'token.unbind' : 'token.bind';
     const outcome = await vault.changeBindings!({
       actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
+      // Through an MCP connection, held to it as `credentialStill` holds a write to it (review r3).
+      connection: ctx.via?.connectionId == null ? null : { id: ctx.via.connectionId, generation: ctx.caller.generation },
       make: make === null ? null : madeBinding(chainKey, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
       // The account's live bindings it was weighed beside, but those 0.14 made and ended just now; the keys it reads, by name.
       live: make === null ? null : (beside?.live ?? []).map((row) => row.id),

@@ -70,7 +70,7 @@ function binding(w: World, sensitive = false, by = ROOT): MadeBinding {
 /** A change as the app asks it; with a binding made, beside the account's live bindings `live` (none unless named). */
 function change(input: Partial<ChangeBindingsInput>): ChangeBindingsInput {
   return {
-    actor: ROOT, via: null, actorAccess: null, make: null, ends: [], reason: 'unbound', revokedAt: Date.now(), revokedBy: 'root@acme.example',
+    actor: ROOT, via: null, actorAccess: null, connection: null, make: null, ends: [], reason: 'unbound', revokedAt: Date.now(), revokedBy: 'root@acme.example',
     policy: { seq: null, protected: [] }, appKey: APP_KEY, reads: [], ...input,
     live: input.live ?? (input.make == null ? null : []),
   };
@@ -330,4 +330,24 @@ test("a binding 0.14 made is ended by the vault with no change; one of the log's
   await db.owner.update(serviceBindings).set({ seal: null }).where(eq(serviceBindings.id, made.id));
   assert.deepEqual(await w.vault.changeBindings!(change({ ends: [await ending(made.id)] })), { ok: false, refused: 'stale' });
   assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make']);
+});
+
+test("a bind through an MCP connection goes ahead only while it is connected; an id the log holds already is no binding to make, its row deleted or not (review r3)", async () => {
+  const w = await world();
+  const { mcpConnections, oauthClients, serviceBindings } = tablesOf(db.owner);
+  const client = randomUUID();
+  await db.owner.insert(oauthClients).values({ id: client, name: 'agent', redirectUris: '[]', authMac: randomBytes(32) } as never);
+  const connection = randomUUID();
+  await db.owner.insert(mcpConnections).values({
+    id: connection, authMac: randomBytes(32), principal: ROOT, generation: 0, clientId: client, clientName: 'agent', registration: 'dcr', scopes: '[]',
+    redirectUri: 'https://agent.example/cb', expiresAt: new Date(Date.now() + 3_600_000), revokedAt: new Date(),
+  } as never);
+  assert.deepEqual(await w.vault.changeBindings!(change({ make: binding(w), connection: { id: connection, generation: 0 }, reason: 'replaced' })), { ok: false, refused: 'ended' });
+  await db.owner.update(mcpConnections).set({ revokedAt: null }).where(eq(mcpConnections.id, connection));
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, connection: { id: connection, generation: 0 }, reason: 'replaced' }))).ok, 'connected, it goes');
+  // Made, ended, its row deleted around the vault: made again under the same id, it would be a second make the replay refuses.
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  await db.owner.delete(serviceBindings).where(eq(serviceBindings.id, made.id));
+  assert.deepEqual(await w.vault.changeBindings!(change({ make: { ...binding(w), id: made.id }, reason: 'replaced' })), { ok: false, refused: 'stale' });
 });
