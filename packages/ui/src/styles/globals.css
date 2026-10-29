@@ -5463,25 +5463,10 @@ a.menu-item:hover {
 }
 
 /* ========================================================================== */
-/* An environment's Proxy tab (a prototype, W260): three variants             */
+/* An environment's Proxy tab (a prototype, W260): a list and a panel          */
 /* ========================================================================== */
 
-/* The tabs, and the variant they show at their end. */
-.proxy-tabs {
-  position: relative;
-}
-
-.proxy-tabs .tabs {
-  max-width: none;
-}
-
-.proxy-variants {
-  position: absolute;
-  top: 0;
-  right: 0;
-}
-
-/* A key a template sends: its name as a chip, apart from the template's text. */
+/* A key named where a value goes: its name as a chip. */
 .proxy-key {
   display: inline-flex;
   align-items: center;
@@ -5507,20 +5492,8 @@ a.menu-item:hover {
   text-decoration: line-through;
 }
 
-.proxy-template {
-  display: inline-flex;
-  flex-shrink: 1;
-  align-items: center;
-  gap: 0.375rem;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 0.8125rem;
-  white-space: nowrap;
-}
-
 .proxy-how {
   color: var(--ink-3);
-  font-size: 0.8125rem;
   white-space: nowrap;
 }
 
@@ -5528,24 +5501,32 @@ a.menu-item:hover {
   color: var(--red);
 }
 
-/* Defined in code, or shadowed by it: a glyph beside the name, its note behind it. */
-.proxy-mark {
-  display: inline-flex;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--ink-3);
-  cursor: help;
+/* An item's kind, the list's first column. */
+.tag.proxy-kind {
+  justify-content: center;
+  min-width: 4.25rem;
+  height: 1.25rem;
+  font-size: 0.6875rem;
 }
 
-.proxy-mark-warn {
+.proxy-kind-route {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.proxy-kind-signer {
+  background: var(--violet-wash);
+  color: var(--violet);
+}
+
+.proxy-kind-verifier {
+  background: var(--green-wash);
+  color: var(--green);
+}
+
+.proxy-kind-tunnel {
+  background: var(--amber-wash);
   color: var(--amber);
-}
-
-.proxy-shadowed td:not(.col-actions) > *,
-.proxy-shadowed .proxy-code,
-.proxy-list-row.proxy-shadowed > :not(.proxy-list-marks) {
-  opacity: 0.5;
 }
 
 /* Fields with their controls folded in ----------------------------------------------------- */
@@ -5555,7 +5536,7 @@ a.menu-item:hover {
   flex: 1 1 auto;
   align-items: center;
   min-width: 0;
-  height: 1.875rem;
+  height: 2rem;
   border: 1px solid var(--edge);
   border-radius: var(--radius);
   background: var(--panel);
@@ -5576,10 +5557,6 @@ a.menu-item:hover {
 
 .fold.is-short {
   flex: none;
-}
-
-.fold.is-disabled {
-  background: var(--subtle);
 }
 
 .fold-input,
@@ -5612,33 +5589,31 @@ a.menu-item:hover {
   color: var(--ink-3);
 }
 
-.fold-input:disabled,
-.fold-select:disabled {
-  color: var(--ink-3);
-}
-
-/* Selects, names and numbers as wide as what they hold. */
+/* Selects, names and short fields as wide as what they hold. */
 .fold-select,
 .fold-name,
-.fold-short,
-.fold-number {
+.fold-short {
   field-sizing: content;
 }
 
 .fold-select {
   flex: none;
-  max-width: 11rem;
+  max-width: 14rem;
   color: var(--ink-2);
   cursor: pointer;
 }
 
-/* The control a field starts with, set apart from what follows by a rule. */
+/* The control a field starts with, or ends with, set apart from the rest by a rule. */
 .fold-lead {
   border-right: 1px solid var(--border);
 }
 
-.fold-select:last-child:not(.fold-lead) {
+.fold-end {
   border-left: 1px solid var(--border);
+}
+
+.fold.is-short .fold-end {
+  border-left: 0;
 }
 
 .fold-menu {
@@ -5657,81 +5632,485 @@ a.menu-item:hover {
   font-size: 0.75rem;
 }
 
-.fold-text + .fold-input {
+.fold-text + .fold-input,
+.fold-text + .tpl .tpl-input,
+.fold-text + .tpl .tpl-mirror {
   padding-left: 0.125rem;
 }
 
 .fold-name {
   flex: none;
+  min-width: 3rem;
 }
 
 .fold-short {
-  flex: 0 1 5.5rem;
-}
-
-.fold-number {
   flex: none;
-  min-width: 1.5rem;
-  padding-right: 0.125rem;
-  text-align: right;
+  min-width: 2.5rem;
 }
 
-.fold-name {
-  min-width: 4rem;
+/* Inert where nothing may change: a locked or read-only field takes no
+   pointer, no caret and no focus ring, and its text reads as text. */
+.proxy-sheet-grid:disabled .fold,
+.fold:has(> :disabled:only-child),
+.fold:not(:has(:enabled)) {
+  border-color: var(--border);
+  background: var(--subtle);
+  box-shadow: none;
 }
 
-/* The compact lead's popover: the kind, the name and the placeholder, each a field. */
-.proxy-popover {
+.proxy-sheet :is(input, select, button.fold-select):disabled {
+  opacity: 1;
+  color: var(--ink-2);
+  cursor: default;
+  caret-color: transparent;
+}
+
+.proxy-sheet .input:disabled,
+.proxy-sheet .select:disabled {
+  border-color: var(--border);
+  background: var(--subtle);
+}
+
+.proxy-sheet .select:disabled {
+  background-image: none;
+}
+
+.proxy-sheet .fold-select:disabled {
+  appearance: none;
+}
+
+/* A template's input: its text drawn by the mirror under it, each {KEY} marked. */
+.tpl {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: 26rem;
-  padding: 0.5rem;
+  flex: 1 1 6rem;
+  align-self: stretch;
+  min-width: 0;
 }
 
-.fold-button {
-  display: inline-flex;
-  flex: none;
+.tpl-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.tpl-mirror,
+.tpl-input {
+  padding: 0 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+}
+
+.tpl-mirror {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 1.75rem;
   height: 100%;
-  border: 0;
-  border-left: 1px solid var(--border);
-  background: transparent;
-  color: var(--ink-3);
-  cursor: pointer;
+  white-space: pre;
+  color: var(--ink);
 }
 
-.fold-button:hover {
+.tpl-input {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  color: transparent;
+  caret-color: var(--ink);
+}
+
+.tpl-input::selection {
+  background: color-mix(in oklab, var(--accent) 25%, transparent);
+}
+
+.proxy-sheet .tpl-input:disabled {
+  color: transparent;
+}
+
+.tpl-placeholder {
+  color: var(--ink-3);
+}
+
+.tpl-key {
+  border-radius: 2px;
+  background: var(--accent-wash);
   color: var(--accent);
 }
 
-/* What is wrong with a row, under its line. */
-.proxy-notes {
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
+.tpl-locked {
+  border-radius: 2px;
+  background: var(--amber-wash);
+  color: var(--amber);
 }
 
+.tpl-missing {
+  border-radius: 2px;
+  background: var(--red-wash);
+  color: var(--red);
+  text-decoration: underline wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+/* What typing { offers: the environment's keys, under the field. */
+.tpl-options {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 0.375rem);
+  left: 0;
+  min-width: 16rem;
+  margin: 0;
+  list-style: none;
+}
+
+.tpl-options .menu-item {
+  cursor: pointer;
+}
+
+.tpl-options .menu-item.is-active {
+  background: var(--subtle);
+}
+
+.tpl-options .menu-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+  color: var(--amber);
+}
+
+/* Notes under a field. */
 .proxy-note {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.375rem;
   margin: 0;
   color: var(--amber);
   font-size: 0.8125rem;
 }
 
+.proxy-note svg {
+  flex: none;
+  margin-top: 0.2rem;
+}
+
 .proxy-note-error {
   color: var(--red);
 }
 
-/* The bar, for the whole page: under the variant, sticking to the window's foot. */
+/* The bar, for the whole page: under the panel, sticking to the window's foot. */
 .pending-bar.proxy-bar {
   margin-top: 0.75rem;
   border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--border));
   border-radius: var(--radius-lg);
+}
+
+/* The list and the panel ---------------------------------------------------------------------------- */
+
+.proxy-split {
+  display: grid;
+  grid-template-columns: minmax(18rem, 26rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.proxy-split > .card {
+  margin: 0;
+}
+
+.proxy-list ul {
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+}
+
+.proxy-list-row {
+  display: grid;
+  grid-template-columns: auto 8.25rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.625rem;
+  width: 100%;
+  padding: 0.4375rem 0.5rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.proxy-list-row:hover {
+  background: var(--subtle);
+}
+
+.proxy-list-row.is-current {
+  background: var(--nav-current);
+}
+
+.proxy-list-row.is-leaving .proxy-list-name {
+  color: var(--red);
+  text-decoration: line-through;
+}
+
+.proxy-list-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-list-target {
+  overflow: hidden;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-list-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0.75rem;
+  color: var(--ink-3);
+}
+
+.proxy-list-marks .dot {
+  background: var(--accent);
+}
+
+.proxy-list-marks .dot-red {
+  background: var(--red);
+}
+
+.proxy-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.proxy-sheet.is-leaving {
+  background: var(--red-wash);
+}
+
+.proxy-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.proxy-sheet-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.proxy-sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.proxy-sheet-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.proxy-line {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.proxy-line-label {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  font-weight: 550;
+}
+
+.proxy-line-label .tag {
+  height: 1.125rem;
+  padding: 0 0.3rem;
+  font-size: 0.6875rem;
+}
+
+.proxy-line-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.proxy-line-field > .fold {
+  flex: none;
+}
+
+.proxy-line-field > .fold.is-short {
+  align-self: flex-start;
+}
+
+/* A field of several entries, each its own line, with its remove at its end. */
+.proxy-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.proxy-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.proxy-row > .proxy-note {
+  grid-column: 1 / -1;
+}
+
+.proxy-row > .fold,
+.proxy-row > .input {
+  grid-column: 1;
+}
+
+.proxy-row > .input {
+  height: 2rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.proxy-add {
+  align-self: flex-start;
+  color: var(--ink-2);
+}
+
+.proxy-static {
+  display: flex;
+  align-items: center;
+  min-height: 2rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.proxy-select {
+  width: auto;
+  max-width: 100%;
+  height: 2rem;
+  font-size: 0.8125rem;
+}
+
+.proxy-select.mono {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.proxy-limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+.proxy-limits > .fold {
+  flex: 0 1 18rem;
+}
+
+.proxy-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.input.proxy-number {
+  width: 6.5rem;
+  height: 2rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A sample call, and what the proxy sends on for it. */
+.proxy-preview {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--canvas);
+}
+
+.proxy-preview-ask.fold {
+  flex: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--panel);
+  box-shadow: none;
+}
+
+.proxy-preview-ask .fold-text {
+  padding-right: 0;
+}
+
+.proxy-preview-ask .fold-text + .fold-input {
+  padding-left: 0;
+}
+
+.proxy-preview-out {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 0.625rem 0.75rem;
+  font-size: 0.75rem;
+}
+
+.proxy-preview-out p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.proxy-preview-header {
+  padding-left: 1.2rem;
+  color: var(--ink-2);
+}
+
+.proxy-preview-refused {
+  color: var(--red);
+}
+
+/* The item as code: closed until asked for. */
+.proxy-as-code summary {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.proxy-as-code pre {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--canvas);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  overflow-x: auto;
 }
 
 /* The review ---------------------------------------------------------------------------------- */
@@ -5741,11 +6120,17 @@ a.menu-item:hover {
   border-top: 1px solid var(--border);
 }
 
+.proxy-change {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
 .proxy-change-title {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin: 0 0 0.25rem;
+  margin: 0;
   font-size: 0.875rem;
 }
 
@@ -5803,7 +6188,7 @@ a.menu-item:hover {
 
 .proxy-copy {
   display: grid;
-  grid-template-columns: auto 8rem minmax(0, 1fr) auto;
+  grid-template-columns: auto auto 9rem minmax(0, 1fr);
   align-items: center;
   gap: 0.75rem;
   padding: 0.5rem 0.75rem;
@@ -5820,486 +6205,8 @@ a.menu-item:hover {
   font-weight: 600;
 }
 
-.proxy-copy-upstream {
-  overflow: hidden;
-  color: var(--ink-3);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .proxy-copy-problem {
-  max-width: 22rem;
   text-align: right;
-}
-
-/* A: the ledger ------------------------------------------------------------------------------------- */
-
-.dt.proxy-ledger {
-  table-layout: fixed;
-}
-
-.dt.proxy-ledger td {
-  height: calc(1.875rem + 2 * 0.5rem + 1px);
-  padding-block: 0.5rem;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.dt.proxy-ledger .n {
-  width: 2.75rem;
-}
-
-.dt.proxy-ledger .col-route {
-  width: 9rem;
-}
-
-.dt.proxy-ledger .col-upstream {
-  width: 14rem;
-}
-
-.dt.proxy-ledger .col-allows {
-  width: 11rem;
-}
-
-.dt.proxy-ledger .col-limit {
-  width: 11rem;
-  color: var(--ink-2);
-  font-size: 0.8125rem;
-}
-
-.dt.proxy-ledger .col-actions {
-  width: 3rem;
-}
-
-/* Editing, a cell is its field: the field takes what the cell has. */
-.dt.proxy-ledger .is-editing td {
-  overflow: visible;
-}
-
-.proxy-cell {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.proxy-cell > *,
-.proxy-template > * {
-  flex: none;
-}
-
-/* What runs out of room fades at the cell's end rather than spilling into the next. */
-.dt.proxy-ledger td:not(.col-actions, .n) .proxy-cell {
-  mask-image: linear-gradient(to left, transparent, black 1.25rem);
-}
-
-.dt.proxy-ledger .is-editing td .proxy-cell {
-  overflow: visible;
-  mask-image: none;
-}
-
-.dt.proxy-ledger .is-editing td .proxy-cell > .fold {
-  flex: 1 1 auto;
-}
-
-.proxy-ellipsis {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.proxy-route {
-  font-weight: 600;
-}
-
-/* A row with notes draws one line under both. */
-.proxy-line.has-notes td {
-  border-bottom-color: transparent;
-}
-
-.dt.proxy-ledger .proxy-notes-row td {
-  height: auto;
-  padding-top: 0;
-}
-
-.proxy-line.is-changed,
-.proxy-notes-row.is-changed {
-  background: var(--accent-wash);
-}
-
-.proxy-line.is-changed .n {
-  box-shadow: inset 3px 0 var(--accent);
-  color: var(--accent);
-}
-
-.proxy-line.is-leaving,
-.proxy-notes-row.is-leaving {
-  background: var(--red-wash);
-}
-
-.proxy-line.is-leaving .n {
-  box-shadow: inset 3px 0 var(--red);
-  color: var(--red);
-}
-
-.proxy-line.is-leaving td:not(.n, .col-actions) > * {
-  text-decoration: line-through;
-  text-decoration-color: var(--red);
-}
-
-/* B: the list and the sheet ------------------------------------------------------------------------- */
-
-.proxy-split > .card {
-  margin: 0;
-}
-
-.proxy-split {
-  display: grid;
-  grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr);
-  align-items: start;
-  gap: 1rem;
-}
-
-.proxy-list ul {
-  margin: 0;
-  padding: 0.25rem;
-  list-style: none;
-}
-
-.proxy-list-row {
-  display: grid;
-  grid-template-columns: 6.5rem minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.5rem;
-  width: 100%;
-  padding: 0.5rem 0.625rem;
-  border: 0;
-  border-radius: var(--radius);
-  background: none;
-  color: var(--ink);
-  font-size: 0.8125rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.proxy-list-row:hover {
-  background: var(--subtle);
-}
-
-.proxy-list-row.is-current {
-  background: var(--nav-current);
-}
-
-.proxy-list-row.is-leaving .proxy-list-name {
-  color: var(--red);
-  text-decoration: line-through;
-}
-
-.proxy-list-name {
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-}
-
-.proxy-list-host {
-  overflow: hidden;
-  color: var(--ink-3);
-  font-size: 0.75rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.proxy-list-marks {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  color: var(--ink-3);
-}
-
-.proxy-list-marks .dot {
-  background: var(--accent);
-}
-
-.proxy-list-marks .dot-red {
-  background: var(--red);
-}
-
-.proxy-sheet {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  padding: 1rem 1.25rem 1.25rem;
-}
-
-.proxy-sheet.is-leaving {
-  background: var(--red-wash);
-}
-
-.proxy-sheet-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.proxy-sheet-title {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.proxy-sheet-actions {
-  margin-left: auto;
-}
-
-.proxy-sheet-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.proxy-sheet-line {
-  display: grid;
-  grid-template-columns: 6rem minmax(0, 1fr);
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.proxy-sheet-label {
-  color: var(--ink-3);
-  font-size: 0.8125rem;
-  font-weight: 550;
-}
-
-.proxy-sheet-field {
-  display: flex;
-  min-width: 0;
-}
-
-/* A sample call, and what the proxy sends on for it. */
-.proxy-preview {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--canvas);
-}
-
-.proxy-preview-ask.fold {
-  flex: none;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: var(--radius) var(--radius) 0 0;
-  background: var(--panel);
-  box-shadow: none;
-}
-
-.proxy-preview-ask .fold-text {
-  padding-right: 0;
-}
-
-.proxy-preview-ask .fold-text + .fold-input {
-  padding-left: 0;
-}
-
-.proxy-preview-out {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-  padding: 0.625rem 0.75rem;
-  font-size: 0.75rem;
-}
-
-.proxy-preview-out p {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.375rem;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.proxy-preview-header {
-  padding-left: 1.2rem;
-  color: var(--ink-2);
-}
-
-.proxy-preview-refused {
-  color: var(--red);
-}
-
-/* C: the document ---------------------------------------------------------------------------------- */
-
-.proxy-doc-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  max-width: var(--card-max);
-}
-
-.proxy-doc-list > .card {
-  margin: 0;
-}
-
-.proxy-doc {
-  position: relative;
-  padding: 0.625rem 1rem 0.75rem;
-}
-
-.proxy-doc.is-changed {
-  box-shadow: inset 3px 0 var(--accent);
-}
-
-.proxy-doc.is-leaving {
-  background: var(--red-wash);
-  box-shadow: inset 3px 0 var(--red);
-}
-
-.proxy-doc .proxy-notes {
-  margin-top: 0.5rem;
-}
-
-.proxy-doc-gutter {
-  position: absolute;
-  top: 0.625rem;
-  right: 0.75rem;
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  color: var(--ink-3);
-}
-
-.proxy-code {
-  font-family: var(--font-mono);
-  font-size: 0.8125rem;
-  font-variant-ligatures: none;
-  line-height: 1.6rem;
-}
-
-.code-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  white-space: pre;
-}
-
-.code-line.depth-1 {
-  padding-left: 2ch;
-}
-
-.code-line.depth-2 {
-  padding-left: 4ch;
-}
-
-.code-comment {
-  color: var(--ink-3);
-}
-
-.code-key {
-  color: var(--ink-2);
-}
-
-.code-punct {
-  color: var(--ink-3);
-}
-
-.code-fn {
-  color: var(--violet);
-}
-
-.code-str,
-.code-input.code-str {
-  color: var(--green);
-}
-
-.code-input.code-num {
-  color: var(--accent);
-}
-
-.code-input.code-name {
-  color: var(--ink);
-  font-weight: 600;
-}
-
-/* A value, editable where it stands: no border until it is pointed at. */
-.code-input,
-.code-select {
-  min-width: 1ch;
-  height: 1.375rem;
-  padding: 0 0.0625rem;
-  field-sizing: content;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  font: inherit;
-}
-
-.code-select {
-  color: var(--green);
-  cursor: pointer;
-  appearance: none;
-}
-
-.code-select.code-fn {
-  color: var(--violet);
-}
-
-.code-menu {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  color: var(--green);
-}
-
-.code-input:not([readonly]):hover,
-.code-select:not(:disabled):hover {
-  background: var(--subtle);
-}
-
-.code-input:focus,
-.code-select:focus {
-  outline: none;
-  background: var(--accent-wash);
-}
-
-.code-input::placeholder {
-  color: var(--ink-3);
-  font-style: italic;
-}
-
-.code-input.is-invalid,
-.code-select.is-invalid {
-  background: var(--red-wash);
-  box-shadow: inset 0 -1px var(--red);
-}
-
-.code-select:disabled {
-  opacity: 1;
-  cursor: default;
-}
-
-.code-keys {
-  display: inline-flex;
-  margin-left: 0.5rem;
-  padding: 0.125rem;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--ink-3);
-  cursor: pointer;
-}
-
-.code-keys:hover {
-  color: var(--accent);
-}
-
-.code-lock {
-  display: inline-flex;
-  margin-left: 0.5rem;
-  color: var(--amber);
 }
 
 /* The role grid's mock `proxy.edit` row: shown, never a box to tick. */

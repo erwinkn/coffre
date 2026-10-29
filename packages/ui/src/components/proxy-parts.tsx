@@ -1,70 +1,60 @@
-// What the Proxy tab's three variants share (W260, a prototype, DO NOT
-// MERGE): the page's pending edits, saved or discarded all at once; the
-// fields, each folding its controls into one input; and the bar, the
-// review and the copy dialogs. `lib/proxy-prototype.ts` holds the rules.
+// What the Proxy tab is made of (W260, a prototype, DO NOT MERGE): the
+// page's pending edits, saved or discarded all at once; the fields, each
+// folding its controls into one input; and the bar, the review and the copy
+// dialogs. `lib/proxy-prototype.ts` holds the rules.
 import { useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Menu } from '@base-ui/react/menu';
-import { Popover } from '@base-ui/react/popover';
 import { toast } from 'sonner';
 
 import {
-  blankDefinition,
-  blankInject,
-  definitionFrom,
   definitionOf,
   definitionProblems,
   diffOf,
-  egressRefusal,
-  formOf,
-  injectInWords,
+  KIND_LABELS,
   keysOf,
   METHODS,
+  normalized,
   proxyKey,
   proxyQuery,
   sameDefinition,
-  soleKey,
   templateParts,
+  transportRefusal,
   unreadable,
-  unreadableInWords,
-  type Form,
-  type InjectKind,
+  type ItemKind,
   type Problems,
   type ProxyChange,
   type ProxyConfig,
   type ProxyCredential,
   type ProxyDefinition,
-  type ProxyEgress,
-  type ProxyInject,
   type ProxyPlace,
   type ProxyStore,
+  type ProxyTransport,
 } from '../lib/proxy-prototype';
 import { isActiveAccessibleEnvironment } from '../lib/project-environments';
-import { usePreferences } from '../lib/preferences';
 import { useShell } from '../lib/use-shell';
 import type { SecretKey } from '../shared/models';
-import { AlertCircle, Check, ChevronDown, CopyFrom, Key, Lock, Plus } from './icons';
-import { EmptyState, MenuPopup, Modal, Spinner, Tip, Toggletip } from './ui';
+import { AlertCircle, Check, ChevronDown, CopyFrom, Lock, Plus } from './icons';
+import { EmptyState, MenuPopup, Modal, Spinner, Toggletip } from './ui';
 
 // --- the edits ---------------------------------------------------------------------------
 
 export type RowState = 'same' | 'changed' | 'added' | 'deleted';
 
-/** One credential as the page shows it: as stored, or as edited and not yet saved. */
+/** One item as the page shows it: as stored, or as edited and not yet saved. */
 export type Row = {
   id: string;
   /** As stored; null for one added here. */
   credential: ProxyCredential | null;
   before: ProxyDefinition | null;
-  form: Form;
   definition: ProxyDefinition;
   state: RowState;
-  /** Open for editing: changed or not. */
-  open: boolean;
   /** Whether its fields take edits: the environment's own, for whoever holds `proxy.edit`. */
   editable: boolean;
-  /** The keys it sends which the editor cannot read: where it sends them stays as it is. */
-  locked: { key: string; sensitive: boolean }[];
+  /** The keys it sends which the editor may not send elsewhere: where it sends them stays as it is. */
+  locked: string[];
+  /** The sensitive keys a change routes, which an Owner may, audited. */
+  routed: string[];
   /** What is wrong with it, once a save was tried. */
   problems: Problems;
 };
@@ -82,11 +72,12 @@ export function useProxyEdits({
   place: ProxyPlace;
   config: ProxyConfig;
   keys: readonly SecretKey[];
+  /** `proxy.edit`, which the mock gives Owners covering the place, who also route sensitive keys. */
   canEdit: boolean;
 }) {
   const queryClient = useQueryClient();
-  // Each open row's form, by id: a stored credential's name, or `new-N`; null marks one to delete.
-  const [drafts, setDrafts] = useState<Record<string, Form | null>>({});
+  // Each edited item, by id: a stored item's name (`:code` for the code's), or `new-N`; null marks one to delete.
+  const [drafts, setDrafts] = useState<Record<string, ProxyDefinition | null>>({});
   const [added, setAdded] = useState<string[]>([]);
   const [tried, setTried] = useState(false);
   const [reviewing, setReviewing] = useState(false);
@@ -95,35 +86,28 @@ export function useProxyEdits({
   const next = useRef(0);
 
   const code = config.credentials.filter((one) => one.source === 'code').map((one) => one.name);
-  const base: Omit<Row, 'problems'>[] = [
+  const base = [
     ...config.credentials.map((credential) => {
       const id = credential.name + (credential.source === 'code' ? ':code' : '');
       const before = definitionOf(credential);
       const draft = drafts[id];
-      const form = draft ?? formOf(before);
-      const definition = definitionFrom(form);
+      const definition = draft ?? before;
       const own = credential.source === 'environment';
-      return {
-        id,
-        credential,
-        before,
-        form,
-        definition,
-        state: (draft === null ? 'deleted' : draft !== undefined && !sameDefinition(definition, before) ? 'changed' : 'same') as RowState,
-        open: draft !== undefined && draft !== null,
-        editable: own && canEdit,
-        locked: own ? unreadable(keysOf(before.inject), keys) : [],
-      };
+      // Locked: a key the editor cannot read, and may not route as an Owner routes a sensitive one.
+      const locked = own ? unreadable(keysOf(before), keys).filter((one) => !(one.sensitive && canEdit)).map((one) => one.key) : [];
+      const state: RowState = draft === null ? 'deleted' : draft !== undefined && !sameDefinition(draft, before) ? 'changed' : 'same';
+      return { id, credential, before, definition, state, editable: own && canEdit, locked };
     }),
-    ...added.map((id) => {
-      const form = drafts[id]!;
-      return { id, credential: null, before: null, form, definition: definitionFrom(form), state: 'added' as RowState, open: true, editable: true, locked: [] };
-    }),
+    ...added.map((id) => ({ id, credential: null, before: null, definition: drafts[id]!, state: 'added' as RowState, editable: true, locked: [] })),
   ];
+  const checkOf = (row: (typeof base)[number]) => {
+    const others = base.filter((one) => one.id !== row.id && one.state !== 'deleted' && one.credential?.source !== 'code').map((one) => one.definition.name.trim());
+    return definitionProblems(row.definition, { place, keys, owner: canEdit, code, others, egresses: config.egresses, networks: config.networks, before: row.before });
+  };
   const rows: Row[] = base.map((row) => {
-    if (!tried || (row.state !== 'changed' && row.state !== 'added')) return { ...row, problems: {} };
-    const others = base.filter((one) => one.id !== row.id && one.state !== 'deleted' && one.credential?.source !== 'code').map((one) => one.definition.name);
-    return { ...row, problems: definitionProblems(row.definition, { place, keys, code, others, egresses: config.egresses, before: row.before }) };
+    if (row.state !== 'changed' && row.state !== 'added') return { ...row, problems: {}, routed: [] };
+    const { problems, routed } = checkOf(row);
+    return { ...row, problems: tried ? problems : {}, routed };
   });
 
   const counts = {
@@ -132,7 +116,6 @@ export function useProxyEdits({
     deleted: rows.filter((row) => row.state === 'deleted').length,
   };
   const changed = counts.added + counts.updated + counts.deleted;
-  const faulty = rows.filter((row) => Object.keys(row.problems).length > 0);
 
   const reset = () => {
     setDrafts({});
@@ -147,34 +130,25 @@ export function useProxyEdits({
     (['deleted', 'changed', 'added'] as const).flatMap((state) =>
       rows
         .filter((row) => row.state === state)
-        .map((row) => ({ row, change: { was: row.credential?.name ?? null, definition: state === 'deleted' ? null : row.definition } })),
+        .map((row) => ({ row, change: { was: row.credential?.name ?? null, definition: state === 'deleted' ? null : normalized(row.definition) } })),
     );
 
   return {
     rows,
     counts,
     changed,
-    /** Whether anything is open or changed, which the bar is for. */
-    active: Object.keys(drafts).length > 0,
     tried,
-    faulty,
+    faulty: rows.filter((row) => Object.keys(row.problems).length > 0),
     reviewing,
     pending,
     error,
     changes,
-    open: (row: Row) => {
-      if (!row.editable || row.id in drafts) return;
-      setDrafts((current) => ({ ...current, [row.id]: formOf(row.before!) }));
-    },
-    patch: (id: string, patch: Partial<Form>) =>
-      setDrafts((current) => {
-        const row = base.find((one) => one.id === id);
-        const form = current[id] ?? (row?.before ? formOf(row.before) : formOf(blankDefinition()));
-        return { ...current, [id]: { ...form, ...patch } };
-      }),
-    add: (forms: Form[] = [formOf(blankDefinition())]) => {
-      const ids = forms.map(() => `new-${next.current++}`);
-      setDrafts((current) => ({ ...current, ...Object.fromEntries(ids.map((id, index) => [id, forms[index]!])) }));
+    /** Change an item: the first change opens it. */
+    patch: (row: Row, change: (definition: ProxyDefinition) => ProxyDefinition) =>
+      setDrafts((current) => ({ ...current, [row.id]: change(current[row.id] ?? row.definition) })),
+    add: (definitions: ProxyDefinition[]) => {
+      const ids = definitions.map(() => `new-${next.current++}`);
+      setDrafts((current) => ({ ...current, ...Object.fromEntries(ids.map((id, index) => [id, definitions[index]!])) }));
       setAdded((current) => [...current, ...ids]);
       return ids;
     },
@@ -186,15 +160,12 @@ export function useProxyEdits({
     },
     restore: (row: Row) => setDrafts(({ [row.id]: _, ...rest }) => rest),
     discard: reset,
-    /** Save: what is wrong shows now, on its rows; else the review. */
+    /** Save: what is wrong shows now, under its fields; else the review. */
     save: () => {
       setTried(true);
       setError(null);
-      const problems = rows.filter((row) => row.state === 'changed' || row.state === 'added').some((row) => {
-        const others = base.filter((one) => one.id !== row.id && one.state !== 'deleted' && one.credential?.source !== 'code').map((one) => one.definition.name);
-        return Object.keys(definitionProblems(row.definition, { place, keys, code, others, egresses: config.egresses, before: row.before })).length > 0;
-      });
-      if (!problems && changed > 0) setReviewing(true);
+      const wrong = base.some((row) => (row.state === 'changed' || row.state === 'added') && Object.keys(checkOf(row).problems).length > 0);
+      if (!wrong && changed > 0) setReviewing(true);
     },
     closeReview: () => setReviewing(false),
     confirm: async () => {
@@ -221,9 +192,9 @@ export function countsInWords(counts: { added: number; updated: number; deleted:
   return parts.length === 0 ? 'No changes' : parts.join(', ');
 }
 
-/** The foot of the page while anything is open: the changes counted, Discard and Save, for all of them at once. */
+/** The foot of the page while anything changed: the changes counted, Discard and Save, for all of them at once. */
 export function PendingBar({ edits }: { edits: Edits }) {
-  if (!edits.active) return null;
+  if (edits.changed === 0) return null;
   const faulty = edits.faulty.length;
   return (
     <div className="pending-bar proxy-bar" role="region" aria-label="Unsaved changes">
@@ -236,335 +207,249 @@ export function PendingBar({ edits }: { edits: Edits }) {
         <button className="btn btn-sm" type="button" onClick={edits.discard}>
           Discard
         </button>
-        <button className="btn btn-sm btn-primary" type="button" onClick={edits.save} disabled={edits.changed === 0}>
+        <button className="btn btn-sm btn-primary" type="button" onClick={edits.save}>
           Save
         </button>
       </div>
       {edits.tried && faulty > 0 && (
         <p className="pending-error" role="alert">
           <AlertCircle size={14} />
-          <span>{faulty === 1 ? `${edits.faulty[0]!.definition.name || 'A new credential'} needs fixing.` : `${faulty} credentials need fixing.`}</span>
+          <span>{faulty === 1 ? `${edits.faulty[0]!.definition.name || 'A new item'} needs fixing.` : `${faulty} items need fixing.`}</span>
         </p>
       )}
     </div>
   );
 }
 
-/** What is wrong with a row, and why where it sends its keys stays: under its line. */
-export function RowNotes({ row }: { row: Row }) {
-  const messages = [...new Set(Object.values(row.problems))];
-  const locked = row.open && row.locked.length > 0;
-  if (messages.length === 0 && !locked) return null;
+/** A note under a field: a problem in red, or what a change does in amber. */
+export function Note({ tone = 'error', children }: { tone?: 'error' | 'warn'; children: ReactNode }) {
   return (
-    <div className="proxy-notes">
-      {locked && (
-        <p className="proxy-note">
-          <Lock size={12} />
-          {unreadableInWords(row.locked)}
-        </p>
-      )}
-      {messages.map((message) => (
-        <p key={message} className="proxy-note proxy-note-error">
-          <AlertCircle size={12} />
-          {message}
-        </p>
-      ))}
-    </div>
+    <p className={`proxy-note${tone === 'error' ? ' proxy-note-error' : ''}`}>
+      {tone === 'error' ? <AlertCircle size={12} /> : <Lock size={12} />}
+      <span>{children}</span>
+    </p>
+  );
+}
+
+/** What today's proxy cannot do, which 0.16's backend change brings. */
+export function Needs016({ what }: { what: string }) {
+  return (
+    <Toggletip label={`${what} need a backend change, in 0.16.`}>
+      <button type="button" className="tag tag-outline tag-button">
+        0.16
+      </button>
+    </Toggletip>
   );
 }
 
 // --- showing ---------------------------------------------------------------------------------
 
-export function KeyChip({ name, keys }: { name: string; keys: readonly SecretKey[] }) {
-  const entry = keys.find((one) => one.key === name);
-  if (entry === undefined) {
-    return (
-      <Tip label="Not in this environment">
-        <span className="proxy-key proxy-key-missing">{name}</span>
-      </Tip>
-    );
-  }
-  if (entry.sensitivity === 'sensitive') {
-    return (
-      <Tip label="Sensitive">
-        <span className="proxy-key proxy-key-sensitive">
-          <Lock size={10} />
-          {name}
-        </span>
-      </Tip>
-    );
-  }
-  return <span className="proxy-key">{name}</span>;
+export function KindTag({ kind }: { kind: ItemKind }) {
+  return <span className={`tag proxy-kind proxy-kind-${kind}`}>{KIND_LABELS[kind]}</span>;
 }
 
-export function Template({ template, keys }: { template: string; keys: readonly SecretKey[] }) {
+/** Where a code item serves: every environment, or those it names. */
+export const scopeInWords = (credential: ProxyCredential) =>
+  credential.environments === null ? 'code · every environment' : `code · ${credential.environments.join(', ')} only`;
+
+/** Fields folded into one: text, selects and buttons inside its border, which focus lights as a whole. */
+export function Fold({ invalid, className, children }: { invalid?: boolean; className?: string; children: ReactNode }) {
+  return <div className={`fold${invalid === true ? ' is-invalid' : ''}${className === undefined ? '' : ` ${className}`}`}>{children}</div>;
+}
+
+/**
+ * A template's input: each `{KEY}` it names marked in place (one the
+ * environment lacks in red, one the editor cannot read in amber), and
+ * typing `{` lists the environment's keys, which arrows and Enter pick.
+ */
+export function TemplateInput({
+  value,
+  keys,
+  label,
+  placeholder,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  keys: readonly SecretKey[];
+  label: string;
+  placeholder?: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const [caret, setCaret] = useState<number | null>(null);
+  const [scroll, setScroll] = useState(0);
+  const [active, setActive] = useState(0);
+  const typed = caret === null ? null : (/\{([A-Za-z0-9_]*)$/.exec(value.slice(0, caret))?.[1] ?? null);
+  const options = typed === null ? [] : keys.filter((entry) => entry.key.toLowerCase().includes(typed.toLowerCase()));
+  const open = !disabled && options.length > 0;
+
+  const track = () => {
+    const element = input.current;
+    if (element === null) return;
+    setCaret(element.selectionStart);
+    setScroll(element.scrollLeft);
+  };
+  const pick = (key: string) => {
+    if (caret === null || typed === null) return;
+    const start = caret - typed.length;
+    const rest = value.slice(caret).replace(/^[A-Za-z0-9_]*\}?/, '');
+    const at = start + key.length + 1;
+    onChange(`${value.slice(0, start)}${key}}${rest}`);
+    setCaret(null);
+    requestAnimationFrame(() => {
+      input.current?.setSelectionRange(at, at);
+      track();
+    });
+  };
+
   return (
-    <span className="mono proxy-template">
-      {templateParts(template).map((part, index) => ('key' in part ? <KeyChip key={index} name={part.key} keys={keys} /> : <span key={index}>{part.text}</span>))}
-    </span>
-  );
-}
-
-/** How a credential sends its keys, on one line, each `{KEY}` a chip. */
-export function InjectText({ inject, keys }: { inject: ProxyInject; keys: readonly SecretKey[] }) {
-  if (inject.kind === 'sigv4') {
-    return (
-      <span className="proxy-template">
-        <span className="proxy-how">SigV4</span>
-        {[inject.accessKeyId, inject.secretAccessKey, inject.sessionToken].filter((one) => one !== '').map((template, index) => (
-          <Template key={index} template={template} keys={keys} />
-        ))}
-        <span className="proxy-how">
-          {inject.service}, {inject.region}
-        </span>
-      </span>
-    );
-  }
-  return (
-    <span className="proxy-template">
-      <span className="proxy-how">{KIND_WORDS[inject.kind]}</span>
-      <Template template={injectInWords(inject)} keys={keys} />
-    </span>
-  );
-}
-
-/** A credential's marks beside its name: defined in code, or shadowed by it. */
-export function SourceMark({ credential }: { credential: ProxyCredential | null }) {
-  if (credential?.source === 'code') {
-    return (
-      <Toggletip label="Defined in code, for every environment">
-        <button type="button" className="proxy-mark" aria-label="Defined in code">
-          <Lock size={12} />
-        </button>
-      </Toggletip>
-    );
-  }
-  if (credential?.shadowedSince != null) {
-    return (
-      <Toggletip label={`Shadowed: the code defines ${credential.name} too, and code's is served`}>
-        <button type="button" className="proxy-mark proxy-mark-warn" aria-label="Shadowed by code">
-          <AlertCircle size={12} />
-        </button>
-      </Toggletip>
-    );
-  }
-  return null;
-}
-
-export const KIND_WORDS: Record<InjectKind, string> = { header: 'Header', query: 'Query', form: 'Form', json: 'JSON', basic: 'Basic', sigv4: 'SigV4' };
-
-export const methodsShort = (methods: readonly string[]) => (methods.length === 0 ? 'Any' : methods.join(' '));
-export const pathsShort = (paths: readonly string[]) => (paths.length === 0 ? 'any path' : paths.join(', '));
-export function limitShort(limit: ProxyDefinition['limit'], perService = false): string {
-  if (perService) return 'Per service';
-  const format = new Intl.NumberFormat('en', { notation: 'compact' });
-  const parts = [limit.perMinute !== null && `${format.format(limit.perMinute)}/min`, limit.perDay !== null && `${format.format(limit.perDay)}/day`].filter((part) => part !== false);
-  return parts.length === 0 ? '–' : parts.join(' · ');
-}
-
-// --- the fields, each one input -----------------------------------------------------------------
-
-/** Controls folded into one field: text and selects inside its border, which focus lights as a whole. */
-export function Fold({ invalid, disabled, className, children }: { invalid?: boolean; disabled?: boolean; className?: string; children: ReactNode }) {
-  return (
-    <div className={`fold${invalid === true ? ' is-invalid' : ''}${disabled === true ? ' is-disabled' : ''}${className === undefined ? '' : ` ${className}`}`}>
-      {children}
+    <div className="tpl">
+      <div className="tpl-clip" aria-hidden>
+        <div className="tpl-mirror mono" style={{ transform: `translateX(${-scroll}px)` }}>
+          {value === '' ? (
+            <span className="tpl-placeholder">{placeholder}</span>
+          ) : (
+            templateParts(value).map((part, index) => ('key' in part ? <Token key={index} name={part.key} keys={keys} /> : <span key={index}>{part.text}</span>))
+          )}
+        </div>
+      </div>
+      <input
+        ref={input}
+        className="fold-input tpl-input mono"
+        aria-label={label}
+        aria-autocomplete="list"
+        aria-expanded={open}
+        value={value}
+        disabled={disabled}
+        spellCheck={false}
+        autoComplete="off"
+        onChange={(event) => {
+          onChange(event.target.value);
+          setActive(0);
+          requestAnimationFrame(track);
+        }}
+        onSelect={track}
+        onScroll={track}
+        onBlur={() => setCaret(null)}
+        onKeyDown={(event) => {
+          if (!open) return;
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            setActive((current) => (current + (event.key === 'ArrowDown' ? 1 : options.length - 1)) % options.length);
+          } else if (event.key === 'Enter' || event.key === 'Tab') {
+            event.preventDefault();
+            pick(options[Math.min(active, options.length - 1)]!.key);
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            setCaret(null);
+          }
+        }}
+      />
+      {open && (
+        <ul className="menu tpl-options" role="listbox" aria-label="Keys">
+          {options.map((entry, index) => (
+            <li
+              key={entry.key}
+              role="option"
+              aria-selected={index === active}
+              className={`menu-item mono${index === active ? ' is-active' : ''}`}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                pick(entry.key);
+              }}
+            >
+              {entry.key}
+              {!entry.readable && (
+                <span className="menu-hint">
+                  <Lock size={11} />
+                  {entry.sensitivity === 'sensitive' ? 'sensitive' : "can't read"}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
 
-type FieldProps = { row: Row; edits: Edits };
-
-const any = (problems: Problems, ...fields: (keyof Problems)[]) => fields.some((field) => problems[field] !== undefined);
-
-export function NameField({ row, edits }: FieldProps) {
-  return (
-    <Fold invalid={any(row.problems, 'name')}>
-      <span className="fold-text">/use/</span>
-      <input className="fold-input mono" aria-label="Name" value={row.form.name} spellCheck={false} autoComplete="off" placeholder="name" onChange={(event) => edits.patch(row.id, { name: event.target.value })} />
-    </Fold>
-  );
+/** A `{KEY}` inside a template's input, as wide as its text: the environment lacks it, or the editor cannot read it. */
+function Token({ name, keys }: { name: string; keys: readonly SecretKey[] }) {
+  const entry = keys.find((one) => one.key === name);
+  const tone = entry === undefined ? 'tpl-missing' : !entry.readable ? 'tpl-locked' : 'tpl-key';
+  return <span className={tone}>{`{${name}}`}</span>;
 }
 
-/** The upstream, and the egress it leaves through at its end. */
-export function UpstreamField({ row, edits, egresses }: FieldProps & { egresses: readonly ProxyEgress[] }) {
-  const disabled = row.locked.length > 0;
+/** One of the environment's keys, for a field that names a key alone. */
+export function KeySelect({
+  value,
+  keys,
+  label,
+  disabled,
+  optional = false,
+  className = 'fold-select mono',
+  onChange,
+}: {
+  value: string;
+  keys: readonly SecretKey[];
+  label: string;
+  disabled: boolean;
+  optional?: boolean;
+  className?: string;
+  onChange: (key: string) => void;
+}) {
+  const known = value === '' || keys.some((entry) => entry.key === value);
   return (
-    <Fold invalid={any(row.problems, 'upstream', 'egress')} disabled={disabled}>
-      <input className="fold-input mono" aria-label="Upstream" value={row.form.upstream} disabled={disabled} spellCheck={false} autoComplete="off" placeholder="https://api.example.com" onChange={(event) => edits.patch(row.id, { upstream: event.target.value })} />
-      <EgressSelect row={row} edits={edits} egresses={egresses} disabled={disabled} />
-    </Fold>
-  );
-}
-
-export function EgressSelect({ row, edits, egresses, disabled, className = 'fold-select' }: FieldProps & { egresses: readonly ProxyEgress[]; disabled: boolean; className?: string }) {
-  return (
-    <select className={className} aria-label="Egress" value={row.form.egress ?? ''} disabled={disabled} onChange={(event) => edits.patch(row.id, { egress: event.target.value === '' ? null : event.target.value })}>
-      <option value="">Direct</option>
-      {egresses.map((egress) => {
-        const refusal = egressRefusal(egress, row.form.upstream);
-        return (
-          <option key={egress.name} value={egress.name} disabled={refusal !== null && egress.name !== row.form.egress} title={egress.description ?? undefined}>
-            {egress.name}
-          </option>
-        );
-      })}
-    </select>
-  );
-}
-
-/**
- * How it sends its keys: the kind, its name, the template, and the
- * environment's keys a click away. `compact` folds the kind, the name and
- * the placeholder into one lead, which opens them: a ledger's cell has room
- * for the template alone.
- */
-export function SendsField({ row, edits, keys, compact = false }: FieldProps & { keys: readonly SecretKey[]; compact?: boolean }) {
-  const inject = row.form.inject;
-  const disabled = row.locked.length > 0;
-  const set = (next: ProxyInject) => edits.patch(row.id, { inject: next });
-  const [into, setInto] = useState<'user' | 'password'>('user');
-  const invalid = any(row.problems, 'injectName', 'template', 'user', 'password', 'accessKeyId', 'secretAccessKey', 'sessionToken', 'region', 'service', 'keys', 'placeholder');
-  if (compact) return <CompactSends row={row} edits={edits} keys={keys} invalid={invalid} disabled={disabled} set={set} />;
-  const kind = (
-    <select className="fold-select fold-lead" aria-label="Sends as" value={inject.kind} disabled={disabled} onChange={(event) => set(blankInject(event.target.value as InjectKind))}>
-      {(Object.keys(KIND_WORDS) as InjectKind[]).map((one) => (
-        <option key={one} value={one}>
-          {KIND_WORDS[one]}
+    <select className={className} aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+      <option value="">{optional ? 'None' : 'Pick a key'}</option>
+      {!known && <option value={value}>{value} (not here)</option>}
+      {keys.map((entry) => (
+        <option key={entry.key} value={entry.key}>
+          {entry.key}
+          {entry.sensitivity === 'sensitive' ? ' (sensitive)' : !entry.readable ? " (can't read)" : ''}
         </option>
       ))}
     </select>
   );
-  if (inject.kind === 'sigv4') {
-    const pick = (field: 'accessKeyId' | 'secretAccessKey' | 'sessionToken', label: string) => (
-      <select className="fold-select mono" aria-label={label} value={soleKey(inject[field])} disabled={disabled} onChange={(event) => set({ ...inject, [field]: event.target.value === '' ? '' : `{${event.target.value}}` })}>
-        <option value="">{field === 'sessionToken' ? 'no token' : label}</option>
-        {keys.map((entry) => (
-          <option key={entry.key} value={entry.key}>
-            {entry.key}
-          </option>
-        ))}
-      </select>
-    );
-    return (
-      <Fold invalid={invalid} disabled={disabled}>
-        {kind}
-        {pick('accessKeyId', 'Access key ID')}
-        {pick('secretAccessKey', 'Secret access key')}
-        <input className="fold-input fold-short mono" aria-label="Region" value={inject.region} disabled={disabled} placeholder="eu-west-3" onChange={(event) => set({ ...inject, region: event.target.value.trim() })} />
-        <input className="fold-input fold-short mono" aria-label="Service" value={inject.service} disabled={disabled} placeholder="s3" onChange={(event) => set({ ...inject, service: event.target.value.trim() })} />
-      </Fold>
-    );
-  }
-  if (inject.kind === 'basic') {
-    return (
-      <Fold invalid={invalid} disabled={disabled}>
-        {kind}
-        <input className="fold-input mono" aria-label="User" value={inject.user} disabled={disabled} placeholder="user" onFocus={() => setInto('user')} onChange={(event) => set({ ...inject, user: event.target.value })} />
-        <span className="fold-text">:</span>
-        <input className="fold-input mono" aria-label="Password" value={inject.password} disabled={disabled} placeholder="empty" onFocus={() => setInto('password')} onChange={(event) => set({ ...inject, password: event.target.value })} />
-        <KeyMenu keys={keys} disabled={disabled} onPick={(key) => set({ ...inject, [into]: `${inject[into]}{${key}}` })} />
-      </Fold>
-    );
-  }
+}
+
+/** Direct, or a transport the code declares: one that names hosts greys out for an address it does not reach. */
+export function TransportSelect({
+  value,
+  transports,
+  address,
+  label,
+  disabled,
+  onChange,
+}: {
+  value: string | null;
+  transports: readonly ProxyTransport[];
+  address: string | null;
+  label: string;
+  disabled: boolean;
+  onChange: (name: string | null) => void;
+}) {
   return (
-    <Fold invalid={invalid} disabled={disabled}>
-      {kind}
-      <input className="fold-input fold-name mono" aria-label={inject.kind === 'header' ? 'Header' : 'Field'} value={inject.name} disabled={disabled} spellCheck={false} placeholder={inject.kind === 'header' ? 'authorization' : 'key'} onChange={(event) => set({ ...inject, name: event.target.value })} />
-      <span className="fold-text">{inject.kind === 'header' ? ':' : '='}</span>
-      <input className="fold-input mono" aria-label="Value" value={inject.template} disabled={disabled} spellCheck={false} placeholder="Bearer {KEY}" onChange={(event) => set({ ...inject, template: event.target.value })} />
-      <KeyMenu keys={keys} disabled={disabled} onPick={(key) => set({ ...inject, template: `${inject.template}{${key}}` })} />
-    </Fold>
+    <select className="fold-select fold-end" aria-label={label} value={value ?? ''} disabled={disabled} onChange={(event) => onChange(event.target.value === '' ? null : event.target.value)}>
+      <option value="">Direct</option>
+      {transports.map((transport) => (
+        <option key={transport.name} value={transport.name} disabled={address !== null && transportRefusal(transport, address) !== null && transport.name !== value} title={transport.description ?? undefined}>
+          {transport.name}
+        </option>
+      ))}
+    </select>
   );
 }
 
-function CompactSends({ row, edits, keys, invalid, disabled, set }: FieldProps & { keys: readonly SecretKey[]; invalid: boolean; disabled: boolean; set: (inject: ProxyInject) => void }) {
-  const { portal } = usePreferences();
-  const inject = row.form.inject;
-  const named = inject.kind !== 'basic' && inject.kind !== 'sigv4';
-  const lead = inject.kind === 'sigv4' ? `SigV4 ${inject.service}` : inject.kind === 'basic' ? 'Basic' : `${inject.kind === 'header' ? '' : `${KIND_WORDS[inject.kind]} `}${inject.name || 'name'}${inject.kind === 'header' ? ':' : '='}`;
-  return (
-    <Fold invalid={invalid} disabled={disabled}>
-      <Popover.Root>
-        <Popover.Trigger className="fold-select fold-lead fold-menu" disabled={disabled}>
-          {lead}
-          <ChevronDown size={12} />
-        </Popover.Trigger>
-        <Popover.Portal container={portal}>
-          <Popover.Positioner className="menu-positioner" align="start" sideOffset={6}>
-            <Popover.Popup className="menu proxy-popover">
-              <SendsField row={row} edits={edits} keys={keys} />
-              {named && <PlaceholderField row={row} edits={edits} />}
-            </Popover.Popup>
-          </Popover.Positioner>
-        </Popover.Portal>
-      </Popover.Root>
-      {inject.kind === 'sigv4' ? (
-        <>
-          {(['accessKeyId', 'secretAccessKey'] as const).map((field) => (
-            <select key={field} className="fold-select mono" aria-label={field === 'accessKeyId' ? 'Access key ID' : 'Secret access key'} value={soleKey(inject[field])} disabled={disabled} onChange={(event) => set({ ...inject, [field]: event.target.value === '' ? '' : `{${event.target.value}}` })}>
-              <option value="">{field === 'accessKeyId' ? 'key ID' : 'secret'}</option>
-              {keys.map((entry) => (
-                <option key={entry.key} value={entry.key}>
-                  {entry.key}
-                </option>
-              ))}
-            </select>
-          ))}
-        </>
-      ) : inject.kind === 'basic' ? (
-        <>
-          <input className="fold-input mono" aria-label="User" value={inject.user} disabled={disabled} placeholder="user" onChange={(event) => set({ ...inject, user: event.target.value })} />
-          <span className="fold-text">:</span>
-          <input className="fold-input mono" aria-label="Password" value={inject.password} disabled={disabled} placeholder="empty" onChange={(event) => set({ ...inject, password: event.target.value })} />
-          <KeyMenu keys={keys} disabled={disabled} onPick={(key) => set({ ...inject, user: `${inject.user}{${key}}` })} />
-        </>
-      ) : (
-        <>
-          <input className="fold-input mono" aria-label="Value" value={inject.template} disabled={disabled} spellCheck={false} placeholder="{KEY}" onChange={(event) => set({ ...inject, template: event.target.value })} />
-          <KeyMenu keys={keys} disabled={disabled} onPick={(key) => set({ ...inject, template: `${inject.template}{${key}}` })} />
-        </>
-      )}
-    </Fold>
-  );
-}
-
-/** The environment's keys, a menu at a field's end: a pick puts `{KEY}` in it. Those the editor cannot read carry a lock. */
-export function KeyMenu({ keys, disabled, onPick, className = 'fold-button' }: { keys: readonly SecretKey[]; disabled: boolean; onPick: (key: string) => void; className?: string }) {
-  return (
-    <Menu.Root>
-      <Menu.Trigger className={className} aria-label="Insert a key" disabled={disabled}>
-        <Key size={13} />
-      </Menu.Trigger>
-      <MenuPopup align="end">
-        {keys.map((entry) => (
-          <Menu.Item key={entry.key} className="menu-item mono" onClick={() => onPick(entry.key)}>
-            {entry.readable ? <Key size={13} /> : <Lock size={13} />}
-            {entry.key}
-          </Menu.Item>
-        ))}
-      </MenuPopup>
-    </Menu.Root>
-  );
-}
-
-/** Which methods and paths an app may ask: the methods a menu at the field's start, the paths typed after it. */
-export function AllowsField({ row, edits }: FieldProps) {
-  return (
-    <Fold invalid={any(row.problems, 'paths')}>
-      <MethodsMenu row={row} edits={edits} />
-      <input className="fold-input mono" aria-label="Paths" value={row.form.paths} spellCheck={false} placeholder="any path" onChange={(event) => edits.patch(row.id, { paths: event.target.value })} />
-    </Fold>
-  );
-}
-
-export function MethodsMenu({ row, edits, className = 'fold-select fold-lead fold-menu', asCode = false }: FieldProps & { className?: string; asCode?: boolean }) {
-  const methods = row.form.methods;
+/** Methods, as a menu at the start of an allow entry: none picked takes any. */
+export function MethodsMenu({ methods, disabled, onChange }: { methods: string[]; disabled: boolean; onChange: (methods: string[]) => void }) {
   const picked = METHODS.filter((method) => methods.includes(method));
   return (
     <Menu.Root>
-      <Menu.Trigger className={className} aria-label="Methods">
-        {asCode ? (picked.length === 0 ? 'any' : `[${picked.map((one) => `'${one}'`).join(', ')}]`) : methodsShort(picked)}
+      <Menu.Trigger className="fold-select fold-lead fold-menu" aria-label="Methods" disabled={disabled}>
+        {picked.length === 0 ? 'Any' : picked.join(' ')}
         <ChevronDown size={12} />
       </Menu.Trigger>
       <MenuPopup align="start">
@@ -574,7 +459,7 @@ export function MethodsMenu({ row, edits, className = 'fold-select fold-lead fol
             className="menu-item mono"
             checked={methods.includes(method)}
             closeOnClick={false}
-            onCheckedChange={(on) => edits.patch(row.id, { methods: on ? [...methods, method] : methods.filter((one) => one !== method) })}
+            onCheckedChange={(on) => onChange(on ? [...methods, method] : methods.filter((one) => one !== method))}
           >
             <span className="menu-check">{methods.includes(method) && <Check size={13} />}</span>
             {method}
@@ -585,59 +470,56 @@ export function MethodsMenu({ row, edits, className = 'fold-select fold-lead fol
   );
 }
 
-export function LimitField({ row, edits }: FieldProps) {
+/** A whole number or nothing: what isn't a digit never lands. */
+export function NumberInput({ value, label, disabled, onChange }: { value: number | null; label: string; disabled: boolean; onChange: (value: number | null) => void }) {
   return (
-    <Fold invalid={any(row.problems, 'perMinute', 'perDay')}>
-      <input className="fold-input fold-number" aria-label="A minute" inputMode="numeric" value={row.form.perMinute} placeholder="–" onChange={(event) => edits.patch(row.id, { perMinute: event.target.value })} />
-      <span className="fold-text">/min</span>
-      <input className="fold-input fold-number" aria-label="A day" inputMode="numeric" value={row.form.perDay} placeholder="–" onChange={(event) => edits.patch(row.id, { perDay: event.target.value })} />
-      <span className="fold-text">/day</span>
-    </Fold>
-  );
-}
-
-/** What the app holds where the key was: the handle as it is, with a prefix, or a JWT carrying some claims. */
-export function PlaceholderField({ row, edits }: FieldProps) {
-  const form = row.form;
-  return (
-    <Fold invalid={any(row.problems, 'placeholder')} className={form.placeholder === 'none' ? 'is-short' : undefined}>
-      <select className={`fold-select${form.placeholder === 'none' ? '' : ' fold-lead'}`} aria-label="Placeholder" value={form.placeholder} onChange={(event) => edits.patch(row.id, { placeholder: event.target.value as Form['placeholder'] })}>
-        <option value="none">Handle</option>
-        <option value="prefix">Prefix</option>
-        <option value="jwt">JWT</option>
-      </select>
-      {form.placeholder !== 'none' && (
-        <input className="fold-input mono" aria-label={form.placeholder === 'prefix' ? 'Prefix' : 'Claims'} value={form.shape} placeholder={form.placeholder === 'prefix' ? 'sk_test_' : 'claims'} onChange={(event) => edits.patch(row.id, { shape: event.target.value })} />
-      )}
-    </Fold>
+    <input
+      className="input proxy-number"
+      aria-label={label}
+      inputMode="numeric"
+      value={value === null ? '' : String(value)}
+      placeholder="–"
+      disabled={disabled}
+      onChange={(event) => {
+        const digits = event.target.value.replace(/\D/g, '').slice(0, 9);
+        onChange(digits === '' ? null : Number(digits));
+      }}
+    />
   );
 }
 
 // --- adding, copying, reviewing -----------------------------------------------------------------
 
-/** Add credential, and Copy from environment in its chevron's menu; for whoever holds `proxy.edit`. */
-export function AddCredential({ canEdit, project, onAdd, onCopy }: { canEdit: boolean; project: string; onAdd: () => void; onCopy: () => void }) {
+/** Add route, the other kinds and Copy from environment in its chevron's menu; for whoever holds `proxy.edit`. */
+export function AddItem({ canEdit, project, onAdd, onCopy }: { canEdit: boolean; project: string; onAdd: (kind: ItemKind) => void; onCopy: () => void }) {
   if (!canEdit) {
     return (
       <Toggletip label={`Needs proxy.edit: Owners of ${project} and of the instance`}>
         <button type="button" className="btn btn-primary" aria-disabled="true">
           <Plus size={14} />
-          Add credential
+          Add route
         </button>
       </Toggletip>
     );
   }
   return (
     <div className="split-button">
-      <button className="btn btn-primary" type="button" onClick={onAdd}>
+      <button className="btn btn-primary" type="button" onClick={() => onAdd('route')}>
         <Plus size={14} />
-        Add credential
+        Add route
       </button>
       <Menu.Root>
         <Menu.Trigger className="btn btn-primary btn-icon" aria-label="More to add">
           <ChevronDown size={14} />
         </Menu.Trigger>
         <MenuPopup align="start">
+          {(['signer', 'verifier', 'tunnel'] as const).map((kind) => (
+            <Menu.Item key={kind} className="menu-item" onClick={() => onAdd(kind)}>
+              <Plus size={14} />
+              Add {KIND_LABELS[kind].toLowerCase()}
+            </Menu.Item>
+          ))}
+          <Menu.Separator className="menu-sep" />
           <Menu.Item className="menu-item" onClick={onCopy}>
             <CopyFrom size={14} />
             Copy from environment…
@@ -651,19 +533,20 @@ export function AddCredential({ canEdit, project, onAdd, onCopy }: { canEdit: bo
 /** The pending changes, each field by field, before they are saved together. */
 export function ReviewDialog({ edits, place }: { edits: Edits; place: ProxyPlace }) {
   if (!edits.reviewing) return null;
-  const changes = edits.changes();
   return (
     <Modal open onOpenChange={(open) => !open && edits.closeReview()} wide title={`Save to ${place.project}/${place.environment}`}>
       <div className="form">
-        {changes.map(({ row, change }) => (
+        {edits.changes().map(({ row, change }) => (
           <section key={row.id} className="proxy-change" aria-label={row.definition.name}>
             <h3 className="proxy-change-title">
               <span className={`tag ${row.state === 'deleted' ? 'tag-red' : row.state === 'added' ? 'tag-green' : 'tag-blue'}`}>
                 {row.state === 'deleted' ? 'Delete' : row.state === 'added' ? 'Add' : 'Update'}
               </span>
+              <KindTag kind={row.definition.kind} />
               <span className="mono">{row.state === 'deleted' ? row.before!.name : row.definition.name}</span>
             </h3>
             {change.definition !== null && <Diff rows={diffOf(row.before, change.definition).filter((line) => row.before !== null || line.label !== 'Name')} adding={row.before === null} />}
+            {row.routed.length > 0 && <Note tone="warn">Routes sensitive {row.routed.join(', ')}: audited as an Owner&apos;s change.</Note>}
           </section>
         ))}
         {edits.error !== null && (
@@ -687,16 +570,14 @@ export function ReviewDialog({ edits, place }: { edits: Edits; place: ProxyPlace
 }
 
 function Diff({ rows, adding }: { rows: ReturnType<typeof diffOf>; adding: boolean }) {
-  // Words in the page's face; addresses, templates and paths as code.
-  const code = (label: string) => (['Name', 'Upstream', 'Egress', 'Sends', 'Paths'].includes(label) ? ' mono' : '');
   return (
     <table className="proxy-diff">
       <tbody>
         {rows.map((row) => (
           <tr key={row.label}>
             <th scope="row">{row.label}</th>
-            {!adding && <td className={`proxy-diff-before${code(row.label)}`}>{row.before ?? '–'}</td>}
-            <td className={`${adding ? '' : 'proxy-diff-after'}${code(row.label)}`}>{row.after ?? '–'}</td>
+            {!adding && <td className="proxy-diff-before mono">{row.before ?? '–'}</td>}
+            <td className={`mono${adding ? '' : ' proxy-diff-after'}`}>{row.after}</td>
           </tr>
         ))}
       </tbody>
@@ -705,15 +586,16 @@ function Diff({ rows, adding }: { rows: ReturnType<typeof diffOf>; adding: boole
 }
 
 /**
- * Definitions from another of the project's environments, added here as
- * pending, as they are: prod set up from staging, its upstreams edited
- * before the save. One this environment cannot take says why.
+ * Items from another of the project's environments, added here as pending,
+ * every field as it is, a route's egress included: the review shows them
+ * before they are saved. One this environment cannot take says why.
  */
 export function CopyFromEnvironment({
   store,
   place,
   config,
   keys,
+  canEdit,
   edits,
   onClose,
 }: {
@@ -721,6 +603,7 @@ export function CopyFromEnvironment({
   place: ProxyPlace;
   config: ProxyConfig;
   keys: readonly SecretKey[];
+  canEdit: boolean;
   edits: Edits;
   onClose: () => void;
 }) {
@@ -735,23 +618,29 @@ export function CopyFromEnvironment({
   const code = config.credentials.filter((one) => one.source === 'code').map((one) => one.name);
   const here = edits.rows.filter((row) => row.state !== 'deleted' && row.credential?.source !== 'code').map((row) => row.definition.name);
   const checked = (from.data?.credentials ?? [])
-    .filter((one) => one.source === 'environment' && one.shadowedSince === null)
+    .filter((one) => one.source === 'environment')
     .map((credential) => {
       const definition = definitionOf(credential);
-      const problems = definitionProblems(definition, { place, keys, code, others: here, egresses: config.egresses, before: null });
-      const held = here.includes(definition.name) ? 'Here already' : null;
-      const refusal = problems.keys ?? problems.template ?? problems.user ?? problems.accessKeyId ?? problems.secretAccessKey ?? problems.egress ?? null;
+      const { problems } = definitionProblems(definition, { place, keys, owner: canEdit, code, others: here, egresses: config.egresses, networks: config.networks, before: null });
+      const held = here.includes(definition.name) ? 'Here already' : code.includes(definition.name) ? 'The code takes it here' : null;
+      const refusal = problems.keys ?? Object.entries(problems).find(([field]) => field !== 'name')?.[1] ?? null;
       return { definition, held, problem: held ?? refusal };
     });
-  const chosen = checked.filter((one) => one.problem === null && picked.has(one.definition.name)).map((one) => one.definition);
+  const chosen = checked.filter((one) => one.problem === null && picked.has(one.definition.name));
 
   return (
     <Modal open onOpenChange={(open) => !open && onClose()} wide title="Copy from environment">
       <div className="form">
-        <select className="select" style={{ width: '14rem' }} aria-label="From" value={source} onChange={(event) => {
-          setSource(event.target.value);
-          setPicked(new Set());
-        }}>
+        <select
+          className="select"
+          style={{ width: '14rem' }}
+          aria-label="From"
+          value={source}
+          onChange={(event) => {
+            setSource(event.target.value);
+            setPicked(new Set());
+          }}
+        >
           {siblings.map((one) => (
             <option key={one.slug} value={one.slug}>
               {place.project}/{one.slug}
@@ -782,9 +671,9 @@ export function CopyFromEnvironment({
                       })
                     }
                   />
+                  <KindTag kind={definition.kind} />
                   <span className="mono proxy-copy-name">{definition.name}</span>
-                  <span className="mono proxy-copy-upstream">{definition.upstream.replace(/^https:\/\//, '')}</span>
-                  {problem !== null && <span className={`proxy-copy-problem${held === null ? ' proxy-error' : ''}`}>{problem}</span>}
+                  <span className={`proxy-copy-problem${problem !== null && held === null ? ' proxy-error' : ''}`}>{problem}</span>
                 </label>
               </li>
             ))}
@@ -799,11 +688,11 @@ export function CopyFromEnvironment({
             type="button"
             disabled={chosen.length === 0}
             onClick={() => {
-              edits.add(chosen.map(formOf));
+              edits.add(chosen.map((one) => one.definition));
               onClose();
             }}
           >
-            Copy {chosen.length === 0 ? '' : chosen.length === 1 ? chosen[0]!.name : `${chosen.length}`}
+            Copy{chosen.length === 0 ? '' : chosen.length === 1 ? ` ${chosen[0]!.definition.name}` : ` ${chosen.length}`}
           </button>
         </div>
       </div>

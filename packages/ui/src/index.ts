@@ -47,14 +47,14 @@ export {
 export {
   definitionProblems,
   definitionOf,
-  keysOf,
+  normalized,
   type ProxyChange,
   type ProxyConfig,
   type ProxyCredential,
   type ProxyDefinition,
-  type ProxyEgress,
   type ProxyPlace,
   type ProxyStore,
+  type ProxyTransport,
 } from './lib/proxy-prototype.ts';
 /** The visitor's API client, as the store's server functions call it. */
 export type { CoffreClient } from '@coffre/client';
