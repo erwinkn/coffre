@@ -1464,7 +1464,10 @@ stands, holding nothing between. MCLifecycle.tla's scenarios:
 `LifecycleIssue`, `LifecyclePolicy` (an issue while an Owner's policy
 change takes the right from the issuer's role), `LifecycleBind` (Ada binds
 svc's CI through the vault, an issue that commits a binding, while she is
-demoted; a run signs in through it), `LifecycleSignIn`,
+demoted; a run signs in through it; a bind that replaces another, which
+takes the ended rows exclusive and then, under the issue lock shared, the
+fence, is the lock pattern `Migration015.tla`'s `Mixed` checks free of wait
+cycles), `LifecycleSignIn`,
 `LifecycleReplay` (one ID token
 presented twice), `LifecycleUnbind`, `LifecycleRevoke` (a manager's revoke
 while an admin takes the right away), `LifecycleForge` and

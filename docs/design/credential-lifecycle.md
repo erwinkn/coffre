@@ -193,10 +193,15 @@ the vault's to change, in one call, `Vault.changeBindings`:
   meanwhile is read again. One with no seal, written around the vault, is
   ended too, with no change: a binding the log holds is always the vault's
   to end, so its object never stands past its end (review r1);
-- a bind holds the account's live bindings to the set the app weighed it
-  beside (an issuer's keys moved, the cap), and the keys its policy reads
-  to the names they were asked by, `FOR SHARE`: what the app's transaction
-  checked under 0.14's head, now under the account's row (review r1);
+- a bind holds the account's bindings not revoked to the set the app
+  weighed it beside (an issuer's keys moved, the cap), under the account's
+  row, and the keys its policy reads to the names they were asked by,
+  compared once the fence is had (which a rename takes too), not locked:
+  a key's writer takes the fence before its row, so a share lock held into
+  the fence would be a cycle. What the app's transaction checked under
+  0.14's head (reviews r1, r3, r4). The app names the rows as they are, MAC
+  or not, as the statement counts them: a row a writer broke is still a
+  row there (Fable);
 - one statement, `change_bindings` (migration 0037): the account's row
   (its update lock, so that two binds take turns over the 16-binding cap)
   and the maker's (shared), compared; the credential the request came in

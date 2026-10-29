@@ -524,15 +524,15 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
 /**
  * The change, sealed: the binding made (`binding.make`), each ended
  * (`binding.revoke`), and each credential they issued (`credential.revoke`),
- * each object's seal over what it becomes and its change's MAC. Only rows
- * the vault sealed: a binding 0.14 made, which the log never held, is
- * `unlogged` (the app ends it as before); one whose seal is not the
- * vault's, or not over its columns, `tampered`; a credential of another
- * binding, or account, too.
+ * each object's seal over what it becomes and its change's MAC. A binding
+ * or credential with no seal (0.14's, which the log never held) is ended
+ * with no change, which the statement holds to its having none; one whose
+ * seal is not the vault's, or not over its columns, is `tampered`, and so
+ * is a credential of another binding, or account.
  */
 export function bindingsCall(
   keys: ChangeKeys, input: ChangeBindingsInput, at: number, read: IssueRead | null,
-): BindingsCall | { refused: 'unlogged' | 'tampered' } {
+): BindingsCall | { refused: 'tampered' } {
   const { actor, make, ends, reason } = input;
   const principal = make?.principal ?? ends[0]!.before.columns.principal;
   const changes: BindingsCall['changes'] = [];

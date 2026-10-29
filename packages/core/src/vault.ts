@@ -548,8 +548,9 @@ export type ChangeBindingsInput = {
 /**
  * Why bindings were not changed, nothing written: as an issue's
  * (`IssueTokenRefusal`); `stale` or `tampered`, a row the log does not
- * hold as its newest (put back) or not the vault's seal; `unlogged`, a
- * binding 0.14 made, which the log never held (the app ends it as before);
+ * hold as its newest (put back) or not the vault's seal; `unlogged`, the
+ * credential the request came in on one 0.14 made (a binding 0.14 made,
+ * the vault ends itself, with no change);
  * `full`, the account holds as many live bindings as one may
  * (`MAX_BINDINGS`), besides those the change ends.
  */

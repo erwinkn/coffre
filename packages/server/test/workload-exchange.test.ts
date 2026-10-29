@@ -1146,6 +1146,25 @@ test("with 0.15's log, a replacement of keys that stopped part way is finished b
   assert.ok(live.every((row) => row.jwks !== null && row.jwksUri !== first.binding.jwksUri), 'both on the new keys');
 });
 
+test("with 0.15's log, a row a writer broke is no wedge: a credential whose MAC fails ends with its binding, and a binding row whose MAC fails stops no other bind (PR 3a, Fable)", {
+  skip: LOG === '0.15' ? false : "0.14's app reads past such rows, in its transaction",
+}, async () => {
+  const id = (await db.owner.select().from(serviceBindings))[0]!.id;
+  const { body } = await trade(token(rsa));
+  assert.ok(body.token);
+  // The run's credential, its MAC broken: dead to the app's checks, still a live row to the vault's statement.
+  await db.owner.update(credentials).set({ authMac: Buffer.alloc(32, 7) });
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, id);
+  assert.ok((await db.owner.select().from(credentials)).every((row) => row.revokedAt !== null), 'ended with its binding');
+  assert.notEqual((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id)))[0]!.revokedAt, null);
+  // A binding row whose MAC a writer broke: the next bind of the account goes ahead, and the broken one is still ended.
+  const broken = await bind(DEPLOY);
+  await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32, 9) }).where(eq(serviceBindings.id, broken));
+  await bind({ ...DEPLOY, environment: 'staging' } as BindingClaims);
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, broken);
+  assert.notEqual((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, broken)))[0]!.revokedAt, null);
+});
+
 test("replacing an issuer's keys replaces each binding on it, the same but for them; a set of old and new takes both while it rotates", async () => {
   const first = await bindCluster([rsa]);
   const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
