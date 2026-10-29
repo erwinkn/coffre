@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
 import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
@@ -613,6 +614,17 @@ async function callChanges(tx: Transaction, calls: readonly PreparedChange[], be
      ORDER BY c.ord`);
   if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('app_change answered out of order');
   return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
+}
+
+/**
+ * An object's key in 0.15's log, `log_changes.object`: the first 16 bytes
+ * of SHA-256 over its kind and id, as a uuid (`log_object` in SQL). The
+ * vault's (`objectKey`), and the app's, which finds a credential's sign-in
+ * by it.
+ */
+export function logObject(kind: string, id: string): string {
+  const hex = createHash('sha256').update(`coffre.object.v1\0${kind}\0${id}`).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** Whether `error` is `app_change`'s refusal of a row that is not its object's newest change's: Postgres's `data_corrupted`. */

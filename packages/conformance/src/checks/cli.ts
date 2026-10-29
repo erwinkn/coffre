@@ -215,7 +215,7 @@ export async function verifyLeftovers(cli: Cli, admin: Person, setups: string[],
   const { values } = await admin.api.secrets.reveal(`${place}/${kept.key}`);
   expect(values[kept.key] === kept.value, `${place}/${kept.key}, kept beside the run's own, was changed`);
   expect((await everythingElse(admin.api)) === before, 'the runs changed a member, a grant, a project or an environment besides their own');
-  const { entries } = await admin.api.audit.list({ actor: PROBE.service, limit: 50 });
+  const { entries } = await admin.api.audit.list({ actor: PROBE.service, limit: 50, sealed: '1' });
   expect(entries.length > 0, `the audit log holds no entry by ${PROBE.service}`);
   return `the second run found all; ${PROBE.service} holds no credential; the CLI's session signed in; ${place}/${kept.key} untouched; nothing else changed; ${entries.length} entries by ${PROBE.service} stay`;
 }

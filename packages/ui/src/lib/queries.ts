@@ -334,6 +334,8 @@ export const queries = {
             decision: search.decision,
             actor: search.actorId,
             detail: search.detail,
+            // What 0.15's sealed log alone records too: sign-ins through trust bindings.
+            sealed: '1',
           }),
         ),
     }),

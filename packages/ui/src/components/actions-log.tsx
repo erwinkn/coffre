@@ -1,7 +1,7 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { uiResult, useCoffre } from '../lib/coffre';
 import { keys } from '../lib/queries';
-import { describe, lines } from '../lib/audit-sentences';
+import { describe, lines, runLabel } from '../lib/audit-sentences';
 import { Sentence } from './audit-sentence';
 import { EmptyState, Notice, Spinner, Timestamp } from './ui';
 import { Activity, Clock, ShieldCheck, SlashCircle } from './icons';
@@ -18,12 +18,11 @@ export function ActionsLog({ member }: { member: string }) {
   const log = useInfiniteQuery({
     queryKey: [...keys.audit, 'actor', member],
     staleTime: 0,
-    initialPageParam: undefined as number | undefined,
+    initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
-      uiResult(() => client.audit.list({ actor: member, limit: PAGE_SIZE, before: pageParam })),
-    // A page lists fewer entries where they name many secrets: `more` says whether older ones follow.
-    getNextPageParam: (page) =>
-      page.ok && page.more && page.entries.length > 0 ? page.entries.at(-1)!.seq : undefined,
+      uiResult(() => client.audit.list({ actor: member, limit: PAGE_SIZE, sealed: '1', before: pageParam })),
+    // A page lists fewer entries where they name many secrets, and says where it stopped in each log: its `next`.
+    getNextPageParam: (page) => (page.ok ? page.next ?? undefined : undefined),
   });
 
   if (log.isPending) {
@@ -73,7 +72,7 @@ export function ActionsLog({ member }: { member: string }) {
                   const lead = batch[0]!;
                   const sentence = describe(batch);
                   return (
-                    <tr key={lead.seq} className={sentence.refused ? 'is-denied' : undefined}>
+                    <tr key={`${lead.log}:${lead.seq}`} className={sentence.refused ? 'is-denied' : undefined}>
                       <td className="nowrap cell-muted" title={lead.occurredAt}>
                         <Timestamp iso={lead.occurredAt} display="relative" />
                       </td>
@@ -81,6 +80,10 @@ export function ActionsLog({ member }: { member: string }) {
                         <span className="sentence">
                           <Sentence parts={sentence.parts} />
                         </span>
+                        {lead.run !== null && (
+                          // The run a service's credential was issued for, as the audit page says it beside the actor.
+                          <small className="actor-run">{runLabel(lead.run)}</small>
+                        )}
                       </td>
                       <td className="nowrap" data-label="Outcome">
                         {sentence.refused ? (

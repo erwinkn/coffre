@@ -9,6 +9,7 @@ import { makesProjects, PERMISSIONS, runsInstance, type Permission } from '@coff
 import type { McpScope } from '@coffre/core/mcp';
 import { z } from 'zod';
 
+import { AUDIT_NEXT } from '../api/audit.ts';
 import { canAnywhere, type Caller } from '../api/caller.ts';
 import { CHANGE_TOOLS, SHOW_VALUE, type Change } from './changes.ts';
 import type { McpConnection } from './service.ts';
@@ -153,7 +154,7 @@ const READ_TOOLS: readonly Tool[] = [
     name: 'read_audit_log',
     needs: 'audit.read',
     title: 'Read the audit log',
-    description: 'The audit log, newest first: what was done, by whom, where, allowed or refused. 50 entries a call unless asked; page back with `before`, the oldest seq seen.',
+    description: 'The audit log, newest first: what was done, by whom, where, allowed or refused. 50 entries a call unless asked; page back with `before`, the `next` a call answered.',
     scope: 'read',
     readOnly: true,
     idempotent: true,
@@ -163,14 +164,14 @@ const READ_TOOLS: readonly Tool[] = [
         path: z.string().min(1).max(300).optional().describe('Only entries about a project, environment or secret'),
         actor: z.string().min(1).max(320).optional().describe('Only entries by this member'),
         decision: z.enum(['allow', 'deny']).optional(),
-        before: z.number().int().min(1).optional().describe('Only entries older than this seq'),
+        before: z.union([z.number().int().min(1), z.string().regex(AUDIT_NEXT)]).optional().describe('Only entries older than where the last call stopped: its `next`'),
         limit: z.number().int().min(1).max(200).optional(),
       })
       .strict(),
-    output: object({ entries: list }),
+    output: object({ entries: list, next: { type: ['string', 'null'] } }, ['entries']),
     names: ({ path, actor }) => [...(path === undefined ? [] : [path]), ...(actor === undefined ? [] : [apiMember(actor)])],
     run: async ({ api }, { actor, limit, ...rest }) => ({
-      structured: await api.audit.list({ ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), limit: limit ?? 50 }),
+      structured: await api.audit.list({ ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), sealed: '1', limit: limit ?? 50 }),
     }),
   }),
 ];

@@ -22,13 +22,14 @@ import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { appendEntries } from '@coffre/db/log';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { localVault } from '@coffre/vault/node';
-import { desc, eq, gt, sql } from 'drizzle-orm';
+import { desc, eq, gt, sql, type SQL } from 'drizzle-orm';
 
 import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import {
-  distinctSecretCounts, environmentSecrets, insertBinding, liveKeysIn, lock, memberStanding, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder, sensitiveFrom,
+  distinctSecretCounts, environmentSecrets, exchangesOf, insertBinding, liveKeysIn, lock, memberStanding, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder, sensitiveFrom,
+  signInPage,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
@@ -1200,3 +1201,77 @@ test("a read of an environment's keys reads as many pages however many keys the 
   }
 });
 
+/**
+ * The audit pages' sign-ins through trust bindings, which 0.15's log alone
+ * records (D147, T156): a page of them, every service's and one's, and the
+ * sign-ins that issued the credentials a page's entries name. Each reads as
+ * many pages however many other changes, and other services' sign-ins, the
+ * log holds (R48). Planted as rows, as only their reads are measured, and
+ * gone again after.
+ */
+test("the audit pages' sign-ins read as many pages however many other changes the log holds", POSTGRES, async () => {
+  const counted = createDatabase(app.client);
+  const credentials = Array.from({ length: 20 }, () => randomUUID());
+  const reads: Record<string, () => Promise<unknown>> = {
+    "every service's sign-ins": () => signInPage(counted, { limit: 100 }),
+    "a service's sign-ins": () => signInPage(counted, { actor: 'token:planted', limit: 100 }),
+    "an older page of a service's": () => signInPage(counted, { actor: 'token:planted', before: { at: 100_150, number: 100_150n }, limit: 100 }),
+    "the sign-ins of a page's credentials": () => exchangesOf(counted, credentials),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const statements = [...app.recorded];
+      app.recorded = null;
+      read[name] = [];
+      for (const statement of statements) {
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  /** `count` changes from number `from`, each asked at the millisecond of its number, long before any checkpoint's floor: of `actor`, a sign-in or a member's change, each its own object or `object`'s. */
+  const plant = (from: number, count: number, actor: string, signIn: boolean, object?: SQL) => db.owner.execute(sql`
+    INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
+    SELECT ${from} + g, ${from} + g, 'planted-' || (${from} + g), ${object ?? sql`gen_random_uuid()`}, ${actor},
+      ${signIn ? sql`'{"op":"credential.issue","ref":{"id":"' || gen_random_uuid() || '","kind":"credential"},"signIn":{"binding":"b","issuer":"i","proof":"oidc","run":{"run_id":"' || g || '"}}}'` : sql`'{"op":"member.add","ref":{"id":"token:x","kind":"principal"}}'`},
+      decode(repeat('00', 16), 'hex')
+    FROM generate_series(1, ${count}) g`);
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_changes`);
+  try {
+    // A log whose indexes are as deep as they get for long (a probe of each is its depth's pages): 60,000 changes of
+    // members, 20,000 sign-ins of another service, and the service's own.
+    await plant(0, 60_000, 'user:admin@acme.example', false);
+    await plant(200_000, 20_000, 'token:other', true);
+    await plant(100_000, 200, 'token:planted', true);
+    for (const [i, id] of credentials.entries()) await plant(100_200 + i, 1, 'token:planted', true, sql`log_object('credential', ${id})`);
+    await settle();
+    const small = await pages();
+    // 100,000 changes of members more, 50,000 sign-ins of the other service around them, 50,000 of its own since, and
+    // 50,000 renewals of one of the page's credentials: a workload's session's history, its own object's.
+    await plant(300_000, 100_000, 'user:admin@acme.example', false);
+    await plant(400_000, 50_000, 'token:other', true);
+    await plant(500_000, 50_000, 'token:planted', true);
+    await plant(600_000, 50_000, 'token:planted', false, sql`log_object('credential', ${credentials[0]!})`);
+    await settle();
+    const grown = await pages();
+    for (const [name, statements] of Object.entries(small)) {
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+      assert.equal(statements.length, 1, `${name} is one statement`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the log grown, ${before} before:\n${plan}`);
+      }
+    }
+    // And they read what was planted: a page of the service's, the older page below it, each credential's sign-in.
+    assert.deepEqual((await signInPage(counted, { actor: 'token:planted', limit: 100 })).rows.length, 100);
+    assert.deepEqual((await signInPage(counted, { actor: 'token:planted', before: { at: 100_150, number: 100_150n }, limit: 100 })).rows.map(({ number }) => number).slice(0, 2), [100_149n, 100_148n]);
+    assert.deepEqual([...(await exchangesOf(counted, credentials)).keys()].sort(), [...credentials].sort());
+  } finally {
+    await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+  }
+});

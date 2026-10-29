@@ -10,7 +10,7 @@ import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProf
 import { createDatabase, type Client, type Database } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
 import type { Vault } from '@coffre/core/vault';
-import { asc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
+import { asc, desc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
@@ -684,7 +684,7 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
     const shown = entries.filter((entry) => entry.action === 'token.revoke').sort((x, y) => x.seq - y.seq).map((entry) => entry.run?.claims.run_id ?? null);
     assert.deepEqual(shown, ['7001', '7001', null]);
   } else {
-    // With 0.15's log, the refusal is 0.14's entry still; each revoke, the vault's change, naming the credential it came in on (T156 shows them).
+    // With 0.15's log, the refusal is 0.14's entry still; each revoke, the vault's change, naming the credential it came in on (T164 shows them).
     assert.deepEqual(revocations, [{ actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody }]);
     assert.deepEqual(await revokesLogged(db.owner), [
       { actor: MEMBER, reason: 'revoke', targetCredentialId: b.id },
@@ -1009,16 +1009,152 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
 
   // Whoever owns the database deletes the credential's row: the log still leads from the read to its run.
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
-  const { entries } = await root.audit.list({ detail: '1' });
-  // The audit page reads 0.15's uses from plan PR 8: until then, the read it shows with its run is 0.14's entry.
-  // With 0.15's log, its sign-in is its change (D147), which the 0.15 page shows with its run (T156).
-  if (LOG === '0.14') {
-    const shown = entries.find((entry) => entry.action === 'secret.read')!;
-    assert.deepEqual(shown.run, { exchangeSeq: entries.find((entry) => entry.action === 'token.exchange')!.seq, claims: exchange!.run });
-    assert.equal(entries.find((entry) => entry.action === 'token.exchange')!.run!.claims.run_id, '7001');
-  }
+  const { entries } = await root.audit.list({ detail: '1', sealed: '1' });
+  // Its sign-in, 0.14's `token.exchange` entry or, with 0.15's log, its change (D147), which the page lists in that
+  // entry's place (T156); and every read it shows, the refused one included, with the run.
+  const signedIn = entries.find((entry) => entry.action === 'token.exchange')!;
+  assert.equal(signedIn.log, LOG);
+  assert.deepEqual(signedIn.run, { exchangeSeq: signedIn.seq, log: LOG, claims: exchange!.run });
+  assert.equal(signedIn.run!.claims.run_id, '7001');
+  const reads = entries.filter((entry) => entry.action === 'secret.read');
+  assert.equal(reads.length, LOG === '0.15' ? 1 : 2);
+  for (const shown of reads) assert.deepEqual(shown.run, signedIn.run);
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
+});
+
+/**
+ * A run's sign-in on the audit pages, under either log (T156): 0.14's `token.exchange` entry, or 0.15's change, which
+ * is its record (D147), listed in that entry's place with what it said: the service, the binding, the generation, the
+ * issuer, the credential and its end, the run, and when. On every list of the instance's entries, and the service's;
+ * on none of a place's, nor of refusals: a refused sign-in is logged by neither (the server's log says why).
+ */
+test("a run's sign-in is on the audit list as 0.14's entry put it, under either log; a refused one, under neither", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  const before = Date.now();
+  const { body } = await trade(token(rsa));
+  assert.equal((await trade(token(rsa, { aud: 'https://elsewhere.example' }))).status, 401);
+  const after = Date.now();
+  const [logged] = await signInsLogged(db.owner);
+  const expected = {
+    credentialId: logged!.credentialId, bindingId: bound, generation: logged!.record.generation, issuer: ISSUER, expiresAt: body.expiresAt, run: logged!.run,
+  };
+  for (const query of [{}, { detail: '1' as const }, { actor: MEMBER }, { actor: SERVICE }]) {
+    const shown = (await root.audit.list({ ...query, sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
+    assert.equal(shown.length, 1, `${JSON.stringify(query)} lists the one sign-in`);
+    const [entry] = shown;
+    assert.deepEqual(
+      { log: entry!.log, author: entry!.author, actorType: entry!.actorType, actorId: entry!.actorId, decision: entry!.decision, detail: entry!.detail, project: entry!.project },
+      { log: LOG, author: LOG === '0.15' ? 'vault' : 'app', actorType: 'service', actorId: SERVICE, decision: 'allow', detail: false, project: null },
+    );
+    assert.deepEqual(Object.fromEntries(Object.keys(expected).map((name) => [name, entry!.metadata[name]])), expected);
+    assert.deepEqual(entry!.run, { exchangeSeq: entry!.seq, log: LOG, claims: logged!.run });
+    const at = Date.parse(entry!.occurredAt);
+    assert.ok(at >= before - 1000 && at <= after + 1000, `${entry!.occurredAt} is when it signed in`);
+  }
+  assert.equal(logged!.run.repository, 'acme/api');
+  for (const query of [{ decision: 'deny' as const }, { path: 'market' }, { actor: DEV }]) {
+    assert.deepEqual((await root.audit.list({ ...query, detail: '1', sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange'), [], JSON.stringify(query));
+  }
+});
+
+/**
+ * Pages of the audit list tile both logs (T156): each entry on one page, newest first, a sign-in 0.15's log records
+ * among 0.14's entries by when; each page's `next`, `before` for the one after, says where it stopped in each. The
+ * detail entries a page leaves out are counted on one page each, as with 0.14's log alone.
+ */
+test('pages of the audit list tile both logs: every entry once, newest first, and every hidden one counted once', async () => {
+  const root = clientFor(deps, ROOT);
+  await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/dev', { name: 'dev' });
+  for (let i = 0; i < 3; i++) {
+    await root.secrets.set('market/dev', { [`KEY_${i}`]: 'value' });
+    for (let k = 0; k < 2; k++) assert.equal((await trade(token(rsa))).status, 200);
+  }
+  const named = (entries: { log: string; seq: number }[]) => entries.map((entry) => `${entry.log}:${entry.seq}`);
+  for (const query of [{}, { detail: '1' as const }, { actor: SERVICE }]) {
+    const whole = await root.audit.list({ ...query, sealed: '1', limit: 500 });
+    assert.deepEqual([whole.more, whole.next], [false, null]);
+    assert.equal(whole.entries.filter((entry) => entry.action === 'token.exchange').length, 6);
+    for (const [i, entry] of whole.entries.entries()) {
+      if (i > 0) assert.ok(Date.parse(whole.entries[i - 1]!.occurredAt) >= Date.parse(entry.occurredAt), 'newest first');
+    }
+    for (const limit of [1, 2, 5]) {
+      const paged: typeof whole.entries = [];
+      const hidden = new Map<string, number>();
+      let before: string | undefined;
+      do {
+        const page = await root.audit.list({ ...query, sealed: '1', limit, ...(before === undefined ? {} : { before }) });
+        assert.ok(page.entries.length <= limit);
+        assert.equal(page.more, page.next !== null);
+        paged.push(...page.entries);
+        for (const { action, count } of page.hidden ?? []) hidden.set(action, (hidden.get(action) ?? 0) + count);
+        before = page.next ?? undefined;
+      } while (before !== undefined);
+      assert.deepEqual(named(paged), named(whole.entries), `${JSON.stringify(query)}, ${limit} a page`);
+      assert.deepEqual(hidden, new Map((whole.hidden ?? []).map(({ action, count }) => [action, count])), `${JSON.stringify(query)}, ${limit} a page: hidden`);
+    }
+  }
+  // A client that does not ask for 0.15's sealed log, as one before 0.15, pages 0.14's log alone, by the last seq it
+  // read: whole, each entry once (review r3 of W258); and a seq alone pages 0.14's log, whatever it asks.
+  const legacy: number[] = [];
+  for (let before: number | undefined; ;) {
+    const page = await root.audit.list({ limit: 1, ...(before === undefined ? {} : { before }) });
+    assert.ok(page.entries.every((entry) => entry.log === '0.14'));
+    legacy.push(...page.entries.map((entry) => entry.seq));
+    // A full page says there may be more: below the first entry, 0, there is none to ask for.
+    if (!page.more || page.entries.at(-1)!.seq === 0) break;
+    before = page.entries.at(-1)!.seq;
+  }
+  const whole = (await root.audit.list({ limit: 500, sealed: '1' })).entries.filter((entry) => entry.log === '0.14');
+  assert.deepEqual(legacy, whole.map((entry) => entry.seq));
+  const newest = whole.at(0)!;
+  assert.ok((await root.audit.list({ before: newest.seq, sealed: '1', limit: 500 })).entries.every((entry) => entry.log === '0.14' && entry.seq < newest.seq));
+});
+
+/**
+ * A sign-in takes its number when it commits, after any wait for a lock, but is listed by when the vault asked (its
+ * `at`), as everything else on the page is by when it happened: one that asked later but waited less is the newer,
+ * on the first page (review r2 of W258). Here the first, numbered first, says it asked after the second.
+ */
+test("sign-ins are listed newest first by when they were asked, not by the number a wait gave them", { skip: LOG === '0.15' ? false : "0.14's sign-ins are entries, numbered and timed under its head" }, async () => {
+  for (let i = 0; i < 2; i++) assert.equal((await trade(token(rsa))).status, 200);
+  const [first, second] = await db.owner.select({ number: logChanges.number, at: logChanges.at }).from(logChanges)
+    .where(sql`${logChanges.payload} LIKE '%"signIn":{%'`).orderBy(asc(logChanges.number));
+  await db.owner.update(logChanges).set({ at: second!.at + 50 }).where(eq(logChanges.number, first!.number));
+  const root = clientFor(deps, ROOT);
+  const one = await root.audit.list({ actor: SERVICE, sealed: '1', limit: 1 });
+  assert.deepEqual(one.entries.map((entry) => BigInt(entry.seq)), [first!.number]);
+  const two = await root.audit.list({ actor: SERVICE, limit: 1, before: one.next! });
+  assert.deepEqual(two.entries.map((entry) => BigInt(entry.seq)), [second!.number]);
+  assert.deepEqual((await root.audit.list({ actor: SERVICE, sealed: '1', limit: 500 })).entries.filter((entry) => entry.log === '0.15').map((entry) => BigInt(entry.seq)), [first!.number, second!.number]);
+});
+
+/**
+ * A row under the sign-ins' index that is no sign-in, which only a database writer leaves there: passed over, the
+ * page going on past it, never a failure (review r2 of W258). Under either log: the page reads 0.15's changes as
+ * they are.
+ */
+test("a change the sign-ins' index holds that is no sign-in is passed over, and the pages go on past it", async () => {
+  assert.equal((await trade(token(rsa))).status, 200);
+  const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).orderBy(desc(logChanges.number)).limit(1);
+  await db.owner.insert(logChanges).values({
+    number: (newest?.number ?? 0n) + 1000n, at: Date.now() + 60_000, requestId: crypto.randomUUID(), object: crypto.randomUUID(), actor: MEMBER,
+    payload: '{"op":"member.add","signIn":{"binding":"none"}}', mac: Buffer.alloc(16),
+  });
+  const root = clientFor(deps, ROOT);
+  const seen: string[] = [];
+  let before: string | undefined;
+  let pages = 0;
+  do {
+    const page = await root.audit.list({ actor: SERVICE, sealed: '1', limit: 1, ...(before === undefined ? {} : { before }) });
+    seen.push(...page.entries.map((entry) => `${entry.log} ${entry.action}`));
+    before = page.next ?? undefined;
+    pages++;
+  } while (before !== undefined && pages < 10);
+  assert.deepEqual(seen, [`${LOG} token.exchange`]);
+  assert.ok(pages >= 2, 'the planted row took a page of its own, which showed nothing');
 });
 
 // --- Keys uploaded with a binding ----------------------------------------------

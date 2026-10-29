@@ -289,13 +289,13 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
   return 'the newest entries deleted, with the head left alone, were caught';
 }
 
-/** The whole log, detail included, newest first. */
+/** The whole log, detail included, newest first: 0.14's entries, and the sign-ins 0.15's records. */
 export async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
-  for (let before: number | undefined; ; ) {
-    const { entries, more } = await api.audit.list({ before, limit: 500, detail: '1' });
+  for (let before: string | undefined; ; ) {
+    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1' });
     all.push(...entries);
-    if (!more || entries.length === 0) return all;
-    before = entries.at(-1)!.seq;
+    if (next === null) return all;
+    before = next;
   }
 }

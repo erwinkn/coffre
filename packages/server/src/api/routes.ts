@@ -6,7 +6,7 @@ import { POLICY_REVISION } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { acceptAuditLoss, auditKeys, listAudit, verifyAudit, verifyAuditTrees } from './audit.ts';
+import { acceptAuditLoss, AUDIT_NEXT, auditKeys, listAudit, verifyAudit, verifyAuditTrees } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -726,13 +726,17 @@ export const routes = {
       decision: z.enum(['allow', 'deny']).optional(),
       // `?detail=1` includes sign-ins and technical steps, `DETAIL_ACTIONS`.
       detail: z.enum(['1', 'true']).optional(),
-      before: z.coerce.number().int().positive().optional(),
+      // `?sealed=1` lists what 0.15's sealed log alone records too, sign-ins through trust bindings, paged by `next`.
+      sealed: z.enum(['1', 'true']).optional(),
+      // A page's `next`, where it stopped in 0.14's log and 0.15's (`-`: nothing older); or a seq, 0.14's log alone.
+      before: z.union([z.coerce.number().int().positive(), z.string().regex(AUDIT_NEXT)]).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
     }),
     run: (ctx, { input }) =>
       listAudit(ctx, {
         ...input,
         detail: input.detail !== undefined,
+        sealed: input.sealed !== undefined,
         path: input.path === undefined ? undefined : parsePath(input.path),
       }),
   }),

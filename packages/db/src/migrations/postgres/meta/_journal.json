@@ -281,6 +281,13 @@
       "when": 1793270313298,
       "tag": "0041_cutover",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1793302884510,
+      "tag": "0042_sign_in_index",
+      "breakpoints": true
     }
   ]
 }

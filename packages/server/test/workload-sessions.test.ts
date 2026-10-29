@@ -283,6 +283,13 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
     assert.equal(signedIn!.record.caller, 'workload');
     assert.deepEqual(await entries('token.exchange'), []);
   }
+  // The audit list shows it as 0.14's entry put it, under either log (T156): a workload's, by its proof, key and hard end.
+  const [shown] = (await clientFor(deps, ROOT).audit.list({ sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
+  assert.deepEqual(
+    [shown!.log, shown!.metadata.kind, shown!.metadata.proof, shown!.metadata.jkt, shown!.metadata.notAfter, shown!.metadata.expiresAt],
+    [LOG, 'workload', 'oidc', row.jkt, row.notAfter!.toISOString(), row.expiresAt.toISOString()],
+  );
+  assert.equal(shown!.run!.claims.repository, (await signInsLogged(db.owner))[0]!.run.repository);
 
   // It reads as the service, with its key's proof.
   const held = { token: made.body.token as string, key };

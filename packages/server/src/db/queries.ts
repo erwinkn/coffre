@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, settingsFrom, type Checkpoint, type EnvironmentColumns,
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { newestSeqQuery, newestVaultSeq, withinBytes } from '@coffre/db/log';
+import { logObject, newestSeqQuery, newestVaultSeq, withinBytes } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1546,24 +1546,89 @@ export async function exchangeStill(
 }
 
 /**
- * The exchanges that issued these credentials, by credential ID: each one's
- * entry and the run its issuer asserted. One read through
- * `audit_log_exchange_idx`, whose expression this repeats.
+ * The sign-ins that issued these credentials, by credential ID: each one's
+ * place in its log and the run its issuer asserted. 0.14's `token.exchange`
+ * entry, through `audit_log_exchange_idx`, whose expression this repeats;
+ * or, with 0.15's log, the credential's sign-in change (D147). A sign-in
+ * makes its credential, so it is the object's first change: one probe of
+ * `log_changes_object_idx` each, however many renewals and revokes came
+ * after (R48). One statement.
  */
-export async function exchangesOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { seq: bigint; run: Record<string, unknown> }>> {
+export async function exchangesOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { seq: bigint; log: '0.14' | '0.15'; run: Record<string, unknown> }>> {
   if (credentialIds.length === 0) return new Map();
-  const { auditLog } = tablesOf(db);
-  const credentialId = dialect.engineOf(db) === 'postgres'
+  const { auditLog, logChanges } = tablesOf(db);
+  const postgres = dialect.engineOf(db) === 'postgres';
+  const credentialId = postgres
     ? sql<string>`((${auditLog.metadata})::jsonb ->> 'credentialId')`
     : sql<string>`json_extract(${auditLog.metadata}, '$.credentialId')`;
-  const rows = await db
-    .select({ credentialId, seq: auditLog.seq, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.exchange'), eq(auditLog.decision, 'allow'), inArray(credentialId, [...credentialIds])));
-  return new Map(rows.map((row) => {
-    const run = (JSON.parse(row.metadata) as { run?: unknown }).run;
-    return [row.credentialId, { seq: row.seq, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {} }];
+  const objects = new Map(credentialIds.map((id) => [logObject('credential', id), id]));
+  // A plain read, `SELECT …`, which a page's other reads may go with (`groupReads`).
+  const rows = await dialect.rowsOf<{ credential: string; seq: string | number | bigint; record: string; log: '0.14' | '0.15' }>(db, sql`
+    SELECT ${credentialId} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log FROM ${auditLog}
+     WHERE ${and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.exchange'), eq(auditLog.decision, 'allow'), inArray(credentialId, [...credentialIds]))}
+    UNION ALL
+    SELECT ${postgres ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15' FROM ${logChanges}
+     WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => sql`(SELECT min(${logChanges.number}) FROM ${logChanges} WHERE ${logChanges.object} = ${object})`), sql`, `)})
+       AND ${isSignIn(db)}`);
+  return new Map(rows.flatMap((row) => {
+    const record = JSON.parse(row.record) as { run?: unknown; signIn?: { run?: unknown } };
+    const run = row.log === '0.14' ? record.run : record.signIn?.run;
+    const id = row.log === '0.14' ? row.credential : objects.get(row.credential);
+    if (id === undefined) return [];
+    return [[id, { seq: BigInt(row.seq), log: row.log, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {} }]];
   }));
+}
+
+/**
+ * A sign-in through a trust binding, as 0.15's log records it (D147): its
+ * change's row. The payload names the credential it made (`ref`), its
+ * generation and end, and the sign-in itself, `signIn`: the binding, the
+ * proof, the issuer, the run, and a workload's key and hard end.
+ */
+export type SignInChange = {
+  number: bigint;
+  /** Milliseconds since the epoch, the vault's clock. */
+  at: number;
+  actor: string;
+  payload: string;
+};
+
+/**
+ * Only a sign-in's change holds a `signIn` object: the condition of
+ * `log_changes_sign_in_idx` and `log_changes_sign_in_actor_idx`, which a read
+ * repeats, word for word and with no parameter, to take them.
+ */
+function isSignIn(db: Queryable): SQL {
+  const { logChanges } = tablesOf(db);
+  return dialect.engineOf(db) === 'postgres'
+    ? sql`strpos(${logChanges.payload}, ${sql.raw(SIGNED_IN)}) > 0`
+    : sql`instr(${logChanges.payload}, ${sql.raw(SIGNED_IN)}) > 0`;
+}
+
+const SIGNED_IN = `'"signIn":{'`;
+
+/**
+ * The sign-ins through trust bindings 0.15's log holds, newest first by
+ * when the vault asked, `at`, then by number: a sign-in that waited for a
+ * lock takes its number after one that asked later. Up to `limit`, below
+ * `before`, of one service if `actor` names it. One read, of as many index
+ * entries as it returns, however many other changes the log holds (R48):
+ * every service's, or one's.
+ */
+export async function signInPage(db: Queryable, filter: { actor?: string; before?: { at: number; number: bigint }; limit: number }): Promise<{ rows: SignInChange[]; more: boolean }> {
+  const { logChanges } = tablesOf(db);
+  const { before } = filter;
+  const rows = await db
+    .select({ number: logChanges.number, at: logChanges.at, actor: logChanges.actor, payload: logChanges.payload })
+    .from(logChanges)
+    .where(and(
+      isSignIn(db),
+      filter.actor === undefined ? undefined : eq(logChanges.actor, filter.actor),
+      before === undefined ? undefined : sql`(${logChanges.at}, ${logChanges.number}) < (${before.at}, ${before.number})`,
+    ))
+    .orderBy(desc(logChanges.at), desc(logChanges.number))
+    .limit(filter.limit + 1);
+  return { rows: rows.slice(0, filter.limit), more: rows.length > filter.limit };
 }
 
 /**

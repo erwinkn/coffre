@@ -69,3 +69,16 @@ test('audit reads a server before 0.7, whose entries say nothing of the secrets 
   assert.equal(listed.queries[0]!.get('path'), null);
   assert.match(listed.stdout, /secret\.read\s+market\/prod\/API_KEY\n$/);
 });
+
+test("audit names the CI run beside a service's entries, its sign-in in 0.15's log or 0.14's (T156)", async (t) => {
+  const run = (log: string, runId: string) => ({ exchangeSeq: 7, log, claims: { repository: 'acme/api', run_id: runId, sha: '3f2a9c1e'.padEnd(40, '0') } });
+  const service = { actorType: 'service', actorId: 'ci-deploy', project: null, environment: null };
+  const listed = await audit(t, [
+    entry(7, { ...service, log: '0.15', author: 'vault', action: 'token.exchange', run: run('0.15', '7002') }),
+    entry(40, { ...service, action: 'secret.read', project: 'market', environment: 'prod', run: run('0.14', '7001') }),
+  ], []);
+  assert.equal(listed.code, 0, listed.stderr);
+  const lines = listed.stdout.trim().split('\n');
+  assert.match(lines[0]!, /service:ci-deploy \(acme\/api run 7001 at 3f2a9c1\)\s+secret\.read\s+market\/prod$/);
+  assert.match(lines[1]!, /service:ci-deploy \(acme\/api run 7002 at 3f2a9c1\)\s+token\.exchange\s+-$/);
+});

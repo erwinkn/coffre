@@ -2088,6 +2088,13 @@ table.claims-table td {
   color: var(--ink-3);
 }
 
+/* Under a number of 0.15's sealed log, which numbers its changes apart from 0.14's chain. */
+.dt .n .n-log {
+  display: block;
+  font-size: 0.625rem;
+  letter-spacing: 0.02em;
+}
+
 /* A folder's heading: the rows below it, up to the next one, are filed in it. */
 .dt .folder-row th {
   height: 2.25rem;
