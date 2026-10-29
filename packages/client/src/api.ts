@@ -1123,12 +1123,14 @@ export type Api = {
       actor?: string;
       decision?: "allow" | "deny";
       detail?: "1" | "true";
+      sealed?: "1" | "true";
       before?: unknown;
       limit?: unknown;
     };
     output: {
       entries: {
         seq: number;
+        log: "0.14" | "0.15";
         author: "app" | "vault";
         occurredAt: string;
         actorType: "service" | "system" | "user";
@@ -1151,6 +1153,7 @@ export type Api = {
         requestId: string | null;
         run: null | {
           exchangeSeq: number;
+          log: "0.14" | "0.15";
           claims: {
             [key: string]: string | number;
           };
@@ -1164,6 +1167,7 @@ export type Api = {
         };
       }[];
       more: boolean;
+      next: string | null;
       hidden?: {
         action: string;
         count: number;
@@ -1787,6 +1791,7 @@ export type ApprovalView = {
 
 export type AuditEntryView = {
   seq: number;
+  log: "0.14" | "0.15";
   author: "app" | "vault";
   occurredAt: string;
   actorType: "service" | "system" | "user";
@@ -1809,6 +1814,7 @@ export type AuditEntryView = {
   requestId: string | null;
   run: null | {
     exchangeSeq: number;
+    log: "0.14" | "0.15";
     claims: {
       [key: string]: string | number;
     };

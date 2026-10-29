@@ -225,8 +225,8 @@ seal a writer cleared is `stale`, never ended quietly (review r2).
 Bindings keep 0.14's `token.bind` and `token.unbind` entries, written once
 the vault's change has committed, following through on its decision. The
 app's own credential checks read `token.unbind` as a binding's tombstone,
-so a row put back stays dead to them too, and the 0.14 audit page keeps
-showing bindings until T156. D147 asked only that no `token.exchange` be
+so a row put back stays dead to them too, and the audit pages show
+bindings through them. D147 asked only that no `token.exchange` be
 written; binds are rare admin acts.
 
 A sign-in is still 1 app statement and 1 vault statement. On the Debian rig
@@ -459,12 +459,12 @@ shares with the other issues.
   through one whose issuer publishes them, nor an AWS binding's, whose
   proofs the app verifies (section 4b). Closing the rest means the
   vault taking the raw bearer token and hashing it itself. Not decided.
-- **The 0.14 audit page under the switch** shows no sign-in, revoke,
-  sign-out or token issue of the vault's, no run beside the entries a run's
-  credential caused, and no label beside those a personal token the vault
-  issued caused (`withCredentials` reads `token.exchange` and
-  `personalTokensOf` `token.create`). T156 reads them from the changes,
-  whose payloads carry both.
+- **The audit pages under the switch** list sign-ins from their changes,
+  and show the run beside the entries a run's credential caused (T156,
+  0.15-plan.md, "As built: T156"). They still show no revoke, sign-out or
+  token issue of the vault's, and no label beside the entries caused by a
+  personal token the vault issued (`personalTokensOf` reads `token.create`).
+  A task of its own reads those from the changes.
 - **Environment rows an issue decides on** (T159, a 0.15 ship gate): their
   project, slug and tombstone are read without their objects' seals, as in
   the vault's `access` and `#account`. T159 checks them for all three. The

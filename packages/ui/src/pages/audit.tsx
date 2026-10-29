@@ -114,7 +114,7 @@ export function AuditPage() {
             Something with direct access to the database has changed what it records
             {broken.failedAtSeq === null ? '' : `, and nothing from entry ${broken.failedAtSeq} on can be relied on`} until
             that is explained.
-            {breakAt !== null && !result.entries.some((entry) => entry.seq === breakAt) && (
+            {breakAt !== null && !result.entries.some((entry) => breaksAt(entry, breakAt)) && (
               <>
                 {' '}Entry {breakAt} is not among the entries below
                 {detail ? (
@@ -202,7 +202,7 @@ export function AuditPage() {
               </thead>
               <tbody>
                 {shown.map((batch) => (
-                  <Line key={batch[0]!.seq} batch={batch} filters={filters} detail={search.detail} breakAt={breakAt} />
+                  <Line key={entryKey(batch[0]!)} batch={batch} filters={filters} detail={search.detail} breakAt={breakAt} />
                 ))}
               </tbody>
             </table>
@@ -216,6 +216,16 @@ export function AuditPage() {
 
 type Entry = AuditEntryView;
 type Filters = { decision?: 'deny'; actorId?: string };
+
+/** Where the chain breaks is an entry of 0.14's: 0.15's sealed log numbers its changes apart, and says no entry of its own. */
+function breaksAt(entry: Entry, seq: number): boolean {
+  return entry.log !== '0.15' && entry.seq === seq;
+}
+
+/** An entry by its log and number: 0.14's chain and 0.15's sealed log each number theirs. */
+function entryKey(entry: Pick<Entry, 'log' | 'seq'>): string {
+  return `${entry.log}:${entry.seq}`;
+}
 
 /**
  * One action: an entry, or a batch of them under one operation, which opens
@@ -233,7 +243,7 @@ function Line({
   detail: '1' | undefined;
   breakAt: number | null;
 }) {
-  const breaksInside = breakAt !== null && batch.some((entry) => entry.seq === breakAt);
+  const breaksInside = breakAt !== null && batch.some((entry) => breaksAt(entry, breakAt));
   const [open, setOpen] = useState(breaksInside);
   const lead = batch[0]!;
   const sentence = describe(batch);
@@ -242,7 +252,7 @@ function Line({
   const grouped = each.length > 1;
   const [unit, units] = each.length === batch.length ? ['entry', 'entries'] : ['secret', 'secrets'];
   // A read of several breaks at its first secret's row.
-  const breakRow = each.findIndex((entry) => entry.seq === breakAt);
+  const breakRow = each.findIndex((entry) => breakAt !== null && breaksAt(entry, breakAt));
   const [first, last] = [Math.min(...seqs), Math.max(...seqs)];
 
   return (
@@ -277,7 +287,7 @@ function Line({
           const one = describe([entry]);
           return (
             <Row
-              key={`${entry.seq}:${i}`}
+              key={`${entryKey(entry)}:${i}`}
               entry={entry}
               seq={String(entry.seq)}
               parts={one.parts}
@@ -332,8 +342,10 @@ function Row({
   ].filter(Boolean);
   return (
     <tr className={classes.length === 0 ? undefined : classes.join(' ')}>
-      <td className="n" data-label="Sequence">
+      <td className="n" data-label="Sequence" title={entry.log === '0.15' ? `Change ${entry.seq} of the sealed log, which numbers its own` : undefined}>
         {seq}
+        {/* 0.15's sealed log numbers its changes apart from 0.14's chain: a sign-in is recorded there alone. */}
+        {entry.log === '0.15' && <small className="n-log">sealed</small>}
       </td>
       <td className="nowrap cell-mono" data-label="When (UTC)">
         <Timestamp iso={entry.occurredAt} precise />
@@ -353,8 +365,8 @@ function Row({
           )}
         </span>
         {entry.run !== null && (
-          // The run its issuer named when the credential was exchanged: what it asserted, kept in entry #exchangeSeq.
-          <small className="actor-run" title={`Exchanged in entry ${entry.run.exchangeSeq}`}>
+          // The run its issuer named when the credential was exchanged: what it asserted, kept in its sign-in, #exchangeSeq.
+          <small className="actor-run" title={entry.run.log === '0.15' ? `Signed in at change ${entry.run.exchangeSeq} of the sealed log` : `Exchanged in entry ${entry.run.exchangeSeq}`}>
             {runLabel(entry.run)}
           </small>
         )}

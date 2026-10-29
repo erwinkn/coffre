@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **0.15's sign-ins through trust bindings are on the audit pages, behind
+  its switch.** Under the switch a sign-in writes no `token.exchange`
+  entry; its change is the record (D147). The audit page, a service's
+  Activity, `coffre audit` and MCP's `read_audit_log` now list it where
+  that entry stood: the service, the binding, the issuer, the credential
+  and its end, the run, and when. Entries a run's credential caused show
+  the run again. The app's login reads `log_changes` through two partial
+  indexes over sign-ins (migration 0042). `GET /api/audit?sealed=1` merges
+  both logs by time and answers `next`, `<seq>:<at>.<change>`, which the
+  next page sends as `before`; without `sealed`, and with a plain seq, a page
+  is 0.14's log alone, as an older client pages it. A sign-in now
+  reads as a sentence, "signed in with an ID token from <issuer>", under
+  either log. `docs/design/0.15-plan.md`, "As built: T156".
 - **0.15's log is cut over from 0.14 at its first start, behind its switch.**
   The first request after a 0.15 vault starts seals every object 0.14 left
   (members, roles, the bulk cap, environments, keys, credentials and trust

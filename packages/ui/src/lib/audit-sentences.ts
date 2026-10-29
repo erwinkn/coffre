@@ -7,8 +7,11 @@
  * A sentence is parts rather than a string, so the page can make the people
  * and places in it links. `plain` flattens it, for tests and titles.
  */
-import { shownMember, type AuditEntryView } from '@coffre/client';
+import { runLabel, shownMember, type AuditEntryView } from '@coffre/client';
 import { INSTANCE_ROLES, isBuiltinRole, isInstanceRole, isScope, ROLES, scopeInWords, type Scope } from '@coffre/core/access';
+
+/** The run an entry was written for, said beside who did it: one rule for the pages and the CLI. */
+export { runLabel };
 
 /** What a sentence is made from: an entry of the log, as `GET /api/audit` gives it. */
 export type AuditEntry = Pick<
@@ -441,6 +444,14 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'stop trusting CI runs to sign in as',
     what: (facts) => subject(facts.entry),
   },
+  // A service signed in through one of its bindings, by its platform's proof: a CI run's, or a workload's session bound
+  // to its key. Its run is said beside who did it (`runLabel`).
+  'token.exchange': {
+    did: 'signed in',
+    tried: 'sign in',
+    what: ({ entry }) => [entry.metadata.proof === 'aws' ? 'with its AWS identity' : `with an ID token from ${issuerName(entry)}`],
+    then: ({ entry }) => (entry.metadata.kind === 'workload' ? [', for a session bound to its key'] : []),
+  },
   'vault.tampered': {
     did: 'found',
     tried: 'check',
@@ -654,6 +665,13 @@ function reaching(entry: AuditEntry, none = ''): Part[] {
     if (role !== null) byRole.set(role, (byRole.get(role) ?? 0) + 1);
   }
   return [`, reaching ${[...byRole].map(([role, count]) => `${role} on ${plural(count, 'place')}`).join(', ')}`];
+}
+
+/** The issuer an ID token came from, by its host: `token.actions.githubusercontent.com`. */
+function issuerName(entry: AuditEntry): string {
+  const issuer = text(entry.metadata.issuer);
+  if (issuer === null) return 'its platform';
+  return URL.canParse(issuer) && new URL(issuer).host !== '' ? new URL(issuer).host : issuer;
 }
 
 /** The GitHub environment a binding takes its runs from, when it names one. */
@@ -881,19 +899,4 @@ export function plain(parts: Part[]): string {
       typeof part === 'string' ? part : 'place' in part ? part.place : part.member.startsWith('user:') ? part.member.slice(5) : shownMember(part.member),
     )
     .join('');
-}
-
-/**
- * The CI run an entry was written for, as its issuer stated it at the
- * exchange: `acme/api run 7001 at 3f2a9c1`, a GitLab pipeline, or the
- * token's subject. Null for an entry no trust binding's credential wrote.
- */
-export function runLabel(run: { claims: Record<string, string | number> } | null): string | null {
-  if (run === null) return null;
-  const { claims } = run;
-  const text = (name: string) => (typeof claims[name] === 'string' || typeof claims[name] === 'number' ? String(claims[name]) : null);
-  const at = text('sha') === null ? '' : ` at ${text('sha')!.slice(0, 7)}`;
-  if (text('repository') !== null && text('run_id') !== null) return `${text('repository')} run ${text('run_id')}${at}`;
-  if (text('project_path') !== null && text('pipeline_id') !== null) return `${text('project_path')} pipeline ${text('pipeline_id')}${at}`;
-  return text('sub') === null ? 'a CI run' : `CI run ${text('sub')}`;
 }

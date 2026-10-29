@@ -70,6 +70,7 @@ import {
   createClient,
   olderThan,
   planImport,
+  runLabel,
   apiMember,
   serviceName,
   shownMember,
@@ -1968,6 +1969,8 @@ async function audit(args: string[]): Promise<void> {
     actor: values.actor === undefined ? undefined : apiMember(values.actor),
     decision: values.denied ? 'deny' : undefined,
     detail: values.detail ? '1' : undefined,
+    // Sign-ins through trust bindings too, which 0.15's sealed log alone records; a server before 0.15 ignores it.
+    sealed: '1',
   });
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);
@@ -1980,7 +1983,9 @@ async function audit(args: string[]): Promise<void> {
     const place = ([entry.project, entry.environment, entry.key].filter((part) => part !== null).join('/') || '-') + read;
     // A personal token's entries are its person's, and say which token: `ada@acme.example via "cursor-agent"`.
     // An instance before 0.7 sends no `token`.
-    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}`;
+    // A CI run's, by the run its issuer named when it signed in: `service:deploy (acme/api run 7001 at 3f2a9c1)`. An instance before 0.1.16 sends no `run`.
+    const run = entry.run == null ? '' : ` (${runLabel(entry.run)})`;
+    const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}${run}`;
     process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
   }
 }

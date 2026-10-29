@@ -918,6 +918,9 @@ export const logChanges = sqliteTable(
     check('log_changes_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('log_changes_mac_check', sql`octet_length(${table.mac}) = 16`),
     index('log_changes_object_idx').on(table.object, table.number),
+    // The sign-ins through trust bindings (schema.ts).
+    index('log_changes_sign_in_idx').on(table.at, table.number).where(sql`instr(${table.payload}, '"signIn":{') > 0`),
+    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(sql`instr(${table.payload}, '"signIn":{') > 0`),
   ],
 );
 

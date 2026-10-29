@@ -1,7 +1,8 @@
-import { createHash, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
+import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
 import { INSTANCE_ROLES, normalDefinition, ROLES, type CallerKind, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope } from '@coffre/core/access';
 import type { WrappedKey } from '@coffre/core/vault';
+import { logObject } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
 
@@ -193,10 +194,7 @@ export function objectKey(ref: Ref): string {
 }
 
 /** `objectKey` for any kind, the log's own included (`log_object` in SQL): a retention change's is ('log', 'retention'). */
-export function logObject(kind: string, id: string): string {
-  const hex = createHash('sha256').update(`coffre.object.v1\0${kind}\0${id}`).digest('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
+export { logObject };
 
 /** The keys seals are made under, derived from the vault's signing keys, the first sealing and every one checking. */
 export type SealKeys = readonly Buffer[];

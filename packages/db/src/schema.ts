@@ -1015,7 +1015,9 @@ export const logConfig = pgTable(
  * good. `object` is the input it changes (`log_object(kind, id)`), `seal`
  * that object's seal after it, `payload` what it does. The MAC is the
  * vault's, HMAC-SHA256 cut to 16 bytes, over everything but the number,
- * which the vault does not know when it asks.
+ * which the vault does not know when it asks. The vault login reads them,
+ * and the app's reads the changes too, for the audit pages: a sign-in
+ * through a trust binding is recorded there alone (D147, T156).
  */
 export const logChanges = pgTable(
   'log_changes',
@@ -1038,6 +1040,11 @@ export const logChanges = pgTable(
     // Each input's newest change, its seal from the index alone (INCLUDE (seal), in the migration's SQL: Drizzle
     // has no INCLUDE): one probe per input.
     index('log_changes_object_idx').on(table.object, table.number),
+    // The sign-ins through trust bindings, newest first by when the vault asked (`at`; its number comes later, after
+    // any wait), every service's and one's: what the audit pages list where 0.14's `token.exchange` stood (T156). Only
+    // a sign-in's payload holds a `signIn` object; `SIGNED_IN` repeats it.
+    index('log_changes_sign_in_idx').on(table.at, table.number).where(sql`strpos(${table.payload}, '"signIn":{') > 0`),
+    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(sql`strpos(${table.payload}, '"signIn":{') > 0`),
   ],
 );
 

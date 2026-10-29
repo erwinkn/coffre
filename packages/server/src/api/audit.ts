@@ -15,10 +15,12 @@ import {
   latestTallied,
   places,
   resolvePath,
+  signInPage,
   talliedAfter,
   talliedAt,
   type AuditFilter,
   type Signed,
+  type SignInChange,
 } from '../db/queries.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
@@ -28,7 +30,14 @@ import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
 
 export type AuditEntryView = {
+  /** Its number in the log `log` names. */
   seq: number;
+  /**
+   * Which log holds it: 0.14's chain, or 0.15's sealed log, where a
+   * sign-in through a trust binding is a change, recorded there alone
+   * (D147), and numbered among its changes and uses.
+   */
+  log: '0.14' | '0.15';
   /** Which component wrote it: the app, or the vault, which decides on keys and access. */
   author: 'app' | 'vault';
   occurredAt: string;
@@ -63,11 +72,12 @@ export type AuditEntryView = {
   requestId: string | null;
   /**
    * For an entry written on a credential a trust binding issued, and for
-   * the exchange itself: the CI run the issuer said it was for, from the
-   * `token.exchange` entry at `exchangeSeq`. What the issuer asserted, not
-   * proof of which run sent the request.
+   * the sign-in itself: the CI run the issuer said it was for, from the
+   * sign-in at `exchangeSeq` of the log `log` names, 0.14's `token.exchange`
+   * entry or 0.15's change. What the issuer asserted, not proof of which run
+   * sent the request.
    */
-  run: { exchangeSeq: number; claims: Record<string, string | number> } | null;
+  run: { exchangeSeq: number; log: '0.14' | '0.15'; claims: Record<string, string | number> } | null;
   /**
    * For an entry written on a personal token: the token, by its row's id
    * and the label its `token.create` entry logged, for "ada via token
@@ -185,8 +195,19 @@ export type AuditQuery = {
   decision?: 'allow' | 'deny';
   /** Include the detail entries, `DETAIL_ACTIONS`. */
   detail?: boolean;
-  /** Entries older than this seq, for paging backwards. */
-  before?: number;
+  /**
+   * Include what 0.15's sealed log alone records, merged by time: the
+   * sign-ins through trust bindings (D147). A client pages such a list by
+   * its `next`. Without it, 0.14's log alone, as before 0.15, which a
+   * client that pages by the last entry's seq still pages whole.
+   */
+  sealed?: boolean;
+  /**
+   * Entries older than this, for paging backwards: a page's `next`, which
+   * names where it stopped in both logs and lists both (`sealed`); or a
+   * seq, which pages 0.14's log alone, as before 0.15.
+   */
+  before?: number | string;
   limit: number;
 };
 
@@ -203,14 +224,22 @@ export type AuditQuery = {
  * up to where it started, the head or `before`: pages tile the log, and
  * each hidden entry is counted on exactly one.
  *
+ * With 0.15's log, a sign-in through a trust binding is its change alone
+ * (D147): asked to (`sealed`), the page lists those too, where 0.14's
+ * `token.exchange` would stand, for whoever reads the instance's entries,
+ * merged by time. Each log is paged by its own order, so the page says
+ * where it stopped in each: `next`, `<seq>:<at>.<change>`, `-` for a log
+ * with nothing older, which the next page takes as `before`. A client
+ * that does not ask pages 0.14's log by its seqs, as before 0.15: a page
+ * that mixed both would leave it nothing consistent to page by.
+ *
  * A page holds `limit` entries, or fewer where they list more secrets than
- * a page holds (`auditPage`): `more` says whether to page back, `before`
- * the oldest seq on it.
+ * a page holds (`auditPage`): `more` says whether to page back.
  */
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[]; more: boolean; hidden?: HiddenCount[] }> {
+): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[] }> {
   const filter: AuditFilter = {
     decision: query.decision,
     excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
@@ -257,16 +286,81 @@ export async function listAudit(
       ? [formatMember(parseMember(query.actor))]
       : ['user', 'token', 'system'].map((prefix) => `${prefix}:${query.actor}`).concat(query.actor);
   }
-  if (query.before !== undefined) filter.beforeSeq = BigInt(query.before);
+  const before = startOf(query.before);
+  if (before.seq !== undefined && before.seq !== 'done') filter.beforeSeq = before.seq;
+  // Sign-ins are the instance's, of no place, and never refused; a service's alone.
+  const actor = filter.actors?.find((name) => name.startsWith('token:'));
+  const signIns = (query.sealed === true || typeof query.before === 'string') && filter.within === undefined && query.path === undefined
+    && query.decision !== 'deny' && (filter.actors === undefined || actor !== undefined);
 
-  const { rows, more } = await auditPage(ctx.db, filter);
-  const entries = await withCredentials(ctx, rows.map(entryView));
-  if (query.detail === true) return { entries, more };
-  const last = more ? rows[rows.length - 1]!.seq : undefined;
-  const hidden = await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, last);
+  const [old, sealed] = await Promise.all([
+    before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
+    signIns && before.change !== 'done' ? signInPage(ctx.db, { actor, before: before.change, limit: query.limit }) : { rows: [], more: false },
+  ]);
+  const page = merged(
+    { read: old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` })), more: old.more },
+    { read: sealed.rows.map((row) => ({ at: row.at, entry: signInView(row), below: `${row.at}.${row.number}`, above: `${row.at}.${row.number + 1n}` })), more: sealed.more },
+    query.limit,
+  );
+  const entries = await withCredentials(ctx, page.entries);
+  const result = { entries, more: page.next !== null, next: page.next };
+  if (query.detail === true) return result;
+  // The page's stretch of 0.14's log: from its oldest entry, or where the page before stopped when it shows none, to
+  // where it started; to the first entry when nothing older is left; nothing when the page before was the last of it.
+  const hidden = before.seq === 'done' ? [] : await auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, page.oldStop === null ? undefined : BigInt(page.oldStop));
   // Most of what is hidden first.
   hidden.sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0));
-  return { entries, more, hidden };
+  return { ...result, hidden };
+}
+
+/** A page's `next`: `<seq>:<at>.<change>`, each `-` for a log with nothing older. */
+export const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}\.-?[0-9]{1,19}|-)$/;
+
+/**
+ * Where a page starts in each log, from the newest (undefined), or past the
+ * oldest (`done`): below a seq of 0.14's; below a change of 0.15's, by its
+ * `at`, then its number, as sign-ins are listed.
+ */
+type Point = { seq?: bigint | 'done'; change?: { at: number; number: bigint } | 'done' };
+
+/** `before` as a point: a page's `next`, or a seq of 0.14's log alone, as clients before 0.15 page. */
+function startOf(before: number | string | undefined): Point {
+  if (before === undefined) return {};
+  if (typeof before === 'number') return { seq: BigInt(before), change: 'done' };
+  const [seq, change] = before.split(':') as [string, string];
+  const [at, number] = change.split('.') as [string, string];
+  return { seq: seq === '-' ? 'done' : BigInt(seq), change: change === '-' ? 'done' : { at: Number(at), number: BigInt(number) } };
+}
+
+/**
+ * An entry as a log's page read it: when, by the clock its log orders by;
+ * its view, or null for one no page shows; and where a page goes on from,
+ * below it, or from it.
+ */
+type Read = { at: number; entry: AuditEntryView | null; below: string; above: string };
+
+/**
+ * The newest `limit` of two logs' entries, each read newest first, up to
+ * `limit`, merged by time: none past what either has unread (`more`), which
+ * could be newer. A row read that shows nothing is passed over, and the
+ * page goes on past it. `next` names where it stopped in each, or null
+ * when both are done; `oldStop` is where it stopped in 0.14's log, the seq
+ * as text, or null when nothing older is left there.
+ */
+function merged(old: { read: Read[]; more: boolean }, sealed: { read: Read[]; more: boolean }, limit: number) {
+  const entries: AuditEntryView[] = [];
+  let [i, j] = [0, 0];
+  while (entries.length < limit) {
+    const [a, b] = [old.read[i], sealed.read[j]];
+    if ((a === undefined && old.more) || (b === undefined && sealed.more) || (a === undefined && b === undefined)) break;
+    const next = b === undefined || (a !== undefined && a.at >= b.at) ? old.read[i++]! : sealed.read[j++]!;
+    if (next.entry !== null) entries.push(next.entry);
+  }
+  // Below the last taken of a log; or, where it took none, from the first read, as the page before stopped.
+  const stop = ({ read, more }: { read: Read[]; more: boolean }, taken: number) =>
+    taken < read.length || more ? (taken > 0 ? read[taken - 1]!.below : read[0]!.above) : null;
+  const [oldStop, change] = [stop(old, i), stop(sealed, j)];
+  return { entries, next: oldStop === null && change === null ? null : `${oldStop ?? '-'}:${change ?? '-'}`, oldStop };
 }
 
 /**
@@ -282,13 +376,13 @@ async function withCredentials(ctx: ApiContext, entries: AuditEntryView[]): Prom
   }))];
   const [exchanges, tokens] = await Promise.all([exchangesOf(ctx.db, ids), personalTokensOf(ctx.db, ids)]);
   return entries.map((entry) => {
-    if (entry.action === 'token.exchange') return { ...entry, run: { exchangeSeq: entry.seq, claims: runClaims(entry.metadata.run) } };
+    if (entry.action === 'token.exchange') return { ...entry, run: { exchangeSeq: entry.seq, log: entry.log, claims: runClaims(entry.metadata.run) } };
     const id = typeof entry.metadata.credentialId === 'string' ? entry.metadata.credentialId : undefined;
     const exchange = id === undefined ? undefined : exchanges.get(id);
     const token = id === undefined ? undefined : tokens.get(id);
     return {
       ...entry,
-      ...(exchange === undefined ? {} : { run: { exchangeSeq: Number(exchange.seq), claims: runClaims(exchange.run) } }),
+      ...(exchange === undefined ? {} : { run: { exchangeSeq: Number(exchange.seq), log: exchange.log, claims: runClaims(exchange.run) } }),
       ...(token === undefined ? {} : { token: { id: id!, label: token.label } }),
     };
   });
@@ -308,6 +402,7 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): 
   const key = row.key ?? (typeof metadata.key === 'string' ? metadata.key : path?.split('/').at(-1) ?? null);
   return {
     seq: Number(row.seq),
+    log: '0.14',
     author: row.author as 'app' | 'vault',
     occurredAt: row.occurredAt,
     ...actorParts(row.actor),
@@ -327,6 +422,56 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): 
     run: null,
     token: null,
     metadata,
+  };
+}
+
+/**
+ * A sign-in 0.15's log records, as 0.14's `token.exchange` entry showed it
+ * (D147): by the service, of the vault, which made it; the credential, the
+ * binding, the account's generation, the issuer and the proof, the
+ * credential's end, a workload's key and hard end, and the run (`run`).
+ * None for a change whose payload is not a sign-in's, which only a database
+ * writer could leave under the index's condition. No request: the change's
+ * id is the vault's own, which names none.
+ */
+function signInView(row: SignInChange): AuditEntryView | null {
+  const payload = JSON.parse(row.payload) as { ref?: { kind?: unknown; id?: unknown }; generation?: unknown; expiresAt?: unknown; signIn?: Record<string, unknown> };
+  const { ref, signIn } = payload;
+  if (ref?.kind !== 'credential' || typeof ref.id !== 'string' || typeof signIn !== 'object' || signIn === null || !row.actor.startsWith('token:')) return null;
+  const time = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? new Date(value).toISOString() : null);
+  const workload = typeof signIn.jkt === 'string';
+  return {
+    seq: Number(row.number),
+    log: '0.15',
+    author: 'vault',
+    occurredAt: new Date(row.at).toISOString(),
+    ...actorParts(row.actor),
+    action: 'token.exchange',
+    decision: 'allow',
+    reason: null,
+    detail: false,
+    subject: null,
+    project: null,
+    environment: null,
+    key: null,
+    version: null,
+    secrets: null,
+    operationId: null,
+    relatedSeq: null,
+    requestId: null,
+    run: null,
+    token: null,
+    metadata: {
+      ...(workload ? { kind: 'workload' } : {}),
+      credentialId: ref.id,
+      bindingId: signIn.binding,
+      generation: payload.generation,
+      issuer: signIn.issuer,
+      proof: signIn.proof,
+      expiresAt: time(payload.expiresAt),
+      ...(workload ? { jkt: signIn.jkt, notAfter: time(signIn.notAfter) } : {}),
+      run: signIn.run,
+    },
   };
 }
 
