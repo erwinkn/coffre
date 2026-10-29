@@ -456,18 +456,6 @@ function EnvironmentLedger({
   for (const draft of drafts) tally[existing.has(draft.key.trim()) ? 'updated' : 'added']++;
   for (const entry of changedEntries) tally[secretChangeFor(changes, entry.key)!.archived ? 'archived' : 'updated']++;
 
-  // Two rows that are both still blank "conflict" too, so say nothing until
-  // every name is filled in; the blank row speaks for itself, once Save is pressed.
-  const problem = unnamed
-    ? null
-    : hasConflict
-      ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
-      : invalid
-        ? 'Names are letters, digits and underscores, and cannot start with a digit.'
-        : waiting !== undefined
-          ? `${waiting.key} waits for its value: type it again.`
-          : null;
-
   // Filtering narrows what is listed, never what is saved: a pending edit on
   // a row the filter hides still counts, and still shows in the bar under the table.
   const needle = query.trim().toLowerCase();
@@ -476,6 +464,20 @@ function EnvironmentLedger({
     sort,
   );
   const columns = 6;
+
+  // Two rows that are both still blank "conflict" too, so say nothing until
+  // every name is filled in; the blank row speaks for itself, once Save is
+  // pressed, but for one the filter hides, which the bar speaks for.
+  const unnamedHidden = changedEntries.some((entry) => secretChangeFor(changes, entry.key)!.key.trim() === '' && !listed.includes(entry));
+  const problem = unnamed
+    ? (attempted && unnamedHidden ? 'A secret the filter hides needs a name.' : null)
+    : hasConflict
+      ? 'Two pending edits would end up with the same name. Secret names are unique in an environment.'
+      : invalid
+        ? 'Names are letters, digits and underscores, and cannot start with a digit.'
+        : waiting !== undefined
+          ? `${waiting.key} waits for its value: type it again.`
+          : null;
 
   return (
     <>
