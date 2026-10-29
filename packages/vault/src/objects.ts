@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 
 import { isCredentialScope, type CallerKind, type CredentialScope, type InstanceRole, type Scope } from '@coffre/core/access';
 import { TOMBSTONE } from '@coffre/core/schemas';
-import type { CredentialColumns, EnvironmentColumns, SecretColumns, VersionColumns } from '@coffre/core/vault';
+import type { BindingColumns, CredentialColumns, EnvironmentColumns, SecretColumns, VersionColumns } from '@coffre/core/vault';
 import { storedRole } from '@coffre/db/grants';
 
-import type { CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PrincipalInput, SecretInput } from './inputs.ts';
+import type { BindingInput, CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PrincipalInput, SecretInput } from './inputs.ts';
 
 /**
  * The tables' rows as the objects of the 0.15 log (inputs.ts): what a seal
@@ -36,6 +36,14 @@ export type { CredentialColumns };
 export function credentialObject(row: CredentialColumns): CredentialInput {
   const caller: CallerKind = row.principal.startsWith('user:') ? 'person' : row.kind === 'workload' ? 'workload' : 'bearer';
   return { kind: 'credential', id: row.id, principal: row.principal, caller, scope: scopeOf(row.scope), expiresAt: row.expiresAt, revoked: row.revoked, generation: row.generation };
+}
+
+/** A trust binding (PR 3a): its columns as the row keeps them, its scope read as a credential's is. */
+export function bindingObject(row: BindingColumns): BindingInput {
+  return {
+    kind: 'binding', id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer,
+    jwksUri: row.jwksUri, claims: row.claims, scope: scopeOf(row.scope), policy: row.policy, revoked: row.revoked,
+  };
 }
 
 function scopeOf(stored: string | null): CredentialScope | null {

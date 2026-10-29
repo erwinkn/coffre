@@ -38,6 +38,8 @@ import {
   type RoleDefinition,
   type Scope,
   type ServiceAccount,
+  type ServiceSetting,
+  readScope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PairNotes } from '@coffre/core/merkle';
@@ -99,6 +101,9 @@ import {
   type RefusalCode,
   type RemoveInput,
   type IssueTokenInput,
+  type ChangeBindingsInput,
+  type ChangeBindingsOutcome,
+  type ChangeBindingsRefusal,
   type IssueTokenOutcome,
   type IssueTokenRefusal,
   type RevokeCredentialInput,
@@ -133,7 +138,7 @@ import { appendEntries, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
-import { checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, type Answer } from './credentials.ts';
+import { bindingsCall, changeBindings, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
 import { credentialObject } from './objects.ts';
 import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
@@ -3089,7 +3094,7 @@ class VaultService implements Vault {
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
       // With it, the vault makes sign-ins through bindings and revokes credentials itself (credentials.ts).
-      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, credentials: true as const, issues: true as const }),
+      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, credentials: true as const, issues: true as const, binds: true as const }),
       // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
       ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const }),
     };
@@ -3178,24 +3183,53 @@ class VaultService implements Vault {
   }
 
   async #issueOnce(log015: NonNullable<PreparedVault['log015']>, input: IssueTokenInput, scope: CredentialScope): Promise<IssueTokenOutcome> {
-    const { actor, principal } = input;
+    const read = await this.#issuerRead(log015, { ...input, scope, service: input.credential.kind === 'service' });
+    if ('refused' in read) return read;
+    const why = weighIssue(input, scope, read.holder, read.places, read.via?.columns ?? null, read.issue.at, read.service);
+    if (why !== null) {
+      await this.#record(read.reports);
+      return { ok: false, refused: 'refused', why };
+    }
+    await this.#record(read.reports);
+    const answer = await issueToken(this.#db, issueCall(log015, input, read.issue));
+    if (answer.number == null) return { ok: false, refused: answer.state === 'expired' ? 'refused' : answer.state as IssueTokenRefusal, ...(answer.state === 'expired' ? { why: 'its end is past' } : {}) };
+    const sealedAt = await log015.sealThrough(BigInt(answer.number));
+    return { ok: true, number: answer.number, witnessed: sealedAt.witnessed ?? null };
+  }
+
+  /**
+   * What a grant to `principal` by `actor` is weighed on, read and checked
+   * as `access` checks each row (a token's issue, PR 2; a binding's, PR 3a):
+   * the members, their grants, the policy, a service's setting and the
+   * places in one snapshot, the credential the request came in on beside it;
+   * then the issuer's standing through that credential, the account's, and
+   * the scope's places. A refusal records what the reads reported; else the
+   * caller records them before it writes.
+   */
+  async #issuerRead(
+    log015: NonNullable<PreparedVault['log015']>,
+    input: Pick<IssueTokenInput, 'actor' | 'via' | 'principal' | 'generation' | 'actorAccess' | 'policy'> & { scope: CredentialScope; service: boolean },
+  ): Promise<{ ok: false; refused: IssueTokenRefusal; why?: string } | {
+    issue: IssueRead; holder: Holdings; places: (Place | null)[]; via: Awaited<ReturnType<typeof store.issuingCredential>>;
+    service: { setting: ServiceSetting | null; account: ServiceAccount } | null; reports: NewEntry[];
+  }> {
+    const { actor, principal, scope } = input;
     const environmentIds = [...new Set([
       ...scope.flatMap((grant) => (grant.environmentId == null ? [] : [grant.environmentId])),
       ...input.policy.protected.map(({ environmentId }) => environmentId),
     ])];
     const reports: NewEntry[] = [];
     // The members, their grants, the policy, the setting and the places in one statement; the credential beside it.
-    const service_ = input.credential.kind === 'service';
     const [reads, via] = await Promise.all([
-      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: service_, environments: environmentIds }),
+      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds }),
       input.via === null ? Promise.resolve(null) : store.issuingCredential(this.#db, input.via),
     ]);
     // The settings from the snapshot's newest entry; the pages before it read only when it fails its check.
-    const settings = service_ ? await this.#settingsAt(this.#db, reports, reads) : null;
+    const settings = input.service ? await this.#settingsAt(this.#db, reports, reads) : null;
     const at = this.#at(reads);
-    const refuse = async (refused: IssueTokenRefusal, why?: string): Promise<IssueTokenOutcome> => {
+    const refuse = async (refused: IssueTokenRefusal) => {
       await this.#record(reports);
-      return { ok: false, refused, ...(why === undefined ? {} : { why }) };
+      return { ok: false as const, refused };
     };
     // The policy the app weighed the scope on, as `policyStill` holds a write to it: one moved since says so, first.
     const newestPolicy = reads.newestPolicy === null ? null : String(reads.newestPolicy.seq);
@@ -3231,7 +3265,7 @@ class VaultService implements Vault {
     // Each place by its environment's slug, which scopes match: one deleted, or of another project, is no place. Its row is
     // not held to its object's seal here, nor in `#account` or `access`: T159, a 0.15 ship gate, checks them for all three.
     // The protected ones' slugs are held to the policy under the issue lock (`issue_token`).
-    const places = scope.map((grant) => {
+    const places = scope.map((grant): Place | null => {
       if (grant.environmentId == null) return { projectId: grant.projectId! };
       const environment = reads.environments.get(grant.environmentId);
       return environment === undefined || environment.deleted || environment.projectId !== grant.projectId
@@ -3239,24 +3273,66 @@ class VaultService implements Vault {
         : { projectId: grant.projectId!, environmentId: grant.environmentId, environmentSlug: environment.slug };
     });
     const service = settings === null ? null : { setting: settings.serviceAccounts, account: await this.#account(this.#db, subject, principalRow) };
-    const why = weighIssue(input, scope, holder, places, via?.columns ?? null, at, service);
-    if (why !== null) return refuse('refused', why);
+    return {
+      holder, places, via, service, reports,
+      issue: {
+        at,
+        actor: { generation: actorRow.generation, accessSeq: actorRow.accessSeq },
+        principal: { generation: principalRow.generation, accessSeq: principalRow.accessSeq },
+        via: via === null ? null : { columns: via.columns, seal: via.seal },
+        // The protected environments' slugs, and the scope's as weighed: none moves before the number (Fable on PR 2).
+        slugs: [
+          ...input.policy.protected,
+          ...places.flatMap((place) => (place?.environmentId == null || input.policy.protected.some(({ environmentId }) => environmentId === place.environmentId)
+            ? []
+            : [{ environmentId: place.environmentId, slug: place.environmentSlug ?? null }])),
+        ],
+      },
+    };
+  }
+
+
+  /**
+   * A service's bindings changed by the vault (credentials.ts, T149 PR 3a;
+   * formal/Lifecycle.tla's bind, as an issue, and unbind): a binding made is
+   * weighed as a service token's issue is, on the same reads (`#issuerRead`,
+   * `weighService`), and those it ends, with every credential they issued,
+   * must be the log's (their seals the vault's). One statement, which holds
+   * all of it as read (`change_bindings`), then the seal wait. A row that
+   * moved meanwhile answers `moved`: the app reads again, as the rows it
+   * ends are its reads.
+   */
+  async changeBindings(input: ChangeBindingsInput): Promise<ChangeBindingsOutcome> {
+    const log015 = this.#log015();
+    await this.#settled();
+    checkChangeBindings(input);
+    const { actor, make } = input;
+    let read: IssueRead | null = null;
+    let reports: NewEntry[] = [];
+    if (make !== null) {
+      const scope = readScope(make.scope);
+      if (scope === null || scope.length === 0) throw new Error('a binding made reaches what its scope names, at least one place');
+      const weighed = await this.#issuerRead(log015, {
+        actor, via: input.via, principal: make.principal, generation: make.generation, actorAccess: input.actorAccess, policy: input.policy, scope, service: true,
+      });
+      if ('refused' in weighed) return weighed;
+      const why = make.createdBy !== actor.slice(actor.indexOf(':') + 1) ? 'a binding names who made it, its maker'
+        : weighed.places.some((place) => place === null) ? 'a place the binding names is no longer there'
+        : weighService(actor, make.principal, scope, weighed.holder, weighed.places as Place[], weighed.service);
+      if (why !== null) {
+        await this.#record(weighed.reports);
+        return { ok: false, refused: 'refused', why };
+      }
+      read = weighed.issue;
+      reports = weighed.reports;
+    }
+    const call = bindingsCall(log015, input, read?.at ?? Date.now() + this.#prepared.options.clockOffset(), read);
     await this.#record(reports);
-    const call = issueCall(log015, input, {
-      at,
-      actor: { generation: actorRow.generation, accessSeq: actorRow.accessSeq },
-      principal: { generation: principalRow.generation, accessSeq: principalRow.accessSeq },
-      via: via === null ? null : { columns: via.columns, seal: via.seal },
-      // The protected environments' slugs, and the scope's as weighed: none moves before the number (Fable on PR 2).
-      slugs: [
-        ...input.policy.protected,
-        ...places.flatMap((place) => (place?.environmentId == null || input.policy.protected.some(({ environmentId }) => environmentId === place.environmentId)
-          ? []
-          : [{ environmentId: place.environmentId, slug: place.environmentSlug ?? null }])),
-      ],
-    });
-    const answer = await issueToken(this.#db, call);
-    if (answer.number == null) return { ok: false, refused: answer.state === 'expired' ? 'refused' : answer.state as IssueTokenRefusal, ...(answer.state === 'expired' ? { why: 'its end is past' } : {}) };
+    if ('refused' in call) return { ok: false, refused: call.refused };
+    const answer = await changeBindings(this.#db, call);
+    if (answer.number == null) return { ok: false, refused: answer.state as ChangeBindingsRefusal };
+    // Only rows the log never held were ended: no change of the log's to wait for.
+    if (answer.number === '0') return { ok: true, number: '0', witnessed: null };
     const sealedAt = await log015.sealThrough(BigInt(answer.number));
     return { ok: true, number: answer.number, witnessed: sealedAt.witnessed ?? null };
   }

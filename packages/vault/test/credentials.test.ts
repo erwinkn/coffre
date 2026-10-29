@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import { issuedGrant, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { CredentialColumns, SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
@@ -42,21 +43,40 @@ function configure(): ResolvedVaultConfig {
   };
 }
 
-const SCOPE = JSON.stringify([{ projectId: randomUUID(), environmentId: null, role: 'viewer', permissions: { normal: ['secret.read'], protected: [] }, sensitive: false }]);
+/** A binding's object's columns as its row keeps them, and its seal: what a sign-in through it names (PR 3a). */
+async function bindingOf(id: string): Promise<SignInInput['binding']> {
+  const { serviceBindings } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
+  return {
+    columns: {
+      id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, jwksUri: row!.jwksUri, claims: row!.claims,
+      scope: row!.scope, policy: row!.policy, revoked: row!.revokedAt !== null,
+    },
+    seal: row!.seal === null ? null : Buffer.from(row!.seal).toString('base64'),
+  };
+}
 
-/** A vault keeping 0.15's log, the service account CI admitted, and a binding of CI's: what a CI run signs in through. */
+/** A vault keeping 0.15's log, the service account CI a viewer of a project, and a binding of CI's the Owner made: what a CI run signs in through. */
 async function world() {
   const config = configure();
   const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
   assert.equal((await vault.access(ROOT)).role, 'owner');
+  const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, principal: CI })).ok);
+  assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
   const keys: ChangeKeys = { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
   const binding = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).serviceBindings).values({
-    id: binding, authMac: randomBytes(32), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`,
-    claims: JSON.stringify({ repository_id: '1' }), scope: SCOPE, policy: null, label: 'deploys', createdBy: 'root@acme.example',
+  const scope = storedScope([issuedGrant({ projectId: project, environmentId: null, role: 'viewer' })]);
+  const made = await vault.changeBindings!({
+    actor: ROOT, via: null, actorAccess: null, connection: null, reason: 'replaced', ends: [], live: [], reads: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
+    make: {
+      id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
+      scope, policy: null, revoked: false, jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
+    },
+    policy: { seq: null, protected: [] }, appKey: APP_KEY,
   });
-  return { vault, keys, binding };
+  assert.ok(made.ok, JSON.stringify(made));
+  return { vault, keys, binding, scope, project, sealed: await bindingOf(binding) };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -66,9 +86,9 @@ function asked(w: World, change: (input: SignInInput) => SignInInput = (input) =
   const now = Date.now();
   return change({
     principal: CI,
-    binding: { id: w.binding, generation: 0, profile: 'github', scope: SCOPE, policy: null },
+    binding: w.sealed,
     credential: {
-      id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys', scope: SCOPE,
+      id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys', scope: w.scope,
       places: null, expiresAt: now + 5 * 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
     appKey: APP_KEY,
@@ -139,14 +159,16 @@ test('a sign-in goes ahead only while the binding is as named and stands, and it
   const w = await world();
   const { serviceBindings, vaultMembers } = tablesOf(db.owner);
   const none = await written();
-  const refused = async (input: SignInInput) => {
-    assert.deepEqual(await w.vault.signIn!(input), { ok: false, refused: 'unbound' });
+  const refused = async (input: SignInInput, why: 'unbound' | 'unsealed' = 'unbound') => {
+    assert.deepEqual(await w.vault.signIn!(input), { ok: false, refused: why });
     assert.deepEqual(await written(), none);
   };
-  // Named with another scope, another generation, another policy, or another binding: none is its row.
-  await refused(asked(w, (input) => ({ ...input, binding: { ...input.binding, scope: '[]' }, credential: { ...input.credential, scope: '[]' } })));
-  await refused(asked(w, (input) => ({ ...input, binding: { ...input.binding, id: randomUUID() } })));
-  await refused(asked(w, (input) => ({ ...input, binding: { ...input.binding, generation: 1 } })));
+  // Named with another scope, another generation, or as another binding: no object the vault sealed (BindingSealed).
+  const named = (change: Partial<SignInInput['binding']['columns']>) => (input: SignInInput) => ({ ...input, binding: { ...input.binding, columns: { ...input.binding.columns, ...change } } });
+  await refused(asked(w, (input) => ({ ...named({ scope: '[]' })(input), credential: { ...input.credential, scope: '[]' } })), 'unsealed');
+  await refused(asked(w, named({ id: randomUUID() })), 'unsealed');
+  await refused(asked(w, named({ generation: 1 })), 'unsealed');
+  await refused(asked(w, named({ issuer: 'https://evil.example' })), 'unsealed');
   // Revoked.
   await db.owner.update(serviceBindings).set({ revokedAt: new Date() }).where(eq(serviceBindings.id, w.binding));
   await refused(asked(w));

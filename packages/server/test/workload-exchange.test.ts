@@ -9,7 +9,8 @@ import type { Role } from '@coffre/core/access';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Client, type Database } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
-import { asc, eq, sql, type SQL } from 'drizzle-orm';
+import type { Vault } from '@coffre/core/vault';
+import { asc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
@@ -265,7 +266,9 @@ test("a run's credential reaches what both its binding's scope and the account h
   );
 });
 
-test('a binding 0.4 makes after the app sealed is sealed by its first exchange, and a run credential of one by its first check: an account widened after reaches neither', async () => {
+test('a binding 0.4 makes after the app sealed is sealed by its first exchange, and a run credential of one by its first check: an account widened after reaches neither', {
+  skip: LOG === '0.15' ? "0.15's vault signs in through no binding it did not seal (PR 3a): one 0.4 made is bound again" : false,
+}, async () => {
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   for (const environment of ['dev', 'prod']) {
@@ -608,7 +611,9 @@ test('removing a binding revokes only what is live: its expired history costs no
     const counting = { ...deps, db: createDatabase(counted(pool, seen)) };
     const read = (table: string) => seen.filter((statement) => new RegExp(`from "${table}"`, 'i').test(statement.text)).reduce((n, statement) => n + statement.rows, 0);
     await createRuntime(config, counting.db, deps.vault, transport).workloads!.unbind(await contextFor(counting, ROOT), SERVICE, binding!.id);
-    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, 1, 'the run under way, not the thousand over');
+    // With 0.15's log, the vault's one statement ends the binding and the run under way (PR 3a): the app writes none.
+    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, LOG === '0.15' ? 0 : 1, 'the run under way, not the thousand over');
+    assert.equal((await db.owner.select().from(credentials).where(isNotNull(credentials.revokedAt))).length, 1, 'the run under way, not the thousand over');
     assert.ok(read('credentials') <= 2, `read ${read('credentials')} credential rows`);
     assert.equal(await caller(body.token!), 401);
     seen.length = 0;
@@ -1080,6 +1085,84 @@ test("uploaded keys are checked when bound: public keys alone, of the two algori
   const named = await bindWith({ keys: [rsa.jwk] }, 'kapsule:fr-par:5f2a');
   assert.ok('issuer' in named && named.issuer === 'kapsule:fr-par:5f2a');
   await assert.rejects(bindWith({ keys: [rsa.jwk] }, ' kapsule'), { status: 400 });
+});
+
+test("with 0.15's log, replacing keys asks each binding's change on its own: one that moved is asked again, those done stand (PR 3a, review r1)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
+}, async (t) => {
+  const first = await bindCluster([rsa]);
+  const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
+  assert.ok('binding' in first && 'binding' in other);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  // The second binding's change finds a row moved (a sign-in through it, say), once.
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    calls += 1;
+    return calls === 2 ? { ok: false as const, refused: 'moved' as const } : change(input);
+  });
+  const done = await replaceKeys([rsa, ec]);
+  assert.ok('bindings' in done);
+  assert.deepEqual(done.replaced, [first.binding.id, other.binding.id]);
+  assert.equal(calls, 3, 'the first once, the second twice');
+  assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer).length, 2);
+});
+
+test("with 0.15's log, a binding made on the issuer while keys are replaced is no part of it: a conflict, not a success that leaves it on the old keys (PR 3a, review r2)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
+}, async (t) => {
+  const first = await bindCluster([rsa]);
+  assert.ok('binding' in first);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    calls += 1;
+    // Once the replacement is planned, before its first change: another binding on the issuer, on the old keys.
+    if (calls === 1) assert.ok('binding' in await bindCluster([rsa], { sub: 'system:serviceaccount:ci:late' }));
+    return change(input);
+  });
+  await assert.rejects(replaceKeys([rsa, ec]), { status: 409, message: /changed while their keys were replaced/ });
+});
+
+test("with 0.15's log, a replacement of keys that stopped part way is finished by asking again with the same keys (PR 3a, review r3)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
+}, async (t) => {
+  const first = await bindCluster([rsa]);
+  const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
+  assert.ok('binding' in first && 'binding' in other);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  // The vault busy for the second binding's change: the first done, the request answers 503.
+  const busy = t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    calls += 1;
+    return calls === 2 ? { ok: false as const, refused: 'busy' as const } : change(input);
+  });
+  await assert.rejects(replaceKeys([rsa, ec]), { status: 503 });
+  busy.mock.restore();
+  const done = await replaceKeys([rsa, ec]);
+  assert.ok('bindings' in done);
+  assert.deepEqual(done.replaced, [other.binding.id], 'what the first left');
+  const live = (await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer);
+  assert.equal(live.length, 2);
+  assert.ok(live.every((row) => row.jwks !== null && row.jwksUri !== first.binding.jwksUri), 'both on the new keys');
+});
+
+test("with 0.15's log, a row a writer broke is no wedge: a credential whose MAC fails ends with its binding, and a binding row whose MAC fails stops no other bind (PR 3a, Fable)", {
+  skip: LOG === '0.15' ? false : "0.14's app reads past such rows, in its transaction",
+}, async () => {
+  const id = (await db.owner.select().from(serviceBindings))[0]!.id;
+  const { body } = await trade(token(rsa));
+  assert.ok(body.token);
+  // The run's credential, its MAC broken: dead to the app's checks, still a live row to the vault's statement.
+  await db.owner.update(credentials).set({ authMac: Buffer.alloc(32, 7) });
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, id);
+  assert.ok((await db.owner.select().from(credentials)).every((row) => row.revokedAt !== null), 'ended with its binding');
+  assert.notEqual((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id)))[0]!.revokedAt, null);
+  // A binding row whose MAC a writer broke: the next bind of the account goes ahead, and the broken one is still ended.
+  const broken = await bind(DEPLOY);
+  await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32, 9) }).where(eq(serviceBindings.id, broken));
+  await bind({ ...DEPLOY, environment: 'staging' } as BindingClaims);
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, broken);
+  assert.notEqual((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, broken)))[0]!.revokedAt, null);
 });
 
 test("replacing an issuer's keys replaces each binding on it, the same but for them; a set of old and new takes both while it rotates", async () => {

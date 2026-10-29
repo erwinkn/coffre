@@ -18,6 +18,16 @@
   records it (D147). A sign-in that waits over a second for its binding is
   refused at once, 429. `docs/design/credential-lifecycle.md`;
   `formal/Lifecycle.tla`.
+- **0.15's vault makes and ends trust bindings, and signs in through none
+  it did not seal, behind its switch.** A binding was the app's row, vouched
+  for by the app's own MAC, so the app's code turned hostile could write one
+  that trusts its own key. The vault now weighs who makes one as it weighs a
+  service token's issue (an Owner alone gives a binding's runs sensitive
+  reads, R32), seals it, and ends one with every credential it issued, in
+  one statement, `change_bindings` (migration 0037); a sign-in takes only a
+  binding whose seal is the vault's. A binding made before the switch signs
+  nobody in under it: bind it again. Bindings keep their `token.bind` and
+  `token.unbind` entries. `docs/design/credential-lifecycle.md`, section 4.
 - **0.15's vault issues tokens itself, and weighs who may, behind its
   switch.** A service token, a personal token or a handle was the app's
   transaction under 0.14's head, and the vault sealed whatever row the app

@@ -260,6 +260,13 @@
       "when": 1793220483207,
       "tag": "0036_vault_issues",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1793230483207,
+      "tag": "0037_vault_bindings",
+      "breakpoints": true
     }
   ]
 }

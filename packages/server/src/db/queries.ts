@@ -1338,6 +1338,18 @@ export type BindingRow = Tables['serviceBindings']['$inferSelect'];
  * moves the generation past every binding at once.
  */
 export async function liveBindings(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<BindingRow[]> {
+  return (await bindingsNow(db, chainKey, principal, generation)).live;
+}
+
+/**
+ * A service's bindings at a generation, from one read: every row not
+ * revoked (`unrevoked`), and those of them live (`liveBindings`: its MAC
+ * the app's, no tombstone). With 0.15's log the vault's change of them
+ * holds the first set to the rows (PR 3a): the MAC and the tombstone are
+ * the app's concerns, and a row that fails them is still a row there,
+ * which would otherwise refuse every change of the account's bindings.
+ */
+export async function bindingsNow(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<{ live: BindingRow[]; unrevoked: BindingRow[] }> {
   const { serviceBindings } = tablesOf(db);
   const rows = await db
     .select()
@@ -1346,7 +1358,26 @@ export async function liveBindings(db: Queryable, chainKey: Buffer, principal: s
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id));
   const genuine = rows.filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
   const dead = await tombstoned(db, genuine.map((row) => row.id));
-  return genuine.filter((row) => !dead.has(row.id));
+  return { live: genuine.filter((row) => !dead.has(row.id)), unrevoked: rows };
+}
+
+/** A binding of `principal`'s by id, as its row is, MAC or not: what the vault ends, whose seal it checks itself (PR 3a). */
+export async function bindingRow(db: Queryable, principal: string, id: string): Promise<BindingRow | null> {
+  const { serviceBindings } = tablesOf(db);
+  const [row] = await db.select().from(serviceBindings).where(and(eq(serviceBindings.id, id), eq(serviceBindings.principal, principal)));
+  return row ?? null;
+}
+
+/**
+ * Every credential binding `bindingId` issued that is neither revoked nor
+ * past its end at `at`, as the rows are, MAC or not: what the vault's end
+ * of the binding must name, every one, to end it (PR 3a). A row whose MAC
+ * fails is dead to the app's checks, and still one the statement counts.
+ */
+export async function issuedCredentials(db: Queryable, principal: string, bindingId: string, at: Date): Promise<CredentialRow[]> {
+  const { credentials } = tablesOf(db);
+  return db.select().from(credentials)
+    .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, `binding:${bindingId}`), isNull(credentials.revokedAt), gt(credentials.expiresAt, at)));
 }
 
 /**

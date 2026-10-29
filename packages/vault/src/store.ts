@@ -855,7 +855,7 @@ export async function loggedRows(db: Queryable): Promise<{
  * The kinds whose objects the change path reads: the vault's own, an
  * environment's, a key's (its reference's end), the roles' and the policy's.
  */
-export type ReadKind = Exclude<Kind, 'credential'>;
+export type ReadKind = Exclude<Kind, 'credential' | 'binding'>;
 
 /** `archived`: a key's rows read even while it is archived, as its unarchive would make them (an end's check, T134). */
 export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, { archived = false } = {}): Promise<HeldObject> {
@@ -1094,6 +1094,8 @@ const KNOWN_OPS: Record<Kind, readonly string[]> = {
   roles: ['role.define'],
   policy: ['bulk.limit'],
   credential: [],
+  // The vault's own statements change a binding (`change_bindings`), never the change path.
+  binding: [],
   secret: ['secret.write', 'secret.delete'],
 };
 
@@ -1110,6 +1112,7 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
     return BigInt(prior.number);
   }
   const op = (JSON.parse(call.payload) as { op?: unknown }).op;
+  if (ref.kind === 'binding') throw new Error('a binding changes by the vault\'s own statements alone (`change_bindings`)');
   if (typeof op !== 'string' || (op !== 'genesis' && !KNOWN_OPS[ref.kind].includes(op))) throw new Error(`this schema knows no change ${String(op)} to a ${ref.kind}`);
   const named = (JSON.parse(call.payload) as { ref?: { kind?: unknown; id?: unknown } }).ref;
   if ((op !== 'genesis' || named !== undefined) && (named?.kind !== ref.kind || named.id !== ref.id)) throw new Error(`a change names the object it is to: ${ref.kind}, ${ref.id}`);

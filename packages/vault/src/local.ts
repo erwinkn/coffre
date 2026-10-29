@@ -29,6 +29,7 @@ export const METHODS = [
   'signIn',
   'revokeCredential',
   'issueToken',
+  'changeBindings',
   'verifyTrees',
 ] as const satisfies readonly (keyof Vault)[];
 

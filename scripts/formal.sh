@@ -292,6 +292,9 @@ REMOVALS=(
   # which the change takes before the fence, so no use waits behind an issue.
   "LifecyclePolicy IssuePolicyHeld SensitiveOnlyFromOwners"
   "LifecyclePolicy PolicyIssueFirst UsesNeverWaitOnIssues"
+  # A binding is the vault's to make, as a token is (PR 3a): weighed on its maker's rows, held to them as read.
+  "LifecycleBind IssuerLocked SensitiveOnlyFromOwners"
+  "LifecycleBind IssuerCAS SensitiveOnlyFromOwners"
   # A sign-in's binding row holds its rate; the account's row, or W242's generation at use, its removal.
   "LifecycleSignIn BindingLocked RateHeld"
   "LifecycleSignIn MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"
