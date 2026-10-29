@@ -402,3 +402,27 @@ test("one new binding id asked for two accounts at once, the first's row deleted
     await holder.end();
   }
 });
+
+test("a binding's row put back after its end, its old seal and all, signs nobody in: the statement holds the seal to its object's newest change (review r5)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const { serviceBindings } = tablesOf(db.owner);
+  const [saved] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
+  const before = await read(made.id);
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: saved!.authMac, seal: saved!.seal }).where(eq(serviceBindings.id, made.id));
+  const { credentials } = tablesOf(db.owner);
+  const none = (await db.owner.select().from(credentials)).length;
+  const now = Date.now();
+  const outcome = await w.vault.signIn!({
+    principal: CI, binding: { columns: before.columns, seal: before.seal },
+    credential: {
+      id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'x', label: null, scope: before.columns.scope,
+      places: null, expiresAt: now + 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
+    },
+    appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} },
+  });
+  assert.deepEqual(outcome, { ok: false, refused: 'unbound' });
+  assert.equal((await db.owner.select().from(credentials)).length, none, 'nothing written');
+});
