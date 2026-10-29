@@ -207,7 +207,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /audit/trees': { ui: [{ does: "Audit: 0.15's log, its newest checkpoint and the entries since, verified with every visit", in: 'lib/queries.ts', call: 'audit.verifyTrees' }] },
   'GET /roles': {
     ui: [
-      { does: 'Settings › Roles and Instance roles; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },
+      { does: 'Settings › Roles, project and global; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },
     ],
   },
   'PUT /roles/:role': {
@@ -224,13 +224,13 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   },
   'PUT /instance-roles/:role': {
     ui: [
-      { does: 'Settings › Instance roles › Edit… › Save', in: 'components/role-editor.tsx', call: 'roles.set', args: ['developer', {}, { instance: true }] },
+      { does: 'Settings › Roles › Global roles › Edit… › Save', in: 'components/role-editor.tsx', call: 'roles.set', args: ['developer', {}, { instance: true }] },
       { does: 'the same dialog: what saving would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.preview', args: ['developer', {}, { instance: true }] },
     ],
   },
   'DELETE /instance-roles/:role': {
     ui: [
-      { does: 'Settings › Instance roles › Edit… › Reset to default', in: 'components/role-editor.tsx', call: 'roles.reset', args: ['developer', { instance: true }] },
+      { does: 'Settings › Roles › Global roles › Edit… › Reset to default', in: 'components/role-editor.tsx', call: 'roles.reset', args: ['developer', { instance: true }] },
       { does: 'the same: what it would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.previewReset', args: ['developer', { instance: true }] },
     ],
   },

@@ -356,7 +356,7 @@ function InstanceRoleNote({ access }: { access: MemberAccess }) {
     <div className="report-notice">
       <Notice tone="info">
         <strong>{name}</strong>
-        {access.scope === null ? '' : unscoped(access.scope) ? ' in every project' : `: ${scopeInWords(access.scope)}`}, from their instance role. The
+        {access.scope === null ? '' : unscoped(access.scope) ? ' in every project' : `: ${scopeInWords(access.scope)}`}, from their global role. The
         grants below add to it.
       </Notice>
     </div>

@@ -126,8 +126,10 @@ export type ProjectsResult = Awaited<ReturnType<typeof readProjects>>;
 export type AuditSearch = { decision?: 'deny'; actorId?: string; detail?: '1' };
 
 /** Settings' tabs past the first, General, by their `?tab=`. */
-export const SETTINGS_TABS = ['roles', 'instance-roles', 'keys'] as const;
+export const SETTINGS_TABS = ['roles', 'keys'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
+/** Settings' search: its tab, and on Roles, `roles=global` for the global roles rather than the project roles. */
+export type SettingsSearch = { tab?: SettingsTab; roles?: 'global' };
 
 export const AUDIT_PAGE_SIZE = 200;
 
@@ -617,7 +619,7 @@ export async function loadDirectory(queryClient: QueryClient, client: CoffreClie
 }
 
 /** The instance's settings: the directory's counts, where people set up service accounts, and what its keys are checked against. */
-/** What a tab of Settings reads, its own alone: General the directory and the instance's settings, both roles tabs the roles, Keys the key checks. */
+/** What a tab of Settings reads, its own alone: General the directory and the instance's settings, Roles the roles, project and global alike, Keys the key checks. */
 export async function loadSettings(queryClient: QueryClient, client: CoffreClient, tab: SettingsTab | undefined) {
   const { capabilities } = await loadShell(queryClient, client);
   if (tab === undefined) {

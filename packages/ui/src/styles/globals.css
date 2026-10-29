@@ -4820,10 +4820,13 @@ a.menu-item:hover {
   padding-top: 0.25rem;
 }
 
-/* Above a page's cards, the one thing to add to them. */
+/* Above a page's cards: what switches which they are, and what adds to them, at its end. */
 .section-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.125rem;
   max-width: var(--card-max);
   margin-bottom: 0.75rem;
 }

@@ -14,20 +14,21 @@ import { ScopeField } from '../components/role-field';
 import { RolesSettings } from '../components/role-editor';
 import { PageTabs } from '../components/tabs';
 import { ErrorLine, Modal, Spinner, Toggletip } from '../components/ui';
-import { Info, Key, Pencil, Settings, ShieldCheck, UserCog } from '../components/icons';
+import { Info, Key, Pencil, Settings, ShieldCheck } from '../components/icons';
 import type { settings as settingsRoute } from '../options';
 
 const Route = pageRoute<typeof settingsRoute>();
 
 /**
  * The instance's settings, a tab each: General, the instance and who
- * creates service accounts; Roles; Instance roles; Keys, for whoever runs
- * the instance. Your own settings are under Account, at the sidebar's foot.
+ * creates service accounts; Roles, the project roles or the global ones;
+ * Keys, for whoever runs the instance. Your own settings are under
+ * Account, at the sidebar's foot.
  */
 export function SettingsPage() {
-  const { tab } = Route.useSearch();
+  const { tab, roles } = Route.useSearch();
   const { capabilities } = useShell();
-  // One route, its tab in the search: a tab's link is current only for its own.
+  // One route, its tab in the search: a link is current only for its own search, but Roles for either of its two.
   const current = { exact: true, includeSearch: true } as const;
   return (
     <>
@@ -38,13 +39,9 @@ export function SettingsPage() {
             <Settings size={15} />
             General
           </Link>,
-          <Link key="roles" to="/settings" search={{ tab: 'roles' }} activeOptions={current}>
+          <Link key="roles" to="/settings" search={{ tab: 'roles' }} activeOptions={{ includeSearch: true }}>
             <ShieldCheck size={15} />
             Roles
-          </Link>,
-          <Link key="instance-roles" to="/settings" search={{ tab: 'instance-roles' }} activeOptions={current}>
-            <UserCog size={15} />
-            Instance roles
           </Link>,
           capabilities.runsInstance && (
             <Link key="keys" to="/settings" search={{ tab: 'keys' }} activeOptions={current}>
@@ -59,7 +56,19 @@ export function SettingsPage() {
       ) : tab === 'keys' ? (
         <KeysTab />
       ) : (
-        <RolesSettings kind={tab === 'roles' ? 'role' : 'instance-role'} />
+        <RolesSettings
+          kind={roles === 'global' ? 'instance-role' : 'role'}
+          switcher={
+            <nav className="segmented" aria-label="Roles">
+              <Link to="/settings" search={{ tab: 'roles' }} activeOptions={current}>
+                Project roles
+              </Link>
+              <Link to="/settings" search={{ tab: 'roles', roles: 'global' }} activeOptions={current}>
+                Global roles
+              </Link>
+            </nav>
+          }
+        />
       )}
     </>
   );

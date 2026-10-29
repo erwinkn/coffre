@@ -39,6 +39,7 @@ import {
   queries,
   tabOpens,
   type AuditSearch,
+  type SettingsSearch,
   type SettingsTab,
   type Freshness,
 } from './lib/queries';
@@ -281,14 +282,15 @@ export const serviceAccountActivity = {
 };
 
 /**
- * `/settings`, its tabs by `?tab=`: General, then Roles, Instance roles and
- * Keys. One route, so a deployment mounts no file per tab; each tab reads
- * its own alone.
+ * `/settings`, its tabs by `?tab=`: General, then Roles, the project roles
+ * or with `roles=global` the global ones, and Keys. One route, so a
+ * deployment mounts no file per tab; each tab reads its own alone.
  */
 export const settings = {
-  validateSearch: (search: Record<string, unknown>): { tab?: SettingsTab } => ({
-    tab: SETTINGS_TABS.find((tab) => tab === search.tab),
-  }),
+  validateSearch: (search: Record<string, unknown>): SettingsSearch => {
+    const tab = SETTINGS_TABS.find((each) => each === search.tab);
+    return { tab, roles: tab === 'roles' && search.roles === 'global' ? 'global' : undefined };
+  },
   loaderDeps: ({ search }: { search: { tab?: SettingsTab } }) => ({ tab: search.tab }),
   // Instance facts come from the directory and the key checks, which only
   // owners may read. Asking on everyone's behalf would write a refusal to the

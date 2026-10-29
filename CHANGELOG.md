@@ -3,9 +3,11 @@
 ## Unreleased
 
 - **Settings has tabs, and an environment's card its page's menu.**
-  Settings is General, Roles, Instance roles and, for whoever runs the
-  instance, Keys, each a `?tab=` of `/settings` that reads its own alone:
-  a deployment mounts no new route. Each role is a card of its own, saying
+  Settings is General, Roles and, for whoever runs the instance, Keys,
+  each a `?tab=` of `/settings` that reads its own alone: a deployment
+  mounts no new route. Roles switches between the project roles and the
+  global roles (`&roles=global`), as the pages now call instance roles;
+  the code, the API, the CLI and the docs keep their name. Each role is a card of its own, saying
   what it can do ("Can", in protected environments), without a built-in
   role's own words, which an Owner's edits would leave stale. General says
   who creates service accounts and where ("Anyone with access, in every

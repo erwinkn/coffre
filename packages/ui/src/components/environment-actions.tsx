@@ -80,7 +80,7 @@ export function RenameEnvironment({
         </label>
         {reslugged && (
           <Notice tone="info">
-            Instance roles scoped to <span className="mono">{environment}</span> stop reaching it; those scoped
+            Global roles scoped to <span className="mono">{environment}</span> stop reaching it; those scoped
             to <span className="mono">{slug}</span> start.
           </Notice>
         )}

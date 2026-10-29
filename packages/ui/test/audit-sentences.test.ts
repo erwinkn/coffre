@@ -145,7 +145,7 @@ test("a grant on every project of 0.4 names its place in words, and what the vau
     'took viewer on every project from carol@acme.example',
   );
   const replaced = { ...grant, action: 'access.revoke', actorId: 'vault', metadata: { previousRole: 'developer', place: '*/dev', replacedBy: { role: 'developer' } } };
-  assert.equal(said(entry(replaced)), 'took developer on dev in every project from carol@acme.example, replaced by the instance role Developer');
+  assert.equal(said(entry(replaced)), 'took developer on dev in every project from carol@acme.example, replaced by the global role Developer');
   assert.equal(
     said(entry({ ...replaced, metadata: { ...replaced.metadata, replacedBy: { role: 'member' } } })),
     'took developer on dev in every project from carol@acme.example, replaced by project grants',
@@ -288,7 +288,7 @@ test('every other action has a sentence', () => {
     [{ action: 'policy.change', author: 'vault', metadata: { change: { kind: 'role', role: 'developer', definition: null }, before: { definition: { name: 'Engineer', description: '', permissions: [], protected: [] } } } }, 'reset the Engineer role'],
     [{ action: 'policy.change', author: 'vault', metadata: { change: { kind: 'role', role: 'release-manager', definition: { name: 'Release manager', description: '', permissions: ['secret.use'], protected: [] } }, before: { definition: null } } }, 'made the Release manager role'],
     [{ action: 'policy.change', author: 'vault', metadata: { change: { kind: 'role', role: 'release-manager', definition: null }, before: { definition: { name: 'Release manager', description: '', permissions: ['secret.use'], protected: [] } } } }, 'deleted the Release manager role'],
-    [{ action: 'policy.change', author: 'vault', metadata: { change: { kind: 'instance-role', role: 'auditor', definition: null }, before: { definition: { name: 'Auditor', description: '', permissions: [], protected: [] } } } }, 'reset the Auditor instance role'],
+    [{ action: 'policy.change', author: 'vault', metadata: { change: { kind: 'instance-role', role: 'auditor', definition: null }, before: { definition: { name: 'Auditor', description: '', permissions: [], protected: [] } } } }, 'reset the Auditor global role'],
     [{ action: 'policy.change', decision: 'deny', reason: 'role_granted', metadata: { role: 'release-manager', grants: 2 } }, 'tried to delete the release-manager role: grants still name it'],
     [{ action: 'policy.change', decision: 'deny', reason: 'requires_instance_owner', metadata: { role: 'developer', kind: 'role' } }, 'tried to edit the Developer role: requires an instance owner'],
     [{ action: 'policy.change', decision: 'deny', reason: 'requires_instance_owner', metadata: { role: 'developer', kind: 'role', definition: null } }, 'tried to reset the Developer role: requires an instance owner'],

@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import { CoffreError, type RoleImpact, type RoleView } from '@coffre/client';
 import { definitionProblem, type Permission, type RoleDefinition } from '@coffre/core/access';
 import { useSuspenseQuery } from '@tanstack/react-query';
@@ -33,30 +33,35 @@ import { ConfirmDialog, ErrorLine, Modal, Notice, Spinner } from './ui';
 
 export type Kind = 'role' | 'instance-role';
 
-/** The instance's roles, or its instance roles: a card each, which opens its editor. */
-export function RolesSettings({ kind }: { kind: Kind }) {
+/**
+ * The instance's project roles, or its global roles (instance roles, in
+ * the code and the API): a card each, which opens its editor, under what
+ * switches between the two.
+ */
+export function RolesSettings({ kind, switcher }: { kind: Kind; switcher: ReactNode }) {
   const { data } = useSuspenseQuery(queries.roles(useCoffre()));
   if (!data.ok) return <ErrorLine error={`The roles could not be read. ${data.error}`} />;
-  // Keyed by kind: an editor open on one tab, its draft included, never outlives it into the other's role of the same id.
-  return <RoleList key={kind} kind={kind} roles={kind === 'role' ? data.roles : data.instanceRoles} editable={data.editable} />;
+  // Keyed by kind: an editor open on one, its draft included, never outlives it into the other's role of the same id.
+  return <RoleList key={kind} kind={kind} roles={kind === 'role' ? data.roles : data.instanceRoles} editable={data.editable} switcher={switcher} />;
 }
 
-function RoleList({ kind, roles, editable }: { kind: Kind; roles: RoleView[]; editable: boolean }) {
+function RoleList({ kind, roles, editable, switcher }: { kind: Kind; roles: RoleView[]; editable: boolean; switcher: ReactNode }) {
   // The role open in the editor, by id, or one being made: never a role's id, which `new` may be.
   const [open, setOpen] = useState<{ role: string } | { making: true } | null>(null);
   const project = kind === 'role';
   const opened = open === null || 'making' in open ? null : roles.find((role) => role.id === open.role);
   return (
     <>
-      {project && editable && (
-        <div className="section-actions">
+      <div className="section-actions">
+        {switcher}
+        {project && editable && (
           <button className="btn" type="button" onClick={() => setOpen({ making: true })}>
             <Plus size={14} />
             New role
           </button>
-        </div>
-      )}
-      <ul className="role-cards" aria-label={project ? 'Roles' : 'Instance roles'}>
+        )}
+      </div>
+      <ul className="role-cards" aria-label={project ? 'Project roles' : 'Global roles'}>
         {roles.map((role) => (
           <li key={role.id} className="role-card">
             <div className="role-card-head">
@@ -354,7 +359,7 @@ function RoleEditor({
         {editable && (
           <p className="hint">
             Reading takes using, and a protected environment holds no more than any other: the boxes keep both true.
-            {instance ? ' An instance role reaches every project its holder’s scope takes in.' : ''}
+            {instance ? ' A global role reaches every project its holder’s scope takes in.' : ''}
           </p>
         )}
         {role !== null && role.edited && (
