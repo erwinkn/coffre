@@ -169,3 +169,21 @@ test("a fetch finishing late, beside warm sets whose keys tokens keep missing, c
   await Promise.allSettled(urls.map((url) => at(url, unknown, warm + 1_000)));
   assert.equal(asked, MAX_KEY_SETS, 'none fetched twice in the minute');
 });
+
+test("a call that names an earlier time than one before it, having waited, erases no wait: the cache's clock never goes back (review r4)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // A minute on, a key it lacks, looked for once: its wait begins then.
+  assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 2000), { outcome: 'unavailable', fetches: 1 });
+  // Calls that took their time a second before that and reach the cache only now: the wait stands.
+  for (let i = 0; i < 5; i += 1) assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 1000), { outcome: 'unavailable', fetches: 0 });
+  assert.deepEqual(await verify(known, KEYS_COOLDOWN_MS + 1000), { outcome: VERIFIED, fetches: 0 });
+});
+
+test('a refresh that failed just before its set expired leaves no first fetch counted as under way: the calls after it wait their minute (review r4)', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  published = [];
+  // A minute and more on, a key the set lacks: looked for, and the issuer answers nothing usable.
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS - 1000), { outcome: 'unavailable', fetches: 1 });
+  // The set expires; each call after asks nothing until the minute is over.
+  for (let i = 0; i < 5; i += 1) assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1 + i), { outcome: 'unavailable', fetches: 0 });
+});

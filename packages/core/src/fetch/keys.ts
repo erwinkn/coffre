@@ -37,6 +37,15 @@ const held = new Map<string, Held>();
 const asked = new Map<string, { at: number; flying: number; again: boolean }>();
 const FIRST_MS = 2 * FETCH_DEADLINE_MS;
 
+/**
+ * The cache's own clock: the latest time any call has named, never going
+ * back, so that a call that waited (on a DPoP proof, say) after naming its
+ * time neither erases a later call's wait nor sees one as not begun
+ * (review r4). A token's own times are still checked at the time it names.
+ */
+let clock = 0;
+const tick = (now: number) => (clock = Math.max(clock, now));
+
 /** The issuer could not be asked for its keys, or will not be for a while. Not a verdict on the token. */
 export class IssuerUnavailable extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -49,6 +58,7 @@ export class IssuerUnavailable extends Error {
 export function forgetKeys(): void {
   held.clear();
   asked.clear();
+  clock = 0;
 }
 
 /** How many key sets this isolate holds, and URLs it waits on: for tests, of the bound. */
@@ -62,11 +72,11 @@ export function keySetsHeld(): { sets: number; asked: number } {
  * key a fresh set lacks, once a minute more.
  */
 function admit(url: string, now: number, first: boolean): boolean {
-  for (const [other, ask] of asked) if (now - ask.at >= KEYS_COOLDOWN_MS || ask.at > now) asked.delete(other);
+  for (const [other, ask] of asked) if (now - ask.at >= KEYS_COOLDOWN_MS) asked.delete(other);
   const ask = asked.get(url);
   if (ask === undefined) {
     if (asked.size >= MAX_KEY_SETS) return false;
-    asked.set(url, { at: now, flying: 1, again: !first });
+    asked.set(url, { at: now, flying: first ? 1 : 0, again: !first });
     return true;
   }
   if (first ? ask.flying === 0 || now - ask.at >= FIRST_MS : ask.again) return false;
@@ -116,7 +126,7 @@ export async function verifyWithKeys(
   token: string,
   expected: { issuer: string; audience: string; now: Date; maxAge?: null },
 ): ReturnType<typeof verifyWorkloadToken> {
-  const now = expected.now.getTime();
+  const now = tick(expected.now.getTime());
   const kept = held.get(url);
   const fresh = kept !== undefined && now - kept.fetchedAt < KEYS_FRESH_MS ? kept.keys : null;
   if (fresh !== null) {
@@ -127,7 +137,7 @@ export async function verifyWithKeys(
     }
   }
   const first = fresh === null;
-  if (!admit(url, now, first)) throw new IssuerUnavailable(first ? WAITING : KEY_ABSENT);
+  if (!admit(url, tick(now), first)) throw new IssuerUnavailable(first ? WAITING : KEY_ABSENT);
   let lacking = false;
   try {
     const keys = await fetchKeys(transport, url, now);
