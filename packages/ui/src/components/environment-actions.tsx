@@ -190,8 +190,9 @@ export function NewEnvironment({
   }, [open, forked]);
   const [how, from] = start === '' ? ['', ''] : (start.split(':') as ['inherit' | 'copy' | 'ref', string]);
   const coffre = useCoffre();
-  // A fork as references copies the keys whose source you read only through their parent: said before you confirm.
-  const { data: parent } = useQuery({ ...queries.secrets(coffre, { project, environment: from }), enabled: how === 'ref' });
+  // A fork as references copies the keys whose source you read only through their parent: said before you confirm,
+  // and read only while the dialog is open.
+  const { data: parent } = useQuery({ ...queries.secrets(coffre, { project, environment: from }), enabled: open && how === 'ref' });
   const copied = how === 'ref' && parent?.ok === true
     ? parent.keys.filter((key) => !key.archived && key.reference !== null && !key.reference.canOpenSource).map((key) => key.key)
     : [];
