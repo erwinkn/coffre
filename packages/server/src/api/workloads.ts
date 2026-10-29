@@ -1656,14 +1656,15 @@ function vaultVerifies(binding: BindingRow): boolean {
  * Whether a binding was made on this instance's public URL, as its row's
  * sealed origin says, or before the column (PR 3b). One made on another
  * takes no token for this one: its runs ask for the URL it was made on.
- * Matching skips it, so that it shadows no binding made here (review r1).
+ * Matching skips it, in every proof's flow, so that it shadows no binding
+ * made here (reviews r1, r2).
  */
-function madeHere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): boolean {
+export function madeHere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): boolean {
   return binding.origin === null || binding.origin === publicUrl;
 }
 
 /** The refusal of a token none of whose bindings was made on this instance's URL. */
-function madeElsewhere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): ExchangeRefused {
+export function madeElsewhere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): ExchangeRefused {
   return new ExchangeRefused('audience', `the binding was made on ${binding.origin}, and takes no token for ${publicUrl}: bind it again here`);
 }
 

@@ -147,13 +147,13 @@ beforeEach(async () => {
   await holdSomething(db.owner, deps.vault, MEMBER, `user:${ROOT}`);
 });
 
-/** An `aws` binding of the service, as PR 1a's binding creation will store one: its claims, and a policy. */
-async function bind(claims: BindingClaims = { account: ACCOUNT, role_id: ROLE_ID }): Promise<string> {
+/** An `aws` binding of the service, as PR 1a's binding creation will store one: its claims, and a policy; made on `origin` when said (PR 3b). */
+async function bind(claims: BindingClaims = { account: ACCOUNT, role_id: ROLE_ID }, origin?: string): Promise<string> {
   const standing = await memberStanding(deps.db, MEMBER);
   const id = randomUUID();
   await insertBinding(deps.db, deps.chainKey, {
     id, principal: MEMBER, generation: standing!.generation, profile: 'aws', issuer: 'urn:coffre:aws', jwksUri: '', jwks: null,
-    claims: canonicalClaims(claims), scope: null, policy: '{}', label: null, createdAt: new Date(), createdBy: ROOT,
+    claims: canonicalClaims(claims), scope: null, policy: '{}', label: null, createdAt: new Date(), createdBy: ROOT, ...(origin === undefined ? {} : { origin }),
   });
   return id;
 }
@@ -210,6 +210,17 @@ test("a role's signed GetCallerIdentity matches its binding by account and role 
   const shouted = await signed(ROLE);
   shouted.headers = Object.fromEntries(Object.entries(shouted.headers).map(([name, value]) => [name.replace(/^./, (c) => c.toUpperCase()), value]));
   assert.ok(!((await verify(shouted)) instanceof ExchangeRefused));
+});
+
+test('a binding made on another public URL takes no proof for this one, and shadows none made here (PR 3b, review r2)', async () => {
+  await bind(undefined, 'https://old.acme.example');
+  await refused(await signed(ROLE), 'audience', /made on https:\/\/old\.acme\.example/);
+  assert.equal(sts.calls, 0, 'STS never asked');
+  // Bound again here, the old one still live beside it: the proof matches the new one.
+  const id = await bind(undefined, ORIGIN);
+  const matched = await verify(await signed(ROLE));
+  assert.ok(!(matched instanceof ExchangeRefused), (matched as Error).message);
+  assert.equal(matched.binding.id, id);
 });
 
 test('a proof whose signature leaves out the key or the audience is refused, and STS never asked', async () => {
