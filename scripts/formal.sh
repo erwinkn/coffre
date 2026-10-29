@@ -331,7 +331,7 @@ EXPECTED=(
   # and then deleted, once the cut is announced (Seal.tla, W229).
   "SealRetention BelowCutKept"
   "SealRetention ReplayAcrossCutSeen"
-  # The vault opens no connection but Postgres: a binding of keys its issuer publishes takes the app's word for its
+  # The vault asks no issuer for keys: a binding of keys its issuer publishes takes the app's word for its
   # tokens, so a compromised app signs a run in through it with a token nobody signed (Lifecycle.tla's Fetched).
   "LifecycleFetched EverySignInOnValidToken"
 )

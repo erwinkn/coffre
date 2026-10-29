@@ -53,7 +53,7 @@ CONSTANTS
     Ops,            \* Ops[p]: what process p may do, one of them
     Rate,           \* how many credentials the binding makes a window
     \* The bindings whose issuer publishes its keys, which the vault does not
-    \* fetch (it opens no connection but Postgres): the app verifies their
+    \* fetch (it asks no issuer anything): the app verifies their
     \* tokens, and the vault takes its word. A binding of keys uploaded with
     \* it (a Kubernetes cluster's), its seal digesting them, is the vault's
     \* to verify. Which keys a binding trusts is in its seal.

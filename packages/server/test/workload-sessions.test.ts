@@ -124,9 +124,9 @@ const transport: WorkloadTransport = {
   },
 };
 
-function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault'] } = {}): CoffreRuntime {
+function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault']; publicUrl?: string } = {}): CoffreRuntime {
   const config = resolveConfig({
-    publicUrl: ORIGIN,
+    publicUrl: options.publicUrl ?? ORIGIN,
     vault: options.vault ?? deps.vault,
     auth: signin({
       providers: [github({ clientId: 'a', clientSecret: 'b' })],
@@ -310,6 +310,20 @@ test("a key-naming token is useless to any other key: its audience names the key
   // Nor does a token for the instance alone buy a GitHub binding's session: its caller could have named the key.
   const plain = await signIn({ oidc: token(GITHUB, { aud: ORIGIN, sub: 'repo:acme/api:ref:refs/heads/main', ...DEPLOY }) }, mine);
   assert.deepEqual([plain.status, plain.body.reason], [401, 'audience']);
+});
+
+test("a binding made on another public URL takes no token for this one, and shadows none made here (PR 3b, review r1)", {
+  skip: LOG === '0.15' ? false : "0.14's bindings carry no origin",
+}, async () => {
+  const elsewhere = makeRuntime({ publicUrl: 'https://old.acme.example' });
+  const claims = { sub: POD.sub, 'kubernetes.io.serviceaccount.uid': POD['kubernetes.io'].serviceaccount.uid };
+  const old = await elsewhere.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'kubernetes', issuer: CLUSTER, claims: claims as never, label: 'old', replaces: [], policy: {} }, { dryRun: false });
+  assert.ok('binding' in old);
+  const refused = await signIn({ oidc: podToken() }, await generateProofKey());
+  assert.deepEqual([refused.status, refused.body.reason], [401, 'audience'], 'the only binding was made on the old URL');
+  // Bound again here, the old one still live: a token for this URL signs in through the new one.
+  await bindPod();
+  await session({ oidc: podToken() });
 });
 
 test("a projected Kubernetes token is spent once, and its session ends at the token's own exp", async () => {

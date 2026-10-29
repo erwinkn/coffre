@@ -11,7 +11,8 @@
   digests; a key they lack is refused, never looked for), its audience (the
   instance's public URL the binding was made on, sealed with it), times,
   claims and profile rules; what the credential is held to comes of the
-  token. The vault opens no connection but Postgres, so a binding of keys
+  token. The vault asks no issuer for keys (it reaches only Postgres and a
+  remote KEK, if configured), so a binding of keys
   its issuer publishes (GitHub, GitLab, generic OIDC) takes the app's word
   for its token, as an AWS binding's signed request does: a compromised app
   could still sign runs in through those, within each binding's scope and

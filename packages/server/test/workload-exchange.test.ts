@@ -640,6 +640,14 @@ test("a binding made on another public URL is still the vault's to end, with wha
   );
   assert.equal(refused.status, 401);
   assert.equal(((await refused.json()) as { reason: string }).reason, 'audience', "a token for the new URL is none of a binding made on the old");
+  // Bound again on the new URL, the old one still live beside it: the old shadows nothing (review r1).
+  const again = await moved.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: 'deploys', replaces: [] }, { dryRun: false });
+  assert.ok('binding' in again);
+  const signedIn = await answer(
+    new Request(`${MOVED}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(rsa, { aud: MOVED }) }) }),
+    moved, ui, IP,
+  );
+  assert.equal(signedIn.status, 200, await signedIn.clone().text());
   await moved.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
   assert.ok((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.revokedAt !== null, 'ended');
   assert.equal(await caller(body.token!), 401, 'with the run it issued');

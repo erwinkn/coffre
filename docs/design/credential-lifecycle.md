@@ -238,9 +238,10 @@ at 20 ms a round trip, beside 1,000 uses a second: 65 ms alone, 72 / 180 ms
 
 Sealed bindings left one hole: the vault took the app's word that the run's
 ID token held, so the app's code, turned hostile, could sign in as any
-service with a sealed binding, with no token at all. The vault opens no
-connection but Postgres (Erwin, 2026-10-29: no egress, which replaces D148 for any issuer
-whose keys must be fetched), so where it closes that hole depends on where
+service with a sealed binding, with no token at all. The vault asks no
+issuer for anything (Erwin, 2026-10-29: no egress, which replaces D148 for
+any issuer whose keys must be fetched; its only outbound connections are
+Postgres and a remote KEK a deployment chose, AWS KMS), so where it closes that hole depends on where
 the binding's keys come from, which its seal says (`jwks_uri`):
 
 - **Keys uploaded with the binding** (a Kubernetes cluster's,
@@ -270,7 +271,8 @@ sessions for an account bound to GitHub, GitLab, a generic OIDC issuer or
 AWS, within its bindings' limits** (the scope each seals, 60 sign-ins a
 minute each), and for no account the vault never bound. A Kubernetes
 binding of uploaded keys is the vault's to verify. The vault itself makes
-no network call: a Node deployment's vault needs no outbound access.
+no call to an issuer: a Node deployment's vault reaches Postgres and, if
+its KEK is remote (AWS KMS), that KEK, nothing else.
 
 What stays sealed, whoever verifies:
 

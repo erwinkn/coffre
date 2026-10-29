@@ -1,7 +1,7 @@
 // The vault verifies a run's ID token itself, on the binding it sealed, when that binding carries its issuer's keys
 // (T149, PR 3b; D148; formal/Lifecycle.tla's VaultVerifiesToken, AudienceSealed, Fetched): what an app turned hostile
 // could hand it in place of the run's own proof buys nothing. Keys it forged, an audience it chose, a key it binds the
-// session to. The vault opens no connection but Postgres: a binding of keys its issuer publishes takes the app's word
+// session to. The vault asks no issuer for keys (with a local KEK, it fetches nothing at all): a binding of keys its issuer publishes takes the app's word
 // for its token, and a token naming a key the uploaded set lacks is refused, never looked for. Both engines.
 import test, { after, afterEach, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ beforeEach(async () => {
   fetched = [];
   globalThis.fetch = async (input) => {
     fetched.push(String(input instanceof Request ? input.url : input));
-    throw new Error('the vault opens no connection but Postgres');
+    throw new Error('the vault asks no issuer for keys');
   };
   await emptyDatabase(db.owner);
 });

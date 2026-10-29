@@ -839,11 +839,12 @@ workloads", or with `coffre trust`. A GitHub App of the deployment's own,
 installed on, private ones too, rather than have their IDs typed; the
 same app can sign people in ([github-app.md](github-app.md)).
 
-With 0.15's log on, the vault opens no connection but Postgres. The app
-fetches each issuer's keys, as before, and verifies a run's token; the vault
+With 0.15's log on, the vault asks no issuer for anything. The app fetches
+each issuer's keys, as before, and verifies a run's token; the vault
 verifies it again itself only where the binding carries its issuer's keys,
-uploaded with it (a Kubernetes cluster's). So the vault's process needs no
-outbound access, and an app turned hostile could still sign runs in through
+uploaded with it (a Kubernetes cluster's). So sign-ins give the vault's
+process no outbound traffic: it reaches Postgres and, if its KEK is a remote
+one, that KEK (AWS KMS, [keys.md](keys.md#aws-kms)), nothing else. An app turned hostile could still sign runs in through
 a binding of GitHub's, GitLab's, another OIDC issuer's or AWS, within its
 scope and rate, though never through one the vault did not seal
 ([credential-lifecycle.md](design/credential-lifecycle.md), section 4b).

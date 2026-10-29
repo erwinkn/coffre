@@ -316,8 +316,11 @@ const OIDC: ProofKind = {
     const issuer = decoded.claims.iss;
     const unbound = new ExchangeRefused('no_match', `no workload binding of ${shownMember(ctx.service)} trusts tokens from ${issuer}`);
     // The bindings first, so that a token none can take costs this one read.
-    const candidates = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
-    if (candidates.length === 0) return unbound;
+    const loaded = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
+    if (loaded.length === 0) return unbound;
+    // Those made on this instance's URL: one made on another shadows none that was (review r1).
+    const candidates = loaded.filter((binding) => madeHere(binding, ctx.publicUrl));
+    if (candidates.length === 0) return madeElsewhere(loaded[loaded.length - 1]!, ctx.publicUrl);
     const accepted = (binding: BindingRow) => expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
     // The audience the token names, if a binding takes it; else the instance's, which verifying it then refuses.
     const named = soleAudience(decoded.claims.aud);
@@ -1192,8 +1195,11 @@ export class WorkloadService {
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
     // The bindings first, so that a token none can take costs this one read.
-    const { bindings: candidates, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
-    if (candidates.length === 0 || spent === null) throw unbound();
+    const { bindings: loaded, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
+    if (loaded.length === 0 || spent === null) throw unbound();
+    // Those made on this instance's URL: one made on another shadows none that was (review r1).
+    const candidates = loaded.filter((binding) => madeHere(binding, this.#deps.publicUrl));
+    if (candidates.length === 0) throw madeElsewhere(loaded[loaded.length - 1]!, this.#deps.publicUrl);
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
     const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };
@@ -1386,7 +1392,7 @@ export class WorkloadService {
   ): Promise<SessionIssued> {
     const { member, name, kind, verified, policy, given } = proof;
     const { binding } = verified;
-    madeHere(binding, this.#deps.publicUrl);
+    if (!madeHere(binding, this.#deps.publicUrl)) throw madeElsewhere(binding, this.#deps.publicUrl);
     const known = await places(this.#deps.db);
     const now = Date.now();
     const { notAfter, expiresAt } = sessionEnds(kind, verified, policy, {}, now);
@@ -1562,7 +1568,7 @@ export class WorkloadService {
    */
   async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, token: string, decoded: DecodedToken): Promise<Exchanged> {
     const issuer = decoded.claims.iss;
-    madeHere(binding, this.#deps.publicUrl);
+    if (!madeHere(binding, this.#deps.publicUrl)) throw madeElsewhere(binding, this.#deps.publicUrl);
     const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
       generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS), stored: binding.scope,
     });
@@ -1639,7 +1645,7 @@ function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<E
 /**
  * Whether the vault verifies a sign-in's token through this binding itself
  * (PR 3b): when it carries its issuer's keys, uploaded with it, which its
- * seal digests. The vault opens no connection but Postgres, so the tokens
+ * seal digests. The vault asks no issuer for keys, so the tokens
  * of an issuer that publishes its keys are the app's to verify.
  */
 function vaultVerifies(binding: BindingRow): boolean {
@@ -1647,14 +1653,18 @@ function vaultVerifies(binding: BindingRow): boolean {
 }
 
 /**
- * A binding made on another public URL than this instance's, as its row's
- * sealed origin says, takes no token for this one (PR 3b): its runs ask
- * for the URL it was made on. Null for one made before the column.
+ * Whether a binding was made on this instance's public URL, as its row's
+ * sealed origin says, or before the column (PR 3b). One made on another
+ * takes no token for this one: its runs ask for the URL it was made on.
+ * Matching skips it, so that it shadows no binding made here (review r1).
  */
-function madeHere(binding: BindingRow, publicUrl: string): void {
-  if (binding.origin !== null && binding.origin !== publicUrl) {
-    throw new ExchangeRefused('audience', `the binding was made on ${binding.origin}, and takes no token for ${publicUrl}: bind it again here`);
-  }
+function madeHere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): boolean {
+  return binding.origin === null || binding.origin === publicUrl;
+}
+
+/** The refusal of a token none of whose bindings was made on this instance's URL. */
+function madeElsewhere(binding: Pick<BindingRow, 'origin'>, publicUrl: string): ExchangeRefused {
+  return new ExchangeRefused('audience', `the binding was made on ${binding.origin}, and takes no token for ${publicUrl}: bind it again here`);
 }
 
 /** The reasons the vault's check of a proof gives that the app's own gives too (`verifyRunToken`, PR 3b). */
