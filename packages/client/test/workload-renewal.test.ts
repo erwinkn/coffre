@@ -12,8 +12,19 @@ const MINUTE = 60_000;
 function coffre(t: test.TestContext, { end, expiresIn, extend }: { end: number; expiresIn: number; extend: number }) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-10-29T12:00:00Z') });
   const calls = { signIn: 0, renew: 0 };
-  /** Requests the fake is still answering: the client schedules its next renewal only once it has the answer. */
-  const state = { answering: 0 };
+  /** What is still running on real I/O: the fake answering a request, and the client signing one (the thread pool's digests and signatures). */
+  const state = { busy: 0 };
+  for (const name of ['digest', 'sign'] as const) {
+    const original = crypto.subtle[name].bind(crypto.subtle) as (...args: unknown[]) => Promise<unknown>;
+    t.mock.method(crypto.subtle, name, async (...args: unknown[]) => {
+      state.busy++;
+      try {
+        return await original(...args);
+      } finally {
+        state.busy--;
+      }
+    });
+  }
   const sessions = new Map<string, { notAfter: number; expiresAt: number }>();
   const answer = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -36,11 +47,11 @@ function coffre(t: test.TestContext, { end, expiresIn, extend }: { end: number; 
     return Response.json({}, { status: 404, headers });
   };
   const fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    state.answering++;
+    state.busy++;
     try {
       return await answer(input, init);
     } finally {
-      state.answering--;
+      state.busy--;
     }
   };
   return { calls, state, fetch };
@@ -54,20 +65,32 @@ async function settle(turns: number) {
   for (let turn = 0; turn < turns; turn++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-/** Wait, on real I/O, for a call the client is making (a signature on the thread pool) to reach the fake, the fake to answer it, and the client to act on the answer. */
-async function until(server: ReturnType<typeof coffre>, done: () => boolean) {
+/**
+ * Wait, on real I/O, until nothing the client started is still running (a signature, the fake's
+ * answer) and it has acted on the answers: what it will schedule is then scheduled. A new call
+ * starts within microtasks of the last one's end, so a turn of the loop with nothing busy is quiet.
+ */
+async function idle(server: ReturnType<typeof coffre>) {
   const deadline = performance.now() + 10_000;
-  while (!(done() && server.state.answering === 0) && performance.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
-  await settle(50);
+  for (;;) {
+    await settle(20);
+    if (server.state.busy === 0 || performance.now() > deadline) return;
+  }
 }
 
-/** Time moved on a second at a time, with the I/O the client waits on run between. */
-async function pass(t: test.TestContext, ms: number) {
+/** Wait for a call the client makes (it signs first, then reaches the fake) to have happened and been handled. */
+async function until(server: ReturnType<typeof coffre>, done: () => boolean) {
+  const deadline = performance.now() + 10_000;
+  while (!done() && performance.now() < deadline) await settle(1);
+  await idle(server);
+}
+
+/** Time moved on a second at a time, the client idle before the next. */
+async function pass(t: test.TestContext, server: ReturnType<typeof coffre>, ms: number) {
   for (let elapsed = 0; elapsed < ms; elapsed += 1000) {
     t.mock.timers.tick(1000);
-    await settle(1);
+    await idle(server);
   }
-  await settle(50);
 }
 
 async function open(t: test.TestContext, server: ReturnType<typeof coffre>) {
@@ -81,14 +104,14 @@ test("a session that ends where its proof does is never renewed, and the next pr
   const server = coffre(t, { end: 10 * MINUTE, expiresIn: 60 * MINUTE, extend: 60 * MINUTE });
   await open(t, server);
   assert.deepEqual(server.calls, { signIn: 1, renew: 0 });
-  await pass(t, 8 * MINUTE);
+  await pass(t, server, 8 * MINUTE);
   assert.deepEqual(server.calls, { signIn: 1, renew: 0 });
   // At 90% of the proof's life (9 minutes) the new session is asked for, before the old one ends.
-  await pass(t, 2 * MINUTE);
+  await pass(t, server, 2 * MINUTE);
   await until(server, () => server.calls.signIn === 2);
   assert.equal(server.calls.signIn, 2);
   assert.equal(server.calls.renew, 0);
-  await pass(t, 8 * MINUTE);
+  await pass(t, server, 8 * MINUTE);
   assert.equal(server.calls.renew, 0);
 });
 
@@ -96,13 +119,13 @@ test('a session with headroom is renewed at half-life, as before', async (t) => 
   // An AWS-shaped session: 60 minutes of proof, a session that expires in 10 and renews by 10.
   const server = coffre(t, { end: 60 * MINUTE, expiresIn: 10 * MINUTE, extend: 10 * MINUTE });
   await open(t, server);
-  await pass(t, 5 * MINUTE + 1000);
+  await pass(t, server, 5 * MINUTE + 1000);
   await until(server, () => server.calls.renew === 1);
   assert.equal(server.calls.renew, 1);
   // Its expiry is now 15 minutes out: the next half-life is 5 minutes on.
-  await pass(t, 4 * MINUTE);
+  await pass(t, server, 4 * MINUTE);
   assert.equal(server.calls.renew, 1);
-  await pass(t, MINUTE + 10_000);
+  await pass(t, server, MINUTE + 10_000);
   await until(server, () => server.calls.renew === 2);
   assert.equal(server.calls.renew, 2);
 });
@@ -111,14 +134,14 @@ test('a renewal that brings the expiry to the hard end is the last for that sess
   // Headroom at sign-in (10 of 30 minutes), then one renewal reaches the end: no half-lives toward a wall.
   const server = coffre(t, { end: 30 * MINUTE, expiresIn: 10 * MINUTE, extend: 60 * MINUTE });
   await open(t, server);
-  await pass(t, 5 * MINUTE + 1000);
+  await pass(t, server, 5 * MINUTE + 1000);
   await until(server, () => server.calls.renew === 1);
   assert.equal(server.calls.renew, 1);
-  await pass(t, 20 * MINUTE);
+  await pass(t, server, 20 * MINUTE);
   assert.equal(server.calls.renew, 1);
   assert.equal(server.calls.signIn, 1);
   // The proof is made again at 90% of its life (27 minutes), before the session's end.
-  await pass(t, 3 * MINUTE);
+  await pass(t, server, 3 * MINUTE);
   await until(server, () => server.calls.signIn === 2);
   assert.equal(server.calls.signIn, 2);
 });
