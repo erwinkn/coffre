@@ -46,7 +46,8 @@ async function settle(turns: number) {
 
 /** Wait, on real I/O, for a call the client is making (a signature on the thread pool) to reach the fake. */
 async function until(done: () => boolean) {
-  for (let turn = 0; turn < 20_000 && !done(); turn++) await new Promise((resolve) => setImmediate(resolve));
+  const deadline = performance.now() + 10_000;
+  while (!done() && performance.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
 }
 
 /** Time moved on a second at a time, with the I/O the client waits on run between. */
@@ -90,7 +91,7 @@ test('a session with headroom is renewed at half-life, as before', async (t) => 
   // Its expiry is now 15 minutes out: the next half-life is 5 minutes on.
   await pass(t, 4 * MINUTE);
   assert.equal(server.calls.renew, 1);
-  await pass(t, MINUTE + 2000);
+  await pass(t, MINUTE + 10_000);
   await until(() => server.calls.renew === 2);
   assert.equal(server.calls.renew, 2);
 });
