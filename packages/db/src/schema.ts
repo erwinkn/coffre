@@ -18,7 +18,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-import { ACTIVE_SUBJECT, relationsOf } from './relations.ts';
+import { ACTIVE_SUBJECT } from './active-subject.ts';
 
 const bytea = customType<{ data: Buffer }>({
   dataType: () => 'bytea',
@@ -1155,9 +1155,3 @@ export const logTiles = pgTable(
     check('log_tiles_hashes_check', sql`octet_length(${table.hashes}) BETWEEN 32 AND 8192 AND octet_length(${table.hashes}) % 32 = 0`),
   ],
 );
-
-// For Drizzle's relational queries; see relations.ts.
-export const {
-  environmentsRelations,
-  secretsRelations,
-} = relationsOf({ projects, environments, secrets, secretVersions });

@@ -1,15 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-import {
-  createTableRelationsHelpers,
-  extractTablesRelationalConfig,
-  getTableName,
-  is,
-  Table,
-  type Assume,
-  type ExtractTablesWithRelations,
-  type RelationalSchemaConfig,
-} from 'drizzle-orm';
+import { getTableName, is, Table, type Assume, type RelationalSchemaConfig } from 'drizzle-orm';
 import { PgDatabase, PgDialect, type PgQueryResultHKT, type PgTransactionConfig } from 'drizzle-orm/pg-core';
 import { PostgresJsSession, PostgresJsTransaction } from 'drizzle-orm/postgres-js/session';
 
@@ -30,7 +21,7 @@ export interface QueryResult extends PgQueryResultHKT {
  * A database, typed as Postgres whichever it is; see portable.ts for why
  * that holds. connect.ts opens one of each from a URL.
  */
-export type Database = PgDatabase<QueryResult, typeof schema>;
+export type Database = PgDatabase<QueryResult, typeof schema, NoRelations>;
 export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Anything a read can run on: the database, or an open transaction. */
 export type Queryable = Database | Transaction;
@@ -86,31 +77,24 @@ function brokenRule(error: unknown): QueryOutsideTransaction | undefined {
 }
 
 /**
- * What Drizzle makes of the schema, which `drizzle(client, { schema })` works
- * out again from every table at each call: on Workers, a database is made
- * per call, and this was a fifth of a vault call's CPU. The schema never
- * changes, so it is worked out once per process or isolate, a settled value.
+ * Coffre runs no relational query (`db.query.*`), and Drizzle's work out of
+ * them, `extractTablesRelationalConfig` and a query builder per table for
+ * every database, was 4 to 11 ms of a cold isolate's CPU and 0.1 ms of each
+ * later call on Workers, where a database is made per call. So the database
+ * has none: `db.query` is empty, in type and at run time, and a `db.query.x`
+ * fails the typecheck. Only the tables stay, for `tablesOf`.
  */
-type Tables = ExtractTablesWithRelations<typeof schema>;
-type Relational = RelationalSchemaConfig<Tables>;
-let relational: Relational | undefined;
-
-function relationalSchema(): Relational {
-  if (relational === undefined) {
-    const { tables, tableNamesMap } = extractTablesRelationalConfig(schema, createTableRelationsHelpers);
-    // Drizzle's own construct passes the same untyped tables on as these.
-    relational = { fullSchema: schema, schema: tables as Relational['schema'], tableNamesMap };
-  }
-  return relational;
-}
+type NoRelations = Record<never, never>;
+type Relational = RelationalSchemaConfig<NoRelations>;
+const relational: Relational = { fullSchema: schema, schema: {}, tableNamesMap: {} };
 
 /**
  * Drizzle's session for postgres.js, but for a transaction's options, which
  * go in its BEGIN, as node-postgres's session sends them, rather than in a
  * SET TRANSACTION of their own: a round trip less for a snapshot read.
  */
-class Session extends PostgresJsSession<PostgresClient, typeof schema, Tables> {
-  override transaction<T>(work: (tx: PostgresJsTransaction<typeof schema, Tables>) => Promise<T>, config?: PgTransactionConfig): Promise<T> {
+class Session extends PostgresJsSession<PostgresClient, typeof schema, NoRelations> {
+  override transaction<T>(work: (tx: PostgresJsTransaction<typeof schema, NoRelations>) => Promise<T>, config?: PgTransactionConfig): Promise<T> {
     const { dialect, schema: tables, options } = this as unknown as { dialect: PgDialect; schema: Relational; options: object };
     return this.client.begin(config === undefined ? '' : transactionOptions(config), (client) =>
       work(new PostgresJsTransaction(dialect, new PostgresJsSession(client, dialect, tables, options), tables))) as Promise<T>;
@@ -134,11 +118,10 @@ function transactionOptions(config: PgTransactionConfig): string {
 export type Client = Pick<PostgresClient, 'unsafe' | 'begin'>;
 
 export function createDatabase(client: Client): Database {
-  // What `drizzle(client, { schema })` sets up, but for the schema's config, made once.
+  // What `drizzle(client, { schema })` sets up, but with no relational queries.
   if ('options' in client) textTypes(client as PostgresClient);
   const dialect = new PgDialect();
-  const config = relationalSchema();
-  const db = new PgDatabase(dialect, new Session(guarded(client) as PostgresClient, dialect, config), config) as Database;
+  const db = new PgDatabase(dialect, new Session(guarded(client) as PostgresClient, dialect, relational), relational) as Database;
   // Each transaction's work runs knowing which one it is in, until that work is done. Not until
   // the COMMIT comes back: the transaction waits on nothing then, so what the work left running
   // may ask for a query, which waits for the transaction to end rather than for itself.

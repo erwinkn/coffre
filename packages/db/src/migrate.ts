@@ -339,7 +339,8 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     async unlock() {
       await client.unsafe('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
-    migrate: (migrationsFolder) => migrate(createDatabase(client), { migrationsFolder }),
+    // The migrator uses the database's dialect and session alone, never its relational config.
+    migrate: (migrationsFolder) => migrate(createDatabase(client) as unknown as Parameters<typeof migrate>[0], { migrationsFolder }),
     async restrict(backupLogin) {
       await restrictDatabase(client);
       if (backupLogin !== undefined) {
