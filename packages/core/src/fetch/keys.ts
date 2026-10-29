@@ -3,37 +3,39 @@ import { MAX_KEYS, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet
 import { FETCH_DEADLINE_MS, FetchRefused, type WorkloadTransport } from './transport.ts';
 
 /**
- * Issuers' keys, as this isolate (or process) last fetched them. Settled
- * values only: a key set and when it came, or when a fetch last failed,
- * never a fetch under way. Two first exchanges in one isolate each fetch,
- * rather than one waiting on the other's request, which Cloudflare cancels
- * as hung once the first ends (AGENTS.md, "What an isolate keeps").
+ * Issuers' keys, as this isolate (or process) last fetched them, and when
+ * each URL was last asked. Settled values only: key sets and times, never a
+ * fetch under way. Two first exchanges in one isolate each fetch, rather
+ * than one waiting on the other's request, which Cloudflare cancels as hung
+ * once the first ends (AGENTS.md, "What an isolate keeps").
  */
-type Entry = { keys: JSONWebKeySet | null; fetchedAt: number; failedAt: number | null };
+type Held = { keys: JSONWebKeySet; fetchedAt: number };
 
 /** A key set is used for ten minutes, then fetched again. */
 export const KEYS_FRESH_MS = 10 * 60 * 1000;
-/** After a failed fetch, or a key the set lacks, this long before that URL is fetched again. */
+/** A URL is asked at most twice in this long: for its keys, and once more for a key they lack, whatever the answers. */
 export const KEYS_COOLDOWN_MS = 60 * 1000;
-/**
- * At most this many key sets, and `MAX_KEYS` keys in each. A set in its
- * minute's wait is never the one evicted, and a URL not among them is
- * fetched only while there is room for it, counting the first fetches under
- * way (`room`): cycling tokens through more URLs than the cache holds, one
- * after another or all at once, buys at most this many fetches a minute
- * (reviews r1, r2).
- */
+/** At most this many key sets held, `MAX_KEYS` keys in each, and as many URLs asked a minute. */
 export const MAX_KEY_SETS = 64;
 
-const entries = new Map<string, Entry>();
+/** The key sets, the least recently fetched first: evicting one changes no wait, which `asked` keeps. */
+const held = new Map<string, Held>();
 
 /**
- * The first fetches under way of URLs the cache does not hold, by when each
- * began: a time, never the fetch, so no call waits on another's. One that a
- * cancelled request never finished stops counting after `STARTED_MS`.
+ * Each URL asked in the last minute: when its first fetch began, how many
+ * of its first fetches are under way, and whether it was asked again for a
+ * key its set lacks (`again`), or need not be (its set, just fetched, lacked
+ * it already). A URL not in it is fetched only while fewer than
+ * `MAX_KEY_SETS` are, and is counted when its fetch begins, before any
+ * wait, so neither tokens cycled through more URLs than it holds nor
+ * fetches finishing late buy more than two fetches a URL a minute and
+ * `MAX_KEY_SETS` URLs in all (reviews r1 to r3); evicting a key set changes
+ * no wait. The one exception: first calls at once for a URL whose keys are
+ * not held fresh each fetch, for `FIRST_MS` at most, so that none waits on
+ * another.
  */
-const started = new Map<string, number>();
-const STARTED_MS = 2 * FETCH_DEADLINE_MS;
+const asked = new Map<string, { at: number; flying: number; again: boolean }>();
+const FIRST_MS = 2 * FETCH_DEADLINE_MS;
 
 /** The issuer could not be asked for its keys, or will not be for a while. Not a verdict on the token. */
 export class IssuerUnavailable extends Error {
@@ -43,15 +45,42 @@ export class IssuerUnavailable extends Error {
   }
 }
 
-/** Forget every key set: for tests, which play several issuers in one process. */
+/** Forget every key set and wait: for tests, which play several issuers in one process. */
 export function forgetKeys(): void {
-  entries.clear();
-  started.clear();
+  held.clear();
+  asked.clear();
 }
 
-/** How many key sets this isolate holds: for tests, of the bound. */
-export function keySetsHeld(): number {
-  return entries.size;
+/** How many key sets this isolate holds, and URLs it waits on: for tests, of the bound. */
+export function keySetsHeld(): { sets: number; asked: number } {
+  return { sets: held.size, asked: asked.size };
+}
+
+/**
+ * Whether `url` may be fetched now, counted as asked if so: for keys not
+ * held fresh (`first`), once a minute but for first calls at once; for a
+ * key a fresh set lacks, once a minute more.
+ */
+function admit(url: string, now: number, first: boolean): boolean {
+  for (const [other, ask] of asked) if (now - ask.at >= KEYS_COOLDOWN_MS || ask.at > now) asked.delete(other);
+  const ask = asked.get(url);
+  if (ask === undefined) {
+    if (asked.size >= MAX_KEY_SETS) return false;
+    asked.set(url, { at: now, flying: 1, again: !first });
+    return true;
+  }
+  if (first ? ask.flying === 0 || now - ask.at >= FIRST_MS : ask.again) return false;
+  if (first) ask.flying += 1;
+  else ask.again = true;
+  return true;
+}
+
+/** A first fetch ended; `lacking`: its set lacked the token's key, so a minute passes before it is looked for again. */
+function landed(url: string, first: boolean, lacking: boolean): void {
+  const ask = asked.get(url);
+  if (ask === undefined) return;
+  if (first && ask.flying > 0) ask.flying -= 1;
+  if (lacking) ask.again = true;
 }
 
 async function fetchKeys(transport: WorkloadTransport, url: string, now: number): Promise<JSONWebKeySet> {
@@ -61,65 +90,25 @@ async function fetchKeys(transport: WorkloadTransport, url: string, now: number)
     if (!Array.isArray(keys) || keys.length === 0) throw new FetchRefused(new URL(url), 'holds no keys');
     if (keys.length > MAX_KEYS) throw new FetchRefused(new URL(url), `holds more than ${MAX_KEYS} keys`);
     const set = { keys: keys.filter((key) => typeof key === 'object' && key !== null && (key as { use?: unknown }).use !== 'enc') } as JSONWebKeySet;
-    remember(url, { keys: set, fetchedAt: now, failedAt: null }, now);
+    held.delete(url);
+    held.set(url, { keys: set, fetchedAt: now });
+    while (held.size > MAX_KEY_SETS) held.delete(held.keys().next().value!);
     return set;
   } catch (error) {
-    remember(url, { keys: entries.get(url)?.keys ?? null, fetchedAt: entries.get(url)?.fetchedAt ?? 0, failedAt: now }, now);
     throw new IssuerUnavailable(`the issuer's keys could not be fetched: ${(error as Error).message}`, { cause: error });
   }
 }
 
-function remember(url: string, entry: Entry, now: number): void {
-  entries.delete(url);
-  entries.set(url, entry);
-  // The oldest go first, but for those waiting their minute: their wait outlives no eviction. Should every other be
-  // waiting (`room` counted one that has begun waiting since), the oldest of them: the bound holds whatever the timing.
-  while (entries.size > MAX_KEY_SETS) {
-    let victim: string | undefined;
-    for (const [held, kept] of entries) {
-      if (held === url) continue;
-      victim ??= held;
-      if (!cooling(kept, now)) {
-        victim = held;
-        break;
-      }
-    }
-    entries.delete(victim!);
-  }
-}
-
-/**
- * Whether a URL the cache does not hold may be fetched: while the sets
- * held and the first fetches under way of others leave a place, or as many
- * sets as those fetches would take are not waiting their minute, to be
- * evicted for them.
- */
-function room(url: string, now: number): boolean {
-  let under = 0;
-  for (const [other, at] of started) {
-    if (now - at >= STARTED_MS || at > now) started.delete(other);
-    else if (other !== url) under += 1;
-  }
-  if (entries.size + under < MAX_KEY_SETS) return true;
-  let evictable = 0;
-  for (const entry of entries.values()) if (!cooling(entry, now)) evictable += 1;
-  return evictable > under;
-}
-
-function cooling(entry: Entry | undefined, now: number): boolean {
-  return entry?.failedAt != null && now - entry.failedAt < KEYS_COOLDOWN_MS;
-}
-
 /** The token's key is not in a set fetched just now: the issuer's, or no one's. */
 const KEY_ABSENT = "the token's key is not among the issuer's, which were fetched a moment ago; try again in a minute";
+const WAITING = "the issuer's keys were asked for a moment ago; try again in a minute";
 
 /**
- * Verify a token under the keys at `url`: the cached set while fresh, else
- * fetched. At most one fetch an exchange: a key missing from a set this
- * call fetched is not there, and a key missing from an older set is fetched
- * for once, in case the issuer rotated. Either way the URL then waits a
- * minute before the next fetch, and until then, or while the issuer cannot
- * be reached, `IssuerUnavailable`. Fresh cached keys work all the while.
+ * Verify a token under the keys at `url`: the held set while fresh; else
+ * the keys fetched, once a minute at most, and for a key a fresh set lacks
+ * (the issuer may have rotated), once a minute more (`admit`). A key
+ * missing from a set just fetched is not there. Until the URL may be asked again, or while the issuer cannot
+ * be reached, `IssuerUnavailable`; fresh held keys work all the while.
  */
 export async function verifyWithKeys(
   transport: WorkloadTransport,
@@ -128,37 +117,29 @@ export async function verifyWithKeys(
   expected: { issuer: string; audience: string; now: Date; maxAge?: null },
 ): ReturnType<typeof verifyWorkloadToken> {
   const now = expected.now.getTime();
-  let entry = entries.get(url);
-  let keys = entry?.keys != null && now - entry.fetchedAt < KEYS_FRESH_MS ? entry.keys : null;
-  const fetched = keys === null;
-  if (keys === null) {
-    if (cooling(entry, now) || (entry === undefined && !room(url, now))) throw new IssuerUnavailable("the issuer's keys could not be fetched a moment ago; try again in a minute");
-    if (entry === undefined) started.set(url, now);
-    try {
-      keys = await fetchKeys(transport, url, now);
-    } finally {
-      if (entry === undefined) started.delete(url);
-    }
-  }
-  try {
-    return await verifyWorkloadToken(token, keys, expected);
-  } catch (error) {
-    if (!absentKey(error)) throw error;
-    entry = entries.get(url);
-    if (fetched || cooling(entry, now)) {
-      if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: now }), failedAt: now }, now);
-      throw new IssuerUnavailable(KEY_ABSENT);
-    }
-    // The issuer may have rotated: fetch once, and wait a minute before the next.
-    remember(url, { ...(entry ?? { keys: null, fetchedAt: 0 }), failedAt: now }, now);
-    const fresh = await fetchKeys(transport, url, now);
-    remember(url, { keys: fresh, fetchedAt: now, failedAt: now }, now);
+  const kept = held.get(url);
+  const fresh = kept !== undefined && now - kept.fetchedAt < KEYS_FRESH_MS ? kept.keys : null;
+  if (fresh !== null) {
     try {
       return await verifyWorkloadToken(token, fresh, expected);
-    } catch (refetched) {
-      if (absentKey(refetched)) throw new IssuerUnavailable(KEY_ABSENT);
-      throw refetched;
+    } catch (error) {
+      if (!absentKey(error)) throw error;
     }
+  }
+  const first = fresh === null;
+  if (!admit(url, now, first)) throw new IssuerUnavailable(first ? WAITING : KEY_ABSENT);
+  let lacking = false;
+  try {
+    const keys = await fetchKeys(transport, url, now);
+    try {
+      return await verifyWorkloadToken(token, keys, expected);
+    } catch (error) {
+      if (!absentKey(error)) throw error;
+      lacking = true;
+      throw new IssuerUnavailable(KEY_ABSENT);
+    }
+  } finally {
+    landed(url, first, lacking);
   }
 }
 

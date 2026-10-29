@@ -91,7 +91,7 @@ test('concurrent cold: each fetches once, never twice, and neither waits on the 
   assert.equal(fetches, 2);
 });
 
-test('tokens cycled through more key URLs than the cache holds cost each at most one fetch a minute: a URL waiting its minute is never evicted, and none is fetched while every one waits', async () => {
+test('tokens cycled through more key URLs than the cache holds cost each at most one fetch a minute: a URL waits its minute whether or not its keys are still held, and none is fetched while 64 wait', async () => {
   let asked = 0;
   const many: WorkloadTransport = {
     json: async () => {
@@ -134,8 +134,38 @@ test('first fetches of more key URLs than the cache holds, all at once and finis
   const settled = await Promise.allSettled(first);
   assert.ok(settled.every((outcome) => outcome.status === 'rejected' && outcome.reason instanceof IssuerUnavailable));
   assert.equal(asked, MAX_KEY_SETS, 'as many fetches as places; the rest were refused before asking');
-  assert.equal(keySetsHeld(), MAX_KEY_SETS);
+  assert.deepEqual(keySetsHeld(), { sets: MAX_KEY_SETS, asked: MAX_KEY_SETS });
   await Promise.allSettled(all(1_000));
   assert.equal(asked, MAX_KEY_SETS, 'each waits its minute: none fetched again');
-  assert.equal(keySetsHeld(), MAX_KEY_SETS);
+  assert.deepEqual(keySetsHeld(), { sets: MAX_KEY_SETS, asked: MAX_KEY_SETS });
+});
+
+test("a fetch finishing late, beside warm sets whose keys tokens keep missing, costs no URL a third fetch in its minute, and holds the bounds (review r3)", async () => {
+  let asked = 0;
+  let release: (() => void) | null = null;
+  const many: WorkloadTransport = {
+    json: async (url) => {
+      asked++;
+      if (url.href === LATE) await new Promise<void>((resolve) => (release = resolve));
+      return { keys: [known.jwk] };
+    },
+  };
+  const LATE = 'https://late.example/keys';
+  const urls = Array.from({ length: MAX_KEY_SETS }, (_, n) => `https://issuer-${n}.example/keys`);
+  const at = (url: string, by: Key, ms: number) => verifyWithKeys(many, url, token(by), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + ms) });
+  // 64 sets held, their minute over.
+  for (const url of urls) await at(url, known, 0);
+  const warm = KEYS_COOLDOWN_MS + 1_000;
+  asked = 0;
+  // A cold URL's fetch begins, and finishes only once every held set has been asked again for a key it lacks.
+  const late = at(LATE, known, warm);
+  const missed = await Promise.allSettled(urls.map((url) => at(url, unknown, warm)));
+  assert.ok(missed.every((outcome) => outcome.status === 'rejected' && outcome.reason instanceof IssuerUnavailable));
+  release!();
+  await late;
+  assert.equal(asked, MAX_KEY_SETS, 'the late one, and one for each held set but the one no place was left for');
+  assert.deepEqual(keySetsHeld(), { sets: MAX_KEY_SETS, asked: MAX_KEY_SETS });
+  // The set it pushed out is asked for again at once: it waits its minute, held or not.
+  await Promise.allSettled(urls.map((url) => at(url, unknown, warm + 1_000)));
+  assert.equal(asked, MAX_KEY_SETS, 'none fetched twice in the minute');
 });

@@ -274,16 +274,18 @@ binding's URLs are held to when made; plain HTTP to loopback only for an
 instance whose sealed origin is loopback, as `pnpm dev`'s). On Node, the
 transport's resolver admits public addresses alone, at connect time, so a
 name that resolves elsewhere a moment later gains nothing, and an address
-written in the URL is held to the same rule. The cache keeps settled key
-sets only, never a fetch under way (AGENTS.md, "What an isolate keeps"), ten
-minutes each; a token naming a key the set lacks has it fetched once more,
-then that URL waits a minute: tokens with random `kid`s cost an issuer one
-fetch a minute, whatever their number. A set in its wait is never the one
-evicted, and a URL the cache does not hold is fetched only while there is a
-place for it, counting the first fetches under way by when they began (a
-time, never the fetch): cycling tokens through more URLs than its 64, one
-after another or all at once, buys no more (reviews r1, r2). They are refused meanwhile (503, try
-again in a minute; for uploaded keys, `unknown_key` and its alert). Never on
+written in the URL is held to the same rule. The cache keeps settled values only, never a
+fetch under way (AGENTS.md, "What an isolate keeps"): key sets, ten minutes
+each, the 64 most recently fetched; and, apart from them, each URL asked in
+the last minute, by when its fetch began. A URL is fetched for its keys at most
+once a minute, whatever the answer, and once more for a key a fresh set
+lacks; at most 64 URLs a minute in all, each counted when its fetch begins, so tokens with random `kid`s, cycled through
+more URLs than the cache holds or finishing late, cost an issuer one fetch a
+minute (reviews r1 to r3); evicting a key set changes no wait. The one
+exception: first calls at once for a URL whose keys are not held fresh each
+fetch, for 10 s at most, so that none waits on another. A token naming a key
+the held set lacks has it fetched once more (the issuer may have rotated),
+unless the set was just fetched without it, and is refused meanwhile (503, try again in a minute; for uploaded keys, `unknown_key` and its alert). Never on
 `/use`: only a sign-in verifies a token.
 
 **Still the app's in 0.15: a proof that is no ID token.** An AWS binding's
