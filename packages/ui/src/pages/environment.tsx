@@ -224,6 +224,8 @@ function EnvironmentLedger({
   const [saveError, setSaveError] = useState<string | null>(null);
   // Whether Save was pressed since the edits began: a blank name is an error only then.
   const [attempted, setAttempted] = useState(false);
+  // Ended with the last open row, however it closed: the next row added starts quiet.
+  if (attempted && drafts.length === 0 && Object.keys(changes).length === 0 && editing.size === 0) setAttempted(false);
   // The keys a save makes sensitive, waiting for its confirmation: nobody sees them again, which the row's menu asks too.
   const [hiding, setHiding] = useState<string[] | null>(null);
   const [query, setQuery] = useState(Route.useSearch().filter ?? '');
@@ -488,6 +490,7 @@ function EnvironmentLedger({
             inProject={inProject}
             personalOf={personal ? parents[0]! : null}
             ownConfig={principal?.type === 'user' && canList && !personal}
+            busy={protecting.state === 'pending'}
           />
         }
         meta={protecting.state === 'pending' ? (
@@ -1929,6 +1932,7 @@ function EnvironmentActions({
   inProject,
   personalOf,
   ownConfig,
+  busy,
 }: {
   project: string;
   environment: string;
@@ -1938,6 +1942,8 @@ function EnvironmentActions({
   personalOf: string | null;
   /** Whether to offer your own config of it, `dev@me`. */
   ownConfig: boolean;
+  /** Whether a change of it, a rename, its protection or its archiving, is on its way: another waits for its answer. */
+  busy: boolean;
 }) {
   const navigate = useNavigate();
   const { projects } = useShell();
@@ -1969,13 +1975,13 @@ function EnvironmentActions({
           ) : (
             <>
               {manages && (
-                <Menu.Item className="menu-item" onClick={() => setOpen('rename')}>
+                <Menu.Item className="menu-item" disabled={busy} onClick={() => setOpen('rename')}>
                   <Pencil size={14} />
                   Rename…
                 </Menu.Item>
               )}
               {protects && (
-                <Menu.Item className="menu-item" onClick={() => setOpen('protect')}>
+                <Menu.Item className="menu-item" disabled={busy} onClick={() => setOpen('protect')}>
                   <Lock size={14} />
                   {inProject!.protected ? 'Unprotect…' : 'Protect…'}
                 </Menu.Item>
@@ -1999,7 +2005,7 @@ function EnvironmentActions({
               {manages && (
                 <>
                   <Menu.Separator className="menu-sep" />
-                  <Menu.Item className="menu-item menu-item-danger" onClick={() => setOpen('archive')}>
+                  <Menu.Item className="menu-item menu-item-danger" disabled={busy} onClick={() => setOpen('archive')}>
                     <Archive size={14} />
                     Archive…
                   </Menu.Item>

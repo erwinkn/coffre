@@ -84,8 +84,9 @@ export function ProtectDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { confirm } = useProtectConfirm(project, environment.slug, environment.protected, environment.unprotectable === true);
-  return <ConfirmDialog open={open} onOpenChange={onOpenChange} {...confirm} />;
+  const { confirm, pending } = useProtectConfirm(project, environment.slug, environment.protected, environment.unprotectable === true);
+  // Once a change is on its way, another waits for its answer: the later of two would otherwise land as it likes.
+  return <ConfirmDialog open={open} onOpenChange={onOpenChange} {...confirm} confirmDisabled={pending} />;
 }
 
 /** What protecting it, or taking it off, says before it does, and whether a change of it is on its way. */

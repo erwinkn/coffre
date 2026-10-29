@@ -2728,20 +2728,26 @@ table.claims-table td {
   opacity: 0.55;
 }
 
-.value-field > .input,
-.value-field > .input:focus,
-.value-field > .input:disabled {
+.value-field > .input {
   flex: 1;
   min-width: 0;
   height: calc(1.875rem - 2px);
   padding-right: 0.25rem;
+}
+
+/* The field draws the border, the ring and the dimming, focused or not. */
+.value-field > .input,
+.value-field > .input:focus,
+.value-field > .input:disabled {
   border: 0;
   background: transparent;
   box-shadow: none;
   opacity: 1;
 }
 
+/* As tall as its lines, as `rows` says. */
 .value-field > .input.value-lines {
+  height: auto;
   min-height: calc(1.875rem - 2px);
 }
 
