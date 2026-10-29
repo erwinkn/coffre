@@ -1496,8 +1496,8 @@ The last row is PR 3's (D148): without sealed bindings, the hostile app
 writes one that trusts its own key, and the vault's check of the token
 proves nothing; with the audience the app names, it replays a token a run
 asked for another instance. `SignInsOnValidTokens` covers the bindings
-whose keys the vault holds, uploaded with them: it opens no connection but
-Postgres, so a binding's keys its issuer publishes (`Fetched`) are the
+whose keys the vault holds, uploaded with them: it never asks an issuer
+for keys, so a binding's keys its issuer publishes (`Fetched`) are the
 app's to check. `EXPECTED`: `LifecycleFetched` breaks
 `EverySignInOnValidToken`, with every protection on, the hostile app
 signing a run in through b with a token nobody signed: the gap the design

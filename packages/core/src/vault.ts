@@ -488,8 +488,8 @@ export type SignInInput = {
    * digest, as a Kubernetes cluster's does), with those keys as its row
    * keeps them; the vault then takes `spent`, `validUntil` and `record.run`
    * from the token, not from the app. Null for a binding of keys its issuer
-   * publishes, which the vault does not fetch (it opens no connection but
-   * Postgres), and for a proof that is no ID token (an AWS signed request):
+   * publishes, which the vault does not fetch (it asks no issuer anything),
+   * and for a proof that is no ID token (an AWS signed request):
    * the app verifies those, so a compromised app could sign a run in
    * through such a binding, within its limits.
    */
