@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A workload client stops renewing a session already at its hard end.**
+  A Kubernetes session ends where its projected token does, so each
+  renewal found nothing to move, answered the same expiry (after a 401
+  for a stale DPoP nonce and a retry) and cost a database transaction:
+  about half of a fleet's sign-in traffic. `@coffre/client/workload` now
+  schedules no renewal while a session's expiry has reached its `notAfter`,
+  and keeps the new proof at 90% of the old one's life. AWS sessions and
+  enrollments, which a renewal can still extend, renew as before.
 - **The Secrets page edits in one line a row, and saves the whole table.**
   A secret being added or edited is one line, its cells on one baseline:
   the name, then the value with who sees it, Generate and, editing an
