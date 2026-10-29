@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A role's card shows every permission, in the same place on every card.**
+  Three rows, Values (Read, Use, Write, Retire), Log (Read) and Manage
+  (Environments, Access, Project): a permission the role holds is solid,
+  one it does not a dashed outline, so that roles compare at a glance and
+  their cards are one height. One it holds only outside protected
+  environments, as Developer's Read, carries a lock, which a line above
+  the cards explains; the sentences "Can …" and "In protected environments
+  …", which repeated each other for most roles, are gone. A screen reader
+  hears each in full: "Read values: yes, except in protected environments".
+  Who holds the role sits at the card's foot, beside Edit.
 - **The Users page says "Global role", and Settings' Roles views say what they are.**
   The Users column, its Change global role menu item and dialog, the role
   field of Add user and the Account page's identity say "Global role", as
@@ -14,9 +24,8 @@
   each a `?tab=` of `/settings` that reads its own alone: a deployment
   mounts no new route. Roles switches between the project roles and the
   global roles (`&roles=global`), as the pages now call instance roles;
-  the code, the API, the CLI and the docs keep their name. Each role is a card of its own, saying
-  what it can do ("Can", in protected environments), without a built-in
-  role's own words, which an Owner's edits would leave stale. General says
+  the code, the API, the CLI and the docs keep their name. Each role is a card of its own,
+  without a built-in role's own words, which an Owner's edits would leave stale. General says
   who creates service accounts and where ("Anyone with access, in every
   project and environment"), its Edit beside it. Keys gives each key by
   the end of its ID and says where the vault key is kept ("kept in the

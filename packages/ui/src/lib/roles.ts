@@ -17,16 +17,16 @@ import {
  * `GET /api/roles`; until it is, the roles as they ship stand in.
  */
 
-/** Every permission in words, in the catalogue's order, and what a short label leaves out. */
-export const PERMISSION_WORDS: Record<Permission, { label: string; note?: string; verb: string }> = {
-  'secret.read': { label: 'Read values', verb: 'read values' },
-  'secret.use': { label: 'Use values', note: 'placeholders, the proxy', verb: 'use values' },
-  'secret.write': { label: 'Write values', verb: 'write values' },
-  'secret.archive': { label: 'Retire values', verb: 'retire values' },
-  'audit.read': { label: 'Read the log', verb: 'read the log' },
-  'environment.manage': { label: 'Manage environments', verb: 'manage environments' },
-  'grant.manage': { label: 'Manage access', verb: 'manage access' },
-  'project.manage': { label: 'Manage the project', verb: 'manage the project' },
+/** Every permission in words, in the catalogue's order, what a short label leaves out, and its word on a role's card, under its row's. */
+export const PERMISSION_WORDS: Record<Permission, { label: string; note?: string; verb: string; short: string }> = {
+  'secret.read': { label: 'Read values', verb: 'read values', short: 'Read' },
+  'secret.use': { label: 'Use values', note: 'placeholders, the proxy', verb: 'use values', short: 'Use' },
+  'secret.write': { label: 'Write values', verb: 'write values', short: 'Write' },
+  'secret.archive': { label: 'Retire values', verb: 'retire values', short: 'Retire' },
+  'audit.read': { label: 'Read the log', verb: 'read the log', short: 'Read' },
+  'environment.manage': { label: 'Manage environments', verb: 'manage environments', short: 'Environments' },
+  'grant.manage': { label: 'Manage access', verb: 'manage access', short: 'Access' },
+  'project.manage': { label: 'Manage the project', verb: 'manage the project', short: 'Project' },
 };
 
 /** The rows of a role's grid: secrets first, as a role is read, then the log, then what only a project holds. */
@@ -43,6 +43,32 @@ export const GRID_PERMISSIONS: readonly Permission[] = [
 
 export function projectWide(permission: Permission): boolean {
   return PROJECT_ONLY_PERMISSIONS.includes(permission);
+}
+
+/**
+ * A role card's rows, the grid's permissions in its order, each on every
+ * card, so that a permission sits in the same place on all of them:
+ *
+ *   Values   Read  Use  Write  Retire
+ *   Log      Read
+ *   Manage   Environments  Access  Project
+ */
+export const CARD_ROWS: readonly { name: string; permissions: readonly Permission[] }[] = [
+  { name: 'Values', permissions: ['secret.read', 'secret.use', 'secret.write', 'secret.archive'] },
+  { name: 'Log', permissions: ['audit.read'] },
+  { name: 'Manage', permissions: ['environment.manage', 'grant.manage', 'project.manage'] },
+];
+
+/**
+ * Where a role holds a permission: everywhere, only outside protected
+ * environments (Developer's Read values), or nowhere. A project-wide one
+ * held is held everywhere: a project is never protected.
+ */
+export type Reach = 'everywhere' | 'unprotected' | 'nowhere';
+
+export function reachOf(role: Pick<RoleDefinition, 'permissions' | 'protected'>, permission: Permission): Reach {
+  if (!role.permissions.includes(permission)) return 'nowhere';
+  return projectWide(permission) || role.protected.includes(permission) ? 'everywhere' : 'unprotected';
 }
 
 /** A role's two columns, as the grid edits them. */

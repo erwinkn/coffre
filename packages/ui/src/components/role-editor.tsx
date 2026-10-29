@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
 import { affects, queries } from '../lib/queries';
 import {
+  CARD_ROWS,
   columnInWords,
   GRID_PERMISSIONS,
   impactExamples,
@@ -14,6 +15,7 @@ import {
   ordered,
   PERMISSION_WORDS,
   projectWide,
+  reachOf,
   roleIdFrom,
   roleIdProblem,
   sameDefinition,
@@ -25,11 +27,11 @@ import { useAction } from '../lib/use-action';
 import { Check, Lock, Pencil, Plus, RotateBack, Trash } from './icons';
 import { ConfirmDialog, ErrorLine, Modal, Notice, Spinner } from './ui';
 
-// Settings › Roles and Instance roles (docs/design/roles.md): what each role
-// can do, in two columns, an environment's and a protected one's, which a
-// person holds there; a service account holds the first everywhere. Any member reads
-// them; an Owner of the whole instance edits them, each change weighed
-// first (`?dryRun=1`) and said in words before it is confirmed.
+// Settings › Roles (docs/design/roles.md): what each role can do, in an
+// environment and in a protected one, which a person holds there; a
+// service account holds the first everywhere. Any member reads them; an
+// Owner of the whole instance edits them, each change weighed first
+// (`?dryRun=1`) and said in words before it is confirmed.
 
 export type Kind = 'role' | 'instance-role';
 
@@ -61,37 +63,31 @@ function RoleList({ kind, roles, editable, switcher }: { kind: Kind; roles: Role
           </button>
         )}
       </div>
-      <p className="roles-desc">
-        {project
-          ? 'Granted on a project or environment; a person or service account can hold several.'
-          : 'One per person, across every project in its scope; assigned on Users.'}
-      </p>
+      <div className="roles-desc">
+        <p>
+          {project
+            ? 'Granted on a project or environment; a person or service account can hold several.'
+            : 'One per person, across every project in its scope; assigned on Users.'}
+        </p>
+        {roles.some((role) => GRID_PERMISSIONS.some((permission) => reachOf(role, permission) === 'unprotected')) && (
+          <p className="role-legend" aria-hidden>
+            <Lock size={12} />
+            Not in protected environments
+          </p>
+        )}
+      </div>
       <ul className="role-cards" aria-label={project ? 'Project roles' : 'Global roles'}>
         {roles.map((role) => (
           <li key={role.id} className="role-card">
-            <div className="role-card-head">
-              <p className="role-card-title">
-                {role.name}
-                <RoleBadges role={role} />
-              </p>
-              <span className="role-card-count">{held(kind, role.grants)}</span>
-            </div>
+            <p className="role-card-title">
+              {role.name}
+              <RoleBadges role={role} />
+            </p>
             {/* A built-in role's own words would go stale as an Owner edits what it can; a custom one's are its maker's. */}
             {!role.builtin && role.description !== '' && <p className="role-card-desc">{role.description}</p>}
-            <dl className="role-columns">
-              <div>
-                <dt>Can</dt>
-                <dd>{columnInWords(role.permissions)}</dd>
-              </div>
-              <div>
-                <dt>
-                  <Lock size={12} />
-                  In protected environments
-                </dt>
-                <dd>{columnInWords(role.protected)}</dd>
-              </div>
-            </dl>
+            <RoleReach role={role} />
             <div className="role-card-foot">
+              <span className="role-card-count">{held(kind, role.grants)}</span>
               <button
                 className="btn btn-sm"
                 type="button"
@@ -124,6 +120,46 @@ function RoleList({ kind, roles, editable, switcher }: { kind: Kind; roles: Role
 function held(kind: Kind, count: number): string {
   if (kind === 'instance-role') return count === 0 ? 'Nobody' : count === 1 ? '1 person' : `${count} people`;
   return count === 0 ? 'No grants' : count === 1 ? '1 grant' : `${count} grants`;
+}
+
+/**
+ * What a role can do, on its card: every permission, in the same place on
+ * every card, held ones solid, the others a dashed outline, and a lock on
+ * one it holds only outside protected environments. A screen reader hears
+ * each in full: "Read values: yes, except in protected environments".
+ */
+function RoleReach({ role }: { role: RoleView }) {
+  return (
+    <dl className="role-reach">
+      {CARD_ROWS.map((row) => (
+        <div key={row.name}>
+          <dt>{row.name}</dt>
+          <dd>
+            <ul>
+              {row.permissions.map((permission) => {
+                const reach = reachOf(role, permission);
+                const { label, short } = PERMISSION_WORDS[permission];
+                const words = reach === 'nowhere' ? 'no' : reach === 'unprotected' ? 'yes, except in protected environments' : 'yes';
+                return (
+                  <li
+                    key={permission}
+                    className={`role-perm role-perm-${reach}`}
+                    title={reach === 'unprotected' ? `${label}, not in protected environments` : label}
+                  >
+                    <span aria-hidden>{short}</span>
+                    {reach === 'unprotected' && <Lock size={11} />}
+                    <span className="visually-hidden">
+                      {label}: {words}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 /** Where a role comes from, and whether it is as it shipped. */

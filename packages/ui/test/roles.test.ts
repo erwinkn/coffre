@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { definitionProblem, PERMISSIONS, ROLES, type Permission } from '@coffre/core/access';
+import { definitionProblem, INSTANCE_ROLES, PERMISSIONS, ROLES, type Permission } from '@coffre/core/access';
 
 import {
+  CARD_ROWS,
   columnInWords,
   GRID_PERMISSIONS,
   impactInWords,
   protectionInWords,
+  reachOf,
   roleIdFrom,
   roleIdProblem,
   sameDefinition,
@@ -71,6 +73,27 @@ test('a column reads as a sentence', () => {
   assert.equal(columnInWords(ROLES.maintainer.permissions), 'read, use, write and retire values and manage environments');
   assert.equal(columnInWords(ROLES['access-manager'].protected), 'nothing');
   assert.equal(columnInWords(ROLES.auditor.permissions), 'read the log');
+});
+
+test("a role card shows every permission, in the grid's order, and where each is held", () => {
+  assert.deepEqual(CARD_ROWS.flatMap((row) => row.permissions), GRID_PERMISSIONS);
+  const reach = (role: Columns) => Object.fromEntries(GRID_PERMISSIONS.map((permission) => [permission, reachOf(role, permission)]));
+  assert.deepEqual(reach(grid([...ROLES.developer.permissions], [...ROLES.developer.protected])), {
+    'secret.read': 'unprotected',
+    'secret.use': 'everywhere',
+    'secret.write': 'everywhere',
+    'secret.archive': 'nowhere',
+    'audit.read': 'nowhere',
+    'environment.manage': 'nowhere',
+    'grant.manage': 'nowhere',
+    'project.manage': 'nowhere',
+  });
+  // A project is never protected: what is held on it carries no lock.
+  const admin = INSTANCE_ROLES.admin;
+  assert.deepEqual(
+    GRID_PERMISSIONS.map((permission) => reachOf(grid([...admin.permissions], [...admin.protected]), permission)),
+    ['nowhere', 'nowhere', 'nowhere', 'nowhere', 'everywhere', 'everywhere', 'everywhere', 'everywhere'],
+  );
 });
 
 test("a new role's id follows its name, and is checked as the server checks it", () => {
