@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **The Secrets page edits in one line a row, and saves the whole table.**
+  A secret being added or edited is one line, its cells on one baseline:
+  the name, then the value with who sees it, Generate and, editing an
+  existing value, Show inside the field's right end; notes and errors sit
+  beneath. A blank name says so once Save is pressed, not when the field
+  loses focus. The rows' own Save and Cancel are gone: the bar under the
+  table saves or discards every edit at once, and counts them ("1 added,
+  2 updated, 1 archived") rather than naming them; it shows while a row
+  is open, so an edit left as it was has its Discard. Escape still closes
+  one row, and a key marked to archive has Don't archive in its ⋯. The
+  page's header has one ⋯ menu, each item for whoever may: Rename…,
+  Protect… or Unprotect…, Fork… (the new-environment dialog, inheriting),
+  My own dev and Archive…; in `dev@me`, Delete…. The protection tag there
+  only shows it. Add secret's split button keeps its shape while its menu
+  is open.
 - **0.15's sign-ins through trust bindings are on the audit pages, behind
   its switch.** Under the switch a sign-in writes no `token.exchange`
   entry; its change is the record (D147). The audit page, a service's

@@ -663,8 +663,8 @@ Left out, on purpose or for later:
   its parent, and stops none of these. A rename in the parent renames its
   override and removal; its own key of the new name moves aside,
   `NEXT_KEY_2`, logged in it, rather than name it to the renamer.
-- **Surfaces.** The UI: "My own dev" on dev's page, `dev@me`'s page (with
-  Make, and Delete), "yours alone" on its card, Personal configs on
+- **Surfaces.** The UI: "My own dev" in dev's page's ⋯ menu, `dev@me`'s page (with
+  Make, and Delete in its ⋯), "yours alone" on its card, Personal configs on
   the project's Environments tab; the CLI: `@me` in every path, `coffre personal`, and a
   note on `list` when `@me` fell back; MCP's read tools take `@me` paths.
 - **Tests.** `packages/server/test/personal.test.ts`, on both engines, and

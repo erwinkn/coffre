@@ -1369,15 +1369,6 @@ a.crumb-link:hover {
   padding-left: 2rem;
 }
 
-/* A secret's value field holds two buttons, Generate and Show, side by side. */
-.input-group.has-generate .input {
-  padding-right: 3.875rem;
-}
-
-.input-group .input-addon-generate {
-  right: calc(0.1875rem + 1.75rem);
-}
-
 /* The engine's clear button for a search field, drawn in the field's own ink
    rather than the bright system glyph. */
 .input[type='search']::-webkit-search-cancel-button {
@@ -2414,13 +2405,6 @@ table.claims-table td {
   display: none;
 }
 
-/* Its buttons stay on its first line, however tall a paste makes it, and
-   hide the text that scrolls under them. */
-.secret-row .input.value-lines ~ .input-addon {
-  top: 0.0625rem;
-  background: var(--panel);
-}
-
 /* Masked where the browser cannot draw discs: the text is there, unseen. */
 .input.is-masked-fallback {
   color: transparent;
@@ -2708,9 +2692,108 @@ table.claims-table td {
   color: var(--red);
 }
 
-/* Who sees the value being written: three radios as a small segmented control, what the level means beside it. */
-.sensitivity-field {
-  gap: 0.25rem 0.625rem;
+/* A row being written is one line: each cell's first line is its field's,
+   and what a field has to say goes beneath it, the row growing down. A
+   cell with no field centres its text on that line. */
+.secret-row.is-editing > td {
+  vertical-align: top;
+}
+
+.secret-row.is-editing > td:not(:has(.edit-stack)) {
+  padding-top: calc(0.5rem + 0.125rem);
+  line-height: 1.875rem;
+}
+
+/* A value being written: one field to the eye, its controls inside its
+   right end -- who sees it, Generate and Show -- on its first line however
+   tall a paste makes it. */
+.value-field {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--panel);
+  transition:
+    border-color 120ms,
+    box-shadow 120ms;
+}
+
+.value-field:has(> .input:focus) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.value-field:has(> .input:disabled) {
+  opacity: 0.55;
+}
+
+.value-field > .input {
+  flex: 1;
+  min-width: 0;
+  height: calc(1.875rem - 2px);
+  padding-right: 0.25rem;
+}
+
+/* The field draws the border, the ring and the dimming, focused or not. */
+.value-field > .input,
+.value-field > .input:focus,
+.value-field > .input:disabled {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 1;
+}
+
+/* As tall as its lines, as `rows` says. */
+.value-field > .input.value-lines {
+  height: auto;
+  min-height: calc(1.875rem - 2px);
+}
+
+.value-field-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: calc(1.875rem - 2px);
+  padding-right: 0.125rem;
+}
+
+.value-field-controls .btn-sm.btn-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* Who sees the value, chosen in its field: the level, quiet, opening its menu. */
+.value-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.375rem;
+  margin-right: 0.125rem;
+  padding: 0 0.3125rem 0 0.4375rem;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--subtle);
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.value-level:hover:not(:disabled),
+.value-level[data-popup-open] {
+  color: var(--ink);
+}
+
+.value-level:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.value-level:disabled {
+  cursor: default;
 }
 
 /* A plain value, listed as it is: a revealed one's type, with no timer. */
@@ -2902,20 +2985,6 @@ tr.row-failure > td:first-child {
   color: var(--accent);
 }
 
-.pending-summary {
-  flex: 1 1 12rem;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink-2);
-  font-size: 0.8125rem;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.pending-summary .mono {
-  color: var(--ink);
-}
-
 .pending-error {
   flex-basis: 100%;
   display: flex;
@@ -2938,17 +3007,18 @@ tr.row-failure > td:first-child {
 }
 
 /* A primary button with a chevron joined to its right, which opens a menu of
-   other things it could do. */
+   other things it could do. By type, not by child: the open menu puts focus
+   guards, spans, either side of the chevron. */
 .split-button {
   display: inline-flex;
 }
 
-.split-button > .btn:first-child {
+.split-button > .btn:first-of-type {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
 
-.split-button > .btn:last-child {
+.split-button > .btn:last-of-type {
   width: 1.875rem;
   border-left-color: color-mix(in oklab, var(--panel) 30%, var(--ink));
   border-top-left-radius: 0;
@@ -5281,8 +5351,7 @@ a.menu-item:hover {
     grid-template-areas: 'key version actions';
   }
 
-  .dt.secrets.stacks .secret-row.is-draft,
-  .dt.secrets.stacks .secret-row.is-changed {
+  .dt.secrets.stacks .secret-row.is-editing {
     grid-template-areas:
       'key key actions'
       'value value version';
@@ -5387,10 +5456,6 @@ a.menu-item:hover {
   .toolbar-meta {
     margin-left: 0;
     flex-basis: 100%;
-  }
-
-  .pending-summary {
-    display: none;
   }
 
   .signin-form {

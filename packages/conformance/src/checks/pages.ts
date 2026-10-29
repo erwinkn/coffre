@@ -178,7 +178,8 @@ function pem(): string {
 /**
  * A row's value field, opened by the button `open` names, and `text`
  * pasted into it as the clipboard would, over the characters `select`
- * picks; then the row saved by its own button. A new secret is named first.
+ * picks; then saved by the button `save` names, under the table. A new
+ * secret is named first.
  * Answers which field has the focus after the paste, and where its caret is.
  */
 const pasteInto = (steps: { open: string; name?: string; field: string; select?: [number, number]; text: string; save: string }) => `(async () => {
@@ -216,7 +217,7 @@ const pasteInto = (steps: { open: string; name?: string; field: string; select?:
 
 /**
  * A new secret's value typed as a person would: `first`, Shift+Enter while composing (which does nothing), Shift+Enter, then
- * `second` into whichever field the page has by then; then the row saved.
+ * `second` into whichever field the page has by then; then saved, under the table.
  * Answers which field has the focus after the line break, and where its caret is.
  */
 const typeLines = (steps: { name: string; field: string; first: string; second: string; save: string }) => `(async () => {
@@ -277,7 +278,7 @@ export async function pastedValues(deployment: Deployment, admin: Person, browse
   const chrome = await Chrome.open(executable);
   try {
     const caret = added.length;
-    const adding = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'Add secret', name: 'PASTED_KEY', field: 'Value for PASTED_KEY', text: added, save: 'Save PASTED_KEY now' }));
+    const adding = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'Add secret', name: 'PASTED_KEY', field: 'Value for PASTED_KEY', text: added, save: 'Save' }));
     expect(adding.errors.length === 0, `${page} reported errors in the browser`, adding.errors.join('\n'));
     expect(
       JSON.stringify(adding.answer) === JSON.stringify({ field: 'textarea', label: 'Value for PASTED_KEY', caret: [caret, caret] }),
@@ -285,7 +286,7 @@ export async function pastedValues(deployment: Deployment, admin: Person, browse
       adding.answer,
     );
     const at = [8, 20] as const;
-    const editing = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'Edit EDITED_KEY', field: 'New value for EDITED_KEY', select: [...at], text: edit.replaceAll('\n', '\r\n'), save: 'Save EDITED_KEY now' }));
+    const editing = await chrome.load(page, admin.browser.cookies(), undefined, pasteInto({ open: 'Edit EDITED_KEY', field: 'New value for EDITED_KEY', select: [...at], text: edit.replaceAll('\n', '\r\n'), save: 'Save' }));
     expect(editing.errors.length === 0, `${page} reported errors in the browser`, editing.errors.join('\n'));
     const after = at[0] + edit.length;
     expect(
@@ -293,7 +294,7 @@ export async function pastedValues(deployment: Deployment, admin: Person, browse
       "a PEM key pasted into an edited value did not leave a textarea focused, its caret after the paste",
       editing.answer,
     );
-    const typing = await chrome.load(page, admin.browser.cookies(), undefined, typeLines({ name: 'TYPED_KEY', field: 'Value for TYPED_KEY', first: 'abc', second: 'def', save: 'Save TYPED_KEY now' }));
+    const typing = await chrome.load(page, admin.browser.cookies(), undefined, typeLines({ name: 'TYPED_KEY', field: 'Value for TYPED_KEY', first: 'abc', second: 'def', save: 'Save' }));
     expect(typing.errors.length === 0, `${page} reported errors in the browser`, typing.errors.join('\n'));
     expect(
       JSON.stringify(typing.answer) === JSON.stringify({ field: 'textarea', label: 'Value for TYPED_KEY', value: 'abc\n', caret: [4, 4] }),
