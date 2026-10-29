@@ -79,8 +79,8 @@ export function GrantRowView({
         <td className="col-access" data-label="Permissions">
           <span className={`tag${grant.role === 'owner' ? ' tag-violet' : ''}`}>{label}</span>
           {byRole && (
-            <span className="role-scope" title="Their instance role reaches this project. Change it on their page in Users.">
-              instance role
+            <span className="role-scope" title="Their global role reaches this project. Change it on their page in Users.">
+              global role
             </span>
           )}
         </td>

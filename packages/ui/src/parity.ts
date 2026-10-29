@@ -55,14 +55,14 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   },
   'PATCH /projects/:project/:environment': {
     ui: [
-      { does: "an environment's card, or an environment › ⋯ › Rename…, Archive…; an archived card › Restore", in: 'components/environment-actions.tsx', call: 'environments.update' },
-      { does: "an environment's card › its Protect… tag, or an environment › ⋯ › Protect…; for an Owner of its project Unprotect…", in: 'components/protected.tsx', call: 'environments.protect' },
+      { does: "an environment's card or page › ⋯ › Rename…, Archive…; an archived card › ⋯ › Restore…", in: 'components/environment-actions.tsx', call: 'environments.update' },
+      { does: "an environment's card or page › ⋯ › Protect…; for an Owner of its project Unprotect…", in: 'components/protected.tsx', call: 'environments.protect' },
     ],
   },
   'DELETE /projects/:project/:environment': {
     ui: [
       { does: "an archived environment's card › ⋯ › Delete…, its path typed out", in: 'components/delete-place.tsx', call: 'environments.delete' },
-      { does: 'your own dev, `dev@me` › ⋯ › Delete…', in: 'pages/environment.tsx', call: 'environments.delete' },
+      { does: 'your own dev, `dev@me`, its card or page › ⋯ › Delete…', in: 'components/environment-actions.tsx', call: 'environments.delete' },
       { does: 'the same dialog: what deleting would erase and revoke', in: 'lib/queries.ts', call: 'environments.previewDelete' },
     ],
   },
@@ -207,7 +207,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /audit/trees': { ui: [{ does: "Audit: 0.15's log, its newest checkpoint and the entries since, verified with every visit", in: 'lib/queries.ts', call: 'audit.verifyTrees' }] },
   'GET /roles': {
     ui: [
-      { does: 'Settings › Roles and Instance roles; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },
+      { does: 'Settings › Roles, project and global; every grant picker, for the roles it offers', in: 'lib/queries.ts', call: 'roles.list' },
     ],
   },
   'PUT /roles/:role': {
@@ -224,18 +224,18 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   },
   'PUT /instance-roles/:role': {
     ui: [
-      { does: 'Settings › Instance roles › Edit… › Save', in: 'components/role-editor.tsx', call: 'roles.set', args: ['developer', {}, { instance: true }] },
+      { does: 'Settings › Roles › Global roles › Edit… › Save', in: 'components/role-editor.tsx', call: 'roles.set', args: ['developer', {}, { instance: true }] },
       { does: 'the same dialog: what saving would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.preview', args: ['developer', {}, { instance: true }] },
     ],
   },
   'DELETE /instance-roles/:role': {
     ui: [
-      { does: 'Settings › Instance roles › Edit… › Reset to default', in: 'components/role-editor.tsx', call: 'roles.reset', args: ['developer', { instance: true }] },
+      { does: 'Settings › Roles › Global roles › Edit… › Reset to default', in: 'components/role-editor.tsx', call: 'roles.reset', args: ['developer', { instance: true }] },
       { does: 'the same: what it would do, before it is confirmed', in: 'components/role-editor.tsx', call: 'roles.previewReset', args: ['developer', { instance: true }] },
     ],
   },
-  'GET /settings': { ui: [{ does: 'Settings › Service accounts: where people set them up', in: 'pages/settings.tsx', call: 'settings.get' }] },
-  'PUT /settings': { ui: [{ does: 'Settings › Service accounts › Edit', in: 'pages/settings.tsx', call: 'settings.set' }] },
+  'GET /settings': { ui: [{ does: 'Settings › General › Service accounts: who creates them', in: 'pages/settings.tsx', call: 'settings.get' }] },
+  'PUT /settings': { ui: [{ does: 'Settings › General › Service accounts › Edit, beside who creates them', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
   'POST /audit/loss': { not: "an Owner's acceptance of lost audit entries is rare and irreversible: `coffre audit accept-loss`, never a button" },
 };

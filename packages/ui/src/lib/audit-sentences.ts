@@ -367,7 +367,7 @@ const TEMPLATES: Record<string, Template> = {
       const by = entry.metadata.replacedBy as { role?: unknown } | undefined;
       if (by === undefined) return [];
       const role = typeof by.role === 'string' ? roleName(by.role) : null;
-      return [role === null || role === 'Member' ? ', replaced by project grants' : `, replaced by the instance role ${role}`];
+      return [role === null || role === 'Member' ? ', replaced by project grants' : `, replaced by the global role ${role}`];
     },
   },
   'member.add': {
@@ -633,7 +633,7 @@ function policyOf(entry: AuditEntry): { verb: keyof typeof POLICY_VERBS; what: P
   const verb = change.definition === null || entry.metadata.definition === null || entry.reason === 'role_granted'
     ? (shipped ? 'reset' : 'delete')
     : before.definition === null ? 'make' : 'edit';
-  return { verb, what: [name === null ? 'a role' : `the ${name} ${instance ? 'instance role' : 'role'}`] };
+  return { verb, what: [name === null ? 'a role' : `the ${name} ${instance ? 'global role' : 'role'}`] };
 }
 
 /** An object of the metadata's, or an empty one for anything else. */

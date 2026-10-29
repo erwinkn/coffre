@@ -1,14 +1,21 @@
 import { useEffect, useState } from 'react';
+import { Menu } from '@base-ui/react/menu';
 import { useQuery } from '@tanstack/react-query';
+import { Link, useNavigate } from '@tanstack/react-router';
+import { toast } from 'sonner';
 import { archiveEnvironment, createEnvironment, renameEnvironment } from '../lib/changes';
 import { useCoffre } from '../lib/coffre';
 import { isActiveAccessibleEnvironment, type ProjectEnvironment } from '../lib/project-environments';
-import { queries } from '../lib/queries';
+import { affects, queries } from '../lib/queries';
+import { useAction } from '../lib/use-action';
 import { useChange } from '../lib/use-change';
 import { useShell } from '../lib/use-shell';
 import { environmentSlugProblem } from '../lib/validation';
+import { DeletePlaceDialog } from './delete-place';
+import { Archive, Fork, Key, Lock, MoreHorizontal, Pencil, RotateBack, Trash } from './icons';
+import { changesProtection, ProtectDialog } from './protected';
 import { ArchiveBlocked, archiveBlockers } from './references';
-import { ConfirmDialog, Modal, Notice } from './ui';
+import { ConfirmDialog, ErrorLine, MenuPopup, Modal, Notice } from './ui';
 
 /**
  * Renaming an environment, `market/dev` to `market/develop`: shown at once
@@ -73,7 +80,7 @@ export function RenameEnvironment({
         </label>
         {reslugged && (
           <Notice tone="info">
-            Instance roles scoped to <span className="mono">{environment}</span> stop reaching it; those scoped
+            Global roles scoped to <span className="mono">{environment}</span> stop reaching it; those scoped
             to <span className="mono">{slug}</span> start.
           </Notice>
         )}
@@ -308,5 +315,194 @@ export function NewEnvironment({
         </div>
       </form>
     </Modal>
+  );
+}
+
+/**
+ * What is done to an environment itself, in one menu, on its card and its
+ * page alike: rename, protect, fork, your own config of it, archive or
+ * restore, and delete once archived; in your own config, delete it. Each
+ * shows only to whoever may do it, as the project tree says, so it asks
+ * the server nothing more.
+ */
+export function EnvironmentMenu({
+  project,
+  environment,
+  inProject,
+  ownConfig,
+  busy,
+  follow,
+  className,
+}: {
+  project: string;
+  environment: string;
+  /** It as the project tree has it. */
+  inProject: ProjectEnvironment | undefined;
+  /** Whether to offer your own config of it, `dev@me`. */
+  ownConfig: boolean;
+  /** Whether a change of it, a rename, its protection or its archiving, is on its way: another waits for its answer. */
+  busy: boolean;
+  /**
+   * Whether it goes where a change leads, as its own page does: to its new
+   * name, to its fork, back to the project once it is archived, and to the
+   * environment your own config was of once you delete it.
+   */
+  follow: boolean;
+  /** The trigger's look: the page header's button, or a card's quiet act. */
+  className: string;
+}) {
+  const navigate = useNavigate();
+  const { projects, capabilities } = useShell();
+  const [open, setOpen] = useState<'rename' | 'protect' | 'fork' | 'archive' | 'delete' | null>(null);
+  const dialog = (which: NonNullable<typeof open>) => ({
+    open: open === which,
+    onOpenChange: (next: boolean) => setOpen(next ? which : null),
+  });
+  const toEnvironment = follow ? (slug: string) => void navigate({ to: '/projects/$project/$environment', params: { project, environment: slug } }) : undefined;
+  // Your own config, `dev@me`: deleted, nothing else; the environment it is yours of.
+  const personalOf = inProject?.personal === true ? inProject.parent : null;
+  // Its dialogs stay mounted by the project's permission, not by its entry in the tree: a rename moves that entry at
+  // once, and a dialog gone with it would drop the rename's answer, and with it the move to its new address.
+  const managesProject = personalOf === null && projects.find((entry) => entry.slug === project)?.permissions.includes('environment.manage') === true;
+  const manages = managesProject && inProject !== undefined && inProject.details !== null;
+  const archived = manages && inProject!.details!.archivedAt !== null;
+  const protects = personalOf === null && inProject !== undefined && changesProtection(projects, project, inProject);
+  const forks = manages && isActiveAccessibleEnvironment(inProject!);
+  // Deleting is for those who run the instance, and only once the environment is archived.
+  const deletes = archived && capabilities.runsInstance;
+  const offers = personalOf !== null || manages || protects || ownConfig;
+  return (
+    <>
+      {offers && (
+        <Menu.Root>
+          <Menu.Trigger className={className} aria-label={`Actions for ${project}/${environment}`}>
+            <MoreHorizontal size={16} />
+          </Menu.Trigger>
+          <MenuPopup align="end">
+            {personalOf !== null ? (
+              <Menu.Item className="menu-item menu-item-danger" onClick={() => setOpen('delete')}>
+                <Trash size={14} />
+                Delete…
+              </Menu.Item>
+            ) : (
+              <>
+                {manages && (
+                  <Menu.Item className="menu-item" disabled={busy} onClick={() => setOpen('rename')}>
+                    <Pencil size={14} />
+                    Rename…
+                  </Menu.Item>
+                )}
+                {protects && (
+                  <Menu.Item className="menu-item" disabled={busy} onClick={() => setOpen('protect')}>
+                    <Lock size={14} />
+                    {inProject!.protected ? 'Unprotect…' : 'Protect…'}
+                  </Menu.Item>
+                )}
+                {forks && (
+                  <Menu.Item className="menu-item" onClick={() => setOpen('fork')}>
+                    <Fork size={14} />
+                    Fork…
+                  </Menu.Item>
+                )}
+                {ownConfig && (
+                  <Menu.LinkItem
+                    className="menu-item"
+                    closeOnClick
+                    render={<Link to="/projects/$project/$environment" params={{ project, environment: `${environment}@me` }} />}
+                  >
+                    <Key size={14} />
+                    My own {environment}
+                  </Menu.LinkItem>
+                )}
+                {manages && (
+                  <>
+                    <Menu.Separator className="menu-sep" />
+                    <Menu.Item className={`menu-item${archived ? '' : ' menu-item-danger'}`} disabled={busy} onClick={() => setOpen('archive')}>
+                      {archived ? <RotateBack size={14} /> : <Archive size={14} />}
+                      {archived ? 'Restore…' : 'Archive…'}
+                    </Menu.Item>
+                  </>
+                )}
+                {deletes && (
+                  <Menu.Item className="menu-item menu-item-danger" disabled={busy} onClick={() => setOpen('delete')}>
+                    <Trash size={14} />
+                    Delete…
+                  </Menu.Item>
+                )}
+              </>
+            )}
+          </MenuPopup>
+        </Menu.Root>
+      )}
+      {managesProject && (
+        <>
+          <RenameEnvironment project={project} environment={environment} {...dialog('rename')} onRenamed={toEnvironment} />
+          <NewEnvironment project={project} from={environment} {...dialog('fork')} onCreated={toEnvironment} />
+        </>
+      )}
+      {manages && (
+        <ArchiveEnvironment
+          project={project}
+          environment={inProject!}
+          {...dialog('archive')}
+          onArchived={follow ? () => {
+            toast.success(`${project}/${environment} archived`);
+            void navigate({ to: '/projects/$project', params: { project } });
+          } : undefined}
+        />
+      )}
+      {protects && <ProtectDialog project={project} environment={inProject!} {...dialog('protect')} />}
+      {deletes && (
+        <DeletePlaceDialog
+          path={`${project}/${environment}`}
+          {...dialog('delete')}
+          onDeleted={() => toast.success(`${project}/${environment} deleted`)}
+        />
+      )}
+      {personalOf !== null && (
+        <DeletePersonal project={project} environment={environment} of={personalOf} {...dialog('delete')} onDeleted={toEnvironment} />
+      )}
+    </>
+  );
+}
+
+/** Delete your personal config: its values erased; the environment it is yours of untouched. */
+function DeletePersonal({
+  project,
+  environment,
+  of,
+  open,
+  onOpenChange,
+  onDeleted,
+}: {
+  project: string;
+  environment: string;
+  of: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Once deleted, with the environment it was yours of. */
+  onDeleted?: (of: string) => void;
+}) {
+  const coffre = useCoffre();
+  const { error, run } = useAction();
+  return (
+    <>
+      {error !== null && <ErrorLine error={error} />}
+      <ConfirmDialog
+        open={open}
+        onOpenChange={onOpenChange}
+        title={<>Delete your own <span className="mono">{of}</span>?</>}
+        body={`The values you set in ${project}/${environment} are erased for good. ${project}/${of} is untouched, and ${environment} reads it again.`}
+        confirmLabel="Delete"
+        onConfirm={() =>
+          void run(() => coffre.environments.delete(`${project}/${environment}`), {
+            affects: [...affects.secrets({ project, environment }), ...affects.places()],
+            onSuccess: () => {
+              toast.success(`Your own ${of} is deleted`);
+              onDeleted?.(of);
+            },
+          })}
+      />
+    </>
   );
 }

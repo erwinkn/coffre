@@ -97,7 +97,9 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
   const person = `/users/${encodeURIComponent(admin.email)}`;
   const pages = [
     ...PAGES,
-    ['/settings', 'Settings', null],
+    ['/settings', 'Settings', 'General'],
+    ['/settings?tab=roles', 'Settings', 'Roles'],
+    ['/settings?tab=keys', 'Settings', 'Keys'],
     [person, admin.email, 'Access'],
     [`${person}/apps`, admin.email, 'Connected apps'],
     [`${person}/activity`, admin.email, 'Activity'],
@@ -126,7 +128,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
         expect(ways.join(' then ') === 'Sign in with OIDC then Bearer tokens', `${path} does not show OIDC, then bearer tokens`, loaded.cards);
         expect(loaded.dialog?.includes('Removing revokes 0 grants, 0 bearer tokens') === true, `${path}: Remove… does not preview what it would revoke`, loaded.dialog);
       }
-      if (path === '/settings') expect(loaded.cards.includes('Keys'), '/settings does not show what the keys are checked against', loaded.cards);
+      if (path === '/settings?tab=keys') expect(loaded.cards.includes('Keys'), `${path} does not show what the keys are checked against`, loaded.cards);
       if (path === `${person}/apps`) expect(loaded.cards.includes('Connected apps'), `${path} does not show an owner the person's connected apps`, loaded.cards);
       if (path === '/account/apps') {
         expect(loaded.cards.join(' then ') === 'Connect an app then Connected apps', `${path} does not show Connect an app, then the connected apps`, loaded.cards);

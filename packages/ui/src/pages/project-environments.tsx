@@ -3,7 +3,6 @@ import type { PersonalConfig } from '@coffre/client';
 import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useShell } from '../lib/use-shell';
-import { Menu } from '@base-ui/react/menu';
 import { toast } from 'sonner';
 import { useCoffre } from '../lib/coffre';
 import { environmentId } from '../lib/changes';
@@ -11,14 +10,13 @@ import { affects, keys, queries } from '../lib/queries';
 import { useChangeStatus } from '../lib/use-change';
 import { ItemFailure, RowPending, rowClass } from '../components/row-state';
 import type { GrantRow, ProjectSummary } from '../shared/models';
-import { ArchiveEnvironment, NewEnvironment, RenameEnvironment } from '../components/environment-actions';
-import { hasEnvironmentDetails, type ProjectEnvironment } from '../lib/project-environments';
-import { ConfirmDialog, EmptyState, ErrorLine, MenuPopup, Timestamp } from '../components/ui';
+import { EnvironmentMenu, NewEnvironment } from '../components/environment-actions';
+import { hasEnvironmentDetails, isActiveAccessibleEnvironment, type ProjectEnvironment } from '../lib/project-environments';
+import { ConfirmDialog, EmptyState, ErrorLine, Timestamp } from '../components/ui';
 import { Card } from '../components/page';
 import { useAction } from '../lib/use-action';
-import { DeletePlaceDialog } from '../components/delete-place';
 import { PrincipalAvatar } from '../components/principal';
-import { Archive, ChevronRight, MoreHorizontal, Pencil, Plus, RotateBack, Trash } from '../components/icons';
+import { ChevronRight, Plus, Trash } from '../components/icons';
 import { Protection } from '../components/protected';
 import { pageRoute } from '../lib/page-route';
 import { useProject } from '../lib/project-page';
@@ -82,7 +80,6 @@ function EnvironmentsPanel({
               <EnvironmentCard
                 project={project.slug}
                 environment={environment}
-                isAdmin={canManage}
                 grants={grants}
               />
             </li>
@@ -121,7 +118,6 @@ function EnvironmentsPanel({
                 <EnvironmentCard
                   project={project.slug}
                   environment={environment}
-                  isAdmin={canManage}
                   grants={grants}
                 />
               </li>
@@ -168,18 +164,13 @@ const SHOWN_HOLDERS = 4;
 function EnvironmentCard({
   project,
   environment,
-  isAdmin,
   grants,
 }: {
   project: string;
   environment: ProjectEnvironment;
-  isAdmin: boolean;
   grants: GrantRow[];
 }) {
-  const [renaming, setRenaming] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const { capabilities } = useShell();
+  const { principal } = useShell();
   const { status, dismiss } = useChangeStatus(keys.projects);
   const state = status(environmentId(project, environment.slug));
   const pending = state.state === 'pending';
@@ -187,9 +178,6 @@ function EnvironmentCard({
   const isArchived = details !== null && details.archivedAt !== null;
   const secretCount = details?.secretCount ?? null;
   const opens = details !== null && !isArchived && environment.accessible && !pending;
-  const manageable = isAdmin && details !== null;
-  // Deleting is for those who run the instance, and only once the environment is archived.
-  const deletable = manageable && isArchived && capabilities.runsInstance;
   const lastChange = useLastChange(project, environment.slug, opens);
   // A personal config is its owner's alone: no grant reaches it, so none is shown on its card.
   const holders = environment.personal === true ? [] : holdersOf(grants, environment.slug);
@@ -211,7 +199,7 @@ function EnvironmentCard({
           ) : (
             <span className="env-card-name">{environment.slug}</span>
           )}
-          <Protection project={project} environment={environment} />
+          <Protection environment={environment} compact />
           {/* A fork: its keys are its parent's, but for those it sets or removes. An instance before 0.7 says nothing. */}
           {environment.personal === true
             ? <span className="tag tag-blue">yours alone</span>
@@ -265,54 +253,15 @@ function EnvironmentCard({
 
       {pending && <RowPending status={state} />}
 
-      {/* Your personal config is deleted from its own page; it is no environment of the team's to rename or archive. */}
-      {manageable && !pending && environment.personal !== true && (
-        <Menu.Root>
-          <Menu.Trigger
-            className="act act-quiet env-card-menu"
-            aria-label={`Actions for ${environment.slug}`}
-          >
-            <MoreHorizontal size={16} />
-          </Menu.Trigger>
-          <MenuPopup align="end">
-            <Menu.Item
-              className="menu-item"
-              onClick={() => setRenaming(true)}
-            >
-              <Pencil size={14} />
-              Rename
-            </Menu.Item>
-            <Menu.Separator className="menu-sep" />
-            <Menu.Item
-              className={`menu-item${isArchived ? '' : ' menu-item-danger'}`}
-              onClick={() => setConfirming(true)}
-            >
-              {isArchived ? <RotateBack size={14} /> : <Archive size={14} />}
-              {isArchived ? 'Restore' : 'Archive…'}
-            </Menu.Item>
-            {deletable && (
-              <Menu.Item className="menu-item menu-item-danger" onClick={() => setDeleting(true)}>
-                <Trash size={14} />
-                Delete…
-              </Menu.Item>
-            )}
-          </MenuPopup>
-        </Menu.Root>
-      )}
-
-      {manageable && (
-        <>
-          <RenameEnvironment project={project} environment={environment.slug} open={renaming} onOpenChange={setRenaming} />
-          <ArchiveEnvironment project={project} environment={environment} open={confirming} onOpenChange={setConfirming} />
-        </>
-      )}
-
-      {deletable && (
-        <DeletePlaceDialog
-          path={`${project}/${environment.slug}`}
-          open={deleting}
-          onOpenChange={setDeleting}
-          onDeleted={() => toast.success(`${project}/${environment.slug} deleted`)}
+      {!pending && (
+        <EnvironmentMenu
+          project={project}
+          environment={environment.slug}
+          inProject={environment}
+          ownConfig={principal?.type === 'user' && isActiveAccessibleEnvironment(environment) && environment.personal !== true}
+          busy={false}
+          follow={false}
+          className="act act-quiet env-card-menu"
         />
       )}
 

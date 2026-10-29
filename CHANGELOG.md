@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Settings has tabs, and an environment's card its page's menu.**
+  Settings is General, Roles and, for whoever runs the instance, Keys,
+  each a `?tab=` of `/settings` that reads its own alone: a deployment
+  mounts no new route. Roles switches between the project roles and the
+  global roles (`&roles=global`), as the pages now call instance roles;
+  the code, the API, the CLI and the docs keep their name. Each role is a card of its own, saying
+  what it can do ("Can", in protected environments), without a built-in
+  role's own words, which an Owner's edits would leave stale. General says
+  who creates service accounts and where ("Anyone with access, in every
+  project and environment"), its Edit beside it. Keys gives each key by
+  the end of its ID and says where the vault key is kept ("kept in the
+  deployment's configuration", "kept in AWS KMS"). An environment's card
+  has the menu its page has: Rename…, Protect… or Unprotect…, Fork…, My
+  own dev, Archive… or Restore…, and Delete… once archived; its
+  protection is a lock, and only while it is on.
 - **A workload client stops renewing a session already at its hard end.**
   A Kubernetes session ends where its projected token does, so each
   renewal found nothing to move, answered the same expiry (after a 401

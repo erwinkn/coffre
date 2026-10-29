@@ -32,12 +32,15 @@ import {
   loadProject,
   loadServiceDirectory,
   loadSettings,
+  SETTINGS_TABS,
   loadSignIn,
   loadShell,
   projectOf,
   queries,
   tabOpens,
   type AuditSearch,
+  type SettingsSearch,
+  type SettingsTab,
   type Freshness,
 } from './lib/queries';
 import type { Permission } from './shared/models';
@@ -278,14 +281,25 @@ export const serviceAccountActivity = {
   },
 };
 
-/** `/settings`. */
+/**
+ * `/settings`, its tabs by `?tab=`: General, then Roles, the project roles
+ * or with `roles=global` the global ones, and Keys. One route, so a
+ * deployment mounts no file per tab; each tab reads its own alone.
+ */
 export const settings = {
+  validateSearch: (search: Record<string, unknown>): SettingsSearch => {
+    const tab = SETTINGS_TABS.find((each) => each === search.tab);
+    return { tab, roles: tab === 'roles' && search.roles === 'global' ? 'global' : undefined };
+  },
+  loaderDeps: ({ search }: { search: { tab?: SettingsTab } }) => ({ tab: search.tab }),
   // Instance facts come from the directory and the key checks, which only
   // owners may read. Asking on everyone's behalf would write a refusal to the
   // audit log for every user who opens the page, so they are only asked for them.
-  loader: ({ context }: Loader) => {
+  // Keys, a tab they alone see, sends anyone else to the first.
+  loader: async ({ context, deps }: Loader & { deps: { tab?: SettingsTab } }) => {
     const { coffre, queryClient } = coffreOf(context);
-    return loadSettings(queryClient, coffre);
+    if (deps.tab === 'keys' && !(await loadShell(queryClient, coffre)).capabilities.runsInstance) throw redirect({ to: '/settings' });
+    return loadSettings(queryClient, coffre, deps.tab);
   },
 };
 

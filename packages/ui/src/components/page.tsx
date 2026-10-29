@@ -88,11 +88,12 @@ export function Card({
 }
 
 /** One labelled fact in a card's `dl.facts`. */
-export function Fact({ label, children }: { label: string; children: ReactNode }) {
+export function Fact({ label, children, action }: { label: string; children: ReactNode; /** What changes it, beside it. */ action?: ReactNode }) {
   return (
-    <div className="fact">
+    <div className={action === undefined ? 'fact' : 'fact fact-with-action'}>
       <dt>{label}</dt>
       <dd>{children}</dd>
+      {action}
     </div>
   );
 }

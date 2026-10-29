@@ -5,9 +5,8 @@ import { keys } from '../lib/queries';
 import { protectionInWords } from '../lib/roles';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { useRoles } from '../lib/use-roles';
-import { useShell } from '../lib/use-shell';
 import { Lock } from './icons';
-import { ConfirmButton, ConfirmDialog, Toggletip } from './ui';
+import { ConfirmDialog, Toggletip } from './ui';
 
 const MEANING = 'Protected: each person here holds their role’s protected column, which an Owner sets in Settings › Roles. Service accounts hold their role as anywhere else.';
 const WHO_UNPROTECTS = 'Only an Owner of its project takes protection off.';
@@ -25,54 +24,35 @@ export function changesProtection(projects: readonly { slug: string; permissions
 }
 
 /**
- * An environment's protection (docs/design/roles.md), on its card and its
- * page. On its card, for whoever changes it (`changesProtection`), the tag
- * is the button that does, behind a confirmation; its page changes it from
- * its actions menu, and shows the tag alone. Everyone else sees the tag,
- * whose note says what it means and who changes it, and nothing while it
- * is off.
+ * An environment's protection (docs/design/roles.md), while it is on: a
+ * tag on its page, a lock on its card, whose note says what it means and
+ * who takes it off. Nothing while it is off. It is changed from the
+ * environment's actions menu (`ProtectDialog`).
  */
-export function Protection({ project, environment, control = true }: { project: string; environment: ProjectEnvironment; control?: boolean }) {
-  const { projects } = useShell();
-  const guarded = environment.protected;
-  if (control && changesProtection(projects, project, environment)) {
-    return <ChangeProtection project={project} slug={environment.slug} guarded={guarded} unprotects={environment.unprotectable === true} />;
-  }
-  if (!guarded) return null;
+export function Protection({ environment, compact = false }: { environment: ProjectEnvironment; compact?: boolean }) {
+  if (!environment.protected) return null;
   return (
     <Toggletip label={`${MEANING} ${WHO_UNPROTECTS}`}>
-      <button type="button" className="tag tag-amber tag-button">
-        <Lock size={11} />
-        Protected
-      </button>
+      {compact ? (
+        <button type="button" className="protected-mark" aria-label="Protected">
+          <Lock size={13} />
+        </button>
+      ) : (
+        <button type="button" className="tag tag-amber tag-button">
+          <Lock size={11} />
+          Protected
+        </button>
+      )}
     </Toggletip>
   );
 }
 
-/** The tag as the button that protects the environment, or takes it off, once confirmed. */
-function ChangeProtection({ project, slug, guarded, unprotects }: { project: string; slug: string; guarded: boolean; unprotects: boolean }) {
-  const { confirm, pending } = useProtectConfirm(project, slug, guarded, unprotects);
-  const place = `${project}/${slug}`;
-  return (
-    <ConfirmButton
-      trigger={
-        <button
-          type="button"
-          className={`tag tag-button tag-control ${guarded ? 'tag-amber' : 'tag-outline'}`}
-          aria-label={guarded ? `Protected: unprotect ${place}…` : `Protect ${place}…`}
-        >
-          <Lock size={11} />
-          {guarded ? 'Protected' : 'Protect…'}
-        </button>
-      }
-      // Once a change is on its way, the tag shows it already; another waits for its answer.
-      disabled={pending}
-      {...confirm}
-    />
-  );
-}
-
-/** Protecting the environment, or taking it off, as a dialog its opener holds open: an actions menu's. */
+/**
+ * Protecting the environment, or taking it off, once confirmed: shown at
+ * once on its card and its page, which say if the server refuses. Once a
+ * change is on its way, another waits for its answer: the later of two
+ * would otherwise land as it likes.
+ */
 export function ProtectDialog({
   project,
   environment,
@@ -84,33 +64,31 @@ export function ProtectDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { confirm, pending } = useProtectConfirm(project, environment.slug, environment.protected, environment.unprotectable === true);
-  // Once a change is on its way, another waits for its answer: the later of two would otherwise land as it likes.
-  return <ConfirmDialog open={open} onOpenChange={onOpenChange} {...confirm} confirmDisabled={pending} />;
-}
-
-/** What protecting it, or taking it off, says before it does, and whether a change of it is on its way. */
-function useProtectConfirm(project: string, slug: string, guarded: boolean, unprotects: boolean) {
   const { roles } = useRoles();
   const protect = useChange(protectEnvironment(useCoffre(), project));
   const { status } = useChangeStatus(keys.projects);
   const protection = protectionInWords(roles);
-  return {
-    pending: status(environmentId(project, slug)).state === 'pending',
-    confirm: {
-      title: (
+  const { slug, protected: guarded } = environment;
+  return (
+    <ConfirmDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={
         <>
           {guarded ? 'Unprotect' : 'Protect'} <span className="mono">{project}/{slug}</span>?
         </>
-      ),
-      body: guarded
-        ? 'People holding a role here get its full column again, as in any other environment. Service accounts are unaffected.'
-        : `People holding a role here get its protected column${protection === null ? ', which for now holds what the other does' : `: ${protection}`}. Service accounts are unaffected.${
-            unprotects ? '' : ` ${WHO_UNPROTECTS}`
-          }`,
-      confirmLabel: guarded ? 'Unprotect' : 'Protect',
-      destructive: guarded,
-      onConfirm: () => protect({ slug, protected: !guarded }),
-    },
-  };
+      }
+      body={
+        guarded
+          ? 'People holding a role here get its full column again, as in any other environment. Service accounts are unaffected.'
+          : `People holding a role here get its protected column${protection === null ? ', which for now holds what the other does' : `: ${protection}`}. Service accounts are unaffected.${
+              environment.unprotectable === true ? '' : ` ${WHO_UNPROTECTS}`
+            }`
+      }
+      confirmLabel={guarded ? 'Unprotect' : 'Protect'}
+      destructive={guarded}
+      confirmDisabled={status(environmentId(project, slug)).state === 'pending'}
+      onConfirm={() => protect({ slug, protected: !guarded })}
+    />
+  );
 }
