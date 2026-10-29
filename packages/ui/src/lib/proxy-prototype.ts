@@ -383,3 +383,67 @@ export function diffOf(before: ProxyDefinition | null, after: ProxyDefinition | 
     return was === now ? [] : [{ label, before: was, after: now }];
   });
 }
+
+// --- the form ---------------------------------------------------------------------------
+
+/** A definition as its fields hold it, typed: lists as comma-separated text, limits as text. */
+export type Form = {
+  name: string;
+  upstream: string;
+  inject: ProxyInject;
+  methods: string[];
+  paths: string;
+  perMinute: string;
+  perDay: string;
+  placeholder: 'none' | 'prefix' | 'jwt';
+  /** The prefix, or the JWT's claims, comma-separated. */
+  shape: string;
+  egress: string | null;
+};
+
+export function formOf(definition: ProxyDefinition): Form {
+  const placeholder = definition.placeholder;
+  return {
+    name: definition.name,
+    upstream: definition.upstream,
+    inject: definition.inject,
+    methods: definition.methods,
+    paths: definition.paths.join(', '),
+    perMinute: definition.limit.perMinute === null ? '' : String(definition.limit.perMinute),
+    perDay: definition.limit.perDay === null ? '' : String(definition.limit.perDay),
+    placeholder: placeholder === null ? 'none' : placeholder.kind,
+    shape: placeholder === null ? '' : placeholder.kind === 'prefix' ? placeholder.prefix : placeholder.claims.join(', '),
+    egress: definition.egress,
+  };
+}
+
+const listOf = (text: string) => text.split(/[\s,]+/).filter((item) => item !== '');
+const numberOf = (text: string) => (text.trim() === '' ? null : Number(text.trim()));
+
+export function definitionFrom(form: Form): ProxyDefinition {
+  return {
+    name: form.name.trim(),
+    upstream: form.upstream.trim().replace(/\/+$/, ''),
+    inject: form.inject,
+    methods: METHODS.filter((method) => form.methods.includes(method)),
+    paths: listOf(form.paths),
+    limit: { perMinute: numberOf(form.perMinute), perDay: numberOf(form.perDay) },
+    placeholder:
+      form.placeholder === 'none' ? null : form.placeholder === 'prefix' ? { kind: 'prefix', prefix: form.shape.trim() } : { kind: 'jwt', claims: listOf(form.shape) },
+    egress: form.egress,
+  };
+}
+
+export const sameDefinition = (a: ProxyDefinition, b: ProxyDefinition) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Where a sample call goes, and why it would not: what the list and detail view previews. */
+export function sampleCall(definition: ProxyDefinition, method: string, path: string): { url: string; refusal: string | null } {
+  const tail = path.startsWith('/') ? path : `/${path}`;
+  const refusal =
+    definition.methods.length > 0 && !definition.methods.includes(method)
+      ? `403: ${method} is not allowed`
+      : definition.paths.length > 0 && !definition.paths.some((prefix) => tail === prefix || tail.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))
+        ? `403: ${tail} is outside ${definition.paths.join(', ')}`
+        : null;
+  return { url: `${definition.upstream}${tail}`, refusal };
+}

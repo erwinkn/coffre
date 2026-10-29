@@ -172,6 +172,10 @@ export const environment = {
  * (`lib/proxy-prototype.ts`), asked together.
  */
 export const environmentProxy = (store: ProxyStore) => ({
+  // Which of the three shapes the page takes, to compare them on the same data: a, the ledger, unless set.
+  validateSearch: (search: Record<string, unknown>): { variant?: 'b' | 'c' } => ({
+    variant: search.variant === 'b' || search.variant === 'c' ? search.variant : undefined,
+  }),
   loader: async ({ context, params }: Loader<{ project: string; environment: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
     await Promise.all([queryClient.fetchQuery(queries.secrets(coffre, params)), queryClient.fetchQuery(proxyQuery(store, params))]);
