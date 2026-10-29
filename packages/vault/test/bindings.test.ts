@@ -16,6 +16,7 @@ import { asc, eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { loggedChange, type ChangeKeys } from '../src/changes.ts';
+import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
@@ -309,7 +310,7 @@ test("the log of a bind, a sign-in through it and its unbind replays to the rows
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
   const { logChanges } = tablesOf(db.owner);
   const holds = authentic(w.keys.mac);
-  const changes = (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).map((raw) => {
+  const changes = (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).filter((raw) => raw.object !== CUTOVER_OBJECT).map((raw) => {
     const row = { ...raw, number: BigInt(raw.number), seal: raw.seal ?? null };
     assert.ok(holds(changeEntry(row)), `entry ${row.number}'s MAC is the vault's`);
     return loggedChange(row)!;

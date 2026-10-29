@@ -91,7 +91,16 @@
 (*                    is the row's alone: a writer clears it, and the      *)
 (*                    unarchive restores the kept object, live; with       *)
 (*                    RestoreFromLog and no tampering, an honest unarchive *)
-(*                    after an end would be refused (HonestUnarchive).     *)
+(*                    after an end would be refused (HonestUnarchive);     *)
+(*   GenesisKeepsArchived with ArchivedAtCutover, the holder archived      *)
+(*                    before the cutover (0.14's alone, no change of it):  *)
+(*                    the cutover gives it the object its rows make,       *)
+(*                    unarchived, and deletes it again (`genesis`, then    *)
+(*                    `secret.delete`: T144), so its log keeps one for an  *)
+(*                    unarchive to restore. Without, its log never held    *)
+(*                    it: the unarchive logs nothing, and leaves a row no  *)
+(*                    seal covers, refused to every use                    *)
+(*                    (HonestUnarchiveServes).                             *)
 (*                                                                         *)
 (* So every input an end decides on is a MAC'd 0.14 entry (the end itself) *)
 (* or an object checked against its seal (R53): no row alone.             *)
@@ -102,7 +111,9 @@ CONSTANTS
     Values,          \* the texts V may hold
     MaxTampers,      \* columns the writer sets
     EndInRow, EndWithEntry, ProjectInObject, ArchivedApart, DigestInSeal, ReferenceInObject, LivenessFromLog,
-    RestoreFromLog, RestorePinned, EndWhileArchived
+    RestoreFromLog, RestorePinned, EndWhileArchived,
+    ArchivedAtCutover,  \* the holder was archived before the cutover: its log starts there
+    GenesisKeepsArchived
 
 VARIABLES
     rows,      \* the columns: H's newest reference row's id (ref: r1 the genuine one) and its end (ended), H's archived_at
@@ -131,6 +142,8 @@ Fork(r) ==
 Value(r) == IF DigestInSeal THEN r.text ELSE None
 ObjectsOf(r) == [holder |-> Holder(r), fork |-> Fork(r), value |-> Value(r)]
 HolderObjects == [gone : BOOLEAN, src : {"source", None}, ref : {"r1", "r2", None}]
+\* What the log keeps of a holder it never held (0.14's alone): nothing to restore.
+Never == [gone |-> TRUE, src |-> "never", ref |-> None]
 \* A holder's object once its reference has ended: no source, no reference row.
 Ended(o) == [o EXCEPT !.src = None, !.ref = None]
 
@@ -145,8 +158,8 @@ Allows014(t) == ~t.ended /\ ~t.harch /\ ~t.env /\ ~t.project
 TypeOK ==
     /\ rows \in [ref : {"r1", "r2"}, ended : BOOLEAN, harch : BOOLEAN, env : BOOLEAN, project : BOOLEAN, text : Values]
     /\ truth \in [ref : {"r1", "r2"}, ended : BOOLEAN, harch : BOOLEAN, env : BOOLEAN, project : BOOLEAN, text : Values]
-    /\ kept \in HolderObjects
-    /\ prepared \in [on : BOOLEAN, object : HolderObjects, against : HolderObjects]
+    /\ kept \in HolderObjects \cup {Never}
+    /\ prepared \in [on : BOOLEAN, object : HolderObjects, against : HolderObjects \cup {Never}]
     /\ pending \in BOOLEAN
     /\ tampers \in 0..MaxTampers
     /\ last \in [allowed : BOOLEAN, refused : BOOLEAN, honestText : BOOLEAN, allowed014 : BOOLEAN]
@@ -159,11 +172,15 @@ Idle == [on |-> FALSE, object |-> [gone |-> TRUE, src |-> None, ref |-> None], a
 
 Start == [ref |-> "r1", ended |-> FALSE, harch |-> FALSE, env |-> FALSE, project |-> FALSE, text |-> CHOOSE v \in Values : TRUE]
 
+\* With ArchivedAtCutover, the cutover found the holder archived: with GenesisKeepsArchived it sealed the object its rows
+\* make unarchived, then deleted it (no object, no seal), as it found it.
+Begin == IF ArchivedAtCutover THEN [Start EXCEPT !.harch = TRUE] ELSE Start
+
 Init ==
-    /\ rows = Start
-    /\ truth = Start
-    /\ seals = Sealed(Start)
-    /\ kept = Holder(Start)
+    /\ rows = Begin
+    /\ truth = Begin
+    /\ seals = Sealed(Begin)
+    /\ kept = IF ArchivedAtCutover /\ ~GenesisKeepsArchived THEN Never ELSE Holder(Start)
     /\ prepared = Idle
     /\ pending = FALSE
     /\ tampers = 0
@@ -195,7 +212,7 @@ End ==
               IN /\ (live /\ ReferenceInObject) => checked
                  /\ IF live /\ stands THEN Write("holder", [rows EXCEPT !.ended = TRUE])
                     ELSE /\ rows' = [rows EXCEPT !.ended = IF rows.ref = "r1" THEN TRUE ELSE @]
-                         /\ kept' = IF EndWhileArchived /\ seals.holder.gone /\ kept.src /= None
+                         /\ kept' = IF EndWhileArchived /\ seals.holder.gone /\ kept /= Never /\ kept.src /= None
                                        /\ (ReferenceInObject => kept.ref = "r1")
                                     THEN Ended(kept) ELSE kept
                          /\ UNCHANGED seals
@@ -220,13 +237,14 @@ ArchiveHolder ==
 \* Its unarchive, in two steps: the vault prepares it from the rows as read (no lock: `prepare`), then the app's
 \* transaction commits it under the fence (`app_change`), its rows as read (`stillAsRead`) and, ChangeChecksSeal, its
 \* row still no object. With RestoreFromLog the prepare holds what the rows make to the object the log keeps; with
-\* RestorePinned the commit holds that kept object to the log's then.
+\* RestorePinned the commit holds that kept object to the log's then. A holder its log never held (Never) has nothing
+\* to hold it to: its unarchive logs nothing, its row left with no seal.
 PrepareUnarchive ==
     /\ truth.harch
     /\ ~prepared.on
     /\ rows.harch
     /\ LET object == Holder([rows EXCEPT !.harch = FALSE])
-       IN /\ RestoreFromLog => object = kept
+       IN /\ RestoreFromLog /\ kept /= Never => object = kept
           /\ prepared' = [on |-> TRUE, object |-> object, against |-> kept]
     /\ UNCHANGED <<rows, truth, seals, kept, pending, tampers, last>>
 
@@ -237,7 +255,10 @@ CommitUnarchive ==
     /\ Holder([rows EXCEPT !.harch = FALSE]) = prepared.object
     /\ RestorePinned => kept = prepared.against
     /\ truth' = [truth EXCEPT !.harch = FALSE]
-    /\ Write("holder", [rows EXCEPT !.harch = FALSE])
+    /\ IF prepared.against = Never
+       THEN /\ rows' = [rows EXCEPT !.harch = FALSE]
+            /\ UNCHANGED <<seals, kept>>
+       ELSE Write("holder", [rows EXCEPT !.harch = FALSE])
     /\ UNCHANGED <<pending, tampers, last>>
 
 \* A prepared unarchive that does not commit (its transaction refused, or the request gone): prepared again, or not.
@@ -307,6 +328,9 @@ UnrefusedReadsHonest == ~last.refused => last.honestText
 \* With no writer, an archived holder can always be unarchived: the protections refuse only rows the log does not
 \* bear out, never an honest end's.
 HonestUnarchive == (tampers = 0 /\ truth.harch /\ ~prepared.on) => ENABLED PrepareUnarchive
+
+\* With no writer, a holder that is not archived is its seal's: an honest unarchive leaves one a use is not refused.
+HonestUnarchiveServes == (tampers = 0 /\ ~truth.harch /\ ~pending) => Holder(rows) = seals.holder
 
 
 =============================================================================

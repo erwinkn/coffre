@@ -144,6 +144,8 @@ const tombstoned = (env: Env) => (env.deleted ? `${env.slug}~deleted-2026-10-24`
  */
 async function write(scene: Scene, app: Scene): Promise<void> {
   const db = database.owner;
+  // The vault open first: under 0.15's log, cut over before these rows, which stay the app's around it (0.14's).
+  await vault.about();
   await db.insert(projects).values(scene.projects.map((project) => ({ id: project.id, slug: project.slug, name: project.slug })));
   await db.insert(environments).values(app.envs.map((env) => ({ id: env.id, projectId: env.projectId, slug: env.slug, name: env.slug, parentId: env.parentId, owner: env.owner })));
   const rows = scene.rows;

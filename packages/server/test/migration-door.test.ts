@@ -180,6 +180,20 @@ test('only a database that cannot be reached is an outage the door lets through;
   assert.equal(isUnreachable(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })), false);
 });
 
+test("a cutover held refused answers readiness 503 and says why in the server's log, though no request asks (review r9)", async () => {
+  await resetDatabase(db.owner);
+  const why = `0.14's chain does not verify at entry ${Math.random()}`;
+  const runtime = { ...freshRuntime(), schema: { migrated: true }, appKey: { settled: true }, cutover: { done: false, held: { why, until: Date.now() + 60_000 } } };
+  const said = mock.method(console, 'error', () => {});
+  try {
+    const ready = await ask(runtime, '/readyz');
+    assert.deepEqual([ready.status, JSON.parse(ready.body)], [503, { ok: false, cutover: false }]);
+    assert.ok(said.mock.calls.some(({ arguments: [first] }) => (first as { reason?: string }).reason === why));
+  } finally {
+    said.mock.restore();
+  }
+});
+
 test('without an audit watch, the scheduled run asks the vault to checkpoint and writes no beat, and readiness is the database migrated', async () => {
   await resetDatabase(db.owner);
   const runtime = { ...freshRuntime(), schema: { migrated: true }, appKey: { settled: true } };

@@ -5,6 +5,7 @@ import { loggedChange } from './changes.ts';
 import type { BulkLimit } from './config.ts';
 import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
 import { applyOp, objectKey, POLICY_REF, ROLES_REF, sealed, sealKey, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { CUTOVER_OBJECT, RETENTION_OBJECT } from './log-entry.ts';
 import { loggedRows } from './store.ts';
 
 /**
@@ -123,7 +124,8 @@ export function replay(
     if (entry.number <= replayed.last) replayed.faults.push(`${entry.number}: after ${replayed.last}, out of number order`);
     else replayed.last = entry.number;
     if (entry.kind === 'change') {
-      change(keys, replayed, entry);
+      // The log's own changes (a retention's, the cutover's) change no input: passed over.
+      if (!LOGS_OWN.has((entry.op as { op: string }).op)) change(keys, replayed, entry);
       continue;
     }
     const code = decideUse(keys, readUse(replayed.rows, replayed.newest, replayed.limit, replayed.bulk, entry.request), entry.request);
@@ -131,6 +133,9 @@ export function replay(
   }
   return replayed;
 }
+
+/** The ops of the log's own changes, which change no input: a retention's (PR 7), the cutover's (PR 9). */
+const LOGS_OWN = new Set(['retention', 'cutover']);
 
 function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   const key = objectKey(entry.ref);
@@ -162,6 +167,8 @@ export async function replayStored(db: Queryable, signingKeys: readonly Uint8Arr
   const faults: string[] = [];
   const entries: Logged[] = [];
   for (const row of changes) {
+    // The log's own changes (a retention's, the cutover's), which name no input, `replay` passes over.
+    if (row.object === RETENTION_OBJECT || row.object === CUTOVER_OBJECT) continue;
     const change = loggedChange({ number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: row.seal === null ? null : Buffer.from(row.seal) });
     if (change === null) faults.push(`${row.number}: names no object it is of`);
     else entries.push(change);

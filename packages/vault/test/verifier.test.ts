@@ -16,7 +16,7 @@ import { eq, sql } from 'drizzle-orm';
 import { genesisCall, type ChangeKeys } from '../src/changes.ts';
 import type { SealThrough } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { noEdits, ROLES_REF, sealKey, type Input, type Ref } from '../src/inputs.ts';
+import { sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
 import { entryMac, logMacKey, RETENTION_ACTOR, RETENTION_OBJECT, retentionPayload } from '../src/log-entry.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
@@ -27,7 +27,7 @@ import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
-import { emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
+import { cutOver, emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -85,7 +85,9 @@ async function instance() {
     if (control.hold) return {} as Awaited<ReturnType<SealThrough>>;
     return cp.sealThrough(number, deadline);
   };
-  const vault = speaking(await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside }, async () => {}, hot));
+  const opened = await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside }, async () => {}, hot);
+  await cutOver(opened, db.vault);
+  const vault = speaking(opened);
   const keys: ChangeKeys = { seals: [sealKey(seed)], mac: logMacKey(seed) };
   const where = await places(db.owner);
   const genesis = async (ref: Ref, input: Input) => {
@@ -93,9 +95,8 @@ async function instance() {
     assert.ok(number !== null && number !== undefined, `${ref.kind} ${ref.id} sealed`);
     await cp.sealThrough(number);
   };
-  // The instance's roles and its dev environment, as the cutover seals them.
+  // The instance's dev environment, made since the cutover (which made its roles), sealed as it would have.
   assert.equal((await vault.access(ROOT)).role, 'owner');
-  await genesis(ROLES_REF, noEdits());
   await genesis({ kind: 'environment', id: where.dev }, environmentObject({ id: where.dev, projectId: where.project, slug: 'dev', owner: null, parentId: null, protected: false, archived: false, projectArchived: false }));
   assert.ok((await vault.admit({ actor: ROOT, principal: ADA })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: where.project, environmentId: where.dev, role: 'developer', expiresAt: null }] })).ok);

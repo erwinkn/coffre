@@ -458,11 +458,14 @@ export function loggedChange(row: { number: bigint; at: number; object: string; 
  * is, the object it holds the payload's `value`. An environment's carries
  * the object as `value` too, which writes its protection, which 0.14 kept
  * in its policy; the roles' and the policy's rows are made from the
- * payload. From no seal: an object the log has never held.
+ * payload. From no seal: an object the log has never held. `old`: the
+ * newest entry of 0.14's it accounts for (`cite`): a member's `access_seq`,
+ * or the `policy.change` an environment's protection or the roles came
+ * from.
  */
-export function genesisCall(keys: ChangeKeys, ref: Ref, input: Input, at: number, actor: string): ChangeCall {
+export function genesisCall(keys: ChangeKeys, ref: Ref, input: Input, at: number, actor: string, old?: bigint): ChangeCall {
   const op: Op = { op: 'genesis', value: input };
   const seal = sealOf(keys.seals[0]!, ref, input);
-  const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op), seal };
+  const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op, old), seal };
   return { ref, ...row, value: ref.kind === 'environment' ? canonical(input) : null, sealFrom: null, mac: entryMac(keys.mac, { tree: 'changes', row }) };
 }

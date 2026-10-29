@@ -71,6 +71,12 @@ export function authentic(key: Buffer): (entry: LogEntry) => boolean {
 export const RETENTION_OBJECT = logObject('log', 'retention');
 export const RETENTION_ACTOR = 'system:retention';
 
+/** The log's own object for the cutover's change from 0.14 (plan PR 9; cutover.ts), its marker: one, ever. */
+export const CUTOVER_OBJECT = logObject('log', 'cutover');
+
+/** Who makes the cutover's changes. */
+export const CUTOVER_ACTOR = 'system:vault';
+
 export function retentionPayload(day: string, cut: Cut): string {
   return JSON.stringify({ op: 'retention', day, cut: { upto: String(cut.upto), at: cut.at, uses: cut.uses.size, root: cut.uses.root.toString('hex') } });
 }

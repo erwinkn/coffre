@@ -214,6 +214,8 @@ REMOVALS=(
   "SealedObjects RestorePinned AllowedAsOld"
   "SealedObjects EndWhileArchived AllowedAsOld"
   "SealedObjects EndWhileArchived HonestUnarchive"
+  # A key archived before the cutover keeps its object in the log, which its unarchive restores (T144).
+  "SealedObjectsCutover GenesisKeepsArchived HonestUnarchiveServes"
   # 0.15's sealing into Merkle checkpoints, two trees as one pair (Seal.tla; W209, W212; the plan's PR 6).
   "Seal NumberUnderLock Complete"
   "Seal CloseLocks Complete"
@@ -266,6 +268,14 @@ REMOVALS=(
   "Migration015Issue ExchangeOnlyIssues NothingAllowedAfterAnswer"
   # A policy change takes the issue lock before the fence (T149, review r3): the barrier holds it while it waits for the fence.
   "Migration015Policy PolicyIssueFirst NoWaitCycle"
+  # The cutover's own 0.14 entry is fenced by the trigger: the issue lock before the fence, as everywhere (T132).
+  "Migration015Issue CutoverIssueFirst NoWaitCycle"
+  # A place 0.14 deleted is deleted as its chain says, never its slugs, which a writer renames either way (T130).
+  "Migration015Deleted DeletedFromChain NoneInDeleted"
+  "Migration015Deleted DeletedFromChain PlaceFollowsOld"
+  # An app's row (a credential, a binding: T160) is checked by the app, under its key, and held to that by the vault.
+  "Migration015AppTamper VerifyRows AllowedOnlyWhenGranted"
+  "Migration015AppTamper VouchedHeld AllowedOnlyWhenGranted"
   "Migration015 Adopt EveryOldWriteAdopted"
   "Migration015 AdoptRepeats EveryOldWriteAdopted"
   "Migration015Tamper VerifyChain AnchorHolds"

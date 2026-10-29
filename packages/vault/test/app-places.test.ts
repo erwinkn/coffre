@@ -16,6 +16,7 @@ import { appChanges, isStaleChange } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
+import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
 import { newestSealedChanges, newestSealedQuery } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
@@ -137,7 +138,7 @@ const codeOf = (outcome: UseOutcome) => (outcome.ok ? null : 'code' in outcome ?
  */
 async function replayAgrees(): Promise<void> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
-    sql`SELECT number, at, object, payload, seal FROM log_changes`);
+    sql`SELECT number, at, object, payload, seal FROM log_changes WHERE object <> ${CUTOVER_OBJECT}`);
   const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
     sql`SELECT number, at, credential, secret, purpose, place FROM log_uses`);
   const entries: Logged[] = [

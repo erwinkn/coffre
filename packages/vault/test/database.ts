@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
+import type { SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
@@ -74,9 +74,30 @@ export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
  */
 export const sealed: SealThrough = async () => ({}) as Sealed;
 
-/** `openLocalVault`, spoken to as the app does (`speaking`), keeping the suite's log (`LOG`). */
+/**
+ * `openLocalVault`, spoken to as the app does (`speaking`), keeping the
+ * suite's log (`LOG`): under 0.15's, cut over from 0.14 as it opens
+ * (`cutOver`), as the app has it before anything else.
+ */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
-  return speaking(await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed } : {}), ...options }, close));
+  const vault = await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed } : {}), ...options }, close);
+  if (vault.cutover !== undefined && (options?.log ?? LOG) === '0.15') await cutOver(vault, db);
+  return speaking(vault);
+}
+
+/**
+ * The cutover (plan PR 9), as the app asks for it, vouching for nothing of
+ * its own: the vault's tests have no app key, so no credential or binding
+ * the app made, and no place it deleted. The chain checked to its head.
+ */
+export async function cutOver(vault: Pick<Vault, 'cutover'>, db: Queryable): Promise<void> {
+  const asked = await vault.cutover!();
+  if (asked.ok && asked.done) return;
+  assert.ok(asked.ok, `the cutover is refused: ${asked.ok ? '' : asked.why}`);
+  const [head] = await rows<{ next_seq: string | number; head_hash: Buffer | Uint8Array }>(db, sql`SELECT next_seq, head_hash FROM audit_chain_head`);
+  const to = { seq: (BigInt(head!.next_seq) - 1n).toString(), hash: Buffer.from(head!.head_hash).toString('hex') };
+  const outcome = await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], deleted: [] });
+  assert.ok(outcome.ok && outcome.done, `the cutover is refused: ${outcome.ok ? '' : outcome.why}`);
 }
 
 export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; hot(connections?: number): Promise<Database>; close(): Promise<void> };

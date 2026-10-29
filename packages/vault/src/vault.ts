@@ -104,6 +104,8 @@ import {
   type IssueTokenInput,
   type ChangeBindingsInput,
   type ChangeBindingsOutcome,
+  type CutoverInput,
+  type CutoverOutcome,
   type ChangeBindingsRefusal,
   type IssueTokenOutcome,
   type IssueTokenRefusal,
@@ -135,10 +137,11 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
+import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
 import { bindingObject, credentialObject } from './objects.ts';
 import type { SealThrough } from './checkpointer.ts';
@@ -227,6 +230,8 @@ export type PreparedVault = {
   log015: (ChangeKeys & { sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]> }) | null;
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
+  /** Whether 0.15's log is cut over from 0.14, as this process found it (`cutover`): until then, nothing of 0.15's runs. */
+  cutover: boolean;
   /** How far the chain is rehashed, by any call of this process: its head must still be there. */
   verified: Position;
   /** What member rows are sealed under now; rows.ts. */
@@ -262,6 +267,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
     limited: false,
+    cutover: false,
     verifier: null,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
     verified: START,
@@ -361,6 +367,14 @@ const SERVICE = /^token:/;
 
 /** Who acts for the vault itself, as when it makes an Owner its deployment names. */
 const VAULT_ACTOR = 'system:vault';
+
+/** The cutover's own entry in 0.14's log (`cutover`): the head its change in 0.15's names, or, denied, why it did not cut over. */
+const CUTOVER = 'log.cutover';
+
+/** Genesis changes a statement: eleven parameters each, well within Postgres's 65,535 a statement. */
+const GENESIS_BATCH = 2000;
+
+const NOT_CUT_OVER = "0.15's log is not cut over from 0.14 yet: the app asks the vault to (`cutover`) before anything else";
 
 // A KEK's check: a known value, the size of a data key, wrapped under it in
 // a context no secret has (the nil UUID), and kept in a `key.check` entry
@@ -594,7 +608,9 @@ class VaultService implements Vault {
     const { log015, uses: cache } = this.#prepared;
     if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
     if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
-    return use({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache }, input);
+    // An isolate's first uses read the cutover's marker (`#cutOverYet`) within their admission, as any call holds a connection.
+    const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
+    return use({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }) }, input);
   }
 
   async #now(db: Queryable): Promise<number> {
@@ -641,6 +657,8 @@ class VaultService implements Vault {
 
   /** `#decide`, once the vault is settled. */
   async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How = {}): Promise<Outcome<T>> {
+    // Every decision of 0.15's log's after its cutover, whichever path it comes by (`#declare`, `#convert`, `#limit`).
+    await this.#cutOverYet();
     const reports: NewEntry[] = [];
     // A read's call is due from its first decision, unless its caller set when.
     const due = how.reads === true ? { ...how, deadline: how.deadline ?? Date.now() + READ_DEADLINE_MS } : how;
@@ -876,6 +894,9 @@ class VaultService implements Vault {
     // database; calls that race settle it alike, and a rotation they race
     // to write goes in once (`#rotate`).
     if (prepared.since === null && prepared.superseded === null) await this.#settle();
+    // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
+    // the bulk cap, after it, as decisions of 0.15's log.
+    if (prepared.superseded === null && prepared.log015 !== null && !prepared.cutover && !(await store.cutOver(this.#db))) return prepared.superseded;
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert();
     if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit();
@@ -1904,6 +1925,8 @@ class VaultService implements Vault {
    * and is asked about again at each of their requests. Whether it ran.
    */
   async #declare(principals: readonly string[]): Promise<boolean> {
+    // Under 0.15's log, no Owner made before the cutover: nothing of the log's precedes its change (AnchorHolds).
+    if (!(await this.#cutOverNow())) return false;
     const at = await this.#now(this.#db);
     const due: string[] = [];
     for (const principal of principals) {
@@ -2485,7 +2508,7 @@ class VaultService implements Vault {
    * no role holds anything but Owner, otherwise whoever can insert rows
    * could unprotect them. Its edits are then unknown, not none.
    */
-  async #policyAt(db: Queryable, reports: NewEntry[], at: number, reads?: Snapshot): Promise<{ policy: Policy; edits: PolicyEdits; readable: boolean }> {
+  async #policyAt(db: Queryable, reports: NewEntry[], at: number, reads?: Snapshot): Promise<{ policy: Policy; edits: PolicyEdits; readable: boolean; seq: bigint | null }> {
     // The snapshot's newest first, with the rows it protects; the pages before it, as they are asked.
     const entry = await newestAuthentic(
       (limit, before) => (reads !== undefined && before === undefined
@@ -2493,11 +2516,11 @@ class VaultService implements Vault {
         : store.newestVaultEntries(db, POLICY, limit, before)),
       this.#check(reports, null),
     );
-    if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS, readable: true };
+    if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS, readable: true, seq: null };
     const edits = typeof entry === 'string' ? null : readEdits(JSON.parse(entry.metadata) as { policy?: unknown });
-    if (edits === null) return { policy: CLOSED_POLICY, edits: NO_EDITS, readable: false };
+    if (edits === null) return { policy: CLOSED_POLICY, edits: NO_EDITS, readable: false, seq: null };
     const rows = entry === reads?.newestPolicy ? reads.environments : await store.environmentsById(db, edits.protected.map((place) => place.environmentId));
-    return { policy: livePolicy(rows, edits, at), edits, readable: true };
+    return { policy: livePolicy(rows, edits, at), edits, readable: true, seq: (entry as StoredEntry).seq };
   }
 
   changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>> {
@@ -3103,6 +3126,222 @@ class VaultService implements Vault {
   }
 
   /**
+   * 0.15's cutover from 0.14 (cutover.ts; plan PR 9; formal/Migration015.tla).
+   * Done once: the marker read with no lock first, so that each isolate's
+   * start stalls nothing once it is. Without `input`, where 0.14's chain is
+   * verified from, for the app to check its own entries from there.
+   *
+   * With it: 0.14's chain walked on from its newest checkpoint, outside any
+   * transaction (VerifyChain); then one transaction, under every member's
+   * row, 0.14's head, the issue lock shared and the fence (RowFirst,
+   * CutoverHeadLock, CutoverIssueFirst, CutoverFence), the marker read again
+   * (Marker), the rest of the chain to the head, what the app checked still
+   * the chain's and nothing of the app's since (VouchedHeld), every row read
+   * and checked (`planCutover`), the places 0.14 deleted made as 0.15 leaves
+   * them, each object's genesis, its own 0.14 entry, `log.cutover`, and the
+   * cutover's change naming it. Answers once that change is sealed (R51).
+   */
+  async cutover(input?: CutoverInput | null): Promise<CutoverOutcome> {
+    const log015 = this.#log015();
+    const prepared = this.#prepared;
+    if (prepared.cutover || (await this.#cutoverSealed())) {
+      prepared.cutover = true;
+      return { ok: true, done: true };
+    }
+    if (prepared.since === null && prepared.superseded === null) await this.#settle();
+    if (prepared.superseded !== null) return { ok: false, refused: 'refused', why: prepared.superseded };
+    const from = await this.#resume(this.#db, 'newest');
+    if (!from.ok) return this.#cutoverRefused(`0.14's chain does not verify at entry ${from.failedAtSeq}: ${from.reason}`);
+    const mark = { seq: from.at.seq.toString(), hash: from.at.hash.toString('hex') };
+    // Over RPC or a socket, no input arrives as null.
+    if (input == null) return { ok: true, done: false, from: mark };
+    // The app checked its entries from where this walk starts, or another checkpoint came since: it checks again.
+    if (input.checked?.from?.seq !== mark.seq || input.checked.from.hash !== mark.hash) return { ok: false, refused: 'moved', why: "0.14's newest checkpoint is not the one the app checked from" };
+    // 0.14's chain whole, outside any transaction (VerifyChain): the prefix its newest checkpoint signed, rehashed from the
+    // first entry, which must come to the hash it signed (an entry edited, deleted or moved before it does not: review
+    // r4), each entry there MAC'd when that checkpoint was signed; then the entries since, by the vault's MACs. Once a
+    // cutover: hashes alone, no MAC, no tally.
+    const signed = await relink(this.#db, START, from.at.seq, Infinity);
+    if (!signed.ok) return this.#cutoverRefused(`0.14's chain does not verify at entry ${signed.failedAtSeq}: ${signed.reason}`);
+    if (signed.at.seq !== from.at.seq || !signed.at.hash.equals(from.at.hash)) return this.#cutoverRefused(`0.14's chain up to entry ${from.at.seq} is not the prefix its newest checkpoint signed`);
+    const walked = await this.#walkOn(from, Infinity);
+    if (!walked.ok) return this.#cutoverRefused(`0.14's chain does not verify at entry ${walked.failedAtSeq}: ${walked.reason}`);
+    const reports: NewEntry[] = [];
+    let number: bigint;
+    try {
+      number = await this.#db.transaction((tx) => this.#cutOver(tx, input, walked, reports));
+    } catch (error) {
+      if (error instanceof VouchMoved || error instanceof Retry) return { ok: false, refused: 'moved', why: error instanceof VouchMoved ? error.message : 'a member was admitted meanwhile' };
+      if (error instanceof CutoverRefused) return this.#cutoverRefused(error.message);
+      throw error;
+    }
+    this.#reported(reports);
+    // Done once sealed (R51), whichever vault's change it is: one found under the locks too.
+    await log015.sealThrough(number);
+    prepared.cutover = true;
+    return { ok: true, done: true };
+  }
+
+  /** The cutover's transaction (`cutover`): its change's number, another vault's if it cut over first. */
+  async #cutOver(tx: Transaction, input: CutoverInput, walked: Walked, reports: NewEntry[]): Promise<bigint> {
+    const log015 = this.#log015();
+    const { logKeys } = this.#prepared;
+    await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+    const principals = (await store.allMembers(tx)).map((row) => row.principal);
+    const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
+    const head = await lockLogHead(tx);
+    await holdFence(tx);
+    const found = await store.cutoverNumber(tx);
+    if (found !== null) return found;
+    if ((await store.allMembers(tx)).length !== rows.size) throw new Retry();
+    // 0.14's chain, to the head it holds: what the walk read still there, and the rest by the vault's MACs.
+    if (!(await carries(tx, headOf(walked.at)))) throw new CutoverRefused(`the log up to entry ${walked.at.seq} changed while the vault walked it`);
+    const walk = new Walk(walked.tally, walked.digest);
+    const rest = await rehash(tx, logKeys, walked.at, walk, {});
+    if (!rest.ok) throw new CutoverRefused(`0.14's chain does not verify at entry ${rest.failedAtSeq}: ${rest.reason}`);
+    const unsigned = await this.#checkpointFault(tx, walk.checkpoints);
+    if (unsigned !== null) throw new CutoverRefused(`0.14's chain does not verify at entry ${unsigned.failedAtSeq}: ${unsigned.reason}`);
+    if (rest.at.seq !== head.nextSeq - 1n || !rest.at.hash.equals(head.headHash)) throw new CutoverRefused("0.14's chain head does not name its last entry");
+    // What the app checked by its MACs is the chain's, and it wrote nothing since: what it vouched for stands (VouchedHeld).
+    const to = { seq: Number(input.checked.to.seq), hash: input.checked.to.hash };
+    if (!Number.isSafeInteger(to.seq) || to.seq < -1 || BigInt(to.seq) > rest.at.seq || !(await carries(tx, to))) throw new VouchMoved("the chain the app checked is not 0.14's now");
+    if (await store.appEntriesAfter(tx, BigInt(to.seq))) throw new VouchMoved('the app wrote to 0.14\'s log since it vouched for its rows');
+
+    const at = await this.#now(tx);
+    const { edits, readable, seq: policySeq } = await this.#policyAt(tx, reports, at);
+    if (!readable) throw new CutoverRefused("0.14's newest policy is not the vault's: its roles and protection are not known");
+    const logged = await store.loggedObjects(tx);
+    const held = new Map<string, GrantRow[]>();
+    for (const grant of await store.grants(tx)) held.set(grant.principal, [...(held.get(grant.principal) ?? []), grant]);
+    const seals = await store.memberSeals(tx);
+    // Each member's newest access entry, all in one read: a row whose MAC holds and names it, the vault's, is as 0.14's
+    // `#integrity` takes it; any other is checked by it, one read each, and reported.
+    const newest = await store.newestAccessEntries(tx);
+    const members = [];
+    for (const member of rows.values()) {
+      const grants = held.get(member.principal) ?? [];
+      const seal = seals.get(member.principal) ?? null;
+      // A member 0.15's log holds already is its log's: not checked as 0.14's again.
+      const fresh = seal === null && !logged.has(objectKey(memberRef(member.principal)));
+      const entry = newest.get(member.principal);
+      const plain = entry !== undefined && entry.seq === member.accessSeq && this.#authentic(entry) && this.#sealed(member, grants);
+      members.push({ member, grants, seal, genuine: !fresh || plain || (await this.#integrity(tx, member.principal, member, grants, reports)) === null });
+    }
+    const secrets = await store.everySecret(tx);
+    const references = await this.#referencesMade(tx, secrets);
+    const plan = planCutover({
+      logged,
+      config: await store.configRows(tx),
+      members,
+      edits,
+      policySeq,
+      bulk: this.#config.bulkLimit,
+      projects: await store.everyProject(tx),
+      environments: await store.everyEnvironment(tx),
+      secrets,
+      references,
+      input,
+      credentials: await store.credentialsAt(tx, input.credentials.map((columns) => columns.id)),
+      bindings: await store.bindingsAt(tx, input.bindings.map((columns) => columns.id)),
+    });
+    // Reported as a change refused on them would be (`#notLogged`), once: a member's by their check (`#integrity`).
+    for (const { ref, fault } of plan.skipped) if (ref.kind !== 'principal') this.#report(reports, null, fault === 'tampered' ? 'mac' : 'stale', `log.${ref.kind}:${ref.id}`);
+
+    await store.endReferenceRows(tx, plan.ends, at);
+    await store.cutoverPlaces(tx, at, plan.rename, plan.archive);
+    // Its own entry last, the head its change names (the anchor): the trigger's issue lock and fence held already.
+    const appended = await this.#append(tx, [...reports, {
+      actor: VAULT_ACTOR, action: CUTOVER, decision: 'allow',
+      metadata: JSON.stringify({ from: { seq: walked.from.at.seq.toString(), hash: walked.from.at.hash.toString('hex') }, sealed: plan.genesis.length + plan.bindings.length, skipped: plan.skipped.length }),
+    }]);
+    const calls = genesisCalls(log015, plan.genesis, at);
+    for (let i = 0; i < calls.length; i += GENESIS_BATCH) {
+      const numbers = await store.changeInputs(tx, calls.slice(i, i + GENESIS_BATCH));
+      if (numbers.some((n) => n === null)) throw new VouchMoved('an object\'s row moved under the cutover\'s locks');
+    }
+    for (const call of genesisCalls(log015, plan.bindings, at)) {
+      if ((await store.sealBinding(tx, call)) === null) throw new VouchMoved(`the binding ${call.ref.id}'s row moved under the cutover's locks`);
+    }
+    const anchor = { seq: appended.nextSeq - 1n, hash: appended.headHash };
+    return store.logCutover(tx, cutoverRow(log015, at, cutoverPayload(anchor, walked.from.at)));
+  }
+
+  /**
+   * Each key's newest reference row's `reference.create`, by its number:
+   * whether it is the vault's, by its MAC, about that row, holder and
+   * source; and whether an authentic `reference.end` ended it.
+   */
+  async #referencesMade(db: Queryable, secrets: readonly store.SecretRead[]): Promise<Map<string, { authentic: boolean; ended: boolean }>> {
+    const rows = secrets.flatMap((secret) => (secret.reference === null ? [] : [{ secret, reference: secret.reference }]));
+    const made = await store.entriesAt(db, rows.map(({ reference }) => reference.createdSeq));
+    // An entry of these the vault's MAC does not hold is damaged history, read under the cutover's locks: refused, never
+    // taken for no end (a reference 0.14 holds ended would be sealed live: review r4) nor for no reference.
+    const damaged = (entry: StoredEntry) => {
+      throw new CutoverRefused(`0.14's ${entry.action} at entry ${entry.seq} does not carry the vault's MAC: its history is damaged`);
+    };
+    const ends = await store.referenceEnds(db, rows.map(({ reference }) => reference.createdSeq));
+    for (const entry of ends) if (!this.#authentic(entry)) damaged(entry);
+    const ended = new Set(ends.map((entry) => entry.relatedSeq!.toString()));
+    return new Map(rows.map(({ secret, reference }) => {
+      const entry = made.get(reference.createdSeq);
+      const created = entry !== undefined && entry.author === 'vault' && entry.action === 'reference.create' && entry.decision === 'allow';
+      if (created && !this.#authentic(entry)) damaged(entry);
+      const sealed = !created ? null : sealedReference(entry, reference.id);
+      // The holder where the vault made it: a row moved around it, its id and reference row kept, would read the source
+      // from another place, where 0.14's read through it is refused.
+      const authentic = sealed !== null && sealed.holder.secretId === secret.id && sealed.holder.projectId === secret.projectId
+        && sealed.holder.environmentId === secret.environmentId && sealed.source.secretId === reference.source;
+      return [reference.createdSeq.toString(), { authentic, ended: ended.has(reference.createdSeq.toString()) }];
+    }));
+  }
+
+  /** A cutover refused, recorded once a process (`log.cutover`, denied), and answered. */
+  async #cutoverRefused(why: string): Promise<CutoverOutcome> {
+    const reports: NewEntry[] = [];
+    const key = `cutover|${why}`;
+    if (!this.#prepared.reported.has(key)) {
+      const entry: NewEntry = { actor: VAULT_ACTOR, action: CUTOVER, decision: 'deny', code: 'log_broken', metadata: JSON.stringify({ reason: why }) };
+      REPORTED.set(entry, key);
+      reports.push(entry);
+    }
+    if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
+    this.#reported(reports);
+    return { ok: false, refused: 'refused', why };
+  }
+
+  /**
+   * Under 0.15's log, that it is cut over from 0.14 (`cutover`): nothing of
+   * 0.15's is decided, changed or used before, so that the cutover's change
+   * precedes every other (AnchorHolds) and nothing decides on rows it has
+   * not sealed. The marker read once, with no lock, until it is there.
+   */
+  async #cutOverYet(): Promise<void> {
+    if (!(await this.#cutOverNow())) throw new Error(NOT_CUT_OVER);
+  }
+
+  /** Whether the vault may serve 0.15's log: kept by 0.14's alone, or cut over, its change sealed (`#cutoverSealed`). */
+  async #cutOverNow(): Promise<boolean> {
+    const prepared = this.#prepared;
+    if (prepared.log015 === null || prepared.cutover) return true;
+    if (!(await this.#cutoverSealed())) return false;
+    prepared.cutover = true;
+    return true;
+  }
+
+  /**
+   * Whether the log is cut over, its change sealed: the marker read with no
+   * lock, then, found, its seal waited for (R51), as the vault that wrote it
+   * waits before it answers. Committed and not sealed yet, as when that vault
+   * waits or failed before its seal, it serves nothing until it is.
+   */
+  async #cutoverSealed(): Promise<boolean> {
+    const number = await store.cutoverNumber(this.#db);
+    if (number === null) return false;
+    await this.#log015().sealThrough(number);
+    return true;
+  }
+
+  /**
    * The app's changes, sealed (`prepareChanges`, plan PR 4b): no lock,
    * nothing written, and no read but, for an unarchive, what its key's log
    * last sealed (`keptObjects`, T134); but the report of a row that is not
@@ -3112,6 +3351,10 @@ class VaultService implements Vault {
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
     const log015 = this.#log015();
     if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
+    // Before the cutover, a change of 0.14's rows alone, which logs nothing (`prepareChanges`): what the app key's
+    // rotation makes as it signs sessions out, which the app's door finishes before it cuts over (review r3). One that
+    // makes an object, or changes one the log holds, waits for the cutover.
+    if (input.changes.some((change) => change.before === null || change.before.seal !== null)) await this.#cutOverYet();
     try {
       const restored = input.changes.flatMap((change) => (change.kind === 'secret' && change.restores === true ? [{ kind: 'secret' as const, id: change.id }] : []));
       const kept = restored.length === 0 ? new Map() : await keptObjects(log015.seals, this.#db, restored);
@@ -3128,6 +3371,7 @@ class VaultService implements Vault {
   /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): one statement, then the seal wait (R51). */
   async signIn(input: SignInInput): Promise<SignInOutcome> {
     const log015 = this.#log015();
+    await this.#cutOverYet();
     const at = Date.now() + this.#prepared.options.clockOffset();
     // The proof, verified here on the sealed binding (D148): what the credential is held to comes of the token, not the app.
     const proven = await this.#proven(log015, input, at);
@@ -3147,6 +3391,7 @@ class VaultService implements Vault {
    */
   async revokeCredential(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome> {
     const log015 = this.#log015();
+    await this.#cutOverYet();
     const notLogged = async (error: NotLogged) => {
       const reports: NewEntry[] = [];
       this.#notLogged(reports, error);
@@ -3243,6 +3488,7 @@ class VaultService implements Vault {
   async issueToken(input: IssueTokenInput): Promise<IssueTokenOutcome> {
     const log015 = this.#log015();
     await this.#settled();
+    await this.#cutOverYet();
     const scope = checkIssue(input);
     for (let tries = 0; ; tries += 1) {
       const outcome = await this.#issueOnce(log015, input, scope);
@@ -3373,6 +3619,7 @@ class VaultService implements Vault {
   async changeBindings(input: ChangeBindingsInput): Promise<ChangeBindingsOutcome> {
     const log015 = this.#log015();
     await this.#settled();
+    await this.#cutOverYet();
     checkChangeBindings(input);
     const { actor, make } = input;
     let read: IssueRead | null = null;
@@ -3666,6 +3913,9 @@ class VaultService implements Vault {
 }
 
 type Broken = Extract<LogVerification, { ok: false }>;
+
+/** 0.14's chain as the cutover walked it from its newest checkpoint, outside any transaction (`#walkOn`). */
+type Walked = { from: Resumed; tally: Tally; digest: string; at: Position };
 
 /**
  * Where a walk of the log resumes: the checkpoint's entry (null for the

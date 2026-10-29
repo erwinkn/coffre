@@ -1385,6 +1385,7 @@ its seal's; otherwise it decides, and serves the text it read.
 | an unarchive restores the object the holder's log last sealed, its rows held to it (RestoreFromLog) | `AllowedAsOld`: the holder archived, its reference ended, the row's end cleared by a writer, and the unarchive seals it live |
 | ... still the log's newest sealed one at the commit (RestorePinned) | `AllowedAsOld`: an end between the unarchive's prepare and its commit, its row's end cleared: the rows as read, sealed live |
 | an end on an archived holder whose kept object reads through the reference logs that object ended (EndWhileArchived) | `AllowedAsOld`: the row's end cleared, the kept object restored live; `HonestUnarchive`: with no writer, the unarchive after an end refused |
+| a key archived before the cutover is given the object its rows make, then deleted again, by the cutover (GenesisKeepsArchived; SealedObjectsCutover, T144) | `HonestUnarchiveServes`: with no writer, its unarchive logs nothing and leaves a row no seal covers, refused to every use |
 
 That the replay decides each use as live did is not this model's: a use not
 refused here reads its seals' objects, so the two agree by construction.
@@ -1421,7 +1422,20 @@ The cutover from 0.14 (the plan's PR 9).
   exclusive, then the fence). The order everywhere: row, head, issue lock,
   fence;
 - in its Tamper and Drops scenarios, a writer who puts rows back, forges a
-  0.14 entry, drops 0.14's newest entry, or clears a marker.
+  0.14 entry, drops 0.14's newest entry, or clears a marker;
+- in Migration015Deleted (T130), the place a use is in: 0.14 may delete its
+  project before the cutover (an authentic `project.delete`, the project's
+  slug a tombstone, its environments' not), and a writer renames either
+  slug, either way. The cutover seals the place in its own entry and gives a
+  deleted project's environment its tombstone;
+- in Migration015AppTamper (T160), the object is the app's row (a
+  credential, a binding), which the app checks under its key before the
+  cutover's locks (`vouched`, with the head it checked against), and a
+  writer puts a row there.
+
+A row 0.14 would not accept gets no genesis (its object stays unsealed,
+`stale` to every use), rather than refusing the cutover: only a broken
+chain or a deletion the chain and the slugs disagree on refuse it.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -1441,6 +1455,9 @@ The cutover from 0.14 (the plan's PR 9).
 | whatever takes the fence in a transaction that may issue too takes the issue lock first (IssueBeforeFence: the trigger, `app_change`) | `NoWaitCycle`: a sign-in holding the fence waits for the issue lock, which the barrier holds while it waits for the fence |
 | the barrier takes the issue lock before the fence (BarrierIssueFirst) | `NoWaitCycle` |
 | a policy change takes the issue lock exclusive after 0.14's head and before the fence (PolicyIssueFirst; Migration015Policy, T149) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
+| the cutover takes the issue lock, shared, before the fence (CutoverIssueFirst; Migration015Issue, T132): its own 0.14 entry, `log.cutover`, is one the trigger fences | `NoWaitCycle`: it holds the fence and its entry's trigger waits for the issue lock, which the barrier holds while it waits for the fence (the checkpointer ticks whether a vault has cut over or not) |
+| a place is deleted as 0.14's chain says, a mismatch with its slugs refusing the cutover (DeletedFromChain; Migration015Deleted, T130) | `NoneInDeleted`: a deleted project renamed back is sealed live and a use there allowed; `PlaceFollowsOld`: a live one tombstoned is sealed deleted |
+| an app's row is sealed only as the app vouched for it, and only if 0.14's chain has not moved past the head it checked against (VouchedHeld; Migration015AppTamper, T160) | `AllowedOnlyWhenGranted`: a writer puts the vouched row back over a revoke that came after the app read it |
 | 0.14's `token.exchange`, which the trigger no longer fences, writes no decision input (ExchangeOnlyIssues; the suites hold the code to it: `decisionInputs`) | `ExchangeChangesNoInput`, `NothingAllowedAfterAnswer` |
 
 `BarrierAvoidsHead` holds in Migration015Issue: the barrier never holds 0.14's

@@ -1,7 +1,7 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
-import { isTombstone, TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS, type CredentialColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
+import { ACCESS_ACTIONS, type BindingColumns, type CredentialColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
@@ -9,6 +9,7 @@ import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { objectKey, type Input, type Kind, type Ref } from './inputs.ts';
+import { CUTOVER_OBJECT } from './log-entry.ts';
 import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
@@ -1256,4 +1257,217 @@ export async function issuingCredential(db: Queryable, id: string): Promise<{ co
     seal: bytes(row.seal),
     newest: bytes(row.newest),
   };
+}
+
+// --- the cutover (cutover.ts) ------------------------------------------------
+
+/** Whether the log is cut over from 0.14: its cutover change, one probe of `log_changes_object_idx`, no lock. */
+export async function cutOver(db: Queryable): Promise<boolean> {
+  return (await cutoverNumber(db)) !== null;
+}
+
+/** The cutover change's number, null for none: one probe of `log_changes_object_idx`, no lock. */
+export async function cutoverNumber(db: Queryable): Promise<bigint | null> {
+  const [row] = await rowsOf<{ number: string | number }>(db, sql`SELECT number FROM log_changes WHERE object = ${CUTOVER_OBJECT} LIMIT 1`);
+  return row === undefined ? null : BigInt(row.number);
+}
+
+/** Every object the log has a change of, by its key: before the cutover, the few 0.15's changes made already. */
+export async function loggedObjects(db: Queryable): Promise<Set<string>> {
+  const rows = await rowsOf<{ object: string }>(db, sql`SELECT DISTINCT object FROM log_changes`);
+  return new Set(rows.map((row) => row.object));
+}
+
+/** The rows `log_config` holds, by name: only `change_input` writes one, sealed (the roles', the policy's). */
+export async function configRows(db: Queryable): Promise<Set<string>> {
+  const rows = await rowsOf<{ name: string }>(db, sql`SELECT name FROM log_config`);
+  return new Set(rows.map((row) => row.name));
+}
+
+/** A member's row's seal, by principal. */
+export async function memberSeals(db: Queryable): Promise<Map<string, Buffer | null>> {
+  const rows = await rowsOf<{ principal: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT principal, seal FROM vault_members`);
+  return new Map(rows.map((row) => [row.principal, bytes(row.seal)]));
+}
+
+export type ProjectRow = { id: string; slug: string; archived: boolean };
+export type EnvironmentRead = { id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; archived: boolean; seal: Buffer | null };
+/** A key's rows, archived or not: its current version, and its newest reference row, ended or not. */
+export type SecretRead = {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  archived: boolean;
+  seal: Buffer | null;
+  /**
+   * Whether its current version is one of its own and its newest by the
+   * versions' own order, as 0.14 holds a source's (`versions`, which joins a
+   * version to its key): the app may write `current_version_id`, never a
+   * version. False for a pointer to another key's version, or to none.
+   */
+  newest: boolean;
+  version: { id: string; sensitive: boolean; plaintext: string | null; kekProvider: string; kekId: string; kekVersion: string; wrappedDek: string } | null;
+  /** Its newest reference row: its id, its source, the `reference.create` it names, and whether its row says it ended. */
+  reference: { id: string; source: string; createdSeq: bigint; ended: boolean } | null;
+};
+
+export async function everyProject(db: Queryable): Promise<ProjectRow[]> {
+  const rows = await rowsOf<{ id: string; slug: string; archived: boolean | number }>(db, sql`SELECT id, slug, archived_at IS NOT NULL AS archived FROM projects`);
+  return rows.map((row) => ({ id: row.id, slug: row.slug, archived: Boolean(row.archived) }));
+}
+
+export async function everyEnvironment(db: Queryable): Promise<EnvironmentRead[]> {
+  const rows = await rowsOf<{ id: string; project_id: string; slug: string; owner: string | null; parent_id: string | null; archived: boolean | number; seal: Buffer | Uint8Array | null }>(
+    db, sql`SELECT id, project_id, slug, owner, parent_id, archived_at IS NOT NULL AS archived, seal FROM environments`,
+  );
+  return rows.map((row) => ({ id: row.id, projectId: row.project_id, slug: row.slug, owner: row.owner, parentId: row.parent_id, archived: Boolean(row.archived), seal: bytes(row.seal) }));
+}
+
+/** Every key, archived or not, as `readObject` makes one (store.ts), with its newest reference row whole. */
+export async function everySecret(db: Queryable): Promise<SecretRead[]> {
+  const newest = (column: string) => sql.raw(`(SELECT y.${column} FROM secret_references y WHERE y.secret_id = s.id ORDER BY y.created_seq DESC LIMIT 1)`);
+  const rows = await rowsOf<{
+    id: string; project_id: string; environment_id: string; archived: boolean | number; seal: Buffer | Uint8Array | null; version_id: string | null;
+    sensitive: boolean | number | null; plaintext: string | null; kek_provider: string | null; kek_id: string | null; kek_version: string | null; wrapped_dek: Buffer | Uint8Array | null;
+    reference_id: string | null; reference_source: string | null; reference_seq: string | number | null; reference_ended: boolean | number | null;
+    newest: boolean | number | null;
+  }>(db, sql`SELECT s.id, s.project_id, s.environment_id, s.archived_at IS NOT NULL AS archived, s.seal, s.current_version_id AS version_id,
+      s.current_version_id IS NULL OR (v.secret_id = s.id AND v.version = (SELECT max(w.version) FROM secret_versions w WHERE w.secret_id = s.id)) AS newest,
+      v.sensitive, v.plaintext, v.kek_provider, v.kek_id, v.kek_version, v.wrapped_dek,
+      ${newest('id')} AS reference_id, ${newest('source_secret_id')} AS reference_source, ${newest('created_seq')} AS reference_seq,
+      ${newest('ended_at')} IS NOT NULL AS reference_ended
+    FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id`);
+  return rows.map((row) => ({
+    id: row.id,
+    projectId: row.project_id,
+    environmentId: row.environment_id,
+    archived: Boolean(row.archived),
+    seal: bytes(row.seal),
+    newest: Boolean(row.newest),
+    // As `readObject` takes a version: none without a wrapped key.
+    version: row.version_id === null || row.wrapped_dek === null ? null : {
+      id: row.version_id, sensitive: Boolean(row.sensitive), plaintext: row.plaintext,
+      kekProvider: row.kek_provider!, kekId: row.kek_id!, kekVersion: row.kek_version!, wrappedDek: Buffer.from(row.wrapped_dek).toString('base64'),
+    },
+    reference: row.reference_id === null ? null : {
+      id: row.reference_id, source: row.reference_source!, createdSeq: BigInt(row.reference_seq!), ended: Boolean(row.reference_ended),
+    },
+  }));
+}
+
+/** A credential the app vouched for, as its row is now (`cutover_credentials`): its object's columns, its seal, and whether the log has a change of it. */
+export type CredentialRead = { columns: CredentialColumns; seal: Buffer | null; logged: boolean };
+/** A binding the app vouched for, as its row is now: its columns but the instance it was made on, its row's `origin` apart (null on one of 0.14's, which the cutover writes), its seal. */
+export type BindingRead = { columns: Omit<BindingColumns, 'origin'>; origin: string | null; seal: Buffer | null; logged: boolean };
+
+export async function credentialsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, CredentialRead>> {
+  if (ids.length === 0) return new Map();
+  type Read = { id: string; principal: string; kind: string; scope: string | null; revoked: boolean | number; expires_at: string | number; not_after: string | number | null; generation: number; seal: Buffer | Uint8Array | null; logged: boolean | number };
+  const rows = engineOf(db) === 'postgres'
+    ? await rowsOf<Read>(db, sql`SELECT * FROM cutover_credentials(${sql.param([...ids])}::uuid[])`)
+    // SQLite has no `log_object`: whether the log holds each is the plan's to see, by its key (`CutoverFacts.logged`).
+    : await rowsOf<Read>(db, sql`SELECT c.id, c.principal, c.kind, c.scope, c.revoked_at IS NOT NULL AS revoked, c.expires_at, c.not_after, c.generation, c.seal,
+        0 AS logged FROM credentials c WHERE c.id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`);
+  return new Map(rows.map((row) => {
+    // As `issuingCredential` reads one (store.ts): its end the earlier of its expiry and its hard end.
+    const ends = [Number(row.expires_at), ...(row.not_after == null ? [] : [Number(row.not_after)])];
+    const columns: CredentialColumns = { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: Boolean(row.revoked), expiresAt: Math.min(...ends), generation: Number(row.generation) };
+    return [row.id, { columns, seal: bytes(row.seal), logged: Boolean(row.logged) }];
+  }));
+}
+
+export async function bindingsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, BindingRead>> {
+  if (ids.length === 0) return new Map();
+  type Read = { id: string; principal: string; generation: number; profile: string; issuer: string; origin: string | null; jwks_uri: string; claims: string; scope: string | null; policy: string | null; revoked: boolean | number; seal: Buffer | Uint8Array | null; logged: boolean | number };
+  const rows = engineOf(db) === 'postgres'
+    ? await rowsOf<Read>(db, sql`SELECT * FROM cutover_bindings(${sql.param([...ids])}::uuid[])`)
+    : await rowsOf<Read>(db, sql`SELECT b.id, b.principal, b.generation, b.profile, b.issuer, b.origin, b.jwks_uri, b.claims, b.scope, b.policy, b.revoked_at IS NOT NULL AS revoked, b.seal,
+        0 AS logged FROM service_bindings b WHERE b.id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`);
+  return new Map(rows.map((row) => {
+    const columns: Omit<BindingColumns, 'origin'> = {
+      id: row.id, principal: row.principal, generation: Number(row.generation), profile: row.profile, issuer: row.issuer, jwksUri: row.jwks_uri,
+      claims: row.claims, scope: row.scope, policy: row.policy, revoked: Boolean(row.revoked),
+    };
+    return [row.id, { columns, origin: row.origin, seal: bytes(row.seal), logged: Boolean(row.logged) }];
+  }));
+}
+
+/** Whether the app wrote any entry of 0.14's after `seq`: what it vouched for may have moved since. */
+export async function appEntriesAfter(db: Queryable, seq: bigint): Promise<boolean> {
+  const rows = await rowsOf<{ found: number }>(db, sql`SELECT 1 AS found FROM audit_log WHERE seq > ${seq} AND author = 'app' LIMIT 1`);
+  return rows.length > 0;
+}
+
+/** The places 0.14 deleted made as 0.15 leaves them: each environment given `<slug>~deleted`, each key archived (`cutover_places`). */
+export async function cutoverPlaces(tx: Transaction, at: number, environments: readonly string[], secrets: readonly string[]): Promise<void> {
+  if (environments.length === 0 && secrets.length === 0) return;
+  if (engineOf(tx) === 'postgres') {
+    await rowsOf(tx, sql`SELECT cutover_places(${at}::bigint, ${sql.param([...environments])}::uuid[], ${sql.param([...secrets])}::uuid[])`);
+    return;
+  }
+  // `cutover_places`, step for step: the transaction holds the database's write lock.
+  const { environments: envs, secrets: keys, projects } = tablesOf(tx);
+  if (await cutOver(tx)) throw new Error('the log is cut over from 0.14 already');
+  const logged = await loggedObjects(tx);
+  const rows = environments.length === 0 ? [] : await tx.select({ id: envs.id, slug: envs.slug, seal: envs.seal, projectSlug: projects.slug })
+    .from(envs).innerJoin(projects, eq(projects.id, envs.projectId)).where(inArray(envs.id, [...environments]));
+  if (rows.length !== environments.length || rows.some((row) => isTombstone(row.slug) || row.seal !== null || !isTombstone(row.projectSlug) || logged.has(objectKey({ kind: 'environment', id: row.id })))) {
+    throw new Error('an environment named is no standing one of a deleted project, 0.14\'s alone');
+  }
+  for (const row of rows) await tx.update(envs).set({ slug: deletedWithProject(row.slug) }).where(eq(envs.id, row.id));
+  const held = secrets.length === 0 ? [] : await tx.select({ id: keys.id, seal: keys.seal, archivedAt: keys.archivedAt, slug: envs.slug, projectSlug: projects.slug })
+    .from(keys).innerJoin(envs, eq(envs.id, keys.environmentId)).innerJoin(projects, eq(projects.id, envs.projectId)).where(inArray(keys.id, [...secrets]));
+  if (held.length !== secrets.length || held.some((row) => row.archivedAt !== null || row.seal !== null || !(isTombstone(row.slug) || isTombstone(row.projectSlug)) || logged.has(objectKey({ kind: 'secret', id: row.id })))) {
+    throw new Error('a key named is no live one under a deleted place, 0.14\'s alone');
+  }
+  const archived = changedRows(await tx.update(keys).set({ archivedAt: new Date(at) }).where(and(inArray(keys.id, [...secrets]), isNull(keys.archivedAt))));
+  if (archived !== secrets.length) throw new Error('a key named was archived meanwhile');
+}
+
+/** A binding's genesis (`seal_binding`): its number, or null if its row is not as its object says, or the log holds it. */
+export async function sealBinding(tx: Transaction, call: ChangeCall): Promise<bigint | null> {
+  if (engineOf(tx) === 'postgres') {
+    const [row] = await rowsOf<{ n: string | number | null }>(tx, sql`SELECT seal_binding(${call.ref.id}::uuid, ${call.requestId}, ${call.at}::bigint, ${call.actor}, ${call.payload},
+      ${call.seal}::bytea, ${call.mac}::bytea) AS n`);
+    return row?.n == null ? null : BigInt(row.n);
+  }
+  const { serviceBindings, logChanges } = tablesOf(tx);
+  if (await cutOver(tx)) throw new Error('the log is cut over from 0.14 already: a binding is the vault\'s to make');
+  if ((await loggedObjects(tx)).has(objectKey(call.ref))) return null;
+  const origin = (JSON.parse(call.payload) as { value?: { origin?: unknown } }).value?.origin;
+  if (typeof origin !== 'string') throw new Error("a binding's genesis names the instance it was made on");
+  const done = changedRows(await tx.update(serviceBindings).set({ seal: call.seal, origin })
+    .where(and(eq(serviceBindings.id, call.ref.id), isNull(serviceBindings.seal), isNull(serviceBindings.revokedAt), isNull(serviceBindings.origin))));
+  if (done === 0) return null;
+  const number = await nextNumber(tx);
+  await tx.insert(logChanges).values({ number, at: call.at, requestId: call.requestId, object: objectKey(call.ref), actor: call.actor, payload: call.payload, seal: call.seal, mac: call.mac });
+  return number;
+}
+
+/** The cutover's change (`log_cutover`): its number. */
+export async function logCutover(tx: Transaction, row: { requestId: string; at: number; actor: string; payload: string; mac: Buffer }): Promise<bigint> {
+  if (engineOf(tx) === 'postgres') {
+    const [found] = await rowsOf<{ n: string | number }>(tx, sql`SELECT log_cutover(${row.requestId}, ${row.at}::bigint, ${row.actor}, ${row.payload}, ${row.mac}::bytea) AS n`);
+    return BigInt(found!.n);
+  }
+  const { logChanges, auditChainHead } = tablesOf(tx);
+  if (await cutOver(tx)) throw Object.assign(new Error('the log is cut over from 0.14 already'), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
+  const { anchor } = JSON.parse(row.payload) as { anchor: { seq: string; hash: string } };
+  const [head] = await tx.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead);
+  if (head === undefined || BigInt(head.nextSeq) !== BigInt(anchor.seq) + 1n || Buffer.from(head.headHash).toString('hex') !== anchor.hash) {
+    throw new Error('a cutover names 0.14\'s head as it stands');
+  }
+  const number = await nextNumber(tx);
+  await tx.insert(logChanges).values({ number, at: row.at, requestId: row.requestId, object: CUTOVER_OBJECT, actor: row.actor, payload: row.payload, seal: null, mac: row.mac });
+  return number;
+}
+
+/** SQLite's next number, both tables one sequence (as `changeOnSqlite` takes it, store.ts). */
+async function nextNumber(tx: Transaction): Promise<bigint> {
+  const [{ last }] = await rowsOf<{ last: number | string | null }>(tx, sql`SELECT max(n) AS last FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
+  return BigInt(last ?? 0) + 1n;
+}
+
+function bytes(value: Buffer | Uint8Array | null): Buffer | null {
+  return value === null ? null : Buffer.from(value);
 }
