@@ -168,6 +168,21 @@ export async function holdIssues(tx: Transaction): Promise<void> {
 }
 
 /**
+ * The issue lock shared, then 0.15's fence exclusive (`1668244070, 0`), as
+ * 0.14's trigger takes them for an entry that changes access: what 0.15's
+ * cutover holds, its member rows and 0.14's head taken first, so that its
+ * own 0.14 entry's trigger waits on nothing (formal/Migration015.tla,
+ * CutoverIssueFirst; T132). Every use and every change waits for its
+ * commit; the checkpointer's barrier, which takes the issue lock exclusive
+ * first, too. SQLite's transactions hold the whole file.
+ */
+export async function holdFence(tx: Transaction): Promise<void> {
+  if (engineOf(tx) === 'sqlite') return;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(1668244070, 1)`);
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244070, 0)`);
+}
+
+/**
  * Lock the log's head if no one holds it, without waiting: whether it is
  * held now. For work any caller may do, of which one at a time is enough,
  * which a request that finds the head taken leaves to the one that has it.

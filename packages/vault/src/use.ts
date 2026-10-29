@@ -132,7 +132,15 @@ const SLOTS = ['e1', 'e2', 'e3', 'e4'] as const;
  * checkpointer's: one key, the tree under the MAC, KindInMac), its key
  * registry, and its isolate's cache.
  */
-export type UsePath = { db: Queryable; sealKeys: SealKeys; macKey: Buffer; keks: KekRegistry; cache: UseCache };
+export type UsePath = {
+  db: Queryable;
+  sealKeys: SealKeys;
+  macKey: Buffer;
+  keks: KekRegistry;
+  cache: UseCache;
+  /** What a call waits for first, within its admission (`inFlight`): an isolate's first, the log's cutover (vault.ts, `#cutOverYet`). */
+  ready?: () => Promise<void>;
+};
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REQUEST_ID = /^(0|[1-9][0-9]{0,18})$/;
@@ -221,7 +229,10 @@ export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
 async function raced(path: UsePath, call: UseCall): Promise<UseRow | Extract<UseOutcome, { busy: UseBusy }>> {
   const { cache } = path;
   cache.inFlight += 1;
-  const running = (engineOf(path.db) === 'postgres' ? callPostgres : callSqlite)(path.db, call).finally(() => {
+  const running = (async () => {
+    await path.ready?.();
+    return (engineOf(path.db) === 'postgres' ? callPostgres : callSqlite)(path.db, call);
+  })().finally(() => {
     cache.inFlight -= 1;
   });
   let timer: ReturnType<typeof setTimeout> | undefined;

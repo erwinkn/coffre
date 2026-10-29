@@ -235,16 +235,18 @@ export function testVault(
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
-  log: Pick<VaultOptions, 'log' | 'sealThrough' | 'uses'> = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
+  /** `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens. */
+  { cutover, ...log }: Pick<VaultOptions, 'log' | 'sealThrough' | 'uses'> & { cutover?: 'app' } = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
   let offset = 0;
   let current: Promise<LocalVault> | null = null;
   const open = async () => {
+    const database = await openVaultDatabase();
     const opened = await localVault(
       {
-        database: await openVaultDatabase(),
+        database,
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
         owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
         // With 0.15's log, its uses too, over the hot path's login (the same file on SQLite): the app opens values through them.
@@ -253,6 +255,8 @@ export function testVault(
       },
       { clockOffset: () => offset, walks, ...log },
     );
+    // Under 0.15's log, cut over from 0.14 first, as the app's door has it (cutover.ts).
+    if (log.log === '0.15' && cutover !== 'app') await cutOverAtOpen(opened, database);
     const [first, ...others] = owners.map((email) => `user:${email}`);
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
     const signedIn = first === undefined ? null : await opened.access(first).catch(() => null);
@@ -289,6 +293,7 @@ export function testVault(
     revokeCredential: call('revokeCredential'),
     issueToken: call('issueToken'),
     changeBindings: call('changeBindings'),
+    cutover: call('cutover'),
     verifyTrees: call('verifyTrees'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),
@@ -302,6 +307,24 @@ export function testVault(
   } as TestVault;
   vaults.add(vault);
   return vault;
+}
+
+/**
+ * The cutover (plan PR 9) as the app asks for it, of a vault the suite opens
+ * on a database nothing of the app's was written to yet: it vouches for no
+ * credential, binding or deleted place, and its chain is checked to its
+ * head. The app's own half, which vouches, is cutover.test.ts's. Refused,
+ * the vault stays as it is: the test asks what it asks of it.
+ */
+async function cutOverAtOpen(vault: Vault, db: Database): Promise<void> {
+  // Refused (a test that broke 0.14's chain before its vault's first call): left so, as the door leaves it; 0.14's
+  // own checks go on, and nothing of 0.15's is served.
+  const asked = await vault.cutover!();
+  if (!asked.ok || asked.done) return;
+  const { auditChainHead } = tablesOf(db);
+  const [head] = await db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead);
+  const to = { seq: (BigInt(head!.nextSeq) - 1n).toString(), hash: Buffer.from(head!.headHash).toString('hex') };
+  await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], deleted: [] });
 }
 
 /** A handler context for one principal, loaded the way a request loads it. */

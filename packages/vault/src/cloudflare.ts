@@ -15,7 +15,7 @@
  * Any number of isolates run it side by side: every decision locks what it
  * is about in the database, so they share one log and one bulk limit.
  */
-import type { ChangeBindingsInput,
+import type { ChangeBindingsInput, CutoverInput,
   AdmitInput,
   RemoveInput,
   RevokeCredentialInput,
@@ -145,6 +145,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async revokeCredential(input: RevokeCredentialInput) { return this.#call((vault) => vault.revokeCredential(input)); }
   async issueToken(input: IssueTokenInput) { return this.#call((vault) => vault.issueToken(input)); }
   async changeBindings(input: ChangeBindingsInput) { return this.#call((vault) => vault.changeBindings(input)); }
+  async cutover(input?: CutoverInput) { return this.#call((vault) => vault.cutover(input)); }
   async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */

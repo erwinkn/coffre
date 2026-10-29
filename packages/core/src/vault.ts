@@ -311,6 +311,18 @@ export interface Vault {
    */
   changeBindings?(input: ChangeBindingsInput): Promise<ChangeBindingsOutcome>;
   /**
+   * 0.15's cutover from 0.14 (docs/design/0.15-plan.md, PR 9;
+   * formal/Migration015.tla): once, before 0.15's log serves anything, every
+   * object 0.14 left sealed as 0.14 accepts it (`genesis`), and the log's
+   * first `cutover` change naming 0.14's last head (the anchor). Without
+   * `input`, whether it is done, and if not, where 0.14's chain is
+   * verified from (its newest checkpoint's prefix), for the app to check
+   * its own entries from there. With `input`, what the app vouches for under
+   * its key, which the vault never holds: it holds each row to it under its
+   * locks. Once done, done for good: a second call finds the marker.
+   */
+  cutover?(input?: CutoverInput): Promise<CutoverOutcome>;
+  /**
    * Check 0.15's log (docs/design/0.15-plan.md, PR 8), as the audit page
    * does on every visit: the newest signed pair, held to the pairs held
    * outside, and every entry after it by its MAC and request, a tick's
@@ -576,6 +588,47 @@ export type ChangeBindingsInput = {
  * (`MAX_BINDINGS`), besides those the change ends.
  */
 export type ChangeBindingsRefusal = IssueTokenRefusal | 'stale' | 'tampered' | 'full';
+
+/** A point of 0.14's chain: an entry's number and its hash (hex); `-1` and the zero hash before the first. */
+export type ChainMark = { seq: string; hash: string };
+
+/**
+ * What the app vouches for, of 0.14's, at the cutover (`Vault.cutover`):
+ * what 0.14 accepts that only the app's key says, each checked as 0.14's
+ * app checks it.
+ */
+export type CutoverInput = {
+  /**
+   * The stretch of 0.14's chain whose app entries the app checked by their
+   * MACs, every link included: from where the vault said it verifies from,
+   * to the head as the app read it. An app entry after `to` sends the
+   * cutover back to the app (`moved`).
+   */
+  checked: { from: ChainMark; to: ChainMark };
+  /**
+   * Each credential 0.14 accepts as it stands, its object's columns as
+   * read: its MAC the app's, not revoked nor past its end, its sign-in
+   * account not unlinked, and no revoke of it in the log (`token.revoke`,
+   * `sign_out`). One a binding issued is left out: 0.14 reads its scope
+   * from the binding, so its row holds none to seal.
+   */
+  credentials: CredentialColumns[];
+  /** Each trust binding 0.14 accepts as it stands: its MAC the app's, not revoked, and no `token.unbind` of it. */
+  bindings: BindingColumns[];
+  /** Each place 0.14's chain deleted, by an authentic `project.delete` or `environment.delete`, with the tombstone it gave the slug. */
+  deleted: { kind: 'project' | 'environment'; id: string; tombstone: string }[];
+};
+
+/**
+ * The cutover's answer: done (now, or before); not yet, with where 0.14's
+ * chain is verified from; `moved`, a 0.14 write since the app read what it
+ * vouched for (ask again); `refused`, 0.14's chain or rows not as 0.14
+ * accepts them, which a cutover does not seal (an operator's to look at).
+ */
+export type CutoverOutcome =
+  | { ok: true; done: true }
+  | { ok: true; done: false; from: ChainMark }
+  | { ok: false; refused: 'moved' | 'refused'; why: string };
 
 export type ChangeBindingsOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: ChangeBindingsRefusal; why?: string };
 

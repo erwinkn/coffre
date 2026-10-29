@@ -9,6 +9,7 @@ import { SigninService } from './api/signin.ts';
 import { WorkloadService } from './api/workloads.ts';
 import type { AuthenticatedIdentity } from './auth.ts';
 import type { ResolvedConfig } from './config.ts';
+import type { CutoverKnown } from './cutover.ts';
 import type { Gates } from './gate.ts';
 import { auditAlerter } from './alerts.ts';
 import { actorOf } from './db/audit.ts';
@@ -44,6 +45,12 @@ export type CoffreRuntime = {
   schema: { migrated: boolean };
   /** Whether the log is under the app's key, for as long as the configuration lives (key-rotation.ts). */
   appKey: { settled: boolean };
+  /**
+   * Whether 0.15's log is cut over from 0.14, or kept by 0.14 alone, for as
+   * long as the configuration lives (cutover.ts). Absent from a runtime made
+   * by hand around a vault its maker cut over (the suites'): nothing to do.
+   */
+  cutover?: CutoverKnown;
   /** The vault's last answer about each principal, for as long as the configuration lives (`Accesses`): none, kept by nothing. */
   accesses?: Accesses;
   /**
@@ -59,7 +66,7 @@ export type CoffreRuntime = {
  * isolate's, or the process's. Settled values, never a pending read
  * (AGENTS.md, "What an isolate keeps").
  */
-type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey']; accesses: Accesses };
+type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey']; cutover: CoffreRuntime['cutover']; accesses: Accesses };
 const known = new WeakMap<ResolvedConfig, Known>();
 
 /**
@@ -83,7 +90,7 @@ export function createRuntime(
   let workloads: WorkloadService | null = null;
   let mcp: McpService | null = null;
   let verifier: IdentityVerifier;
-  const { schema, scopes, appKey, accesses } = knownOf(config);
+  const { schema, scopes, appKey, cutover, accesses } = knownOf(config);
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
       db,
@@ -119,6 +126,7 @@ export function createRuntime(
     waitUntil,
     schema,
     appKey,
+    cutover,
     accesses,
     rotateAfterDays: config.rotateAfterDays,
     plugins: config.plugins,
@@ -129,7 +137,7 @@ export function createRuntime(
 function knownOf(config: ResolvedConfig): Known {
   let kept = known.get(config);
   if (kept === undefined) {
-    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false }, accesses: new Accesses() };
+    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false }, cutover: { done: false }, accesses: new Accesses() };
     known.set(config, kept);
   }
   return kept;

@@ -18,6 +18,7 @@ import { appChanges, appendEntries, isStaleChange } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { genesisCall, loggedChange, type ChangeKeys } from '../src/changes.ts';
+import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey, sealKey, sealOf, type EnvironmentInput, type Ref } from '../src/inputs.ts';
@@ -114,7 +115,8 @@ class Moved extends Error {}
 async function logged(keys: ChangeKeys): Promise<LoggedChange[]> {
   const { logChanges } = tablesOf(db.owner);
   const holds = authentic(keys.mac);
-  return (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).map((raw) => {
+  // The cutover's own change, which names no object, passed over.
+  return (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).filter((raw) => raw.object !== CUTOVER_OBJECT).map((raw) => {
     const row = { ...raw, number: BigInt(raw.number), seal: raw.seal ?? null };
     assert.ok(holds(changeEntry(row)), `entry ${row.number}'s MAC is the vault's`);
     const change = loggedChange(row);

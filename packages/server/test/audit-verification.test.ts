@@ -4,13 +4,13 @@ import { randomUUID } from 'node:crypto';
 
 import { deriveLogKey, entryHash } from '@coffre/core/audit';
 import { appendEntries, BATCH_BYTES, LogHeadMismatch, withinBytes } from '@coffre/db/log';
-import { and, desc, eq, gte, lte, or } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, min, or } from 'drizzle-orm';
 
 import { appendAudit, CHAIN_WALK, type AuditEntry } from '../src/db/audit.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
 
 const db = await openTestDatabase();
 const deps = testDeps(db.runtime, ['root@acme.example']);
@@ -36,18 +36,23 @@ for (const preceding of [0, 5_000]) {
   });
 
   test(`audit verification rejects a sequence gap after ${preceding} entries`, async () => {
+    // Under 0.15's log, cut over first, its vault's entries before the app's: a chain broken before the cutover refuses
+    // it, and nothing of 0.15's serves (cutover.test.ts).
+    if (LOG === '0.15') await root.me();
+    const [{ nextSeq }] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
+    const gap = Number(nextSeq) + preceding;
     await write(preceding + 2);
     // An entry deleted by the owner, at the first entry of a verification
     // batch: the check carries the expected number across batches.
-    await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(eq(auditLog.seq, BigInt(preceding))));
+    await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(eq(auditLog.seq, BigInt(gap))));
 
     assert.deepEqual(await root.audit.verify(), {
       ok: false,
       // Up to the entry before the one missing, which with none before is nothing.
-      through: preceding === 0 ? null : preceding - 1,
-      failedAtSeq: preceding + 1,
+      through: gap === 0 ? null : gap - 1,
+      failedAtSeq: gap + 1,
       author: 'app',
-      reason: `sequence gap: expected seq ${preceding}, found ${preceding + 1}`,
+      reason: `sequence gap: expected seq ${gap}, found ${gap + 1}`,
     });
   });
 }
@@ -75,14 +80,15 @@ test('an entry in the vault\'s name that the vault did not write fails verificat
   await write(1);
   // As the database's owner, whom row-level security does not stop: only
   // the vault's MAC tells, and only the vault holds its key.
+  const [{ nextSeq: forged }] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
   await forgeVaultEntry(db.owner);
   // An honest append takes the forged head as its predecessor.
   await write(1);
-  // The vault's making root an Owner, the app's entry; then the forged one.
+  // The vault's making root an Owner (under 0.15's log, after its cutover's entry), the app's entry; then the forged one.
   assert.deepEqual(await root.audit.verify(), {
     ok: false,
-    through: 1,
-    failedAtSeq: 2,
+    through: Number(forged) - 1,
+    failedAtSeq: Number(forged),
     author: 'vault',
     reason: `written under vault:0000000000000000, a key this verifier does not hold: either it is forged, or the vault wrote it under another vault key or signing key, which must stay configured: a vault key that was replaced stays in the vault's config, in previousKeks`,
   });
@@ -204,9 +210,10 @@ test('the page checks what was written since the last beat, and only the walk fr
   const [head] = await db.owner.select().from(auditChainHead);
   const page = await root.audit.verify();
   assert.deepEqual(page.ok && [page.from, page.through, page.remaining], [verified!.seq + 1, Number(head.nextSeq) - 1, 0], JSON.stringify(page));
-  // The walk from the first entry reads them all, and fails at the first.
+  // The walk from the first entry reads them all, and fails at the first, the app's first entry.
+  const [{ first }] = await db.owner.select({ first: min(auditLog.seq) }).from(auditLog).where(eq(auditLog.author, 'app'));
   const whole = await root.audit.verifyWhole();
-  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.author, whole.reason], [1, 'app', 'hash does not match the entry']);
+  assert.deepEqual(!whole.ok && [whole.failedAtSeq, whole.author, whole.reason], [Number(first), 'app', 'hash does not match the entry']);
 });
 
 test("an entry forged in the app's name is found by the next check, though checkpoints sign over it", async () => {
@@ -300,12 +307,15 @@ test('only an Owner of the whole instance, as a person, accepts lost entries thr
   await write(3);
   await beat();
   const { checkpoint } = (await deps.anchor.read())!;
-  // The tail from entry 2 cut, and grown again by processes started since, with the same keys: a restart, as after a cut.
+  // The tail cut after the entry that made root an Owner (entry 1; under 0.15's log, after its cutover's entry), and
+  // grown again by processes started since, with the same keys: a restart, as after a cut.
+  const [{ seq: admitted }] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.action, 'member.add'), eq(auditLog.subjectPrincipal, 'user:root@acme.example')));
+  const cut = admitted + 1n;
   await withLogUnlocked(db.owner, async (owner) => {
-    const [kept] = await owner.select().from(auditLog).where(eq(auditLog.seq, 1n));
-    await owner.update(auditLog).set({ relatedSeq: null }).where(gte(auditLog.seq, 2n));
-    await owner.delete(auditLog).where(gte(auditLog.seq, 2n));
-    await owner.update(auditChainHead).set({ nextSeq: 2n, headHash: kept!.hash });
+    const [kept] = await owner.select().from(auditLog).where(eq(auditLog.seq, admitted));
+    await owner.update(auditLog).set({ relatedSeq: null }).where(gte(auditLog.seq, cut));
+    await owner.delete(auditLog).where(gte(auditLog.seq, cut));
+    await owner.update(auditChainHead).set({ nextSeq: cut, headHash: kept!.hash });
   });
   const restarted: typeof deps = { ...deps, chainKey: Buffer.from(deps.chainKey), vault: testVault(['root@acme.example'], {}, { kek: deps.vault.kek }) };
   const after = () => writeAuditHeartbeat(db.runtime, restarted.chainKey, restarted.vault, deps.anchor, { warn: () => {} });
@@ -316,14 +326,14 @@ test('only an Owner of the whole instance, as a person, accepts lost entries thr
   await owner.members.add('user:ada@acme.example', { role: 'admin' });
   const refused = (call: Promise<unknown>) => call.then(() => assert.fail('accepted'), (error: { status?: number; message?: string }) => error);
   // An admin of the whole instance is no Owner.
-  assert.equal((await refused(clientFor(restarted, 'ada@acme.example').audit.acceptLoss({ from: 2, to: checkpoint!.seq }))).status, 403);
+  assert.equal((await refused(clientFor(restarted, 'ada@acme.example').audit.acceptLoss({ from: Number(cut), to: checkpoint!.seq }))).status, 403);
   // A range that misses the entry the finding names.
   const missed = await refused(owner.audit.acceptLoss({ from: checkpoint!.seq + 1, to: checkpoint!.seq + 5 }));
   assert.deepEqual([missed.status, /do not hold entry/.test(missed.message ?? '')], [400, true]);
   assert.equal((await deps.anchor.read())!.finding?.seq, checkpoint!.seq, 'a refusal moved the anchor');
 
   // Nothing past the range: the walk goes on from the entry before it.
-  assert.deepEqual(await owner.audit.acceptLoss({ from: 2, to: checkpoint!.seq }), { resumes: 1 });
+  assert.deepEqual(await owner.audit.acceptLoss({ from: Number(cut), to: checkpoint!.seq }), { resumes: Number(admitted) });
   const [logged] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'audit.loss_accepted'));
   assert.equal(logged!.actor, 'user:root@acme.example');
   assert.equal(await after(), true);

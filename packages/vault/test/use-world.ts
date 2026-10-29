@@ -9,7 +9,9 @@ import type { UseInput } from '@coffre/core/vault';
 import { tablesOf, type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
+import type { Sealed } from '../src/checkpointer.ts';
 import { resolveVaultConfig } from '../src/config.ts';
+import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
@@ -52,13 +54,21 @@ export async function emptyLog(): Promise<void> {
   }
 }
 
-/** 0.15's log switched on. A use never waits for a seal (R51): the checkpointer's `sealThrough` fails the test if asked. */
+/**
+ * 0.15's log switched on. A use never waits for a seal (R51): the
+ * checkpointer's `sealThrough` fails the test if asked, but for the
+ * cutover's own change, which an isolate's first call waits for once.
+ */
 export const LOG_015: VaultOptions = {
   log: '0.15',
-  sealThrough: async () => {
+  sealThrough: async (number) => {
+    if (number === cutoverNumber) return {} as Sealed;
     throw new Error('a use waited for a seal');
   },
 };
+
+/** The cutover's change this fixture stands in for, by its number (`cutOverStandIn`). */
+let cutoverNumber: bigint | null = null;
 
 /** A vault of its own, a fresh isolate: its own seal cache, covers and admission count; and the vault, for its decisions. */
 export async function isolate(options: VaultOptions = {}) {
@@ -126,10 +136,11 @@ export async function world(options: { count?: number; windowMs?: number; role?:
     credential: { kind: 'credential', id: credentialId, principal, caller, scope: null, expiresAt, revoked: false, generation: 0 } as Input,
     environment: { kind: 'environment', id: dev, projectId: project, slug: 'dev', owner: null, parentId: null, protected: false, deleted: false, archived: false, projectArchived: false } as Input,
   };
-  // The instance's one policy and one roles object: the first world's.
+  // The instance's one policy and one roles object: the first world's, and the cutover's marker beside them.
   if ((await rows(db.owner, sql`SELECT 1 FROM log_config`)).length === 0) {
     await genesis({ kind: 'policy', id: 'instance' }, { kind: 'policy', bulk: { count: options.count ?? 1000, windowMs: options.windowMs ?? 15 * 60_000 } });
     await genesis({ kind: 'roles', id: 'instance' }, { kind: 'roles', roles: {}, instanceRoles: {} });
+    await cutOverStandIn();
   }
   await genesis({ kind: 'principal', id: principal }, objects.principal);
   await genesis({ kind: 'credential', id: credentialId }, objects.credential);
@@ -158,6 +169,24 @@ export async function world(options: { count?: number; windowMs?: number; role?:
     return id;
   };
   return { project, dev, principal, credentialId, objects, keys, key, grant };
+}
+
+/**
+ * The cutover's change (plan PR 9), as this fixture stands in for it with its
+ * own genesis changes: the marker a 0.15 vault waits for before it serves,
+ * naming 0.14's head as it is.
+ */
+export async function cutOverStandIn(): Promise<void> {
+  await db.owner.transaction(async (tx) => {
+    if (ENGINE === 'postgres') await run(tx, FENCE);
+    const [head] = await rows<{ next_seq: string | number; head_hash: Buffer | Uint8Array }>(tx, sql`SELECT next_seq, head_hash FROM audit_chain_head`);
+    const anchor = { seq: (BigInt(head!.next_seq) - 1n).toString(), hash: Buffer.from(head!.head_hash).toString('hex') };
+    const n = await nextNumber(tx);
+    cutoverNumber = BigInt(n);
+    const row = { at: Date.now(), requestId: randomUUID(), object: CUTOVER_OBJECT, actor: 'system:vault', payload: JSON.stringify({ op: 'cutover', anchor, from: anchor }), seal: null };
+    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      VALUES (${n}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${null}, ${entryMac(MAC, { tree: 'changes', row })})`);
+  });
 }
 
 /** An object's first change, `genesis`, sealing its row as it is (or, for the roles and the policy, making it from its value). */

@@ -39,6 +39,7 @@ import {
   emptyDatabase,
   ENGINE,
   locksHere,
+  LOG,
   log014Only,
   newEnvironment,
   newProject,
@@ -153,6 +154,9 @@ function signedOf(detail: Record<string, unknown>): Checkpoint {
 
 /** What an append-only refusal looks like through Drizzle, which wraps the database's error. */
 const appendOnly = (error: unknown) => /append-only/.test(`${error} ${(error as { cause?: unknown }).cause}`);
+
+/** The vault's entries the cutover writes before anything else under 0.15's log (`log.cutover`; plan PR 9): one, or none. */
+const CUTOVER_ENTRIES = LOG === '0.15' ? 1 : 0;
 
 test('a read needs a live grant on the environment, and unwraps the key it was wrapped with', async () => {
   const w = await world();
@@ -2146,10 +2150,13 @@ test('a log of large entries is checked whole and signed, a batch of it in memor
 });
 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {
-  // An empty log has nothing to sign, and the refusal writes nothing to sign next.
-  const empty = await (await fresh()).checkpoint();
-  assert.equal(!empty.ok && empty.refusal.code, 'invalid');
-  assert.equal((await store.vaultPage(db.owner, undefined, 1)).length, 0);
+  // An empty log has nothing to sign, and the refusal writes nothing to sign next. Under 0.15's log, none is empty:
+  // the cutover's entry is the vault's first.
+  if (CUTOVER_ENTRIES === 0) {
+    const empty = await (await fresh()).checkpoint();
+    assert.equal(!empty.ok && empty.refusal.code, 'invalid');
+    assert.equal((await store.vaultPage(db.owner, undefined, 1)).length, 0);
+  }
   const w = await world();
   const { auditLog } = tablesOf(db.owner);
   const { checkpointKeys } = await w.vault.about();
@@ -2246,8 +2253,8 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   await member(w, ADA, []);
   const [last] = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))).slice(-1) as StoredEntry[];
   const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
-  // Root made an Owner, as the deployment names them, and Ada's admission.
-  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 2, through: upTo.seq });
+  // Root made an Owner, as the deployment names them, and Ada's admission (and under 0.15's log, the cutover's entry).
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 2 + CUTOVER_ENTRIES, through: upTo.seq });
   assert.deepEqual(await w.vault.verifyLog({ upTo: { ...upTo, hash: 'f'.repeat(64) } }), {
     ok: false,
     failedAtSeq: upTo.seq,
@@ -2777,7 +2784,8 @@ test("a stretch holds each tally to the walk as it stood at that tally's prefix,
   );
   const vault = await fresh();
   const first = await vault.checkpoint();
-  assert.ok(first.ok && first.checkpoint.seq === 0, JSON.stringify(first));
+  // Under 0.15's log, the cutover's entry after it, which lets the vault name its Owner at its first call.
+  assert.ok(first.ok && first.checkpoint.seq === 2 * CUTOVER_ENTRIES, JSON.stringify(first));
   await reads(3);
   const second = await vault.checkpoint();
   assert.ok(second.ok);
@@ -2797,8 +2805,8 @@ test('an app older than 0.10.1, which names no `from`, gets an ok only for the w
   const current = await short.verifyLog({ upTo, from: 'start' });
   assert.ok(current.ok && current.through! < upTo.seq, JSON.stringify(current));
   // A walk whose budget ends at the last entry is done, and holds the rows to it.
-  const exact = await openLocalVault(db.vault, configure(), { walks: { verify: 6 } });
-  assert.deepEqual(await exact.verifyLog({ upTo, from: 'start' }), { ok: true, entries: 6, through: upTo.seq });
+  const exact = await openLocalVault(db.vault, configure(), { walks: { verify: 6 + CUTOVER_ENTRIES } });
+  assert.deepEqual(await exact.verifyLog({ upTo, from: 'start' }), { ok: true, entries: 6 + CUTOVER_ENTRIES, through: upTo.seq });
   void w;
 });
 
@@ -3452,8 +3460,8 @@ for (const overdue of [false, true]) {
       assert.equal(verification.failedAtSeq, Number(appended.seqStart));
       assert.match(verification.reason, /overdue/);
     } else {
-      // Root made an Owner, as the deployment names them, and the intent.
-      assert.deepEqual(verification, { ok: true, entries: 2, through: Number(appended.seqStart), pending: 1 });
+      // Root made an Owner, as the deployment names them, and the intent (and under 0.15's log, the cutover's entry).
+      assert.deepEqual(verification, { ok: true, entries: 2 + CUTOVER_ENTRIES, through: Number(appended.seqStart), pending: 1 });
     }
   });
 }
@@ -3577,9 +3585,10 @@ const named = (email: string) => `not_allowed: the deployment names ${email} an 
 test('on a new instance, the first person its deployment names to sign in becomes an Owner, then the rest of the list, signed in or not', async () => {
   await places(db.owner);
   const vault = await namingOwners('root@acme.example', 'sam@acme.example');
-  // Ada, whom it does not name, is nobody, and makes nobody anything.
+  // Ada, whom it does not name, is nobody, and makes nobody anything: before the vault's first entry, nobody is.
+  // Under 0.15's log, the cutover's entry is that, and its first call after names them all.
   assert.equal((await vault.access(ADA)).status, 'unknown');
-  assert.deepEqual(await ownership(), []);
+  assert.deepEqual(await ownership(), CUTOVER_ENTRIES === 0 ? [] : [['member.add', ROOT, 'allow', 'owners'], ['member.add', SAM, 'allow', 'owners']]);
   const root = await vault.access(ROOT);
   assert.deepEqual([root.status, root.role, root.scope], ['active', 'owner', EVERYWHERE]);
   // The vault's next call, whoever's, makes Sam one too: he never signed in.

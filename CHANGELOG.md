@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **0.15's log is cut over from 0.14 at its first start, behind its switch.**
+  The first request after a 0.15 vault starts seals every object 0.14 left
+  (members, roles, the bulk cap, environments, keys, credentials and trust
+  bindings) as 0.14 accepts it, once, and anchors the new log at 0.14's
+  head, its own `log.cutover` entry (migration 0041). The vault checks what
+  its key covers: each member's row and access entry, 0.14's chain from its
+  newest checkpoint. The app vouches for what only its key covers: each
+  credential's and binding's MAC, a revoke or an unlink in the log, a
+  place's deletion. A binding made on 0.14 is sealed as made on the
+  deployment's public URL, so CI and workloads sign in through it at once.
+  A row 0.14 would not take is left unsealed and reported, never sealed
+  in. A deleted project's environments become `<slug>~deleted`, and keys
+  under deleted places are archived. An archived key keeps its object, so
+  its unarchive restores it. A tombstone that 0.14's chain does not bear
+  out refuses the cutover, and the app answers 503 until it is put right.
+  Nothing of 0.15's serves before the cutover. A write an old 0.14 isolate
+  makes after it leaves its object refused, fail closed, until a later
+  change adopts such writes. `docs/design/0.15-plan.md`, "As built: PR
+  9a".
 - **0.15's vault verifies a run's ID token itself where its binding carries
   the keys, behind its switch.** A sealed binding still took the app's word
   that the token held, so the app's code turned hostile could sign a run in
