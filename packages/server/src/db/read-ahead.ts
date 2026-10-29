@@ -38,18 +38,39 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
   const [row] = await rowsOf<{ read: string; now: string }>(db, sql`SELECT app_read(
     ${asked.tokenHash ?? null}::bytea, ${path?.project ?? null}::text, ${path?.environment ?? null}::text, ${keys === null ? null : sql.param(keys)}::text[]
   ) AS read, ${clock(db)} AS now`);
-  const read = JSON.parse(row!.read) as Answer;
+  return readAheadOf(db, JSON.parse(row!.read) as Answer, row!.now, { tokenHash: asked.tokenHash !== undefined, path: path !== undefined });
+}
+
+/**
+ * The rows the vault's named use answers (T145, PR B; `Vault.useNamed`, migration 0044's `app`): what `app_read`
+ * answers, for the request's credential, place and key, read in the use's own statement, so that the app reads nothing
+ * itself. Null for SQLite's vault, which answers none: the app reads its own rows there, as ever.
+ */
+export function namedAhead(db: Queryable, app: string | null): ReadAhead | null {
+  if (app === null) return null;
+  const read = JSON.parse(app) as Answer & { now: string };
+  const ahead = readAheadOf(db, read, read.now, { tokenHash: true, path: true });
+  // The key it used, as `resolvePath` answers a path's key: what a reveal of `market/dev/API_KEY` says of one it finds no value of.
+  const [used] = read.secrets ?? [];
+  if (ahead.place != null && used !== undefined) {
+    const { id, key, archivedAt, currentVersionId, currentVersion } = rowOf(tablesOf(db).secrets, used.secret);
+    ahead.place = { ...ahead.place, secret: { id, key, archivedAt, currentVersionId, currentVersion } };
+  }
+  return ahead;
+}
+
+function readAheadOf(db: Queryable, read: Answer, now: string, asked: { tokenHash: boolean; path: boolean }): ReadAhead {
   const { credentials, identities, projects, environments, secrets, secretVersions } = tablesOf(db);
   const ahead: ReadAhead = {};
-  if (asked.tokenHash !== undefined) {
+  if (asked.tokenHash) {
     ahead.credential = read.credential === null ? null : {
       credential: rowOf(credentials, read.credential),
       identity: read.identity === null ? null : rowOf(identities, read.identity),
-      now: row!.now,
+      now,
       policySeq: read.policy,
     };
   }
-  if (path !== undefined) {
+  if (asked.path) {
     if (read.project === null) {
       ahead.place = null;
     } else {

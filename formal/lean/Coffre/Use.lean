@@ -74,6 +74,8 @@ structure SecretIn where
   sensitive : Bool
   /-- Whether it holds a wrapped key: a plain value or a reference holds none. -/
   wrapped : Bool
+  /-- A plain value: its text's digest, no key. The vault hands its text back, decided as any value, uncapped (T145). -/
+  plain : Bool
   source : Option String
   /-- A reference whose end its row says: neither a version of its own nor a source (0.14's `reference.end`). -/
   ended : Bool
@@ -139,7 +141,8 @@ def dedup : List String → List String
 /-- `useEnvironments`. -/
 def useEnvs (v : UseView) (place : Option String) : List String :=
   match v.secret.row with
-  | none => []
+  -- A key the place does not hold: the place it was sought in, where the caller's standing decides (T145).
+  | none => place.toList
   | some s =>
     let value := match s.source with
       | none => some s
@@ -218,7 +221,21 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
     if c.revoked || (match c.expiresAt with | some e => r.time ≥ e | none => false)
       || (match v.principal.bind (·.row) with | some m => m.active && m.generation != c.generation | none => false) then .error "credential"
     else match v.secret.row with
-    | none => .error "missing"
+    | none =>
+      -- A key the place does not hold (T145; Probing.tla, MissingByStanding): refused as the caller stands where it
+      -- was sought, and `missing` only to one who may act there, so that nobody it refuses learns whether it is held.
+      let rows : Table EnvIn := ids.filterMap fun id => ((v.envs.get? id).bind (·.row)).map (id, ·)
+      match r.place with
+      | none => .error "missing"
+      | some p => match rows.get? p with
+        | none => .error "missing"
+        | some e =>
+          let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD noEdits) (rows.map (·.2)) r.time
+          let envRows : Table EnvRow := rows.map fun (id, e) => (id, ⟨e.project, e.slug, e.owner, e.parent, e.deleted⟩)
+          let perm : Permission := if r.purpose == "use" then .use else .read
+          match keyRefusal reader c.principal perm ⟨e.project, p⟩ ⟨e.project, p⟩ envRows none false with
+          | some code => .error code
+          | none => .error "missing"
     | some s =>
       let value := match s.source with
         | none => some s
@@ -228,7 +245,7 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
       | some x =>
         if s.ended then .error "ended" else
         if x.source.isSome && s.source.isSome then .error "bad_claim" else
-        if !x.wrapped then .error "bad_claim" else
+        if !x.wrapped && !x.plain then .error "bad_claim" else
         -- The rows read, by the id each was read by.
         let rows : Table EnvIn := ids.filterMap fun id => ((v.envs.get? id).bind (·.row)).map (id, ·)
         -- Through a fork, as 0.14's `throughOk`: a live, unarchived environment of the key's project, unarchived too, not its own.
@@ -251,8 +268,17 @@ def rowsRefusal (v : UseView) (r : UseReq) (ids : List String) : Code :=
   | .error c => some c
   | .ok k => k.decide none
 
-/-- The cap, on the policy's count and what the use read of it. -/
+/-- Whether the value a use reads is plain: its key's own, or its reference's source's. -/
+def plainValue (v : UseView) : Bool :=
+  match v.secret.row with
+  | none => false
+  | some s => match s.source with
+    | none => s.plain
+    | some _ => (v.source.bind (·.row)).any (·.plain)
+
+/-- The cap, on the policy's count and what the use read of it: none for a plain value, which counts toward nothing. -/
 def capOf (v : UseView) : Code :=
+  if plainValue v then none else
   match v.policy.row, v.bulk with
   | some count, some b => capRefusal count b
   | none, _ => some "no_policy"
@@ -381,14 +407,18 @@ theorem allowed_same_generation {v : UseView} {r : UseReq} (h : decideUse v r = 
   · unfold keyOf at hk
     simp [hc, hm, ha, hb] at hk
 
-/-- **Within the cap.** An allowed use's key is in its principal's set, or fewer than the log's count of other keys count. -/
-theorem allowed_within_cap {v : UseView} {r : UseReq} (h : decideUse v r = none) :
+/--
+**Within the cap.** An allowed use's key, of a value that is not plain, is in its principal's set, or fewer than the
+log's count of other keys count. A plain value counts toward nothing (T145).
+-/
+theorem allowed_within_cap {v : UseView} {r : UseReq} (h : decideUse v r = none) (hplain : plainValue v = false) :
     ∃ count b, v.policy.row = some count ∧ v.bulk = some b ∧ (b.inSet = true ∨ b.others < count) := by
   unfold decideUse at h
   split at h
   · cases h
   · have hcap := (orElse_none h).2
     unfold capOf at hcap
+    simp only [hplain, Bool.false_eq_true, ↓reduceIte] at hcap
     split at hcap
     · rename_i count b hp hb
       refine ⟨count, b, hp, hb, ?_⟩

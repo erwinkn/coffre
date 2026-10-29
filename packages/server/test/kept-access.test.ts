@@ -37,6 +37,11 @@ let root: CoffreClient;
 /** The vault the runtime calls, counted; `unchecked` makes it answer as a vault older than 0.14.1, which names nothing back. */
 let calls: string[];
 let unchecked = false;
+/**
+ * Whether the vault serves a request's one key by name (T145, PR B): then it keeps no answer. Off but where a test
+ * turns it on, so that a read of one key here goes as a read of several does, on the answer kept, until PR B2.
+ */
+let named = false;
 let runtime: CoffreRuntime;
 
 before(async () => {
@@ -52,8 +57,10 @@ beforeEach(async () => {
   deps = testDeps(db.runtime, [ROOT]);
   calls = [];
   unchecked = false;
+  named = false;
   const counted = new Proxy(deps.vault as unknown as Vault, {
     get(target, key) {
+      if (key === 'useNamed' && !named) return undefined;
       const value: unknown = Reflect.get(target, key, target);
       if (typeof value !== 'function') return value;
       return async (...args: unknown[]) => {
@@ -137,6 +144,25 @@ test('a read on a kept answer makes one vault call, which checks it', async () =
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   assert.deepEqual(calls, [OPENS]);
+});
+
+test("0.15: a read of one key keeps and recalls nothing: the vault's one use by name decides on the reader as they are", { skip: LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap" }, async () => {
+  named = true;
+  const reader = await readerSession();
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
+  calls = [];
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
+  assert.deepEqual(calls, ['useNamed']);
+  // Revoked: refused at once as they are now, by the same one call, which logs the request (R53); nothing asked first.
+  await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
+  calls = [];
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '403 missing_secret_read');
+  assert.deepEqual(calls, ['useNamed']);
+  assert.equal((await usesLogged(db.owner)).length, 2, 'the first read (the second rode its cover) and the refusal');
+  // Granted elsewhere: read there at once, with no answer kept to refuse it first.
+  calls = [];
+  assert.equal(await reveal(reader, 'market/prod/API_KEY'), 'fake-prod-key');
+  assert.deepEqual(calls, ['useNamed']);
 });
 
 test('a grant revoked since: the vault refuses the kept answer, reading and logging no read, and the read is refused as the reader is now', async () => {

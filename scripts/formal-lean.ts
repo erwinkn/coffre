@@ -458,7 +458,9 @@ repeat(20000, () => {
     bulk: credential.row === null ? null : { inSet: chance(0.5), others: Math.floor(random() * 6) },
   };
   const request: UseRequest = {
-    credential: 'c1', secretId: secret.row?.id ?? pick(KEYS), place: owner || chance(0.7) ? null : chance(0.3) ? secret.row?.environmentId ?? null : pick(ENVIRONMENTS), purpose: pick(PURPOSES),
+    // A key the place does not hold is mostly asked for where it was sought (T145): the caller's standing there decides.
+    credential: 'c1', secretId: secret.row?.id ?? pick(KEYS),
+    place: secret.row === null ? (chance(0.8) ? pick(ENVIRONMENTS) : null) : owner || chance(0.7) ? null : chance(0.3) ? secret.row.environmentId : pick(ENVIRONMENTS), purpose: pick(PURPOSES),
     keepsSensitive: chance(0.5), at: 900 + Math.floor(random() * 300),
   };
   add(

@@ -90,6 +90,12 @@ CONSTANTS
 (* protection: the way the request came in decides it.                     *)
 (***************************************************************************)
 CONSTANTS
+    \* PR B: no answer about the account before the use, kept or asked: the
+    \* app sends the vault what the request names, the vault's one call
+    \* decides on the credential and the account as they are, and the app's
+    \* checks of the rows it answers (their MACs, a handle's places) can only
+    \* refuse. Not a protection: the code's shape.
+    CallerFromUse,
     FencedInUse,
     \* The use decides on the credential's generation and its account's,
     \* each sealed in its object (vault decide.ts, decideChecked; inputs.ts:
@@ -314,7 +320,10 @@ UseVerify(p) ==
        IF named = {}
          THEN Refuse(p)
          ELSE \E r \in named :
-                IF ~r.revoked /\ ((BindingCheckedAtUse /\ r.by # "token") => Stands(r.by, r.gen))
+                \* PR B: the vault's call is the first thing the request makes; it finds the credential, whatever its row says.
+                IF Uses015 /\ CallerFromUse
+                  THEN Read(p, "use.use", [l[p] EXCEPT !.cred = r.id])
+                ELSE IF ~r.revoked /\ ((BindingCheckedAtUse /\ r.by # "token") => Stands(r.by, r.gen))
                   THEN Read(p, "use.access", [l[p] EXCEPT !.cred = r.id])
                   ELSE Refuse(p)
 

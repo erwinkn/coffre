@@ -1,10 +1,15 @@
 import { createClient, type CoffreClient } from '@coffre/client';
-import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand, type TokenKind } from '@coffre/core/identity';
+import { personalOf } from '@coffre/core/schemas';
+import type { Purpose } from '@coffre/core/vault';
 
 import { AccessChanged } from './accesses.ts';
+import type { ApiContext } from './api/context.ts';
 import { ApiError } from './api/errors.ts';
+import { parsePath, type Path } from './api/paths.ts';
 import { Render } from './api/render.ts';
 import { API_BODY_BYTES, routeParts, serveApi } from './api/router.ts';
+import { revealInput } from './api/routes.ts';
 import {
   authenticateRequest,
   headerToken,
@@ -16,7 +21,8 @@ import {
   unauthenticated,
   type AuthenticatedIdentity,
 } from './auth.ts';
-import { errorResponse, jsonResponse, methodNotAllowed, readLimitedBytes } from './http.ts';
+import { errorResponse, jsonResponse, methodNotAllowed, parseJsonBody, readLimitedBytes } from './http.ts';
+import { useByName } from './named-use.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { publicProviders } from './signin.ts';
 
@@ -84,6 +90,36 @@ const isPageRead = (request: Request) => routeIn(request, PAGE_READS);
  * one vault call, not two (`accessFor`).
  */
 const RECALLING = [['reveals']];
+
+/** The credentials whose reveal of one key the vault serves by name: a person's or a service's, never a workload's. */
+const NAMED_KINDS: readonly TokenKind[] = ['browser', 'cli', 'personal', 'service'];
+
+/**
+ * The one key a reveal's body names, and where: its path's (`market/dev/API_KEY`, to reveal) or a list of one
+ * (`market/dev`, `keys: ['API_KEY']`, as `coffre export --keys` runs it). Null for anything else, a personal config
+ * included, or a body the route refuses: the request goes as ever.
+ */
+function namedReveal(body: Uint8Array): { place: { project: string; environment: string }; key: string; purpose: Purpose } | null {
+  let input: unknown;
+  try {
+    // Decoded as the route decodes it (`readJson`).
+    input = parseJsonBody(new TextDecoder('utf-8', { fatal: true }).decode(body));
+  } catch {
+    return null;
+  }
+  const parsed = revealInput.safeParse(input);
+  if (!parsed.success) return null;
+  const { path: asked, keys } = parsed.data;
+  let path: Path;
+  try {
+    path = parsePath(asked, [2, 3]);
+  } catch {
+    return null;
+  }
+  const key = keys === undefined ? path.key : path.key === undefined && keys.length === 1 ? keys[0] : undefined;
+  if (key === undefined || path.environment === undefined || personalOf(path.environment) !== null) return null;
+  return { place: { project: path.project, environment: path.environment }, key, purpose: path.key === undefined ? 'run' : 'reveal' };
+}
 
 /**
  * The reads that only show their caller, and decide nothing: who they
@@ -209,21 +245,11 @@ export async function fetchApi(
     if (pathname === '/api/auth') {
       return request.method === 'GET' ? jsonResponse(authInfo(request, runtime)) : methodNotAllowed(['GET']);
     }
-    const authenticate: Authenticate | undefined = recall || shows
-      ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, recall ? { recall: true } : { shows: 'caller' })
-      : options.authenticate;
-    const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess);
-    if (identity instanceof Response) return identity;
-    if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
-      return identity.caller.tampered ? accessTampered() : registrationRequired();
-    }
-    let served = request;
-    if (identity.caller.recalled !== undefined) {
-      // Its bytes, read once within the bound, not teed: a branch left unread would hold back the cancel of a body past it,
-      // which then never answers. Decoded by the route, as any request's.
-      let body: Uint8Array<ArrayBuffer>;
+    // Its bytes, read once within the bound, not teed: a branch left unread would hold back the cancel of a body past it,
+    // which then never answers. Decoded by the route, as any request's.
+    const bytes = async (): Promise<Uint8Array<ArrayBuffer> | Response> => {
       try {
-        body = await readLimitedBytes(request, API_BODY_BYTES);
+        return await readLimitedBytes(request, API_BODY_BYTES);
       } catch (error) {
         // A body refused is answered as for a request that asked who its caller is: its caller asked for now, first.
         const asked = await apiCaller(request, runtime, options.sourceIp, options.authenticate, options.inProcess);
@@ -231,10 +257,47 @@ export async function fetchApi(
         if (!asked.registered) return asked.caller.tampered ? accessTampered() : registrationRequired();
         throw error;
       }
-      const replay = () => new Request(request.url, { method: request.method, headers: request.headers, body });
-      [served, again] = [replay(), replay()];
+    };
+    let authenticate: Authenticate | undefined = recall || shows
+      ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, recall ? { recall: true } : { shows: 'caller' })
+      : options.authenticate;
+    // A reveal of one key, by its path or as a list of one, with a coffre credential: the vault's one call by name, which
+    // decides on the caller as they are (`useByName`, T145, PR B). Its body is read first, to know the key.
+    let body: Uint8Array<ArrayBuffer> | null = null;
+    let named: ApiContext['named'];
+    if (recall && runtime.vault.useNamed !== undefined && apiCredential(request, runtime.auth) !== null) {
+      const read = await bytes();
+      if (read instanceof Response) return read;
+      body = read;
+      const asked = namedReveal(body);
+      const recalled = authenticate!;
+      if (asked !== null) {
+        authenticate = async (token) => {
+          const used = await useByName(runtime, request, options.sourceIp, token, { kinds: NAMED_KINDS, ...asked });
+          if (used === null) return recalled(token);
+          named = { decided: used.decided, ahead: used.ahead };
+          return used.identity;
+        };
+      }
     }
-    const response = await serveApi(served, apiContext(runtime, identity, options.render));
+    const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess);
+    if (identity instanceof Response) return identity;
+    if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
+      return identity.caller.tampered ? accessTampered() : registrationRequired();
+    }
+    let served = request;
+    if (body === null && identity.caller.recalled !== undefined) {
+      const read = await bytes();
+      if (read instanceof Response) return read;
+      body = read;
+    }
+    if (body !== null) {
+      const sent = body;
+      const replay = () => new Request(request.url, { method: request.method, headers: request.headers, body: sent });
+      served = replay();
+      if (identity.caller.recalled !== undefined) again = replay();
+    }
+    const response = await serveApi(served, { ...apiContext(runtime, identity, options.render), ...(named === undefined ? {} : { named }) });
     // Nothing goes back on a kept answer the vault has not vouched for this request.
     await identity.caller.recalled?.confirm();
     if (identity.workload == null) return response;

@@ -253,10 +253,13 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
   const replayed = await replayStored(db.owner, [signingKey]);
   assert.deepEqual(replayed.faults, []);
   assert.deepEqual([...replayed.decided.values()], [null, 'no_grant'], 'the first allowed, the second refused, live as replayed');
-  // Revoked, the token reads nothing, and its request never reaches the vault.
+  // Revoked, the token reads nothing: its one key's use by name (T145) refuses it as the vault's rows have it, logged as
+  // its request, and the app's own check answers it, 401, as ever.
   await root.tokens.revoke(CI, issued.id);
   await assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), (error: { status: number }) => error.status === 401);
-  assert.equal((await usesLogged()).length, 2);
+  const revoked = await replayStored(db.owner, [signingKey]);
+  assert.deepEqual([...revoked.decided.values()], [null, 'no_grant', 'credential']);
+  assert.equal((await usesLogged()).length, 3);
 });
 
 test(`0.15: a whole environment of more keys than a request has uses in flight (${USES_AT_ONCE}) opens each, by one use each`, async () => {
@@ -304,6 +307,9 @@ test('0.15: a value written between the app\'s read and its use answers 409, to 
     await root.secrets.set('market/dev', { API_KEY: 'rotated' });
     return use(input);
   };
-  await assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), (error: { status: number; reason?: string }) => error.status === 409 && error.reason === 'changed');
-  assert.equal((await ci.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'rotated', 'asked again, the new one');
+  // Two keys, which the app reads before their uses (a request of one key is the vault's use by name, which reads its rows
+  // with the use: there is no read before it to differ from).
+  const both = () => ci.secrets.reveal('market/dev', ['API_KEY', 'WEBHOOK']);
+  await assert.rejects(both(), (error: { status: number; reason?: string }) => error.status === 409 && error.reason === 'changed');
+  assert.equal((await both()).values.API_KEY, 'rotated', 'asked again, the new one');
 });

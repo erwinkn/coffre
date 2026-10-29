@@ -181,6 +181,10 @@ else is needed.
   to be used for them or exposed to their app, in process only.
 - `handle(handle)`: whether a handle still stands, opening nothing, and
   the environments it was made for, which the proxy's stable URL resolves to.
+- `useMadeFor(handle, …)` (0.15, T145): `use` of a handle's one key at the
+  environment it was made for, in the vault's one call, which finds that
+  environment itself; null where the vault serves it not so, and `handle`
+  then `use` answer it. The stable URL's, with the cache off.
 - `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
   out, on Node through `createCoffre(…).upgrade`.
 

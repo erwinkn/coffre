@@ -29,6 +29,7 @@ import type { ChangeBindingsInput, CutoverInput,
   SignInInput,
   ChangePolicyInput,
   UnwrapInput,
+  NamedUseInput,
   UseInput,
   Vault,
   VerifyLogInput,
@@ -60,7 +61,7 @@ export type WorkersVaultConfig = VaultConfig & {
   database: PostgresDatabase;
   witnesses?: readonly Witness[];
   hotDatabase?: PostgresDatabase;
-  uses?: { inFlight?: number; connections?: number; coverMs?: number };
+  uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number };
 };
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
@@ -98,6 +99,19 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     try {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).use!(input);
+    } finally {
+      this.ctx.waitUntil(pool.end());
+    }
+  }
+
+  /** 0.15's use as the request names it: the same one connection, for its read of ids on a miss and its one use. */
+  async useNamed(input: NamedUseInput) {
+    const { prepared, hotDatabase } = await this.#ready();
+    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
+    const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
+    try {
+      const hot = createDatabase(pool);
+      return await openVault(hot, prepared, hot).useNamed!(input);
     } finally {
       this.ctx.waitUntil(pool.end());
     }

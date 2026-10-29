@@ -520,8 +520,10 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     };
     const handle = (await found(stable)) ?? (named === undefined ? null : await found(named)) ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? null;
     if (handle === null) return refused ?? failure(401, `send the handle \`coffre run\` gave your app where ${stable.name} takes its key, or as x-coffre-handle`);
-    const paths = await madeFor(coffre, proxy, handle);
-    if (raw.length === 1 || !(paths ?? []).includes(`${place[0]}/${place[1]}`)) {
+    // The environment the handle was made for, the URL's: null where the URL names one of the handle's instead.
+    const routed = async (): Promise<string | Response | null> => {
+      const paths = await madeFor(coffre, proxy, handle);
+      if (raw.length !== 1 && (paths ?? []).includes(`${place[0]}/${place[1]}`)) return null;
       if (paths === null) return failure(409, `this handle was made before coffre 0.9 and names no environment: run the app with \`coffre run\` again, or name the environment, ${coffre.publicUrl}/use/<project>/<environment>/${stable.name}`);
       // As many as it was made for, a deleted one too: what the handle names decides, never what is left of it.
       const live = paths.filter((path) => path !== null);
@@ -530,8 +532,21 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
         return failure(409, `this handle stands in for ${paths.length} environments, and the stable URL is for a run of one: name it${live.length === 0 ? '' : `, ${urls}`}`);
       }
       if (live.length === 0) return failure(409, 'the environment this handle was made for is gone');
-      return forward(request, coffre, proxy, live[0]!, stable, raw.slice(1), url.search, peeked.get(stable));
+      return live[0]!;
+    };
+    // With no cache, and a URL whose third segment names nothing of the proxy's, so that it is the stable URL whatever
+    // the handle was made for, unless `<a>/<b>` is that environment: its one key in the vault's one call, which finds
+    // the environment itself (T145). Anything else it serves not so, as below.
+    const third = place[2];
+    const direct = proxy.cacheMs === 0 && coffre.useMadeFor !== undefined && stable.keys.length === 1
+      && (raw.length === 1 || (third !== undefined && !proxy.credentials.has(third) && !proxy.signers.has(third) && !proxy.verifiers.has(third)));
+    if (direct) {
+      const unless = [...(raw.length === 1 ? [] : [`${place[0]}/${place[1]}`]), ...proxy.generate.keys()];
+      return forward(request, coffre, proxy, { unless, routed: async () => (await routed()) ?? noCredential(third!) }, stable, raw.slice(1), url.search, peeked.get(stable));
     }
+    const route = await routed();
+    if (route instanceof Response) return route;
+    if (route !== null) return forward(request, coffre, proxy, route, stable, raw.slice(1), url.search, peeked.get(stable));
   }
   if (raw.length === 2) {
     if (request.method === 'POST') return compute(request, coffre, proxy, `${place[0]}/${place[1]}`);
@@ -542,9 +557,12 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   const credential = proxy.credentials.get(place[2]!);
   if (credential === undefined && proxy.signers.has(place[2]!)) return failure(404, `${place[2]} is a signer, which reaches no upstream: credential(${JSON.stringify(place[2])}).sign(message)`);
   if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
-  if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
+  if (credential === undefined) return noCredential(place[2]!);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search, peeked.get(credential));
 }
+
+/** A credential the URL names that the deployment's proxy has not. */
+const noCredential = (name: string) => failure(404, `this instance has no credential ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
 
 /**
  * The environments `handle` was made for, by path as they are named now,
@@ -1195,19 +1213,46 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
  * values opened (or remembered), the request sent on with them. `peeked`,
  * a form or JSON rule's body as the stable URL already read it.
  */
-async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
+/**
+ * The stable URL's environment, when the vault's one call finds it (`PluginContext.useMadeFor`): not one of `unless`;
+ * where it finds none so, the one `routed` says, or its refusal.
+ */
+type MadeFor = { unless: readonly string[]; routed: () => Promise<string | Response> };
+
+async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | MadeFor, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
+  // The stable URL's environment, as `routed` finds it, once: and its refusal before any of the request's own, as when
+  // the route was found first (review r2 of #412).
+  let routing: Promise<string | Response> | undefined;
+  const routed = (made: MadeFor) => (routing ??= made.routed());
+  const refuse = async (response: Response): Promise<Response> => {
+    if (typeof path === 'string') return response;
+    const route = await routed(path);
+    return route instanceof Response ? route : response;
+  };
+  // The body, read: a read that throws (a stream that breaks) after the route's refusal, if it has one (review r3).
+  const read = async <T>(reading: () => Promise<T>): Promise<T | Response> => {
+    try {
+      return await reading();
+    } catch (error) {
+      if (typeof path !== 'string') {
+        const route = await routed(path);
+        if (route instanceof Response) return route;
+      }
+      throw error;
+    }
+  };
   const aimed = aim(request, credential, rest, search);
-  if (aimed instanceof Response) return aimed;
+  if (aimed instanceof Response) return refuse(aimed);
   const { target } = aimed;
   const inject = credential.inject;
   // A form or JSON rule's handle is in the body's field: the body read whole first, and the field found.
-  const early = peeked ?? (inBody(inject) ? await fillable(request, credential, inject) : null);
-  if (early instanceof Response) return early;
+  const early = peeked ?? (inBody(inject) ? await read(() => fillable(request, credential, inject)) : null);
+  if (early instanceof Response) return refuse(early);
   const field = early?.field ?? null;
   const handle = handleIn(request, credential, target, field?.value ?? null);
-  if (handle === null) return failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`);
+  if (handle === null) return refuse(failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`));
   // The field holds the handle the request is let in on, x-coffre-handle's too: the value goes nowhere the app did not put it.
-  if (field !== null && handleOf(credential, field.value) !== handle) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
+  if (field !== null && handleOf(credential, field.value) !== handle) return refuse(failure(400, `the handle is not in the field where ${credential.name} takes its key`));
   // A query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
   // under the upstream gives back. Otherwise the placeholder's shape around the handle, which the proxy reads as the app's own
   // (`e30` is `{}`: the proxy reads no claim).
@@ -1215,14 +1260,33 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const back = inject.kind !== 'query' ? null : given !== null && handleOf(credential, given) === handle ? given
     : credential.placeholder === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.placeholder.kind === 'prefix' ? `${credential.placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
-  const content = early?.content ?? (await carried(request, credential));
-  if (content instanceof Response) return content;
-  const opened = await valuesFor(coffre, proxy, handle, path, credential, { host: target.host });
+  const content = early?.content ?? (await read(() => carried(request, credential)));
+  if (content instanceof Response) return refuse(content);
+  const through = { host: target.host };
+  let route: string;
+  let opened: Opened;
+  if (typeof path === 'string') {
+    route = path;
+    opened = await valuesFor(coffre, proxy, handle, route, credential, through);
+  } else {
+    const logged = { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) };
+    const made = await coffre.useMadeFor!(handle, { keys: [credential.keys[0]!], purpose: 'use', logged, unless: path.unless });
+    if (made === null) {
+      const found = await routed(path);
+      if (found instanceof Response) return found;
+      route = found;
+      opened = await valuesFor(coffre, proxy, handle, route, credential, through);
+    } else {
+      route = made.environment.path;
+      if (!Object.hasOwn(made.values, credential.keys[0]!)) throw new CoffreError(409, 'conflict', `${route} holds no ${credential.keys[0]}, which ${credential.name} needs`);
+      opened = { values: made.values, plain: made.plain };
+    }
+  }
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
   // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
-  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${path}/${credential.name}`, back, field, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
+  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}/${credential.name}`, back, field, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
 }
 
 /** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */

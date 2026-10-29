@@ -292,7 +292,8 @@ export function decideUse(keys: SealKeys, view: UseView, request: UseRequest): U
  */
 export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source' | 'environments'>, request: Pick<UseRequest, 'place'>): string[] {
   const secret = view.secret.row;
-  if (secret === null) return [];
+  // A key the place does not hold: the place it was sought in, where the caller's standing decides (T145).
+  if (secret === null) return request.place === null ? [] : [request.place];
   const value = secret.source === null ? secret : view.source?.row ?? null;
   const ids = [...(request.place === null ? [] : [request.place]), secret.environmentId];
   if (value !== null) {
@@ -355,15 +356,29 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
   const account = view.principal?.row ?? null;
   if (credential === null || credential.revoked || (credential.expiresAt !== null && request.at >= credential.expiresAt)
     || (account?.status === 'active' && account.generation !== credential.generation)) return 'credential';
-  if (secret === null) return 'missing';
+  if (secret === null) {
+    // A key the place does not hold (T145; formal/Probing.tla, MissingByStanding): refused as the caller stands where it
+    // was sought, and `missing` only to one who may act there, so that nobody it refuses learns whether it is held.
+    const sought = request.place === null ? null : view.environments.get(request.place)?.row ?? null;
+    if (sought === null) return 'missing';
+    const rows = new Map(ids.flatMap((id) => {
+      const row = view.environments.get(id)!.row;
+      return row === null ? [] : [[id, row] as const];
+    }));
+    const reader = readerOf(view.principal!.row, credential, view.roles.row ?? noEdits(), rows.values(), request.at);
+    const place: SecretPlace = { projectId: sought.projectId, environmentId: sought.id };
+    const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived, projectArchived }]) => [id, { projectId, slug, owner, parentId, deleted, archived: archived || projectArchived }]));
+    const [code] = keyRefusals(reader, { principal: credential.principal, permission: request.purpose === 'use' ? 'secret.use' : 'secret.read', secrets: [place], at: [place], environments: environmentRows, needs: [null] });
+    return code ?? 'missing';
+  }
   const value = secret.source === null ? secret : view.source!.row;
   if (value === null) return 'ended';
   // A reference whose end its row says (`ended_at`): no version of its own, no source. 0.14's `reference.end`.
   if (secret.source === null && secret.version === '') return 'ended';
   // A reference reads a key's own value: one to another reference is none the change path makes.
   if (value.source !== null && secret.source !== null) return 'bad_claim';
-  // A use opens a wrapped key: a plain value, which 0.14's vault never decides either, is the app's to hand back.
-  if (value.key === null) return 'bad_claim';
+  // A use opens a wrapped key, or hands back a plain value's text, which its digest binds (T145): any other is no value.
+  if (value.key === null && value.digest === null) return 'bad_claim';
   const rows = new Map(ids.flatMap((id) => {
     const row = view.environments.get(id)!.row;
     return row === null ? [] : [[id, row] as const];
@@ -389,6 +404,8 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
     secrets: [{ projectId: value.projectId, sensitive: value.nature === 'sensitive' }], viaReference: [secret.source !== null],
   });
   if (code != null) return code;
+  // A plain value counts toward no cap, as when the app handed it back itself.
+  if (value.key === null) return null;
   return overCap(view.bulk!, policy.bulk) ? 'bulk_limit' : null;
 }
 

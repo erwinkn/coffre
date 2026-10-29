@@ -212,7 +212,7 @@ def credentialIn (j : Json) : Parse CredentialIn := do
 
 def secretIn (j : Json) : Parse SecretIn := do
   pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "environmentId"), (← str (← req j "nature")) == "sensitive",
-    !(← present j "key").isNull, ← optStr (field j "source"), (← str (← req j "version")).isEmpty && (field j "source").isNull⟩
+    !(← present j "key").isNull, !(field j "digest").isNull, ← optStr (field j "source"), (← str (← req j "version")).isEmpty && (field j "source").isNull⟩
 
 def envIn (j : Json) : Parse EnvIn := do
   pure ⟨← str (← req j "id"), ← str (← req j "projectId"), ← str (← req j "slug"), ← optStr (field j "owner"), ← optStr (field j "parentId"),

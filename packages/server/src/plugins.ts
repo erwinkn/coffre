@@ -6,6 +6,7 @@
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
 import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
+import { personalOf } from '@coffre/core/schemas';
 
 import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
@@ -22,6 +23,7 @@ import { uses015 } from './api/changes.ts';
 import { callBindings, frozenTargets } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
 import { fetchApi } from './fetch-api.ts';
+import { useByName } from './named-use.ts';
 import { errorResponse } from './http.ts';
 import { limitAlert, raiseAlert } from './alerts.ts';
 import { logged } from './logged.ts';
@@ -109,6 +111,13 @@ export type PluginContext = {
    * (docs/design/workload-access.md, section 6.1).
    */
   use(handle: string | WorkloadUse, asked: UseAsked): Promise<Used>;
+  /**
+   * `use` of a handle's one key at the environment it was made for, the credential proxy's stable URL, in the vault's
+   * one call (T145): unless that environment is one of `unless` (`market/dev`), which the request does not mean. Null
+   * where the vault serves it not so (a handle of several environments, of none, of 0.8, a fork or a personal config,
+   * one of `unless`, an older vault): nothing was used, and `handle` then `use` answer it, as ever.
+   */
+  useMadeFor?(handle: string, asked: Omit<UseAsked, 'path' | 'keys' | 'only'> & { keys: readonly [string]; unless: readonly string[] }): Promise<Used | null>;
   /**
    * Whether `handle` still stands, opening nothing and logging nothing:
    * when it ends, and the environments it was made for, each by path as it
@@ -506,6 +515,49 @@ function pluginContext(
       throw new CoffreError(503, 'unavailable', 'coffre cannot check who you are right now');
     }
   };
+  /**
+   * 0.15's use by name, the vault's one call (`useByName`): a handle's one key, or none (`key` null: its standing at the
+   * place alone). Null where the vault serves none so: the use goes as ever.
+   */
+  const namedFor = async (handle: string, place: { project: string; environment: string } | null, key: string | null, purpose: 'use' | 'expose' = 'use', unless?: readonly string[]) => {
+    if (binding !== null) return null;
+    const others = unless?.flatMap((path) => {
+      const [project, environment] = path.split('/');
+      return project === undefined || environment === undefined ? [] : [{ project, environment }];
+    });
+    const used = await useByName(runtime, request, sourceIp, handle, { kinds: ['handle'], place, key, purpose, ...(others === undefined ? {} : { unless: others }) });
+    if (used === null) return null;
+    if (used.identity instanceof Response) await answer(used.identity);
+    return { ...used, identity: used.identity as AuthenticatedIdentity };
+  };
+  /** An API error, as a plugin sees it. */
+  const rethrown = (error: unknown): never => {
+    if (!(error instanceof ApiError)) throw error;
+    throw new CoffreError(error.status, error.code, error.message, error.reason, error.retryAfter);
+  };
+  /**
+   * A handle's use of one key by name (`namedFor`), and the read on what it answered; null where the vault serves none
+   * so. `asked.path` null: at the environment the handle was made for, unless it is one of `unless`.
+   */
+  const byName = async (handle: string, asked: Omit<UseAsked, 'path'> & { path: string | null }, unless?: readonly string[]) => {
+    let place: { project: string; environment: string } | null = null;
+    if (asked.path !== null) {
+      const named = parsedPlace(asked.path);
+      // A personal config (`dev@me`) is read by its owner: as ever.
+      if (named?.environment === undefined || personalOf(named.environment) !== null) return null;
+      place = { project: named.project, environment: named.environment };
+    }
+    try {
+      const used = await namedFor(handle, place, (asked.keys as readonly string[])[0]!, asked.purpose === 'expose' ? 'expose' : 'use', unless);
+      if (used === null || used.place === null) return null;
+      const read = await reveal(apiContext(runtime, used.identity), { project: used.place.project, environment: used.place.environment }, {
+        purpose: asked.purpose, keys: asked.keys, logged: asked.logged, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
+      });
+      return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt: used.identity.credentialExpiresAt! };
+    } catch (error) {
+      return rethrown(error);
+    }
+  };
   const noCredential = () => new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
   // The workload callers this request's context made: the only ones its `use` takes.
   const standings: Standings = new WeakMap();
@@ -547,6 +599,23 @@ function pluginContext(
     workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
     recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {
+      // A handle of one environment: its person's standing there, decided by the vault's one named call on the sealed
+      // rows, nothing asked of `access` (T145). Refused, it names no environment.
+      const standing = await namedFor(handle, null, null).catch(rethrown);
+      if (standing !== null) {
+        // Whether the handle stands, and where: what its person may do there is the use's to decide, and to log (review r1).
+        const { credentialExpiresAt, handlePlaces: places } = standing.identity;
+        if (places === null) return { expiresAt: credentialExpiresAt!, paths: null };
+        const place = standing.ahead?.place;
+        const live = (slug: string) => !slug.includes('~');
+        const paths = place != null && place.environment !== null
+          ? [live(place.project.slug) && live(place.environment.slug) ? `${place.project.slug}/${place.environment.slug}` : null]
+          : await (async () => {
+            const found = await environmentPaths(runtime.db, places.map((one) => one.environmentId));
+            return places.map(({ environmentId, personal }) => (found.has(environmentId) ? `${found.get(environmentId)}${personal ? '@me' : ''}` : null));
+          })();
+        return { expiresAt: credentialExpiresAt!, paths };
+      }
       // Asking the vault about the person, as ever; with 0.15's uses, its credential read ahead. A use that follows reads
       // it again, with its place and keys, in the one call it makes anyway, and decides on the answer kept here.
       const identity = await proxyHandle(handle, false, (await readFor(handle))?.credential);
@@ -565,6 +634,12 @@ function pluginContext(
       await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));
     },
     use: async (handle, asked) => {
+      // One key, a handle's: the vault's one named call, which decides on the caller as it is (T145). Several, or anything
+      // the vault does not serve by name, as below until PR B2.
+      if (typeof handle === 'string' && asked.only === true && Array.isArray(asked.keys) && asked.keys.length === 1) {
+        const used = await byName(handle, asked);
+        if (used !== null) return used;
+      }
       // On the vault's answer about the caller kept from an earlier request, which the vault checks as it opens the
       // values: one call. One that is not the vault's now read and logged nothing, and the read goes again, asking.
       try {
@@ -574,6 +649,7 @@ function pluginContext(
       }
       return use(handle, asked, false);
     },
+    useMadeFor: (handle, asked) => byName(handle, { ...asked, path: null, only: true }, asked.unless),
     api: (token) => {
       if (binding !== null) throw noCredential();
       let checked: Promise<AuthenticatedIdentity | Response> | undefined;

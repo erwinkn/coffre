@@ -395,6 +395,7 @@ Each CI run holds an ID token, good for one credential.
 | Under 0.15's log, the app's check after the use, with no lock (`credentialStill`): 0.15's credential object carries no generation, and a removal ends the account's credentials by revoking each, in its sweep, after `member.remove` | a token used between a removal and its sweep, the account admitted again meanwhile: the use allows it, and the value goes to a credential the removal ended (`NoReleaseAfterEnd`, `Revoking015`) | this model, PR 5b, which keeps the check |
 | Under 0.15's log, untrusting or replacing a binding revokes what it issued, each revoke a change (`#revoke`) | the same, through a credential of an untrusted binding: the use decides on the credential's row (`NoReleaseAfterEnd`, `Revoking015`) | |
 | Under 0.15's log, the use decides on the credential's generation and its account's, each sealed in its object, and the app reads nothing after it (`decideChecked`; `recorded`, `stood`) | the same use as `Revoking015`'s, between a removal and its sweep, the account admitted again: allowed, and nothing after it withholds the value (`NoReleaseAfterEnd`, `Revoking015Folded`) | T145, which drops `credentialStill` from the use's path |
+| With a request's one key used by name, the caller is the use's own, decided on the sealed rows, with nothing asked or kept before it (`useByName`, `CallerFromUse`): the generation check and the revokes above stay needed, each | the same releases, through a use that picks the credential by its token alone (`NoReleaseAfterEnd`, `Revoking015Caller`) | T145, PR B |
 
 The race this model found, as the script prints it with the export's fence off. A
 run's token is checked (step 5), its revocation commits (6), and the vault,
@@ -486,6 +487,61 @@ so a window of releases rather than decisions may hold one more read's
 keys at its edge, by that transaction's length: milliseconds, against a
 window of fifteen minutes. #292's review.
 
+### Probing.tla
+
+What someone whose grant was revoked learns of a place's keys by asking
+for them: nothing. Two runs go side by side, alike but for one thing: in
+run A someone makes `API_KEY` after the revoke, a sealed value or a plain
+one; in run B nobody does. Ada asks for it, by its path or the proxy,
+while the vault comes and goes from overload, and every answer she gets
+must be the same in both runs (`SameAnswer`), a self-composition: what
+would tell them apart is a key she may not know of. Review r2 of #406
+found the hole this closes: a busy use's 503 for a key made since beside
+a 403 for one never made.
+
+One step is one request, whole. `CallerFromUse` is the code's shape, not a
+protection: before PR B, an answer about Ada kept from an earlier request
+(`Accesses`), which a refusal confirms first (`Recalled.confirm`); with
+PR B, a request's one key decided by the vault's use by name on Ada as she
+is, sealed (`useByName`, `Vault.useNamed`).
+
+| Protection, in the code | Turned off, TLC finds |
+|---|---|
+| A key the place does not hold is decided by the vault, on Ada's standing where it was sought first, `missing` only if she may act there (`decideChecked`) | a 403 for a key made since, a 404 for one never made (`SameAnswer`, `Probing`) |
+| A plain value goes back only once the vault has decided on her standing, as a missing key does (`decideChecked`) | a plain value made since handed back, a 404 for one never made (`SameAnswer`, `Probing`) |
+| That decision is admitted as a use is, and busy as one is, before anything is read (`useNamed`) | a 503 for a key made since, a 403 or 404 for one never made (`SameAnswer`, `Probing`) |
+| A use late once admitted (it waited for Ada's principal's lock, for the cap's row of a key she has not used in the window, which a key never made never does) first asks the vault for her standing at the place, in a call that waits for no lock and reads no key: refused there, it is refused as any key is (`useNamed`) | her principal's lock held past the deadline by another call: a 503 for a key made since, before a request of hers for it writes its cap's row, a 403 for one never made, and the reverse after (`SameAnswer`, `Probing`; reviews r1 and r2 of #412) |
+| That call runs within the place in admission the late use held, once the use's own call, left behind at its deadline, has let it go (`useNamed`, `leftBehind`) | admission full, the late use's own call holding the last place: its standing refused busy, a 503 for a key made since, a 403 for one never made (`SameAnswer`, `Probing`; review r3 of #412) |
+| Before PR B, a busy refusal on a kept answer confirms it first (`Recalled.confirm`) | the same 503 against 403 (`SameAnswer`, `ProbingKept`) |
+
+The app checks her standing too, the vault's answer, before it reads
+anything (`need`): with either side alone the answers are the same.
+`packages/vault/test/use-named.test.ts` holds the vault's,
+`packages/server/test/named-reveal.test.ts` and
+`proxy-handle-check.test.ts` the app's. What it abstracts: the load
+itself (busy is a choice of TLC's, the same in both runs, as admission
+reads nothing a request names; so is a lock held on Ada's principal, which
+a use waits for only once admitted, and only for a key with no fresh row
+of the cap's, which any request of hers for it writes), timing (a key cached in the isolate's map
+answers a read sooner than one never made, which costs its resolution:
+not closed), and every other refusal, which reads no key.
+
+### Naming.tla
+
+A use as the request names it maps the key's name to its id once
+(`use_resolve`), keeps the map in the isolate, and uses by the id. Between
+the two, the key may be renamed away and another made, or renamed, under
+its name. Every use the log records must be of the key the request named,
+as the use read it (`UsedAsNamed`).
+
+| Protection, in the code | Turned off, TLC finds |
+|---|---|
+| `use_credential` holds the rows it reads to the names the request gave: a token's hash, slugs or key name that no longer match answer `moved`, nothing written, and the vault reads the map again (migration 0044; `useNamed`) | the key renamed away used by the id kept, its use logged (`UsedAsNamed`, `Naming`; review r2 of #412) |
+
+The tests hold the code to it: `packages/vault/test/use-named.test.ts`, a
+key renamed, a token's hash moved, a key deleted and made again under its
+name.
+
 ### Their invariants
 
 | Invariant | What must hold in every state |
@@ -498,6 +554,8 @@ window of fifteen minutes. #292's review.
 | `NoReleaseAfterEnd` | No value reaches a caller through a credential whose release, the vault's `secret.read`, follows the entry that ended it: its `token.revoke`, its binding's `token.unbind`, or a removal past its generation |
 | `UnboundStayUnusable` | A credential an untrusted or replaced binding issued never verifies again |
 | `NoReadOnStaleAnswer` | No `secret.read` is logged on an answer of the vault's kept from an earlier request that is no longer its answer |
+| `SameAnswer` | Every answer to someone with no access is the same whether a key they ask for was made since or never made |
+| `UsedAsNamed` | Every use the log records is of the key the request named, as the use read it |
 | `SensitiveOnlyFromOwners` | A scope reads a project's sensitive values only if whoever issued it is an Owner of the project when it commits |
 | `SealedOnce` | The older release's token is sealed once, however many first uses race |
 | `CapHolds` | At most the limit's keys decided for the principal in any window |
@@ -511,6 +569,10 @@ window of fifteen minutes. #292's review.
 | `Proxying` | A reader uses its token through the credential proxy alone, its use logged by the vault or by the app, while an owner revokes the token or removes the account: each fence shown needed on the proxy's own path | 505 |
 | `Revoking015` | `Revoking` with 0.15's reads: each one use, deciding on the rows as they are and logging its request. It states no `NoReadOnStaleAnswer`: a kept answer is no input of a use, whose entry is the request whatever it decides | 82 thousand |
 | `Revoking015Folded` | `Revoking015`, each use deciding on the generations too, and the app reading nothing after it (T145) | 62 thousand |
+| `Revoking015Caller` | `Revoking015Folded`, the caller decided by the use itself, nothing asked of the vault before it (T145, PR B) | 33 thousand |
+| `Probing` | Ada, revoked, asks for a key made since or never made, a sealed value or a plain one, by its path or the proxy, while the vault comes and goes from overload and another call holds her principal's lock; each answer the vault's, decided on her standing (T145, PR B) | 128 |
+| `ProbingKept` | The same before PR B: decided on an answer about Ada kept from before the revoke, which a refusal confirms first (#406 r2) | 40 |
+| `Naming` | One request's key name mapped to its id once, while the key is renamed and another named so (T145, PR B) | 31 |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 

@@ -135,6 +135,29 @@ export function unauthenticated(auth: AuthConfig): Response {
 export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
+/**
+ * What a credential is refused on its kind alone, before anything is read or asked of the vault: a handle anywhere but
+ * the credential proxy, anything else there, an enrollment code, a service's bearer token on a strict instance. Null
+ * for none. A use by name asks it first (`useByName`), so that the vault is asked nothing for a credential refused so.
+ */
+export function refusedByKind(runtime: Pick<CoffreRuntime, 'auth'>, token: string, options: { handle?: boolean } = {}): Response | null {
+  // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
+  const kind = tokenKind(token);
+  const handle = kind === 'handle';
+  if (handle && options.handle !== true) {
+    return errorResponse(new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle'));
+  }
+  if (!handle && options.handle === true) return errorResponse(new ApiError('unauthenticated', 'the credential proxy takes a handle (coffre_use_…), as `coffre run` gives your app one'));
+  // An enrollment code buys a workload's session and is no credential; a session is used with its key's proof, never
+  // as a bearer: its hash covers its prefix, so neither is ever looked up as one (docs/design/workload-access.md).
+  if (kind === 'enrollment') return errorResponse(new ApiError('unauthenticated', 'an enrollment code is no credential: a workload exchanges it at /api/auth/workload', 'enrollment'));
+  // A strict instance leaves services nothing but key-bound sessions (section 6.3): a bearer service token, kept or exchanged, reads nothing.
+  if (kind === 'service' && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true) {
+    return errorResponse(new ApiError('unauthenticated', 'this instance takes no service token (useOnly): sign the service in at /api/auth/workload, with its key', 'use_only'));
+  }
+  return null;
+}
+
 /** What a member whose record failed the vault's integrity check is told, wherever they ask. */
 export const TAMPERED_MESSAGE =
   "your access record failed coffre's integrity check: it was changed outside coffre. An owner must remove you and add you again";
@@ -154,26 +177,17 @@ export async function authenticateRequest(
    * `ahead`: the credential as `app_read` read it already, with what the request reads next (db/read-ahead.ts).
    * `shows`: what the request shows of its caller, which the app reads from the vault's rows with the credential (`Shows`):
    * `'caller'`, all of it, asking nothing of the vault, a caller `unchecked`, which nothing decides on.
+   * `standing`: the caller as the vault's named use decided them (`Vault.useNamed`, T145): nothing asked or kept.
    */
-  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows } = {},
+  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
-  // A handle is a placeholder for secrets in a person's app: it reaches the credential proxy, never the API, a page or a plugin's API.
   const kind = tokenKind(token);
   const handle = kind === 'handle';
-  if (handle && options.handle !== true) {
-    return errorResponse(new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle'));
-  }
-  if (!handle && options.handle === true) return errorResponse(new ApiError('unauthenticated', 'the credential proxy takes a handle (coffre_use_…), as `coffre run` gives your app one'));
-  // An enrollment code buys a workload's session and is no credential; a session is used with its key's proof, never
-  // as a bearer: its hash covers its prefix, so neither is ever looked up as one (docs/design/workload-access.md).
-  if (kind === 'enrollment') return errorResponse(new ApiError('unauthenticated', 'an enrollment code is no credential: a workload exchanges it at /api/auth/workload', 'enrollment'));
+  const refused = refusedByKind(runtime, token, options);
+  if (refused !== null) return refused;
   // Never on a kept answer: started over, its request would show its proof a second time, which the gate refuses.
   if (kind === 'workload') return authenticateWorkload(request, runtime, requestId, token, sourceIp, options.shows === 'caller');
-  // A strict instance leaves services nothing but key-bound sessions (section 6.3): a bearer service token, kept or exchanged, reads nothing.
-  if (kind === 'service' && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true) {
-    return errorResponse(new ApiError('unauthenticated', 'this instance takes no service token (useOnly): sign the service in at /api/auth/workload, with its key', 'use_only'));
-  }
 
   let principal: Principal;
   let credentialId: string | null = null;
@@ -191,7 +205,7 @@ export async function authenticateRequest(
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
   try {
-    const asked = { sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }) };
+    const asked = { sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }) };
     // Only coffre's own credentials are read ahead: Access's verifier reads none.
     const verifying = options.ahead !== undefined && runtime.verifier instanceof SigninService
       ? runtime.verifier.verify(token, { ...asked, ahead: options.ahead })

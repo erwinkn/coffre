@@ -4,6 +4,7 @@ import {
   USE_DEADLINE_MS,
   USE_METADATA_LENGTH,
   useRefusalMessage,
+  type NamedUseOutcome,
   type Purpose,
   type Refusal,
   type SecretRef,
@@ -110,7 +111,13 @@ export async function openValues(
    * the record, and `used` says so too.
    */
   use?: UseRecord,
+  /**
+   * The use of this request's one key the vault made already, by name (`Vault.useNamed`, T145): nothing is opened
+   * again, and its outcome is the value's, a plain one's text included, which the vault decided as any.
+   */
+  decided?: Decided,
 ): Promise<Keyed<string> & { used?: true; stood?: true }> {
+  if (decided !== undefined) return decidedValues(decided, items);
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const { credentialRow, ...asked } = asking;
@@ -227,6 +234,33 @@ function openedValue(value: UsedValue): string {
   }
 }
 
+/** A use of a request's one key the vault made already, by name (`Vault.useNamed`): the key's id, and its outcome. */
+export type Decided = { secretId: string | null; outcome: Extract<NamedUseOutcome, { served: true }>['outcome'] };
+
+/**
+ * The values of a read the vault decided already, by name: at most its one key, whose outcome stands for it, a refusal
+ * as `useValues` answers it. The use decided on the request's credential too, so nothing reads it again (`stood`);
+ * `used` where its entry is the vault's, a sealed value's.
+ */
+function decidedValues({ secretId, outcome }: Decided, items: readonly OpenItem[]): Keyed<string> & { used?: true; stood: true } {
+  // Nothing of it going back (a key the place does not hold, a person's sensitive value a list leaves out): its outcome,
+  // logged as the vault decided it, refuses nothing more. The vault wrote no use of a key it does not hold: the app's
+  // own entry records the request, as before (review r1).
+  if (items.length === 0) return { ok: true, values: [], stood: true };
+  if (!outcome.ok) throw refusedUse(outcome);
+  const values = items.map((item) => {
+    if ((item.holder ?? item.secret.secretId) !== secretId) throw new Error("a named use's read opens no key but the one the vault decided");
+    if ('plain' in outcome) {
+      if (outcome.versionId !== item.secretVersionId) throw changed();
+      return outcome.plain;
+    }
+    if (outcome.value.versionId !== item.secretVersionId) throw changed();
+    return openedValue(outcome.value);
+  });
+  // A plain value's use the vault decided writes no entry: the app's records it, as when it handed one back itself.
+  return { ok: true, values, stood: true, ...('plain' in outcome ? {} : { used: true as const }) };
+}
+
 /** A key this read names, written or removed while it ran: 409, to ask again. */
 const changed = () => new ApiError('conflict', 'a key this read names was changed while it ran: try again', 'changed');
 
@@ -236,7 +270,7 @@ const changed = () => new ApiError('conflict', 'a key this read names was change
  * it, 409, to be asked again; no cap logged yet, or a use not decided
  * (busy), 503 with the vault's `Retry-After`.
  */
-function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError {
+export function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError {
   if ('busy' in outcome) return new ApiError('unavailable', UNAVAILABLE, undefined, String(outcome.retryAfter));
   switch (outcome.code) {
     case 'credential':

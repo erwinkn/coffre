@@ -5,12 +5,13 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import type { ReadAhead } from '../db/read-ahead.ts';
 import type { AppChanges } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, vaultRefused } from './errors.ts';
-import type { Asking } from './keys.ts';
+import type { Asking, Decided } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { Render } from './render.ts';
 import type { PersonalToken, SigninService } from './signin.ts';
@@ -79,6 +80,11 @@ export type ApiContext = {
   watch?: { hooks: Watcher; context: (asCaller?: boolean) => WatchContext } | null;
   /** The page's render the request is one call of, whose calls read the instance's places once (`Render`); none for a request of its own. */
   render?: Render;
+  /**
+   * The use of the request's one key the vault made already, by name, and the rows it answered (`useByName`, T145): a
+   * reveal of that key reads and opens nothing again.
+   */
+  named?: { decided: Decided; ahead: ReadAhead | null };
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */

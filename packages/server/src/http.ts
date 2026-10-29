@@ -83,7 +83,7 @@ const MAX_BODY_NODES = 20000;
  * children only while under the cap, so a 262k-element array is refused
  * after counting it, never after copying it.
  */
-function parseJsonBody(text: string): unknown {
+export function parseJsonBody(text: string): unknown {
   let body: unknown;
   try {
     body = JSON.parse(text);

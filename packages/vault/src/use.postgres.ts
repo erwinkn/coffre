@@ -2,10 +2,10 @@ import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
-import type { UseCall, UseRow } from './use.ts';
+import type { Resolved, UseCall, UseRow } from './use.ts';
 
 /**
- * A use on Postgres: one call of `use_credential` (0024's, as 0033 has it), one
+ * A use on Postgres: one call of `use_credential` (0024's, as 0044 has it), one
  * statement and one round trip, its own transaction. It answers its row as
  * one JSON value (0024 says why), read back here as `UseRow`.
  */
@@ -16,16 +16,37 @@ export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
     ${call.mac}::bytea, ${String(call.deadline)}::bigint,
     ${call.cover?.number ?? null}::bigint, ${call.cover === undefined ? null : String(call.cover.at)}::bigint, ${call.cover?.requestId ?? null}::bigint,
     ${known?.newest ?? null}::bigint, ${known?.newestMac ?? null}::bytea,
-    ${known?.cap.count ?? null}::integer, ${known === undefined ? null : String(known.cap.windowMs)}::bigint
+    ${known?.cap.count ?? null}::integer, ${known === undefined ? null : String(known.cap.windowMs)}::bigint,
+    ${call.names?.tokenHash ?? null}::bytea, ${call.names?.project ?? null}::text, ${call.names?.environment ?? null}::text, ${call.names?.key ?? null}::text
   )::text AS use`);
   return rowOf(row!.use);
+}
+
+/** The ids of what a request names, as `use_resolve` (0044) reads them: one statement. */
+export async function callResolve(db: Queryable, asked: { tokenHash: Buffer; place: { project: string; environment: string } | null; keys: readonly string[] }): Promise<Resolved> {
+  const [row] = await rowsOf<{ ids: string }>(db, sql`SELECT use_resolve(${asked.tokenHash}::bytea, ${asked.place?.project ?? null}::text,
+    ${asked.place?.environment ?? null}::text, ${sql.param([...asked.keys])}::text[])::text AS ids`);
+  return resolvedOf(JSON.parse(row!.ids) as ResolvedJson);
+}
+
+/** `use_resolve`'s JSON, as SQLite's twin answers it too. */
+export type ResolvedJson = {
+  credential: string | null; project?: string | null; environment?: string | null; slugs?: { project: string; environment: string } | null; shared?: boolean;
+  keys?: Record<string, string>;
+};
+
+export function resolvedOf(json: ResolvedJson): Resolved {
+  return {
+    credential: json.credential, project: json.project ?? null, environment: json.environment ?? null, slugs: json.slugs ?? null, shared: json.shared === true,
+    keys: new Map(Object.entries(json.keys ?? {})),
+  };
 }
 
 /** The row's bigints: as text, exactly. */
 const WHOLE = ['number', 'covered', 'newest', 'inputs', 'c_expires', 'm_old', 'm_access', 'cap_window'] as const;
 /** Its bytes, which JSON carries as `\x` and hex. */
 const BYTES = [
-  'newest_mac', 'c_seal', 'c_last', 'm_seal', 'm_last', 'r_seal', 'r_last', 'p_seal', 'p_last', 's_seal', 's_last', 'x_seal', 'x_last',
+  'newest_mac', 'c_token_hash', 'c_seal', 'c_last', 'm_seal', 'm_last', 'r_seal', 'r_last', 'p_seal', 'p_last', 's_seal', 's_last', 'x_seal', 'x_last',
   'v_ciphertext', 'v_iv', 'v_auth_tag', 'v_wrapped_dek', ...['e1', 'e2', 'e3', 'e4'].flatMap((slot) => [`${slot}_seal`, `${slot}_last`]),
 ] as const;
 
