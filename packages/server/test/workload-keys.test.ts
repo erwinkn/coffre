@@ -2,7 +2,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
 
-import { forgetKeys, IssuerUnavailable, KEYS_COOLDOWN_MS, KEYS_FRESH_MS, verifyWithKeys } from '../src/workloads/keys.ts';
+import { forgetKeys, IssuerUnavailable, KEYS_COOLDOWN_MS, KEYS_FRESH_MS, MAX_KEY_SETS, verifyWithKeys } from '../src/workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -89,4 +89,29 @@ test('concurrent cold: each fetches once, never twice, and neither waits on the 
   const knowns = await Promise.all([verify(known), verify(known)]);
   assert.deepEqual(knowns.map((each) => each.outcome), [VERIFIED, VERIFIED]);
   assert.equal(fetches, 2);
+});
+
+test('tokens cycled through more key URLs than the cache holds cost each at most one fetch a minute: a URL waiting its minute is never evicted, and none is fetched while every one waits', async () => {
+  let asked = 0;
+  const many: WorkloadTransport = {
+    json: async () => {
+      asked++;
+      return { keys: [known.jwk] };
+    },
+  };
+  const urls = Array.from({ length: MAX_KEY_SETS + 6 }, (_, n) => `https://issuer-${n}.example/keys`);
+  const cycle = async (at: number) => {
+    for (const url of urls) {
+      await assert.rejects(verifyWithKeys(many, url, token(unknown), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + at) }), IssuerUnavailable);
+    }
+  };
+  await cycle(0);
+  assert.equal(asked, MAX_KEY_SETS, 'one fetch for each URL the cache can hold; the rest wait');
+  await cycle(1_000);
+  await cycle(2_000);
+  assert.equal(asked, MAX_KEY_SETS, 'none again within the minute, however often they come round');
+  // The keys each holds still verify the issuer's own tokens meanwhile.
+  assert.equal(await verifyWithKeys(many, urls[0]!, token(known), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + 3_000) }).then((claims) => claims.sub), 'repo:acme/api');
+  await cycle(KEYS_COOLDOWN_MS + 3_000);
+  assert.ok(asked <= 2 * MAX_KEY_SETS, `a minute on, at most one each again: ${asked}`);
 });

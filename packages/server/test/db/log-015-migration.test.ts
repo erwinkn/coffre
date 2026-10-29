@@ -21,7 +21,7 @@ import { TEST_ENGINE } from './engine.ts';
 /**
  * 0.15's expand migration (0022_log_015 on Postgres, 0018_log_015 on
  * SQLite) on a database 0.14.5 made and used: every row it held is kept,
- * each sealed table gains a null seal (an environment its protection too) and nothing else, and 0.14.5's code
+ * each sealed table gains a null seal (an environment its protection too, a binding the origin its seal covers, PR 3b) and nothing else, and 0.14.5's code
  * still reads it and appends to its log, the chain unbroken, as it serves
  * between `coffre migrate` and the deploy.
  */
@@ -178,9 +178,9 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
     for (const [table, before] of Object.entries(kept)) {
       const after = await read(opened.owner, table);
       if (SEALED.includes(table)) {
-        // What 0.15 adds to its rows: the seal, and an environment's protection.
-        assert.deepEqual(after.map(({ seal, protected: _, ...row }) => row), before, `${table} keeps its rows`);
-        assert.ok(after.every((row) => row.seal === null && (row.protected ?? null) === null), `${table}'s rows are not sealed yet`);
+        // What 0.15 adds to its rows: the seal, an environment's protection, and a binding's origin.
+        assert.deepEqual(after.map(({ seal, protected: _, origin: __, ...row }) => row), before, `${table} keeps its rows`);
+        assert.ok(after.every((row) => row.seal === null && (row.protected ?? null) === null && (row.origin ?? null) === null), `${table}'s rows are not sealed yet`);
       } else {
         assert.deepEqual(after, before, `${table} is as it was`);
       }

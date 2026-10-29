@@ -208,7 +208,7 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
     const b = m.row;
     await tx.insert(serviceBindings).values({
       id: b.id, authMac: m.authMac, principal: b.principal, generation: b.generation, profile: b.profile, issuer: b.issuer, jwksUri: b.jwksUri, jwks: b.jwks,
-      claims: b.claims, scope: b.scope, policy: b.policy, label: b.label, createdBy: b.createdBy, createdAt: new Date(b.createdAt), seal: m.seal,
+      claims: b.claims, scope: b.scope, policy: b.policy, origin: b.origin, label: b.label, createdBy: b.createdBy, createdAt: new Date(b.createdAt), seal: m.seal,
     });
   }
   const ended = new Date(c.revokedAt);

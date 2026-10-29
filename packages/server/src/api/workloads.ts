@@ -7,7 +7,6 @@ import {
   addressWithin,
   BindingInvalid,
   canonicalClaims,
-  claimAt,
   checkBinding,
   checkFetchUrl,
   checkPolicy,
@@ -29,6 +28,9 @@ import {
   OIDC_PROFILES,
   POLICY_DEFAULTS,
   PROFILE_URNS,
+  runClaims,
+  soleAudience,
+  UPLOADED_KEYS,
   POLICY_FIELDS,
   policyText,
   REPEATING_PROFILES,
@@ -289,12 +291,6 @@ export type ProofKind = {
 // How long a session lives past each renewal, and a run's credential: @coffre/core, where the vault reads them too.
 export { EXCHANGED_CREDENTIAL_MS, SESSION_MS } from '@coffre/core/identity';
 
-/** The audience a token names, alone; null for none, or several. */
-function soleAudience(aud: unknown): string | null {
-  if (typeof aud === 'string') return aud;
-  return Array.isArray(aud) && aud.length === 1 && typeof aud[0] === 'string' ? aud[0] : null;
-}
-
 /**
  * `oidc`: a platform's ID token (section 4.2), matched against the
  * service's bindings of the ID-token profiles that carry a policy, by the
@@ -414,22 +410,6 @@ export const EXCHANGES_PER_BINDING_MINUTE = 60;
  */
 export const exchangeLimit = { inFlight: 32 };
 let inFlight = 0;
-
-/**
- * The claims of the run a credential was issued for, as the issuer
- * asserted them: in the exchange's entry, so that a read leads back to
- * its run. What the issuer says, not proof of which run sent the request.
- */
-const RUN_CLAIMS = [
-  'sub', 'jti', 'actor', 'event_name', 'ref', 'base_ref', 'head_ref', 'sha', 'repository', 'repository_id', 'run_id', 'run_attempt',
-  'workflow_ref', 'job_workflow_ref', 'job_workflow_sha', 'environment',
-  'project_path', 'project_id', 'namespace_id', 'pipeline_id', 'pipeline_source', 'job_id',
-  'kubernetes.io.pod.name',
-] as const;
-const MAX_RUN_CLAIM = 256;
-
-/** A binding's `jwks_uri` when it carries its issuer's keys: the SHA-256 of those keys (`UploadedKeys`), where a fetched set's URL would be. */
-const UPLOADED = 'sha256:';
 
 /** Refusals logged, by reason and service, once a minute each. */
 const refusalsLogged = new Map<string, number>();
@@ -635,7 +615,7 @@ export class WorkloadService {
           ? policy.issuer
           : uploaded === null
             ? await discoverKeys(this.#deps.transport, policy.issuer, { allowLoopback: this.#deps.config.allowLoopback })
-            : `${UPLOADED}${uploaded.digest}`;
+            : `${UPLOADED_KEYS}${uploaded.digest}`;
       } catch (error) {
         if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${policy.issuer}: ${error.message}`);
         throw error;
@@ -651,7 +631,7 @@ export class WorkloadService {
           return row.issuer === policy.issuer && row.jwksUri !== jwksUri ? [{ ...row, why: 'keys_moved' }] : [];
         });
         // Keys uploaded, on either side, are no move of the issuer's: the bindings that would go are still good.
-        if (replaces.some((row) => row.why === 'keys_moved' && (row.jwksUri.startsWith(UPLOADED) || jwksUri.startsWith(UPLOADED)))) {
+        if (replaces.some((row) => row.why === 'keys_moved' && (row.jwksUri.startsWith(UPLOADED_KEYS) || jwksUri.startsWith(UPLOADED_KEYS)))) {
           throw conflict(
             `${shownMember(member)}'s other bindings on ${policy.issuer} verify with other keys: replace their keys with these first, or replace those bindings with this one`,
           );
@@ -804,7 +784,7 @@ export class WorkloadService {
     const member = `token:${serviceId}`;
     const details = { principalType: 'service', principalId: serviceId, issuer: input.issuer };
     const uploaded = await keysOf(input.jwks);
-    const jwksUri = `${UPLOADED}${uploaded.digest}`;
+    const jwksUri = `${UPLOADED_KEYS}${uploaded.digest}`;
     return withRefusals(this.#deps, async () => {
       // The issuer as the vault answers now, held to under the head (`issuerStill`), as in `bind`.
       const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
@@ -1712,17 +1692,6 @@ function matching(bindings: BindingRow[], claims: Record<string, unknown>, membe
   throw new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts these claims: ${(closest ?? []).join(', ')} differ`);
 }
 
-/** The run's claims, as the issuer stated them: those that say which run, each bounded. */
-function runClaims(claims: Record<string, unknown>): Record<string, string | number> {
-  const run: Record<string, string | number> = {};
-  for (const name of RUN_CLAIMS) {
-    const value = claimAt(claims, name);
-    if (typeof value === 'string') run[name] = value.slice(0, MAX_RUN_CLAIM);
-    else if (typeof value === 'number' && Number.isFinite(value)) run[name] = value;
-  }
-  return run;
-}
-
 /** One line per reason and service a minute, in this isolate: enough to see a refusal, not a flood. An unknown key's names its issuer and key. */
 function logRefusal(error: ExchangeRefused, service: string, sourceIp: string | null): void {
   const key = `${error.reason} ${String(service).slice(0, 120)}`;
@@ -1868,7 +1837,7 @@ export function environmentsOf(scope: CredentialScope, known: readonly PlaceRow[
 }
 
 /** A binding as an owner sees it: its policy shown as the caller names it (`namedPolicy`, `shownPolicy`). */
-function view(row: BindingRow, scope: ScopeByPath | null, policy: PolicyView | null): BindingView {
+function view(row: Omit<BindingRow, 'origin'>, scope: ScopeByPath | null, policy: PolicyView | null): BindingView {
   return {
     id: row.id,
     profile: row.profile as WorkloadProfile,

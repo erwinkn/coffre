@@ -562,6 +562,8 @@ export const serviceBindings = sqliteTable(
     scope: text(),
     // What a workload's binding says beyond its claims (`BindingPolicy`), canonical JSON: null on a binding `/api/auth/oidc` takes, never on another (docs/design/workload-access.md, section 11).
     policy: text(),
+    // The instance it was made on (schema.ts).
+    origin: text(),
     label: text(),
     createdAt: createdAt(),
     createdBy: text('created_by').notNull(),

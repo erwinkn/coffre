@@ -49,7 +49,7 @@ export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answ
   return JSON.parse(row!.answer) as Answer;
 }
 
-/** `change_bindings` (migration 0037): one statement, its own transaction, its answer one JSON value. */
+/** `change_bindings` (migrations 0037, 0040): one statement, its own transaction, its answer one JSON value. */
 export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promise<Answer> {
   const m = c.make;
   const r = m?.read ?? null;
@@ -64,7 +64,7 @@ export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promis
     ${c.policy.seq}::bigint, ${array(c.policy.slugs.map(({ environmentId }) => environmentId))}::uuid[], ${array(c.policy.slugs.map(({ slug }) => slug))}::text[], ${c.appKey}::text,
     ${MAX_BINDINGS}::integer, ${c.live === null ? null : array(c.live)}::uuid[], ${array(c.reads.map((read) => read.id))}::uuid[], ${array(c.reads.map((read) => read.key))}::text[],
     ${b?.id ?? null}::uuid, ${m?.authMac ?? null}::bytea, ${b?.profile ?? null}::text, ${b?.issuer ?? null}::text, ${b?.jwksUri ?? null}::text, ${b?.jwks ?? null}::text,
-    ${b?.claims ?? null}::text, ${b?.scope ?? null}::text, ${b?.policy ?? null}::text, ${b?.label ?? null}::text, ${b?.createdBy ?? null}::text,
+    ${b?.claims ?? null}::text, ${b?.scope ?? null}::text, ${b?.policy ?? null}::text, ${b?.origin ?? null}::text, ${b?.label ?? null}::text, ${b?.createdBy ?? null}::text,
     ${b === null ? null : String(b.createdAt)}::bigint, ${m?.seal ?? null}::bytea,
     ${array(c.ends.map((e) => e.id))}::uuid[], ${array(c.ends.map((e) => e.macFrom))}::bytea[], ${array(c.ends.map((e) => e.sealFrom))}::bytea[],
     ${array(c.ends.map((e) => e.authMac))}::bytea[], ${array(c.ends.map((e) => e.seal))}::bytea[],

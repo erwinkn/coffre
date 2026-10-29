@@ -267,6 +267,13 @@
       "when": 1793230483207,
       "tag": "0037_vault_bindings",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1793247589162,
+      "tag": "0040_binding_origin",
+      "breakpoints": true
     }
   ]
 }

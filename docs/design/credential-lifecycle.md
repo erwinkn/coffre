@@ -248,8 +248,11 @@ the binding it sealed (`#proven`, `verifyRunToken` in
   which must be the one whose digest the seal covers (`sha256:<digest>`). A
   set the app forged is refused, `keys`, 401 "bind it again";
 - **the audience** is sealed too (AudienceSealed). The binding's object
-  carries `origin`, the instance's public URL when it was made, which no
-  column holds. A CI run's token names exactly that; a workload's names its
+  carries `origin`, the instance's public URL when it was made, which its
+  row keeps (migration 0040), so that a binding made before the instance
+  moved to another URL is still named as sealed, and ended with what it
+  issued; it takes no token for the new URL (bind again). A CI run's token
+  names exactly that; a workload's names its
   profile's audience on that origin: Azure's fixed one, or, where the
   platform lets its caller pick (GitHub, GCP, Fly, Vercel),
   `<origin>#jkt=<thumbprint>` or `?jkt=`, the thumbprint of the key whose
@@ -275,7 +278,10 @@ written in the URL is held to the same rule. The cache keeps settled key
 sets only, never a fetch under way (AGENTS.md, "What an isolate keeps"), ten
 minutes each; a token naming a key the set lacks has it fetched once more,
 then that URL waits a minute: tokens with random `kid`s cost an issuer one
-fetch a minute, whatever their number, and are refused meanwhile (503, try
+fetch a minute, whatever their number. A set in its wait is never the one
+evicted, and while all 64 the cache holds wait, a URL not among them is not
+fetched either, so cycling tokens through more URLs buys no more (review
+r1). They are refused meanwhile (503, try
 again in a minute; for uploaded keys, `unknown_key` and its alert). Never on
 `/use`: only a sign-in verifies a token.
 
@@ -287,7 +293,8 @@ compromised app could still mint sessions for an AWS-bound account: the one
 case left. 0.16 moves the AWS check into the vault.
 
 **For T160's cutover.** Each adopted 0.14 binding is sealed with the
-deployment's public URL as its `origin`: a bearer binding's audience is that
+deployment's public URL as its `origin`, written to its row's column too
+(one PR 3a made has none, and is named on the public URL): a bearer binding's audience is that
 URL, a workload's `policy.audience ?? origin` (or the key-naming forms on it).
 
 ## 5. The model: `formal/Lifecycle.tla`
