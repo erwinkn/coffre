@@ -107,7 +107,7 @@ $$;
 -- Locks, in the order every writer takes them:
 -- 1. the account's row, its update lock (two binds take turns over its count), then the maker's, shared (IssuerLocked);
 -- 2. the credential it came in on, shared;
--- 3. the bindings it ends and their credentials, exclusive (BindingLocked: a sign-in through one waits, or is seen);
+-- 3. the bindings it ends and their credentials, exclusive (BindingLocked: a sign-in through one waits, or is seen); the keys a binding it makes reads, shared;
 -- 4. the issue lock, shared (IssuePolicyHeld, IssueOffFence);
 -- 5. when it ends any, the fence, exclusive (RevokeTakesFence), after the issue lock (PolicyIssueFirst).
 -- No 0.14 head and no 0.14 entry: its changes record it (D147).
@@ -116,6 +116,7 @@ CREATE FUNCTION change_bindings(
     p_make boolean, p_principal text, p_generation integer, p_principal_seq bigint, p_actor_generation integer, p_actor_seq bigint,
     p_via uuid, p_via_seal bytea, p_via_end bigint,
     p_policy_seq bigint, p_protected uuid[], p_slugs text[], p_app_key text, p_max integer,
+    p_live uuid[], p_read_keys uuid[], p_read_names text[],
     p_id uuid, p_auth_mac bytea, p_profile text, p_issuer text, p_jwks_uri text, p_jwks text, p_claims text, p_scope text, p_policy text,
     p_label text, p_created_by text, p_created_at bigint, p_seal bytea,
     p_ends uuid[], p_end_mac_from bytea[], p_end_seal_from bytea[], p_end_auth_mac bytea[], p_end_seal bytea[],
@@ -131,7 +132,8 @@ DECLARE
     ended timestamptz := timestamptz 'epoch' + p_revoked_at * interval '1 millisecond';
 BEGIN
     IF p_make = (p_id IS NULL) OR (NOT p_make AND cardinality(p_ends) = 0) OR cardinality(p_creds) <> cardinality(p_cred_binding)
-       OR cardinality(p_change_request) <> (CASE WHEN p_make THEN 1 ELSE 0 END) + cardinality(p_ends) + cardinality(p_creds) THEN
+       OR p_make = (p_live IS NULL) OR cardinality(p_read_keys) <> cardinality(p_read_names)
+       OR cardinality(p_change_request) <> (CASE WHEN p_make THEN 1 ELSE 0 END) + cardinality(p_ends) + (SELECT count(*) FROM unnest(p_cred_seal) AS s WHERE s IS NOT NULL) THEN
         RAISE EXCEPTION 'a change of bindings makes one, ends some, or both, with a change for each object' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     IF p_make THEN
@@ -150,7 +152,8 @@ BEGIN
             IF NOT EXISTS (SELECT 1 FROM public.credentials c
                             WHERE c.id = p_via AND c.principal = p_actor AND c.revoked_at IS NULL AND c.seal = p_via_seal
                               AND floor(extract(epoch FROM least(c.expires_at, coalesce(c.not_after, c.expires_at))) * 1000)::bigint = p_via_end)
-               OR p_via_end <= (extract(epoch FROM now_ts) * 1000)::bigint
+               -- The clock once the locks are had, not when the statement began: one that ended while it waited has ended.
+               OR p_via_end <= (extract(epoch FROM clock_timestamp()) * 1000)::bigint
                OR p_via_seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('credential', p_via::text) ORDER BY c.number DESC LIMIT 1) THEN
                 RETURN json_build_object('state', 'ended');
             END IF;
@@ -165,20 +168,34 @@ BEGIN
        <> cardinality(p_ends) THEN
         RETURN json_build_object('state', 'moved');
     END IF;
+    -- A credential 0.14 made, or one written around the vault, has no seal: ended with its binding all the same, its row
+    -- revoked with no change, the log holding no object of it.
     PERFORM 1 FROM public.credentials c WHERE c.id = ANY(p_creds) ORDER BY c.id FOR UPDATE;
     IF (SELECT count(*) FROM unnest(p_creds, p_cred_binding, p_cred_mac_from, p_cred_seal_from) AS x(id, binding, mac, seal)
           JOIN public.credentials c ON c.id = x.id AND x.binding = ANY(p_ends) AND c.created_by = 'binding:' || x.binding::text
-                                   AND c.revoked_at IS NULL AND c.auth_mac = x.mac AND c.seal = x.seal)
+                                   AND c.revoked_at IS NULL AND c.auth_mac = x.mac AND c.seal IS NOT DISTINCT FROM x.seal)
        <> cardinality(p_creds)
        OR EXISTS (SELECT 1 FROM unnest(p_ends) AS e(id) JOIN public.credentials c
                     ON c.principal = p_principal AND c.created_by = 'binding:' || e.id::text AND c.revoked_at IS NULL AND c.expires_at > now_ts
                    WHERE NOT (c.id = ANY(p_creds))) THEN
         RETURN json_build_object('state', 'moved');
     END IF;
-    -- At most `p_max` live bindings of the account's generation, those it ends left out: counted under its row's lock.
-    IF p_make AND (SELECT count(*) FROM public.service_bindings b
-                    WHERE b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL AND NOT (b.id = ANY(p_ends))) >= p_max THEN
-        RETURN json_build_object('state', 'full');
+    IF p_make THEN
+        -- The account's live bindings as the app read them, which it weighed this one beside (an issuer's keys moved, the
+        -- bindings it replaces): another made or ended since is read again. Under the account's row's lock, which every
+        -- bind takes, so two binds take turns. At most `p_max`, those it ends left out.
+        IF ARRAY(SELECT b.id FROM public.service_bindings b WHERE b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL ORDER BY b.id)
+           IS DISTINCT FROM ARRAY(SELECT l FROM unnest(p_live) AS l ORDER BY l) THEN
+            RETURN json_build_object('state', 'moved');
+        END IF;
+        IF cardinality(p_live) - (SELECT count(*) FROM unnest(p_live) AS l WHERE l = ANY(p_ends)) >= p_max THEN
+            RETURN json_build_object('state', 'full');
+        END IF;
+        -- The keys its policy reads, by the names they were asked by: held, and still those names (a rename meanwhile names another).
+        PERFORM 1 FROM public.secrets x WHERE x.id = ANY(p_read_keys) ORDER BY x.id FOR SHARE;
+        IF (SELECT count(*) FROM unnest(p_read_keys, p_read_names) AS r(id, name) JOIN public.secrets x ON x.id = r.id AND x.key = r.name) <> cardinality(p_read_keys) THEN
+            RETURN json_build_object('state', 'moved');
+        END IF;
     END IF;
     -- IssuePolicyHeld: the issue lock, shared; then, under it, the policy and the slugs this change was weighed on, and the numbers.
     PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
@@ -228,6 +245,6 @@ REVOKE ALL ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, tex
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, text, text, text, text, bytea, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text) TO coffre_vault;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, integer, uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, integer, uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]) TO coffre_vault;

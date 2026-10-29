@@ -132,7 +132,7 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
 
 /** `change_bindings` on SQLite, step for step, in one transaction: SQLite runs one writer at a time. */
 export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<Answer> {
-  const { auditLog, credentials, environments, logChanges, projects, serviceBindings, vaultMembers } = tablesOf(tx);
+  const { auditLog, credentials, environments, logChanges, projects, secrets, serviceBindings, vaultMembers } = tablesOf(tx);
   const now = Date.now();
   const newest = async (ref: Parameters<typeof objectKey>[0]) =>
     (await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey(ref))).orderBy(desc(logChanges.number)).limit(1))[0]?.seal ?? null;
@@ -155,11 +155,16 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
       }
     }
   }
-  // At most `MAX_BINDINGS` live bindings of the account's generation, those it ends left out.
+  // The account's live bindings as the app read them, at most `MAX_BINDINGS` besides those it ends; the keys it reads by their names.
   if (m !== null) {
     const live = await tx.select({ id: serviceBindings.id }).from(serviceBindings)
       .where(and(eq(serviceBindings.principal, c.principal), eq(serviceBindings.generation, m.row.generation), isNull(serviceBindings.revokedAt)));
+    if (live.map(({ id }) => id).sort().join() !== [...(c.live ?? [])].sort().join()) return { state: 'moved' };
     if (live.filter(({ id }) => !c.ends.some((end) => end.id === id)).length >= MAX_BINDINGS) return { state: 'full' };
+    for (const read of c.reads) {
+      const [row] = await tx.select({ key: secrets.key }).from(secrets).where(eq(secrets.id, read.id));
+      if (row?.key !== read.key) return { state: 'moved' };
+    }
   }
   // The bindings it ends, and every live credential they issued, as read.
   for (const end of c.ends) {

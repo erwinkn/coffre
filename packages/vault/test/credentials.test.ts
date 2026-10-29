@@ -68,7 +68,7 @@ async function world() {
   const binding = randomUUID();
   const scope = storedScope([issuedGrant({ projectId: project, environmentId: null, role: 'viewer' })]);
   const made = await vault.changeBindings!({
-    actor: ROOT, via: null, actorAccess: null, reason: 'replaced', ends: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
+    actor: ROOT, via: null, actorAccess: null, reason: 'replaced', ends: [], live: [], reads: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
     make: {
       id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
       scope, policy: null, revoked: false, jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),

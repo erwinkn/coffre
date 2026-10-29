@@ -190,7 +190,13 @@ the vault's to change, in one call, `Vault.changeBindings`:
 - **ending one** (an unbind, or the binding a new one replaces) takes every
   live credential it issued with it. The app names them, each with its seal
   and MAC; the statement holds the set to the rows, so one a sign-in made
-  meanwhile is read again;
+  meanwhile is read again. One with no seal, written around the vault, is
+  ended too, with no change: a binding the log holds is always the vault's
+  to end, so its object never stands past its end (review r1);
+- a bind holds the account's live bindings to the set the app weighed it
+  beside (an issuer's keys moved, the cap), and the keys its policy reads
+  to the names they were asked by, `FOR SHARE`: what the app's transaction
+  checked under 0.14's head, now under the account's row (review r1);
 - one statement, `change_bindings` (migration 0037): the account's row
   (its update lock, so that two binds take turns over the 16-binding cap)
   and the maker's (shared), compared; the credential the request came in

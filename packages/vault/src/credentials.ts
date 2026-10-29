@@ -470,7 +470,10 @@ export type BindingsCall = {
   /** The binding made, its seal; and its maker's standing as read (`IssueRead`): null for an unbind. */
   make: { row: MadeBinding; authMac: Buffer; seal: Buffer; read: IssueRead; via: string | null } | null;
   ends: { id: string; macFrom: Buffer; sealFrom: Buffer; authMac: Buffer; seal: Buffer }[];
-  credentials: { id: string; binding: string; macFrom: Buffer; sealFrom: Buffer; authMac: Buffer; seal: Buffer }[];
+  /** A credential with no seal (`sealFrom` null) is ended with no change, its `seal` null. */
+  credentials: { id: string; binding: string; macFrom: Buffer; sealFrom: Buffer | null; authMac: Buffer; seal: Buffer | null }[];
+  live: string[] | null;
+  reads: { id: string; key: string }[];
   revokedAt: number;
   revokedBy: string;
   policy: { seq: string | null; slugs: { environmentId: string; slug: string | null }[] };
@@ -480,16 +483,21 @@ export type BindingsCall = {
 
 /** The shape of a change of bindings as the app sends it; throws on one no app of this release sends. */
 export function checkChangeBindings(input: ChangeBindingsInput): void {
-  const { actor, via, actorAccess, make, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
+  const { actor, via, actorAccess, make, live, reads, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
   const named = (before: { columns?: unknown; seal?: unknown } | undefined) => before !== undefined && isBase64(before.seal, 16);
   if (typeof actor !== 'string' || !member.test(actor) || (via !== null && (typeof via !== 'string' || !UUID.test(via)))
     || (actorAccess !== null && (typeof actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(actorAccess)))
     || !Array.isArray(ends) || (make === null && ends.length === 0) || !['replaced', 'keys_moved', 'unbound'].includes(reason)
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || !isPolicy(policy) || policy === null
-    || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)) {
-    throw new Error('a change of bindings names who makes it, on what, the binding it makes or those it ends, why, when, the policy weighed, and the app\'s key');
+    || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
+    || (make === null) !== (live === null) || (live !== null && (!Array.isArray(live) || !live.every((id) => typeof id === 'string' && UUID.test(id))))
+    || !Array.isArray(reads) || !reads.every((read) => typeof read?.id === 'string' && UUID.test(read.id) && typeof read.key === 'string')) {
+    throw new Error('a change of bindings names who makes it, on what, the binding it makes and those beside it, those it ends, why, when, the policy weighed, and the app\'s key');
   }
+  // Each object once: a binding or a credential named twice would be two changes of it, the second one the replay refuses.
+  const ids = [...(make === null ? [] : [make.id]), ...ends.map((end) => end?.before?.columns?.id), ...ends.flatMap((end) => (end?.credentials ?? []).map((credential) => credential?.before?.columns?.id))];
+  if (new Set(ids).size !== ids.length) throw new Error('a change of bindings names each binding and credential once');
   if (make !== null) {
     checkBinding(make);
     if (make.revoked || (make.jwks !== null && typeof make.jwks !== 'string') || (make.label !== null && typeof make.label !== 'string') || typeof make.createdBy !== 'string'
@@ -503,7 +511,8 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
     }
     checkBinding(end.before.columns);
     for (const credential of end.credentials) {
-      if (!named(credential?.before) || typeof credential.before.columns?.id !== 'string' || !isBase64(credential.authMacFrom, 32) || !isBase64(credential.authMac, 32)) {
+      const before = credential?.before;
+      if (before === undefined || (before.seal !== null && !isBase64(before.seal, 16)) || typeof before.columns?.id !== 'string' || !isBase64(credential.authMacFrom, 32) || !isBase64(credential.authMac, 32)) {
         throw new Error('a credential a binding ended issued is named as read, with its seal and the app\'s MACs before and after');
       }
     }
@@ -553,9 +562,15 @@ export function bindingsCall(
     ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
     for (const credential of end.credentials) {
       const cref: Ref = { kind: 'credential', id: credential.before.columns.id };
+      if (credential.before.columns.principal !== principal || credential.before.columns.revoked) return { refused: 'tampered' };
+      // One with no seal is none of the log's: ended, its row revoked, with no change (the statement holds it to having none).
+      if (credential.before.seal === null) {
+        swept.push({ id: cref.id, binding: columns.id, macFrom: Buffer.from(credential.authMacFrom, 'base64'), sealFrom: null, authMac: Buffer.from(credential.authMac, 'base64'), seal: null });
+        continue;
+      }
       const cfrom = Buffer.from(credential.before.seal, 'base64');
       const now = credentialObject(credential.before.columns);
-      if (credential.before.columns.principal !== principal || credential.before.columns.revoked || !sealed(keys.seals, cref, now, cfrom)) return { refused: 'tampered' };
+      if (!sealed(keys.seals, cref, now, cfrom)) return { refused: 'tampered' };
       const cseal = sealOf(keys.seals[0]!, cref, applyOp(now, cref, { op: 'credential.revoke' })!);
       // Each after the bindings', in the order named.
       sweeps.push(() => change(cref, canonical({
@@ -567,7 +582,7 @@ export function bindingsCall(
   }
   for (const sweep of sweeps) sweep();
   return {
-    at, actor, principal, make: made, ends: ended, credentials: swept, revokedAt: input.revokedAt, revokedBy: input.revokedBy,
+    at, actor, principal, make: made, ends: ended, credentials: swept, live: input.live, reads: input.reads, revokedAt: input.revokedAt, revokedBy: input.revokedBy,
     policy: { seq: input.policy.seq, slugs: read?.slugs ?? input.policy.protected }, appKey: input.appKey, changes,
   };
 }

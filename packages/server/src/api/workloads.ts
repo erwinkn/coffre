@@ -699,7 +699,7 @@ export class WorkloadService {
               },
             }),
           ];
-          await this.#bindingsByVault(ctx, caller, accessSeq, member, row, ending, planned.replaces.some(({ why }) => why === 'keys_moved') ? 'keys_moved' : 'replaced', details, entries);
+          await this.#bindingsByVault(ctx, caller, accessSeq, member, row, { live, reads }, ending, planned.replaces.some(({ why }) => why === 'keys_moved') ? 'keys_moved' : 'replaced', details, entries);
           return {
             binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, planned.policy),
             replaced: planned.replaces.map(({ id }) => id),
@@ -830,14 +830,16 @@ export class WorkloadService {
       if (options.dryRun) return plan;
       // Each new binding's policy, its old one's, shown by path and name.
       const shown = await this.#shownPolicies(replaced);
-      // With 0.15's log, each replaced by the vault, one call each, in the order of those they replace (PR 3a).
+      // With 0.15's log, each replaced by the vault, one call each, in the order of those they replace (PR 3a); each read
+      // and retried on its own, so that one that moved is asked again without undoing those done (review r1).
       if (await vaultBinds(this.#deps.vault)) {
-        return retrying(async () => {
-          const live = replacing(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation));
-          if (live.map((row) => row.id).join() !== plan.replaces.join()) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
-          const bindings: BindingView[] = [];
-          const now = Date.now();
-          for (const [i, old] of live.entries()) {
+        const bindings: BindingView[] = [];
+        const now = Date.now();
+        for (const [i, planned] of replaced.entries()) {
+          bindings.push(await retrying(async () => {
+            const live = await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation);
+            const old = live.find((row) => row.id === planned.id);
+            if (old === undefined) throw conflict(`the bindings on ${input.issuer} changed while their keys were replaced: try again`);
             const { scope, byPath } = scopes.get(old.id)!;
             const row = {
               id: randomUUID(), principal: member, generation: standing.generation, profile: old.profile, issuer: old.issuer, jwksUri, jwks: uploaded.jwks,
@@ -845,7 +847,7 @@ export class WorkloadService {
               // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
               createdAt: new Date(now + i),
             };
-            await this.#bindingsByVault(ctx, caller, accessSeq, member, row, [old], 'keys_moved', { ...details, bindingId: old.id }, [
+            await this.#bindingsByVault(ctx, caller, accessSeq, member, row, { live, reads: [] }, [old], 'keys_moved', { ...details, bindingId: old.id }, [
               allowed(ctx, 'token.unbind', { metadata: { bindingId: old.id, principalType: 'service', principalId: serviceId, reason: 'keys_replaced', by: row.id } }),
               allowed(ctx, 'token.bind', {
                 metadata: {
@@ -854,10 +856,10 @@ export class WorkloadService {
                 },
               }),
             ]);
-            bindings.push(view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, shown(old.policy)));
-          }
-          return { bindings, replaced: plan.replaces };
-        });
+            return view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, byPath, shown(old.policy));
+          }));
+        }
+        return { bindings, replaced: plan.replaces };
       }
 
       return retrying(async () => {
@@ -933,7 +935,7 @@ export class WorkloadService {
           const live = row !== null && row.revokedAt === null
             && (await liveBindings(this.#deps.db, this.#deps.chainKey, member, row.generation)).some((candidate) => candidate.id === bindingId);
           if (!live) throw new Refusal(notFound('unknown trust binding'), denied(ctx, 'token.unbind', 'unknown_binding', { metadata }));
-          await this.#bindingsByVault(ctx, ctx.caller, null, member, null, [row], 'unbound', metadata, [allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } })]);
+          await this.#bindingsByVault(ctx, ctx.caller, null, member, null, null, [row], 'unbound', metadata, [allowed(ctx, 'token.unbind', { metadata: { ...metadata, reason: 'removed' } })]);
           return { unbound: true as const };
         });
       }
@@ -1061,6 +1063,7 @@ export class WorkloadService {
     accessSeq: bigint | null,
     member: string,
     make: Parameters<typeof madeBinding>[1] | null,
+    beside: { live: readonly BindingRow[]; reads: readonly ResolvedRead[] } | null,
     ends: readonly BindingRow[],
     reason: ChangeBindingsInput['reason'],
     details: Record<string, unknown>,
@@ -1083,6 +1086,9 @@ export class WorkloadService {
     const outcome = await vault.changeBindings!({
       actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
       make: make === null ? null : madeBinding(chainKey, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
+      // The account's live bindings it was weighed beside, but those 0.14 made and ended just now; the keys it reads, by name.
+      live: make === null ? null : (beside?.live ?? []).filter((row) => !ends.some((ended) => ended.id === row.id && row.seal === null)).map((row) => row.id),
+      reads: (beside?.reads ?? []).flatMap((read) => (read.keys === '*' ? [] : read.keys.map(({ id, key }) => ({ id, key })))),
       policy: {
         seq: caller.policySeq?.toString() ?? null,
         protected: Object.values(caller.policy.protectedIn).flat().map(({ environmentId, slug }) => ({ environmentId, slug })),

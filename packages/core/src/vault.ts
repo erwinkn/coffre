@@ -511,8 +511,11 @@ export type EndedBinding = {
   before: { columns: BindingColumns; seal: string };
   authMacFrom: string;
   authMac: string;
-  /** Every live credential it issued, each as `revokeCredential` names one: the statement holds the set to the rows. */
-  credentials: { before: { columns: CredentialColumns; seal: string }; authMacFrom: string; authMac: string }[];
+  /**
+   * Every live credential it issued, each as `revokeCredential` names one: the statement holds the set to the rows. One
+   * with no seal (0.14's, or written around the vault) is ended all the same, its row revoked with no change.
+   */
+  credentials: { before: { columns: CredentialColumns; seal: string | null }; authMacFrom: string; authMac: string }[];
 };
 
 export type ChangeBindingsInput = {
@@ -524,6 +527,10 @@ export type ChangeBindingsInput = {
   actorAccess: string | null;
   /** The binding it makes; null for an unbind. Its account at its generation, as its columns name them. */
   make: MadeBinding | null;
+  /** With a binding made, the account's live bindings as the app read them, by id, which it was weighed beside; else null. */
+  live: string[] | null;
+  /** The keys a binding made reads (its policy's `reads`), by id and the name they were asked by: none moves before the write. */
+  reads: { id: string; key: string }[];
   /** The bindings it ends: those the new one replaces, or the one unbound. */
   ends: EndedBinding[];
   /** Why they end, for the changes' record. */

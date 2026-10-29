@@ -9,6 +9,7 @@ import type { Role } from '@coffre/core/access';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Client, type Database } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
+import type { Vault } from '@coffre/core/vault';
 import { asc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
@@ -1084,6 +1085,26 @@ test("uploaded keys are checked when bound: public keys alone, of the two algori
   const named = await bindWith({ keys: [rsa.jwk] }, 'kapsule:fr-par:5f2a');
   assert.ok('issuer' in named && named.issuer === 'kapsule:fr-par:5f2a');
   await assert.rejects(bindWith({ keys: [rsa.jwk] }, ' kapsule'), { status: 400 });
+});
+
+test("with 0.15's log, replacing keys asks each binding's change on its own: one that moved is asked again, those done stand (PR 3a, review r1)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
+}, async (t) => {
+  const first = await bindCluster([rsa]);
+  const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
+  assert.ok('binding' in first && 'binding' in other);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  // The second binding's change finds a row moved (a sign-in through it, say), once.
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    calls += 1;
+    return calls === 2 ? { ok: false as const, refused: 'moved' as const } : change(input);
+  });
+  const done = await replaceKeys([rsa, ec]);
+  assert.ok('bindings' in done);
+  assert.deepEqual(done.replaced, [first.binding.id, other.binding.id]);
+  assert.equal(calls, 3, 'the first once, the second twice');
+  assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer).length, 2);
 });
 
 test("replacing an issuer's keys replaces each binding on it, the same but for them; a set of old and new takes both while it rotates", async () => {

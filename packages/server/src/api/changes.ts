@@ -375,18 +375,20 @@ export function madeBinding(chainKey: Buffer, row: Omit<BindingRow, 'authMac' | 
 
 /**
  * A binding the vault ends (`changeBindings`), with the live credentials it
- * issued, each as read with its seal and MAC and the app's MAC over it
- * revoked at `at`; null when it or one of them is 0.14's, which the log
- * never held, and the app ends as before.
+ * issued, each as read with its seal (none for one 0.14 made, or written
+ * around the vault, which the vault ends too) and MAC, and the app's MAC
+ * over it revoked at `at`; null when the binding is 0.14's, which the log
+ * never held, and the app ends as before. A binding the log holds is always
+ * the vault's to end (review r1): left to the app, its object would stand.
  */
 export function endedBinding(chainKey: Buffer, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding | null {
-  if (row.seal === null || credentials.some((credential) => credential.seal === null)) return null;
+  if (row.seal === null) return null;
   return {
     before: { columns: sealedBinding(row).columns, seal: Buffer.from(row.seal).toString('base64') },
     authMacFrom: Buffer.from(row.authMac).toString('base64'),
     authMac: authMac(chainKey, 'service_bindings', { ...row, revokedAt: at }).toString('base64'),
     credentials: credentials.map((credential) => ({
-      before: { columns: credentialColumns(credential), seal: Buffer.from(credential.seal!).toString('base64') },
+      before: { columns: credentialColumns(credential), seal: credential.seal === null ? null : Buffer.from(credential.seal).toString('base64') },
       authMacFrom: Buffer.from(credential.authMac).toString('base64'),
       authMac: authMac(chainKey, 'credentials', { ...credential, revokedAt: at }).toString('base64'),
     })),

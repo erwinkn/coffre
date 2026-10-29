@@ -15,8 +15,11 @@ import { postgresSession } from '@coffre/db/connect';
 import { asc, eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { objectKey } from '../src/inputs.ts';
-import { emptyDatabase, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
+import { loggedChange, type ChangeKeys } from '../src/changes.ts';
+import { objectKey, sealKey } from '../src/inputs.ts';
+import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
+import { replay } from '../src/log-replay.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -42,13 +45,15 @@ function configure(): ResolvedVaultConfig {
 
 /** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project. */
 async function world() {
-  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed });
+  const config = configure();
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
-  return { vault, project };
+  const keys: ChangeKeys = { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
+  return { vault, project, keys };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -62,10 +67,12 @@ function binding(w: World, sensitive = false, by = ROOT): MadeBinding {
   };
 }
 
+/** A change as the app asks it; with a binding made, beside the account's live bindings `live` (none unless named). */
 function change(input: Partial<ChangeBindingsInput>): ChangeBindingsInput {
   return {
     actor: ROOT, via: null, actorAccess: null, make: null, ends: [], reason: 'unbound', revokedAt: Date.now(), revokedBy: 'root@acme.example',
-    policy: { seq: null, protected: [] }, appKey: APP_KEY, ...input,
+    policy: { seq: null, protected: [] }, appKey: APP_KEY, reads: [], ...input,
+    live: input.live ?? (input.make == null ? null : []),
   };
 }
 
@@ -109,7 +116,7 @@ async function ending(id: string, credentials?: string[]): Promise<ChangeBinding
     credentials: rows.map((row) => ({
       before: {
         columns: { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: false, generation: row.generation, expiresAt: row.expiresAt.getTime() } satisfies CredentialColumns,
-        seal: Buffer.from(row.seal!).toString('base64'),
+        seal: row.seal === null ? null : Buffer.from(row.seal).toString('base64'),
       },
       authMacFrom: Buffer.from(row.authMac).toString('base64'), authMac: randomBytes(32).toString('base64'),
     })),
@@ -154,7 +161,7 @@ test('a binding 0.14 made, which the log never held, or one whose row was edited
   assert.deepEqual((await signIn(w, old.id)).outcome, { ok: false, refused: 'unsealed' });
   // One the vault sealed, its keys moved to the app's own around it: the row is not the object its seal covers.
   const made = binding(w);
-  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, live: [old.id], reason: 'replaced' }))).ok);
   const sealedAs = await read(made.id);
   await db.owner.update(serviceBindings).set({ jwksUri: 'https://evil.example/jwks' }).where(eq(serviceBindings.id, made.id));
   assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unsealed' }, 'named as the row is now');
@@ -209,7 +216,7 @@ test("a binding that replaces another ends it, and what it issued, in the same s
   const run = await signIn(w, old.id);
   assert.ok(run.outcome.ok);
   const next = binding(w);
-  const outcome = await w.vault.changeBindings!(change({ make: next, ends: [await ending(old.id)], reason: 'keys_moved' }));
+  const outcome = await w.vault.changeBindings!(change({ make: next, live: [old.id], ends: [await ending(old.id)], reason: 'keys_moved' }));
   assert.ok(outcome.ok, JSON.stringify(outcome));
   assert.deepEqual(await ops({ kind: 'binding', id: old.id }), ['binding.make', 'binding.revoke']);
   assert.deepEqual(await ops({ kind: 'credential', id: run.credential }), ['credential.issue', 'credential.revoke']);
@@ -247,4 +254,64 @@ test("a binding's maker whose access moved since the app weighed it is refused, 
   assert.equal(!stale.ok && stale.refused, 'access');
   const { serviceBindings } = tablesOf(db.owner);
   assert.equal((await db.owner.select().from(serviceBindings)).length, 0);
+});
+
+test("a credential with no seal its sealed binding issued (one planted around the vault) is ended with it; the binding's object ends all the same (review r1)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const run = await signIn(w, made.id);
+  assert.ok(run.outcome.ok);
+  const { credentials } = tablesOf(db.owner);
+  const planted = randomUUID();
+  await db.owner.insert(credentials).values({
+    id: planted, kind: 'service', authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, principal: CI,
+    createdBy: `binding:${made.id}`, expiresAt: new Date(Date.now() + 300_000),
+  });
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make', 'binding.revoke']);
+  assert.deepEqual(await ops({ kind: 'credential', id: planted }), [], 'none of the log\'s: no change of it');
+  assert.ok((await db.owner.select().from(credentials)).every((row) => row.revokedAt !== null), 'both ended');
+});
+
+test("a bind weighed beside the account's bindings as they were is read again when another was made meanwhile, or a key it reads renamed (review r1)", async () => {
+  const w = await world();
+  assert.ok((await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced' }))).ok);
+  // Beside none, as it read them before the first was made.
+  assert.deepEqual(await w.vault.changeBindings!(change({ make: binding(w), live: [], reason: 'replaced' })), { ok: false, refused: 'moved' });
+  // A key its policy reads, asked by a name it no longer has.
+  const { secrets, serviceBindings } = tablesOf(db.owner);
+  const environment = await newEnvironment(db.owner, w.project);
+  const key = randomUUID();
+  await db.owner.insert(secrets).values({ id: key, projectId: w.project, environmentId: environment, key: 'RENAMED' });
+  const live = (await db.owner.select({ id: serviceBindings.id }).from(serviceBindings)).map(({ id }) => id);
+  assert.deepEqual(await w.vault.changeBindings!(change({ make: binding(w), live, reads: [{ id: key, key: 'API_KEY' }], reason: 'replaced' })), { ok: false, refused: 'moved' });
+  assert.ok((await w.vault.changeBindings!(change({ make: binding(w), live, reads: [{ id: key, key: 'RENAMED' }], reason: 'replaced' }))).ok, 'by its name now');
+});
+
+test("a change names each binding and credential once: one named twice is no change the replay could take (review r1)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const end = await ending(made.id);
+  await assert.rejects(w.vault.changeBindings!(change({ ends: [end, end] })), /each binding and credential once/);
+});
+
+test("the log of a bind, a sign-in through it and its unbind replays to the rows: each entry the vault's, no fault (review r1)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  assert.ok((await signIn(w, made.id)).outcome.ok);
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  const { logChanges } = tablesOf(db.owner);
+  const holds = authentic(w.keys.mac);
+  const changes = (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).map((raw) => {
+    const row = { ...raw, number: BigInt(raw.number), seal: raw.seal ?? null };
+    assert.ok(holds(changeEntry(row)), `entry ${row.number}'s MAC is the vault's`);
+    return loggedChange(row)!;
+  });
+  const replayed = replay(w.keys.seals, changes);
+  assert.deepEqual(replayed.faults, []);
+  const binding_ = replayed.rows.get(objectKey({ kind: 'binding', id: made.id }));
+  assert.equal((binding_?.row as { revoked?: boolean } | undefined)?.revoked, true, 'the replay ends it too');
 });
