@@ -28,6 +28,7 @@ import {
   MAX_TOKEN_AGE_SECONDS,
   OIDC_PROFILES,
   POLICY_DEFAULTS,
+  PROFILE_URNS,
   POLICY_FIELDS,
   policyText,
   REPEATING_PROFILES,
@@ -46,7 +47,7 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
-import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInRefusal, Vault } from '@coffre/core/vault';
+import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInOutcome, SignInRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
@@ -394,6 +395,9 @@ export function proofOf(profile: string): { name: ProofName; kind: ProofKind } |
 
 /** What a workload sends to sign in (section 4.1): the service, `token:<name>` or its name, and one proof by its kind. */
 export type SessionRequest = { service: string; proof: Readonly<Record<string, unknown>> };
+
+/** A sign-in's request beside its body: its DPoP header, verified (`jkt`, its key's thumbprint), which the vault verifies again. */
+export type SignInMeta = { requestId: string; sourceIp: string | null; jkt: string; dpop: string };
 
 /** A session made: its token, sent with the key's proof; its expiry and hard end; the environments it reaches, by path. */
 export type SessionIssued = { token: string; tokenType: 'DPoP'; expiresAt: string; notAfter: string; places: string[] };
@@ -1072,7 +1076,7 @@ export class WorkloadService {
     caller: Caller,
     accessSeq: bigint | null,
     member: string,
-    make: Parameters<typeof madeBinding>[1] | null,
+    make: Parameters<typeof madeBinding>[2] | null,
     beside: { live: readonly string[]; reads: readonly ResolvedRead[] } | null,
     ends: readonly BindingRow[],
     reason: ChangeBindingsInput['reason'],
@@ -1084,14 +1088,14 @@ export class WorkloadService {
     const sealedEnds: EndedBinding[] = [];
     for (const row of ends) {
       // Every one the statement counts, MAC or not (Fable on PR 3a): one the app's check passes over would refuse the end.
-      sealedEnds.push(endedBinding(chainKey, row, await issuedCredentials(db, member, row.id, at), at));
+      sealedEnds.push(endedBinding(chainKey, this.#deps.publicUrl, row, await issuedCredentials(db, member, row.id, at), at));
     }
     const action = make === null ? 'token.unbind' : 'token.bind';
     const outcome = await vault.changeBindings!({
       actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
       // Through an MCP connection, held to it as `credentialStill` holds a write to it (review r3).
       connection: ctx.via?.connectionId == null ? null : { id: ctx.via.connectionId, generation: ctx.caller.generation },
-      make: make === null ? null : madeBinding(chainKey, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
+      make: make === null ? null : madeBinding(chainKey, this.#deps.publicUrl, make), ends: sealedEnds, reason, revokedAt: at.getTime(), revokedBy: ctx.caller.principal.id,
       // The account's live bindings it was weighed beside, but those 0.14 made and ended just now; the keys it reads, by name.
       live: make === null ? null : [...(beside?.live ?? [])],
       reads: (beside?.reads ?? []).flatMap((read) => (read.keys === '*' ? [] : read.keys.map(({ id, key }) => ({ id, key })))),
@@ -1250,7 +1254,7 @@ export class WorkloadService {
    * ends its proof gave; it expires `lifetimeMs` after it is made, and at
    * each renewal. One its binding has wait for approval is answered 202.
    */
-  async signIn(request: SessionRequest, meta: { requestId: string; sourceIp: string | null; jkt: string }): Promise<SessionIssued | SessionPending> {
+  async signIn(request: SessionRequest, meta: SignInMeta): Promise<SessionIssued | SessionPending> {
     if (inFlight >= exchangeLimit.inFlight) throw new ExchangeRefused('busy', 'too many exchanges under way: try again shortly', 429);
     inFlight++;
     try {
@@ -1263,7 +1267,7 @@ export class WorkloadService {
     }
   }
 
-  async #signIn(request: SessionRequest, meta: { requestId: string; sourceIp: string | null; jkt: string }): Promise<SessionIssued | SessionPending> {
+  async #signIn(request: SessionRequest, meta: SignInMeta): Promise<SessionIssued | SessionPending> {
     const { db, chainKey, vault, config, publicUrl, transport } = this.#deps;
     const names = Object.keys(request.proof);
     const name = names[0] as ProofName;
@@ -1285,7 +1289,9 @@ export class WorkloadService {
     }
     // With 0.15's log, the vault makes the session (T149): it spends the token, and weighs the account, the binding, its
     // freezes and its rate, in one call. A proof that decides in the transaction (`commit`) makes it as below.
-    if (kind.commit === undefined && (await vaultMakesCredentials(vault))) return this.#signInByVault(vault as CredentialsVault, { member, name, kind, verified, policy }, meta, ctx);
+    if (kind.commit === undefined && (await vaultMakesCredentials(vault))) {
+      return this.#signInByVault(vault as CredentialsVault, { member, name, kind, verified, policy, given: request.proof[name] }, meta, ctx);
+    }
     const spent = verified.spentKey;
     if (spent !== undefined && (await tokenConsumed(db, spent))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your platform for a fresh one');
     const standing = await vault.access(member);
@@ -1395,11 +1401,11 @@ export class WorkloadService {
    */
   async #signInByVault(
     vault: CredentialsVault,
-    proof: { member: string; name: ProofName; kind: ProofKind; verified: MatchedProof; policy: BindingPolicy },
-    meta: { requestId: string; sourceIp: string | null; jkt: string },
+    proof: { member: string; name: ProofName; kind: ProofKind; verified: MatchedProof; policy: BindingPolicy; given: unknown },
+    meta: SignInMeta,
     ctx: ProofContext,
   ): Promise<SessionIssued> {
-    const { member, name, kind, verified, policy } = proof;
+    const { member, name, kind, verified, policy, given } = proof;
     const { binding } = verified;
     const known = await places(this.#deps.db);
     const now = Date.now();
@@ -1416,15 +1422,20 @@ export class WorkloadService {
     });
     const outcome = await vault.signIn({
       principal: member,
-      binding: sealedBinding(binding),
+      binding: sealedBinding(binding, this.#deps.publicUrl),
       credential: signedInCredential(row),
       appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: verified.spentKey?.toString('base64') ?? null,
       // Its proof's end is the session's hard end, held to in the statement.
       validUntil: null,
       record: { proof: name, issuer: binding.issuer, run: runClaims(verified.claims) },
+      // An ID token, verified again by the vault on the binding it sealed, the session's key by the DPoP proof it signed
+      // (D148, PR 3b). A proof that is no ID token is the app's alone to verify in 0.15: an AWS signed request (0.16 moves
+      // it into the vault), so a compromised app could still make sessions of an AWS binding's.
+      proof: Object.hasOwn(PROFILE_URNS, binding.profile) ? null : { token: given as string, jwks: binding.jwks, dpop: meta.dpop },
     });
     if (!outcome.ok) {
+      if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
       throw signInRefusal(outcome.refused, {
         unbound: `no workload binding of ${shownMember(member)} takes this proof`,
         frozen: `${shownMember(member)} is frozen: a manager stopped its use, and no session is made until they lift it`,
@@ -1500,7 +1511,7 @@ export class WorkloadService {
     // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. Every sign-in through a binding goes there, so
     // that each one's rate is counted under its row: one 0.4 made, its scope unsealed, is sealed first, and read again.
     const byVault = await vaultMakesCredentials(vault);
-    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, decoded);
+    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, request.token, decoded);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
@@ -1510,7 +1521,7 @@ export class WorkloadService {
     if (byVault) {
       const sealed = await findBinding(db, chainKey, member, binding.id);
       if (sealed === null || unsealedScope(sealed.scope)) throw unbound();
-      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, decoded);
+      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, request.token, decoded);
     }
 
     const service = member.slice('token:'.length);
@@ -1562,16 +1573,19 @@ export class WorkloadService {
    * generation, the binding's rate and the token spent once are weighed in
    * its statement, on their rows, under their locks (formal/Lifecycle.tla's
    * BindingLocked, MemberLocked, SpentChecked); no 0.14 head, and no
-   * `token.exchange` entry: its change records the run (D147).
+   * `token.exchange` entry: its change records the run (D147). The token
+   * goes with it, and the vault verifies it again on the binding it sealed
+   * (D148, PR 3b): what decides is its check, the app's a filter that keeps
+   * a token no binding takes from costing the vault a call.
    */
-  async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, decoded: DecodedToken): Promise<Exchanged> {
+  async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, token: string, decoded: DecodedToken): Promise<Exchanged> {
     const issuer = decoded.claims.iss;
     const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
       generation: binding.generation, bindingId: binding.id, label: binding.label, expiresAt: new Date(Date.now() + EXCHANGED_CREDENTIAL_MS), stored: binding.scope,
     });
     const outcome = await vault.signIn({
       principal: member,
-      binding: sealedBinding(binding),
+      binding: sealedBinding(binding, this.#deps.publicUrl),
       credential: signedInCredential({ ...row, kind: 'service' }),
       appKey: appLogKey(this.#deps.chainKey).keyId,
       spent: decoded.signingInputHash.toString('base64'),
@@ -1579,8 +1593,10 @@ export class WorkloadService {
       // Whole ms, down: a token's times may be fractional seconds, which the checks before took.
       validUntil: Math.floor(Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000)),
       record: { proof: 'oidc', issuer, run: runClaims(claims) },
+      proof: { token, jwks: binding.jwks, dpop: null },
     });
     if (!outcome.ok) {
+      if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
       // Past its times by the statement: which of them, as the commit under the head says it.
       const issued = outcome.refused === 'expired' ? issuedRefusal(decoded.claims.iat, Date.now() / 1000) : null;
       if (issued !== null) throw refused(issued);
@@ -1622,7 +1638,7 @@ function signedInCredential(row: {
 }
 
 /** A sign-in the vault refused, as the workload's owner reads it: today's codes and words, each path its own. */
-function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired' | 'unsealed'>, string> & { frozen?: string }): ExchangeRefused {
+function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired' | 'unsealed' | 'proof'>, string> & { frozen?: string }): ExchangeRefused {
   switch (refused) {
     // An instance under an app key the log moved on from, as for the seconds a deploy takes: 503, as its append would answer.
     case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
@@ -1634,6 +1650,25 @@ function signInRefusal(refused: SignInRefusal, words: Record<Exclude<SignInRefus
     // Made before the vault sealed bindings, or changed around it: a manager binds it again (PR 3a).
     case 'unsealed': return new ExchangeRefused('unsealed', 'this binding is none the vault sealed, made before it sealed them or changed since: bind it again');
   }
+}
+
+/** The reasons the vault's check of a proof gives that the app's own gives too (`verifyRunToken`, PR 3b). */
+const PROOF_REASONS: ReadonlySet<string> = new Set<ExchangeReason>([
+  'malformed', 'no_match', 'signature', 'unknown_key', 'expired', 'too_old', 'too_long', 'not_yet_valid', 'audience', 'issuer_unavailable', 'dpop',
+]);
+
+/**
+ * A proof the vault refused, as the app's own check words it: an issuer it
+ * cannot ask is 503 for a minute, a key a service's uploaded keys lack
+ * alerts (`UnknownKey`), and keys that are not the ones its binding's seal
+ * digests, a row changed around the vault, are a binding to make again.
+ */
+function proofRefusal(outcome: Extract<SignInOutcome, { refused: 'proof' }>, member: string, binding: BindingRow): ExchangeRefused {
+  const { reason, message, kid } = outcome;
+  if (reason === 'issuer_unavailable') return new ExchangeRefused('issuer_unavailable', message, 503, '60');
+  if (reason === 'unknown_key' && binding.jwks !== null) return new UnknownKey(member, binding, binding.issuer, kid);
+  if (reason === 'keys') return new ExchangeRefused('unsealed', `${message}: bind it again`);
+  return new ExchangeRefused(PROOF_REASONS.has(reason) ? (reason as ExchangeReason) : 'malformed', message);
 }
 
 /** An uploaded key set, checked (`uploadedKeys`), or a 400 saying what is wrong with it. */

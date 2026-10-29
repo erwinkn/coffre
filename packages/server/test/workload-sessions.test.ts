@@ -162,7 +162,7 @@ beforeEach(async () => {
   }
   limits = processLimits({ perSource: 1000, total: 1000 });
   gate = new TestGate();
-  deps = testDeps(db.runtime, [ROOT]);
+  deps = testDeps(db.runtime, [ROOT], { issuers: transport });
   vaultCalls = 0;
   const access = deps.vault.access.bind(deps.vault);
   deps.vault.access = async (principal) => {

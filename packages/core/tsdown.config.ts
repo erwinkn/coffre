@@ -7,6 +7,9 @@ export default defineConfig({
     audit: 'src/audit/chain.ts',
     dotenv: 'src/dotenv.ts',
     envelope: 'src/envelope.ts',
+    // How coffre fetches an issuer's discovery document and keys, and keeps the keys: the app's and the vault's (T149, PR 3b).
+    fetch: 'src/fetch/index.ts',
+    'fetch-node': 'src/fetch/node.ts',
     identity: 'src/identity/index.ts',
     kek: 'src/kek/index.ts',
     // MCP's scopes and client rules, for the server and the consent page.

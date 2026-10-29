@@ -353,11 +353,11 @@ export function environmentChange(before: ObjectRead<EnvironmentColumns> | undef
   return { kind: 'environment', id: after.id, before: before === undefined ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
 }
 
-/** A binding's row as its object takes it (PR 3a): its columns, its seal (null for one the vault never sealed). */
-export function sealedBinding(row: BindingRow): { columns: BindingColumns; seal: string | null } {
+/** A binding's row as its object takes it (PR 3a), made on `origin`, this instance's public URL (PR 3b): its columns, its seal (null for one the vault never sealed). */
+export function sealedBinding(row: BindingRow, origin: string): { columns: BindingColumns; seal: string | null } {
   return {
     columns: {
-      id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer, jwksUri: row.jwksUri, claims: row.claims,
+      id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer, origin, jwksUri: row.jwksUri, claims: row.claims,
       scope: row.scope, policy: row.policy, revoked: row.revokedAt !== null,
     },
     seal: sealText(row.seal ?? null),
@@ -365,10 +365,10 @@ export function sealedBinding(row: BindingRow): { columns: BindingColumns; seal:
 }
 
 /** A binding the vault makes (`changeBindings`): its row, as `insertBinding` writes it, and the app's MAC over it. */
-export function madeBinding(chainKey: Buffer, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal'>): MadeBinding {
+export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal'>): MadeBinding {
   const signed = { ...row, revokedAt: null };
   return {
-    ...sealedBinding({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }).columns,
+    ...sealedBinding({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, origin).columns,
     jwks: row.jwks ?? null, label: row.label ?? null, createdBy: row.createdBy, createdAt: row.createdAt.getTime(), authMac: authMac(chainKey, 'service_bindings', signed).toString('base64'),
   };
 }
@@ -381,9 +381,9 @@ export function madeBinding(chainKey: Buffer, row: Omit<BindingRow, 'authMac' | 
  * left to the app could be a binding of the log's whose seal a writer
  * cleared, and its object would stand past its end (reviews r1, r2).
  */
-export function endedBinding(chainKey: Buffer, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding {
+export function endedBinding(chainKey: Buffer, origin: string, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding {
   return {
-    before: sealedBinding(row) as EndedBinding['before'],
+    before: sealedBinding(row, origin) as EndedBinding['before'],
     authMacFrom: Buffer.from(row.authMac).toString('base64'),
     authMac: authMac(chainKey, 'service_bindings', { ...row, revokedAt: at }).toString('base64'),
     credentials: credentials.map((credential) => ({

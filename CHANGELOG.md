@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **0.15's vault verifies a run's ID token itself, behind its switch.** A
+  sealed binding still took the app's word that the token held, so the
+  app's code turned hostile could sign a run in with no token at all. A
+  sign-in now carries the token, and the vault verifies it on the binding it
+  sealed: its keys (fetched, or the uploaded set its seal digests), its
+  audience (the instance's public URL the binding was made on, sealed with
+  it; for a platform whose caller picks it, that URL naming the key whose
+  DPoP proof the vault checks), times, claims and profile rules. What the
+  credential is held to comes of the token. An AWS binding's signed request
+  stays the app's to verify in 0.15, the one case where a compromised app
+  could still mint a session; 0.16 moves it. Warm, a sign-in costs what it
+  did; with both sides' key caches cold, one fetch more.
+  `docs/design/credential-lifecycle.md`, section 4b; `formal/Lifecycle.tla`'s
+  AudienceSealed.
+  **Upgrading, on Node:** under the switch, the vault's process fetches the
+  issuers' keys too, so it needs outbound HTTPS to each issuer a binding
+  trusts (`token.actions.githubusercontent.com` for GitHub), as the app's
+  has. It reaches public addresses only, checked as it connects, within 3
+  seconds (`docs/deploy.md`, "CI runs without a stored token").
 - **0.15's sign-in through a trust binding, a revoke and a sign-out are
   each one vault call, behind its switch.** A CI run's sign-in was 8 app
   statements, 6 of them holding 0.14's head, which every app write waits

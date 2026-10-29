@@ -3,6 +3,8 @@ export * from './auth.ts';
 export * from './constraints.ts';
 export * from './dpop.ts';
 export * from './github-app.ts';
+export * from './profile-rules.ts';
+export * from './run-proof.ts';
 export * from './signin/index.ts';
 export * from './tokens.ts';
 export * from './types.ts';

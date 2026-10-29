@@ -111,6 +111,10 @@ CONSTANTS
     \* The vault verifies the CI run's ID token itself (D148), against the
     \* binding's keys.
     VaultVerifiesToken,
+    \* ... and holds its audience to the one the sealed binding names, not to
+    \* one the app names: a token its issuer signed for another audience (an
+    \* instance of someone else's) is none of this binding's (PR 3b).
+    AudienceSealed,
     \* The vault takes only a binding it sealed (a change of the log, made
     \* by a manager of the account): the app's row alone is no binding.
     BindingSealed
@@ -122,9 +126,12 @@ Sens == {"read", "sens"}
 Bindings == {"b", "b2", "b3"}
 \* The ID tokens: j1 and j2, signed by b's issuer; "bad", signed by nobody;
 \* "e2", signed by the key evil's binding b2 trusts.
-IdTokens == {"j1", "j2", "bad", "e2"}
-SignedBy == [b \in Bindings |-> IF b = "b2" THEN {"e2"} ELSE {"j1", "j2"}]
-Valid == SignedBy["b"]
+IdTokens == {"j1", "j2", "bad", "e2", "x"}
+\* "x": signed by b's issuer, for another audience (another instance's).
+SignedBy == [b \in Bindings |-> IF b = "b2" THEN {"e2"} ELSE {"j1", "j2", "x"}]
+AudOf(tok) == IF tok = "x" THEN "other" ELSE "us"
+\* Every binding's sealed audience is this instance's.
+Valid == {t \in SignedBy["b"] : AudOf(t) = "us"}
 
 \* The credential each issuing process makes.
 IssuedBy == [p \in {"ada", "evil", "s1", "s2"} |->
@@ -239,7 +246,7 @@ Init ==
     /\ spent = {}
     /\ pc = [p \in Procs |-> "start"]
     /\ op = [p \in Procs |-> [kind |-> "none"]]
-    /\ l = [p \in Procs |-> [c |-> None, tok |-> None, n |-> 0, gen |-> 0, ok |-> FALSE, w |-> NoRow,
+    /\ l = [p \in Procs |-> [c |-> None, tok |-> None, aud |-> "us", n |-> 0, gen |-> 0, ok |-> FALSE, w |-> NoRow,
                              owner |-> FALSE, cA |-> NoRow, set |-> {}, b |-> None, before |-> {}]]
     /\ handed = {"cS"}
     /\ answered = {}
@@ -388,10 +395,10 @@ SignInStart(s) ==
     /\ pc[s] = "start"
     /\ \/ \E o \in Ops[s] :
             /\ o.b \in bindings
-            /\ l' = [l EXCEPT ![s].tok = o.tok, ![s].b = o.b]
+            /\ l' = [l EXCEPT ![s].tok = o.tok, ![s].b = o.b, ![s].aud = o.aud]
             /\ op' = [op EXCEPT ![s] = [kind |-> "signin"]]
-            \* The honest app refuses a token its binding's keys did not sign.
-            /\ IF o.evil \/ o.tok \in SignedBy[o.b] THEN Goto(s, "rows") ELSE Goto(s, "done")
+            \* The honest app refuses a token its binding's keys did not sign, or signed for another audience.
+            /\ IF o.evil \/ (o.tok \in SignedBy[o.b] /\ AudOf(o.tok) = "us") THEN Goto(s, "rows") ELSE Goto(s, "done")
        \/ \* Never asks.
           /\ Goto(s, "done") /\ UNCHANGED <<l, op>>
     /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, handed, answered, given, revs, dems, used>>
@@ -413,7 +420,7 @@ SignInBody(s) ==
            tok == l[s].tok
            ok == /\ b = "b" => unbound = 0
                  /\ BindingSealed => b \in bsealed
-                 /\ VaultVerifiesToken => tok \in SignedBy[b]
+                 /\ VaultVerifiesToken => tok \in SignedBy[b] /\ AudOf(tok) = (IF AudienceSealed THEN "us" ELSE l[s].aud)
                  /\ status = "active" /\ gen = 0
                  /\ Cardinality({g \in given : g.kind = "signin"}) < Rate
                  /\ SpentChecked => tok \notin spent

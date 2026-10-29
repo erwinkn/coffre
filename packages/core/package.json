@@ -37,6 +37,16 @@
       "types": "./dist/envelope.d.ts",
       "default": "./dist/envelope.js"
     },
+    "./fetch": {
+      "coffre:source": "./src/fetch/index.ts",
+      "types": "./dist/fetch.d.ts",
+      "default": "./dist/fetch.js"
+    },
+    "./fetch/node": {
+      "coffre:source": "./src/fetch/node.ts",
+      "types": "./dist/fetch-node.d.ts",
+      "default": "./dist/fetch-node.js"
+    },
     "./identity": {
       "coffre:source": "./src/identity/index.ts",
       "types": "./dist/identity.d.ts",

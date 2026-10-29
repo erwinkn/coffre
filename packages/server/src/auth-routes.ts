@@ -225,7 +225,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
     if (header === null) return refuseExchange(new ExchangeRefused('dpop', "a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in"));
     const proof = await verifyProof(header, { method: request.method, url: signedUrl(request, runtime.publicUrl), skewSeconds: EXCHANGE_SKEW_SECONDS });
     if (!proof.ok) return refuseExchange(new ExchangeRefused('dpop', `the DPoP proof does not hold: ${proof.message}`));
-    const made = await workloads.signIn(body, { requestId: crypto.randomUUID(), sourceIp, jkt: proof.jkt });
+    const made = await workloads.signIn(body, { requestId: crypto.randomUUID(), sourceIp, jkt: proof.jkt, dpop: header });
     const nonce = await gateNonce(runtime, body.service);
     return jsonResponse(made, 'pending' in made ? 202 : 200, nonce === null ? {} : { 'dpop-nonce': nonce });
   } catch (error) {

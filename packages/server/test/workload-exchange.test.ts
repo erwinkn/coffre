@@ -125,7 +125,7 @@ beforeEach(async () => {
     [KEYS, { keys: [rsa.jwk, ec.jwk] }],
   ]);
   limits = processLimits({ perSource: 1000, total: 1000 });
-  deps = testDeps(db.runtime, [ROOT]);
+  deps = testDeps(db.runtime, [ROOT], { issuers: transport });
   vaultCalls = 0;
   beforeAccess = undefined;
   afterAccess = undefined;

@@ -313,6 +313,8 @@ REMOVALS=(
   "LifecycleCompromised IssuerLocked SensitiveOnlyFromOwners"
   "LifecycleCompromised VaultVerifiesToken SignInsOnValidTokens"
   "LifecycleCompromised BindingSealed SignInsOnValidTokens"
+  # The vault holds the token's audience to the sealed binding's, never to one the app names (PR 3b).
+  "LifecycleCompromised AudienceSealed SignInsOnValidTokens"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.

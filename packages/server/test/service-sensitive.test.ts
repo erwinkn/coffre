@@ -71,7 +71,7 @@ after(async () => {
 beforeEach(async () => {
   await resetDatabase(db.owner);
   forgetKeys();
-  deps = testDeps(db.runtime, [ROOT]);
+  deps = testDeps(db.runtime, [ROOT], { issuers: transport });
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,

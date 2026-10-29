@@ -1488,11 +1488,12 @@ while an admin takes the right away), `LifecycleForge` and
 | the account's row shared (MemberLocked) and W242's generation at use (UseChecksGeneration), each covering for the other | `AllowedAtCurrentGeneration` without both |
 | the use checks seals (SealChecked) | `AllowedOnSealed` |
 | the seal covers the token's hash (HashSealed) and the app checks its MAC (AppChecksMac), each enough | `AllowedAsPresented` without both |
-| the vault verifies the ID token (VaultVerifiesToken); and takes only a binding it sealed (BindingSealed) | `SignInsOnValidTokens`, each |
+| the vault verifies the ID token (VaultVerifiesToken), against the audience its binding seals (AudienceSealed); and takes only a binding it sealed (BindingSealed) | `SignInsOnValidTokens`, each |
 
 The last row is PR 3's (D148): without sealed bindings, the hostile app
 writes one that trusts its own key, and the vault's check of the token
-proves nothing.
+proves nothing; with the audience the app names, it replays a token a run
+asked for another instance.
 
 **Not modelled:** the checkpointer's barrier and R51's wait beyond the
 revoke's answer (HotPathOneIssue's), Postgres's lock queue (HotPathOne's),

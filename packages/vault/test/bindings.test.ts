@@ -19,12 +19,14 @@ import { loggedChange, type ChangeKeys } from '../src/changes.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
+import { forgetKeys } from '@coffre/core/fetch';
+
+import { ISSUER, ORIGIN, testIssuer } from './issuer.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
 const CI = 'token:ci';
-const ISSUER = 'https://token.actions.githubusercontent.com';
 const APP_KEY = 'app:0123456789abcdef';
 
 let db: TestDatabase;
@@ -32,7 +34,10 @@ before(async () => {
   db = await openTestDatabase();
 });
 after(() => db.close());
-beforeEach(() => emptyDatabase(db.owner));
+beforeEach(async () => {
+  forgetKeys();
+  await emptyDatabase(db.owner);
+});
 
 function configure(): ResolvedVaultConfig {
   return {
@@ -46,14 +51,15 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project. */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
+  const issuer = testIssuer();
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, issuers: { transport: issuer.transport } });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
   const keys: ChangeKeys = { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
-  return { vault, project, keys };
+  return { vault, project, keys, issuer };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -61,7 +67,7 @@ type World = Awaited<ReturnType<typeof world>>;
 /** A binding of CI's, as the app asks the vault to make it: by the Owner, viewing the project, reading sensitive values when `sensitive`. */
 function binding(w: World, sensitive = false, by = ROOT): MadeBinding {
   return {
-    id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
+    id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
     scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive }]), policy: null, revoked: false,
     jwks: null, label: 'deploys', createdBy: by.slice('user:'.length), createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
   };
@@ -82,7 +88,7 @@ async function read(id: string): Promise<{ columns: SignInInput['binding']['colu
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
   return {
     columns: {
-      id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, jwksUri: row!.jwksUri, claims: row!.claims,
+      id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, origin: ORIGIN, jwksUri: row!.jwksUri, claims: row!.claims,
       scope: row!.scope, policy: row!.policy, revoked: row!.revokedAt !== null,
     },
     seal: row!.seal === null ? null : Buffer.from(row!.seal).toString('base64'),
@@ -102,6 +108,7 @@ async function signIn(w: World, id: string): Promise<{ outcome: Awaited<ReturnTy
       places: null, expiresAt: now + 5 * 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
     appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: { run_id: '7001' } },
+    proof: { token: w.issuer.token(), jwks: null, dpop: null },
   });
   return { outcome, credential };
 }
@@ -174,6 +181,7 @@ test('a binding 0.14 made, which the log never held, or one whose row was edited
       places: null, expiresAt: now + 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
     appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} },
+    proof: { token: w.issuer.token(), jwks: null, dpop: null },
   });
   assert.deepEqual(asSealed, { ok: false, refused: 'unbound' });
 });
@@ -422,6 +430,7 @@ test("a binding's row put back after its end, its old seal and all, signs nobody
       places: null, expiresAt: now + 60_000, notAfter: null, jkt: null, authMac: randomBytes(32).toString('base64'),
     },
     appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} },
+    proof: { token: w.issuer.token(), jwks: null, dpop: null },
   });
   assert.deepEqual(outcome, { ok: false, refused: 'unbound' });
   assert.equal((await db.owner.select().from(credentials)).length, none, 'nothing written');

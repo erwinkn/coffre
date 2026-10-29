@@ -482,6 +482,17 @@ export type SignInInput = {
   validUntil: number | null;
   /** What the change records of the sign-in besides (D147): the proof, its issuer, and the run's claims. */
   record: { proof: string; issuer: string; run: Record<string, string | number> };
+  /**
+   * The proof itself, which the vault verifies (D148, PR 3b): the run's ID
+   * token, the keys uploaded with its binding as its row keeps them (null
+   * for keys its issuer publishes, which the vault fetches), and a
+   * workload's DPoP proof, whose key the session is bound to. With it, the
+   * vault takes `spent`, `validUntil` and `record.run` from the token, not
+   * from the app. Null for a proof that is no ID token (an AWS signed
+   * request, Cloudflare's, an enrollment code): the app's to verify in
+   * 0.15, the one case where a compromised app could still sign a run in.
+   */
+  proof: { token: string; jwks: string | null; dpop: string | null } | null;
 };
 
 /**
@@ -496,6 +507,13 @@ export type BindingColumns = {
   generation: number;
   profile: string;
   issuer: string;
+  /**
+   * The instance's public URL it was made on (PR 3b): its base audience, as
+   * a token for it must name it (`expectedAudiences`), and where a workload's
+   * DPoP proof is signed for. No column: the app names it, and the seal
+   * holds it, so a binding of another URL's is none of this instance's.
+   */
+  origin: string;
   jwksUri: string;
   claims: string;
   scope: string | null;
@@ -580,9 +598,18 @@ export type SignInCredential = {
  * rotated from.
  */
 /** Why a sign-in made nothing; `unsealed`: its binding is none the vault sealed (one 0.14 made, or a row not its object), which signs nobody in (PR 3a). */
-export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed';
+export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed' | 'proof';
 
-export type SignInOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: SignInRefusal };
+/**
+ * A sign-in's answer. `proof`: the vault's check of the proof refused it,
+ * `reason` saying why as the app's refusals do (`ExchangeReason`): an
+ * unknown key names it (`kid`), and `issuer_unavailable` means its keys
+ * could not be fetched, or will not be for a minute.
+ */
+export type SignInOutcome =
+  | { ok: true; number: string; witnessed: boolean | null }
+  | { ok: false; refused: Exclude<SignInRefusal, 'proof'> }
+  | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null };
 
 /** A token the vault issues (`Vault.issueToken`). Times in ms since the epoch, bytes in base64. */
 export type IssueTokenInput = {

@@ -183,7 +183,7 @@ type Outcome = { received: Map<string, Set<string>>; texts: Map<string, string>;
 async function scenario(world: World, policy: Policy, ops: readonly Op[], note: (text: string) => void = () => {}): Promise<Outcome> {
   await resetDatabase(db.owner);
   forgetKeys();
-  const vault = testVault([ROOT.slice('user:'.length)], { bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, { kek: Buffer.alloc(32, 17) });
+  const vault = testVault([ROOT.slice('user:'.length)], { bulkLimit: { count: 1_000_000, windowMinutes: 1 } }, { kek: Buffer.alloc(32, 17) }, undefined, undefined, transport);
   const deps: FixtureDeps = { db: db.runtime, vault, chainKey: Buffer.alloc(32, 23), anchor: testAnchor() };
   const config = resolveConfig({
     publicUrl: ORIGIN,
