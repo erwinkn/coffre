@@ -34,8 +34,10 @@ import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
+import { openLocalVault as openRawVault } from '../src/local.ts';
 import {
   CONVERSION,
+  cutOver,
   emptyDatabase,
   ENGINE,
   locksHere,
@@ -1786,6 +1788,25 @@ async function everyProjectGrant(principal: string, slug: string | null, role: s
   await db.owner.update(vaultMembers).set({ accessSeq: appended.seqStart }).where(eq(vaultMembers.principal, principal));
   await reseal(principal);
 }
+
+test("a grant on a slug in every project of 0.4, converted after 0.15's cutover, becomes none on a place a writer renamed to that slug and back (T159, review r7)", { skip: LOG !== '0.15' && "0.15's log: the cutover seals the places the conversion reads" }, async () => {
+  // As 0.4 left it, under 0.14's log: dev and prod, and CI a Viewer of every project's staging, which none is.
+  const old = await openLocalVault(db.vault, configure(), { log: '0.14' });
+  assert.equal((await old.access(ROOT)).role, 'owner');
+  const where = await places(db.owner);
+  assert.ok((await old.admit({ actor: ROOT, principal: 'token:ci' })).ok);
+  await everyProjectGrant('token:ci', 'staging', 'viewer');
+  // The cutover, by a vault of 0.15 that makes no call after it: nothing converted yet.
+  await cutOver(await openRawVault(db.vault, configure(), { log: '0.15', sealThrough: sealedNow }), db.vault);
+  // A writer renames prod to staging, its seal kept; a new vault converts on its first call; the writer puts prod back.
+  await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${where.prod}`);
+  const upgraded = await openRawVault(db.vault, configure(), { log: '0.15', sealThrough: sealedNow });
+  await upgraded.access('token:ci');
+  await run(db.owner, sql`UPDATE environments SET slug = 'prod' WHERE id = ${where.prod}`);
+  const ci = await upgraded.access('token:ci');
+  assert.equal(ci.status, 'active');
+  assert.deepEqual(ci.grants, [], 'no place answered to staging as the log holds it');
+});
 
 test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding no more than before, and the log replays it', log014Only(CONVERSION), async () => {
   const w = await world();

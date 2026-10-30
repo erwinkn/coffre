@@ -1108,9 +1108,11 @@ class VaultService implements Vault {
     const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
     if (everyProject.length === 0) return;
     if (await reportStands(d.tx, principal, this.#check(d.reports, principal))) return;
-    // The projects there are now, read under the log's head, which a deletion holds.
+    // The projects there are now, read under the log's head, which a deletion holds; each environment by its slug as 0.15's
+    // log holds its row (T159, review r7): a grant on a slug in every project becomes one on each place that answers to
+    // it, never on one a writer renamed into it.
     const before = roleOf(principal, row);
-    const conversion = everyProjectConversion(principal, before.role, subject.stored, d.at, await store.liveProjects(d.tx));
+    const conversion = everyProjectConversion(principal, before.role, subject.stored, d.at, await this.#livePlaces(d));
     const after = { role: conversion.role, scope: conversion.scope };
     const replacedBy = { role: after.role, scope: after.scope, grants: conversion.grants.length };
     d.grants.set(principal, [...subject.stored]);
@@ -2504,7 +2506,8 @@ class VaultService implements Vault {
   /**
    * Every live project and its environments, each environment by its
    * project, slug and tombstone as 0.15's log holds its row (T159): one that
-   * is not is no place anyone sets a service account up in. Each read once,
+   * is not is no place anyone sets a service account up in, nor that a
+   * grant on every project of 0.4 becomes one on. Each read once,
    * in the statement whose rows are checked, so what is checked is what is
    * weighed (review r3: a row renamed between two reads, and back).
    */
