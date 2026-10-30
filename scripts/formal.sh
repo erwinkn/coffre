@@ -468,7 +468,11 @@ tlc() {
 
 failed=0
 scenarios=()
-for cfg in "$root"/formal/*.cfg; do scenarios+=("$(basename "$cfg" .cfg)"); done
+# Scenarios of several minutes run only by their own runner's --long (scripts/formal-shards.sh).
+for cfg in "$root"/formal/*.cfg; do
+  case "$(basename "$cfg" .cfg)" in ShardsCombined) continue ;; esac
+  scenarios+=("$(basename "$cfg" .cfg)")
+done
 
 for name in $only; do
   [ -f "$root/formal/$name.cfg" ] || { echo "no scenario $name: formal/$name.cfg" >&2; exit 2; }
