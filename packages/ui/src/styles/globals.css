@@ -4819,10 +4819,11 @@ a.menu-item:hover {
   list-style: none;
 }
 
+/* What it shows and its widest look, held and locked, share one cell, so
+   that its width never depends on what the role holds. */
 .role-perm {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
+  display: inline-grid;
+  place-items: center;
   height: 1.375rem;
   padding: 0 0.45rem;
   border: 1px dashed var(--border);
@@ -4838,6 +4839,19 @@ a.menu-item:hover {
   border-color: transparent;
   background: light-dark(color-mix(in oklab, var(--ink) 8%, var(--panel)), color-mix(in oklab, var(--ink) 12%, var(--panel)));
   color: var(--ink);
+  font-weight: 550;
+}
+
+.role-perm-shown,
+.role-perm-widest {
+  display: inline-flex;
+  grid-area: 1 / 1;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.role-perm-widest {
+  visibility: hidden;
   font-weight: 550;
 }
 

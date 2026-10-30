@@ -135,7 +135,8 @@ function RoleReach({ role }: { role: RoleView }) {
         <div key={row.name}>
           <dt>{row.name}</dt>
           <dd>
-            <ul>
+            {/* Safari reads a list without bullets as no list, unless told. */}
+            <ul role="list">
               {row.permissions.map((permission) => {
                 const reach = reachOf(role, permission);
                 const { label, short } = PERMISSION_WORDS[permission];
@@ -146,8 +147,15 @@ function RoleReach({ role }: { role: RoleView }) {
                     className={`role-perm role-perm-${reach}`}
                     title={reach === 'unprotected' ? `${label}, not in protected environments` : label}
                   >
-                    <span aria-hidden>{short}</span>
-                    {reach === 'unprotected' && <Lock size={11} />}
+                    <span className="role-perm-shown" aria-hidden>
+                      {short}
+                      {reach === 'unprotected' && <Lock size={11} />}
+                    </span>
+                    {/* Its widest look, unseen: a chip is as wide on every card, whatever the role holds, and wraps alike. */}
+                    <span className="role-perm-widest" aria-hidden>
+                      {short}
+                      {!projectWide(permission) && <Lock size={11} />}
+                    </span>
                     <span className="visually-hidden">
                       {label}: {words}
                     </span>
