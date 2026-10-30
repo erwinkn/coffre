@@ -34,6 +34,8 @@ export type HarnessOptions = {
   runtime?: string;
   /** The same server as coffre_vault_runtime, the login the vault runs as; workers only. */
   vaultRuntime?: string;
+  /** The same server as coffre_vault_hot, the login 0.15's uses run as; workers only. */
+  hotRuntime?: string;
 };
 
 export type Deployment = {
@@ -106,9 +108,10 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     );
     if (busy) throw new Failure(`port ${taken} is taken; pass --port for a free run of three`);
   }
-  if (kind === 'workers' && (options.postgres === undefined || options.runtime === undefined || options.vaultRuntime === undefined)) {
+  if (kind === 'workers' && [options.postgres, options.runtime, options.vaultRuntime, options.hotRuntime].includes(undefined)) {
     throw new Failure(
-      'workers run on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL> and --vault-runtime <coffre_vault_runtime URL>',
+      'workers run on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL>, --vault-runtime <coffre_vault_runtime URL> ' +
+        'and --hot-runtime <coffre_vault_hot URL>',
     );
   }
 
@@ -219,6 +222,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     const owner = withDatabase(options.postgres!, name);
     const runtime = withDatabase(options.runtime!, name);
     const vaultRuntime = withDatabase(options.vaultRuntime!, name);
+    const hotRuntime = withDatabase(options.hotRuntime!, name);
     await using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) => sql.exec(`CREATE DATABASE ${name}`));
     cleanup = () =>
       using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) =>
@@ -252,6 +256,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       ...OWNER_VARS,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: runtime,
       CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE: vaultRuntime,
+      CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HOT_HYPERDRIVE: hotRuntime,
       WRANGLER_SEND_METRICS: 'false',
     });
     let wrangler = startWrangler();
@@ -290,6 +295,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       const started = start('vault', process.execPath, ['src/vault.ts'], {
         VAULT_SOCKET: socket,
         DATABASE_URL: `file:${database}`,
+        // SQLite has no logins: the hot path's database is the same file.
+        HOT_DATABASE_URL: `file:${database}`,
         VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
         VAULT_KEY: KEYS.VAULT_KEY,
         ...OWNER_VARS,

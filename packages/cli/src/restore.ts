@@ -108,8 +108,8 @@ const LEFT_TO_DO = [
   '`pnpm exec coffre setup --reset-passwords` where the runtime logins\' passwords changed (a new server; PlanetScale resets them), ' +
     "or else `pnpm exec coffre migrate`: either migrates, and reasserts the database's own privileges, which a dump of one database leaves out; " +
     'add --backup-login <login> to grant the backup login its group on this server',
-  'Point both components at it, each with its own login: on Workers both Hyperdrive configs, coffre and coffre-vault, as setup shows; ' +
-    'on Node, DATABASE_URL in .env and vault.env',
+  'Point both components at it, each with its own login: on Workers the three Hyperdrive configs, coffre, coffre-vault and coffre-vault-hot, as setup shows; ' +
+    'on Node, DATABASE_URL in .env and vault.env, and HOT_DATABASE_URL in vault.env',
   'Redeploy or restart both, with the same keys and settings',
   '`coffre verify log`, then `coffre verify keys`, before reopening traffic',
 ];

@@ -3,6 +3,7 @@ import { checkpointer, postgres, vault, type ObjectNamespace } from '@coffre/vau
 
 type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
+  HOT_HYPERDRIVE: { connectionString: string };
   CHECKPOINTER: ObjectNamespace;
   COFFRE_VAULT_KEY_ID: string;
   COFFRE_VAULT_KEY: string;
@@ -11,6 +12,7 @@ type Env = {
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
+  hotDatabase: postgres(env.HOT_HYPERDRIVE),
   checkpointer: env.CHECKPOINTER,
   kek: { id: env.COFFRE_VAULT_KEY_ID, key: env.COFFRE_VAULT_KEY },
   owners: env.COFFRE_OWNERS.split(','),

@@ -15,6 +15,8 @@ function env(name: string): string {
 const vault = await serveVault({
   socket: env('VAULT_SOCKET'),
   database: env('DATABASE_URL'),
+  // The uses' own login, coffre_vault_hot, whose timeouts bound each one.
+  hotDatabase: env('HOT_DATABASE_URL'),
   // Where the checkpointer remembers the last checkpoint it signed, out of
   // reach of whoever writes the database: a file the vault's user alone writes.
   checkpointer: { memory: env('CHECKPOINTER_MEMORY') },

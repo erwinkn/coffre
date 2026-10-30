@@ -105,7 +105,7 @@ test('wrangler.jsonc is read for what setup needs, and edited in place, its comm
     const before = readWorker(dir, 'app/wrangler.jsonc');
     assert.deepEqual(
       { name: before.name, accountId: before.accountId, hyperdrive: before.hyperdrive, route: before.route },
-      { name: 'coffre', accountId: null, hyperdrive: null, route: null },
+      { name: 'coffre', accountId: null, hyperdrive: { HYPERDRIVE: null }, route: null },
     );
     assert.ok(placeholder(before.vars.PUBLIC_URL) && placeholder(before.vars.GITHUB_CLIENT_ID));
     assert.ok(placeholder(readWorker(dir, 'vault/wrangler.jsonc').vars.OWNERS));
@@ -124,11 +124,13 @@ test('wrangler.jsonc is read for what setup needs, and edited in place, its comm
     const after = readWorker(dir, 'app/wrangler.jsonc');
     assert.deepEqual(
       { accountId: after.accountId, hyperdrive: after.hyperdrive, route: after.route, url: after.vars.PUBLIC_URL },
-      { accountId: 'acc-1', hyperdrive: 'hd-1', route: 'secrets.acme.test', url: 'https://secrets.acme.test' },
+      { accountId: 'acc-1', hyperdrive: { HYPERDRIVE: 'hd-1' }, route: 'secrets.acme.test', url: 'https://secrets.acme.test' },
     );
     // The rest, as it was.
     const parsed = parse(text) as { services: unknown; triggers: unknown };
     assert.deepEqual(parsed.services, [{ binding: 'VAULT', service: 'coffre-vault' }]);
+    // The vault's two configs, each under its binding, in the file's order.
+    assert.deepEqual(readWorker(dir, 'vault/wrangler.jsonc').hyperdrive, { VAULT_HYPERDRIVE: null, HOT_HYPERDRIVE: null });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -159,24 +161,27 @@ test('what a directory records of its deployment: the Hyperdrive ids it binds, a
   try {
     cpSync(templateDir('workers'), dir, { recursive: true, filter: (path) => !path.includes('node_modules') });
     const read = () => recordsOf({ app: readWorker(dir, 'app/wrangler.jsonc'), vault: readWorker(dir, 'vault/wrangler.jsonc') });
-    assert.deepEqual(read(), { hyperdrive: { app: null, vault: null }, vaultKeyId: null }, 'a fresh deployment records nothing, vault-1 included');
+    assert.deepEqual(read(), { hyperdrive: { app: null, vault: null, hot: null }, vaultKeyId: null }, 'a fresh deployment records nothing, vault-1 included');
     editWorker(dir, 'app/wrangler.jsonc', [{ path: ['hyperdrive', 0, 'id'], value: 'hd-app' }]);
-    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['vars', 'VAULT_KEY_ID'], value: 'vault-2026-10-03-abcdef' }]);
-    assert.deepEqual(read(), { hyperdrive: { app: 'hd-app', vault: null }, vaultKeyId: 'vault-2026-10-03-abcdef' });
+    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['vars', 'VAULT_KEY_ID'], value: 'vault-2026-10-03-abcdef' }, { path: ['hyperdrive', 1, 'id'], value: 'hd-hot' }]);
+    assert.deepEqual(read(), { hyperdrive: { app: 'hd-app', vault: null, hot: 'hd-hot' }, vaultKeyId: 'vault-2026-10-03-abcdef' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("a Worker is this deployment's only when it binds what this directory records; another deployment's otherwise", () => {
-  const records = { hyperdrive: { app: 'hd-app', vault: 'hd-vault' }, vaultKeyId: 'vault-2026-10-03-abcdef' };
-  const nothing = { hyperdrive: { app: null, vault: null }, vaultKeyId: null };
+  const records = { hyperdrive: { app: 'hd-app', vault: 'hd-vault', hot: 'hd-hot' }, vaultKeyId: 'vault-2026-10-03-abcdef' };
+  const nothing = { hyperdrive: { app: null, vault: null, hot: null }, vaultKeyId: null };
   const app = [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-app' }];
   assert.equal(isOurs('app', app, records), true);
   assert.equal(isOurs('app', [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-elsewhere' }], records), false);
   assert.equal(isOurs('app', app, nothing), false, 'a fresh directory owns no Worker that exists');
   const vault = [{ type: 'plain_text', name: 'VAULT_KEY_ID', text: 'vault-2026-10-03-abcdef' }];
-  assert.equal(isOurs('vault', vault, { ...records, hyperdrive: { app: null, vault: null } }), true, 'by its vault ID');
+  assert.equal(isOurs('vault', vault, { ...records, hyperdrive: { app: null, vault: null, hot: null } }), true, 'by its vault ID');
+  // The vault Worker binds two configs: either one recorded here makes it ours; the hot path's never makes the app ours.
+  assert.equal(isOurs('vault', [{ type: 'hyperdrive', name: 'HOT_HYPERDRIVE', id: 'hd-hot' }], { ...nothing, hyperdrive: { app: null, vault: null, hot: 'hd-hot' } }), true);
+  assert.equal(isOurs('app', [{ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'hd-hot' }], { ...nothing, hyperdrive: { app: null, vault: null, hot: 'hd-hot' } }), false);
   assert.equal(isOurs('vault', [{ type: 'plain_text', name: 'VAULT_KEY_ID', text: 'vault-1' }], nothing), false);
 });
 

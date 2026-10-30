@@ -6,6 +6,7 @@ import { checkpointer, postgres, vault } from '@coffre/vault/cloudflare';
 
 type Env = {
   VAULT_HYPERDRIVE: Hyperdrive;
+  HOT_HYPERDRIVE: Hyperdrive;
   CHECKPOINTER: DurableObjectNamespace;
   VAULT_KEY_ID: string;
   VAULT_KEY: string;
@@ -14,6 +15,8 @@ type Env = {
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
+  // The uses' own login, coffre_vault_hot, whose timeouts bound each one.
+  hotDatabase: postgres(env.HOT_HYPERDRIVE),
   // A change answers once the checkpointer has sealed it in a signed checkpoint.
   checkpointer: env.CHECKPOINTER,
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },

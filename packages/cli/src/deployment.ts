@@ -333,7 +333,8 @@ export type WorkerConfig = {
   name: string;
   accountId: string | null;
   vars: Record<string, string>;
-  hyperdrive: string | null;
+  /** Each Hyperdrive binding's config id, in the file's order: null for the template's placeholder. */
+  hyperdrive: Record<string, string | null>;
   route: string | null;
 };
 
@@ -348,7 +349,7 @@ export function readWorker(dir: string, path: string): WorkerConfig {
     name?: string;
     account_id?: string;
     vars?: Record<string, unknown>;
-    hyperdrive?: { id?: string }[];
+    hyperdrive?: { binding?: string; id?: string }[];
     routes?: (string | { pattern?: string })[];
   };
   if (errors.length > 0) throw new Error(`${path} is not valid: ${printParseErrorCode(errors[0]!.error)} at offset ${errors[0]!.offset}`);
@@ -359,7 +360,9 @@ export function readWorker(dir: string, path: string): WorkerConfig {
     name: config.name,
     accountId: config.account_id ?? null,
     vars: Object.fromEntries(Object.entries(config.vars ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
-    hyperdrive: placeholder(config.hyperdrive?.[0]?.id) ? null : config.hyperdrive![0]!.id!,
+    hyperdrive: Object.fromEntries(
+      (config.hyperdrive ?? []).flatMap(({ binding, id }) => (typeof binding === 'string' ? [[binding, placeholder(id) ? null : id!]] : [])),
+    ),
     route: typeof route === 'string' ? route : (route?.pattern ?? null),
   };
 }

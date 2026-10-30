@@ -10,6 +10,7 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 
 export default vault((env) => ({
   database: postgres(env.VAULT_HYPERDRIVE), // coffre_vault_runtime, caching disabled
+  hotDatabase: postgres(env.HOT_HYPERDRIVE), // coffre_vault_hot, for 0.15's uses
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
   owners: env.OWNERS.split(','), // Owners of the whole instance, whom nobody demotes while named
 }));
@@ -19,7 +20,7 @@ On Node, `serveVault({ socket, database, … })` from `@coffre/vault/node`,
 with the vault's Postgres URL. Only `coffre_vault_runtime` may write members
 and grants; the app uses `coffre_runtime`. See the
 [deploy guide](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md)
-for the logins and both Hyperdrive configs.
+for the logins and the Hyperdrive configs.
 
 Part of [coffre](https://github.com/erwinkn/coffre), a secrets manager you
 deploy as a small project of your own. Its eight `@coffre/*` packages are
