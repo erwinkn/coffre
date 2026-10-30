@@ -49,6 +49,7 @@ import { Route as CoffreServiceAccountsAccountActivityRouteImport } from './rout
 import { Route as CoffreUsersUserIndexRouteImport } from './routes/_coffre/users.$user.index'
 import { Route as CoffreUsersUserActivityRouteImport } from './routes/_coffre/users.$user.activity'
 import { Route as CoffreUsersUserAppsRouteImport } from './routes/_coffre/users.$user.apps'
+import { Route as CoffreProjectsProjectEnvironmentProxyRouteImport } from './routes/_coffre/projects.$project_.$environment_.proxy'
 
 const CoffreRoute = CoffreRouteImport.update({
   id: '/_coffre',
@@ -258,6 +259,12 @@ const CoffreUsersUserAppsRoute = CoffreUsersUserAppsRouteImport.update({
   path: '/apps',
   getParentRoute: () => CoffreUsersUserRoute,
 } as any)
+const CoffreProjectsProjectEnvironmentProxyRoute =
+  CoffreProjectsProjectEnvironmentProxyRouteImport.update({
+    id: '/projects/$project_/$environment_/proxy',
+    path: '/projects/$project/$environment/proxy',
+    getParentRoute: () => CoffreRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof CoffreIndexRoute
@@ -298,6 +305,7 @@ export interface FileRoutesByFullPath {
   '/projects/$project/': typeof CoffreProjectsProjectIndexRoute
   '/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
   '/users/$user/': typeof CoffreUsersUserIndexRoute
+  '/projects/$project/$environment/proxy': typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 export interface FileRoutesByTo {
   '/': typeof CoffreIndexRoute
@@ -334,6 +342,7 @@ export interface FileRoutesByTo {
   '/projects/$project': typeof CoffreProjectsProjectIndexRoute
   '/service-accounts/$account': typeof CoffreServiceAccountsAccountIndexRoute
   '/users/$user': typeof CoffreUsersUserIndexRoute
+  '/projects/$project/$environment/proxy': typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -377,6 +386,7 @@ export interface FileRoutesById {
   '/_coffre/projects/$project/': typeof CoffreProjectsProjectIndexRoute
   '/_coffre/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
   '/_coffre/users/$user/': typeof CoffreUsersUserIndexRoute
+  '/_coffre/projects/$project_/$environment_/proxy': typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -419,6 +429,7 @@ export interface FileRouteTypes {
     | '/projects/$project/'
     | '/service-accounts/$account/'
     | '/users/$user/'
+    | '/projects/$project/$environment/proxy'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -455,6 +466,7 @@ export interface FileRouteTypes {
     | '/projects/$project'
     | '/service-accounts/$account'
     | '/users/$user'
+    | '/projects/$project/$environment/proxy'
   id:
     | '__root__'
     | '/_coffre'
@@ -497,6 +509,7 @@ export interface FileRouteTypes {
     | '/_coffre/projects/$project/'
     | '/_coffre/service-accounts/$account/'
     | '/_coffre/users/$user/'
+    | '/_coffre/projects/$project_/$environment_/proxy'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -794,6 +807,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CoffreUsersUserAppsRouteImport
       parentRoute: typeof CoffreUsersUserRoute
     }
+    '/_coffre/projects/$project_/$environment_/proxy': {
+      id: '/_coffre/projects/$project_/$environment_/proxy'
+      path: '/projects/$project/$environment/proxy'
+      fullPath: '/projects/$project/$environment/proxy'
+      preLoaderRoute: typeof CoffreProjectsProjectEnvironmentProxyRouteImport
+      parentRoute: typeof CoffreRoute
+    }
   }
 }
 
@@ -884,6 +904,7 @@ interface CoffreRouteChildren {
   CoffreServiceAccountsIndexRoute: typeof CoffreServiceAccountsIndexRoute
   CoffreUsersIndexRoute: typeof CoffreUsersIndexRoute
   CoffreProjectsProjectEnvironmentRoute: typeof CoffreProjectsProjectEnvironmentRoute
+  CoffreProjectsProjectEnvironmentProxyRoute: typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 
 const CoffreRouteChildren: CoffreRouteChildren = {
@@ -899,6 +920,8 @@ const CoffreRouteChildren: CoffreRouteChildren = {
   CoffreServiceAccountsIndexRoute: CoffreServiceAccountsIndexRoute,
   CoffreUsersIndexRoute: CoffreUsersIndexRoute,
   CoffreProjectsProjectEnvironmentRoute: CoffreProjectsProjectEnvironmentRoute,
+  CoffreProjectsProjectEnvironmentProxyRoute:
+    CoffreProjectsProjectEnvironmentProxyRoute,
 }
 
 const CoffreRouteWithChildren =
