@@ -318,3 +318,40 @@ test("an issue weighed on the account's places by slug is refused when one is re
   // Asked again, on the account as it is now: Maya manages it no more.
   assert.equal((await w.vault.issueToken!(await issueOn(w.vault, { ...input, credential: { ...input.credential, id: randomUUID() } }))).ok, false);
 });
+
+test('a reference is decided on its holder\'s project as the row the decision checks says it, not as an earlier read saw it (review r4)', postgresOnly('row locks'), async () => {
+  const w = await world();
+  // Maya, a Developer of billing alone, refers from billing to a key held in a new place of market's.
+  const billing = w.elsewhere;
+  const [kept] = [await newEnvironment(db.owner, billing)];
+  const sourceId = randomUUID();
+  await db.owner.insert(tablesOf(db.owner).secrets).values({ id: sourceId, projectId: billing, environmentId: kept, key: 'SOURCE' });
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: MAYA })).ok);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, caller: 'person', principal: MAYA, changes: [{ projectId: billing, environmentId: null, role: 'developer', expiresAt: null }] })).ok);
+  const place = await newEnvironment(db.owner, w.project);
+  const refer = () => w.vault.reference({
+    principal: MAYA, caller: 'person',
+    items: [{ id: randomUUID(), holder: { projectId: billing, environmentId: place, secretId: randomUUID(), path: 'billing/x/HELD' }, source: { secretId: sourceId } }],
+  });
+  const refused = await refer();
+  assert.equal(!refused.ok && refused.refusal.code, 'bad_claim', 'a market place claimed as billing\'s');
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A writer moves the place to billing while the request reads it, then back before its decision does.
+    await run(db.owner, sql`UPDATE environments SET project_id = ${billing} WHERE id = ${place}`);
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${MAYA}' FOR NO KEY UPDATE`);
+    const referring = refer();
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%vault_members%'`))[0]!.n;
+    for (let tries = 0; (await waits()) === 0; tries += 1) {
+      assert.ok(tries < 200, 'the decision waits on her row');
+      await sleep(10);
+    }
+    await run(db.owner, sql`UPDATE environments SET project_id = ${w.project} WHERE id = ${place}`);
+    await holder.unsafe('COMMIT');
+    const outcome = await referring;
+    assert.equal(!outcome.ok && outcome.refusal.code, 'bad_claim', JSON.stringify(outcome));
+  } finally {
+    await holder.end();
+  }
+});

@@ -1858,7 +1858,8 @@ class VaultService implements Vault {
       this.#placesHold(environments, environments.keys(), d.reports);
       const codes = items.map((item): RefusalCode | null => {
         const source = sources.get(item.source.secretId);
-        if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
+        // The holder's project as the row this decision checked says it (review r4): the read before only names the entry.
+        if (source === undefined || environments.get(item.holder.environmentId)?.projectId !== item.holder.projectId) return 'bad_claim';
         if (source.secretId === item.holder.secretId) return 'invalid';
         return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) ?? 'secret');
       });
