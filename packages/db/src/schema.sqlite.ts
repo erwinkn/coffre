@@ -828,6 +828,8 @@ export const credentials = sqliteTable(
       foreignColumns: [identities.id, identities.principal, identities.generation],
     }).onDelete('restrict'),
     index('credentials_principal_idx').on(table.principal, table.generation),
+    // A member's credentials by their end, newest first, with when each was made: what a page of their uses walks (T166).
+    index('credentials_expiry_idx').on(table.principal, table.expiresAt, table.id, table.createdAt),
     // A member's credentials still live, however many have expired: a CI run
     // leaves one behind each time it signs in.
     index('credentials_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
@@ -947,6 +949,10 @@ export const logUses = sqliteTable(
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
+    // The audit pages' (schema.ts).
+    index('log_uses_credential_idx').on(table.credential, table.at, table.number),
+    index('log_uses_secret_idx').on(table.secret, table.at, table.number),
+    index('log_uses_place_idx').on(table.place, table.at, table.number).where(sql`${table.place} IS NOT NULL`),
   ],
 );
 

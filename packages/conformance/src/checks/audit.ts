@@ -14,16 +14,21 @@ import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts'
 /**
  * Every returned value read, committed by the vault under the response's
  * operation: one entry for the place, which lists each secret of a read of
- * several, and which a look for any one of them finds.
+ * several, and which a look for any one of them finds. With 0.15's log, each
+ * value read is its use (`usesAudited`).
  */
 export async function revealAudited(deployment: Deployment, { admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run'): Promise<string> {
   const path = purpose === 'reveal' ? `${DEV}/API_KEY` : DEV;
+  const asked = Date.now();
   const { operationId, values } = await reader.api.secrets.reveal(path);
   expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
   const expected = purpose === 'reveal' ? { API_KEY: canaries[`${DEV}/API_KEY`] } : valuesIn(canaries, DEV);
   expect(JSON.stringify(Object.entries(values).sort()) === JSON.stringify(Object.entries(expected).sort()), 'the read returned different values', values);
   const entries = await everyAuditEntry(admin.api);
   const bundle = entries.filter((entry) => entry.operationId === operationId);
+  if (bundle.length === 0 && entries.some((entry) => entry.log === '0.15' && entry.action === 'secret.read')) {
+    return usesAudited(deployment, { admin, reader }, Object.keys(expected), purpose, asked, entries);
+  }
   expect(bundle.length === 1, 'the read of one place is not logged as one entry', bundle);
   const [entry] = bundle as [AuditEntryView];
   const read = entry.secrets ?? [{ key: entry.key, version: entry.version }];
@@ -52,6 +57,44 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
     }
   });
   return `${read.length} values read by the vault for ${purpose}, in one entry under ${operationId}`;
+}
+
+/**
+ * How long before a read 0.15's log may hold the use it rode on: a repeat
+ * within a minute rides on the first one's entry (a cover, R53), and the
+ * deployment's clock may stand a little off the harness's.
+ */
+const COVERED_MS = 90_000;
+
+/**
+ * Every value read, with 0.15's log, where a read is a use of each key,
+ * which names no operation (R53, T166): the reader's newest read of each,
+ * for the purpose, made by this read or by one within the minute before it
+ * that this rode on, the vault's and vouched for, of the version the key
+ * holds, in the key's own log, and the row the vault wrote.
+ */
+async function usesAudited(
+  deployment: Deployment, { admin, reader }: Pick<People, 'admin' | 'reader'>, keys: string[], purpose: 'reveal' | 'run', asked: number, entries: AuditEntryView[],
+): Promise<string> {
+  const { keys: listed } = await admin.api.secrets.list(DEV);
+  const read = keys.map((key) => {
+    const entry = entries.find((found) => found.log === '0.15' && found.action === 'secret.read' && found.actorId === reader.email && found.key === key && found.metadata.purpose === purpose);
+    expect(entry !== undefined && Date.parse(entry.occurredAt) >= asked - COVERED_MS, `the read of ${key} is not in 0.15's log`, entry ?? entries.slice(0, 5));
+    expect(entry.author === 'vault' && entry.decision === 'allow' && entry.forged !== true, `the read of ${key} is not the vault's allowed read`, entry);
+    expect(entry.version === listed.find((found) => found.key === key)?.version, `the entry for ${key} names another version`, entry);
+    return entry;
+  });
+  for (const entry of read) {
+    const own = await admin.api.audit.list({ path: `${DEV}/${String(entry.key)}`, limit: 200, sealed: '1' });
+    expect(own.entries.some((found) => found.log === '0.15' && found.seq === entry.seq), `the read is not in ${String(entry.key)}'s log`, own.entries.slice(0, 5));
+  }
+  await using(deployment.database(), async (sql) => {
+    for (const entry of read) {
+      const rows = await query<{ secret: string }>(sql, 'SELECT secret FROM log_uses WHERE number = $1', [entry.seq]);
+      expect(rows.length === 1 && String(rows[0]!.secret) === entry.metadata.secretId, 'the read is not the use the vault wrote', { entry, rows });
+    }
+  });
+  return `${read.length} values read by the vault for ${purpose}, each its use in 0.15's log`;
 }
 
 /**

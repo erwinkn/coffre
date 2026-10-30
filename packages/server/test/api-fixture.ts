@@ -322,6 +322,7 @@ export function testVault(
     changeBindings: call('changeBindings'),
     cutover: call('cutover'),
     verifyTrees: call('verifyTrees'),
+    vouch: call('vouch'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),
     // And its use by name (T145, PR B): a reveal's or a handle's one key, which the vault resolves and uses in one call.

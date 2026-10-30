@@ -28,6 +28,7 @@ import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
+import { usesBy } from '../db/uses.ts';
 import {
   priorConnections,
   revokePriorMembership,
@@ -497,7 +498,10 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
   // Everyone, not just them: the service tokens they issued belong to others. Beside it, every place (which whoever
   // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
-  const [everyone, known, owners, references] = await Promise.all([directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member))]);
+  // And their reads under 0.15's log, each a use (T166), which the report weighs with their entries below.
+  const [everyone, known, owners, references, used] = await Promise.all([
+    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), usesBy(ctx.db, [formatMember(member)]),
+  ]);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
@@ -509,7 +513,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     .filter((credential) => credential.kind === 'service' && credential.createdBy === member.id)
     .sort((a, b) => compare(a.service, b.service) || a.createdAt.getTime() - b.createdAt.getTime());
 
-  const activity = await ctx.db.transaction((tx) => memberActivity(tx, [member.id]), SNAPSHOT);
+  const activity = await ctx.db.transaction((tx) => memberActivity(tx, [member.id], used), SNAPSHOT);
   const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
   const made = references.map((reference) => reference.view);
   made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));

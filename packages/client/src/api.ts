@@ -54,6 +54,7 @@ export type Api = {
         };
       };
       credentialExpiresAt: string | null;
+      credentialId: string | null;
       environments: {
         project: string;
         environment: string;
@@ -1132,6 +1133,7 @@ export type Api = {
       entries: {
         seq: number;
         log: "0.14" | "0.15";
+        forged?: true;
         author: "app" | "vault";
         occurredAt: string;
         actorType: "service" | "system" | "user";
@@ -1793,6 +1795,7 @@ export type ApprovalView = {
 export type AuditEntryView = {
   seq: number;
   log: "0.14" | "0.15";
+  forged?: true;
   author: "app" | "vault";
   occurredAt: string;
   actorType: "service" | "system" | "user";
@@ -2116,6 +2119,7 @@ export type Me = {
     };
   };
   credentialExpiresAt: string | null;
+  credentialId: string | null;
   environments: {
     project: string;
     environment: string;

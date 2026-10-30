@@ -38,6 +38,7 @@ import type { ChangeBindingsInput, CutoverInput,
   UseInput,
   Vault,
   VerifyLogInput,
+  VouchInput,
   WrapInput,
 } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
@@ -201,6 +202,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async changeBindings(input: ChangeBindingsInput) { return this.#call((vault) => vault.changeBindings(input)); }
   async cutover(input?: CutoverInput) { return this.#call((vault) => vault.cutover(input)); }
   async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
+  async vouch(input: VouchInput) { return this.#call((vault) => vault.vouch(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

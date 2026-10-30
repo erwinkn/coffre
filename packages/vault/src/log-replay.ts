@@ -1,3 +1,4 @@
+import { useCode, useOfCode, USE_PURPOSES, USE_WAYS } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 
 import { bulkStep, type BulkRows } from './bulk.ts';
@@ -76,32 +77,21 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
 
 /**
  * A use's purpose, keepsSensitive and way in as its row stores them, in
- * one smallint (schema 0022, 0046): the purpose's code, plus 256 when a
- * copy keeps values sensitive, plus 512 times its way in's (`WAYS`; T147).
+ * one smallint (schema 0022, 0046): core's codes (`USE_PURPOSES`), which
+ * the audit pages read back too (T166).
  */
-export const PURPOSES = ['reveal', 'run', 'compare', 'copy', 'use', 'expose'] as const satisfies readonly UseRequest['purpose'][];
-
-// Every purpose has a code: one missing here fails to compile.
-const everyPurpose: [Exclude<UseRequest['purpose'], (typeof PURPOSES)[number]>] extends [never] ? true : never = true;
-void everyPurpose;
+export const PURPOSES = USE_PURPOSES satisfies readonly UseRequest['purpose'][];
 
 /** Each way in (decide.ts, `Way`), by its code: a credential's, 0, as every use before T147. */
-export const WAYS = ['credential', 'connection', 'binding', 'access'] as const satisfies readonly Way[];
-
-// Every way in has a code: one missing here fails to compile.
-const everyWay: [Exclude<Way, (typeof WAYS)[number]>] extends [never] ? true : never = true;
-void everyWay;
+export const WAYS = USE_WAYS satisfies readonly Way[];
 
 export function purposeCode(request: Pick<UseRequest, 'purpose' | 'keepsSensitive' | 'way'>): number {
-  return PURPOSES.indexOf(request.purpose) + (request.keepsSensitive ? 256 : 0) + 512 * WAYS.indexOf(request.way ?? 'credential');
+  return useCode(request);
 }
 
 /** The purpose, keepsSensitive and way in a row's code stores; null for a code no release writes. */
 export function purposeOf(code: number): Pick<UseRequest, 'purpose' | 'keepsSensitive' | 'way'> | null {
-  const purpose = PURPOSES[code % 256];
-  const way = WAYS[Math.floor(code / 512)];
-  if (!Number.isInteger(code) || code < 0 || purpose === undefined || way === undefined) return null;
-  return { purpose, keepsSensitive: code % 512 >= 256, ...(way === 'credential' ? {} : { way }) };
+  return useOfCode(code);
 }
 
 /** The log replayed: the rows it says the tables hold, each object's newest seal, every principal's bulk rows, and what does not hold. */

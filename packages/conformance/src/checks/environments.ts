@@ -140,7 +140,8 @@ export async function personalConfigs(deployment: Deployment, { admin, reader }:
 
 /** The key in dev the reference check makes, archived once checked. */
 const HELD = 'CONFORMANCE_REFERENCE';
-const FORGED = 'CONFORMANCE_FORGED';
+/** The key a forged reference row is held by, a new one each run: it is archived after, and its name stays taken (`references`). */
+const FORGED = `CONFORMANCE_FORGED_${randomUUID().slice(0, 8).toUpperCase()}`;
 
 /** The status a call failed with and its reason, the vault's or the app's, or that it went through. */
 async function outcome(call: Promise<unknown>): Promise<string> {
@@ -174,7 +175,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   try {
     const read = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
-    const logged = async (path: string) => (await admin.api.audit.list({ path, limit: 200 })).entries
+    const logged = async (path: string) => (await admin.api.audit.list({ path, limit: 200, sealed: '1' })).entries
       .filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email && entry.metadata.via !== undefined).length;
     expect(await logged(PROD) >= 1 && await logged(DEV) >= 1, "the read through the reference is not in both the source's log and the holder's");
 
@@ -224,9 +225,11 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       // Read from its seal, the row is no reference at all, and its key holds no value; the vault would refuse it anyway.
       expect(['404 no_value', '404 not_found', '403 bad_claim', NO].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
     } finally {
+      // Its row goes, and the key is archived, not deleted: with 0.15's log, the refused read is the app's entry, which
+      // names the key, and the log keeps every entry.
       await using(deployment.database(), async (sql) => {
         await query(sql, 'DELETE FROM secret_references WHERE secret_id = $1', [forged]);
-        await query(sql, 'DELETE FROM secrets WHERE id = $1', [forged]);
+        await query(sql, sql.engine === 'postgres' ? 'UPDATE secrets SET archived_at = now() WHERE id = $1' : 'UPDATE secrets SET archived_at = CAST(unixepoch(\'subsec\') * 1000 AS INTEGER) WHERE id = $1', [forged]);
       });
     }
 
