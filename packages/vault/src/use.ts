@@ -7,7 +7,7 @@ import { engineOf } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
-import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
+import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
 import { noEdits, objectKey, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys } from './inputs.ts';
 import { entryMac } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
@@ -553,9 +553,10 @@ function keep(cache: UseCache, at: string, key: string | null, row: UseRow): voi
   if (key !== null && row.n_standing !== false) cache.key(read.environment, key, row.n_secret);
 }
 
-/** The place a named call read its names at, by the ids of its row as the call read it. */
+/** The place a named call read its names at, by the ids of its row as the call read it: none for a row its seals do not bear out (T159). */
 function placeOf(checked: CheckedView, row: UseRow): { projectId: string; environmentId: string } | null {
-  const place = row.n_place === null ? null : checked.environments.get(row.n_place)?.row ?? null;
+  const read = row.n_place === null ? undefined : checked.environments.get(row.n_place);
+  const place = read !== undefined && read.valid && read.current ? read.row : null;
   return place === null ? null : { projectId: place.projectId, environmentId: place.id };
 }
 
@@ -587,10 +588,15 @@ export function routeOf(caller: CallerSeals, at: number): 'name' | 'credential' 
 function standingOf(checked: CheckedView, request: UseRequest): Access {
   const credential = checked.credential.row!;
   const principal = checked.principal!.row;
-  const stand = checked.secret.row?.environmentId ?? request.place;
-  const place = stand === null ? undefined : checked.environments.get(stand);
-  const sealed = [checked.roles, checked.policy, ...(place === undefined ? [] : [place])].every((input) => input.valid && input.current);
-  const rows = [...checked.environments.values()].flatMap((read) => (read.row === null ? [] : [read.row]));
+  // Every place the use weighed (where its key is sought or held, read through, its value's, a personal config's parent):
+  // one a writer changed refused the use, and tells the app nothing either (T159, Fable on #431).
+  const weighed = useEnvironments(checked, request).flatMap((id) => {
+    const read = checked.environments.get(id);
+    return read === undefined ? [] : [read];
+  });
+  const sealed = [checked.roles, checked.policy, ...weighed].every((input) => input.valid && input.current);
+  // Only the rows their seals bear out: another a writer changed protects or names nothing the app is told (T159).
+  const rows = [...checked.environments.values()].flatMap((read) => (read.row === null || !read.valid || !read.current ? [] : [read.row]));
   const reader = sealed
     ? readerOf(principal, credential, checked.roles.row ?? noEdits(), rows, request.at)
     : { status: readerOf(principal, credential, noEdits(), [], request.at).status, live: NOTHING };

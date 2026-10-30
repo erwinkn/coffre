@@ -17,7 +17,7 @@ import { tablesOf, type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { emptyDatabase, newProject, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
+import { emptyDatabase, newProject, openTestDatabase, places, postgresOnly, rows, sealPlaces, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -278,6 +278,7 @@ test('an id protected before its row exists protects it for ten minutes; one sti
   const [refused, written] = [randomUUID(), randomUUID()];
   assert.ok((await protect(w.vault, ROOT, w.project, [refused, written])).ok);
   await db.owner.insert(tablesOf(db.owner).environments).values({ id: written, projectId: w.project, slug: 'staging', name: 'Staging' });
+  await sealPlaces(db.owner, [{ id: written, projectId: w.project, slug: 'staging' }]);
   w.clock.offset = UNWRITTEN_FORK_MS + 60_000;
   const young = randomUUID();
   assert.ok((await protect(w.vault, ROOT, w.project, [young])).ok);

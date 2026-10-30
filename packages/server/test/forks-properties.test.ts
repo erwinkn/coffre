@@ -54,7 +54,9 @@ let sealed = false;
 before(async () => {
   database = await openTestDatabase();
   await resetDatabase(database.owner);
-  vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 31) });
+  // 0.14's log, whatever the suite's: the places are written as rows around the vault, which 0.15's decides nothing on
+  // (T159), and what is held here is the app's resolution of them, not the vault's log.
+  vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 31) }, {}, {});
 });
 after(async () => { await database.close(); });
 
@@ -144,7 +146,7 @@ const tombstoned = (env: Env) => (env.deleted ? `${env.slug}~deleted-2026-10-24`
  */
 async function write(scene: Scene, app: Scene): Promise<void> {
   const db = database.owner;
-  // The vault open first: under 0.15's log, cut over before these rows, which stay the app's around it (0.14's).
+  // The vault open first: its rows are the app's, around it.
   await vault.about();
   await db.insert(projects).values(scene.projects.map((project) => ({ id: project.id, slug: project.slug, name: project.slug })));
   await db.insert(environments).values(app.envs.map((env) => ({ id: env.id, projectId: env.projectId, slug: env.slug, name: env.slug, parentId: env.parentId, owner: env.owner })));

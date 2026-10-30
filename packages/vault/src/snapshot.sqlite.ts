@@ -31,6 +31,7 @@ export function snapshotQuery(asked: Asked): SQL {
   const tomb = `%${TOMBSTONE}%`;
   const released = asked.released;
   const head = asked.head === true;
+  const seals = asked.seals === true;
   return sql`
     WITH policy AS (
       SELECT * FROM audit_log WHERE author = 'vault' AND action = 'policy.change' AND decision = 'allow' ORDER BY seq DESC LIMIT 1
@@ -73,17 +74,38 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT json_group_array(json_object(
           'id', env.id, 'projectId', env.project_id, 'slug', env.slug, 'owner', env.owner, 'parentId', env.parent_id,
           'deleted', env.slug LIKE ${tomb} OR project.slug LIKE ${tomb},
-          'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL))
+          'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL${seals
+            ? sql`,
+          -- What 0.15's log holds the row to (T159), but its newest change's seal, which snapshot reads after.
+          'protected', env.protected, 'ownArchived', env.archived_at IS NOT NULL, 'projectArchived', project.archived_at IS NOT NULL,
+          'seal', lower(hex(env.seal))`
+            : sql``}))
         FROM environments env JOIN projects project ON project.id = env.project_id
         WHERE env.id IN (SELECT value FROM json_each(${environments}))
-          OR env.id IN (SELECT parent_id FROM environments WHERE id IN (SELECT value FROM json_each(${environments})) AND owner IS NOT NULL)
+          OR env.id IN (SELECT parent_id FROM environments WHERE id IN (SELECT value FROM json_each(${environments})) AND owner IS NOT NULL)${seals
+            ? sql`
+          OR env.id IN (SELECT environment_id FROM vault_grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL)`
+            : sql``}
           OR env.id IN (
             SELECT json_extract(place.value, '$.environmentId')
             FROM policy, json_each(policy.metadata, '$.policy.protected') AS place
             -- Of a forged entry's, an element that is no object names nothing: json_extract would fail on a string.
             WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'
           )
-      )),
+      )),${seals
+        ? sql`
+      -- Every place id asked, row or none: snapshot finds those the log holds a change of and no row answers to (review r5).
+      'placeIds', json((
+        SELECT json_group_array(id) FROM (
+          SELECT value AS id FROM json_each(${environments})
+          UNION SELECT parent_id FROM environments WHERE id IN (SELECT value FROM json_each(${environments})) AND owner IS NOT NULL
+          UNION SELECT environment_id FROM vault_grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL
+          UNION SELECT json_extract(place.value, '$.environmentId')
+            FROM policy, json_each(policy.metadata, '$.policy.protected') AS place
+            WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'
+        ) WHERE id IS NOT NULL
+      )),`
+        : sql``}
       'ended', json((
         SELECT json_group_array(related_seq) FROM audit_log
         WHERE author = 'vault' AND action = 'reference.end' AND decision = 'allow' AND related_seq IN (SELECT value FROM json_each(${references}))

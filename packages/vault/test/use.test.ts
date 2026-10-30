@@ -28,7 +28,7 @@ import { logStore } from '../src/log-store.ts';
 import { newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, isolate, MAC, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, MAC, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 /** The hot path's login, as an isolate's uses run on it. */
@@ -863,3 +863,37 @@ for (const period of ['the same', 'passed'] as const) {
     }
   });
 }
+
+test('a place renamed, brought back from its deletion, or moved into the key\'s project around the log, its seal kept, is refused tampered by ID, for a run and a reveal alike (T159)', async () => {
+  const w = await world();
+  const id = await w.key();
+  const { use } = await isolate();
+  const both = async (extra: Partial<Parameters<typeof ask>[2]> = {}) => {
+    const codes = [];
+    for (const purpose of ['run', 'reveal'] as const) codes.push(code(heard(await use(ask(w, id, { purpose, ...extra })))));
+    return codes;
+  };
+  assert.deepEqual(await both(), [null, null]);
+  const environment = w.objects.environment as Extract<Input, { kind: 'environment' }>;
+  // Renamed: a scoped role's filters read the slug.
+  await run(db.owner, sql`UPDATE environments SET slug = 'prod' WHERE id = ${w.dev}`);
+  assert.deepEqual(await both(), ['tampered', 'tampered']);
+  await run(db.owner, sql`UPDATE environments SET slug = 'dev' WHERE id = ${w.dev}`);
+  assert.deepEqual(await both(), [null, null]);
+  // A fork of another project's, moved into the key's to read it through: a live place of its project, by its row.
+  const elsewhere = randomUUID();
+  const fork = randomUUID();
+  await db.owner.insert(tablesOf(db.owner).projects).values({ id: elsewhere, slug: `p-${elsewhere.slice(0, 8)}`, name: 'Elsewhere' });
+  await db.owner.insert(tablesOf(db.owner).environments).values({ id: fork, projectId: elsewhere, slug: 'fork', name: 'fork', protected: false });
+  await genesis({ kind: 'environment', id: fork }, { ...environment, id: fork, projectId: elsewhere, slug: 'fork' });
+  assert.deepEqual(await both({ place: fork }), ['bad_claim', 'bad_claim'], 'read through another project\'s place');
+  await run(db.owner, sql`UPDATE environments SET project_id = ${w.project} WHERE id = ${fork}`);
+  assert.deepEqual(await both({ place: fork }), ['tampered', 'tampered']);
+  // Deleted, as the app deletes it; then its tombstone cleared.
+  await change({ kind: 'environment', id: w.dev }, { op: 'environment.delete' }, { ...environment, deleted: true }, async (tx, value) => {
+    await run(tx, sql`UPDATE environments SET slug = 'dev~deleted-1', seal = ${value} WHERE id = ${w.dev}`);
+  });
+  assert.deepEqual(await both(), ['deleted', 'deleted']);
+  await run(db.owner, sql`UPDATE environments SET slug = 'dev' WHERE id = ${w.dev}`);
+  assert.deepEqual(await both(), ['tampered', 'tampered']);
+});

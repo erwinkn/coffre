@@ -6,7 +6,7 @@ import { issuedGrant } from '@coffre/core/access';
 import { and, eq, isNotNull } from 'drizzle-orm';
 
 import { environments, secrets, secretVersions } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**
  * Personal configs (docs/design/forking.md, R8): `market/dev@me` is your own
@@ -124,7 +124,9 @@ test('a forged owner opens nothing: the value is bound to its owner, not to the 
   // Written around the app: the config made Bo's. Bo reads dev, so the vault's decision passes, and the unwrap fails.
   await db.owner.update(environments).set({ owner: `user:${BO}` }).where(eq(environments.id, config.id));
   await assert.rejects(bo.secrets.reveal('market/dev@me'), (error: { status: number }) => error.status >= 400);
-  assert.equal((await values(bo, 'market/dev@me/STRIPE_KEY')).STRIPE_KEY, 'sk_test_1');
+  // What dev holds, read through it: under 0.15's log, refused too, as any read through a row the log does not hold (T159).
+  if (LOG === '0.15') await assert.rejects(values(bo, 'market/dev@me/STRIPE_KEY'));
+  else assert.equal((await values(bo, 'market/dev@me/STRIPE_KEY')).STRIPE_KEY, 'sk_test_1');
   await assert.rejects(bo.secrets.reveal('market/dev@me/DATABASE_URL'));
   // Cleared, as a release before personal configs would see it: a project grant reaches it, and still opens nothing.
   await db.owner.update(environments).set({ owner: null }).where(eq(environments.id, config.id));

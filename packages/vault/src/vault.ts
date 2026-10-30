@@ -159,7 +159,7 @@ import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
-import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
+import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
@@ -234,6 +234,12 @@ export type PreparedVault = {
   limited: boolean;
   /** Whether 0.15's log is cut over from 0.14, as this process found it (`cutover`): until then, nothing of 0.15's runs. */
   cutover: boolean;
+  /**
+   * Whether this process found 0.15's log's cutover written, sealed or not
+   * yet (`#settled`): from then on every environment row is sealed, and the
+   * vault checks each one it decides on (`#placeFault`).
+   */
+  marked: boolean;
   /** How far the chain is rehashed, by any call of this process: its head must still be there. */
   verified: Position;
   /** What member rows are sealed under now; rows.ts. */
@@ -270,6 +276,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
     limited: false,
     cutover: false,
+    marked: false,
     verifier: null,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
     verified: START,
@@ -408,12 +415,24 @@ function inputGrant(grant: Pick<GrantRow, 'projectId' | 'environmentId' | 'envir
   return { projectId: grant.projectId, environmentId: grant.environmentId, environmentSlug: grant.environmentSlug, role: grant.role, expiresAt: grant.expiresAt };
 }
 
+/**
+ * The environments an issue was weighed on, each once, with the slug it was weighed with first: what `issue_token`
+ * holds under the issue lock (IssuePolicyHeld).
+ */
+function weighed(slugs: readonly { environmentId: string; slug: string | null }[]): { environmentId: string; slug: string | null }[] {
+  const seen = new Set<string>();
+  return slugs.filter(({ environmentId }) => !seen.has(environmentId) && seen.add(environmentId) !== undefined);
+}
+
 function placeOf(grant: store.Place) {
   return { projectId: grant.projectId ?? null, environmentId: grant.environmentId ?? null, environmentSlug: grant.environmentSlug ?? null };
 }
 
 /** Why a change to a tampered member is refused. */
 const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: remove them to start over";
+
+/** Why a decision on a place whose row is not as 0.15's log holds it is refused (T159): the row, not the member, is at fault. */
+const TAMPERED_PLACE = "an environment it is about failed the vault's integrity check: its row is not as the log holds it";
 
 /** The action of the vault's entry that holds the instance's settings, and changes them (`settings`). */
 const SETTINGS = 'settings.change';
@@ -451,6 +470,9 @@ class Retry {}
 
 /** What each `vault.tampered` entry reports, to mark it logged once committed. */
 const REPORTED = new WeakMap<NewEntry, string>();
+
+/** Each environment row's check, once made (`#placeFault`): one HMAC a row, however many parts of a decision read it. */
+const PLACE_FAULTS = new WeakMap<EnvironmentSeal, 'tampered' | 'stale' | null>();
 
 /** A key service that did not answer, and the entries that record what it did do. */
 class Outage {
@@ -666,6 +688,7 @@ class VaultService implements Vault {
       ...rest,
       principals,
       head,
+      seals: this.#checksPlaces(),
       // A read waits for the head in one of a few places in line, or is refused at once.
       ...(reading ? { waiters: READ_HEAD_WAITERS } : {}),
       ...(released === undefined ? {} : { released: { ...released, windowMs: this.#config.bulkLimit.windowMs, clockOffsetMs: this.#prepared.options.clockOffset(), cap: this.#config.bulkLimit.count } }),
@@ -834,6 +857,89 @@ class VaultService implements Vault {
     return 'stale';
   }
 
+  /**
+   * Whether the vault checks the environment rows it decides on against
+   * 0.15's log (T159): under it, once its cutover is written, which seals
+   * every row. Every read of them asks their seals then (`seals`).
+   */
+  #checksPlaces(): boolean {
+    const { log015, cutover, marked } = this.#prepared;
+    return log015 !== null && (cutover || marked);
+  }
+
+  /**
+   * Why environment `id`'s row, as a decision read it, is not as 0.15's log
+   * holds it (T159; R53, every decision input sealed): its seal is not the
+   * vault's over its object (`tampered`: re-parented, renamed, its tombstone
+   * set or cleared around the log), or not its object's newest change's
+   * (`stale`: put back from before a change, or written with none). A live
+   * object in a project whose slug is a tombstone is `tampered` too: a
+   * project's deletion under 0.15's log deletes each of its environments, as
+   * the cutover sealed them, so only a writer leaves one so (review r2). Each
+   * is reported, once, as a change refused on it is (`#notLogged`), the row's
+   * and not any member's. Null when it is as the log holds it, and for a row
+   * read without its seals: under 0.14's log alone, or before the cutover.
+   */
+  #placeFault(id: string, row: EnvironmentRow, reports: NewEntry[]): 'tampered' | 'stale' | null {
+    const read = row.sealed;
+    if (read === undefined) return null;
+    let fault = PLACE_FAULTS.get(read);
+    if (fault === undefined) {
+      fault = !sealedObject(this.#prepared.log015!.seals, { kind: 'environment', id }, read.object, read.seal) || (row.deleted && !read.object.deleted) ? 'tampered'
+        : read.newest === null || !read.newest.equals(read.seal!) ? 'stale' : null;
+      PLACE_FAULTS.set(read, fault);
+    }
+    if (fault !== null) this.#report(reports, null, fault === 'tampered' ? 'mac' : 'stale', `log.environment:${id}`);
+    return fault;
+  }
+
+  /**
+   * A member's grants whose places hold: each on an environment, on a row
+   * as 0.15's log holds it, which its project is read from (the grant's row
+   * names none of its own). One on a row that is not, or on no row, holds
+   * nothing (T159): where it is is a writer's. Their other grants stand.
+   * Each row from `rows` when there, else read, with its seals.
+   */
+  async #heldGrants(db: Queryable, grants: readonly GrantRow[], reports: NewEntry[], rows?: ReadonlyMap<string, EnvironmentRow>): Promise<GrantRow[]> {
+    if (!this.#checksPlaces()) return [...grants];
+    const ids = [...new Set(grants.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId])))];
+    const missing = ids.filter((id) => !rows?.has(id));
+    const read = missing.length === 0 ? new Map<string, EnvironmentRow>() : await store.environmentsById(db, missing, { seals: true });
+    const faulty = new Set(ids.filter((id) => {
+      const row = rows?.get(id) ?? read.get(id);
+      if (row !== undefined) return this.#placeFault(id, row, reports) !== null;
+      this.#report(reports, null, 'stale', `log.environment:${id}`);
+      return true;
+    }));
+    return grants.filter((grant) => grant.environmentId === null || !faulty.has(grant.environmentId));
+  }
+
+  /**
+   * Refuse a decision about places whose rows are not as 0.15's log holds
+   * them (`#placeFault`), each reported: what it would decide on them is a
+   * writer's (T159). Ids with no row are left to the decision, which knows
+   * no such place.
+   */
+  #placesHold(rows: ReadonlyMap<string, EnvironmentRow>, ids: Iterable<string>, reports: NewEntry[]): void {
+    let hold = true;
+    for (const id of new Set(ids)) {
+      const row = rows.get(id);
+      if (row !== undefined && this.#placeFault(id, row, reports) !== null) hold = false;
+    }
+    if (!hold) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);
+  }
+
+  /**
+   * The policy `edits` make over the rows of the environments they protect
+   * (`livePolicy`), a row not as 0.15's log holds it taken as still
+   * protected, its slug unknown: one deleted or renamed around the log
+   * narrows what anyone holds there, never widens it (T159).
+   */
+  #livePolicy(rows: ReadonlyMap<string, EnvironmentRow>, edits: PolicyEdits, at: number, reports: NewEntry[]): Policy {
+    const held = new Map([...rows].map(([id, row]) => [id, this.#placeFault(id, row, reports) === null ? row : { ...row, slug: null, deleted: false }]));
+    return livePolicy(held, edits, at);
+  }
+
   /** The newest access entry about `principal` that carries the vault's MAC (`newestAccess` in @coffre/db/grants). */
   #newestAccess(db: Queryable, principal: string, reports: NewEntry[], reads?: Snapshot): Promise<Newest> {
     if (reads === undefined || !reads.grants.has(principal)) return newestAccess(db, principal, this.#check(reports, principal));
@@ -933,7 +1039,10 @@ class VaultService implements Vault {
     if (prepared.since === null && prepared.superseded === null) await this.#settle();
     // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
     // the bulk cap, after it, as decisions of 0.15's log.
-    if (prepared.superseded === null && prepared.log015 !== null && !prepared.cutover && !(await store.cutOver(this.#db))) return prepared.superseded;
+    if (prepared.superseded === null && prepared.log015 !== null && !prepared.cutover && !prepared.marked) {
+      if (!(await store.cutOver(this.#db))) return prepared.superseded;
+      prepared.marked = true;
+    }
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert();
     if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit();
@@ -999,9 +1108,11 @@ class VaultService implements Vault {
     const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
     if (everyProject.length === 0) return;
     if (await reportStands(d.tx, principal, this.#check(d.reports, principal))) return;
-    // The projects there are now, read under the log's head, which a deletion holds.
+    // The projects there are now, read under the log's head, which a deletion holds; each environment by its slug as 0.15's
+    // log holds its row (T159, review r7): a grant on a slug in every project becomes one on each place that answers to
+    // it, never on one a writer renamed into it.
     const before = roleOf(principal, row);
-    const conversion = everyProjectConversion(principal, before.role, subject.stored, d.at, await store.liveProjects(d.tx));
+    const conversion = everyProjectConversion(principal, before.role, subject.stored, d.at, await this.#livePlaces(d));
     const after = { role: conversion.role, scope: conversion.scope };
     const replacedBy = { role: after.role, scope: after.scope, grants: conversion.grants.length };
     d.grants.set(principal, [...subject.stored]);
@@ -1187,7 +1298,14 @@ class VaultService implements Vault {
     const items = loaded.versions.map((version) => ({ ...version, secret: { ...version.secret } }));
     validateItems(items, 'wrapped');
     const sealed = await this.#referencesAt(vias);
-    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])));
+    // Settled first, as a decision is: a new process learns here whether the log is cut over, and so whether a fork's row
+    // is held to its seal (review r1).
+    await this.#settled();
+    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])), { seals: this.#checksPlaces() });
+    // A fork whose row is not as 0.15's log holds it is no place to read through (T159), reported.
+    const forkReports: NewEntry[] = [];
+    for (const [id, fork] of forks) if (this.#placeFault(id, fork, forkReports) !== null) forks.delete(id);
+    await this.#record(forkReports);
     // A reference reads only the current version of the source its entry names.
     const viaOk = items.map((item, i) => vias[i] === null || (sealed[i] !== null && sealed[i]!.source.secretId === item.secret.secretId && item.current));
     // A fork an inherited value is read in is a live environment of the same project as the value's, and not its own,
@@ -1521,6 +1639,9 @@ class VaultService implements Vault {
       const at = secrets.map((secret, i) => call.places?.[i] ?? secret);
       // Each a personal config is a config of too, whose read its owner needs (`places`).
       const environments = d.reads.environments;
+      // Each as 0.15's log holds its row (T159): its project, its slug, its tombstone, a personal config's owner and parent.
+      const decided = [...secrets, ...at].map((place) => place.environmentId);
+      this.#placesHold(environments, [...decided, ...decided.flatMap((id) => (environments.get(id)?.owner == null ? [] : [environments.get(id)!.parentId!]))], d.reports);
       owners.clear();
       for (const [id, environment] of environments) if (environment.owner !== null) owners.set(id, ownerKey(environment.owner));
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
@@ -1734,10 +1855,13 @@ class VaultService implements Vault {
       const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
         const source = sources.get(item.source.secretId);
         return source === undefined ? [item.holder.environmentId] : [item.holder.environmentId, source.environmentId];
-      }));
+      }), { seals: this.#checksPlaces() });
+      // Each as 0.15's log holds its row (T159).
+      this.#placesHold(environments, environments.keys(), d.reports);
       const codes = items.map((item): RefusalCode | null => {
         const source = sources.get(item.source.secretId);
-        if (source === undefined || projectOf.get(item.holder.environmentId) !== item.holder.projectId) return 'bad_claim';
+        // The holder's project as the row this decision checked says it (review r4): the read before only names the entry.
+        if (source === undefined || environments.get(item.holder.environmentId)?.projectId !== item.holder.projectId) return 'bad_claim';
         if (source.secretId === item.holder.secretId) return 'invalid';
         return referenceRefusal(reader, item.holder, source, environments, natures.get(source.secretId) ?? 'secret');
       });
@@ -1813,7 +1937,9 @@ class VaultService implements Vault {
       // Under the log's head: two ends of one reference at once, the second finds the first; and the actor's standing stands.
       const actor = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads), input);
       // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
-      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId));
+      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId), { seals: this.#checksPlaces() });
+      // Each as 0.15's log holds its row (T159).
+      this.#placesHold(environments, environments.keys(), d.reports);
       // Who may end each: write where it is held; for a break, managing the source's project's access too; abandoning,
       // its maker alone, for a write of theirs that stored nothing (the vault never reads the app's rows, so whose
       // seal it is decides, and no one else's end says it).
@@ -2049,7 +2175,8 @@ class VaultService implements Vault {
     if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants };
     if (!PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants };
     if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
-    const held = grants.map((grant) => ({ ...grant, role: grant.role as Role }));
+    // What they hold: their grants but those on a place whose row is not as 0.15's log holds it (T159). Kept as stored.
+    const held = (await this.#heldGrants(db, grants, reports, reads?.environments)).map((grant) => ({ ...grant, role: grant.role as Role }));
     const { role, scope } = roleOf(principal, row);
     // Every decision about them reads the policy: their roles as an Owner edited them, and which environments are protected.
     const { policy } = await this.#policyAt(db, reports, at, reads);
@@ -2072,7 +2199,9 @@ class VaultService implements Vault {
   #revisionOf(standing: Standing, d: Decision): string | null {
     const { policy } = standing.live;
     if (standing.status !== 'active' || policy === undefined) return null;
-    return this.#access(standing.principal, d.members.get(standing.principal), standing.stored, d.at, false, policy).revision!;
+    // Its grants that hold, as `access` answers them (`#heldGrants`): those `all` keeps.
+    const held = standing.stored.filter((grant) => grant.environmentId === null || standing.all.grants.some((kept) => kept.environmentId === grant.environmentId));
+    return this.#access(standing.principal, d.members.get(standing.principal), held, d.at, false, policy).revision!;
   }
 
   /**
@@ -2097,11 +2226,13 @@ class VaultService implements Vault {
   /** `access`, as the rows are now. */
   async #read(principal: string, superseded: string | null): Promise<Access> {
     const read = async (db: Queryable, reports: NewEntry[]) => {
-      const reads = await snapshot(db, { principals: [principal], members: true });
+      const reads = await snapshot(db, { principals: [principal], members: true, seals: this.#checksPlaces() });
       const [row, held, at] = [reads.members.get(principal), reads.grants.get(principal)!, this.#at(reads)];
       const fault = await this.#integrity(db, principal, row, held, reports, reads);
+      // Their grants but those on a place whose row is not as 0.15's log holds it, which hold nothing (T159).
+      const holding = fault === null ? await this.#heldGrants(db, held, reports, reads.environments) : held;
       const { policy } = await this.#policyAt(db, reports, at, reads);
-      return this.#access(principal, row, held, at, fault !== null, policy);
+      return this.#access(principal, row, holding, at, fault !== null, policy);
     };
     const found: NewEntry[] = [];
     const quick = await read(this.#db, found).catch((error: unknown) => {
@@ -2187,11 +2318,10 @@ class VaultService implements Vault {
           throw refused('invalid', `${change.role} can only be granted on a project`);
         }
       }
-      const known = await store.places(
-        d.tx,
-        changes.map((change) => change.projectId!),
-        changes.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId])),
-      );
+      const named = changes.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId]));
+      const known = await store.places(d.tx, changes.map((change) => change.projectId!), named, { seals: this.#checksPlaces() });
+      // Each environment by its project and slug as 0.15's log holds its row (T159): what a grant there is weighed on.
+      this.#placesHold(known.environments, named, d.reports);
       const where: Place[] = changes.map(({ projectId, environmentId, role }) => {
         const environment = environmentId === null ? undefined : known.environments.get(environmentId);
         if (!known.projects.has(projectId!) || (environmentId !== null && environment?.projectId !== projectId)) {
@@ -2225,7 +2355,7 @@ class VaultService implements Vault {
         // The setting as of the log's head, which a change to it takes too.
         const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
         // One just admitted holds nothing yet, and is theirs.
-        const account = admitted !== undefined || row === undefined ? { grants: [], admittedBy: actor } : await this.#account(d.tx, subject, row);
+        const account = admitted !== undefined || row === undefined ? { grants: [], admittedBy: actor } : await this.#account(d.tx, subject, row, d.reads, d.reports);
         // Each place's new role they must hold, and what it held before: taking a grant away is changing it.
         const gives = changes.every((change, i) => {
           const before = subject.live.grants.find((grant) => placeKey({ ...grant, environmentSlug: null }) === placeKey(change));
@@ -2368,9 +2498,28 @@ class VaultService implements Vault {
    */
   async #setsUp(d: Decision, acting: Standing, service: boolean, refused: (code: RefusalCode, message?: string) => Refused): Promise<void> {
     const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
-    if (!service || !PERSON.test(acting.principal) || !setsUpServices(acting.live, setting, placesOf(await store.liveProjects(d.tx)))) {
+    if (!service || !PERSON.test(acting.principal) || !setsUpServices(acting.live, setting, placesOf(await this.#livePlaces(d)))) {
       throw refused('not_allowed', 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up');
     }
+  }
+
+  /**
+   * Every live project and its environments, each environment by its
+   * project, slug and tombstone as 0.15's log holds its row (T159): one that
+   * is not is no place anyone sets a service account up in, nor that a
+   * grant on every project of 0.4 becomes one on. Each read once,
+   * in the statement whose rows are checked, so what is checked is what is
+   * weighed (review r3: a row renamed between two reads, and back).
+   */
+  async #livePlaces(d: Decision): Promise<Awaited<ReturnType<typeof store.liveProjects>>> {
+    const projects = await store.liveProjects(d.tx);
+    if (!this.#checksPlaces()) return projects;
+    const rows = await store.environmentsById(d.tx, 'all', { seals: true });
+    const held = [...rows].filter(([id, row]) => this.#placeFault(id, row, d.reports) === null && !row.deleted);
+    return projects.map((project) => ({
+      id: project.id,
+      environments: held.filter(([, row]) => row.projectId === project.id).map(([id, row]) => ({ id, slug: row.slug })).sort((a, b) => (a.id < b.id ? -1 : 1)),
+    }));
   }
 
   /**
@@ -2438,7 +2587,7 @@ class VaultService implements Vault {
       if (!runsInstance(holder)) {
         // A service account its manager removes: they reach everything it holds (`managesService`).
         const theirs = SERVICE.test(principal) && PERSON.test(actor) && row?.status === 'active' &&
-          managesService(holder, (await this.#settingsAt(d.tx, d.reports)).serviceAccounts, actor, await this.#account(d.tx, subject, row));
+          managesService(holder, (await this.#settingsAt(d.tx, d.reports)).serviceAccounts, actor, await this.#account(d.tx, subject, row, d.reads, d.reports));
         if (!theirs) throw refused('not_allowed', 'only admins and owners of the whole instance may remove members, and a service account whoever manages it');
       }
       if (row?.status !== 'active') throw refused(row === undefined ? 'not_a_member' : 'removed');
@@ -2487,8 +2636,15 @@ class VaultService implements Vault {
    * environment by its slug, which the setting's scope matches, and who
    * admitted it, as its row says.
    */
-  async #account(db: Queryable, subject: Standing, row: Member): Promise<ServiceAccount> {
-    const slugs = await store.environmentsById(db, subject.live.grants.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId])));
+  async #account(db: Queryable, subject: Standing, row: Member, reads: Snapshot, reports: NewEntry[]): Promise<ServiceAccount> {
+    // Every place it holds a grant on, lapsed ones too, as 0.15's log holds its row (T159): one that is not holds nothing,
+    // and so would leave the account easier to manage, not harder. Refused instead.
+    const ids = subject.stored.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId]));
+    // The decision's own read of them, their grants' places among it once 0.15's log is cut over (`asked.seals`); else read.
+    const missing = ids.filter((id) => !reads.environments.has(id));
+    const slugs = missing.length === 0 ? reads.environments : new Map([...reads.environments, ...await store.environmentsById(db, missing, { seals: this.#checksPlaces() })]);
+    if (this.#checksPlaces() && ids.some((id) => !slugs.has(id))) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);
+    this.#placesHold(slugs, ids, reports);
     return {
       grants: subject.live.grants.map((grant) => ({
         role: grant.role,
@@ -2557,8 +2713,10 @@ class VaultService implements Vault {
     if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS, readable: true, seq: null };
     const edits = typeof entry === 'string' ? null : readEdits(JSON.parse(entry.metadata) as { policy?: unknown });
     if (edits === null) return { policy: CLOSED_POLICY, edits: NO_EDITS, readable: false, seq: null };
-    const rows = entry === reads?.newestPolicy ? reads.environments : await store.environmentsById(db, edits.protected.map((place) => place.environmentId));
-    return { policy: livePolicy(rows, edits, at), edits, readable: true, seq: (entry as StoredEntry).seq };
+    const rows = entry === reads?.newestPolicy
+      ? reads.environments
+      : await store.environmentsById(db, edits.protected.map((place) => place.environmentId), { seals: this.#checksPlaces() });
+    return { policy: this.#livePolicy(rows, edits, at, reports), edits, readable: true, seq: (entry as StoredEntry).seq };
   }
 
   changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>> {
@@ -2648,7 +2806,11 @@ class VaultService implements Vault {
         if (!(await store.projectLive(d.tx, change.projectId))) throw refused('invalid', 'no such project');
         at.projectId = change.projectId;
         // Each a live environment of the project, or none yet: a fork's id, protected before its row is written.
-        const found = await store.environmentsById(d.tx, change.environmentIds);
+        const found = await store.environmentsById(d.tx, change.environmentIds, { seals: this.#checksPlaces() });
+        // Each as 0.15's log holds its row (T159, review r1): its project and whether it was deleted decide what changes, and
+        // a tombstone set around the log would keep a protection's end from its object. One the log has never held (no
+        // seal, no change) is 0.14's alone, which the change path takes as such.
+        this.#placesHold(found, [...found].flatMap(([id, row]) => (row.sealed?.seal == null && row.sealed?.newest == null ? [] : [id])), d.reports);
         if ([...found.values()].some((environment) => environment.projectId !== change.projectId)) throw refused('invalid', 'each environment is one of the project\'s');
         if (change.environmentIds.length === 1 && found.has(change.environmentIds[0]!)) at.environmentId = change.environmentIds[0];
         // An environment whose object 0.15's log changes with this: one with a row, not deleted (`environment.protect`).
@@ -2676,7 +2838,10 @@ class VaultService implements Vault {
         throw refused('invalid', 'a change is to a role, an instance role, or protection');
       }
       // The policy now, and the newest change, which it is as of: this one's, when it changed anything.
-      const answer = { policy: livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId)), next, d.at), seq: newest === null ? null : Number(newest) };
+      const answer = {
+        policy: this.#livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId), { seals: this.#checksPlaces() }), next, d.at, d.reports),
+        seq: newest === null ? null : Number(newest),
+      };
       if (!readable || JSON.stringify(next) !== JSON.stringify(edits)) {
         // With 0.15's log, ordered against the vault's issues in flight, which check the policy under the issue lock shared:
         // exclusive, its rows written, before its append's trigger takes the fence (`holdIssues`).
@@ -3574,21 +3739,25 @@ class VaultService implements Vault {
     const reports: NewEntry[] = [];
     // The members, their grants, the policy, the setting and the places in one statement; the credential beside it.
     const [reads, via] = await Promise.all([
-      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds }),
+      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds, seals: this.#checksPlaces() }),
       input.via === null ? Promise.resolve(null) : store.issuingCredential(this.#db, input.via),
     ]);
     // The settings from the snapshot's newest entry; the pages before it read only when it fails its check.
     const settings = input.service ? await this.#settingsAt(this.#db, reports, reads) : null;
     const at = this.#at(reads);
-    const refuse = async (refused: IssueTokenRefusal) => {
+    const refuse = async (refused: IssueTokenRefusal, why?: string) => {
       await this.#record(reports);
-      return { ok: false as const, refused };
+      return { ok: false as const, refused, ...(why === undefined ? {} : { why }) };
     };
+    // Each environment read, as 0.15's log holds its row (T159): a protected one that is not stays protected, its slug
+    // unknown, as `access` answers it (`#livePolicy`); one the scope names refuses the issue; a member's grant on one
+    // holds nothing (`#standing`), and the account's refuses whoever manages it (`#account`).
+    const faulty = new Set([...reads.environments].flatMap(([id, row]) => (this.#placeFault(id, row, reports) === null ? [] : [id])));
     // The policy the app weighed the scope on, as `policyStill` holds a write to it: one moved since says so, first.
     const newestPolicy = reads.newestPolicy === null ? null : String(reads.newestPolicy.seq);
     const renamed = input.policy.protected.some(({ environmentId, slug }) => {
       const environment = reads.environments.get(environmentId);
-      return (environment === undefined || environment.deleted ? null : environment.slug) !== slug;
+      return (environment === undefined || faulty.has(environmentId) || environment.deleted ? null : environment.slug) !== slug;
     });
     if (newestPolicy !== input.policy.seq || renamed) return refuse('policy');
     const actorRow = reads.members.get(actor);
@@ -3615,9 +3784,10 @@ class VaultService implements Vault {
     if (subject.status !== 'active' || principalRow === undefined || principalRow.generation !== input.generation) {
       return refuse(principal === actor ? 'ended' : 'gone');
     }
-    // Each place by its environment's slug, which scopes match: one deleted, or of another project, is no place. Its row is
-    // not held to its object's seal here, nor in `#account` or `access`: T159, a 0.15 ship gate, checks them for all three.
-    // The protected ones' slugs are held to the policy under the issue lock (`issue_token`).
+    if (scope.some((grant) => grant.environmentId != null && faulty.has(grant.environmentId))) return refuse('refused', TAMPERED_PLACE);
+    // Each place by its environment's slug, which scopes match: one deleted, or of another project, is no place. The
+    // protected ones' slugs are held to the policy under the issue lock (`issue_token`), but those whose rows are not as
+    // the log holds them, which it weighed with none: no slug moves that.
     const places = scope.map((grant): Place | null => {
       if (grant.environmentId == null) return { projectId: grant.projectId! };
       const environment = reads.environments.get(grant.environmentId);
@@ -3625,7 +3795,13 @@ class VaultService implements Vault {
         ? null
         : { projectId: grant.projectId!, environmentId: grant.environmentId, environmentSlug: environment.slug };
     });
-    const service = settings === null ? null : { setting: settings.serviceAccounts, account: await this.#account(this.#db, subject, principalRow) };
+    let service: { setting: ServiceSetting | null; account: ServiceAccount } | null = null;
+    try {
+      if (settings !== null) service = { setting: settings.serviceAccounts, account: await this.#account(this.#db, subject, principalRow, reads, reports) };
+    } catch (error) {
+      if (error instanceof Refused) return refuse('refused', error.refusal.message);
+      throw error;
+    }
     return {
       holder, places, via, service, reports,
       issue: {
@@ -3634,12 +3810,15 @@ class VaultService implements Vault {
         principal: { generation: principalRow.generation, accessSeq: principalRow.accessSeq },
         via: via === null ? null : { columns: via.columns, seal: via.seal },
         // The protected environments' slugs, and the scope's as weighed: none moves before the number (Fable on PR 2).
-        slugs: [
-          ...input.policy.protected,
-          ...places.flatMap((place) => (place?.environmentId == null || input.policy.protected.some(({ environmentId }) => environmentId === place.environmentId)
-            ? []
-            : [{ environmentId: place.environmentId, slug: place.environmentSlug ?? null }])),
-        ],
+        slugs: weighed([
+          ...input.policy.protected.filter(({ environmentId }) => !faulty.has(environmentId)),
+          ...places.flatMap((place) => (place?.environmentId == null ? [] : [{ environmentId: place.environmentId, slug: place.environmentSlug ?? null }])),
+          // The places of the account's grants, by whose slugs `#account` weighed who manages it (review r2).
+          ...(service === null ? [] : subject.live.grants.flatMap((grant) => {
+            const row = grant.environmentId === null ? undefined : reads.environments.get(grant.environmentId);
+            return row === undefined ? [] : [{ environmentId: grant.environmentId!, slug: row.deleted ? null : row.slug }];
+          })),
+        ]),
       },
     };
   }

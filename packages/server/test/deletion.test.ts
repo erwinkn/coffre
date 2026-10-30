@@ -8,7 +8,7 @@ import type { Database } from '@coffre/db';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
-import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { postgresOnly } from './db/engine.ts';
 
 const ROOT = 'admin@acme.example';
@@ -595,16 +595,20 @@ test('the vault grants nothing on a deleted place, and still revokes there', asy
   await seedMarket();
   const version = await currentVersion('prod', 'API_KEY');
   await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
+  // Under 0.15's log a project's deletion deletes its environments too: a project's tombstone alone is a writer's, and its
+  // environments' rows are not as the log holds them (T159).
+  const there = LOG === '0.15' ? 'tampered' : 'deleted';
   const change = (role: 'viewer' | null, environmentId: string | null) => deps.vault.setAccess({
     actor: `user:${ROOT}`, principal: CI, requestId: 'r', operationId: crypto.randomUUID(),
     changes: [{ projectId: version.projectId, environmentId, role, expiresAt: null }],
   });
-  for (const environmentId of [null, version.environmentId]) {
-    const outcome = await change('viewer', environmentId);
-    assert.equal(outcome.ok ? null : outcome.refusal.code, 'deleted');
-  }
+  const onProject = await change('viewer', null);
+  assert.equal(onProject.ok ? null : onProject.refusal.code, 'deleted');
+  const onEnvironment = await change('viewer', version.environmentId);
+  assert.equal(onEnvironment.ok ? null : onEnvironment.refusal.code, there);
   const revoked = await change(null, version.environmentId);
-  assert.deepEqual(revoked.ok ? revoked.changes : revoked.refusal, ['revoked']);
+  if (LOG === '0.15') assert.equal(revoked.ok ? null : revoked.refusal.code, 'tampered');
+  else assert.deepEqual(revoked.ok ? revoked.changes : revoked.refusal, ['revoked']);
 });
 
 test('the vault refuses a deleted place as deleted, its erased versions included', async () => {
@@ -619,12 +623,16 @@ test('the vault refuses a deleted place as deleted, its erased versions included
 test('a tombstone is refused by the rule, not by its emptied keys: values left in it, and a grant still on it, open nothing', async () => {
   await seedMarket();
   const version = await currentVersion('prod', 'API_KEY');
-  // As if the erase had missed it: the slug says deleted, the value and the developer's grant are still there.
+  // As if the erase had missed it: the slug says deleted, the value and the developer's grant are still there. Under 0.15's
+  // log, where a project's deletion deletes its environments too, a project's tombstone alone is a writer's: its
+  // environments' rows are not as the log holds them, a grant on one holds nothing, and a decision there is refused (T159).
   await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
-  assert.equal((await deps.vault.access(DEV)).grants.length, 2);
+  const there = LOG === '0.15' ? 'tampered' : 'deleted';
+  assert.equal((await deps.vault.access(DEV)).grants.length, LOG === '0.15' ? 1 : 2);
 
   for (const principal of [DEV, `user:${ROOT}`]) {
     const outcome = await unwrapAs(principal, version.id);
+    // Refused as deleted before anything weighs the place's row.
     assert.equal(outcome.ok ? null : outcome.refusal.code, 'deleted', principal);
   }
   const wrapped = await deps.vault.wrap({
@@ -636,7 +644,8 @@ test('a tombstone is refused by the rule, not by its emptied keys: values left i
       key: randomBytes(32).toString('base64'),
     }],
   });
-  assert.equal(wrapped.ok ? null : wrapped.refusal.code, 'deleted');
+  assert.equal(wrapped.ok ? null : wrapped.refusal.code, there);
+  if (LOG === '0.15') return;
   const refusals = await db.owner.select({ action: auditLog.action }).from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.decision, 'deny'), eq(auditLog.code, 'deleted')))
     .orderBy(asc(auditLog.seq));

@@ -678,3 +678,25 @@ test("a reference whose source's environment is archived is the vault's refusal,
     await cold.end();
   }
 });
+
+test('a place renamed, or brought back from its deletion, around the log, its seal kept, is refused tampered by the name it is read by, never its key (T159)', async () => {
+  const w = await named();
+  const name = await w.nameOf(await w.key('sk_live_1'));
+  const { vault } = await isolate();
+  const at = (environment: string) => w.ask(name, { place: { project: w.slug, environment } });
+  assert.equal(codeOf(await vault.useNamed!(at('dev'))), 'ok');
+  // Renamed, and asked for by the name its row says now: a scoped role's filters read the slug.
+  await run(db.owner, sql`UPDATE environments SET slug = 'renamed' WHERE id = ${w.dev}`);
+  assert.equal(codeOf(await vault.useNamed!(at('renamed'))), 'tampered');
+  await run(db.owner, sql`UPDATE environments SET slug = 'dev' WHERE id = ${w.dev}`);
+  assert.equal(codeOf(await vault.useNamed!(at('dev'))), 'ok');
+  // Deleted, as the app deletes it: no place by that name. Then its tombstone cleared.
+  const environment = w.objects.environment as Extract<Input, { kind: 'environment' }>;
+  await change({ kind: 'environment', id: w.dev }, { op: 'environment.delete' }, { ...environment, deleted: true }, async (tx, value) => {
+    await run(tx, sql`UPDATE environments SET slug = 'dev~deleted-1' WHERE id = ${w.dev}`);
+    await seal('environments', 'id', w.dev)(tx, value);
+  });
+  assert.equal((await vault.useNamed!(at('dev'))).served, false, 'none by that name: the app decides on the place');
+  await run(db.owner, sql`UPDATE environments SET slug = 'dev' WHERE id = ${w.dev}`);
+  assert.equal(codeOf(await vault.useNamed!(at('dev'))), 'tampered');
+});

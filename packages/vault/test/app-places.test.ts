@@ -22,7 +22,7 @@ import { newestSealedChanges, newestSealedQuery } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, secretObject } from '../src/objects.ts';
-import { ENGINE, openTestDatabase, rows, run, sealed, sqlitePlan, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, sealed, sqlitePlan, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, isolate, ROOT, SEAL, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -848,7 +848,12 @@ test("a break by a Developer in a protected environment after a writer marked it
   await db.owner.insert(t.environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
   const old = randomUUID();
   const oldRef = randomUUID();
-  const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id: oldRef, holder: { projectId: w.project, environmentId: legacy, secretId: old, path: 'p/legacy/OLD' }, source: { secretId: source } }] });
+  // Made by an isolate still on 0.14's log, as its environment was: 0.15's vault decides on no row its log does not hold
+  // (T159), and since PR 9b nothing of 0.14's writes after the cutover, so such a holder is one a writer let through.
+  const { vault: older } = await isolate({ log: '0.14' });
+  const made = await withOldWrites(db.owner, () => older.reference({
+    principal: ROOT, caller: 'person', items: [{ id: oldRef, holder: { projectId: w.project, environmentId: legacy, secretId: old, path: 'p/legacy/OLD' }, source: { secretId: source } }],
+  }));
   assert.ok(made.ok, JSON.stringify(made));
   await db.owner.insert(t.secrets).values({ id: old, projectId: w.project, environmentId: legacy, key: 'OLD' });
   await db.owner.insert(t.secretReferences).values({

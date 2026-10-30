@@ -464,9 +464,11 @@ shares with the other issues.
   0.15-plan.md, "As built: T156"); and the vault's token issues, revokes
   and sign-outs, as detail, with the label beside the entries a personal
   token the vault issued caused (T164, "As built: T164").
-- **Environment rows an issue decides on** (T159, a 0.15 ship gate): their
-  project, slug and tombstone are read without their objects' seals, as in
-  the vault's `access` and `#account`. T159 checks them for all three. The
-  protected ones' slugs are held to the policy under the issue lock.
+- **Environment rows an issue decides on** are held to their objects'
+  seals (T159; 0.15-plan.md, "As built: T159"), as everywhere the vault
+  decides: a scope's place that fails refuses the issue, an account's grant
+  on one refuses whoever manages it, a protected one stays protected with no
+  slug. The protected ones' slugs are held to the policy under the issue
+  lock, as before.
 - **Still the app's, with `prepare`:** browser and device sign-ins, renewal,
   a member's removal sweep, unbinding, the key rotation's sign-outs.

@@ -2,14 +2,18 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import type { SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
+import type { ObjectChange, SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
-import { forgetLogHeads } from '@coffre/db/log';
+import { appChanges, forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 
+import { prepareChanges, type ChangeKeys } from '../src/changes.ts';
 import type { Sealed, SealThrough } from '../src/checkpointer.ts';
+import { sealKey } from '../src/inputs.ts';
 import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
+import { logMacKey } from '../src/log-entry.ts';
+import { cutOver as cutOverYet } from '../src/store.ts';
 
 /**
  * The suite's database, as the vault's tests use it: the one the server's
@@ -81,8 +85,35 @@ export const sealed: SealThrough = async () => ({}) as Sealed;
  */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
   const vault = await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed } : {}), ...options }, close);
-  if (vault.cutover !== undefined && (options?.log ?? LOG) === '0.15') await cutOver(vault, db);
+  if (vault.cutover !== undefined && (options?.log ?? LOG) === '0.15') {
+    placeKeys = { seals: config.signingKeys.map((key) => sealKey(key)), mac: logMacKey(config.signingKeys[0]!) };
+    await cutOver(vault, db);
+  }
   return speaking(vault);
+}
+
+/**
+ * The keys the vault this process opened last under 0.15's log seals with
+ * (`openLocalVault`): what the fixtures seal the places they write with
+ * once the log is cut over (`sealPlaces`). The vault checks every
+ * environment row it decides on against the log (T159).
+ */
+let placeKeys: ChangeKeys | null = null;
+
+/**
+ * New environments' rows, written by a test, sealed as the app's creation
+ * of each seals it (`Vault.prepare`, then `app_change` in a transaction of
+ * its own): under 0.15's log, once it is cut over. Before, the cutover's
+ * genesis seals them; under 0.14's alone, nothing does.
+ */
+export async function sealPlaces(owner: Database, made: readonly { id: string; projectId: string; slug: string; parentId?: string | null }[]): Promise<void> {
+  if (placeKeys === null || !(await cutOverYet(owner))) return;
+  const changes: ObjectChange[] = made.map(({ id, projectId, slug, parentId = null }) => ({
+    kind: 'environment', id, before: null, after: { id, projectId, slug, owner: null, parentId, protected: null, archived: false, projectArchived: false },
+  }));
+  const calls = prepareChanges(placeKeys, Date.now(), 'user:root@acme.example', changes, new Map());
+  const numbers = await owner.transaction((tx) => appChanges(tx, calls));
+  assert.ok(numbers.every((number) => number !== null && number > 0n), 'a new environment is sealed as the app makes one');
 }
 
 /**
@@ -187,6 +218,29 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
   }
 }
 
+/**
+ * `work`, with 0.14's writes let through after the cutover (`audit_log_refuse_old`, 0047): a late write of 0.14's, as
+ * only someone who lifts the trigger could leave since PR 9b, for a test of rows 0.14's log alone holds. Lifted for every
+ * connection until `work` ends.
+ */
+export async function withOldWrites<T>(owner: Database, work: () => Promise<T>): Promise<T> {
+  if (ENGINE === 'postgres') {
+    await run(owner, sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
+    try {
+      return await work();
+    } finally {
+      await run(owner, sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
+    }
+  }
+  const [trigger] = await rows<{ sql: string }>(owner, sql`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'audit_log_refuse_old'`);
+  await run(owner, sql`DROP TRIGGER audit_log_refuse_old`);
+  try {
+    return await work();
+  } finally {
+    await run(owner, sql.raw(trigger!.sql));
+  }
+}
+
 /** Rows of a raw query, on either engine. */
 export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
   if (ENGINE === 'postgres') return [...await db.execute(query)] as Row[];
@@ -285,8 +339,38 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   forgetLogHeads();
 }
 
-/** A project with two environments, and secrets in them on demand, as the app would have made them. */
-export async function places(owner: Database) {
+/**
+ * An environment renamed or archived as the app does it: under 0.15's log,
+ * cut over, its change sealed (`Vault.prepare`) and written beside the row
+ * in one transaction (`app_change`); otherwise the row alone.
+ */
+export async function changePlace(owner: Database, id: string, set: { slug?: string; archived?: boolean }): Promise<void> {
+  const write = (db: Queryable) => run(db, sql`UPDATE environments SET slug = coalesce(${set.slug ?? null}, slug),
+    archived_at = ${set.archived === undefined ? sql`archived_at` : set.archived ? sql`${ENGINE === 'postgres' ? new Date() : Date.now()}` : sql`NULL`} WHERE id = ${id}`);
+  if (placeKeys === null || !(await cutOverYet(owner))) return write(owner);
+  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | number | null; archived: boolean | number; project_archived: boolean | number; seal: Buffer | Uint8Array | null }>(owner,
+    sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
+      FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
+  assert.ok(row !== undefined, `no environment ${id}`);
+  const columns = {
+    id, projectId: row.project_id, slug: row.slug, owner: row.owner, parentId: row.parent_id, protected: row.protected === null ? null : Boolean(row.protected),
+    archived: Boolean(row.archived), projectArchived: Boolean(row.project_archived),
+  };
+  const before = { columns, seal: row.seal === null ? null : Buffer.from(row.seal).toString('base64') };
+  const after = { ...columns, slug: set.slug ?? columns.slug, archived: set.archived ?? columns.archived };
+  const calls = prepareChanges(placeKeys, Date.now(), 'user:root@acme.example', [{ kind: 'environment', id, before, after }], new Map());
+  const numbers = await owner.transaction(async (tx) => {
+    await write(tx);
+    return appChanges(tx, calls);
+  });
+  assert.ok(numbers.every((number) => number !== null && number > 0n), 'an environment is changed as the app changes one');
+}
+
+/**
+ * A project with two environments, and secrets in them on demand, as the app would have made them; `sealed: false`, its
+ * rows as 0.14's log alone holds them, for a test that stands in for the cutover itself.
+ */
+export async function places(owner: Database, { sealed: seal = true }: { sealed?: boolean } = {}) {
   const { environments, secrets } = tablesOf(owner);
   const project = await newProject(owner);
   const [dev, prod] = [randomUUID(), randomUUID()];
@@ -294,6 +378,7 @@ export async function places(owner: Database) {
     { id: dev, projectId: project, slug: 'dev', name: 'Development' },
     { id: prod, projectId: project, slug: 'prod', name: 'Production' },
   ]);
+  if (seal) await sealPlaces(owner, [{ id: dev, projectId: project, slug: 'dev' }, { id: prod, projectId: project, slug: 'prod' }]);
   let n = 0;
   /** A new secret's ref, its row committed. */
   const secret = async (environmentId: string, key = 'DATABASE_URL'): Promise<SecretRef> => {
@@ -316,6 +401,7 @@ export async function newEnvironment(owner: Database, projectId: string): Promis
   const { environments } = tablesOf(owner);
   const id = randomUUID();
   await owner.insert(environments).values({ id, projectId, slug: `e-${id.slice(0, 8)}`, name: 'Environment' });
+  await sealPlaces(owner, [{ id, projectId, slug: `e-${id.slice(0, 8)}` }]);
   return id;
 }
 

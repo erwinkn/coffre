@@ -34,8 +34,10 @@ import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
+import { openLocalVault as openRawVault } from '../src/local.ts';
 import {
   CONVERSION,
+  cutOver,
   emptyDatabase,
   ENGINE,
   locksHere,
@@ -44,7 +46,9 @@ import {
   newEnvironment,
   newProject,
   openTestDatabase,
+  changePlace,
   places,
+  sealPlaces,
   storedVersions,
   postgresOnly,
   rows,
@@ -1459,6 +1463,7 @@ async function laterProject(): Promise<{ project: string; dev: SecretRef; prod: 
     { id: devId, projectId: project, slug: 'dev', name: 'Development' },
     { id: prodId, projectId: project, slug: 'prod', name: 'Production' },
   ]);
+  await sealPlaces(db.owner, [{ id: devId, projectId: project, slug: 'dev' }, { id: prodId, projectId: project, slug: 'prod' }]);
   const secretIn = async (environmentId: string): Promise<SecretRef> => {
     const id = randomUUID();
     await db.owner.insert(secrets).values({ id, projectId: project, environmentId, key: `KEY_${id.slice(0, 8)}` });
@@ -1668,7 +1673,6 @@ test('a service account whose row was deleted is refused, under forged entries a
 
 test('an instance role reaches every project in its scope, the ones made later too, and grants add to it', async () => {
   const w = await world();
-  const { environments } = tablesOf(db.owner);
   assert.deepEqual(await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY }), {
     ok: true, created: true, role: 'developer', scope: DEV_ONLY, generation: 0,
   });
@@ -1687,9 +1691,9 @@ test('an instance role reaches every project in its scope, the ones made later t
   assert.equal(!misclaimed.ok && misclaimed.refusal.code, 'no_grant');
 
   // The slug is read at each decision: a rename moves the environment in or out.
-  await db.owner.update(environments).set({ slug: 'development' }).where(eq(environments.id, later.devId));
+  await changePlace(db.owner, later.devId, { slug: 'development' });
   assert.deepEqual(await readWrite(w, ADA, later.dev), ['no_grant', 'no_grant']);
-  await db.owner.update(environments).set({ slug: 'dev' }).where(eq(environments.id, later.prodId));
+  await changePlace(db.owner, later.prodId, { slug: 'dev' });
   assert.deepEqual(await readWrite(w, ADA, later.prod), ['ok', 'ok']);
 
   // What they hold says so, and the log replays it.
@@ -1784,6 +1788,25 @@ async function everyProjectGrant(principal: string, slug: string | null, role: s
   await db.owner.update(vaultMembers).set({ accessSeq: appended.seqStart }).where(eq(vaultMembers.principal, principal));
   await reseal(principal);
 }
+
+test("a grant on a slug in every project of 0.4, converted after 0.15's cutover, becomes none on a place a writer renamed to that slug and back (T159, review r7)", { skip: LOG !== '0.15' && "0.15's log: the cutover seals the places the conversion reads" }, async () => {
+  // As 0.4 left it, under 0.14's log: dev and prod, and CI a Viewer of every project's staging, which none is.
+  const old = await openLocalVault(db.vault, configure(), { log: '0.14' });
+  assert.equal((await old.access(ROOT)).role, 'owner');
+  const where = await places(db.owner);
+  assert.ok((await old.admit({ actor: ROOT, principal: 'token:ci' })).ok);
+  await everyProjectGrant('token:ci', 'staging', 'viewer');
+  // The cutover, by a vault of 0.15 that makes no call after it: nothing converted yet.
+  await cutOver(await openRawVault(db.vault, configure(), { log: '0.15', sealThrough: sealedNow }), db.vault);
+  // A writer renames prod to staging, its seal kept; a new vault converts on its first call; the writer puts prod back.
+  await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${where.prod}`);
+  const upgraded = await openRawVault(db.vault, configure(), { log: '0.15', sealThrough: sealedNow });
+  await upgraded.access('token:ci');
+  await run(db.owner, sql`UPDATE environments SET slug = 'prod' WHERE id = ${where.prod}`);
+  const ci = await upgraded.access('token:ci');
+  assert.equal(ci.status, 'active');
+  assert.deepEqual(ci.grants, [], 'no place answered to staging as the log holds it');
+});
 
 test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding no more than before, and the log replays it', log014Only(CONVERSION), async () => {
   const w = await world();
