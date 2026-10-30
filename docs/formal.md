@@ -1708,6 +1708,46 @@ revoke's answer (HotPathOneIssue's), Postgres's lock queue (HotPathOne's),
 the proof's claims and the binding's match, and a removal's sweep beyond one
 step.
 
+### WaysIn.tla
+
+A use through a way in that has no credentials row (T147, T136): an MCP
+connection, a Cloudflare service binding, and a browser behind Cloudflare
+Access. Each is the same one statement as a use through a credential
+(`Lifecycle.tla`): the fence shared, the way in and its account read and
+weighed as they are, the number, the commit, with no read of the app's
+after it. The connection is a sealed object of the log, which the app's
+revokes change (`app_change`, the fence exclusive, a compare-and-set on its
+seal); the binding is the vault's, which an unbind changes; Access has no
+row, and its use weighs the account alone. A removal moves the account's
+generation on and revokes its connections in a sweep of its own, after it,
+so an admission in between finds a connection live but of an earlier
+generation; a binding is never swept, and its generation alone ends it.
+MCWaysIn.tla's scenarios: `WaysInRevoke` (two uses while the connection's
+person disconnects it), `WaysInUnbind` (two uses while a manager unbinds
+the binding), `WaysInRemove` (two uses through any way in while the account
+is removed, or removed and admitted again, its sweep after) and
+`WaysInForge` (a database writer puts back the revoked connection's or the
+unbound binding's row).
+
+| protection | turned off, TLC finds |
+|---|---|
+| the use's statement reads the way in's object and decides on it, not on the app's check before (WayReadInUse) | `EndOrdersUses`, for the connection's revoke and the unbind each: the app's check passes, the end commits, the use is numbered after it |
+| a connection's revoke takes the fence exclusive (RevokeTakesFence) | `EndOrdersUses`: a use decides on the live row and is numbered after the revoke |
+| an unbind takes it too (UnbindTakesFence) | `EndOrdersUses`, the same |
+| a removal takes it too (RemovalTakesFence) | `RemovalOrdersUses` |
+| the use's statement reads the account, not the app's answer about it (AccountReadInUse) | `RemovalOrdersUses`: through Access, the removal commits after the app's check, and the use is allowed after it |
+| the use refuses a way in of an earlier generation (UseChecksGeneration) | `AllowedAtCurrentGeneration`: the account removed and admitted again, the binding (never swept) or the connection (before its sweep) serves |
+| the use checks seals (SealChecked) | `AllowedOnSealed`: the revoked connection's or the unbound binding's row put back serves |
+
+**Not modelled:** the connection's refresh-token rotation and last use,
+which write its row but no column of its object, and which a use, taking no
+row's lock, never waits on; its expiry, decided at the request's time as a
+credential's; what the app checks before the use beyond it standing (an
+access token's MAC, the connection's scopes, a binding's freezes); and the
+cutover, which seals the connections 0.14 left as it seals credentials and
+bindings, an app object it vouched for (`Migration015.tla`'s AppObject and
+VouchedHeld).
+
 ## TLC
 
 [TLC](https://github.com/tlaplus/tlaplus) is the TLA+ tools' explicit-state

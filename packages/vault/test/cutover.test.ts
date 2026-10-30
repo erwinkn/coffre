@@ -48,7 +48,7 @@ function configure(): ResolvedVaultConfig {
 }
 
 /** Nothing vouched for: what a case's app says when it made no credential or binding, and deleted nothing. */
-const NONE: Omit<CutoverInput, 'checked'> = { credentials: [], bindings: [], deleted: [] };
+const NONE: Omit<CutoverInput, 'checked'> = { credentials: [], bindings: [], connections: [], deleted: [] };
 
 
 /**

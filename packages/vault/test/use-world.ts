@@ -19,8 +19,10 @@ import { newRequestId } from '../src/use.ts';
 import { ENGINE, rows, run, type TestDatabase } from './database.ts';
 
 export const SIGNING_KEY = randomBytes(32);
+/** The vault's key encryption key, as a configuration names it: a vault elsewhere (a Worker's) opens what this one wrapped. */
+export const KEK = { id: 'use-test', key: randomBytes(32).toString('base64') };
 export const CONFIG = resolveVaultConfig({
-  kek: { id: 'use-test', key: randomBytes(32).toString('base64') },
+  kek: KEK,
   signingKey: SIGNING_KEY.toString('base64'),
   owners: ['root@acme.example'],
 });
@@ -206,6 +208,7 @@ export async function genesis(ref: Ref, object: Input): Promise<void> {
   const op: Op = { op: 'genesis', value: object };
   const where: Record<string, [string, string]> = {
     principal: ['vault_members', 'principal'], credential: ['credentials', 'id'], environment: ['environments', 'id'], secret: ['secrets', 'id'],
+    connection: ['mcp_connections', 'id'], binding: ['service_bindings', 'id'],
   };
   await change(ref, op, object, async (tx, value) => {
     if (ref.kind === 'roles' || ref.kind === 'policy') {

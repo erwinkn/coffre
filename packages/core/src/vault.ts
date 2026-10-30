@@ -383,9 +383,25 @@ export type CredentialColumns = {
   generation: number;
 };
 
+/**
+ * An MCP connection's (`mcp_connections`), as its object takes them (T147):
+ * whose it is, at which generation of their account it was approved, its
+ * end, and whether it was revoked. What a refresh moves (its tokens' hashes)
+ * and its last use are no part of it.
+ */
+export type ConnectionColumns = {
+  id: string;
+  principal: string;
+  generation: number;
+  /** Its `expires_at`, in whole ms: a stored time's sub-millisecond part dropped, never rounded. */
+  expiresAt: number;
+  revoked: boolean;
+};
+
 /** One object's change, as the app will write it: its columns before (null: it makes the object), their seal, and after. */
 export type ObjectChange =
   | ChangeOf<'credential', CredentialColumns, CredentialColumns>
+  | ChangeOf<'connection', ConnectionColumns, ConnectionColumns>
   /**
    * A key's: null after, archived or erased (no object). `restores`: an
    * archived key unarchived, `after` its rows as read: the vault holds them
@@ -623,6 +639,8 @@ export type CutoverInput = {
   credentials: CredentialColumns[];
   /** Each trust binding 0.14 accepts as it stands: its MAC the app's, not revoked, and no `token.unbind` of it. */
   bindings: BindingColumns[];
+  /** Each MCP connection 0.14 accepts as it stands (T147): its MAC the app's, not revoked nor past its end. */
+  connections: ConnectionColumns[];
   /** Each place 0.14's chain deleted, by an authentic `project.delete` or `environment.delete`, with the tombstone it gave the slug. */
   deleted: { kind: 'project' | 'environment'; id: string; tombstone: string }[];
 };
@@ -1316,7 +1334,14 @@ export function newUseRequestId(): string {
 
 /** A use as the app asks for it: on which credential, which key, through which place, why, and when. */
 export type UseInput = {
+  /**
+   * What the request came in on (T147): a credentials row, by id; with
+   * `way`, an MCP connection or a Cloudflare service binding, by id, or,
+   * behind Cloudflare Access, which signs a browser in with no row of
+   * coffre's, the person (`user:…`), whose account is all the use weighs.
+   */
   credential: string;
+  way?: UseWay;
   secretId: string;
   /** The fork an inherited value is read in (`UnwrapInput`'s `through`); null for the key's own environment. */
   place: string | null;
@@ -1333,6 +1358,9 @@ export type UseInput = {
   /** When it must have answered: at most 3 s after `at` (R53). */
   deadline: number;
 };
+
+/** The way in a use came through that has no credentials row (`UseInput.way`): each a sealed object of the log but Access. */
+export type UseWay = 'connection' | 'binding' | 'access';
 
 /** Why a use is refused: the rules' codes, and those of sealed inputs. */
 export type UseCode =

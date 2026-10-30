@@ -1856,22 +1856,27 @@ export async function revokePriorMembership(
   principal: { type: string; id: string },
   generation: number,
   revokedBy: string,
-): Promise<string[]> {
-  const { identities, mcpConnections } = tablesOf(db);
+): Promise<{ credentials: string[]; connections: string[] }> {
+  const { identities } = tablesOf(db);
   const revokedAt = new Date();
-  const older = (table: typeof identities | typeof mcpConnections) =>
-    and(eq(table.principal, principalOf(principal)), lt(table.generation, generation), isNull(table.revokedAt));
-  const tables = [
-    [identities, older(identities)],
-    [mcpConnections, and(older(mcpConnections), gt(mcpConnections.expiresAt, revokedAt))],
-  ] as const;
-  for (const [table, where] of tables) {
-    for (const row of await db.select().from(table).where(where)) {
-      if (!checkAuthRow(chainKey, getTableName(table) as AuthTable, row)) continue;
-      await updateAuth(db, chainKey, table, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
-    }
+  for (const row of await db.select().from(identities).where(and(eq(identities.principal, principalOf(principal)), lt(identities.generation, generation), isNull(identities.revokedAt)))) {
+    if (!checkAuthRow(chainKey, 'identities', row)) continue;
+    await updateAuth(db, chainKey, identities, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy });
   }
-  return revokeCredentialsWhere(db, chainKey, priorCredentials(principal, generation, revokedAt), { revokedAt, revokedBy });
+  // Each connection it ends is a change of 0.15's log, as each credential is (T147): the caller prepared them from the same read.
+  const connections: string[] = [];
+  for (const row of await priorConnections(db, chainKey, principal, generation, revokedAt)) {
+    if ((await updateAuth(db, chainKey, tablesOf(db).mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy })) > 0) connections.push(row.id);
+  }
+  return { credentials: await revokeCredentialsWhere(db, chainKey, priorCredentials(principal, generation, revokedAt), { revokedAt, revokedBy }), connections };
+}
+
+/** A member's live MCP connections of a membership before `generation`, their MACs the app's: what `revokePriorMembership` ends. */
+export async function priorConnections(db: Queryable, chainKey: Buffer, principal: { type: string; id: string }, generation: number, at: Date): Promise<ConnectionRow[]> {
+  const { mcpConnections } = tablesOf(db);
+  const rows = await db.select().from(mcpConnections).where(and(eq(mcpConnections.principal, principalOf(principal)), lt(mcpConnections.generation, generation),
+    isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)));
+  return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
 }
 
 /** A member's credentials of a membership before `generation`, live at `at`: expired ones are dead already, and a CI service leaves one behind each run. */

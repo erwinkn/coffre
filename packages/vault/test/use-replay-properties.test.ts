@@ -252,6 +252,7 @@ function edited(row: Input): Input {
   switch (row.kind) {
     case 'principal': return { ...row, role: row.role === 'owner' ? 'member' : 'owner' };
     case 'credential': return { ...row, revoked: !row.revoked };
+    case 'connection': return { ...row, revoked: !row.revoked };
     case 'binding': return { ...row, revoked: !row.revoked };
     case 'secret': return { ...row, nature: row.nature === 'sensitive' ? 'secret' : 'sensitive' };
     case 'environment': return { ...row, deleted: !row.deleted };

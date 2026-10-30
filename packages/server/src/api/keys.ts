@@ -18,6 +18,7 @@ import {
 } from '@coffre/core/vault';
 
 import { AccessChanged, type Recalled } from '../accesses.ts';
+import type { WayIn } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { uses015 } from './changes.ts';
 import { ApiError, UNAVAILABLE, UnloggedRefusal, vaultRefused } from './errors.ts';
@@ -95,10 +96,10 @@ export async function openValues(
     purpose: Purpose;
     keepsSensitive?: boolean;
     /**
-     * The id of the credentials row the request came in on: with 0.15's uses on, each value is opened by a use on it
-     * (`useValues`). Not `credentialId`, which names the request's provenance in the vault's entries, and is no row's.
+     * The way the request came in (`wayIn`): with 0.15's uses on, each value is opened by a use through it (`useValues`).
+     * Not `credentialId`, which names the request's provenance in the vault's entries, and is no row's.
      */
-    credentialRow?: string | null;
+    way?: WayIn | null;
   },
   items: OpenItem[],
   /** The caller's, decided on a kept answer of the vault's: the vault checks it, and says so by naming it back. */
@@ -120,9 +121,9 @@ export async function openValues(
   if (decided !== undefined) return decidedValues(decided, items);
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
-  const { credentialRow, ...asked } = asking;
-  if (credentialRow != null && (await uses015(vault))) {
-    const opened = await useValues(vault, { credential: credentialRow, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed).catch((error: unknown) => {
+  const { way, ...asked } = asking;
+  if (way != null && (await uses015(vault))) {
+    const opened = await useValues(vault, { ...way, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed).catch((error: unknown) => {
       // The request's operation, for the app's entry of a refusal the vault logged nothing of.
       if (error instanceof UnloggedRefusal) error.fields.operationId = asking.operationId;
       throw error;
@@ -132,7 +133,7 @@ export async function openValues(
     // no use decided, nor one inherited in a fork, where the use checks no permission of the caller's: the app asks.
     if (recalled !== undefined && sealed.length === items.length && sealed.every((item) => item.through === undefined)) recalled.vouched();
     let next = 0;
-    // `stood`: each use decided on `credentialRow` as it was then, revoked, ended or of a generation its account has moved
+    // `stood`: each use decided on the way in as it was then, revoked, ended or of a generation its account has moved
     // past, sealed (formal/Credentials.tla, Revoking015Folded): what `credentialStill` would read again.
     return { ok: true, values: items.map((item) => (plain(item) ? item.plaintext! : opened[next++]!)), used: true, stood: true };
   }
@@ -192,7 +193,7 @@ export const USES_AT_ONCE = 4;
  */
 export async function useValues(
   vault: Vault,
-  asked: { credential: string; purpose: Purpose; keepsSensitive: boolean },
+  asked: WayIn & { purpose: Purpose; keepsSensitive: boolean },
   items: readonly OpenItem[],
 ): Promise<string[]> {
   const values: string[] = [];
@@ -206,6 +207,7 @@ export async function useValues(
       try {
         const outcome = await vault.use!({
           credential: asked.credential,
+          ...(asked.way === undefined ? {} : { way: asked.way }),
           secretId: item.holder ?? item.secret.secretId,
           place: item.through ?? null,
           purpose: asked.purpose,

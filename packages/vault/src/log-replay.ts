@@ -3,7 +3,7 @@ import type { Queryable } from '@coffre/db';
 import { bulkStep, type BulkRows } from './bulk.ts';
 import { loggedChange } from './changes.ts';
 import type { BulkLimit } from './config.ts';
-import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
+import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
 import { applyOp, objectKey, POLICY_REF, ROLES_REF, sealed, sealKey, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
 import { CUTOVER_OBJECT, RETENTION_OBJECT } from './log-entry.ts';
 import { loggedRows } from './store.ts';
@@ -50,10 +50,14 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
     const stored = rows.get(key)?.row.kind === kind ? rows.get(key)! : undefined;
     return { row: (stored?.row ?? null) as Extract<Input, { kind: K }> | null, seal: stored?.seal ?? null, newest: newest.get(key) ?? null };
   };
-  const credential = read('credential', request.credential);
+  // The way in's object, of its own kind; behind Access none, the person being the one the request's key names (T147).
+  const way = request.way ?? 'credential';
+  const credential: Read<WayInput> = way === 'access' ? { row: null, seal: null, newest: null } : read(way, request.credential);
+  const person = way === 'access' && rows.get(request.credential)?.row.kind === 'principal' ? (rows.get(request.credential)!.row as Extract<Input, { kind: 'principal' }>).principal : null;
   const secret = read('secret', request.secretId);
   const policy = read('policy', POLICY_REF.id);
-  const principal = credential.row === null ? null : read('principal', credential.row.principal);
+  const holder = way === 'access' ? person : credential.row?.principal ?? null;
+  const principal = holder === null ? null : read('principal', holder);
   const source = secret.row?.source == null ? null : read('secret', secret.row.source);
   const environments = new Map<string, Read<Extract<Input, { kind: 'environment' }>>>();
   // Each environment the rows read so far name, until no new one: the statement's joins, in order.
@@ -61,9 +65,9 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
     for (const id of named) if (!environments.has(id)) environments.set(id, read('environment', id));
   }
   let cap = null;
-  if (credential.row !== null) {
-    const held = bulk.get(credential.row.principal) ?? new Map<string, number>();
-    bulk.set(credential.row.principal, held);
+  if (holder !== null) {
+    const held = bulk.get(holder) ?? new Map<string, number>();
+    bulk.set(holder, held);
     // No policy in the log, no cap to move: the decision refuses the use (`no_policy`).
     cap = limit === null ? { inSet: false, others: 0 } : bulkStep(held, request.secretId, request.at, limit);
   }
@@ -71,9 +75,9 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
 }
 
 /**
- * A use's purpose and keepsSensitive as its row stores them, in one
- * smallint (schema 0022): the purpose's code, plus 256 when a copy keeps
- * values sensitive.
+ * A use's purpose, keepsSensitive and way in as its row stores them, in
+ * one smallint (schema 0022, 0046): the purpose's code, plus 256 when a
+ * copy keeps values sensitive, plus 512 times its way in's (`WAYS`; T147).
  */
 export const PURPOSES = ['reveal', 'run', 'compare', 'copy', 'use', 'expose'] as const satisfies readonly UseRequest['purpose'][];
 
@@ -81,14 +85,23 @@ export const PURPOSES = ['reveal', 'run', 'compare', 'copy', 'use', 'expose'] as
 const everyPurpose: [Exclude<UseRequest['purpose'], (typeof PURPOSES)[number]>] extends [never] ? true : never = true;
 void everyPurpose;
 
-export function purposeCode(request: Pick<UseRequest, 'purpose' | 'keepsSensitive'>): number {
-  return PURPOSES.indexOf(request.purpose) + (request.keepsSensitive ? 256 : 0);
+/** Each way in (decide.ts, `Way`), by its code: a credential's, 0, as every use before T147. */
+export const WAYS = ['credential', 'connection', 'binding', 'access'] as const satisfies readonly Way[];
+
+// Every way in has a code: one missing here fails to compile.
+const everyWay: [Exclude<Way, (typeof WAYS)[number]>] extends [never] ? true : never = true;
+void everyWay;
+
+export function purposeCode(request: Pick<UseRequest, 'purpose' | 'keepsSensitive' | 'way'>): number {
+  return PURPOSES.indexOf(request.purpose) + (request.keepsSensitive ? 256 : 0) + 512 * WAYS.indexOf(request.way ?? 'credential');
 }
 
-/** The purpose and keepsSensitive a row's code stores; null for a code no release writes. */
-export function purposeOf(code: number): Pick<UseRequest, 'purpose' | 'keepsSensitive'> | null {
+/** The purpose, keepsSensitive and way in a row's code stores; null for a code no release writes. */
+export function purposeOf(code: number): Pick<UseRequest, 'purpose' | 'keepsSensitive' | 'way'> | null {
   const purpose = PURPOSES[code % 256];
-  return Number.isInteger(code) && code >= 0 && code < 512 && purpose !== undefined ? { purpose, keepsSensitive: code >= 256 } : null;
+  const way = WAYS[Math.floor(code / 512)];
+  if (!Number.isInteger(code) || code < 0 || purpose === undefined || way === undefined) return null;
+  return { purpose, keepsSensitive: code % 512 >= 256, ...(way === 'credential' ? {} : { way }) };
 }
 
 /** The log replayed: the rows it says the tables hold, each object's newest seal, every principal's bulk rows, and what does not hold. */

@@ -15,6 +15,9 @@ import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
  *   grant they hold, lapsed ones included.
  * - **credential:** a session, token or binding: whose it is, what kind,
  *   its scope, its end, and whether it was revoked.
+ * - **connection:** an MCP client a person connected (T147): whose, at
+ *   which generation, its end, and whether it was revoked. A use through
+ *   it weighs it as a person's credential of no scope.
  * - **secret:** a key's current version: where it is, its nature, its
  *   wrapped data key or a plain value's digest, or, for a reference, its
  *   source while its reference stands.
@@ -69,6 +72,22 @@ export type CredentialInput = {
   revoked: boolean;
   /** Its account's generation when it was issued: it reaches only while the account's is the same. */
   generation: number;
+};
+
+/**
+ * An MCP connection (T147): the way in of every call its client makes as
+ * its person, which a use weighs as it weighs a person's session, a
+ * credential of no scope. Its row's other columns, its tokens' hashes and
+ * its last use, which a refresh moves, are no part of it.
+ */
+export type ConnectionInput = {
+  kind: 'connection';
+  id: string;
+  principal: string;
+  /** Its account's generation when its person approved it: it reaches only while the account's is the same. */
+  generation: number;
+  expiresAt: number;
+  revoked: boolean;
 };
 
 /**
@@ -165,7 +184,7 @@ export type RolesInput = {
 
 export type PolicyInput = { kind: 'policy'; bulk: BulkLimit };
 
-export type Input = PrincipalInput | CredentialInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput;
+export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput;
 export type Kind = Input['kind'];
 
 /** An object of the log: its kind and its id (the instance's own for the roles and the policy, of which there is one each). */
@@ -269,6 +288,10 @@ export type Op =
   | { op: 'access.revoke'; place: GrantPlace }
   | { op: 'credential.issue'; principal: string; caller: CallerKind; scope: CredentialScope | null; expiresAt: number | null; generation: number }
   | { op: 'credential.revoke' }
+  /** An MCP connection approved by its person (T147): its whole object. */
+  | { op: 'connection.make'; value: ConnectionInput }
+  /** An MCP connection ended: disconnected, superseded, its token replayed, or its account removed. */
+  | { op: 'connection.revoke' }
   /** A binding made (PR 3a): its whole object, which the vault weighed its maker on. */
   | { op: 'binding.make'; value: BindingInput }
   /** A binding ended: unbound, or replaced by another. */
@@ -316,6 +339,8 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       if (id.kind !== ref.kind || id.id !== ref.id) return undefined;
       if (op.value.kind === 'policy' && !allowedLimit(op.value.bulk)) return undefined;
       if (op.value.kind === 'credential' && !callerFits(op.value)) return undefined;
+      // A connection is a person's: a client acts as its person, never as a service.
+      if (op.value.kind === 'connection' && !op.value.principal.startsWith('user:')) return undefined;
       return op.value;
     }
     case 'member.add':
@@ -348,6 +373,12 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
     case 'credential.revoke': {
       const credential = of('credential');
       return credential !== null && !credential.revoked ? { ...credential, revoked: true } : undefined;
+    }
+    case 'connection.make':
+      return created('connection') && op.value.kind === 'connection' && op.value.id === ref.id && !op.value.revoked && op.value.principal.startsWith('user:') ? op.value : undefined;
+    case 'connection.revoke': {
+      const connection = of('connection');
+      return connection !== null && !connection.revoked ? { ...connection, revoked: true } : undefined;
     }
     case 'binding.make':
       return created('binding') && op.value.id === ref.id && !op.value.revoked ? op.value : undefined;

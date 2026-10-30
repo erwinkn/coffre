@@ -1,11 +1,14 @@
 import {
-  allows, EVERYWHERE, INSTANCE_ROLES, NOTHING, ROLES, ownsProject, readsSensitive, useOnly, withinCredential,
+  allows, EVERYWHERE, INSTANCE_ROLES, NOTHING, ROLES, ownsProject, readsSensitive, sessionScope, useOnly, withinCredential,
   type HeldKey, type Holdings, type Permission, type Place, type Policy,
 } from '@coffre/core/access';
-import { handsBack, live, PRINCIPAL, type Access, type Purpose, type RefusalCode, type UseCode } from '@coffre/core/vault';
+import { handsBack, live, PRINCIPAL, type Access, type Purpose, type RefusalCode, type UseCode, type UseWay } from '@coffre/core/vault';
 
 import { overCap, type BulkRead } from './bulk.ts';
-import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
+import {
+  noEdits, objectKey, sealed, type BindingInput, type ConnectionInput, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref,
+  type RolesInput, type SealKeys, type SecretInput,
+} from './inputs.ts';
 import type { EnvironmentRow } from './store.ts';
 
 /**
@@ -214,7 +217,13 @@ export function referenceRefusal(
  * decided either way.
  */
 export type UseRequest = {
+  /**
+   * Its way in, by id: a credential's, or, with `way`, an MCP connection's or a Cloudflare binding's; behind Cloudflare
+   * Access, the person's object's key (`objectKey`), the only id a person has (T147).
+   */
   credential: string;
+  /** What `credential` is the id of (`Way`): a credential, absent. */
+  way?: Way;
   secretId: string;
   place: string | null;
   purpose: Purpose;
@@ -231,6 +240,15 @@ export type UseRequest = {
 
 export type { UseCode };
 
+/**
+ * What a use came in on (T147; formal/WaysIn.tla): a credential; an MCP connection; a Cloudflare service binding; or,
+ * behind Cloudflare Access, which signs a browser in with no row of coffre's, the person alone.
+ */
+export type Way = 'credential' | UseWay;
+
+/** The object a use's way in is: a credential's, a connection's or a binding's. Behind Access, none: the account alone. */
+export type WayInput = CredentialInput | ConnectionInput | BindingInput;
+
 /** One input as a use read it: its row (null: none), the seal on it, and the seal its object's newest change left (null: none, or gone). */
 export type Read<T extends Input> = { row: T | null; seal: Buffer | null; newest: Buffer | null };
 
@@ -240,10 +258,12 @@ export type Read<T extends Input> = { row: T | null; seal: Buffer | null; newest
  * `checked` (`checkSeals`). `principal` and `bulk` are read for the
  * credential's principal, and null with no credential row; `source` for a
  * reference, null otherwise; `environments`, by id, every one
- * `useEnvironments` names.
+ * `useEnvironments` names. Read, `credential` is the way in's object, of
+ * its own kind (`WayInput`; none behind Access, whose `principal` is read by
+ * the request's key); checked, the credential it stands for (`wayChecked`).
  */
 export type UseView<checked extends boolean = false> = {
-  credential: In<CredentialInput, checked>;
+  credential: checked extends true ? Checked<CredentialInput> : Read<WayInput>;
   principal: In<PrincipalInput, checked> | null;
   roles: In<RolesInput, checked>;
   policy: In<PolicyInput, checked>;
@@ -265,17 +285,17 @@ type In<T extends Input, checked extends boolean> = checked extends true ? Check
  * A row with none (none read) is valid, and current while its object has
  * no newest seal either: never made, or gone.
  */
-export function checkSeals(keys: SealKeys, view: UseView, request: Pick<UseRequest, 'credential' | 'secretId'>): CheckedView {
+export function checkSeals(keys: SealKeys, view: UseView, request: Pick<UseRequest, 'credential' | 'secretId' | 'way'>): CheckedView {
   const check = <T extends Input>(read: Read<T>, ref: Ref): Checked<T> => ({
     row: read.row,
     valid: read.row === null ? read.seal === null : sealed(keys, ref, read.row, read.seal),
     current: read.row === null ? read.newest === null : read.seal !== null && read.newest !== null && read.seal.equals(read.newest),
   });
-  const credential = view.credential.row;
+  const credential = wayChecked(check, view, request);
   const secret = view.secret.row;
   return {
-    credential: check(view.credential, { kind: 'credential', id: request.credential }),
-    principal: view.principal === null || credential === null ? null : check(view.principal, { kind: 'principal', id: credential.principal }),
+    credential,
+    principal: view.principal === null || credential.row === null ? null : check(view.principal, { kind: 'principal', id: credential.row.principal }),
     roles: check(view.roles, { kind: 'roles', id: 'instance' }),
     policy: check(view.policy, { kind: 'policy', id: 'instance' }),
     secret: check(view.secret, { kind: 'secret', id: request.secretId }),
@@ -283,6 +303,64 @@ export function checkSeals(keys: SealKeys, view: UseView, request: Pick<UseReque
     environments: new Map([...view.environments].map(([id, read]) => [id, check(read, { kind: 'environment', id })])),
     bulk: view.bulk,
   };
+}
+
+/**
+ * A use's way in, its seal checked against its own object, and read as the credential it stands for (T147;
+ * formal/WaysIn.tla, WayReadInUse, AccountReadInUse), so that every rule after weighs it as one:
+ *
+ *   a credential          itself
+ *   an MCP connection     its person's credential, of no scope, as a session is: what its person holds, to its end
+ *   a Cloudflare binding  its service's workload credential, of its scope with its policy's reads (`sessionScope`), as
+ *                         the session a sign-in through it would make; one no Cloudflare call is taken through (another
+ *                         profile, no policy) reaches nothing
+ *   Cloudflare Access     the account alone, of its generation, a person's or an Access service token's, which Access
+ *                         signs in with no row of coffre's: the account is all there is to end; a service's, a bearer
+ *                         of no scope, as a service token of 0.4
+ *
+ * Behind Access, the account read must be the one the request's key names; none, there is no way in.
+ */
+function wayChecked(check: <T extends Input>(read: Read<T>, ref: Ref) => Checked<T>, view: UseView, request: Pick<UseRequest, 'credential' | 'way'>): Checked<CredentialInput> {
+  const way = request.way ?? 'credential';
+  if (way === 'access') {
+    const account = view.principal?.row ?? null;
+    if (account === null || objectKey({ kind: 'principal', id: account.principal }) !== request.credential) return { row: null, valid: true, current: true };
+    const caller = account.principal.startsWith('user:') ? 'person' : 'bearer';
+    return { row: { kind: 'credential', id: request.credential, principal: account.principal, caller, scope: null, expiresAt: null, revoked: false, generation: account.generation }, valid: true, current: true };
+  }
+  const read = view.credential;
+  if (read.row !== null && read.row.kind !== way) return { row: null, valid: false, current: false };
+  const checked = check(read, { kind: way, id: request.credential });
+  return { ...checked, row: checked.row === null ? null : asCredential(checked.row) };
+}
+
+/** A way in's object as the credential it stands for (`wayChecked`). */
+export function asCredential(object: WayInput): CredentialInput {
+  switch (object.kind) {
+    case 'credential':
+      return object;
+    case 'connection':
+      return { kind: 'credential', id: object.id, principal: object.principal, caller: 'person', scope: null, expiresAt: object.expiresAt, revoked: object.revoked, generation: object.generation };
+    case 'binding': {
+      const policy = bindingPolicy(object);
+      return {
+        kind: 'credential', id: object.id, principal: object.principal, caller: 'workload',
+        scope: policy === null ? [] : sessionScope({ scope: null }, { scope: object.scope === null ? null : JSON.stringify(object.scope) }, policy),
+        expiresAt: null, revoked: object.revoked || policy === null, generation: object.generation,
+      };
+    }
+  }
+}
+
+/**
+ * A binding's policy, as a Cloudflare call through it is taken (`bindingWorkload`): of profile `cloudflare`, with one;
+ * else null. Its text is under the binding's seal, and the vault made it canonical JSON: one that does not parse is a
+ * bug of the vault's, which fails the call (and its replay) rather than read as a binding ended.
+ */
+function bindingPolicy(binding: BindingInput): { reads?: Parameters<typeof sessionScope>[2]['reads'] } | null {
+  if (binding.profile !== 'cloudflare' || binding.policy === null) return null;
+  const policy = JSON.parse(binding.policy) as unknown;
+  return policy !== null && typeof policy === 'object' && !Array.isArray(policy) ? (policy as { reads?: Parameters<typeof sessionScope>[2]['reads'] }) : null;
 }
 
 /**

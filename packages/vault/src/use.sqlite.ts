@@ -7,12 +7,12 @@ import { sql, type SQL } from 'drizzle-orm';
 import { periodOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
 import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
-import { purposeOf } from './log-replay.ts';
+import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
 import type { Resolved, UseCall, UseRow } from './use.ts';
 
 /**
- * `use_credential` (0024's, as 0045 has it) on SQLite, for tests and local development
+ * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
  * (docs/design/0.15-plan.md, "Postgres serves; SQLite is for tests"): the
  * same reads and writes, the same row, in one transaction. SQLite runs one
  * writer at a time (`BEGIN IMMEDIATE`, @coffre/db/connect), so the fence and
@@ -83,8 +83,18 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     };
   }
 
-  const c = await one<{ principal: string; kind: string; scope: string | null; revoked_at: number | null; expires_at: number; not_after: number | null; seal: Buffer | null; generation: number; token_hash: Buffer }>(
-    sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation, token_hash FROM credentials WHERE id = ${read.credential}`);
+  // The way in (0046, T147): a credential's row, an MCP connection's or a Cloudflare binding's, each read as the
+  // credential's columns, a binding's whole row beside; behind Access, the person alone.
+  const way = WAYS[call.way];
+  type WayRow = { principal: string; kind: string | null; scope: string | null; revoked_at: number | null; expires_at: number | null; not_after: number | null; seal: Buffer | null; generation: number | null; token_hash: Buffer | null };
+  const c: WayRow | undefined = way === 'access'
+    ? { principal: call.principal!, kind: null, scope: null, revoked_at: null, expires_at: null, not_after: null, seal: null, generation: null, token_hash: null }
+    : way === 'connection'
+      ? await one<WayRow>(sql`SELECT principal, NULL AS kind, NULL AS scope, revoked_at, expires_at, NULL AS not_after, seal, generation, NULL AS token_hash FROM mcp_connections WHERE id = ${read.credential}`)
+      : way === 'binding'
+        ? await one<WayRow>(sql`SELECT principal, NULL AS kind, scope, revoked_at, NULL AS expires_at, NULL AS not_after, seal, generation, NULL AS token_hash FROM service_bindings WHERE id = ${read.credential}`)
+        : await one<WayRow>(sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation, token_hash FROM credentials WHERE id = ${read.credential}`);
+  const wRow = way !== 'binding' || c === undefined ? null : (await one<Record<string, unknown>>(sql`SELECT principal, generation, profile, issuer, origin, jwks_uri, claims, scope, policy, revoked_at FROM service_bindings WHERE id = ${read.credential}`)) ?? null;
   const m = c === undefined ? undefined : await one<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null; generation: number }>(
     sql`SELECT status, owner, role, scope, seal, generation FROM vault_members WHERE principal = ${c.principal}`);
   const grants = m === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
@@ -142,7 +152,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
 
   const last = (kind: Kind, id: string | null) => (cached ? Promise.resolve(undefined) : newestOf(kind, id));
   const [lc, lm, lr, ls, lx, ...le] = await Promise.all([
-    last('credential', read.credential), last('principal', c?.principal ?? null), last('roles', 'instance'), last('secret', read.secretId), last('secret', sSource),
+    last(way === 'access' ? 'credential' : way, way === 'access' ? null : read.credential), last('principal', c?.principal ?? null), last('roles', 'instance'), last('secret', read.secretId), last('secret', sSource),
     ...ids.map((id) => last('environment', id)),
   ]);
   const numbers = [lc, lm, lr, cached ? undefined : policy, ls, lx, ...le].flatMap((change) => (change === undefined ? [] : [BigInt(change.number)]));
@@ -197,7 +207,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
       [`${at}_seal`]: blob(row?.seal), [`${at}_last`]: blob(le[i]?.seal),
     };
   };
-  const expires = c === undefined ? null : Math.min(c.expires_at, c.not_after ?? Infinity);
+  const expires = c === undefined || c.expires_at === null ? null : Math.min(c.expires_at, c.not_after ?? Infinity);
   return {
     state: namedState ?? (decide ? 'decide' : null), number, covered: covered ? cover!.number : null, newest: n === undefined ? null : n.number, newest_mac: blob(n?.mac), inputs: cached || inputs === null ? null : String(inputs),
     probed: !cached,
@@ -224,6 +234,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     c_token_hash: blob(c?.token_hash), app: null,
     n_credential: resolved === null ? null : read.credential, n_secret: resolved === null ? null : read.secretId, n_place: resolved?.place ?? null,
     n_project: resolved?.project ?? null, n_environment: resolved?.environment ?? null, n_standing: stands,
+    w_row: wRow,
   } as UseRow;
 }
 

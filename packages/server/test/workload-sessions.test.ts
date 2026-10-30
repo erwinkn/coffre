@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, signInsLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, signInsLogged, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, logChanges, secrets, serviceBindings } from './db/tables.ts';
 import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -948,6 +948,11 @@ test("a Cloudflare call uses its service's values: the vault's read names no cre
   assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
   const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
   assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
+  // With 0.15's log, the use is the record, the binding its way in (T147), its kind in the purpose's bits above 512.
+  if (LOG === '0.15') {
+    assert.deepEqual((await usesLogged(db.owner)).map((use) => [use.credential, Math.floor(use.purpose / 512)]), [[binding, 2]]);
+    return;
+  }
   // The read, then the use the app gave the vault to append beside it, under the same head: the app appends nothing.
   const [logged, opened] = await newest('vault', 2);
   assert.deepEqual([opened!.action, opened!.decision, logged!.action], ['secret.read', 'allow', 'credential.use']);
@@ -965,6 +970,8 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
   // Checked; then unbound before the vault is asked.
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
+  // With 0.15's log, the use itself reads the binding ended (T147, WaysIn.tla's WayReadInUse): nothing released.
+  if (LOG === '0.15') return assert.equal((await newest('vault')).find((entry) => entry.action === 'secret.read'), undefined);
   // The vault released, and logged it with the use it was given: a use records the release, as the read does. The
   // app withheld the value, and logged that, naming the binding, the same operation's entry after it.
   assert.deepEqual((await newest('vault', 2)).map((entry) => `${entry.action} ${entry.decision}`), ['credential.use allow', 'secret.read allow']);
@@ -982,7 +989,9 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
  * The models (formal/Credentials.tla) take a statement as one step, and
  * cannot see that; this does.
  */
-test('a Cloudflare binding unbound while its use waits for the head releases nothing', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a Cloudflare binding unbound while its use waits for the head releases nothing', LOG === '0.15'
+  ? { skip: "0.15's use takes no head, and decides on the binding's object, which an unbind changes under the fence (WaysIn.tla, WaysInUnbind)" }
+  : postgresOnly('SQLite runs one writer at a time'), async () => {
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   await marketProd();
@@ -1012,7 +1021,7 @@ test('a Cloudflare binding unbound while its use waits for the head releases not
   await assert.rejects(using, { status: 401 });
 });
 
-test('a vault older than 0.14.5, which names no use back, and a use too long for it, leave the app to log the use under the head', async () => {
+test('a vault older than 0.14.5, which names no use back, and a use too long for it, leave the app to log the use under the head', { skip: LOG === '0.15' ? "0.15's use is its own record, through a binding too (T147)" : false }, async () => {
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   // An older vault takes no record of the use: it ignores it, and names nothing back.
   const older = new Proxy(deps.vault, {
@@ -1032,7 +1041,9 @@ test('a vault older than 0.14.5, which names no use back, and a use too long for
   }
 });
 
-test('a Cloudflare binding with a tombstone, though its row was never revoked, releases nothing', async () => {
+// 0.14's: a binding's end, with 0.15's log, is its change in the log, which its uses decide on (WaysIn.tla, T147), as its
+// sign-ins do (0037): no 0.14 tombstone is read, and a row and its log restored together stand together.
+test('a Cloudflare binding with a tombstone, though its row was never revoked, releases nothing', { skip: LOG === '0.15' ? "0.15's uses decide on the binding's object, no tombstone of 0.14's" : false }, async () => {
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   await marketProd();

@@ -7,11 +7,11 @@ import { engineOf } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
-import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, type CheckedView, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
-import { noEdits, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys } from './inputs.ts';
+import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
+import { noEdits, objectKey, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys } from './inputs.ts';
 import { entryMac } from './log-entry.ts';
-import { configObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
-import { PURPOSES, purposeCode } from './log-replay.ts';
+import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
+import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { callUse as callPostgres } from './use.postgres.ts';
 import { callUse as callSqlite } from './use.sqlite.ts';
 
@@ -169,6 +169,8 @@ function remember<T>(map: Map<string, T>, key: string, value: T, cap: number): v
  */
 export type UseCall = {
   credential: string | null; secretId: string | null; requestId: string; at: number; purpose: number; place: string | null; mac: Buffer; deadline: number;
+  /** Its way in (`WAYS`'s index: a credential, 0), and behind Access the person, `credential` their object's key (T147). */
+  way: number; principal: string | null;
   cover?: Cover;
   known?: Pick<CachedSeals, 'newest' | 'newestMac' | 'cap'>;
   names?: Names;
@@ -221,6 +223,8 @@ export type UseRow = {
    * W268): false, it read no key and answered on the place alone, as for a key the place does not hold.
    */
   n_standing: boolean | null;
+  /** A Cloudflare binding's row, which a use through it read whole, its object (T147): as `to_json` writes it. */
+  w_row: Record<string, unknown> | null;
 } & Slot<'e1'> & Slot<'e2'> & Slot<'e3'> & Slot<'e4'>;
 
 type Slot<N extends string> = {
@@ -256,10 +260,24 @@ function checkInput(input: Pick<UseInput, 'requestId' | 'at' | 'deadline' | 'kee
   if (!(PURPOSES as readonly string[]).includes(input.purpose)) throw new Error(`no purpose ${String(input.purpose)}`);
 }
 
-function checkIds(input: { credential: string; secretId: string | null; place: string | null }): void {
-  if (!UUID.test(input.credential) || (input.secretId !== null && !UUID.test(input.secretId)) || (input.place !== null && !UUID.test(input.place))) {
-    throw new Error('a use names its credential, its key and its place, if any, by lowercase UUID');
+function checkIds(input: { credential: string; secretId: string | null; place: string | null; way?: unknown }): void {
+  if (input.way !== undefined && !(WAYS as readonly unknown[]).includes(input.way)) throw new Error(`no way in ${String(input.way)}`);
+  // Behind Access, the account: a `user:` or a `token:`, as `vault_members` holds them.
+  const named = input.way === 'access' ? /^(user|token):[^\s]{1,320}$/.test(input.credential) : UUID.test(input.credential);
+  if (!named || (input.secretId !== null && !UUID.test(input.secretId)) || (input.place !== null && !UUID.test(input.place))) {
+    throw new Error('a use names its way in, its key and its place, if any, by lowercase UUID; behind Access, its account');
   }
+}
+
+/**
+ * A use's way in as its entry names it (T147): a credential's, a connection's or a binding's id; behind Access, the
+ * person's object's key, and the person beside it, which the call reads their row by.
+ */
+function wayOf(input: Pick<UseInput, 'credential' | 'way'>): { credential: string; way: Way; principal: string | null } {
+  const way = input.way ?? 'credential';
+  return way === 'access'
+    ? { credential: objectKey({ kind: 'principal', id: input.credential }), way, principal: input.credential }
+    : { credential: input.credential, way, principal: null };
 }
 
 /** Busy answers: nothing was decided, ask again shortly. */
@@ -269,10 +287,11 @@ const busy = (why: UseBusy, retryAfter = 1): Extract<UseOutcome, { busy: UseBusy
 export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
   checkInput(input);
   checkIds(input);
-  let used = await useOnce(path, input);
+  const asked = { ...input, ...wayOf(input) };
+  let used = await useOnce(path, asked);
   // Its key would take its principal's lock: decided first, as a named use is, and made by a second call once allowed;
   // refused, nothing written, which the app logs (`number` null; review r2 of D153, DecideBeforeLock).
-  if ('again' in used) used = await useOnce(path, input, undefined, true);
+  if ('again' in used) used = await useOnce(path, asked, undefined, true);
   if (!('outcome' in used)) throw new Error('use_credential answered a named state to a use that named nothing');
   // A plain value is the app's to hand back on a use by ids, as 0.14's vault never decides one: `decideChecked` refuses
   // it, `bad_claim`, live and replayed alike; only a named use hands one back.
@@ -280,8 +299,8 @@ export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
   return used.outcome;
 }
 
-/** A use's request as the vault makes it: by its ids. */
-type Ids = { credential: string; secretId: string | null; place: string | null };
+/** A use's request as the vault makes it: by its ids, and its way in's (`wayOf`). */
+type Ids = { credential: string; secretId: string | null; place: string | null; way?: Way; principal?: string | null };
 
 /**
  * A use's answer inside the vault: its outcome, its row, the view it decided on, if it got that far. A named one may
@@ -308,13 +327,16 @@ type Used =
  */
 async function useOnce(
   path: UsePath,
-  input: Pick<UseInput, 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & { credential: string | null; secretId: string | null },
+  input: Pick<UseInput, 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & {
+    credential: string | null; secretId: string | null; way?: Way; principal?: string | null;
+  },
   names?: Names,
   decided = false,
 ): Promise<Used> {
   const { cache } = path;
+  const way = input.way ?? 'credential';
   const request: UseRequest = {
-    credential: input.credential ?? '', secretId: input.secretId ?? '', place: input.place, purpose: input.purpose,
+    credential: input.credential ?? '', ...(way === 'credential' ? {} : { way }), secretId: input.secretId ?? '', place: input.place, purpose: input.purpose,
     keepsSensitive: input.keepsSensitive === true, at: input.at, ...(names === undefined ? {} : { plain: true as const }),
   };
   // A deadline the database would refuse (deadline_max) is refused here at no cost; one already past, too.
@@ -332,6 +354,7 @@ async function useOnce(
   const cover = held !== undefined && input.at < held.until && input.at >= held.at && (known?.inputs == null || BigInt(held.number) > BigInt(known.inputs)) ? held : undefined;
   const call: UseCall = {
     credential: input.credential, secretId: input.secretId, requestId: input.requestId, at: input.at, purpose, place: input.place,
+    way: WAYS.indexOf(way), principal: input.principal ?? null,
     // No ids, no use: a call that only reads by names writes nothing, whatever its MAC (0045, `v_right`).
     mac: input.credential === null
       ? Buffer.alloc(16)
@@ -358,8 +381,8 @@ async function useOnce(
     // allowed, made by those ids, in a second call. A moved call read every seal anew (0045), so the map's never judge
     // the names' rows.
     const ids: Ids = names === undefined
-      ? { credential: input.credential!, secretId: input.secretId, place: input.place }
-      : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null ? row.n_place : null };
+      ? { credential: input.credential!, secretId: input.secretId, place: input.place, way, principal: input.principal ?? null }
+      : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null ? row.n_place : null, way, principal: null };
     const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
     const view = viewOf(row, named, row.probed ? undefined : known);
     if (view.changed) cache.seals.delete(key);
@@ -398,7 +421,7 @@ async function useOnce(
   // A plain value, decided: its text, which its object's digest binds; no entry, no cover (it counts toward nothing).
   if (value.key === null) return { outcome: { ok: true, plain: row.v_plaintext!, versionId: value.version }, row, checked, request };
   if (row.covered === null) {
-    const expires = v.credential.row!.expiresAt ?? Infinity;
+    const expires = checked.credential.row!.expiresAt ?? Infinity;
     cache.keep(cache.covers, coverKey, { number: row.number!, at: input.at, requestId: input.requestId, until: Math.min(input.at + cache.limits.coverMs, expires) });
   }
   const opened = await open(path, v, row, input.deadline);
@@ -639,10 +662,7 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
   // No seal is equal to none: an input moved is current to nothing.
   const last = (input: keyof Identities): Buffer | null => (moved.includes(input) ? UNKNOWN : cached[input]);
   const read = <T extends Input>(object: T | null, seal: Buffer | null, newest: Buffer | null): Read<T> => ({ row: object, seal, newest });
-  const credential = read(row.c_principal === null ? null : credentialObject({
-    id: request.credential, principal: row.c_principal, kind: row.c_kind!, scope: row.c_scope, revoked: row.c_revoked === true,
-    expiresAt: row.c_expires === null ? null : Number(row.c_expires), generation: row.c_generation!,
-  }), row.c_seal, last('c'));
+  const credential: Read<WayInput> = read(wayObject(row, request), row.c_seal, last('c'));
   const principal = row.c_principal === null ? null : read(row.m_status === null ? null : principalObject({
     principal: row.c_principal, status: row.m_status, generation: row.m_generation!, ...memberStanding({ owner: row.m_owner === true, role: row.m_role, scope: row.m_scope }),
   }, grantsOf(row)), row.m_seal, last('m'));
@@ -677,7 +697,8 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
     secret,
     source,
     environments,
-    bulk: credential.row === null ? null : { inSet: row.in_set === true, others: Number(row.others ?? 0) },
+    // Behind Access, the account is the way in: its cap is read with it.
+    bulk: (request.way === 'access' ? principal?.row ?? null : credential.row) === null ? null : { inSet: row.in_set === true, others: Number(row.others ?? 0) },
   };
   // UsesSeeOldWrites: 0.14's newest access entry about the principal, at or below the one its newest change accounts for.
   const old = cached.mOld;
@@ -686,6 +707,33 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
 }
 
 const UNKNOWN = Buffer.alloc(0);
+
+/**
+ * The way in's object, from its row's columns as the call read them (T147): a credential's or a connection's, its
+ * columns; a binding's, its whole row (`w_row`); behind Access none, the account's row being all of it.
+ */
+function wayObject(row: UseRow, request: UseRequest): WayInput | null {
+  if (row.c_principal === null) return null;
+  const expiresAt = row.c_expires === null ? null : Number(row.c_expires);
+  switch (request.way ?? 'credential') {
+    case 'credential':
+      return credentialObject({ id: request.credential, principal: row.c_principal, kind: row.c_kind!, scope: row.c_scope, revoked: row.c_revoked === true, expiresAt, generation: row.c_generation! });
+    case 'connection':
+      return connectionObject({ id: request.credential, principal: row.c_principal, generation: row.c_generation!, expiresAt: expiresAt!, revoked: row.c_revoked === true });
+    case 'binding': {
+      const b = row.w_row;
+      if (b === null) return null;
+      const text = (value: unknown) => (value == null ? null : String(value));
+      return bindingObject({
+        id: request.credential, principal: String(b.principal), generation: Number(b.generation), profile: String(b.profile), issuer: String(b.issuer),
+        // A sealed binding names the instance it was made on (0040): one with none bears out no seal.
+        origin: text(b.origin) ?? '', jwksUri: String(b.jwks_uri), claims: String(b.claims), scope: text(b.scope), policy: text(b.policy), revoked: b.revoked_at != null,
+      });
+    }
+    case 'access':
+      return null;
+  }
+}
 
 function grantsOf(row: UseRow): InputGrant[] {
   return (row.g_role ?? []).map((role, i) => ({

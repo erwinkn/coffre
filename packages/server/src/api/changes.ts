@@ -1,6 +1,6 @@
 import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
-import type { BindingColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
+import type { BindingColumns, ConnectionColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Transaction } from '@coffre/db';
 import { appChanges, holdIssues, isStaleChange } from '@coffre/db/log';
 
@@ -138,8 +138,8 @@ export class AppChanges {
    * issued meanwhile would be revoked with no change, its row no longer the
    * log's.
    */
-  expectRevoked(ids: Iterable<string>): void {
-    const prepared = this.#changes.filter((change) => change.kind === 'credential' && change.before !== null && !change.before.columns.revoked && change.after.revoked).map(({ id }) => id);
+  expectRevoked(ids: Iterable<string>, kind: 'credential' | 'connection' = 'credential'): void {
+    const prepared = this.#changes.filter((change) => change.kind === kind && change.before !== null && !change.before.columns.revoked && change.after.revoked).map(({ id }) => id);
     if (!sameIds([...ids], prepared)) throw new ObjectMoved();
   }
 
@@ -293,6 +293,32 @@ export function credentialChange(
     before: before === null ? null : { columns: credentialColumns(before), seal: before.seal === null ? null : before.seal.toString('base64') },
     after: credentialColumns(after),
   };
+}
+
+/** An MCP connection's row as its object takes it (T147): whose, at which generation, its end, revoked or not. */
+export function connectionColumns(row: { id: string; principal: string; generation: number; expiresAt: Date; revokedAt: Date | null }): ConnectionColumns {
+  return { id: row.id, principal: row.principal, generation: row.generation, expiresAt: row.expiresAt.getTime(), revoked: row.revokedAt !== null };
+}
+
+type ConnectionRowRead = Parameters<typeof connectionColumns>[0] & { seal: Buffer | null };
+
+/**
+ * An MCP connection's change (T147): made (no row before), or from its row as read, with its seal. A use through it
+ * decides on its object, so each of its ends is a change, under the fence, as a credential's revoke is.
+ */
+export function connectionChange(before: ConnectionRowRead | null, after: Parameters<typeof connectionColumns>[0]): ObjectChange {
+  return {
+    kind: 'connection',
+    id: after.id,
+    before: before === null ? null : { columns: connectionColumns(before), seal: sealText(before.seal) },
+    after: connectionColumns(after),
+  };
+}
+
+/** Each live connection revoked: its change. */
+export function connectionRevokes(rows: readonly ConnectionRowRead[]): ObjectChange[] {
+  const now = new Date();
+  return rows.map((row) => connectionChange(row, { ...row, revokedAt: now }));
 }
 
 /** Two sets of ids alike: a set a write chose again under the head, and the one it prepared. */

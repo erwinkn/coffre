@@ -672,8 +672,11 @@ export const mcpConnections = sqliteTable(
     lastUsedIp: text('last_used_ip'),
     revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
+    // 0.15's seal (schema.ts).
+    seal: bytes('seal'),
   },
   (table) => [
+    check('mcp_connections_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('mcp_connections_principal_check', sql`${table.principal} LIKE 'user:%'`),
     check('mcp_connections_registration_check', sql`${table.registration} IN ('cimd', 'dcr')`),
     check('mcp_connections_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),

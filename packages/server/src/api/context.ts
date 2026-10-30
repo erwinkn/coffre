@@ -1,6 +1,6 @@
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
-import type { Refusal as VaultRefusal, RequestTrace, Through, Vault } from '@coffre/core/vault';
+import type { Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHead } from '@coffre/db/log';
 
@@ -48,6 +48,8 @@ export type ApiContext = {
   credentialId: string | null;
   /** The Cloudflare service binding a call came through, which stands in for a credential (`AuthenticatedIdentity.bindingId`). */
   bindingId?: string | null;
+  /** Signed in by Cloudflare Access, with no row of coffre's (`AuthenticatedIdentity.access`). */
+  access?: boolean;
   /**
    * That credential, when a trust binding issued it for a CI run, or it is
    * a personal token: every entry the request writes names it, the vault's
@@ -280,12 +282,14 @@ export const POLICY_CHANGED = 'policy_changed';
  * released says so (`stood`): each use decided on the credential the
  * request came in on, as it was in the use's own statement, under the
  * fence each change to it or its account takes exclusive, so the read
- * needs no read of it after (formal/Credentials.tla, Revoking015Folded).
- * That is all of the way in for a request on a credential alone; one
- * through an MCP connection or a Cloudflare binding reads it as before.
+ * needs no read of it after (formal/Credentials.tla, Revoking015Folded):
+ * whatever the way in, a credential, an MCP connection, a Cloudflare
+ * binding or Cloudflare Access, each the use's own input under that fence
+ * (formal/WaysIn.tla, T147).
  *
  *   Ada's /use, 0.15                      app_read, use_credential    the value: no third statement
  *   Ada removed, admitted again           her token, not yet swept    the use refuses it: an earlier generation
+ *   her MCP client's reveal               use_credential              disconnected meanwhile: refused in the use
  */
 export async function recorded<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
@@ -306,7 +310,7 @@ export async function recorded<T>(
       });
     } else {
       if (fencing) await fenced(ctx);
-      if (!(standing && ctx.credentialId !== null && ctx.bindingId == null && ctx.via === null)) await credentialStill(ctx, ctx.db, 'secret.read', where);
+      if (!standing) await credentialStill(ctx, ctx.db, 'secret.read', where);
     }
     return result;
   });
@@ -433,6 +437,29 @@ export function need(
 export function vaultCredential(ctx: { provenance?: string | null; bindingId?: string | null }): string | null {
   return ctx.bindingId == null ? (ctx.provenance ?? null) : null;
 }
+
+/**
+ * The way a request came in, as 0.15's use names it (T147; formal/WaysIn.tla): its credentials row; the MCP
+ * connection a tool's call came through; the Cloudflare service binding a call came through; or, behind Cloudflare
+ * Access, which signs a browser or a service token in with no row of coffre's, its account alone. Null for none of
+ * them: the request reads as 0.14's do.
+ *
+ *   Ada's `coffre run`, her CLI session           { credential: <session> }
+ *   her MCP client's reveal_secret_values         { credential: <connection>, way: 'connection' }
+ *   a Worker's call through its binding           { credential: <binding>, way: 'binding' }
+ *   her browser behind Cloudflare Access          { credential: 'user:ada@acme.example', way: 'access' }
+ */
+export function wayIn(ctx: Pick<ApiContext, 'caller' | 'credentialId' | 'bindingId' | 'via' | 'access'>): WayIn | null {
+  if (ctx.credentialId !== null) return { credential: ctx.credentialId };
+  if (ctx.via !== null) return { credential: ctx.via.connectionId, way: 'connection' };
+  if (ctx.bindingId != null) return { credential: ctx.bindingId, way: 'binding' };
+  // Said by its authentication, never inferred from what is missing: a caller made otherwise reads as 0.14's do.
+  if (ctx.access === true) return { credential: formatMember(ctx.caller.principal), way: 'access' };
+  return null;
+}
+
+/** What a use came in on (`UseInput`'s `credential` and `way`). */
+export type WayIn = Pick<UseInput, 'credential' | 'way'>;
 
 /** The caller, as the vault knows them, for this request. */
 export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provenance?: string | null; bindingId?: string | null }, operationId: string | null = null): Asking {

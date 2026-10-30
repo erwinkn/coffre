@@ -21,6 +21,7 @@ import { mcpConnections } from '@coffre/db/schema';
 
 import { callerFrom, newestPolicySeq, type Caller } from '../api/caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, type ApiContext } from '../api/context.ts';
+import { AppChanges, connectionChange, connectionRevokes, retrying } from '../api/changes.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
@@ -244,8 +245,14 @@ export class McpService {
     const member = `user:${principal.id}`;
     const code = secret();
     const id = randomUUID();
+    const made = new Date();
+    const expiresAt = new Date(made.getTime() + this.#deps.signin.cliSessionDays * 86_400_000);
+    // With 0.15's log, a connection is an object of it, made by a change with its row (T147): every use through it decides on it.
+    const changes = await AppChanges.prepare(this.#deps.vault, member, [
+      connectionChange(null, { id, principal: member, generation: asker.caller.generation, expiresAt, revokedAt: null }),
+    ]);
     await audited(this.#deps, async (tx, log) => {
-      const now = new Date();
+      const now = made;
       const standing = await memberStanding(tx, member);
       if (standing?.status !== 'active' || standing.generation !== asker.caller.generation) {
         throw new Refusal(forbidden('that session has ended'), denied(asker, 'mcp.connect', 'session_ended', { metadata: shown }));
@@ -269,10 +276,10 @@ export class McpService {
         codeHash: hashSecret(code),
         codeChallenge: request.code_challenge!,
         codeExpiresAt: new Date(now.getTime() + CODE_SECONDS * 1000),
-        expiresAt: new Date(now.getTime() + this.#deps.signin.cliSessionDays * 86_400_000),
+        expiresAt,
       });
       log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } }));
-    });
+    }, changes);
     return back({ code });
   }
 
@@ -380,33 +387,50 @@ export class McpService {
     const { principal } = asker.caller;
     const unknown = () =>
       new Refusal(notFound('unknown connected app'), denied(asker, 'mcp.disconnect', 'unknown_connection', { metadata: { connectionId: id } }));
-    return audited(this.#deps, async (tx, log) => {
+    const found = async (db: Database | Transaction) => {
       let row: Awaited<ReturnType<typeof findConnection>>;
       try {
-        row = await findConnection(tx, this.#deps.chainKey, { id });
+        row = await findConnection(db, this.#deps.chainKey, { id });
       } catch (error) {
         // A row that fails its MAC is nobody's app: nothing it claims holds.
         if (!(error instanceof AuthRowTampered)) throw error;
         throw unknown();
       }
       if (row === null || row.revokedAt !== null || row.expiresAt <= row.now) throw unknown();
-      const own = row.principal === principalOf(principal);
-      if (!own) requireInstance(asker, 'mcp.disconnect', { metadata: { connectionId: id } }, "disconnect other people's apps");
-      const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id, revokedAt: null }, { revokedAt: new Date(), revokedBy: principal.id });
-      if (ended === 0) throw unknown();
-      const member = memberOf(row.principal);
-      log.push(
-        allowed(asker, 'mcp.disconnect', {
-          metadata: {
-            connectionId: id,
-            clientId: row.clientId,
-            clientName: row.clientName,
-            reason: own ? 'person' : 'owner',
-            ...(own ? {} : { principalType: member.type, principalId: member.id }),
-          },
-        }),
-      );
-      return { disconnected: true as const };
+      return row;
+    };
+    // With 0.15's log, its end is a change (T147), prepared from the row as read, which the transaction holds it to; a
+    // connection that is none is refused in the transaction, as ever.
+    return retrying(async () => {
+      const changes = await AppChanges.prepare(this.#deps.vault, principalOf(principal), async () => {
+        try {
+          return connectionRevokes([await found(this.#deps.db)]);
+        } catch (error) {
+          if (error instanceof Refusal) return [];
+          throw error;
+        }
+      });
+      return audited(this.#deps, async (tx, log) => {
+        const row = await found(tx);
+        const own = row.principal === principalOf(principal);
+        if (!own) requireInstance(asker, 'mcp.disconnect', { metadata: { connectionId: id } }, "disconnect other people's apps");
+        const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id, revokedAt: null }, { revokedAt: new Date(), revokedBy: principal.id });
+        if (ended === 0) throw unknown();
+        changes?.expectRevoked([id], 'connection');
+        const member = memberOf(row.principal);
+        log.push(
+          allowed(asker, 'mcp.disconnect', {
+            metadata: {
+              connectionId: id,
+              clientId: row.clientId,
+              clientName: row.clientName,
+              reason: own ? 'person' : 'owner',
+              ...(own ? {} : { principalType: member.type, principalId: member.id }),
+            },
+          }),
+        );
+        return { disconnected: true as const };
+      }, changes);
     });
   }
 
@@ -445,23 +469,32 @@ export class McpService {
     if (!pkceMatches(row.codeChallenge, verifier)) throw new OAuthError('invalid_grant', 'the code_verifier does not match the code_challenge');
     await this.#stillMember(row);
     const refresh = secret(REFRESH_PREFIX);
-    await audited(this.#deps, async (tx, log) => {
-      await this.#standing(tx, row);
-      // Only an unredeemed code: of two racing, one gets the tokens.
-      const redeemed = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, codeChallenge: row.codeChallenge }, {
-        codeChallenge: null,
-        codeExpiresAt: null,
-        refreshHash: hashSecret(refresh),
-      });
-      if (redeemed === 0) throw new OAuthError('invalid_grant', 'that code was used already');
-      log.push(this.#entry(row, 'mcp.token', 'allow', meta, { grant: 'authorization_code' }));
-      // A step-up: the client's earlier connections that this one grants all of and more end now, as the consent page said.
-      const granted = parseScopes(row.scopes).scopes;
-      for (const earlier of await liveConnections(tx, this.#deps.chainKey, row.principal, row.now)) {
-        if (earlier.id === row.id || earlier.clientId !== row.clientId || earlier.refreshHash === null || !supersedes(granted, parseScopes(earlier.scopes).scopes)) continue;
-        const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: earlier.id, revokedAt: null }, { revokedAt: row.now, revokedBy: 'coffre' });
-        if (ended > 0) log.push(this.#entry(earlier, 'mcp.disconnect', 'allow', meta, { reason: 'superseded', supersededBy: row.id }));
-      }
+    // A step-up: the client's earlier connections that this one grants all of and more end now, as the consent page said;
+    // with 0.15's log, each a change (T147), from the set as read, which the transaction holds it to.
+    const granted = parseScopes(row.scopes).scopes;
+    const superseded = async (db: Database | Transaction) => (await liveConnections(db, this.#deps.chainKey, row.principal, row.now))
+      .filter((earlier) => earlier.id !== row.id && earlier.clientId === row.clientId && earlier.refreshHash !== null && supersedes(granted, parseScopes(earlier.scopes).scopes));
+    await retrying(async () => {
+      const changes = await AppChanges.prepare(this.#deps.vault, row.principal, async () => connectionRevokes(await superseded(this.#deps.db)));
+      await audited(this.#deps, async (tx, log) => {
+        await this.#standing(tx, row);
+        // Only an unredeemed code: of two racing, one gets the tokens.
+        const redeemed = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, codeChallenge: row.codeChallenge }, {
+          codeChallenge: null,
+          codeExpiresAt: null,
+          refreshHash: hashSecret(refresh),
+        });
+        if (redeemed === 0) throw new OAuthError('invalid_grant', 'that code was used already');
+        log.push(this.#entry(row, 'mcp.token', 'allow', meta, { grant: 'authorization_code' }));
+        const ends: string[] = [];
+        for (const earlier of await superseded(tx)) {
+          const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: earlier.id, revokedAt: null }, { revokedAt: row.now, revokedBy: 'coffre' });
+          if (ended === 0) continue;
+          ends.push(earlier.id);
+          log.push(this.#entry(earlier, 'mcp.disconnect', 'allow', meta, { reason: 'superseded', supersededBy: row.id }));
+        }
+        changes?.expectRevoked(ends, 'connection');
+      }, changes);
     });
     return this.#answer(row, parseScopes(row.scopes).scopes, refresh, row.now);
   }
@@ -663,9 +696,14 @@ export class McpService {
 
   /** End a connection, and log why: `mcp.disconnect`, in its person's name. */
   async #end(row: ConnectionRow, reason: string, meta: Meta, by = 'coffre'): Promise<void> {
-    await audited(this.#deps, async (tx, log) => {
-      const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, revokedAt: null }, { revokedAt: new Date(), revokedBy: by });
-      if (ended > 0) log.push(this.#entry(row, 'mcp.disconnect', 'allow', meta, { reason }));
+    // With 0.15's log, a change (T147), from the row as read; ended meanwhile by another, none.
+    await retrying(async () => {
+      const changes = await AppChanges.prepare(this.#deps.vault, row.principal, row.revokedAt === null ? connectionRevokes([row]) : []);
+      await audited(this.#deps, async (tx, log) => {
+        const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, revokedAt: null }, { revokedAt: new Date(), revokedBy: by });
+        if (ended > 0) log.push(this.#entry(row, 'mcp.disconnect', 'allow', meta, { reason }));
+        else changes?.drop();
+      }, changes);
     });
   }
 

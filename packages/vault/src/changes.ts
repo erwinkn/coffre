@@ -6,7 +6,7 @@ import type { Queryable, Transaction } from '@coffre/db';
 import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac } from './log-entry.ts';
-import { credentialObject, environmentObject, secretObject } from './objects.ts';
+import { connectionObject, credentialObject, environmentObject, secretObject } from './objects.ts';
 import { changeInputs, isStale, newestChange, newestSealedChanges, readObject, type ChangeCall, type ReadKind } from './store.ts';
 
 /**
@@ -350,7 +350,7 @@ export function prepareChanges(keys: ChangeKeys, at: number, actor: string, chan
 }
 
 /** Each kind of the app's objects, from its columns (objects.ts). */
-const OBJECTS = { credential: credentialObject, secret: secretObject, environment: environmentObject } as const;
+const OBJECTS = { credential: credentialObject, connection: connectionObject, secret: secretObject, environment: environmentObject } as const;
 
 /** The object a change leaves: null for a key archived or erased. */
 function objectOf(change: ObjectChange): Input | null {
@@ -363,6 +363,8 @@ function objectOf(change: ObjectChange): Input | null {
  * else differs, they do not reach.
  * - a credential: its issue (and a revoke, issued revoked); its scope
  *   written, its end moved, then its revoke;
+ * - an MCP connection: made, then its revoke (made revoked: a step-up's
+ *   earlier one never is); nothing else of it moves;
  * - a key: written whole, its value or its reference (`secret.write`); or
  *   deleted, archived or erased;
  * - an environment: made, with the protection its id was given; renamed,
@@ -382,6 +384,11 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
       if (before.expiresAt !== after.expiresAt) ops.push({ op: 'credential.renew', expiresAt: after.expiresAt });
       if (!before.revoked && after.revoked) ops.push({ op: 'credential.revoke' });
       return ops;
+    }
+    case 'connection': {
+      if (before === null) return [{ op: 'connection.make', value: { ...after, revoked: false } }, ...(after.revoked ? [{ op: 'connection.revoke' } as const] : [])];
+      if (before.kind !== 'connection') return [];
+      return !before.revoked && after.revoked ? [{ op: 'connection.revoke' }] : [];
     }
     case 'secret': {
       if (before !== null && canonical(before) === canonical(after)) return [];

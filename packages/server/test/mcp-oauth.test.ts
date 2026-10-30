@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { github, signin, type RateLimiter } from '@coffre/core/identity';
-import { eq, inArray } from 'drizzle-orm';
+import { logObject } from '@coffre/db/log';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
@@ -16,8 +17,8 @@ import { forgetDocuments } from '../src/mcp/clients.ts';
 import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, mcpConnections, oauthClients } from './db/tables.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { auditLog, logChanges, mcpConnections, oauthClients } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const RESOURCE = `${ORIGIN}/mcp`;
@@ -492,7 +493,10 @@ test("an owner reads a person's connected apps in their report; removal disconne
   const rows = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
   assert.deepEqual(rows.map((row) => [row.revokedAt !== null, row.revokedBy]), [[true, ROOT], [true, ROOT]], 'revoked, not only dead by the generation');
 
-  // As a removal before this release left them, dead by the generation alone: re-admission revokes them.
+  // As a removal before this release left them, dead by the generation alone: re-admission revokes them. 0.15's log holds
+  // each connection as an object, which a row un-revoked around coffre is not: its re-admission refuses to change it, as
+  // it refuses a credential's (T147); the cutover seals a removal's leftovers as 0.14 left them, and re-admission ends them.
+  if (LOG === '0.15') return;
   await updateAuth(db.owner, deps.chainKey, mcpConnections, { principal: `user:${DEV}` }, { revokedAt: null, revokedBy: null });
   assert.equal((await as('PUT', `/api/members/user:${DEV}`)).status, 200);
   const readmitted = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
@@ -500,6 +504,35 @@ test("an owner reads a person's connected apps in their report; removal disconne
   const back = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
   assert.deepEqual([back.live.apps, back.apps], [0, []], 'a fresh start');
   assert.equal((await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: app.refresh_token, client_id: CLAUDE_CODE }))).status, 400);
+});
+
+test("an app of an earlier membership, sealed live by the cutover, ends by its change at re-admission, or at a sign-in's sweep (T147)", { skip: LOG === '0.15' ? false : "0.14's re-admission is the test above" }, async () => {
+  const member = `user:${DEV}`;
+  for (const sweep of ['re-admission', 'sign-in'] as const) {
+    await connect();
+    const [app] = await db.owner.select().from(mcpConnections).where(and(eq(mcpConnections.principal, member), isNull(mcpConnections.revokedAt)));
+    // As a removal before this release leaves one, and the cutover seals it live: the vault's removal and admission, no sweep of the app's.
+    const correlation = () => ({ actor: `user:${ROOT}`, principal: member, requestId: randomUUID(), operationId: randomUUID() });
+    assert.ok((await deps.vault.remove(correlation())).ok);
+    assert.ok((await deps.vault.admit(correlation())).ok);
+    const [still] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.id, app!.id));
+    assert.equal(still!.revokedAt, null, `${sweep}: live, of the generation before`);
+    if (sweep === 're-admission') {
+      const admitted = await route(`/api/members/${member}`, { method: 'PUT', headers: { authorization: `Bearer ${await session(ROOT)}` } });
+      assert.equal(admitted.status, 200, await admitted.clone().text());
+    } else {
+      // A sign-in that binds an account of the new membership sweeps the old one's ways in.
+      const signed = await runtime.signin!.completeSignin({ provider: 'github', subject: `gh-${randomUUID()}`, emails: [DEV], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox' });
+      assert.ok(signed.ok, JSON.stringify(signed));
+    }
+    // Ended, and by a change of the log whose seal its row carries: no row the log does not bear out.
+    const [ended] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.id, app!.id));
+    assert.notEqual(ended!.revokedAt, null, `${sweep}: revoked`);
+    const [last] = await db.owner.select({ payload: logChanges.payload, seal: logChanges.seal }).from(logChanges)
+      .where(eq(logChanges.object, logObject('connection', app!.id))).orderBy(desc(logChanges.number)).limit(1);
+    assert.equal((JSON.parse(last!.payload) as { op: string }).op, 'connection.revoke', sweep);
+    assert.ok(ended!.seal !== null && last!.seal !== null && Buffer.from(ended!.seal).equals(Buffer.from(last!.seal)), `${sweep}: its row is its newest change's`);
+  }
 });
 
 test("an instance that serves no MCP lists no one's apps", async () => {

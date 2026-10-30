@@ -1,12 +1,12 @@
 // What the app's half of 0.15's cutover from 0.14 reads (cutover.ts): the
 // entries and rows it vouches for under its key.
 import type { StoredEntry } from '@coffre/core/audit';
-import type { BindingColumns, CredentialColumns } from '@coffre/core/vault';
+import type { BindingColumns, ConnectionColumns, CredentialColumns } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { entryColumns } from '@coffre/db/log';
 import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 
-import { credentialColumns, sealedBinding } from '../api/changes.ts';
+import { connectionColumns, credentialColumns, sealedBinding } from '../api/changes.ts';
 import { checkAuthRow } from '../auth-rows.ts';
 import { tombstoned } from './queries.ts';
 
@@ -50,4 +50,16 @@ export async function liveBindings(db: Queryable, chainKey: Buffer, publicUrl: s
     .filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
   const dead = await tombstoned(db, rows.map((row) => row.id));
   return rows.filter((row) => !dead.has(row.id)).map((row) => sealedBinding(row, publicUrl).columns);
+}
+
+/**
+ * Each MCP connection 0.14 accepts as it stands, unsealed (T147): its MAC
+ * the app's, neither revoked nor past its end. One of an earlier generation
+ * of its account too, which a use refuses on that, as `credentialStill` did.
+ */
+export async function liveConnections(db: Queryable, chainKey: Buffer): Promise<ConnectionColumns[]> {
+  const { mcpConnections } = tablesOf(db);
+  const rows = await db.select().from(mcpConnections)
+    .where(and(isNull(mcpConnections.seal), isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, new Date())));
+  return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row)).map(connectionColumns);
 }

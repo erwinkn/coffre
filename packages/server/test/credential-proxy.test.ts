@@ -282,16 +282,17 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   assert.deepEqual(one.body.result!.content, [{ type: 'text', text: 'not available: no such key, or no access to it' }]);
   assert.equal(await refusedFor(), 'sensitive');
 
-  // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this. Through MCP,
-  // which comes in on no credential, as 0.14's read under either log.
+  // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this.
   const refused = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author === 'vault');
-  assert.ok(refused.length >= (LOG === '0.14' ? 4 : 1));
+  // With 0.15's log, every one of them is decided before its use, which writes nothing (D153): the app's entry records it.
+  if (LOG === '0.14') assert.ok(refused.length >= 4);
+  else assert.equal(refused.length, 0);
   assert.ok(refused.every((entry) => entry.code === 'sensitive'));
   if (LOG === '0.15') {
-    // On a credential, 0.15's "no" is decided before the use, which writes nothing (D153): the app's entry of each
-    // request logs it, by the person.
+    // On a credential, and through MCP on its connection (T147), 0.15's "no" is decided before the use, which writes
+    // nothing (D153): the app's entry of each request logs it, by the person.
     const app = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author !== 'vault');
-    assert.ok(app.length >= 3 && app.every((entry) => entry.metadata.reason === 'sensitive'), JSON.stringify(app.map((entry) => entry.metadata)));
+    assert.ok(app.length >= 4 && app.every((entry) => entry.metadata.reason === 'sensitive'), JSON.stringify(app.map((entry) => entry.metadata)));
     assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
   }
 

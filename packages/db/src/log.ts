@@ -641,6 +641,7 @@ class StaleRow extends Error {}
 
 const APP_OPS: Record<PreparedChange['kind'], readonly string[]> = {
   credential: ['credential.issue', 'credential.revoke', 'credential.renew', 'credential.scope'],
+  connection: ['connection.make', 'connection.revoke'],
   secret: ['secret.write', 'secret.delete'],
   environment: ['environment.create', 'environment.rename', 'environment.archive', 'project.archive', 'environment.delete'],
 };
@@ -691,9 +692,10 @@ async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64
 
 /** The table whose rows hold an object of this kind, the app's. */
 function appTable(tx: Transaction, kind: PreparedChange['kind']) {
-  const { credentials, secrets, environments } = tablesOf(tx);
+  const { credentials, mcpConnections, secrets, environments } = tablesOf(tx);
   switch (kind) {
     case 'credential': return credentials;
+    case 'connection': return mcpConnections;
     case 'secret': return secrets;
     case 'environment': return environments;
     default: throw new Error(`no object kind ${String(kind)}`);

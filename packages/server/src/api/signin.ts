@@ -43,6 +43,7 @@ import {
   liveCredentialsWhere,
   priorCredentials,
   revokeCredentialsWhere,
+  priorConnections,
   revokePriorMembership,
   update,
   updateAuth,
@@ -50,7 +51,7 @@ import {
 } from '../db/queries.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, COFFRE_ACTOR, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
+import { AppChanges, COFFRE_ACTOR, connectionRevokes, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
@@ -467,7 +468,8 @@ export class SigninService {
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.browserSessionHours * 3_600_000), generation: standing.generation };
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
         const prior = previous === null ? await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, priorCredentials(principal, standing.generation, new Date())) : [];
-        return [this.#issueChange('browser', principal, plan), ...revokes(prior)];
+        const apps = previous === null ? await priorConnections(this.#deps.db, this.#deps.chainKey, principal, standing.generation, new Date()) : [];
+        return [this.#issueChange('browser', principal, plan), ...revokes(prior), ...connectionRevokes(apps)];
       });
       return audited(this.#deps, async (tx, log) => {
         if (!(await this.#stillMember(tx, principal, standing))) throw refuse('deactivated', preparedId);
@@ -494,7 +496,8 @@ export class SigninService {
           generation = standing.generation;
           // A crashed older attempt may have committed after the removal sweep.
           const ended = await revokePriorMembership(tx, this.#deps.chainKey, principal, generation, 'system:signin');
-          changes?.expectRevoked(ended);
+          changes?.expectRevoked(ended.credentials);
+          changes?.expectRevoked(ended.connections, 'connection');
 
           const [person] = await members(tx, this.#deps.chainKey, { member: { type: 'user', id: principalId } }, now);
           const others = (person?.identities ?? []).filter(
