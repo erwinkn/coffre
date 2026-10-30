@@ -19,7 +19,8 @@
 // JavaScript without them: built in as modules that throw, they are never
 // looked for, where a node_modules above the Action or NODE_PATH could hand
 // the step's token and ID token to whatever it found. The build fails on any
-// other import or require of a module that is not Node's own.
+// other import or require of a module that is not Node's own, named as
+// `node:<name>`, which Node never looks for elsewhere.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { isBuiltin } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -56,6 +57,8 @@ try {
           if (kind === 'dynamic-import' && importer?.endsWith('/src/main.ts')) return { id, external: true };
           if (/(^|\/)package\.json$/.test(id)) this.error(`${importer} imports ${id}: the Action's CLI names no version`);
           if (ADDONS.has(id)) return `\0absent:${id}`;
+          // Node's own by its `node:` name, which never looks in a node_modules, on any Node.
+          if (!id.startsWith('node:') && isBuiltin(id)) return { id: `node:${id}`, external: true };
           return null;
         },
         load(id) {
@@ -73,7 +76,7 @@ try {
     ...built.matchAll(/\b__require\("([^"]+)"\)/g),
     ...built.matchAll(/\bimport\("([^"]+)"\)/g),
   ].map((match) => match[1]);
-  const outside = named.filter((id) => !isBuiltin(id) && !/^\.\/[a-z-]+\.ts$/.test(id));
+  const outside = named.filter((id) => !(id.startsWith('node:') && isBuiltin(id)) && !/^\.\/[a-z-]+\.ts$/.test(id));
   if (outside.length > 0) throw new Error(`the Action's CLI would load ${[...new Set(outside)].join(', ')} from outside it`);
   if (!check) {
     writeFileSync(target, built);

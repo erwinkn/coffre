@@ -259,13 +259,17 @@ test('the Action\'s CLI loads nothing from outside it: a planted bufferutil or u
             writeFileSync(join(base, name, 'index.js'), `require('node:fs').appendFileSync(${JSON.stringify(marker)}, '${name} from ${base}\\n');\n`);
         }
     }
-    for (const args of [['help'], ['--url', 'http://127.0.0.1:9', 'export', 'app/ci', '--format', 'shell']]) {
-        spawnSync(process.execPath, [join(dir, 'action/coffre.mjs'), ...args], {
-            cwd: dir,
-            encoding: 'utf8',
-            env: { PATH: process.env.PATH, HOME: dir, NODE_PATH: join(dir, 'path') },
-            timeout: 10_000,
-        });
-    }
+    const cli = (...args) => spawnSync(process.execPath, [join(dir, 'action/coffre.mjs'), ...args], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH, HOME: dir, NODE_PATH: join(dir, 'path') },
+        timeout: 10_000,
+    });
+    // It ran, so that nothing planted ran means nothing was loaded, not that it never started.
+    const help = cli('help');
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /^coffre /);
+    const read = cli('--url', 'http://127.0.0.1:9', 'export', 'app/ci', '--format', 'shell');
+    assert.match(read.stderr, /^coffre: /);
     assert.equal(existsSync(marker) ? readFileSync(marker, 'utf8') : '', '');
 });

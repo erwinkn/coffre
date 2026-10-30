@@ -30,6 +30,21 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: node scripts/version-only.mjs "$BASE_SHA" HEAD
 
+  # On every change, a release's bump included: the Action's CLI is what
+  # this revision's sources build. Two changes merged side by side can each
+  # hold a rebuilt file and leave main a third, which no build made, that a
+  # bump would otherwise carry into a tag.
+  action:
+    name: Action's CLI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - name: Hold action/coffre.mjs to the sources
+        run: pnpm check:action
+
   checks:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
@@ -45,7 +60,6 @@ jobs:
           pnpm lint
           pnpm typecheck
           pnpm check:pins
-          pnpm check:action
           pnpm check:contrast
           pnpm check:docs
 
@@ -374,7 +388,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, checks, tests, tests-015, schema, formal, proofs, workers, node, consumer, compat, image]
+    needs: [changes, action, checks, tests, tests-015, schema, formal, proofs, workers, node, consumer, compat, image]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump
@@ -382,8 +396,8 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           jq -e '
-            .changes.result == "success" and
+            .changes.result == "success" and .action.result == "success" and
             ((.changes.outputs.version_only == "true") as $fast
-              | del(.changes)
+              | del(.changes, .action)
               | all(.[]; .result == (if $fast then "skipped" else "success" end)))
           ' <<< "$RESULTS"

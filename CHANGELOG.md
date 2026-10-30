@@ -32,8 +32,9 @@
   native addons, which it looked for in any `node_modules` above it and on
   `NODE_PATH`, are left out, and the build fails on any other. Its inputs, checks, messages, masking and throwaway
   home are as they were; npx is no longer needed beside Node 20 or newer.
-  Validate's `pnpm check:action` holds the file to the sources, which a
-  change to the CLI rebuilds with `pnpm build:action`; it names no version,
+  `pnpm check:action` holds the file to the sources, on every change, a
+  release's bump included, and again before a tag publishes; a change to
+  the CLI rebuilds it with `pnpm build:action`; it names no version,
   so `pnpm bump` no longer edits the Action.
 - **A workload client stops renewing a session already at its hard end.**
   A Kubernetes session ends where its projected token does, so each

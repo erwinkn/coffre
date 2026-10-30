@@ -9627,7 +9627,7 @@ var require_limiter = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/permessage-deflate.js
 var require_permessage_deflate = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	const zlib = __require("zlib");
+	const zlib = __require("node:zlib");
 	const bufferUtil = require_buffer_util();
 	const Limiter = require_limiter();
 	const { kStatusCode } = require_constants();
@@ -9968,7 +9968,7 @@ var require__absent_utf_8_validate = /* @__PURE__ */ __commonJSMin((() => {
 //#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/validation.js
 var require_validation = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	const { isUtf8 } = __require("buffer");
+	const { isUtf8 } = __require("node:buffer");
 	const { hasBlob } = require_constants();
 	const tokenChars = [
 		0,
@@ -10164,7 +10164,7 @@ var require_validation = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/receiver.js
 var require_receiver = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	const { Writable } = __require("stream");
+	const { Writable } = __require("node:stream");
 	const PerMessageDeflate = require_permessage_deflate();
 	const { BINARY_TYPES, EMPTY_BUFFER, kStatusCode, kWebSocket } = require_constants();
 	const { concat, toArrayBuffer, unmask } = require_buffer_util();
@@ -10627,9 +10627,9 @@ var require_receiver = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/sender.js
 var require_sender = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	const { Duplex: Duplex$3 } = __require("stream");
-	const { randomFillSync } = __require("crypto");
-	const { types: { isUint8Array } } = __require("util");
+	const { Duplex: Duplex$3 } = __require("node:stream");
+	const { randomFillSync } = __require("node:crypto");
+	const { types: { isUint8Array } } = __require("node:util");
 	const PerMessageDeflate = require_permessage_deflate();
 	const { EMPTY_BUFFER, kWebSocket, NOOP } = require_constants();
 	const { isBlob, isValidStatusCode } = require_validation();
@@ -11502,14 +11502,14 @@ var require_extension = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/websocket.js
 var require_websocket = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	const EventEmitter$1 = __require("events");
-	const https = __require("https");
-	const http$2 = __require("http");
-	const net = __require("net");
-	const tls = __require("tls");
-	const { randomBytes: randomBytes$2, createHash: createHash$2 } = __require("crypto");
-	const { Duplex: Duplex$2, Readable: Readable$1 } = __require("stream");
-	const { URL: URL$1 } = __require("url");
+	const EventEmitter$1 = __require("node:events");
+	const https = __require("node:https");
+	const http$2 = __require("node:http");
+	const net = __require("node:net");
+	const tls = __require("node:tls");
+	const { randomBytes: randomBytes$2, createHash: createHash$2 } = __require("node:crypto");
+	const { Duplex: Duplex$2, Readable: Readable$1 } = __require("node:stream");
+	const { URL: URL$1 } = __require("node:url");
 	const PerMessageDeflate = require_permessage_deflate();
 	const Receiver = require_receiver();
 	const Sender = require_sender();
@@ -12496,7 +12496,7 @@ var require_websocket = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/stream.js
 var require_stream = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	require_websocket();
-	const { Duplex: Duplex$1 } = __require("stream");
+	const { Duplex: Duplex$1 } = __require("node:stream");
 	/**
 	* Emits the `'close'` event on a stream.
 	*
@@ -12650,10 +12650,10 @@ var require_subprotocol = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/websocket-server.js
 var require_websocket_server = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	const EventEmitter = __require("events");
-	const http$1 = __require("http");
-	const { Duplex } = __require("stream");
-	const { createHash: createHash$1 } = __require("crypto");
+	const EventEmitter = __require("node:events");
+	const http$1 = __require("node:http");
+	const { Duplex } = __require("node:stream");
+	const { createHash: createHash$1 } = __require("node:crypto");
 	const extension = require_extension();
 	const PerMessageDeflate = require_permessage_deflate();
 	const subprotocol = require_subprotocol();

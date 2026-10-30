@@ -10,6 +10,7 @@ const jobs = ['checks', 'tests', 'tests-015', 'schema', 'formal', 'proofs', 'wor
 function needs(fast) {
     return {
         changes: { result: 'success', outputs: { version_only: String(fast) } },
+        action: { result: 'success' },
         ...Object.fromEntries(jobs.map((name) => [name, { result: fast ? 'skipped' : 'success' }])),
     };
 }
@@ -26,7 +27,7 @@ test('Validate accepts complete validation and only the explicitly proven fast p
 });
 
 test('each failed, cancelled or unexpected skipped job makes normal Validate fail', () => {
-    for (const job of ['changes', ...jobs]) {
+    for (const job of ['changes', 'action', ...jobs]) {
         for (const result of ['failure', 'cancelled', 'skipped']) {
             const input = needs(false);
             input[job].result = result;
@@ -35,11 +36,13 @@ test('each failed, cancelled or unexpected skipped job makes normal Validate fai
     }
 });
 
-test('fast Validate refuses a failed classifier or any unexpectedly run heavy job', () => {
-    for (const result of ['failure', 'cancelled', 'skipped']) {
-        const input = needs(true);
-        input.changes.result = result;
-        assert.equal(accepted(input), false);
+test('fast Validate refuses a failed classifier or Action check, or any unexpectedly run heavy job', () => {
+    for (const job of ['changes', 'action']) {
+        for (const result of ['failure', 'cancelled', 'skipped']) {
+            const input = needs(true);
+            input[job].result = result;
+            assert.equal(accepted(input), false, `${job}: ${result}`);
+        }
     }
     for (const job of jobs) {
         for (const result of ['success', 'failure', 'cancelled']) {
