@@ -15,7 +15,10 @@
   a second run, and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
   adding the binding to a file an earlier release wrote; the database's
   connections are now split three ways, so each config gets a third of
-  what is left, 6 on a `max_connections` of 25, where it got 9. On Node,
+  what is left, 6 on a `max_connections` of 25, where it got 9, and a rerun
+  lowers the app's and the vault's to it, the hot config holding none
+  until 0.15; a database needs 21 connections for the three, where 16 did
+  for two. On Node,
   its screen, summary and `--json` give the URL for `vault.env`, as
   `HOT_DATABASE_URL`. The examples pass it as `hotDatabase`: the vault
   Worker binds `HOT_HYPERDRIVE`, and the Node vault reads

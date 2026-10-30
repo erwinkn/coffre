@@ -108,9 +108,10 @@ The migrations create three group roles, and grant the first two to their logins
 | `coffre_vault_hot` | `coffre_vault` | the vault's, for 0.15's uses, under the hot path's own settings (below) |
 | `coffre_backup_login`, or yours | `coffre_backup` | read every row, the log's included, for `coffre backup` ([restore.md](restore.md#backing-up)); write nothing |
 
-Neither runtime login owns tables or may change or delete audit entries.
-Row-level security permits each to append only as its own author. Do not run
-either component as the owner or give the runtime logins additional roles.
+No runtime login owns tables or may change or delete audit entries.
+Row-level security permits each to append only as its own author: the hot
+path's as the vault. Do not run either component as the owner or give the
+runtime logins additional roles.
 
 They also make `coffre_vault_hot`, the third runtime login, when it is
 missing: a member of `coffre_vault` with its own lock and statement

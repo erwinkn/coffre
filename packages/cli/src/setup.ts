@@ -29,20 +29,21 @@ import { type GuideBlock, type Screen, showSecrets, type Value } from './secrets
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
-import { Cloudflare, type Database, deployedSummary, Later } from './workers.ts';
+import { Cloudflare, configName, type Database, deployedSummary, Later, OWNED } from './workers.ts';
 
 /**
- * The three runtime roles, as the migrations name them, and the Hyperdrive
- * config each gets on Workers: the app's, the vault's, and the vault's hot
- * path's, 0.15's uses, which 0022 makes unable to log in. And the backup
- * login, which `coffre_backup` lets read every row for `coffre backup`, and
- * which no Worker uses.
+ * The three runtime roles, as the migrations name them, each with a
+ * Hyperdrive config of its own on Workers: the app's, the vault's, and the
+ * vault's hot path's, 0.15's uses, which 0022 makes unable to log in. And
+ * the backup login, which `coffre_backup` lets read every row for `coffre
+ * backup`, and which no Worker uses.
  */
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime', hot: 'coffre_vault_hot', backup: 'coffre_backup_login' } as const;
-const HYPERDRIVE = { app: 'coffre', vault: 'coffre-vault', hot: 'coffre-vault-hot' } as const;
 type Component = keyof typeof ROLES;
 const COMPONENTS = ['app', 'vault', 'hot', 'backup'] as const;
-/** The logins that run, each with a Hyperdrive config of its own on Workers. */
+/** The template's Workers, after which the configs the screen's commands make are named (`configName`). */
+const TEMPLATE = { app: 'coffre', vault: 'coffre-vault' } as const;
+/** The logins that run. */
 type Runtime = Exclude<Component, 'backup'>;
 const RUNTIMES = ['app', 'vault', 'hot'] as const;
 /** The logins a run gives a password unasked when they cannot log in: nothing logs in as them yet (`provision`). */
@@ -746,9 +747,6 @@ const RUNTIME_URLS = {
   },
 } as const satisfies Record<Runtime, { label: string; file: string; variable: string; about: string }>;
 
-/** Whose each runtime login's config is, in a sentence's words. */
-const OWNERS = { app: "the app's", vault: "the vault's", hot: "the hot path's" } as const satisfies Record<Runtime, string>;
-
 /** The values to save, by section: the app's key and URL, the vault's ID, key and its two URLs, and the backup's URL, as this run made them. */
 export function setupValues({ keys, app, vault, hot, backup }: SetupResult): Record<'app' | 'vault' | 'backup', Value[]> {
   const made = keys === null ? { app: [], vault: [] } : keyValues(keys);
@@ -783,7 +781,7 @@ export function setupScreen(result: SetupResult): Screen {
   const kept = RUNTIMES.filter((component) => result[component].url === null);
   const hyperdrive = set.map((component) => {
     const login = result[component];
-    const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <${OWNERS[component]} config id>`;
+    const target = login.password === 'created' ? `create ${configName(component, TEMPLATE)} --caching-disabled` : `update <${OWNED[component]} config id>`;
     // Setup can't see what a config allows now, so an update sets the limit too (`cappedLimit`), and says so.
     return { command: hyperdriveCommand(target, limit === null ? null : cappedLimit(null, limit)) };
   });
@@ -804,8 +802,8 @@ export function setupScreen(result: SetupResult): Screen {
             ...(kept.length === 0
               ? []
               : [
-                  `${listed(kept.map((component) => OWNERS[component]), 'and').replace(/^t/, 'T')} ${kept.length === 1 ? 'config keeps its password, and its limit' : 'configs keep their passwords, and their limits'}, which setup can't see: one a share of two configs set may be above ${limit}. Lower ${kept.length === 1 ? 'it' : 'each'} to ${limit}, unless it is there or below already:`,
-                  ...kept.map((component) => ({ command: `pnpm exec wrangler hyperdrive update <${OWNERS[component]} config id> --origin-connection-limit=${limit}` })),
+                  `${listed(kept.map((component) => OWNED[component]), 'and').replace(/^t/, 'T')} ${kept.length === 1 ? 'config keeps its password, and its limit' : 'configs keep their passwords, and their limits'}, which setup can't see: one a share of two configs set may be above ${limit}. Lower ${kept.length === 1 ? 'it' : 'each'} to ${limit}, unless it is there or below already:`,
+                  ...kept.map((component) => ({ command: `pnpm exec wrangler hyperdrive update <${OWNED[component]} config id> --origin-connection-limit=${limit}` })),
                 ]),
             'Or make them in the Cloudflare dashboard, under Hyperdrive.',
             ...(created ? ["Their ids go under hyperdrive: the app's in app/wrangler.jsonc, at HYPERDRIVE; the vault's and the hot path's in vault/wrangler.jsonc, at VAULT_HYPERDRIVE and HOT_HYPERDRIVE."] : []),
@@ -871,7 +869,7 @@ export function summary(result: SetupResult, out: Output): string {
       ? []
       : [reset.length === RUNTIMES.length
           ? 'each Hyperdrive config updated with its new database URL'
-          : `${listed(reset.map((component) => OWNERS[component]), 'and')} ${reset.length === 1 ? 'config updated with its new database URL' : 'configs updated with their new database URLs'}`]),
+          : `${listed(reset.map((component) => OWNED[component]), 'and')} ${reset.length === 1 ? 'config updated with its new database URL' : 'configs updated with their new database URLs'}`]),
     ...(result.keys === null ? [] : ['VAULT_KEY_ID under vars', 'APP_KEY and VAULT_KEY as secrets']),
   ];
   const fresh = created.length > 0 || result.keys !== null;

@@ -165,6 +165,10 @@ test('what a directory records of its deployment: the Hyperdrive ids it binds, a
     editWorker(dir, 'app/wrangler.jsonc', [{ path: ['hyperdrive', 0, 'id'], value: 'hd-app' }]);
     editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['vars', 'VAULT_KEY_ID'], value: 'vault-2026-10-03-abcdef' }, { path: ['hyperdrive', 1, 'id'], value: 'hd-hot' }]);
     assert.deepEqual(read(), { hyperdrive: { app: 'hd-app', vault: null, hot: 'hd-hot' }, vaultKeyId: 'vault-2026-10-03-abcdef' });
+    // A binding the deployment renamed, in its file and its Worker's code, as setup took the first before the vault had two: still recorded.
+    editWorker(dir, 'app/wrangler.jsonc', [{ path: ['hyperdrive', 0, 'binding'], value: 'DB' }]);
+    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 0, 'binding'], value: 'VAULT_DB' }, { path: ['hyperdrive', 0, 'id'], value: 'hd-vault' }]);
+    assert.deepEqual(read().hyperdrive, { app: 'hd-app', vault: 'hd-vault', hot: 'hd-hot' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

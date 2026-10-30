@@ -61,8 +61,20 @@ const BOUND = {
   vault: { worker: 'vault', binding: 'VAULT_HYPERDRIVE', suffix: '' },
   hot: { worker: 'vault', binding: 'HOT_HYPERDRIVE', suffix: '-hot' },
 } as const satisfies Record<Config, { worker: Component; binding: string; suffix: string }>;
-/** Whose each config is, in an error's words. */
-const OWNED = { app: "the app's", vault: "the vault's", hot: "the hot path's" } as const;
+/** Whose each config is, in a sentence's words. */
+export const OWNED = { app: "the app's", vault: "the vault's", hot: "the hot path's" } as const satisfies Record<Config, string>;
+
+/**
+ * The binding a config is under in its Worker's file: its own name; else,
+ * the app's and the vault's, the first other than the hot path's, as setup
+ * took it before the vault had two, so that a deployment that renamed its
+ * binding is still found. The hot path's is by name alone.
+ */
+function bindingOf(config: Config, worker: WorkerConfig): string {
+  const { binding } = BOUND[config];
+  if (binding in worker.hyperdrive || config === 'hot') return binding;
+  return Object.keys(worker.hyperdrive).find((name) => name !== BOUND.hot.binding) ?? binding;
+}
 
 /** A config's name, from its Worker's. */
 export const configName = (config: Config, names: Record<Component, string>) => `${names[BOUND[config].worker]}${BOUND[config].suffix}`;
@@ -109,7 +121,10 @@ const MADE_VAULT_ID = /^vault-\d{4}-\d{2}-\d{2}-[a-z2-7]{6}$/;
 export function recordsOf(workers: Record<Component, WorkerConfig>): Records {
   const id = workers.vault.vars.VAULT_KEY_ID;
   return {
-    hyperdrive: Object.fromEntries(CONFIGS.map((config) => [config, workers[BOUND[config].worker].hyperdrive[BOUND[config].binding] ?? null])) as Record<Config, string | null>,
+    hyperdrive: Object.fromEntries(CONFIGS.map((config) => {
+      const worker = workers[BOUND[config].worker];
+      return [config, worker.hyperdrive[bindingOf(config, worker)] ?? null];
+    })) as Record<Config, string | null>,
     vaultKeyId: id !== undefined && MADE_VAULT_ID.test(id) ? id : null,
   };
 }
@@ -583,7 +598,8 @@ export class Cloudflare {
    * whole, on one line as that release wrote it.
    */
   #bind(config: Config, id: string): void {
-    const { worker, binding } = BOUND[config];
+    const { worker } = BOUND[config];
+    const binding = bindingOf(config, this.workers[worker]);
     const { path, hyperdrive } = this.workers[worker];
     const at = Object.keys(hyperdrive).indexOf(binding);
     this.#edit(worker, [

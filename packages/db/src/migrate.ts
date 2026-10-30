@@ -53,6 +53,9 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
   await client.unsafe(`DO $$ DECLARE
     held text[];
   BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot') THEN
+      RAISE EXCEPTION 'coffre_vault_hot does not exist, though 0022 made it: run coffre setup, which makes it a login, or have a login with CREATEROLE run CREATE ROLE coffre_vault_hot NOLOGIN, then migrate again';
+    END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (rolsuper OR rolreplication OR rolbypassrls)) THEN
       RAISE EXCEPTION 'coffre_vault_hot has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off';
     END IF;
@@ -74,20 +77,30 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
     ) THEN
       RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
     END IF;
-    SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
-      ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
-    END IF;
-    IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
-    IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
-    IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
-    IF NOT EXISTS (
-      SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
-    ) THEN
-      GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
-    END IF;
-  EXCEPTION WHEN insufficient_privilege THEN
-    RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+    -- The role is the server's, as turnJitOff's logins are: a run on another database may be changing it too, and fails the second change.
+    FOR attempt IN 1..5 LOOP
+      BEGIN
+        SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
+          ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
+        END IF;
+        IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
+        IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
+        IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
+        ) THEN
+          GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
+        END IF;
+        EXIT;
+      EXCEPTION
+        WHEN insufficient_privilege THEN
+          RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+        WHEN internal_error OR unique_violation THEN
+          IF attempt = 5 THEN RAISE; END IF;
+          PERFORM pg_sleep(0.2);
+      END;
+    END LOOP;
   END $$`);
 }
 
