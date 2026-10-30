@@ -136,7 +136,7 @@ test("a 0.15 instance backed up and restored comes back on 0.15: cut over, its t
   const kek = randomBytes(32);
   const seed = derivedSigningKey(kek);
   const signer = await checkpointerOver(await openVaultDatabase(), seed, 'memory');
-  const vault = testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, { kek }, {}, { log: '0.15', sealThrough: signer.sealThrough });
+  const vault = testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, { kek }, {}, { log: '0.15', sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })] }) });
   const root = clientFor(deps, ROOT);
@@ -182,7 +182,7 @@ test("a 0.15 instance backed up and restored comes back on 0.15: cut over, its t
     const fresh = await checkpointerOver(restoredVault.db, seed, 'memory-restored');
     const again = await localVault(
       { database: restoredVault.db, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], hotDatabase: urlOf(restored, 'coffre_vault_hot:local-hot-only') },
-      { log: '0.15', sealThrough: fresh.sealThrough },
+      { log: '0.15', sealThrough: fresh.sealThrough, heldOutside: fresh.heldOutside },
     );
     assert.deepEqual(await again.cutover!(), { ok: true, done: true });
     const trees = await again.verifyTrees!();

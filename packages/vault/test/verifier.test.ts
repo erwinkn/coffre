@@ -171,7 +171,7 @@ test('a log the vault wrote verifies on a page\'s check; with 0.14\'s alone ther
   assert.equal(checked.unsealed, 1);
   assert.equal(checked.checkpoint?.upto, w.cp.pair.pair.upto.toString());
 
-  const old = await openLocalVault(db.vault, w.config, {}, async () => {}, hot);
+  const old = await openLocalVault(db.vault, w.config, { log: '0.14' }, async () => {}, hot);
   assert.deepEqual(await old.verifyTrees!(), { kept: false });
 });
 

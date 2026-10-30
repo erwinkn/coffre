@@ -7,10 +7,10 @@
 // through the vault's Hyperdrive for as long as it lives: its ticks run one
 // at a time, and a Durable Object may keep a connection across requests.
 //
-// The deployment binds it, exports it (`export const CoffreCheckpointer =
-// checkpointer()`, beside `vault(…)`), and starts it once; nothing does yet:
-// 0.15's log is switched on in plan PR 10. Asked with `fetch`, as the
-// anchor and the gates are.
+// The deployment binds it and exports it (`export const CoffreCheckpointer =
+// checkpointer()`, beside `vault(…)`); the vault starts it, from each
+// isolate's first call (cloudflare.ts). Asked with `fetch`, as the anchor
+// and the gates are.
 import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
@@ -222,8 +222,9 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
       try {
         const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' } | { op: 'remembered' };
         if (call.op === 'start') {
-          if ((await this.#open()) === null) return Response.json({ error: this.#failed }, { status: 503 });
+          // The alarm first, whether it opens or not: refused, each tick tries again and makes the next days of uses meanwhile.
           if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
+          if ((await this.#open()) === null) return Response.json({ error: this.#failed }, { status: 503 });
           return Response.json({ ok: true });
         }
         if (call.op === 'seal') {
@@ -270,7 +271,8 @@ async function ask<T>(namespace: ObjectNamespace, name: string, call: object): P
   if (typeof namespace?.idFromName !== 'function') throw new Error('there is no CHECKPOINTER binding: bind the CoffreCheckpointer Durable Object to the vault');
   const response = await namespace.get(namespace.idFromName(name)).fetch(new Request('https://checkpointer/', { method: 'POST', body: JSON.stringify(call) }));
   const body = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(`the checkpointer failed: ${body.error ?? response.status}`);
+  // Its status kept: a 503 is an object that refused to open, its alarm set (`start`).
+  if (!response.ok) throw Object.assign(new Error(`the checkpointer failed: ${body.error ?? response.status}`), { status: response.status });
   return body;
 }
 
@@ -279,7 +281,7 @@ export function durableSealThrough(namespace: ObjectNamespace, name = 'checkpoin
   return async (number, deadline) => sealedFromJson(await ask<SealedJson>(namespace, name, { op: 'seal', number: String(number), deadline }));
 }
 
-/** Starts the object's ticks, once; again is harmless. */
+/** Starts the object's ticks, once; again is harmless. Throws when it cannot open, its alarm set all the same. */
 export async function startCheckpointer(namespace: ObjectNamespace, name = 'checkpointer'): Promise<void> {
   await ask(namespace, name, { op: 'start' });
 }

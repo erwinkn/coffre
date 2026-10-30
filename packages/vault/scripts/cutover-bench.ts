@@ -93,7 +93,7 @@ if (checkpointed) {
 const [{ entries }] = await owner.unsafe<{ entries: string }[]>('SELECT count(*) AS entries FROM audit_log');
 
 // The cutover: the app's two calls, timed apart, and the whole.
-const vault = await openLocalVault(database, config, { log: '0.15', sealThrough: async () => ({}) as never });
+const vault = await openLocalVault(database, config, { log: '0.15', sealThrough: async () => ({}) as never, heldOutside: async () => [] });
 started = process.hrtime.bigint();
 const asked = await vault.cutover!();
 if (!asked.ok || asked.done) throw new Error(JSON.stringify(asked));

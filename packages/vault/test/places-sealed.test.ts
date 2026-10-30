@@ -19,7 +19,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openRawVault } from '../src/local.ts';
 import { newestSeals, newestSealsQuery } from '../src/store.ts';
-import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -51,7 +51,7 @@ function configure(): ResolvedVaultConfig {
  */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const [dev, prod] = [await newEnvironment(db.owner, project), await newEnvironment(db.owner, project)];
@@ -242,7 +242,7 @@ test('a new process\'s first call, a read through a fork renamed around the log,
   assert.ok((await read(w.vault)).ok, 'read through dev, another place of its project');
   await run(db.owner, sql`UPDATE environments SET slug = 'renamed' WHERE id = ${w.dev}`);
   // A vault that has made no call yet: it learns the log is cut over as it reads, not after.
-  const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed }));
+  const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
   assert.equal((await read(fresh)).ok, false);
   assert.equal((await read(fresh)).ok, false);
 });
@@ -364,7 +364,7 @@ test('a reference is decided on its holder\'s project as the row the decision ch
 test('a protected place whose row a writer deleted outright stays protected: the log holds it, so it is no fork never written (review r5)', async () => {
   const w = await world();
   let offset = 0;
-  const vault = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, clockOffset: () => offset });
+  const vault = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, clockOffset: () => offset });
   const [a, b] = [await newEnvironment(db.owner, w.project), await newEnvironment(db.owner, w.project)];
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [a, b], protected: true } })).ok);
   // Maya, a Developer of the whole instance, reads no protected place; CI views the project, by Root's grant.
@@ -410,7 +410,7 @@ test('on SQLite, a place renamed as the app renames it between a read\'s rows an
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
   });
-  const vault = speaking(await openRawVault(hooked(db.vault), w.config, { log: '0.15', sealThrough: sealed }));
+  const vault = speaking(await openRawVault(hooked(db.vault), w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
   const access = await vault.access(ADA);
   await renaming;
   assert.notEqual(renaming, null, 'the rename ran during the read');

@@ -17,13 +17,13 @@ in `experiments/merkle/` on those branches, not on `main`.
   attacks and the pair's rules).
 - **Go's check:** `scripts/audit-tree-go.sh`.
 
-**Status.** Nothing calls this code yet, and 0.14 behaviour does not
-change. PR 6a (#370) shipped the trees and the checkpointer behind its seam.
-PR 6b wires them to the database and the runtimes ("Where it runs",
+**Status.** PR 6a (#370) shipped the trees and the checkpointer behind its
+seam. PR 6b wires them to the database and the runtimes ("Where it runs",
 below): the store over migration 0022, the checkpointer on Node and in its
-Durable Object, and the witnesses. Every piece waits for 0.15's log to be
-switched on (plan PR 10). The change path (plan PR 4) calls `sealThrough`
-through the seam 6b leaves it.
+Durable Object, and the witnesses. The change path (plan PR 4) calls
+`sealThrough` through the seam 6b leaves it. Since plan PR 10, every
+deployment runs it: the vault's process on Node (`keepCheckpointer`), the
+`CoffreCheckpointer` object the vault starts on Workers.
 
 ## In short
 
@@ -476,10 +476,22 @@ a new log; how a rotation carries the trees across is the cutover's
 - The memory is a file, written whole, synced, renamed over the last, and
   the directory synced (`fileMemory`).
 - Alarms are appended to `<memory>.alarms`, one JSON line each.
+- The vault's process runs it (`localVault`, `serveVault`), through
+  `keepCheckpointer`, opened before the vault serves. An open refused (a
+  log it cannot take, as after a restore; the database out of reach) is an
+  alarm, kept once, and tried again every 10 s, each try making the next
+  days of uses first: uses go on, and a change's seal fails with why. One
+  vault process per database: two would each sign, and the floor's check
+  refuses the second's ticks.
 
 **On Workers** (`packages/vault/src/checkpointer-workers.ts`): one Durable
 Object, `export const CoffreCheckpointer = checkpointer()` beside `vault(…)`,
 configured by the same `vault(env => …)`.
+- **The vault starts it**, from each isolate's first call, before that call
+  goes on (`start` in `cloudflare.ts`): its alarm set, then its open. An
+  object that refuses to open is started all the same, and each alarm
+  tries again, making the next days of uses meanwhile; one out of reach is
+  tried again by a call 10 s later.
 - **Its memory is its storage**, synced before `remember` returns
   (RememberFirst). The output gate holds a Response and a new connection
   until a write is durable, but not a query on a connection already open,

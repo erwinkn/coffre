@@ -46,7 +46,7 @@ flag, where the shell's history and other users could read it. Then:
    ([restore.md](restore.md#backing-up)). On PlanetScale Postgres they log
    in as `<login>.<branch id>`, `coffre_runtime.<branch id>` say, the
    branch taken from the administrator's own login. The hot path's login is
-   unused until 0.15's log is the default; the migrations make it unable to
+   the one every use runs as; the migrations make it unable to
    log in when setup has not run, and setup's next run gives it a
    password, unasked.
 2. It migrates the database as the administrator, as
@@ -119,8 +119,8 @@ timeouts (1 s and 2 s) and generic plans, for 0.15's hot path, which
 answers a use within those bounds or not at all. The migrations make it
 unable to log in; `coffre setup` makes it beforehand as a login, or gives
 it a password after, and the vault reaches it through a pool of its own:
-`HOT_HYPERDRIVE` on Workers, `HOT_DATABASE_URL` on Node. Nothing uses it
-until 0.15's log is the default.
+`HOT_HYPERDRIVE` on Workers, `HOT_DATABASE_URL` on Node. Every use runs
+as it: a vault without it refuses to start.
 
 Every migrate run gives `coffre_vault_hot` its group and settings again
 when it lacks them, as a role dropped and made again does. It also sets
@@ -302,8 +302,8 @@ acme-secrets/
   app/src/routes/_solo.tsx     the sign-in pages' frame, { ...solo }; its pages in _solo/
   app/vite.config.ts           cloudflare(…), tanstackStart(), viteReact(), coffre()
   app/wrangler.jsonc           HYPERDRIVE, VAULT service binding, Cron
-  vault/src/worker.ts          vault(env => ({ database, hotDatabase, kek, owners }))
-  vault/wrangler.jsonc         VAULT_HYPERDRIVE and HOT_HYPERDRIVE; no public route
+  vault/src/worker.ts          vault(env => ({ database, hotDatabase, checkpointer, kek, owners })); CoffreCheckpointer
+  vault/wrangler.jsonc         VAULT_HYPERDRIVE, HOT_HYPERDRIVE, CHECKPOINTER; no public route
 ```
 
 The app is a TanStack Start app of its own, coffre's routes and pages among
@@ -312,7 +312,12 @@ its own route files ([Your own routes](#your-own-routes), and
 `app/dist`: the Worker and its `wrangler.json`, which `wrangler deploy -c
 app/dist/server/wrangler.json` uploads as it is, and the pages' static files,
 which become the Worker's assets. The vault is a plain Worker, which wrangler
-builds itself. `pnpm dev` runs both under `vite dev`, the vault beside the
+builds itself. Beside it runs its checkpointer, the Durable Object
+`CoffreCheckpointer`: every half second it seals what the log took into a
+checkpoint the vault's key signs, and a change answers once sealed. It
+remembers the newest checkpoint it signed in its own storage, where whoever
+writes the database cannot reach. The vault starts it from its first call;
+a vault with no `CHECKPOINTER` bound refuses every call, saying so. `pnpm dev` runs both under `vite dev`, the vault beside the
 app.
 
 ### Deploys on every push
@@ -588,7 +593,7 @@ read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault-hot 
 ```
 
 The first takes the app's database URL, the second the vault's, the third
-the vault's hot path's, unused until 0.15's log is the default. They drop
+the vault's hot path's, which every use takes. They drop
 the URL's TLS parameters: Hyperdrive always connects over TLS, and checks
 the certificate against public CAs. The Cloudflare dashboard's Hyperdrive
 page makes the same configs, without a shell.
@@ -663,8 +668,9 @@ it cannot derive its signing key from it, and needs a third key,
 
 ### 4. Deploy
 
-`pnpm run deploy` deploys the vault, then builds the app with Vite and
-deploys what it built. `pnpm build` builds both without deploying them. Route the app to `PUBLIC_URL`, sign in as the
+`pnpm run deploy` builds the app with Vite, then deploys the vault and the
+app, back to back, so that an upgrade's vault and app go live seconds apart.
+`pnpm build` builds both without deploying them. Route the app to `PUBLIC_URL`, sign in as the
 Owner, the first time, then try the CLI:
 
 ```sh
@@ -679,7 +685,7 @@ acme-secrets/
   app/src/server.ts      { fetch: Start's handler, coffre.request(request) its context }; coffre.schedule()
   app/src/routes/        the root and coffre's routes, as on Workers
   app/vite.config.ts     tanstackStart(), viteReact(), coffre()
-  src/vault.ts           serveVault({ socket, database, hotDatabase, kek, owners })
+  src/vault.ts           serveVault({ socket, database, hotDatabase, checkpointer: { memory }, kek, owners })
   .env.example           app settings
   vault.env.example      vault settings
 ```
@@ -727,6 +733,15 @@ two users sharing a group. Each env file belongs to its own process's user;
 the app's user must not read `vault.env`. Set `VAULT_SOCKET` in both files
 to the same absolute path in a directory they can access. The vault makes
 the socket `0660`; its group must be the shared group.
+
+The vault's process also runs the checkpointer, which every half second
+seals what the log took into a checkpoint the vault's key signs; a change
+answers once sealed. It remembers the newest checkpoint it signed in a
+file, `CHECKPOINTER_MEMORY` in `vault.env`, where whoever writes the
+database cannot reach: on persistent storage, writable by the vault's user
+alone, its alarms beside it (`<file>.alarms`), and never restored with the
+database ([On 0.15's log](restore.md#on-015s-log)). Run one vault process
+per database: two would each sign, and each refuse the other's checkpoints.
 
 ```sh
 pnpm build    # the pages, with Vite, into app/dist

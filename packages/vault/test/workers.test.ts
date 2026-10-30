@@ -17,11 +17,12 @@ import { fileURLToPath } from 'node:url';
 import type { WrappedKey } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { isUnavailable } from '@coffre/db/dialect';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { postgresSession } from '@coffre/db/connect';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
+import { resolveVaultConfig } from '../src/config.ts';
 import { READ_HEAD_WAITERS } from '../src/vault.ts';
 
 const ROOT = 'user:root@acme.example';
@@ -33,7 +34,10 @@ before(async () => {
 });
 after(() => db?.close());
 beforeEach(async () => {
-  if (!skip) await emptyDatabase(db.owner);
+  if (skip) return;
+  await emptyDatabase(db.owner);
+  // 0.15's trees too: each test's checkpointer starts with no memory, over a log of its own.
+  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
 });
 
 /**
@@ -124,6 +128,10 @@ async function freshVault(database: string): Promise<{
   call(method: string, ...args: unknown[]): Promise<{ ok: boolean; error?: string; code?: string; result?: unknown }>;
   stop(): Promise<void>;
 }> {
+  const key = randomBytes(32).toString('base64');
+  // Cut over from 0.14 first, as the app's door has it, from another process: the isolate's calls below are its first.
+  const cut = await openLocalVault(db.vault, resolveVaultConfig({ kek: { id: 'vault-workers-test', key }, owners: ['root@acme.example'] }), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  await cut.close();
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
   const name = 'coffre-vault-workers-test';
   writeFileSync(
@@ -132,8 +140,13 @@ async function freshVault(database: string): Promise<{
       name,
       compatibility_date: '2026-08-06',
       compatibility_flags: ['nodejs_compat'],
-      vars: { VAULT_KEY: randomBytes(32).toString('base64') },
-      hyperdrive: [{ binding: 'VAULT_HYPERDRIVE', id: 'vault-workers-test', localConnectionString: database }],
+      vars: { VAULT_KEY: key },
+      hyperdrive: [
+        { binding: 'VAULT_HYPERDRIVE', id: 'vault-workers-test', localConnectionString: database },
+        { binding: 'HOT_HYPERDRIVE', id: 'vault-workers-hot', localConnectionString: HOT_URL },
+      ],
+      durable_objects: { bindings: [{ name: 'CHECKPOINTER', class_name: 'CoffreCheckpointer' }] },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['CoffreCheckpointer'] }],
       services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
     }),
   );
@@ -150,16 +163,20 @@ async function freshVault(database: string): Promise<{
     rmSync(dir, { recursive: true, force: true });
     throw error;
   }
+  const call = async (method: string, ...args: unknown[]) => {
+    const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ method, args }), signal: AbortSignal.timeout(20_000) });
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as { ok: boolean; error?: string; code?: string; result?: unknown };
+    } catch {
+      return { ok: false, error: `${response.status}: ${text}` };
+    }
+  };
+  // Its connection the object's own, opened here rather than inside the first call counted (a call starts it too).
+  const started = await call('startCheckpointer');
+  assert.ok(started.ok, started.error ?? 'the checkpointer did not start');
   return {
-    async call(method, ...args) {
-      const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ method, args }), signal: AbortSignal.timeout(20_000) });
-      const text = await response.text();
-      try {
-        return JSON.parse(text) as { ok: boolean; error?: string; code?: string; result?: unknown };
-      } catch {
-        return { ok: false, error: `${response.status}: ${text}` };
-      }
-    },
+    call,
     async stop() {
       await worker.stop();
       rmSync(dir, { recursive: true, force: true });

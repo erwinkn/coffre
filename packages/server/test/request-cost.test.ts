@@ -197,7 +197,7 @@ before(async () => {
     database: createDatabase(vaultPool.client),
     kek: { id: 'test-kek-1', key: randomBytes(32).toString('base64') },
     owners: [ROOT],
-  });
+  }, { log: '0.14' });
   // Every call the app makes of the vault: on Workers, each its own invocation and connection.
   const vault = new Proxy(opened as unknown as FixtureDeps['vault'], {
     get(target, key) {

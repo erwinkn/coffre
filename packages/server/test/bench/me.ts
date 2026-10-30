@@ -83,7 +83,7 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new CountedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }) };
+        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.14' }) };
       })();
       instance.pool.cost = cost;
       cost.vaultCalls += 1;
