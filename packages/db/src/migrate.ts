@@ -21,7 +21,10 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
 /** The logins that run coffre's own statements: the app's, the vault's, and 0.15's hot path's. */
 const RUNTIME_LOGINS = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'];
 
-/** Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry, and the runtime logins' `jit = off`. */
+/**
+ * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry, the hot path's login's
+ * group and settings, and the runtime logins' `jit = off`.
+ */
 export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
   await client.unsafe(`DO $$ BEGIN
     EXECUTE format(
@@ -29,7 +32,34 @@ export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): 
       current_database()
     );
   END $$`);
+  await holdHotLogin(client);
   await turnJitOff(client, RUNTIME_LOGINS);
+}
+
+/**
+ * What 0022 gives `coffre_vault_hot`, given again when it lacks it: its
+ * membership in coffre_vault, inherited, and its lock and statement
+ * timeouts and generic plans. A role dropped and made again, as `coffre
+ * setup` makes a missing one, has none of them, and 0022 never runs
+ * twice. Only what differs, and refused as 0022 refuses it, saying what to
+ * run, to a login that may not change the role or grant the group.
+ */
+export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
+  await client.unsafe(`DO $$ DECLARE
+    held text[];
+  BEGIN
+    SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
+    IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
+    IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
+    IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
+    ) THEN
+      GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
+    END IF;
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+  END $$`);
 }
 
 /**

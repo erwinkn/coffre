@@ -9,7 +9,8 @@
   `coffre_vault`; on a database migrated before, where 0022 made it unable
   to log in, setup's next run gives it a password unasked, and
   `--reset-passwords` resets it with the others. It checks the login holds
-  the vault's rights. On Workers, setup makes a third Hyperdrive config,
+  the vault's rights, and every migrate run gives the role its group and
+  settings again when it lacks them, as one dropped and made again does. On Workers, setup makes a third Hyperdrive config,
   `<vault Worker>-hot` (`coffre-vault-hot`), caching off, finds it again on
   a second run, and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
   adding the binding to a file an earlier release wrote; the database's
@@ -19,7 +20,9 @@
   `HOT_DATABASE_URL`. The examples pass it as `hotDatabase`: the vault
   Worker binds `HOT_HYPERDRIVE`, and the Node vault reads
   `HOT_DATABASE_URL`, the same `file:` URL as `DATABASE_URL` on SQLite.
-  Conformance on Workers takes `--hot-runtime <coffre_vault_hot URL>`. The
+  Conformance on Workers takes `--hot-runtime <coffre_vault_hot URL>`, and
+  its `hot login` check holds that login to the vault's rights and the hot
+  path's timeouts. The
   hot path stays unused until 0.15's log is the default: a deployment sees
   no change but the login and its config. To have them, run `coffre setup`
   again in the deployment's directory; a deployment made before passes

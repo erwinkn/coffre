@@ -316,14 +316,14 @@ test("DNS elsewhere, an administrator who can't create roles: setup refuses befo
   }
 });
 
-test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and neither login was changed, as it says", { skip }, async () => {
+test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and no login was changed, as it says", { skip }, async () => {
   await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_domain_shared'));
   const held = await verifiers();
   const { text, code, writes } = await refused('shared', `${CLUSTER}/setup_domain_shared`, 'shared.example.org', 0, 'is also the login of');
   assert.deepEqual(writes, [], 'nothing written to Cloudflare');
   assert.equal(code, 1, text);
   assert.match(text, /✗ coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
-  assert.match(text, /Neither\s+login\s+was\s+changed\./);
+  assert.match(text, /No\s+login\s+was\s+changed\./);
   assert.deepEqual(await verifiers(), held, "the first deployment's logins keep their passwords");
 });
 

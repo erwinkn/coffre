@@ -121,7 +121,9 @@ it a password after, and the vault reaches it through a pool of its own:
 `HOT_HYPERDRIVE` on Workers, `HOT_DATABASE_URL` on Node. Nothing uses it
 until 0.15's log is the default.
 
-Every migrate run also sets `jit = off` on the three runtime logins
+Every migrate run gives `coffre_vault_hot` its group and settings again
+when it lacks them, as a role dropped and made again does. It also sets
+`jit = off` on the three runtime logins
 (`ALTER ROLE … SET jit = off`), when they lack it. Past
 `jit_above_cost` Postgres compiles a statement's plan at every execution, and a
 statement's estimate grows with its tables: a use that costs 2 ms took 150.

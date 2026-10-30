@@ -16,9 +16,10 @@ export default vault((env) => ({
 }));
 ```
 
-On Node, `serveVault({ socket, database, … })` from `@coffre/vault/node`,
-with the vault's Postgres URL. Only `coffre_vault_runtime` may write members
-and grants; the app uses `coffre_runtime`. See the
+On Node, `serveVault({ socket, database, hotDatabase, … })` from
+`@coffre/vault/node`, with the vault's Postgres URLs. Only the vault's
+logins, `coffre_vault_runtime` and its hot path's, `coffre_vault_hot`, may
+write members and grants; the app uses `coffre_runtime`. See the
 [deploy guide](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md)
 for the logins and the Hyperdrive configs.
 

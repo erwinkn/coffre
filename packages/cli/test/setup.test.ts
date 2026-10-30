@@ -215,6 +215,16 @@ test('where the values go: new Hyperdrive configs, or after a reset, the ones to
   assert.deepEqual(lines(small).slice(0, 1), [`No Hyperdrive config for each database URL: ${tooFewConnections(small.connections)}.`]);
   for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|p4|postgresql:/.test(command), command);
   assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL', 'Hot path database URL', 'Backup database URL']);
+  // Only the hot path's login new, as after an upgrade: its config to make, and the two kept configs' limits lowered to a third,
+  // with no password in the commands, since a share of two may have set them above it.
+  const kept = (login: SetupResult['app']) => ({ ...login, password: 'kept' as const, url: null });
+  const upgraded = { ...made, keys: null, app: kept(made.app), vault: kept(made.vault), backup: kept(made.backup) };
+  assert.deepEqual(commands(upgraded), [
+    hyperdriveCommand('create coffre-vault-hot --caching-disabled', 6),
+    "pnpm exec wrangler hyperdrive update <the app's config id> --origin-connection-limit=6",
+    "pnpm exec wrangler hyperdrive update <the vault's config id> --origin-connection-limit=6",
+  ]);
+  assert.ok(lines(upgraded).includes("The app's and the vault's configs keep their passwords, and their limits, which setup can't see: one a share of two configs set may be above 6. Lower each to 6, unless it is there or below already:"));
   // Where each goes: the hot path's into vault.env too, under a name of its own, and its config's id beside the vault's.
   const node = setupScreen(made).guide[1]!.lines;
   assert.ok(node.includes('vault.env takes the vault database URL, as DATABASE_URL.') && node.includes('vault.env takes the hot path database URL, as HOT_DATABASE_URL.'));
@@ -616,6 +626,15 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   assert.ok(await connects(first.vault.DATABASE_URL!), 'the vault keeps its password');
   assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
 
+  // Dropped after 0022 ran, which never runs again: setup makes it, and the migrate run gives it its group and settings, so every new password works.
+  await asSuperuser('setup_hot', (client) => client.unsafe('DROP ROLE coffre_vault_hot'));
+  const remade = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
+  const again = json(remade);
+  assert.match(remade.stderr, /coffre_vault_hot\s+can read the log and write members; cannot delete log entries or create tables\n/);
+  assert.equal(again.logins.coffre_vault_hot!.password, 'created');
+  for (const each of [again.app.DATABASE_URL!, again.vault.DATABASE_URL!, again.vault.HOT_DATABASE_URL!]) assert.ok(await connects(each));
+  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
+
   // One another role made, unable to log in: on Postgres 16, the owner may not change it without its ADMIN. Said so, before the app's and the vault's change.
   await asSuperuser('setup_hot', async (client) => {
     await client.unsafe('DROP ROLE coffre_vault_hot');
@@ -624,8 +643,8 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   const refused = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /✗ Make the four logins\n\s+setup_owner may not change coffre_vault_hot, which another role made: have that role grant setup_owner ADMIN on coffre_vault_hot, or drop coffre_vault_hot, then run coffre setup again/);
-  assert.ok(await connects(first.app.DATABASE_URL!), 'the app keeps its password');
-  assert.ok(await connects(first.vault.DATABASE_URL!), 'the vault keeps its password');
+  assert.ok(await connects(again.app.DATABASE_URL!), 'the app keeps its password');
+  assert.ok(await connects(again.vault.DATABASE_URL!), 'the vault keeps its password');
 });
 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
@@ -667,7 +686,7 @@ test('on a terminal: the steps on the main screen, the values on the alternate s
     terminal.send('R');
     await terminal.waitFor('Vault database URL');
     terminal.send('q');
-    await terminal.waitFor('Have you saved all seven values?');
+    await terminal.waitFor('Have you saved all 7 values?');
     terminal.send('y');
     await terminal.waitFor('were shown once');
   }));

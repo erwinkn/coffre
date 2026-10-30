@@ -36,7 +36,7 @@ import {
 } from './cloudflare.ts';
 import { cappedLimit } from './connections.ts';
 import { deployOnPush, gitRemote, repositoryOf, SECRETS, WORKFLOW } from './deploy-on-push.ts';
-import { BUILT_APP, buildApp, editWorker, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
+import { BUILT_APP, buildApp, editWorker, hyperdriveBindings, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
 import { createGitHubApp, GITHUB, type GitHub, logoPath } from './github-app.ts';
 import { recordLines, recordsToAdd, Refused, saasZone, type Served, serveThrough, standing, tokenNeeded, waitForRecords, zoneOf } from './hostname.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
@@ -414,7 +414,8 @@ export class Cloudflare {
           const problem = nameProblem(answer);
           if (problem !== null) return problem;
           const others = await othersUnder(found.api, found.account.id, found.configs, { app: answer, vault: `${answer}-vault` }, records, administrator);
-          return others.length === 0 ? null : `${listed(others, 'and')}: another deployment's too`;
+          // The reason first: the line is cut to the terminal's width, and five names may not fit.
+          return others.length === 0 ? null : `another deployment's too: ${listed(others, 'and')}`;
         },
       });
       workers.app.name = name;
@@ -566,19 +567,19 @@ export class Cloudflare {
   /**
    * A config's id, under its binding in its Worker's wrangler.jsonc. A vault
    * whose file a release before the hot path's wrote has no HOT_HYPERDRIVE:
-   * its list is written again with it after its own, on one line as that
-   * release wrote it, the vault's own id set just before (CONFIGS' order).
+   * its list is written again with it after the bindings it has, each kept
+   * whole, on one line as that release wrote it.
    */
   #bind(config: Config, id: string): void {
     const { worker, binding } = BOUND[config];
-    const bound = this.workers[worker].hyperdrive;
-    const at = Object.keys(bound).indexOf(binding);
-    bound[binding] = id;
+    const { path, hyperdrive } = this.workers[worker];
+    const at = Object.keys(hyperdrive).indexOf(binding);
     this.#edit(worker, [
       at === -1
-        ? { path: ['hyperdrive'], value: Object.entries(bound).map(([name, each]) => ({ binding: name, id: each })), what: 'Hyperdrive' }
+        ? { path: ['hyperdrive'], value: [...hyperdriveBindings(this.#dir, path), { binding, id }], what: 'Hyperdrive' }
         : { path: ['hyperdrive', at, 'id'], value: id, what: 'Hyperdrive' },
     ]);
+    hyperdrive[binding] = id;
   }
 
   /**

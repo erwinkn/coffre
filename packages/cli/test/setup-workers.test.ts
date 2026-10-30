@@ -372,8 +372,10 @@ test('a run with everything done: nothing made, nothing shown, both deployed aga
 test("a deployment set up before the hot path's config: its role made a login, its config made and bound, the others kept", { skip }, async () => {
   // As a release before this one left it: no HOT_HYPERDRIVE in vault/wrangler.jsonc, no config for it, and 0022's role, unable to log in.
   const path = join(deployment(), 'vault', 'wrangler.jsonc');
-  const vaultId = readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive.VAULT_HYPERDRIVE!;
-  writeFileSync(path, readFileSync(path, 'utf8').replace(/"hyperdrive": \[[\s\S]*\]\n\}\n$/, `"hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "${vaultId}" }]\n}\n`));
+  const vaultConfig = readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive.VAULT_HYPERDRIVE!;
+  // Its binding with a local connection string of its own, as wrangler takes one, which setup keeps.
+  const local = 'postgres://coffre_vault_runtime:local@127.0.0.1:5432/coffre';
+  writeFileSync(path, readFileSync(path, 'utf8').replace(/"hyperdrive": \[[\s\S]*\]\n\}\n$/, `"hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "${vaultConfig}", "localConnectionString": "${local}" }]\n}\n`));
   assert.deepEqual(Object.keys(readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive), ['VAULT_HYPERDRIVE']);
   const all = cloudflare.state.configs.get('acc-acme')!;
   all.splice(all.findIndex(({ name }) => name === 'coffre-vault-hot'), 1);
@@ -392,9 +394,13 @@ test("a deployment set up before the hot path's config: its role made a login, i
   secrets.add(hot.origin.password);
   assert.deepEqual([hot.origin.user, hot.caching.disabled, hot.origin_connection_limit], ['coffre_vault_hot', true, 20]);
   assert.deepEqual(await firstConnects(), [true, true, true]);
-  // Bound after the vault's own, on the line the release before wrote.
-  assert.deepEqual(readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive, { VAULT_HYPERDRIVE: vaultId, HOT_HYPERDRIVE: hot.id });
-  assert.ok(readFileSync(path, 'utf8').endsWith(`"hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "${vaultId}" }, { "binding": "HOT_HYPERDRIVE", "id": "${hot.id}" }]\n}\n`));
+  // Bound after the vault's own, kept whole, on the line the release before wrote.
+  assert.deepEqual(readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive, { VAULT_HYPERDRIVE: vaultConfig, HOT_HYPERDRIVE: hot.id });
+  assert.ok(
+    readFileSync(path, 'utf8').endsWith(
+      `"hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "${vaultConfig}", "localConnectionString": "${local}" }, { "binding": "HOT_HYPERDRIVE", "id": "${hot.id}" }]\n}\n`,
+    ),
+  );
   assert.match(dryRun('coffre-vault'), new RegExp(`env\\.HOT_HYPERDRIVE \\(${hot.id}\\)`));
   assertKept(output, calls());
 });

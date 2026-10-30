@@ -153,6 +153,7 @@ In order, since each builds on the ones before:
 | no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
 | app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
+| hot login | `--hot-runtime` logs in as `coffre_vault_hot`, with its lock timeout of 1 s, statement timeout of 2 s and generic plans, may write members as the vault's login may, and is refused all the vault's login is. Checked though nothing uses it until 0.15's log is the default. Postgres only |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
 | no audit, no access | A refused append commits no grant, removal or admission |
 | full verification | Verification from the newest checkpoint, and the walk from the first entry a stretch a request, each reach the actual head and count every entry; the audit page is sent with its verification result |

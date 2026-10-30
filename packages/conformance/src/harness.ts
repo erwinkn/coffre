@@ -58,6 +58,8 @@ export type Deployment = {
   runtime: (() => Promise<Sql>) | null;
   /** The database as the login the vault runs as, likewise. */
   vaultRuntime: (() => Promise<Sql>) | null;
+  /** The database as the login 0.15's uses run as, likewise. */
+  hotRuntime: (() => Promise<Sql>) | null;
   /** The file holding the database, when it is one. */
   databaseFile: string | null;
   /** The browser's half of the app's build: its static files. */
@@ -279,6 +281,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       database: () => postgres(owner),
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
+      hotRuntime: () => postgres(hotRuntime),
       databaseFile: null,
       clientDir: join(dir, 'app/dist/client'),
       output,
@@ -344,6 +347,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       database: async () => sqlite(database),
       runtime: null,
       vaultRuntime: null,
+      hotRuntime: null,
       databaseFile: database,
       clientDir: join(dir, 'app/dist/client'),
       output,

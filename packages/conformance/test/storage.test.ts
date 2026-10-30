@@ -39,7 +39,7 @@ async function fixture(t: test.TestContext) {
   };
   const deployment = {
     origin: 'http://conformance.test', databaseFile: file, database: async () => sqlite(file),
-    runtime: null, vaultRuntime: null, output: () => '',
+    runtime: null, vaultRuntime: null, hotRuntime: null, output: () => '',
   } as Deployment;
   return { deployment, people };
 }

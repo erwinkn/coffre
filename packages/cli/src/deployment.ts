@@ -367,6 +367,12 @@ export function readWorker(dir: string, path: string): WorkerConfig {
   };
 }
 
+/** A Worker's Hyperdrive bindings as its wrangler.jsonc has them, each with every property it has, a `localConnectionString` among them. */
+export function hyperdriveBindings(dir: string, path: string): Record<string, unknown>[] {
+  const config = parse(readFileSync(join(dir, path), 'utf8'), [], { allowTrailingComma: true }) as { hyperdrive?: Record<string, unknown>[] };
+  return config.hyperdrive ?? [];
+}
+
 /**
  * What a deployment's Start app builds with and shares with coffre's pages:
  * @coffre/ui's peers, which it must have at exactly the versions the pages

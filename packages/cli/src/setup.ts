@@ -702,6 +702,9 @@ const RUNTIME_URLS = {
   },
 } as const satisfies Record<Runtime, { label: string; file: string; variable: string; about: string }>;
 
+/** Whose each runtime login's config is, in a sentence's words. */
+const OWNERS = { app: "the app's", vault: "the vault's", hot: "the hot path's" } as const satisfies Record<Runtime, string>;
+
 /** The values to save, by section: the app's key and URL, the vault's ID, key and its two URLs, and the backup's URL, as this run made them. */
 export function setupValues({ keys, app, vault, hot, backup }: SetupResult): Record<'app' | 'vault' | 'backup', Value[]> {
   const made = keys === null ? { app: [], vault: [] } : keyValues(keys);
@@ -732,9 +735,11 @@ export function setupScreen(result: SetupResult): Screen {
   const keys = keyGuide();
   const limit = hyperdriveLimit(result.connections);
   const updated = set.filter((component) => result[component].password !== 'created');
+  // A config this run gave no new password: a share of fewer configs may have set its limit, above what each of three gets now.
+  const kept = RUNTIMES.filter((component) => result[component].url === null);
   const hyperdrive = set.map((component) => {
     const login = result[component];
-    const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <the ${component === 'hot' ? 'hot path' : component}'s config id>`;
+    const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <${OWNERS[component]} config id>`;
     // Setup can't see what a config allows now, so an update sets the limit too (`cappedLimit`), and says so.
     return { command: hyperdriveCommand(target, limit === null ? null : cappedLimit(null, limit)) };
   });
@@ -752,6 +757,12 @@ export function setupScreen(result: SetupResult): Screen {
                 ]),
             ...hyperdrive.flatMap((command, i) => [`The ${lowered(RUNTIME_URLS[set[i]!].label)}:`, command]),
             `Each command sets its config's connection limit to ${limit}, so that all three configs fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
+            ...(kept.length === 0
+              ? []
+              : [
+                  `${listed(kept.map((component) => OWNERS[component]), 'and').replace(/^t/, 'T')} ${kept.length === 1 ? 'config keeps its password, and its limit' : 'configs keep their passwords, and their limits'}, which setup can't see: one a share of two configs set may be above ${limit}. Lower ${kept.length === 1 ? 'it' : 'each'} to ${limit}, unless it is there or below already:`,
+                  ...kept.map((component) => ({ command: `pnpm exec wrangler hyperdrive update <${OWNERS[component]} config id> --origin-connection-limit=${limit}` })),
+                ]),
             'Or make them in the Cloudflare dashboard, under Hyperdrive.',
             ...(created ? ["Their ids go under hyperdrive: the app's in app/wrangler.jsonc, at HYPERDRIVE; the vault's and the hot path's in vault/wrangler.jsonc, at VAULT_HYPERDRIVE and HOT_HYPERDRIVE."] : []),
           ]),
@@ -808,7 +819,6 @@ export function summary(result: SetupResult, out: Output): string {
   const set = RUNTIMES.filter((component) => result[component].url !== null);
   const created = set.filter((component) => result[component].password === 'created');
   const reset = set.filter((component) => result[component].password === 'reset');
-  const owners = { app: "the app's", vault: "the vault's", hot: "the hot path's" } as const;
   const workers = [
     ...(created.length === 0
       ? []
@@ -817,7 +827,7 @@ export function summary(result: SetupResult, out: Output): string {
       ? []
       : [reset.length === RUNTIMES.length
           ? 'each Hyperdrive config updated with its new database URL'
-          : `${listed(reset.map((component) => owners[component]), 'and')} ${reset.length === 1 ? 'config updated with its new database URL' : 'configs updated with their new database URLs'}`]),
+          : `${listed(reset.map((component) => OWNERS[component]), 'and')} ${reset.length === 1 ? 'config updated with its new database URL' : 'configs updated with their new database URLs'}`]),
     ...(result.keys === null ? [] : ['VAULT_KEY_ID under vars', 'APP_KEY and VAULT_KEY as secrets']),
   ];
   const fresh = created.length > 0 || result.keys !== null;
