@@ -22,7 +22,7 @@ import { newestSealedChanges, newestSealedQuery } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, secretObject } from '../src/objects.ts';
-import { ENGINE, openTestDatabase, rows, run, sealed, sqlitePlan, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, isolate, ROOT, SEAL, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -512,7 +512,7 @@ test("`app_change` takes a restored seal only on a key's object made again from 
  * afresh: each test empties the log (`emptyLog`), and a member row sealed by a change no longer there is stale.
  */
 async function deciding() {
-  const { vault } = await isolate({ sealThrough: sealed });
+  const { vault } = await isolate({ sealThrough: sealed, heldOutside: nothingHeld });
   await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${ROOT}`);
   await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${ROOT}`);
   await vault.access(ROOT);

@@ -49,6 +49,7 @@ import {
   postgresOnly,
   rows,
   run,
+  nothingHeld,
   sealed as sealedNow,
   withLogUnlocked,
   type TestDatabase,
@@ -491,7 +492,7 @@ test('aliased restore targets keep each source version in its own entry', async 
   const target = { ...first, version: 3 };
   // Workers RPC can preserve aliases; use the implementation without the local JSON transport.
   // The suite's log, as the world's vault keeps it: under 0.15's, cut over, a vault of 0.14's writes nothing (PR 9b).
-  const vault = openVault(db.vault, await prepareVault(config, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {}));
+  const vault = openVault(db.vault, await prepareVault(config, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : {}));
   const result = await vault.rewrap({ principal: ROOT, caller: 'person', items: sources.map((source, i) => ({
     secret: target, ...source, from: i + 1, wrapped: wrappedKeys[i],
   })) });
@@ -4036,10 +4037,10 @@ for (const [shared, joined] of [[false, false], [true, false], [false, true]] as
   test(`a person's request that read them before another request of theirs made them an Owner answers them one (${shared ? 'one process' : 'two processes'}${joined ? ', another Owner made since' : ''})`, { timeout: 10_000 }, async () => {
     await places(db.owner);
     const config = configure({ owners: ['root@acme.example', 'sam@acme.example'] });
-    const prepared = await prepareVault(config);
+    const prepared = await prepareVault(config, { log: '0.14' });
     const slow = pausedReadAbout(db.vault, ROOT);
     const first = openVault(slow.database, prepared);
-    const other = openVault(await db.connect(), shared ? prepared : await prepareVault(config));
+    const other = openVault(await db.connect(), shared ? prepared : await prepareVault(config, { log: '0.14' }));
     // Both settled first, so that only root's requests remain.
     assert.equal((await first.access(ADA)).status, 'unknown');
     assert.equal((await other.access(ADA)).status, 'unknown');
@@ -4057,7 +4058,7 @@ for (const [shared, joined] of [[false, false], [true, false], [false, true]] as
 
 test('a row the log never admitted makes nobody an Owner, and is not taken for one: the others the deployment names become Owners', async () => {
   await places(db.owner);
-  const prepared = await prepareVault(configure({ owners: ['root@acme.example', 'sam@acme.example'] }));
+  const prepared = await prepareVault(configure({ owners: ['root@acme.example', 'sam@acme.example'] }), { log: '0.14' });
   const vault = openVault(db.vault, prepared);
   assert.equal((await vault.access(ADA)).status, 'unknown');
   // Root's row, written around the vault, with no entry of the vault's behind it.
@@ -4079,7 +4080,7 @@ test('a vault starting while another makes someone on its list an Owner finds th
   const config = configure({ owners: ['root@acme.example', 'bob@acme.example'] });
   // Its start reads that Bob has no row, then waits while another process, deployed with the same list, admits him an Owner.
   const slow = pausedReadAbout(db.vault, BOB, 'vault_members');
-  const starting = openVault(slow.database, await prepareVault(config));
+  const starting = openVault(slow.database, await prepareVault(config, { log: '0.14' }));
   slow.arm();
   const pending = starting.access(ADA);
   await slow.reached;

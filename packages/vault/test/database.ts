@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import type { PairNotes } from '@coffre/core/merkle';
 import type { SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
@@ -60,12 +61,13 @@ function said(input: unknown): unknown {
 export type LocalVault = SpeakingVault<RawLocalVault>;
 
 /**
- * Which log the suite's vaults keep (`VaultOptions.log`): 0.14's unless
- * `COFFRE_TEST_LOG` says 0.15, which runs every vault test with 0.15's log
- * on too (0.15's plan: each PR runs the suite on both settings). Its changes
- * answer once committed here: no checkpointer runs (`sealed`).
+ * Which log the suite's vaults keep (`VaultOptions.log`): 0.15's, the
+ * default, unless `COFFRE_TEST_LOG` says 0.14, which runs every vault test
+ * on 0.14's alone, as CI does beside it until 0.16 removes it (0.15's plan:
+ * each PR runs the suite on both settings). Its changes answer once
+ * committed here: no checkpointer runs (`sealed`).
  */
-export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
+export const LOG = process.env.COFFRE_TEST_LOG === '0.14' ? '0.14' : '0.15';
 
 /**
  * A checkpointer that seals everything at once: what a change waits on,
@@ -74,13 +76,16 @@ export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
  */
 export const sealed: SealThrough = async () => ({}) as Sealed;
 
+/** No pair held outside, as a signer that never signed: what a vault with no checkpointer is verified against. */
+export const nothingHeld = async (): Promise<PairNotes[]> => [];
+
 /**
  * `openLocalVault`, spoken to as the app does (`speaking`), keeping the
  * suite's log (`LOG`): under 0.15's, cut over from 0.14 as it opens
  * (`cutOver`), as the app has it before anything else.
  */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
-  const vault = await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed } : {}), ...options }, close);
+  const vault = await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed, heldOutside: nothingHeld } : { log: LOG }), ...options }, close);
   if (vault.cutover !== undefined && (options?.log ?? LOG) === '0.15') await cutOver(vault, db);
   return speaking(vault);
 }

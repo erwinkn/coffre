@@ -42,12 +42,12 @@ async function sealedInstance() {
     intervalMs: 60_000,
   });
   running.push(checkpointer);
-  const vault = testVault(['root@acme.example'], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer.sealThrough });
+  const vault = testVault(['root@acme.example'], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside });
   return testDeps(db.runtime, ['root@acme.example'], { vault });
 }
 
 test("GET /audit/trees: nothing to check with 0.14's log alone", async () => {
-  const deps = testDeps(db.runtime, ['root@acme.example'], { vault: testVault(['root@acme.example'], {}, { kek: randomBytes(32) }, {}, {}) });
+  const deps = testDeps(db.runtime, ['root@acme.example'], { vault: testVault(['root@acme.example'], {}, { kek: randomBytes(32) }, {}, { log: '0.14' }) });
   const root = clientFor(deps, 'root@acme.example');
   await root.me();
   assert.deepEqual(await root.audit.verifyTrees(), { kept: false });

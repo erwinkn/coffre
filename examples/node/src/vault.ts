@@ -2,7 +2,8 @@
 // server's database through a login of its own. It answers only on a Unix
 // socket, which it makes 0660: run it as its own user, sharing a group with
 // the server's, and nothing that faces the network can read the vault key.
-// Settings come from vault.env.
+// It also runs the checkpointer, which signs the audit log every half second:
+// run one vault per database. Settings come from vault.env.
 import { serveVault } from '@coffre/vault/node';
 
 function env(name: string): string {
@@ -14,6 +15,9 @@ function env(name: string): string {
 const vault = await serveVault({
   socket: env('VAULT_SOCKET'),
   database: env('DATABASE_URL'),
+  // Where the checkpointer remembers the last checkpoint it signed, out of
+  // reach of whoever writes the database: a file the vault's user alone writes.
+  checkpointer: { memory: env('CHECKPOINTER_MEMORY') },
   kek: { id: env('VAULT_KEY_ID'), key: env('VAULT_KEY') },
   // After a rotation, the vault keys before it, so the data keys they wrapped
   // still open and the records signed under them before it still verify:

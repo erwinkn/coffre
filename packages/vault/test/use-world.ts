@@ -67,6 +67,7 @@ export const LOG_015: VaultOptions = {
     if (number === cutoverNumber) return {} as Sealed;
     throw new Error('a use waited for a seal');
   },
+  heldOutside: async () => [],
 };
 
 /** The cutover's change this fixture stands in for, by its number (`cutOverStandIn`). */

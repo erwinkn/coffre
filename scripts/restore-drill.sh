@@ -55,7 +55,9 @@ trap cleanup EXIT
 
 # The Workers example, as `coffre init` writes it, over database $1, with
 # the KEK $2: both Workers under wrangler dev, each with its own login, the
-# app as it builds, behind conformance's entry for wrangler dev.
+# app as it builds, behind conformance's entry for wrangler dev. Each start
+# keeps its Durable Objects' storage apart: the checkpointer's memory starts
+# empty, as docs/restore.md resets it after a restore ("On 0.15's log").
 app_config=''
 start_coffre() {
     local state="$scratch/state-$1-$RANDOM"

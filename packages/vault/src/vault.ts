@@ -175,10 +175,11 @@ export type VaultOptions = {
   /** How far one call walks the log (`WALKS`); tests shorten them. */
   walks?: Partial<Walks>;
   /**
-   * Which log the vault keeps (0.15's plan, "Behind one switch"): 0.14's
-   * alone, the default until 0.15's flip (plan PR 10), or 0.15's too, where
-   * each decision that changes an input also logs it as a change of
-   * 0.15's log (`changes.ts`). Not a deployment's to set.
+   * Which log the vault keeps (0.15's plan, "Behind one switch"): 0.15's,
+   * the default since its flip (plan PR 10), where each decision that
+   * changes an input also logs it as a change of 0.15's log (`changes.ts`),
+   * or 0.14's alone, for the suites until 0.16 removes it. Not a
+   * deployment's to set: once cut over, the database refuses 0.14's writes.
    */
   log?: '0.14' | '0.15';
   /**
@@ -186,15 +187,16 @@ export type VaultOptions = {
    * sealed in a signed checkpoint, and witnessed or past the witnesses'
    * bound (R51): the checkpointer's `sealThrough` (checkpointer.ts). A
    * change whose entry it does not seal fails, though committed. Required
-   * with `log: '0.15'`.
+   * under 0.15's log.
    */
   sealThrough?: SealThrough;
   /**
    * Under 0.15's log, the pairs held where no database writer reaches: the
    * signer's memory (`durableHeldOutside` on Workers, the Node runner's
    * `heldOutside`), later a witness's. The verifier holds every walk to
-   * them; without, a database rolled back whole to an earlier pair verifies
-   * until the signer's next tick refuses it (verifier.ts).
+   * them; without, a database rolled back whole to an earlier pair would
+   * verify until the signer's next tick refuses it (verifier.ts). Required
+   * under 0.15's log, as `sealThrough` is (T151).
    */
   heldOutside?: () => Promise<readonly PairNotes[]>;
   /**
@@ -267,7 +269,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
-    log015: options.log === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
+    log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
     limited: false,
     cutover: false,
     verifier: null,
@@ -283,8 +285,9 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
 }
 
 /** 0.15's change keys from the vault's signing keys, the first sealing and MACing, each checking a seal. */
-function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined, heldOutside = async (): Promise<readonly PairNotes[]> => []): NonNullable<PreparedVault['log015']> {
+function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined, heldOutside: (() => Promise<readonly PairNotes[]>) | undefined): NonNullable<PreparedVault['log015']> {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
+  if (heldOutside === undefined) throw new Error("0.15's log is verified against the pairs held where no database writer reaches: give the vault the checkpointer's heldOutside");
   return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough, heldOutside };
 }
 

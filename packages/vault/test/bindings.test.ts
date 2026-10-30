@@ -20,7 +20,7 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -49,7 +49,7 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project. */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);

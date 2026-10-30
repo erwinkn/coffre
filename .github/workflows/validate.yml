@@ -79,12 +79,12 @@ jobs:
       - name: Tests
         run: pnpm test
 
-  tests-015:
+  tests-014:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
-    # The whole suite again with 0.15's log switched on (docs/design/0.15-plan.md: each PR runs it on both settings),
-    # beside the other: the switch is internal, and no deployment turns it on before plan PR 10.
-    name: Tests on 0.15's log
+    # The whole suite again on 0.14's log alone (docs/design/0.15-plan.md: each PR runs it on both settings), beside
+    # the other, which runs 0.15's, the default since plan PR 10: until 0.16 removes the 0.14 path.
+    name: Tests on 0.14's log
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -93,10 +93,10 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           build: 'false'
-      - name: Tests on 0.15's log
+      - name: Tests on 0.14's log
         run: ./scripts/test-suite.sh
         env:
-          COFFRE_TEST_LOG: '0.15'
+          COFFRE_TEST_LOG: '0.14'
 
   matrices:
     needs: changes
@@ -407,7 +407,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, action, checks, tests, tests-015, matrices, schema, formal, proofs, workers, node, consumer, compat, image]
+    needs: [changes, action, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, consumer, compat, image]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump

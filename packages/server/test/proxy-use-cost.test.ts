@@ -25,7 +25,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
@@ -94,7 +94,7 @@ before(async () => {
   // Uses go in at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps it.
   await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const setup = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') }), deps.db, deps.vault, transport);
   setupRuntime = setup;
   const root = clientFor(deps, ROOT);
@@ -117,7 +117,7 @@ before(async () => {
   hot = new RecordingPool(TEST_HOT_DATABASE_URL);
   vault = await localVault(
     { database: createDatabase(vaultPool.client), hotDatabase: createDatabase(hot.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
-    { log: '0.15', sealThrough: sealedNow },
+    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
   );
   const config = resolveConfig({
     publicUrl: ORIGIN, vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64'),

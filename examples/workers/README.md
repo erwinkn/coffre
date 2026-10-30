@@ -103,8 +103,9 @@ instead of a key of your own, the vault also needs a `SIGNING_KEY`
 pnpm run deploy
 ```
 
-deploys the vault, then builds the app with Vite and deploys what it
-built, which binds to the vault. Wrangler uploads that build as it is
+builds the app with Vite, then deploys the vault and the app, back to back:
+the app binds to the vault, and a vault of a newer release may refuse what an
+older app asks until the app of its release is up. Wrangler uploads the build as it is
 (`app/dist/server/wrangler.json`), without bundling it again. Route the app to
 `PUBLIC_URL` in the dashboard, or with `routes` in `app/wrangler.jsonc`, then
 sign in there as the Owner, the first time, and from a terminal:

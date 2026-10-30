@@ -320,12 +320,12 @@ backup verifies as well as a recent one ([Limits](architecture.md#limits)).
 
 ## On 0.15's log
 
-An instance on 0.15's log (`log: '0.15'`, behind its switch until it is the
-default) keeps two logs in the same database: 0.14's chain, which the steps
-above check, and 0.15's, its changes and uses sealed into checkpoints that
-its checkpointer signs. A backup holds both. Its checkpointer keeps one
-thing outside the database: its memory of the newest pair it signed (a
-file beside the vault on Node, its Durable Object's storage on Workers).
+Since 0.15, an instance keeps two logs in the same database: 0.14's chain,
+which the steps above check, and 0.15's, its changes and uses sealed into
+checkpoints that its checkpointer signs. A backup holds both. Its
+checkpointer keeps one thing outside the database: its memory of the newest
+pair it signed (the vault's `CHECKPOINTER_MEMORY` file on Node, its Durable
+Object's storage on Workers).
 
 The restore takes one step more. The checkpointer's memory is newer than
 the backup: it remembers pairs signed after it. It refuses the restored log

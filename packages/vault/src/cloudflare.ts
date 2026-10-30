@@ -1,16 +1,20 @@
 /**
  * The vault as a Worker, behind an entrypoint the app's `VAULT` service
  * binding calls over RPC. It has no route and no HTTP surface. It decides
- * in the database the app uses, through a Hyperdrive binding of its own,
- * whose login is the vault's:
+ * in the database the app uses, through two Hyperdrive bindings of its
+ * own, the vault's login and its uses' (`coffre_vault_hot`), and seals its
+ * log through the checkpointer's Durable Object:
  *
- *   import { postgres, vault } from '@coffre/vault/cloudflare';
+ *   import { checkpointer, postgres, vault } from '@coffre/vault/cloudflare';
  *
  *   export default vault((env: Env) => ({
- *     database: postgres(env.HYPERDRIVE),
+ *     database: postgres(env.VAULT_HYPERDRIVE),
+ *     hotDatabase: postgres(env.HOT_HYPERDRIVE),
+ *     checkpointer: env.CHECKPOINTER,
  *     kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
  *     owners: ['admin@acme.example'],
  *   }));
+ *   export const CoffreCheckpointer = checkpointer();
  *
  * Any number of isolates run it side by side: every decision locks what it
  * is about in the database, so they share one log and one bulk limit.
@@ -40,39 +44,34 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import type { Witness } from './checkpointer.ts';
-import { checkpointerObject, durableHeldOutside, durableSealThrough, type ObjectNamespace } from './checkpointer-workers.ts';
+import { checkpointerObject, durableHeldOutside, durableSealThrough, startCheckpointer, type ObjectNamespace } from './checkpointer-workers.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
-import { openVault, prepareVault, type PreparedVault, type VaultOptions } from './vault.ts';
+import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
 export type { Vault, VaultConfig };
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 export * from './index.ts';
 
 /**
- * What the vault Worker's `vault(env => …)` returns. `witnesses` are 0.15's
- * (docs/design/audit-tree.md, R40: a deployment opts in), unused until its
- * log is switched on (plan PR 10). `hotDatabase`: 0.15's hot path, behind
- * its switch (docs/design/0.15-plan.md, PR 5), a Hyperdrive config of its
- * own whose login is `coffre_vault_hot`; and `uses`, how many uses an
- * isolate has in flight at most (by default `connections`, the share of
- * that config's pool an isolate may hold: T112 measures it).
- *
- * `log`, the switch itself (`VaultOptions.log`), until PR 10 flips it:
- * `'0.15'` keeps 0.15's log, whose changes answer once the checkpointer's
- * Durable Object, `checkpointer` (its namespace, `CoffreCheckpointer`
- * bound beside the vault), has sealed them (R51), and whose verifier holds
- * every walk to the pairs that object remembers.
- *
- *   vault((env: Env) => ({ database: postgres(env.HYPERDRIVE), hotDatabase: postgres(env.HOT_HYPERDRIVE),
- *     log: '0.15', checkpointer: env.CHECKPOINTER, kek: …, owners: […] }))
+ * What the vault Worker's `vault(env => …)` returns, for 0.15's log
+ * (docs/design/0.15-plan.md):
+ * - `hotDatabase`: the uses' own Hyperdrive config, whose login is
+ *   `coffre_vault_hot`, and `uses`, how many uses an isolate has in flight
+ *   at most (by default `connections`, the share of that config's pool an
+ *   isolate may hold: T112 measures it);
+ * - `checkpointer`: the namespace of the checkpointer's Durable Object,
+ *   `CoffreCheckpointer` (`checkpointer()`, below), bound beside the vault.
+ *   A change answers once that object has sealed it (R51), and the
+ *   verifier holds every check to the pair it remembers;
+ * - `witnesses` (docs/design/audit-tree.md, R40: a deployment opts in).
+ * A configuration without the first two is refused, at the first call.
  */
 export type WorkersVaultConfig = VaultConfig & {
   database: PostgresDatabase;
+  hotDatabase: PostgresDatabase;
+  checkpointer: ObjectNamespace;
   witnesses?: readonly Witness[];
-  hotDatabase?: PostgresDatabase;
   uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number };
-  log?: '0.14' | '0.15';
-  checkpointer?: ObjectNamespace;
 };
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
@@ -83,7 +82,16 @@ let configure: ((env: never) => WorkersVaultConfig) | null = null;
  * isolate keeps: the ready value itself, never the work of making it, which
  * would belong to the call that started it (vault.ts, `PreparedVault`).
  */
-const ready = new WeakMap<object, { database: PostgresDatabase; hotDatabase?: PostgresDatabase; prepared: PreparedVault }>();
+const ready = new WeakMap<object, Ready>();
+
+/**
+ * One `env`'s vault, ready: its databases, its prepared state, and whether
+ * a call of this isolate started the checkpointer, or when one last tried.
+ */
+type Ready = { database: PostgresDatabase; hotDatabase: PostgresDatabase; checkpointer: ObjectNamespace; prepared: PreparedVault; started: boolean; tried: number };
+
+/** How long after a start that failed, the checkpointer's object out of reach, the next call tries again. */
+const START_AGAIN_MS = 10_000;
 
 /**
  * What the app's `VAULT` service binding calls. Each call gets a database of
@@ -105,7 +113,6 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   /** 0.15's use: one connection of the hot path's config, for its one statement. */
   async use(input: UseInput) {
     const { prepared, hotDatabase } = await this.#ready();
-    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
       const hot = createDatabase(pool);
@@ -118,7 +125,6 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   /** 0.15's use as the request names it: the same one connection, for its read of ids on a miss and its one use. */
   async useNamed(input: NamedUseInput) {
     const { prepared, hotDatabase } = await this.#ready();
-    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
       const hot = createDatabase(pool);
@@ -128,17 +134,24 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     }
   }
 
-  async #ready(): Promise<{ database: PostgresDatabase; hotDatabase?: PostgresDatabase; prepared: PreparedVault }> {
+  async #ready(): Promise<Ready> {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const prepared = await prepareVault(resolveVaultConfig(config), { ...(config.uses === undefined ? {} : { uses: config.uses }), ...logOf(config) });
+      const { checkpointer: namespace, hotDatabase } = checked(config);
+      const prepared = await prepareVault(resolveVaultConfig(config), {
+        ...(config.uses === undefined ? {} : { uses: config.uses }),
+        log: '0.15',
+        sealThrough: durableSealThrough(namespace),
+        heldOutside: durableHeldOutside(namespace),
+      });
       // Calls that raced here each made one; the first kept serves them all from now on.
-      entry = ready.get(env) ?? { database: config.database, ...(config.hotDatabase === undefined ? {} : { hotDatabase: config.hotDatabase }), prepared };
+      entry = ready.get(env) ?? { database: config.database, hotDatabase, checkpointer: namespace, prepared, started: false, tried: -Infinity };
       ready.set(env, entry);
     }
+    if (!entry.started && Date.now() - entry.tried >= START_AGAIN_MS) await start(entry);
     return entry;
   }
 
@@ -158,9 +171,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async checkpoint() { return this.#call((vault) => vault.checkpoint()); }
   /** What the vault says of itself; its uses over the hot path's own config (`use`), which `#call`'s vault has not. */
   async about() {
-    const { hotDatabase } = await this.#ready();
     const about = await this.#call((vault) => vault.about());
-    return about.log === '0.15' && hotDatabase !== undefined ? { ...about, uses: true as const } : about;
+    return about.log === '0.15' ? { ...about, uses: true as const } : about;
   }
   async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
@@ -179,11 +191,35 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 }
 
-/** The log a configuration keeps (`WorkersVaultConfig.log`): 0.15's seals and remembers through its checkpointer's object. */
-function logOf(config: WorkersVaultConfig): Pick<VaultOptions, 'log' | 'sealThrough' | 'heldOutside'> {
-  if (config.log !== '0.15') return {};
-  if (config.checkpointer === undefined) throw new Error("0.15's log answers a change once its checkpointer has sealed it: set checkpointer in vault(…), its Durable Object's namespace");
-  return { log: '0.15', sealThrough: durableSealThrough(config.checkpointer), heldOutside: durableHeldOutside(config.checkpointer) };
+/** The bindings 0.15's log needs, present: a binding left out of wrangler.jsonc reads as undefined, and is refused here, by name. */
+function checked(config: WorkersVaultConfig): { hotDatabase: PostgresDatabase; checkpointer: ObjectNamespace } {
+  if (config.hotDatabase?.hyperdrive?.connectionString === undefined) {
+    throw new Error("the vault's uses run through a Hyperdrive config of their own: set hotDatabase in vault(…), postgres(env.HOT_HYPERDRIVE), its login coffre_vault_hot");
+  }
+  if (typeof config.checkpointer?.idFromName !== 'function') {
+    throw new Error("the vault answers a change once its checkpointer has sealed it: set checkpointer in vault(…), env.CHECKPOINTER, and bind the CoffreCheckpointer Durable Object beside the vault");
+  }
+  return { hotDatabase: config.hotDatabase, checkpointer: config.checkpointer };
+}
+
+/**
+ * The checkpointer's object started, from a call of this isolate, before it
+ * goes on: its alarm set, and it open, so that no call meets a log with no
+ * checkpoint yet. Started again is harmless, so each isolate starts it once.
+ * An object that refuses to open (a log it cannot take: docs/restore.md) is
+ * started all the same, its alarm set, and says why in its alarms; one out
+ * of reach is tried again by a later call. Neither stops this call: a use
+ * needs no checkpointer, and a change fails on its seal.
+ */
+async function start(entry: Ready): Promise<void> {
+  entry.tried = Date.now();
+  try {
+    await startCheckpointer(entry.checkpointer);
+    entry.started = true;
+  } catch (error) {
+    if ((error as { status?: number }).status === 503) entry.started = true;
+    console.warn(`coffre vault: ${(error as Error).message}`);
+  }
 }
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */
@@ -196,7 +232,6 @@ export function vault<Env>(configure_: (env: Env) => WorkersVaultConfig): typeof
  * 0.15's checkpointer, the Durable Object class a deployment binds beside
  * the vault, configured by the same `vault(env => …)`: its Hyperdrive, its
  * signing key, its witnesses. `export const CoffreCheckpointer = checkpointer()`.
- * Unused until 0.15's log is switched on (plan PR 10).
  */
 export function checkpointer() {
   return checkpointerObject((env: object) => {
@@ -206,5 +241,5 @@ export function checkpointer() {
   });
 }
 
-export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer } from './checkpointer-workers.ts';
+export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer, type ObjectNamespace } from './checkpointer-workers.ts';
 export { durableWitness, r2Archive, witnessObject as witness, type WitnessSettings } from './witness-workers.ts';

@@ -19,8 +19,8 @@ import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
-import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -82,7 +82,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev');
@@ -114,7 +114,7 @@ before(async () => {
   // The app and the vault on pools of their own that record what they run, as a deployment's; each vault call counted.
   app = new RecordingPool(TEST_RUNTIME_DATABASE_URL);
   vaultPool = new RecordingPool(TEST_VAULT_DATABASE_URL);
-  vault = await localVault({ database: createDatabase(vaultPool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow });
+  vault = await localVault({ database: createDatabase(vaultPool.client), hotDatabase: TEST_HOT_DATABASE_URL, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
   const counted = new Proxy(vault, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
