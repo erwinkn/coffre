@@ -2501,19 +2501,21 @@ class VaultService implements Vault {
   }
 
   /**
-   * Every live project and its environments, each environment by its slug as
-   * 0.15's log holds its row (T159, review r2): one that is not is no place
-   * anyone sets a service account up in.
+   * Every live project and its environments, each environment by its
+   * project, slug and tombstone as 0.15's log holds its row (T159): one that
+   * is not is no place anyone sets a service account up in. Each read once,
+   * in the statement whose rows are checked, so what is checked is what is
+   * weighed (review r3: a row renamed between two reads, and back).
    */
   async #livePlaces(d: Decision): Promise<Awaited<ReturnType<typeof store.liveProjects>>> {
     const projects = await store.liveProjects(d.tx);
     if (!this.#checksPlaces()) return projects;
-    const rows = await store.environmentsById(d.tx, projects.flatMap((project) => project.environments.map(({ id }) => id)), { seals: true });
-    const holds = (id: string) => {
-      const row = rows.get(id);
-      return row !== undefined && this.#placeFault(id, row, d.reports) === null;
-    };
-    return projects.map((project) => ({ ...project, environments: project.environments.filter(({ id }) => holds(id)) }));
+    const rows = await store.environmentsById(d.tx, 'all', { seals: true });
+    const held = [...rows].filter(([id, row]) => this.#placeFault(id, row, d.reports) === null && !row.deleted);
+    return projects.map((project) => ({
+      id: project.id,
+      environments: held.filter(([, row]) => row.projectId === project.id).map(([id, row]) => ({ id, slug: row.slug })).sort((a, b) => (a.id < b.id ? -1 : 1)),
+    }));
   }
 
   /**

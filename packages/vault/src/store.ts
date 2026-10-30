@@ -281,15 +281,15 @@ export type EnvironmentSeal = { object: EnvironmentInput; seal: Buffer | null; n
  * Each of these environments that exists, by id, with its project, its
  * slug, what grants on one slug in every project match, and whether it was
  * deleted, alone or with its project: then no key under it opens, or is
- * wrapped, whatever grant would cover it. With `seals`, what 0.15's log
- * holds each to as well, in the same statement on Postgres.
+ * wrapped, whatever grant would cover it; `all`, every one. With `seals`,
+ * what 0.15's log holds each to as well, in the same statement on Postgres.
  */
 export async function environmentsById(
   db: Queryable,
-  ids: readonly string[],
+  ids: readonly string[] | 'all',
   { seals = false }: { seals?: boolean } = {},
 ): Promise<Map<string, EnvironmentRow>> {
-  if (ids.length === 0) return new Map();
+  if (ids !== 'all' && ids.length === 0) return new Map();
   const { environments, projects } = tablesOf(db);
   const postgres = engineOf(db) === 'postgres';
   const columns = {
@@ -315,7 +315,7 @@ export async function environmentsById(
     .select(seals ? { ...columns, ...sealColumns } : columns)
     .from(environments)
     .innerJoin(projects, eq(projects.id, environments.projectId))
-    .where(inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
+    .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
   // SQLite has no `log_object`: the newest changes in a statement of their own, by the keys the vault computes.
   const newest = seals && !postgres ? await newestSeals(db, rows.map((row) => ({ kind: 'environment', id: row.id }))) : null;
   return new Map(rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
