@@ -1284,6 +1284,9 @@ class VaultService implements Vault {
     const items = loaded.versions.map((version) => ({ ...version, secret: { ...version.secret } }));
     validateItems(items, 'wrapped');
     const sealed = await this.#referencesAt(vias);
+    // Settled first, as a decision is: a new process learns here whether the log is cut over, and so whether a fork's row
+    // is held to its seal (review r1).
+    await this.#settled();
     const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])), { seals: this.#checksPlaces() });
     // A fork whose row is not as 0.15's log holds it is no place to read through (T159), reported.
     const forkReports: NewEntry[] = [];
@@ -2769,7 +2772,11 @@ class VaultService implements Vault {
         if (!(await store.projectLive(d.tx, change.projectId))) throw refused('invalid', 'no such project');
         at.projectId = change.projectId;
         // Each a live environment of the project, or none yet: a fork's id, protected before its row is written.
-        const found = await store.environmentsById(d.tx, change.environmentIds);
+        const found = await store.environmentsById(d.tx, change.environmentIds, { seals: this.#checksPlaces() });
+        // Each as 0.15's log holds its row (T159, review r1): its project and whether it was deleted decide what changes, and
+        // a tombstone set around the log would keep a protection's end from its object. One the log has never held (no
+        // seal, no change) is 0.14's alone, which the change path takes as such.
+        this.#placesHold(found, [...found].flatMap(([id, row]) => (row.sealed?.seal == null && row.sealed?.newest == null ? [] : [id])), d.reports);
         if ([...found.values()].some((environment) => environment.projectId !== change.projectId)) throw refused('invalid', 'each environment is one of the project\'s');
         if (change.environmentIds.length === 1 && found.has(change.environmentIds[0]!)) at.environmentId = change.environmentIds[0];
         // An environment whose object 0.15's log changes with this: one with a row, not deleted (`environment.protect`).

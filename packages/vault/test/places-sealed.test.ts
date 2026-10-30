@@ -15,7 +15,9 @@ import { tablesOf } from '@coffre/db';
 import { count, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { changePlace, emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { openLocalVault as openRawVault } from '../src/local.ts';
+import { newestSealsQuery } from '../src/store.ts';
+import { changePlace, emptyDatabase, ENGINE, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -46,7 +48,8 @@ function configure(): ResolvedVaultConfig {
  * project of its own. Ada a Developer of `dev` and a Viewer of `prod`, by grants on each.
  */
 async function world() {
-  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed });
+  const config = configure();
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const [dev, prod] = [await newEnvironment(db.owner, project), await newEnvironment(db.owner, project)];
@@ -56,7 +59,7 @@ async function world() {
     actor: ROOT, caller: 'person', principal: ADA,
     changes: [{ projectId: project, environmentId: dev, role: 'developer', expiresAt: null }, { projectId: project, environmentId: prod, role: 'viewer', expiresAt: null }],
   })).ok);
-  return { vault, project, dev, prod, elsewhere };
+  return { vault, config, project, dev, prod, elsewhere };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -218,3 +221,41 @@ for (const how of ['renamed', 'brought back from its deletion']) {
     assert.deepEqual(!wrapped.ok && wrapped.refusal, { code: 'tampered', message: TAMPERED_PLACE });
   });
 }
+
+test('a new process\'s first call, a read through a fork renamed around the log, is refused as every later one is (review r1)', async () => {
+  const w = await world();
+  const id = randomUUID();
+  await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
+  const secret = { projectId: w.project, environmentId: w.prod, secretId: id, version: 1, path: 'p/prod/DATABASE_URL' };
+  const key = randomBytes(32).toString('base64');
+  const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key }] });
+  assert.ok(wrapped.ok);
+  const [item] = await storedVersions(db.owner, [{ secret, wrapped: wrapped.wrapped[0]! }]);
+  const read = (vault: LocalVault) => vault.unwrap({ principal: ADA, caller: 'person', purpose: 'reveal', items: [{ ...item!, through: w.dev }] });
+  assert.ok((await read(w.vault)).ok, 'read through dev, another place of its project');
+  await run(db.owner, sql`UPDATE environments SET slug = 'renamed' WHERE id = ${w.dev}`);
+  // A vault that has made no call yet: it learns the log is cut over as it reads, not after.
+  const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed }));
+  assert.equal((await read(fresh)).ok, false);
+  assert.equal((await read(fresh)).ok, false);
+});
+
+test('unprotecting a place whose tombstone a writer set around the log is refused: the protection\'s end is its object\'s too (review r1)', async () => {
+  const w = await world();
+  const protect = (on: boolean) => w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev], protected: on } });
+  assert.ok((await protect(true)).ok);
+  const [{ slug }] = await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM environments WHERE id = ${w.dev}`) as [{ slug: string }];
+  await run(db.owner, sql`UPDATE environments SET slug = ${`${slug}~deleted-1`} WHERE id = ${w.dev}`);
+  const ended = await protect(false);
+  assert.deepEqual(!ended.ok && ended.refusal, { code: 'tampered', message: TAMPERED_PLACE });
+  assert.ok((await w.vault.policy()).protected.includes(w.dev), 'still protected');
+});
+
+test('on SQLite, the newest changes of several places are one probe each, however long their histories (R48, review r1)', { skip: ENGINE === 'sqlite' ? false : 'SQLite only: Postgres reads them in the snapshot' }, async () => {
+  const refs = [randomUUID(), randomUUID(), randomUUID()].map((id) => ({ kind: 'environment' as const, id }));
+  const plan = await sqlitePlan(newestSealsQuery(refs));
+  // Each newest number by the index's `max`, then its row by its number: never every change of an object in turn.
+  assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
+  assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
+  assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
+});

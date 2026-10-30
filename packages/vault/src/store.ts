@@ -345,11 +345,18 @@ export function environmentSeal(columns: EnvironmentColumns, seal: Buffer | Uint
  */
 export async function newestSeals(db: Queryable, refs: readonly Ref[]): Promise<Map<string, Buffer | null>> {
   if (refs.length === 0) return new Map();
-  const keys = sql.join([...new Set(refs.map((ref) => objectKey(ref)))].map((key) => sql`${key}`), sql`, `);
-  const rows = await rowsOf<{ object: string; seal: Buffer | Uint8Array | null }>(
-    db, sql`SELECT c.object, c.seal FROM log_changes c WHERE c.object IN (${keys}) AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = c.object)`,
-  );
+  const rows = await rowsOf<{ object: string; seal: Buffer | Uint8Array | null }>(db, newestSealsQuery(refs));
   return new Map(rows.map((row) => [row.object, bytes(row.seal)]));
+}
+
+/**
+ * `newestSeals`' statement: from the keys asked, each its newest change by one probe of `log_changes_object_idx`
+ * (its `max`), then that row by the same index. The same work however long each object's history (R48).
+ */
+export function newestSealsQuery(refs: readonly Ref[]): SQL {
+  const keys = sql.join([...new Set(refs.map((ref) => objectKey(ref)))].map((key) => sql`SELECT ${key} AS object`), sql` UNION ALL `);
+  return sql`SELECT c.object, c.seal FROM (${keys}) k
+    JOIN log_changes c ON c.object = k.object AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.object)`;
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
