@@ -16942,6 +16942,7 @@ async function send(request, to, hint, handled = [], ask = once) {
 		const next = detail === null ? null : hint?.(response.status, typeof body.reason === "string" ? body.reason : null) ?? null;
 		if (next !== null) fail(`${detail}: ${next}`);
 		if (response.status === 403) fail(`forbidden: ${detail ?? "you do not have a grant for that environment"}`);
+		if (response.status === 404 && body.error === "not_available" && detail !== null) fail(detail);
 		if (response.status === 404) fail(detail === null ? "not found" : `not found: ${detail}`);
 		const status = `request failed with status ${response.status}`;
 		if (detail !== null) fail(`${status}: ${detail}`);
