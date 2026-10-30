@@ -1090,7 +1090,7 @@ export class WorkloadService {
     if (outcome.ok) {
       // A transaction of its own, after the vault's commit: should it fail, the change stands and the request answers an
       // error, and asked again it makes another binding (a new id). Rare, and the tombstone is the app's own concern.
-      await audited({ db, chainKey }, async (_tx, log) => {
+      await audited({ db, chainKey, vault }, async (_tx, log) => {
         log.push(...entries);
       });
       return;

@@ -369,6 +369,8 @@ export const auditLog = sqliteTable(
     prevHash: bytes('prev_hash').notNull(),
     mac: bytes('mac').notNull(),
     hash: bytes('hash').notNull(),
+    // Set on every entry a writer under 0.15's log appends (schema.ts says why).
+    log015: flag('log015'),
   },
   (table) => [
     check('audit_log_author_check', sql`${table.author} IN ('app', 'vault')`),

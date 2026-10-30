@@ -230,7 +230,7 @@ test('a reference the vault did not make is refused: no entry, another one, a fo
   const create = (await vaultEntries('reference.create'))[0]!;
   const forged = await db.vault.transaction((tx) => appendEntries(tx, forger, [{
     actor: ADA, action: 'reference.create', decision: 'allow', projectId: w.billing, environmentId: w.billingProd, metadata: JSON.stringify({ ...create.metadata, reference: via.reference }),
-  }]));
+  }], undefined, undefined, [], true));
   assert.equal(await refusedAs({ reference: via.reference, seq: Number(forged.seqStart) }), 'bad_claim');
   // The genuine reference, presented with another secret's version.
   const other = await w.market.secret(w.market.prod, 'OTHER');

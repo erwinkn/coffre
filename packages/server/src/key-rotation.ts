@@ -26,7 +26,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
 
-import { AppChanges, COFFRE_ACTOR, retrying, revokes } from './api/changes.ts';
+import { AppChanges, COFFRE_ACTOR, keeps015, retrying, revokes } from './api/changes.ts';
 import { signedAgain, signedBy, type AuthRow, type AuthTable } from './auth-rows.ts';
 import { appendAudit, appLogKey, type AppKeys, type AuditEntry } from './db/audit.ts';
 import type { CredentialRow } from './db/queries.ts';
@@ -222,7 +222,7 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
       decision: 'allow',
       subject: fromId,
       metadata: { from: fromId, resealed, signedOut, later, unsigned: unsigned.slice(0, NAMED), unsignedCount: unsigned.length, next },
-    }]);
+    }], [], prepared !== null);
     prepared?.expectRevoked(ended);
     await prepared?.commit(tx);
     return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others };
@@ -270,13 +270,15 @@ async function sessionsEnded(db: Database, keys: AppKeys, standing: Extract<KeyS
  * From here on the old key vouches for nothing. Where the app stands
  * after, read again: another key may be due to move from in turn.
  */
-export async function finishRotation(db: Database, keys: AppKeys, { wait = true }: { wait?: boolean } = {}): Promise<KeyState> {
+export async function finishRotation(db: Database, keys: AppKeys, { wait = true, vault }: { wait?: boolean; vault: Vault }): Promise<KeyState> {
+  // Under 0.15's log, its entry says so (`appendEntries`): a rotation at a later deploy comes after the cutover.
+  const log015 = await keeps015(vault);
   return db.transaction(async (tx): Promise<KeyState> => {
     if (!(await headFor(tx, wait))) return busy;
     const standing = await keyState(tx, keys);
     if (standing.kind !== 'sealing') return standing;
     const fromId = appLogKey(standing.from).keyId;
-    await appendAudit(tx, keys.chainKey, [{ ...ROTATION, action: 'key.rotate', decision: 'allow', subject: fromId, metadata: { from: fromId } }]);
+    await appendAudit(tx, keys.chainKey, [{ ...ROTATION, action: 'key.rotate', decision: 'allow', subject: fromId, metadata: { from: fromId } }], [], log015);
     return keyState(tx, keys);
   });
 }

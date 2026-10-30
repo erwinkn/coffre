@@ -257,7 +257,7 @@ export async function keyReady(runtime: CoffreRuntime, { wait = false }: { wait?
         return false;
       });
       if (!sealed) return { kind: 'stalled' };
-      state = await finishRotation(runtime.db, runtime, { wait });
+      state = await finishRotation(runtime.db, runtime, { wait, vault: runtime.vault });
     }
   } catch (error) {
     if (!isUnreachable(error)) throw error;

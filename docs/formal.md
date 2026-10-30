@@ -1597,7 +1597,7 @@ The cutover from 0.14 (the plan's PR 9).
 - 0.14's row (its MAC and `access_seq`) and chain;
 - an old isolate still serving 0.14 uses and writes after the deploy;
 - two 0.15 vault starts, at once or one after the other;
-- a 0.15 use, a 0.15 change, and checkpointer ticks;
+- a 0.15 use and a 0.15 change;
 - in Migration015Issue (T123), sign-ins: 0.14's `token.exchange`, which the
   trigger lets by; a 0.15 sign-in (0.14's head, then the issue lock); one
   that also revokes the account's earlier sessions (its trigger: the issue
@@ -1614,7 +1614,14 @@ The cutover from 0.14 (the plan's PR 9).
 - in Migration015AppTamper (T160), the object is the app's row (a
   credential, a binding), which the app checks under its key before the
   cutover's locks (`vouched`, with the head it checked against), and a
-  writer puts a row there.
+  writer puts a row there;
+- in Migration015EntryLess (PR 9b), the app's row again, changed by 0.15
+  with no 0.14 entry (T149's revoke, an unbind's ends), while 0.14's use of
+  it checks it under the head, then commits: two steps.
+
+Once the cutover is there, 0.14's writes are refused (PR 9b): its append
+fails, and the write with it. The plan's alternative, adopting each late
+write at every checkpointer tick, was modelled until then (git history).
 
 A row 0.14 would not accept gets no genesis (its object stays unsealed,
 `stale` to every use), rather than refusing the cutover: only a broken
@@ -1627,21 +1634,20 @@ chain or a deletion the chain and the slugs disagree on refuse it.
 | the cutover checks each row as 0.14's `#integrity` does (VerifyRows) | `NewLogFollowsOld`, `AllowedOnlyWhenGranted` |
 | 0.14's chain verified up to the anchor | `AnchorHolds` |
 | 0.15 changes also advance 0.14's fence (DualFence) | `NothingAllowedAfterAnswer` |
-| a trigger takes the 0.15 fence for each 0.14 access change (OldWritesFence) | `NothingAllowedAfterAnswer` |
+| a trigger takes the 0.15 fence for each 0.14 access change (OldWritesFence), or refuses it once the cutover is there (OldWritesRefused): each covers for the other | `NothingAllowedAfterAnswer` |
+| 0.14's writes refused once the cutover is there (OldWritesRefused, PR 9b) | `OldWritesBeforeAnchor`: a late write lands past the anchor, which no 0.15 change seals |
+| a 0.15 change that writes no 0.14 entry takes 0.14's head all the same (EntryLessHead; Migration015EntryLess, PR 9b) | `NothingAllowedAfterAnswer`: a revoke commits and answers between 0.14's check of the row and its commit |
 | 0.14's head before the 0.15 fence (ChangeHeadFirst) | `NoWaitCycle` |
 | the object's member row before 0.14's head (RowFirst): 0.14 takes rows before its head, so the order is row, head, fence | `NoWaitCycle` |
-| adoption, at every tick | `EveryOldWriteAdopted` |
-| adoption verifies the entry and seals what it wrote | `NewLogFollowsOld`, `AllowedOnlyWhenGranted` |
-| adoption only after the newest seal's 0.14 entry (AdoptAfterSeal) | `NewChangesStand` |
-| a 0.15 use reads the object's newest 0.14 access entry (UsesSeeOldWrites) | `AllowedOnlyWhenGranted` |
-| a row marker in place of that read (Migration015Marker) | `AllowedOnlyWhenGranted`, and it fails as soon as the writer clears it |
+| a 0.15 use reads the object's newest authentic 0.14 access entry (UsesSeeOldWrites), or 0.14's late writes are refused: each covers for the other, the refusal being a trigger the database's owner can drop | `AllowedOnlyWhenGranted`: a row put back over a late write |
+| a row marker in place of that read (Migration015Marker, the trigger's refusal dropped) | `AllowedOnlyWhenGranted`, and it fails as soon as the writer clears it |
 | whatever takes the fence in a transaction that may issue too takes the issue lock first (IssueBeforeFence: the trigger, `app_change`) | `NoWaitCycle`: a sign-in holding the fence waits for the issue lock, which the barrier holds while it waits for the fence |
 | the barrier takes the issue lock before the fence (BarrierIssueFirst) | `NoWaitCycle` |
 | a policy change takes the issue lock exclusive after 0.14's head and before the fence (PolicyIssueFirst; Migration015Policy, T149) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
 | the cutover takes the issue lock, shared, before the fence (CutoverIssueFirst; Migration015Issue, T132): its own 0.14 entry, `log.cutover`, is one the trigger fences | `NoWaitCycle`: it holds the fence and its entry's trigger waits for the issue lock, which the barrier holds while it waits for the fence (the checkpointer ticks whether a vault has cut over or not) |
 | a place is deleted as 0.14's chain says, a mismatch with its slugs refusing the cutover (DeletedFromChain; Migration015Deleted, T130) | `NoneInDeleted`: a deleted project renamed back is sealed live and a use there allowed; `PlaceFollowsOld`: a live one tombstoned is sealed deleted |
 | an app's row is sealed only as the app vouched for it, and only if 0.14's chain has not moved past the head it checked against (VouchedHeld; Migration015AppTamper, T160) | `AllowedOnlyWhenGranted`: a writer puts the vouched row back over a revoke that came after the app read it |
-| 0.14's `token.exchange`, which the trigger no longer fences, writes no decision input (ExchangeOnlyIssues; the suites hold the code to it: `decisionInputs`) | `ExchangeChangesNoInput`, `NothingAllowedAfterAnswer` |
+| 0.14's `token.exchange`, which the trigger no longer fences, writes no decision input (ExchangeOnlyIssues; the suites hold the code to it: `decisionInputs`) | `ExchangeChangesNoInput`; `NothingAllowedAfterAnswer` with the refusal off too |
 
 `BarrierAvoidsHead` holds in Migration015Issue: the barrier never holds 0.14's
 head or waits for it. The vault's own changes never issue: `change_input`

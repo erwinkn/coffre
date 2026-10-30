@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { ROLES } from '@coffre/core/access';
+import { deriveLogKey } from '@coffre/core/audit';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { CutoverInput, CutoverOutcome, SecretRef, Vault } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
@@ -19,11 +20,13 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { keptObjects, loggedChange } from '../src/changes.ts';
 import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { CUTOVER_OBJECT } from '../src/cutover.ts';
+import { CUTOVER_OBJECT, genesisCalls } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault as openRaw } from '../src/local.ts';
+import { logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { vaultLogKey } from '../src/log.ts';
+import { bindingObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
 import { emptyDatabase, ENGINE, openLocalVault, openTestDatabase, OWNER_URL, places, postgresOnly, rows, run, sealed, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 
@@ -622,4 +625,72 @@ test('the log cut over, every 0.14 entry named by its vault key: the anchor hold
   const [entry] = await rows<{ key_id: string }>(db.owner, sql`SELECT key_id FROM audit_log WHERE seq = ${BigInt(cutover!.anchor.seq)}`);
   assert.equal(entry!.key_id, vaultLogKey(w.config.signingKeys[0]!).keyId);
   void ENGINE;
+});
+
+/** The database's refusal of a write of 0.14's after the cutover (migration 0047), however the driver wraps it. */
+const refusedLate = (error: Error & { cause?: Error }) => /is cut over from 0\.14/.test(`${error.message} ${error.cause?.message ?? ''}`);
+
+test("0.14's writes refused once the cutover is there: a decision of 0.14's vault, on an isolate still serving, fails whole, its reads go on; 0.15's lands (OldWritesRefused, PR 9b)", async () => {
+  const w = await instance014();
+  // Before the cutover, 0.14 writes as it always has.
+  assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);
+  const vault = await vault015(w.config);
+  assert.deepEqual(await cutOver(vault), { ok: true, done: true });
+  const { vaultMembers } = tablesOf(db.owner);
+  const member = async () => (await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA)))[0];
+  const before = await member();
+  const [{ entries }] = await rows<{ entries: string | number }>(db.owner, sql`SELECT count(*) AS entries FROM audit_log`);
+  await assert.rejects(w.old.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] }), refusedLate);
+  assert.deepEqual(await member(), before);
+  const [{ entries: after }] = await rows<{ entries: string | number }>(db.owner, sql`SELECT count(*) AS entries FROM audit_log`);
+  assert.equal(String(after), String(entries));
+  assert.equal((await w.old.access(ADA)).role, (await vault.access(ADA)).role);
+  // 0.15's own write, its entry marked, lands, and the log replays to it.
+  assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] })).ok);
+  assert.deepEqual(await opsOf({ kind: 'principal', id: ADA }), ['genesis', 'access.grant']);
+  await holdsReplay(w.config, [{ kind: 'principal', id: ADA }]);
+  // 0.14's app, appending as it always has (no mark): a write refused, a read's entry not.
+  const appKey = deriveLogKey('app', randomBytes(32));
+  await assert.rejects(db.owner.transaction((tx) => appendEntries(tx, appKey, [{ actor: 'user:root@acme.example', action: 'secret.write', decision: 'allow', metadata: '{}' }])), refusedLate);
+  await db.owner.transaction((tx) => appendEntries(tx, appKey, [{ actor: 'user:root@acme.example', action: 'secret.read', decision: 'allow', metadata: '{}' }]));
+});
+
+test("a binding's genesis is held to its scope too, as JSON: a row whose scope moved past the cutover's read is not sealed; one whose scope is none 0.14 writes is left unsealed, reported (PR 9a's P3)", async () => {
+  const w = await instance014();
+  assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
+  const { serviceBindings } = tablesOf(db.owner);
+  const ISSUER = 'https://token.actions.githubusercontent.com';
+  const binding = async (scope: string | null) => {
+    const id = randomUUID();
+    const row = { id, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: '{"repository_id":"1"}', scope, policy: null };
+    await db.owner.insert(serviceBindings).values({ ...row, authMac: randomBytes(32), label: null, createdBy: ROOT, createdAt: new Date() });
+    return { ...row, origin: 'https://secrets.acme.example', revoked: false };
+  };
+  const scope = JSON.stringify([{ projectId: w.project, environmentId: null, role: 'viewer' }]);
+  const [scoped, garbled] = [await binding(scope), await binding('{not json')];
+  if (ENGINE === 'postgres') {
+    // Its genesis as the cutover would call it, from the row as read, then a scope written under the cutover's locks: not sealed.
+    const keys = { seals: w.config.signingKeys.map(sealKey), mac: logMacKey(w.config.signingKeys[0]!) };
+    const [call] = genesisCalls(keys, [{ ref: { kind: 'binding', id: scoped.id }, object: bindingObject(scoped) }], Date.now());
+    assert.equal(await db.vault.transaction(async (tx) => {
+      await run(db.owner, sql`UPDATE service_bindings SET scope = '[]' WHERE id = ${scoped.id}`);
+      return store.sealBinding(tx, call!);
+    }), null);
+    await run(db.owner, sql`UPDATE service_bindings SET scope = ${scope} WHERE id = ${scoped.id}`);
+  }
+  const vault = await vault015(w.config);
+  assert.deepEqual(await cutOver(vault, { ...NONE, bindings: [scoped, garbled] }), { ok: true, done: true });
+  assert.deepEqual(await opsOf({ kind: 'binding', id: scoped.id }), ['genesis']);
+  assert.deepEqual(await opsOf({ kind: 'binding', id: garbled.id }), []);
+  const [report] = await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered' AND code = 'mac'`);
+  assert.ok(report !== undefined, 'the garbled binding is reported');
+});
+
+test("an append of 3,000 entries, the most one statement takes, fits its parameters with the mark, which is a literal, and each says whether 0.15 wrote it (review r5 of PR 9b)", postgresOnly("the budget is Postgres's 65,535 parameters a statement (`ROWS_AT_ONCE`)"), async () => {
+  const key = deriveLogKey('vault', randomBytes(32));
+  const entries = Array.from({ length: 3000 }, () => ({ actor: ROOT, action: 'secret.read', decision: 'allow' as const, metadata: '{}' }));
+  await db.owner.transaction((tx) => appendEntries(tx, key, entries, undefined, undefined, [], true));
+  await db.owner.transaction((tx) => appendEntries(tx, key, entries.slice(0, 2)));
+  const marks = await rows<{ log015: boolean | null; n: string | number }>(db.owner, sql`SELECT log015, count(*) AS n FROM audit_log GROUP BY log015 ORDER BY log015`);
+  assert.deepEqual(marks.map((row) => [row.log015, Number(row.n)]), [[true, 3000], [null, 2]]);
 });

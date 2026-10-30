@@ -270,6 +270,12 @@ export async function appendEntries(
    * come back as `changes`.
    */
   changes: readonly PreparedChange[] = [],
+  /**
+   * Whether the writer runs under 0.15's log: its entries carry `log015`,
+   * which no MAC covers and 0.14's code never sets. Once the log is cut
+   * over, migration 0047's trigger refuses a write's entry without it.
+   */
+  log015 = false,
 ): Promise<Appended & { changes: (bigint | null)[] }> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
@@ -298,7 +304,7 @@ export async function appendEntries(
 
   let seq = head.nextSeq;
   let prevHash = head.headHash;
-  const rows: (typeof auditLog.$inferInsert)[] = [];
+  const rows: (Omit<typeof auditLog.$inferInsert, 'log015'> & { log015?: SQL })[] = [];
   for (const entry of entries) {
     const fields: LogFields = {
       seq,
@@ -321,7 +327,8 @@ export async function appendEntries(
       metadata: entry.metadata ?? '{}',
     };
     const { mac, hash } = sealEntry(key, prevHash, fields);
-    rows.push({ ...fields, prevHash, mac, hash });
+    // A literal, not a parameter: a row's 21 parameters are what `ROWS_AT_ONCE` counts (review r5).
+    rows.push({ ...fields, prevHash, mac, hash, ...(log015 ? { log015: sql`true` } : {}) });
     prevHash = hash;
     seq += 1n;
   }
@@ -368,7 +375,7 @@ async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
   };
 }
 
-/** Entries one statement inserts at most, at 21 parameters each: Postgres takes 65,535. */
+/** Entries one statement inserts at most, at 21 parameters each (`log015` a literal): Postgres takes 65,535. */
 const ROWS_AT_ONCE = 3000;
 
 /**

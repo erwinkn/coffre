@@ -753,7 +753,7 @@ async function endPriorMembership(ctx: ApiContext, member: MemberRef, generation
       ...revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))),
       ...connectionRevokes(await priorConnections(ctx.db, ctx.chainKey, member, generation, new Date())),
     ]);
-    await audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
+    await audited({ db: ctx.db, chainKey: ctx.chainKey, vault: ctx.vault }, async (tx) => {
       const ended = await revokePriorMembership(tx, ctx.chainKey, member, generation, ctx.caller.principal.id);
       changes?.expectRevoked(ended.credentials);
       changes?.expectRevoked(ended.connections, 'connection');
@@ -823,7 +823,7 @@ export async function removeMember(
       ...(member.type === 'user' ? connectionRevokes((await liveConnections(ctx.db, ctx.chainKey, principal, new Date())).filter((row) => row.generation < generation)) : []),
     ]);
     // Following through on the vault's removal, made under its head: no fence (`audited`), the ways in end whatever came since.
-    return audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
+    return audited({ db: ctx.db, chainKey: ctx.chainKey, vault: ctx.vault }, async (tx) => {
       const now = new Date();
       const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
       const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < generation);

@@ -194,7 +194,8 @@ async function forge(metadata: unknown, count = 1): Promise<void> {
       operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: JSON.stringify(metadata),
     };
     const hash = entryHash(prevHash, fields, mac);
-    forged.push({ ...fields, prevHash, mac, hash });
+    // The writer sets every column: `log015` too, which the cut-over log asks of a write (migration 0047).
+    forged.push({ ...fields, prevHash, mac, hash, log015: true });
     prevHash = hash;
   }
   for (let i = 0; i < forged.length; i += 200) await db.owner.insert(auditLog).values(forged.slice(i, i + 200));

@@ -49,6 +49,7 @@ import {
   postgresOnly,
   rows,
   run,
+  sealed as sealedNow,
   withLogUnlocked,
   type TestDatabase,
   openLocalVault,
@@ -489,7 +490,8 @@ test('aliased restore targets keep each source version in its own entry', async 
   const sources = await versionItems([first, second].map((secret, i) => ({ secret, wrapped: wrappedKeys[i] })));
   const target = { ...first, version: 3 };
   // Workers RPC can preserve aliases; use the implementation without the local JSON transport.
-  const vault = openVault(db.vault, await prepareVault(config));
+  // The suite's log, as the world's vault keeps it: under 0.15's, cut over, a vault of 0.14's writes nothing (PR 9b).
+  const vault = openVault(db.vault, await prepareVault(config, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {}));
   const result = await vault.rewrap({ principal: ROOT, caller: 'person', items: sources.map((source, i) => ({
     secret: target, ...source, from: i + 1, wrapped: wrappedKeys[i],
   })) });
@@ -949,7 +951,7 @@ test('a forged read that names no key counts against the bulk limit as one key, 
   const [a, b, c] = await keys(w, 3);
   // Entries the vault never writes: a list that is no list, a list with items that name nothing, and no list at all.
   for (const detail of [{ secrets: { secretId: randomUUID() } }, { secrets: [{ secretId: a!.secret.secretId }, 'item', { item: 1 }, { secretId: 1 }] }, {}]) {
-    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify(detail) }]));
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify(detail) }], undefined, undefined, [], true));
   }
   // Each forged entry is one key for what it fails to name, and a is one more: four.
   const read = async (item: typeof a) => {
@@ -1517,7 +1519,7 @@ test('a person sets up a service account in the vault too: no more than they hol
   };
   const mac = Buffer.alloc(32, 7);
   const hash = entryHash(head.headHash, fields, mac);
-  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash, log015: true });
   await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
   assert.deepEqual(await w.vault.settings(), { serviceAccounts: PROD_ONLY });
   assert.equal(code(await grant(ADA, w.dev, 'developer')), 'not_allowed');
@@ -1541,7 +1543,7 @@ async function forgeEntries(count: number, entry: { action: string; actor?: stri
       operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: entry.metadata ?? '{}',
     };
     const hash = entryHash(prevHash, fields, mac);
-    rows.push({ ...fields, prevHash, mac, hash });
+    rows.push({ ...fields, prevHash, mac, hash, log015: true });
     [seq, prevHash] = [seq + 1n, hash];
   }
   for (let i = 0; i < rows.length; i += 100) await db.owner.insert(auditLog).values(rows.slice(i, i + 100));
@@ -1777,7 +1779,7 @@ test('only those who run the instance set roles, never their own, and a scoped a
 async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {
   const { vaultGrants, vaultMembers } = tablesOf(db.owner);
   const metadata = JSON.stringify({ role, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), previousRole: null, place: slug === null ? '*' : `*/${slug}` });
-  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }]));
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }], undefined, undefined, [], true));
   await db.owner.insert(vaultGrants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
   await db.owner.update(vaultMembers).set({ accessSeq: appended.seqStart }).where(eq(vaultMembers.principal, principal));
   await reseal(principal);
@@ -2135,7 +2137,7 @@ test('a log of large entries is checked whole and signed, a batch of it in memor
   // A read of thousands of secrets lists them all: a few such entries outrun one batch's bytes.
   const listing = 'x'.repeat(Math.ceil(BATCH_BYTES / 3));
   for (let i = 0; i < 7; i++) {
-    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ listing }) }]));
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ADA, action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ listing }) }], undefined, undefined, [], true));
   }
   const fresh = await openLocalVault(db.vault, configure());
   const verified = await fresh.verifyLog({});
@@ -2222,7 +2224,7 @@ test("given the app's head, the vault checks its own entries and leaves the chai
   await member(w, ADA, []);
   // One of the app's entries, as the app appends one, between two of the vault's.
   await db.owner.transaction((tx) =>
-    appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }]),
+    appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true),
   );
   await member(w, BOB, []);
   const rows = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))) as StoredEntry[];
@@ -2563,7 +2565,7 @@ for (const author of ['vault', 'app'] as const) {
     // One of the app's entries, as the app appends one, which the vault checks by its hash and links alone.
     if (author === 'app') {
       await db.owner.transaction((tx) =>
-        appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }]),
+        appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true),
       );
     }
     const [{ last }] = await db.owner.select({ last: sql<string>`max(${auditLog.seq})` }).from(auditLog);
@@ -2580,7 +2582,7 @@ for (const author of ['vault', 'app'] as const) {
     await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
       actor: 'system:coffre-scheduler', action: 'audit.checkpoint', decision: 'deny', code: 'log_broken',
       metadata: JSON.stringify({ failedAtSeq: Number(edited), reason: 'hash does not match the entry' }),
-    }]));
+    }], undefined, undefined, [], true));
     await member(w, 'user:eve@acme.example', []);
 
     // The next call resumes from the newest checkpoint, past the edit, and walks only what came since: it checks the
@@ -2689,7 +2691,7 @@ test('two checkpoints at once, catching up from the same tally, sign one prefix 
 async function reads(entries: number) {
   await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, Array.from({ length: entries }, () => ({
     actor: ROOT, action: 'secret.read', decision: 'allow' as const, metadata: '{"purpose":"reveal"}',
-  }))));
+  })), undefined, undefined, [], true));
 }
 
 test('checkpoints and checks go on from the newest tally, and read nothing before it but its hash', async () => {
@@ -2780,7 +2782,7 @@ test("a stretch holds each tally to the walk as it stood at that tally's prefix,
   // The app's entry first, as on a deployment whose first beat comes before anyone signs in: the first checkpoint
   // signs it with no key of the vault's yet, and the vault's entries after it, in the same batch, bring one.
   await db.owner.transaction((tx) =>
-    appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }]),
+    appendEntries(tx, deriveLogKey('app', randomBytes(32)), [{ actor: 'system:coffre-scheduler', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true),
   );
   const vault = await fresh();
   const first = await vault.checkpoint();
@@ -2964,7 +2966,7 @@ test('an entry forged in the vault\'s name about a member is passed over and rep
   };
   const mac = Buffer.alloc(32, 7);
   const hash = entryHash(head.headHash, fields, mac);
-  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash, log015: true });
   await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
 
   assert.equal((await w.vault.access(ADA)).status, 'active');
@@ -2989,7 +2991,7 @@ test("through a key service, a read that finds a forged entry logs its intent, t
   };
   const mac = Buffer.alloc(32, 7);
   const hash = entryHash(head.headHash, fields, mac);
-  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash, log015: true });
   await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
 
   // The intent's decision appends its intent, then the report it found, each after the other under the one head it holds.
@@ -3154,7 +3156,7 @@ test('after a rotation, the replaced KEK vouches for nothing new: entries and ro
   const leaked = keysFrom(old);
   // An access entry about Ada is passed over, and reported.
   const forged = await db.vault.transaction((tx) =>
-    appendEntries(tx, leaked.log, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: ADA, metadata: '{}' }]),
+    appendEntries(tx, leaked.log, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: ADA, metadata: '{}' }], undefined, undefined, [], true),
   );
   assert.equal((await after.vault.access(ADA)).status, 'active');
   assert.deepEqual(await tamperings(after), [[ADA, 'forged_entry']]);
@@ -3232,7 +3234,7 @@ test("what an escrowed vault key is checked against: each key's check, newest fi
   const forger = localKek('kek-2');
   const wrapped = await new LocalKekProvider(Buffer.from(forger.key, 'base64'), 'kek-2').wrap(Buffer.from(KEY_CHECK_VALUE), KEY_CHECK_CONTEXT);
   const metadata = JSON.stringify({ kekProvider: 'local', kekId: 'kek-2', kekVersion: wrapped.kekVersion, bytes: wrapped.bytes.toString('base64'), proof: null });
-  await db.vault.transaction((tx) => appendEntries(tx, keysFrom(forger).log, [{ actor: 'system:vault', action: KEY_CHECK, decision: 'allow', metadata }]));
+  await db.vault.transaction((tx) => appendEntries(tx, keysFrom(forger).log, [{ actor: 'system:vault', action: KEY_CHECK, decision: 'allow', metadata }], undefined, undefined, [], true));
   assert.deepEqual((await after.vault.keyChecks()).checks, checks);
 });
 
@@ -3452,7 +3454,7 @@ for (const overdue of [false, true]) {
     const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
       actor: ADA, action: 'key.intent', decision: 'allow', operationId,
       metadata: JSON.stringify({ intent: randomUUID(), operation: 'key.wrap', expiresAt: Date.now() + 60_000, keys: [{ item: 0, subject: 'market/dev/KEY', secretId: randomUUID(), version: 1 }] }),
-    }]));
+    }], undefined, undefined, [], true));
     if (overdue) w.clock.offset = 120_000;
     const verification = await w.vault.verifyLog({});
     if (overdue) {
@@ -3520,12 +3522,12 @@ for (const duplicate of [false, true]) {
       metadata: JSON.stringify({ intent: intentId, operation: 'key.wrap', expiresAt: Date.now() + 60_000, keys: [0, 1].map((item) => ({
         item, subject: secret.path, secretId: secret.secretId, version: secret.version,
       })) }),
-    }]));
+    }], undefined, undefined, [], true));
     const outcome = {
       actor: ADA, action: 'key.wrap', decision: 'allow' as const, operationId, relatedSeq: intent.seqStart,
       metadata: JSON.stringify({ intent: intentId, item: 0, subject: secret.path, secretId: secret.secretId, version: secret.version }),
     };
-    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, duplicate ? [outcome, outcome] : [outcome]));
+    await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, duplicate ? [outcome, outcome] : [outcome], undefined, undefined, [], true));
     if (!duplicate) w.clock.offset = 120_000;
     const result = await w.vault.verifyLog({});
     assert.equal(result.ok, false);
@@ -3543,13 +3545,13 @@ for (const forged of ['repeats an item', 'names another version'] as const) {
     const intent = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
       actor: ADA, action: 'key.intent', decision: 'allow', operationId,
       metadata: JSON.stringify({ intent: intentId, operation: 'secret.read', expiresAt: Date.now() + 60_000, keys }),
-    }]));
+    }], undefined, undefined, [], true));
     const listed = forged === 'repeats an item' ? [keys[0], keys[0]] : [keys[0], { ...keys[1]!, version: 2 }];
     await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{
       actor: ADA, action: 'secret.read', decision: 'allow', operationId, relatedSeq: intent.seqStart,
       projectId: w.project, environmentId: w.dev,
       metadata: JSON.stringify({ purpose: 'run', intent: intentId, secrets: listed }),
-    }]));
+    }], undefined, undefined, [], true));
     const result = await w.vault.verifyLog({});
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.reason, forged === 'repeats an item' ? /does not identify one item/ : /does not match its intended secret/);
@@ -3906,7 +3908,7 @@ function rootRowOf05(principal: string): Promise<void> {
 
 /** A Member's row as a vault of 0.5 wrote it, admitted by `actor`, its `member.add` saying `detail`. */
 async function rowOf05(principal: string, detail: Record<string, unknown>, actor: string): Promise<void> {
-  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor, action: 'member.add', decision: 'allow', subjectPrincipal: principal, metadata: JSON.stringify(detail) }]));
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor, action: 'member.add', decision: 'allow', subjectPrincipal: principal, metadata: JSON.stringify(detail) }], undefined, undefined, [], true));
   const at = appended.occurredAt;
   await db.owner.transaction((tx) => store.insertMember(tx, {
     principal, status: 'active', role: 'member', scope: EVERYWHERE, generation: 0, createdAt: at, createdBy: actor,

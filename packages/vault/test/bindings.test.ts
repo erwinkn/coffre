@@ -251,6 +251,29 @@ test("an unbind takes the fence for its statement; a bind that ends nothing take
   }
 });
 
+test("an unbind takes 0.14's head first, which 0.14's use of a credential it ends holds from its check to its commit; a bind that ends nothing takes none (EntryLessHead, PR 9b)", postgresOnly("0.14's head is a row lock of Postgres"), async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  assert.ok((await signIn(w, made.id)).outcome.ok);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // 0.14's use of the run's credential, on an isolate still serving: under the head, checked, not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    const another = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', live: [made.id] }));
+    assert.ok(another.ok, `made while the head is held: ${JSON.stringify(another)}`);
+    let ended = false;
+    const unbinding = w.vault.changeBindings!(change({ ends: [await ending(made.id)] })).then((outcome) => ((ended = true), outcome));
+    await sleep(200);
+    assert.equal(ended, false, "the unbind waits for 0.14's head");
+    await holder.unsafe('COMMIT');
+    assert.ok((await unbinding).ok);
+  } finally {
+    await holder.end();
+  }
+});
+
 test("a binding's maker whose access moved since the app weighed it is refused, for the app to weigh again", async () => {
   const w = await world();
   const { vaultMembers } = tablesOf(db.owner);

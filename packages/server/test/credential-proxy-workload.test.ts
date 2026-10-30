@@ -226,7 +226,7 @@ async function use(held: Session, method: string, path: string, init: { headers?
 
 async function freeze(target: string, action: 'workload.freeze' | 'workload.unfreeze' = 'workload.freeze') {
   const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  await audited({ db: deps.db, chainKey: deps.chainKey }, async (_tx, log) => {
+  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
     log.push(allowed(ctx, action, { metadata: { target } }));
   });
 }

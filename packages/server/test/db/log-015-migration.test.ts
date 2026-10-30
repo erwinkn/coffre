@@ -154,9 +154,13 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
       }
       assert.equal(await migrated(opened.owner), false, "0.14.5's schema lacks this tree's newest migration");
       for (const statement of rows(TEST_ENGINE)) await exec(opened.owner, statement);
+      // This tree's appender names `log015` (0044), which 0.14.5's never does: a column of the old schema's only while
+      // it appends as 0.14.5 would.
+      await exec(opened.owner, 'ALTER TABLE audit_log ADD COLUMN log015 boolean');
       for (const action of ['project.update', 'secret.read']) {
         await opened.app.transaction((tx) => appendAudit(tx, chainKey, [{ actorType: 'system', actorId: 'test', action, decision: 'allow' }]));
       }
+      await exec(opened.owner, 'ALTER TABLE audit_log DROP COLUMN log015');
     } finally {
       await opened.close();
     }
@@ -181,6 +185,10 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
         // What 0.15 adds to its rows: the seal, an environment's protection, and a binding's origin.
         assert.deepEqual(after.map(({ seal, protected: _, origin: __, ...row }) => row), before, `${table} keeps its rows`);
         assert.ok(after.every((row) => row.seal === null && (row.protected ?? null) === null && (row.origin ?? null) === null), `${table}'s rows are not sealed yet`);
+      } else if (table === 'audit_log') {
+        // What 0.15 adds to its entries: whether a writer under its log wrote them (0044), none of 0.14.5's.
+        assert.deepEqual(after.map(({ log015: _, ...row }) => row), before, `${table} is as it was`);
+        assert.ok(after.every((row) => row.log015 === null), "0.14.5's entries are 0.14's");
       } else {
         assert.deepEqual(after, before, `${table} is as it was`);
       }

@@ -495,14 +495,15 @@ test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head,
   const old = postgresSession(OWNER_URL);
   try {
     // 0.14's vault: the member's queue and row, then, a moment later, the head, then an entry that changes access,
-    // which takes the fence (OldWritesFence).
+    // which takes the fence (OldWritesFence). Marked as a writer under 0.15's log marks it: once cut over, 0.14's own is
+    // refused at its append (PR 9b), after its row and head, which this holds all the same.
     await old.unsafe('BEGIN');
     await old.unsafe(`SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM vault_members WHERE principal = $1 FOR NO KEY UPDATE`, [ADA]);
     const changed = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] });
     await waitFor(async () => (await waiting()) > 0, 'the change waits for the row');
     await old.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
-    await old.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-      SELECT next_seq, 'vault', 'fixture', 0, 'system:fixture', 'access.grant', 'allow', head_hash, decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex') FROM audit_chain_head`);
+    await old.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, log015)
+      SELECT next_seq, 'vault', 'fixture', 0, 'system:fixture', 'access.grant', 'allow', head_hash, decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), true FROM audit_chain_head`);
     await old.unsafe('ROLLBACK');
     const outcome = await changed;
     assert.ok(outcome.ok, JSON.stringify(outcome));

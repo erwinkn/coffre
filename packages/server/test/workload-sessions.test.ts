@@ -236,7 +236,7 @@ async function sessionRow(held: Session) {
 /** A freeze or a lift, as PR 4's routes will append it: the newest allowed entry naming the target decides. */
 async function freeze(target: string, action: 'workload.freeze' | 'workload.unfreeze' = 'workload.freeze') {
   const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  await audited({ db: deps.db, chainKey: deps.chainKey }, async (_tx, log) => {
+  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
     log.push(allowed(ctx, action, { metadata: { target } }));
   });
 }
@@ -1003,7 +1003,7 @@ test('a Cloudflare binding unbound while its use waits for the head releases not
   let holding!: () => void;
   const held = new Promise<void>((resolve) => (holding = resolve));
   // The unbind's tombstone, under the head, not yet committed.
-  const unbinding = audited({ db: deps.db, chainKey: deps.chainKey }, async (_tx, log) => {
+  const unbinding = audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
     log.push(allowed(ctx, 'token.unbind', { metadata: { bindingId: binding } }));
     holding();
     await committing;
@@ -1051,7 +1051,7 @@ test('a Cloudflare binding with a tombstone, though its row was never revoked, r
   assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
   // A tombstone alone, as an unbind whose row update a restored backup lost.
   const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  await audited({ db: deps.db, chainKey: deps.chainKey }, async (_tx, log) => {
+  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
     log.push(allowed(ctx, 'token.unbind', { metadata: { bindingId: binding } }));
   });
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });

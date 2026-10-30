@@ -106,6 +106,27 @@
   is 0.14's log alone, as an older client pages it. A sign-in now
   reads as a sentence, "signed in with an ID token from <issuer>", under
   either log. `docs/design/0.15-plan.md`, "As built: T156".
+- **Once 0.15's log is cut over, 0.14's writes are refused, behind its switch.**
+  An isolate of 0.14 still serving after the deploy goes on reading, but
+  its writes fail whole (500), and its client asks again of 0.15: a value
+  saved, an access changed, a token issued, a sign-in. Every entry a writer
+  under 0.15's log appends now says so (`audit_log.log015`), and the
+  database refuses an allowed write's entry without it once the cutover is
+  there (migration 0047). So nothing 0.14 writes lands where 0.15 never
+  sealed it. A session an old isolate renews after the switch is refused
+  once, and its person signs in again. Deploy 0.15 at once, not
+  gradually: on Workers, the 500s last as long as requests in flight on old
+  isolates; on Node, a rolling update of several replicas is gradual, and
+  from the first request a 0.15 replica serves, every write to a replica
+  still on 0.14 answers 500 until the rollout ends. A vault's revoke or unbind, which writes no 0.14 entry, now
+  waits for an old isolate's use of that credential in flight (0.14's
+  head). An access entry forged in the vault's name no longer makes an
+  account's uses `stale`: the use checks its MAC and passes it over, and
+  the next decision about the account reports it. A binding's scope moved under the cutover's locks is no longer
+  sealed. The restore drill runs on 0.15's log too: after a restore, the
+  checkpointer refuses the restored log until its memory is reset
+  (`docs/restore.md`, "On 0.15's log"). `docs/design/0.15-plan.md`, "As
+  built: PR 9b".
 - **0.15's log is cut over from 0.14 at its first start, behind its switch.**
   The first request after a 0.15 vault starts seals every object 0.14 left
   (members, roles, the bulk cap, environments, keys, credentials and trust
@@ -121,10 +142,8 @@
   under deleted places are archived. An archived key keeps its object, so
   its unarchive restores it. A tombstone that 0.14's chain does not bear
   out refuses the cutover, and the app answers 503 until it is put right.
-  Nothing of 0.15's serves before the cutover. A write an old 0.14 isolate
-  makes after it leaves its object refused, fail closed, until a later
-  change adopts such writes. `docs/design/0.15-plan.md`, "As built: PR
-  9a".
+  Nothing of 0.15's serves before the cutover. `docs/design/0.15-plan.md`,
+  "As built: PR 9a".
 - **0.15's vault verifies a run's ID token itself where its binding carries
   the keys, behind its switch.** A sealed binding still took the app's word
   that the token held, so the app's code turned hostile could sign a run in

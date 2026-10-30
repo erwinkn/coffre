@@ -492,7 +492,7 @@ export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vau
       return row.scope === rows.find(({ id }) => id === row.id)!.scope ? [credentialChange(row, { ...row, scope: token.scope })] : [];
     });
   });
-  return audited({ db, chainKey, caller: { policySeq, policy } }, async (tx, log) => {
+  return audited({ db, chainKey, vault, caller: { policySeq, policy } }, async (tx, log) => {
     for (const { caller, accessSeq } of issuers.values()) await issuerStill(tx, caller, accessSeq);
     const done = new Map<string, { tokens: string[]; bindings: string[] }>();
     const written: string[] = [];

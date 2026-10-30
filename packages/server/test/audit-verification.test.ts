@@ -22,6 +22,8 @@ after(async () => {
 });
 
 const entry: AuditEntry = { actorType: 'system', actorId: 'test', action: 'test', decision: 'allow' };
+/** Under 0.15's log, cut over, the app's and the vault's entries say they are 0.15's (`log015`), as their appends mark them. */
+const LOG015 = LOG === '0.15';
 
 for (const preceding of [0, 5_000]) {
   test(`the runtime login moving the head forward stops the next append, after ${preceding} entries`, async () => {
@@ -30,7 +32,7 @@ for (const preceding of [0, 5_000]) {
     // filled in after. The append checks that the head names the last entry.
     await db.runtime.update(auditChainHead).set({ nextSeq: BigInt(preceding + 5) });
     await assert.rejects(
-      db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [entry])),
+      db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [entry], [], LOG015)),
       (error) => error instanceof LogHeadMismatch,
     );
   });
@@ -69,7 +71,7 @@ async function forgeVaultEntry(writer: typeof db.owner): Promise<void> {
   const mac = Buffer.alloc(32, 0x41);
   const hash = entryHash(head.headHash, fields, mac);
   await writer.transaction(async (tx) => {
-    await tx.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+    await tx.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash, log015: true });
     await tx.update(auditChainHead).set({ nextSeq: fields.seq + 1n, headHash: hash });
   });
 }
@@ -103,7 +105,7 @@ async function write(entries: number): Promise<void> {
   // Keep each insert below the database's parameter limit.
   for (let written = 0; written < entries; written += 500) {
     const batch = Math.min(500, entries - written);
-    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, Array.from({ length: batch }, () => entry)));
+    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, Array.from({ length: batch }, () => entry), [], LOG015));
   }
 }
 
@@ -112,8 +114,8 @@ test('a log of large entries is verified whole, in batches that hold no more tha
   const listing = 'x'.repeat(Math.ceil(BATCH_BYTES / 3));
   const vaultKey = deriveLogKey('vault', deps.vault.signingKey);
   for (let i = 0; i < 4; i++) {
-    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ ...entry, metadata: { listing } }]));
-    await db.owner.transaction((tx) => appendEntries(tx, vaultKey, [{ actor: 'user:root@acme.example', action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ listing }) }]));
+    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ ...entry, metadata: { listing } }], [], LOG015));
+    await db.owner.transaction((tx) => appendEntries(tx, vaultKey, [{ actor: 'user:root@acme.example', action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ listing }) }], undefined, undefined, [], LOG015));
     await write(2);
   }
   const [head] = await db.owner.select().from(auditChainHead);
@@ -128,7 +130,7 @@ test('a log of large entries is verified whole, in batches that hold no more tha
 test('a page of the log holds no more than BATCH_BYTES of what its entries list, and says there is more: the pages still tile it', async () => {
   const listing = 'x'.repeat(Math.ceil(BATCH_BYTES / 3));
   for (let i = 0; i < 4; i++) {
-    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ ...entry, action: 'large', metadata: { listing } }]));
+    await db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [{ ...entry, action: 'large', metadata: { listing } }], [], LOG015));
     await write(1);
   }
   const seen: number[] = [];
@@ -153,7 +155,7 @@ test('audit verification reports live key operations without calling the log bro
     metadata: JSON.stringify({ intent: randomUUID(), operation: 'key.wrap', expiresAt: Date.now() + 60_000, keys: [{
       item: 0, secretId: randomUUID(), subject: 'market/dev/KEY', version: 1,
     }] }),
-  }]));
+  }], undefined, undefined, [], LOG015));
   const verified = await root.audit.verify();
   assert.ok(verified.ok);
   assert.equal(verified.pending, 1);
@@ -180,7 +182,7 @@ async function reads(entries: number): Promise<void> {
   const vaultKey = deriveLogKey('vault', deps.vault.signingKey);
   await db.owner.transaction((tx) => appendEntries(tx, vaultKey, Array.from({ length: entries }, () => ({
     actor: 'user:root@acme.example', action: 'secret.read', decision: 'allow' as const, metadata: '{"purpose":"reveal"}',
-  }))));
+  })), undefined, undefined, [], LOG015));
 }
 
 test('with the watch but no anchor of the app\'s yet, the page goes on from the newest checkpoint, as without one', async () => {
@@ -297,7 +299,7 @@ async function forgeAppEntry(): Promise<void> {
   const mac = Buffer.alloc(32, 0x41);
   const hash = entryHash(head.headHash, fields, mac);
   await db.owner.transaction(async (tx) => {
-    await tx.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash });
+    await tx.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash, log015: true });
     await tx.update(auditChainHead).set({ nextSeq: fields.seq + 1n, headHash: hash });
   });
 }
