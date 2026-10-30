@@ -218,6 +218,29 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
   }
 }
 
+/**
+ * `work`, with 0.14's writes let through after the cutover (`audit_log_refuse_old`, 0047): a late write of 0.14's, as
+ * only someone who lifts the trigger could leave since PR 9b, for a test of rows 0.14's log alone holds. Lifted for every
+ * connection until `work` ends.
+ */
+export async function withOldWrites<T>(owner: Database, work: () => Promise<T>): Promise<T> {
+  if (ENGINE === 'postgres') {
+    await run(owner, sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
+    try {
+      return await work();
+    } finally {
+      await run(owner, sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
+    }
+  }
+  const [trigger] = await rows<{ sql: string }>(owner, sql`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'audit_log_refuse_old'`);
+  await run(owner, sql`DROP TRIGGER audit_log_refuse_old`);
+  try {
+    return await work();
+  } finally {
+    await run(owner, sql.raw(trigger!.sql));
+  }
+}
+
 /** Rows of a raw query, on either engine. */
 export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
   if (ENGINE === 'postgres') return [...await db.execute(query)] as Row[];
