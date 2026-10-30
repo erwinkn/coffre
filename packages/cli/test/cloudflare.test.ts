@@ -185,18 +185,25 @@ test("a Worker is this deployment's only when it binds what this directory recor
   assert.equal(isOurs('vault', [{ type: 'plain_text', name: 'VAULT_KEY_ID', text: 'vault-1' }], nothing), false);
 });
 
-test("a Hyperdrive config is this deployment's by the id it records, or by name only on this run's database", () => {
+test("a Hyperdrive config is this deployment's by the id it records, or by name only on this run's database, server and login", () => {
   const administrator = new URL('postgresql://owner:pw@db.acme.test:5432/coffre');
-  const config = (id: string, name: string, host: string, database: string) => ({ id, name, origin: { host, port: 5432, database, user: 'coffre_runtime' } });
+  const config = (id: string, name: string, host: string, database: string, user = 'coffre_runtime', port = 5432) => ({ id, name, origin: { host, port, database, user } });
   const live = config('hd-live', 'coffre', 'db.live.test', 'coffre');
   const leftover = config('hd-left', 'coffre-try', 'db.acme.test', 'coffre');
-  assert.equal(ourConfig([live], 'coffre', null, administrator), undefined, 'another database: never touched');
-  assert.equal(ourConfig([live], 'coffre', 'hd-live', administrator), live, 'recorded here: ours, wherever it points');
-  assert.equal(ourConfig([live, leftover], 'coffre-try', null, administrator), leftover, "made by a run that stopped before recording it");
-  assert.equal(ourConfig([config('hd-x', 'coffre', 'db.acme.test', 'other')], 'coffre', null, administrator), undefined, 'same host, another database');
-  // Another server on the same host: the app's config of a deployment named coffre-vault-hot, never this one's hot path's.
-  const elsewhere = { ...config('hd-other', 'coffre-vault-hot', 'db.acme.test', 'coffre'), origin: { host: 'db.acme.test', port: 6432, database: 'coffre', user: 'coffre_runtime' } };
-  assert.equal(ourConfig([elsewhere], 'coffre-vault-hot', null, administrator), undefined, 'same host and database name, another port');
+  assert.equal(ourConfig([live], 'coffre', null, administrator, 'coffre_runtime'), undefined, 'another database: never touched');
+  assert.equal(ourConfig([live], 'coffre', 'hd-live', administrator, 'coffre_runtime'), live, 'recorded here: ours, wherever it points');
+  assert.equal(ourConfig([live, leftover], 'coffre-try', null, administrator, 'coffre_runtime'), leftover, "made by a run that stopped before recording it");
+  assert.equal(ourConfig([config('hd-x', 'coffre', 'db.acme.test', 'other')], 'coffre', null, administrator, 'coffre_runtime'), undefined, 'same host, another database');
+  // The app's config of a deployment named coffre-vault-hot is never this one's hot path's: on another cluster of the host, or as another login.
+  const port = config('hd-port', 'coffre-vault-hot', 'db.acme.test', 'coffre', 'coffre_runtime', 6432);
+  assert.equal(ourConfig([port], 'coffre-vault-hot', null, administrator, 'coffre_runtime'), undefined, 'same host and database name, another port');
+  assert.equal(ourConfig([config('hd-app', 'coffre-vault-hot', 'db.acme.test', 'coffre')], 'coffre-vault-hot', null, administrator, 'coffre_vault_hot'), undefined, 'another login');
+  // On PlanetScale, one endpoint, port and database name serve every branch: the login's suffix names it.
+  const planetscale = new URL('postgresql://postgres.main7:pw@eu.pg.psdb.cloud:5432/coffre');
+  const branch = config('hd-branch', 'coffre-vault-hot', 'eu.pg.psdb.cloud', 'coffre', 'coffre_runtime.dev42');
+  assert.equal(ourConfig([branch], 'coffre-vault-hot', null, planetscale, 'coffre_vault_hot.main7'), undefined, 'another branch');
+  const made = config('hd-made', 'coffre-vault-hot', 'eu.pg.psdb.cloud', 'coffre', 'coffre_vault_hot.main7');
+  assert.equal(ourConfig([branch, made], 'coffre-vault-hot', null, planetscale, 'coffre_vault_hot.main7'), made, 'this branch, as this login');
 });
 
 test("a hot path's login setup unlocks gets a new password whatever its config holds, so another deployment sharing it stops the run first", () => {

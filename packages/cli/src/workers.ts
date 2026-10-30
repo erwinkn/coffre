@@ -138,12 +138,16 @@ function sameServer(origin: HyperdriveConfig['origin'], administrator: URL): boo
 /**
  * A Hyperdrive config of this deployment's: the one this directory records;
  * else one under its name that points at this run's database, on this
- * server, its port included, made by a run that stopped before recording
- * it. One under the name that points elsewhere is another deployment's:
- * `coffre-vault-hot` may be the app's config of one named so.
+ * server, its port included, as `login`, which names the branch on
+ * PlanetScale: one a run made before it stopped, before recording it. One
+ * under the name that points elsewhere, or logs in as another, is another
+ * deployment's: `coffre-vault-hot` may be the app's config of one named so.
  */
-export function ourConfig(configs: readonly HyperdriveConfig[], name: string, recorded: string | null, administrator: URL): HyperdriveConfig | undefined {
-  return configs.find(({ id }) => id === recorded) ?? configs.find((config) => config.name === name && sameServer(config.origin, administrator) && sameDatabase(config.origin, administrator));
+export function ourConfig(configs: readonly HyperdriveConfig[], name: string, recorded: string | null, administrator: URL, login: string): HyperdriveConfig | undefined {
+  return (
+    configs.find(({ id }) => id === recorded) ??
+    configs.find(({ name: named, origin }) => named === name && sameServer(origin, administrator) && sameDatabase(origin, administrator) && origin.user === login)
+  );
 }
 
 /**
@@ -202,7 +206,7 @@ async function othersUnder(
   configs: readonly HyperdriveConfig[],
   names: Record<Component, string>,
   records: Records,
-  administrator: URL,
+  database: Database,
 ): Promise<string[]> {
   const others: string[] = [];
   for (const component of COMPONENTS) {
@@ -212,7 +216,9 @@ async function othersUnder(
     for (const config of CONFIGS.filter((each) => BOUND[each].worker === component)) {
       const name = configName(config, names);
       const named = configs.find((each) => each.name === name);
-      if (named !== undefined && named !== ourConfig(configs, name, records.hyperdrive[config], administrator)) others.push(`the Hyperdrive config ${name}`);
+      if (named !== undefined && named !== ourConfig(configs, name, records.hyperdrive[config], database.administrator, database.logins[config].login)) {
+        others.push(`the Hyperdrive config ${name}`);
+      }
     }
   }
   return others;
@@ -231,7 +237,7 @@ async function othersUnder(
 export function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Config, boolean> {
   const { administrator } = database;
   const records = recordsOf(workers);
-  const ourOwn = (config: Config) => ourConfig(configs, configName(config, namesOf(workers)), records.hyperdrive[config], administrator);
+  const ourOwn = (config: Config) => ourConfig(configs, configName(config, namesOf(workers)), records.hyperdrive[config], administrator, database.logins[config].login);
   const ours = new Set(CONFIGS.map(ourOwn));
   const resets = {} as Record<Config, boolean>;
   // All checked before any changes.
@@ -283,6 +289,8 @@ export class Cloudflare {
   readonly #wrangler: Wrangler;
   readonly #found: Found;
   readonly #administrator: URL;
+  /** What each config's login logs in as: its role, with the branch on PlanetScale. */
+  readonly #logins: Record<Config, string>;
   readonly #github: GitHub;
   /** Each secret this run handles, to take out of any error shown. */
   readonly #secrets: string[];
@@ -314,7 +322,7 @@ export class Cloudflare {
     wrangler: Wrangler,
     workers: Record<Component, WorkerConfig>,
     found: Found,
-    administrator: URL,
+    database: Database,
     answers: { address: string; owners: { name: OwnersVar; value: string }; serving: Serving; token: string | null },
     checked: Checked,
     resetPasswords: boolean,
@@ -324,7 +332,8 @@ export class Cloudflare {
     this.#wrangler = wrangler;
     this.workers = workers;
     this.#found = found;
-    this.#administrator = administrator;
+    this.#administrator = database.administrator;
+    this.#logins = Object.fromEntries(CONFIGS.map((config) => [config, database.logins[config].login])) as Record<Config, string>;
     this.address = answers.address;
     this.owners = answers.owners;
     this.serving = answers.serving;
@@ -377,7 +386,7 @@ export class Cloudflare {
           (accounts.length === 1 ? accounts[0]! : accounts[await step.choose('Which Cloudflare account?', accounts.map(({ name }) => name))]!);
         const [zones, configs, email] = await Promise.all([api.zones(account.id), api.hyperdriveConfigs(account.id), api.email()]);
         const names = { app: workers.app.name, vault: workers.vault.name };
-        const others = await othersUnder(api, account.id, configs, names, records, administrator);
+        const others = await othersUnder(api, account.id, configs, names, records, database);
         found = { api, account, zones, configs, others, secrets: { app: new Set(), vault: new Set() }, email };
         return `Signed in to Cloudflare${email === null ? '' : ` as ${email}`}, account ${account.name}`;
       });
@@ -416,7 +425,7 @@ export class Cloudflare {
         check: async (answer) => {
           const problem = nameProblem(answer);
           if (problem !== null) return problem;
-          const others = await othersUnder(found.api, found.account.id, found.configs, { app: answer, vault: `${answer}-vault` }, records, administrator);
+          const others = await othersUnder(found.api, found.account.id, found.configs, { app: answer, vault: `${answer}-vault` }, records, database);
           // The reason first: the line is cut to the terminal's width, and five names may not fit.
           return others.length === 0 ? null : `another deployment's too: ${listed(others, 'and')}`;
         },
@@ -461,7 +470,7 @@ export class Cloudflare {
       .join(',');
     out.write('\n');
     const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
-    return new Cloudflare(dir, wrangler, workers, found, administrator, { address, owners: { name, value: owners }, serving, token }, settled, options.resetPasswords, secrets);
+    return new Cloudflare(dir, wrangler, workers, found, database, { address, owners: { name, value: owners }, serving, token }, settled, options.resetPasswords, secrets);
   }
 
   /**
@@ -476,7 +485,7 @@ export class Cloudflare {
 
   /** A Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
   #config(config: Config): HyperdriveConfig | undefined {
-    return ourConfig(this.#found.configs, configName(config, namesOf(this.workers)), recordsOf(this.workers).hyperdrive[config], this.#administrator);
+    return ourConfig(this.#found.configs, configName(config, namesOf(this.workers)), recordsOf(this.workers).hyperdrive[config], this.#administrator, this.#logins[config]);
   }
 
   /** What each Cloudflare step does while it runs. */
