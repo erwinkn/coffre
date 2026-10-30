@@ -2,7 +2,7 @@ import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
-import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns, withinBytes } from '@coffre/db/log';
@@ -290,6 +290,11 @@ export async function environmentsById(
   { seals = false }: { seals?: boolean } = {},
 ): Promise<Map<string, EnvironmentRow>> {
   if (ids !== 'all' && ids.length === 0) return new Map();
+  // With seals, on SQLite the rows' newest seals in a statement after, and anywhere those of ids with no row: one snapshot.
+  return seals ? oneSnapshot(db, (on) => environmentRows(on, ids, true)) : environmentRows(db, ids, false);
+}
+
+async function environmentRows(db: Queryable, ids: readonly string[] | 'all', seals: boolean): Promise<Map<string, EnvironmentRow>> {
   const { environments, projects } = tablesOf(db);
   const postgres = engineOf(db) === 'postgres';
   const columns = {
@@ -354,9 +359,20 @@ async function loggedEnvironments(db: Queryable, ids: readonly string[]): Promis
     const found = await newestSeals(db, ids.map((id) => ({ kind: 'environment', id })));
     return new Map(ids.flatMap((id) => (found.has(objectKey({ kind: 'environment', id })) ? [[id, found.get(objectKey({ kind: 'environment', id })) ?? null] as const] : [])));
   }
+  // Still no row as of this statement: one made since the read before is no place deleted (review r6).
   const rows = await rowsOf<{ id: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT g.id::text AS id, l.seal FROM unnest(${sql.param([...ids])}::uuid[]) AS g (id)
-    CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', g.id::text) ORDER BY l.number DESC LIMIT 1) l`);
+    CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', g.id::text) ORDER BY l.number DESC LIMIT 1) l
+    WHERE NOT EXISTS (SELECT 1 FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = g.id)`);
   return new Map(rows.map((row) => [row.id, bytes(row.seal)]));
+}
+
+/**
+ * `read`, on SQLite, where a read of seals takes two statements, in one transaction, one snapshot of the file, so that
+ * no change commits between them (review r6): its own, or the one `db` is already. On Postgres as it is: each such read
+ * is one statement, and the one more for ids with no row checks again that none answers to them.
+ */
+export function oneSnapshot<T>(db: Queryable, read: (on: Queryable) => Promise<T>): Promise<T> {
+  return engineOf(db) === 'postgres' || 'rollback' in db ? read(db) : (db as Database).transaction((tx) => read(tx));
 }
 
 /** The columns `environmentsById` reads with `seals`, as the drivers answer them. */

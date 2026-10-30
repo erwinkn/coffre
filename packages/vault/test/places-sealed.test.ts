@@ -380,3 +380,35 @@ test('a protected place whose row a writer deleted outright stays protected: the
   assert.equal((await give()).ok, false);
   assert.equal((await issueProject()).ok, false);
 });
+
+test('on SQLite, a place renamed as the app renames it between a read\'s rows and their newest seals is read as one or the other, never as tampered (review r6)', { skip: ENGINE === 'sqlite' ? false : 'SQLite only: Postgres reads both in one statement' }, async () => {
+  const w = await world();
+  // The vault's database, which starts the rename as it is about to read the newest seals: committed at once when that
+  // read is no transaction, waited on when it is one (connect.ts runs one at a time).
+  let renaming: Promise<void> | null = null;
+  const hooked = <T extends object>(on: T): T => new Proxy(on, {
+    get(target, name, receiver) {
+      const value = Reflect.get(target, name, receiver) as unknown;
+      if (name === 'all' && typeof value === 'function') {
+        return async (query: Parameters<typeof sql>[0]) => {
+          const text = (target as unknown as { dialect: { sqlToQuery(q: unknown): { sql: string } } }).dialect.sqlToQuery(query).sql;
+          if (renaming === null && /json_each/.test(text) && /log_changes c/.test(text)) {
+            renaming = changePlace(db.owner, w.dev, { slug: 'renamed' });
+            await Promise.race([renaming, sleep(300)]);
+          }
+          return (value as (q: unknown) => Promise<unknown>).call(target, query);
+        };
+      }
+      if (name === 'transaction' && typeof value === 'function') {
+        return (work: (tx: object) => Promise<unknown>, config?: unknown) => (value as (w: unknown, c?: unknown) => Promise<unknown>).call(target, (tx: object) => work(hooked(tx)), config);
+      }
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  const vault = speaking(await openRawVault(hooked(db.vault), w.config, { log: '0.15', sealThrough: sealed }));
+  const access = await vault.access(ADA);
+  await renaming;
+  assert.notEqual(renaming, null, 'the rename ran during the read');
+  assert.deepEqual(access.grants.map((grant) => grant.environmentId).sort(), [w.dev, w.prod].sort());
+  assert.deepEqual(await placeReports(), []);
+});

@@ -132,14 +132,24 @@ export function current(head: LockedHead): boolean {
 async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
   const engine = engineOf(db);
   const query = (engine === 'postgres' ? postgres : sqlite)(asked);
-  const [row] = await rowsOf<{ snapshot: string | Raw }>(db, query);
-  const raw: Raw = typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
+  const statement = async (on: Queryable) => {
+    const [row] = await rowsOf<{ snapshot: string | Raw }>(on, query);
+    return typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
+  };
+  if (engine === 'postgres' || asked.seals !== true) return snapshotOf(asked, await statement(db), null);
   // SQLite has no `log_object`: the environments' newest changes in a statement of their own, by the keys the vault
-  // computes, the places asked with no row among them (`gone`, which Postgres's statement answers itself).
-  const rowless = asked.seals === true && engine !== 'postgres' ? (raw.placeIds ?? []).filter((id) => !raw.environments.some((row) => row.id === id)) : [];
-  const newest = asked.seals === true && engine !== 'postgres'
-    ? await store.newestSeals(db, [...raw.environments.map(({ id }) => id), ...rowless].map((id) => ({ kind: 'environment' as const, id })))
-    : null;
+  // computes, the places asked with no row among them (`gone`, which Postgres's statement answers itself). Both in one
+  // transaction, one snapshot of the file, so that a change committed between them is never a row's seal against a
+  // newer one (review r6); inside a decision's, a savepoint of it.
+  return store.oneSnapshot(db, async (on) => {
+    const raw = await statement(on);
+    const rowless = (raw.placeIds ?? []).filter((id) => !raw.environments.some((row) => row.id === id));
+    return snapshotOf(asked, raw, await store.newestSeals(on, [...raw.environments.map(({ id }) => id), ...rowless].map((id) => ({ kind: 'environment' as const, id }))), rowless);
+  });
+}
+
+/** A snapshot from its statement's row; on SQLite, with the newest seals and the rowless places read beside it. */
+function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, Buffer | null> | null, rowless: readonly string[] = []): Snapshot {
   const gone = newest === null
     ? (raw.gone ?? []).map(({ id, newest: last }) => [id, hex(last)] as const)
     : rowless.flatMap((id) => (newest.has(objectKey({ kind: 'environment', id })) ? [[id, newest.get(objectKey({ kind: 'environment', id })) ?? null] as const] : []));
