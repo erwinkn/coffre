@@ -708,7 +708,10 @@ the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,
 `VAULT_KEY_ID`, the vault key, `VAULT_KEY`, the vault's database URL, and
 its hot path's, as `HOT_DATABASE_URL`. The URLs name one database, through
 different logins, with the TLS settings the administrator's connection
-string had:
+string had. The hot path's leaves out the administrator's own
+`lock_timeout`, `statement_timeout` and `plan_cache_mode`, which would
+outrank its login's at every connection, and setup refuses one whose
+`options` still set them:
 
 ```dotenv
 # .env

@@ -671,6 +671,31 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   assert.ok(await connects(again.vault.DATABASE_URL!), 'the vault keeps its password');
 });
 
+test("the hot path's URL logs in under its own bounds: the administrator's session settings are left out of it, and one it cannot leave out is refused", needsCluster, async () => {
+  const url = await database('setup_hot_url', 'superuser');
+  const loose = new URL(url);
+  loose.searchParams.set('statement_timeout', '0');
+  loose.searchParams.set('lock_timeout', '0');
+  const shown = json(setup(['--json'], { stdin: `${loose.href}\n` }));
+  const hot = new URL(shown.vault.HOT_DATABASE_URL!);
+  assert.deepEqual([hot.searchParams.has('statement_timeout'), hot.searchParams.has('lock_timeout')], [false, false]);
+  assert.equal(new URL(shown.vault.DATABASE_URL!).searchParams.get('statement_timeout'), '0', "the vault's URL, as the administrator's");
+  const client = postgresClient(hot.href, { max: 1 });
+  try {
+    const [held] = await client.unsafe<{ statement: string; lock: string }[]>("SELECT current_setting('statement_timeout') AS statement, current_setting('lock_timeout') AS lock");
+    assert.deepEqual(held, { statement: '2s', lock: '1s' });
+  } finally {
+    await client.end();
+  }
+  // A setting in its options, which a URL's own parameters cannot say apart from a host's: refused before anything is shown.
+  const options = new URL(url);
+  options.searchParams.set('options', '-c plan_cache_mode=auto');
+  const refused = setup(['--reset-passwords', '--json'], { stdin: `${options.href}\n` });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /coffre_vault_hot logs in with plan_cache_mode auto, not the hot path's plan_cache_mode force_generic_plan/);
+  assert.equal(refused.stdout, '');
+});
+
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
   const url = await database('setup_loose', 'superuser');
   json(setup(['--json'], { stdin: `${url}\n` }));

@@ -401,6 +401,7 @@ async function run(
         const login = logins[component];
         const allowed = login.url === null ? await granted(client, login.role) : await probed(login.url);
         details.push(checked(component, login, allowed));
+        if (component === 'hot' && login.url !== null) await holdsHotSettings(login);
       }
       const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null && login.password === 'kept');
       if (kept.length > 0) details.push(`${listed(kept.map(({ role }) => role), 'and')}: from the catalog, with no new password to log in with`);
@@ -517,7 +518,8 @@ async function provision(
       const password = newPassword();
       secrets.push(password);
       await changeRole(client, user, role, sql(`LOGIN PASSWORD ${quoteLiteral(scramVerifier(password))}`));
-      logins[component] = { ...login, url: loginUrl(administrator, login.login, password) };
+      const url = loginUrl(administrator, login.login, password);
+      logins[component] = { ...login, url: component === 'hot' ? withoutHotSettings(url) : url };
     }
   }
   return logins;
@@ -628,6 +630,44 @@ const BOUNDARY = [
     privilege: "has_schema_privilege($1, 'public', 'CREATE') OR has_database_privilege($1, current_database(), 'CREATE')",
   },
 ] as const;
+
+/** The settings 0022 gives the hot path's login, which bound a use, as Postgres reports them. */
+const HOT_SETTINGS = { lock_timeout: '1s', statement_timeout: '2s', plan_cache_mode: 'force_generic_plan' } as const;
+
+/**
+ * A hot path's URL without the administrator's own values of its settings:
+ * the driver sends a URL's parameters as the session's, which outrank the
+ * role's at login. Its TLS settings and the rest stay.
+ */
+function withoutHotSettings(url: string): string {
+  const parsed = new URL(url);
+  for (const name of Object.keys(HOT_SETTINGS)) parsed.searchParams.delete(name);
+  return parsed.href;
+}
+
+/**
+ * The hot path's login, through the URL shown, has its own settings: one
+ * the URL still overrides, through `options` say, is refused before it is
+ * shown.
+ */
+async function holdsHotSettings(login: Login): Promise<void> {
+  const client = postgresSession(login.url!, { application_name: 'coffre-setup' });
+  try {
+    const [held] = await client.unsafe<Record<keyof typeof HOT_SETTINGS, string>[]>(
+      `SELECT ${Object.keys(HOT_SETTINGS).map((name) => `current_setting('${name}') AS ${name}`).join(', ')}`,
+    );
+    const wrong = Object.entries(HOT_SETTINGS).filter(([name, value]) => held![name as keyof typeof HOT_SETTINGS] !== value);
+    if (wrong.length > 0) {
+      throw new SetupError(
+        `${login.role} logs in with ${listed(wrong.map(([name]) => `${name} ${held![name as keyof typeof HOT_SETTINGS]}`), 'and')}, not the hot path's ` +
+          `${listed(wrong.map(([name, value]) => `${name} ${value}`), 'and')}: the administrator's connection string sets ${wrong.length === 1 ? 'it' : 'them'}, in its options. ` +
+          'Nothing is shown: take them out, then run coffre setup again with --reset-passwords.',
+      );
+    }
+  } finally {
+    await client.end();
+  }
+}
 
 /** Each probe, tried as the login in a transaction rolled back: allowed, or refused for want of a privilege. */
 async function probed(url: string): Promise<boolean[]> {
