@@ -22,7 +22,7 @@ export function RoleField({ value, onChange }: { value: RoleVars; onChange: (val
   return (
     <>
       <label className="field">
-        <span className="label">Role</span>
+        <span className="label">Global role</span>
         <select
           className="select"
           value={role}

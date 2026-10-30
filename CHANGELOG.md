@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The Users page says "Global role", and Settings' Roles views say what they are.**
+  The Users column, its Change global role menu item and dialog, the role
+  field of Add user and the Account page's identity say "Global role", as
+  Settings does. Under the switch, a line each: project roles are "granted on a
+  project or environment; a person or service account can hold several";
+  global roles are "one per person, across every project in its scope;
+  assigned on Users". The old `?tab=instance-roles` lands on Global roles.
 - **Settings has tabs, and an environment's card its page's menu.**
   Settings is General, Roles and, for whoever runs the instance, Keys,
   each a `?tab=` of `/settings` that reads its own alone: a deployment

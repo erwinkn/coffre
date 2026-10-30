@@ -61,6 +61,11 @@ function RoleList({ kind, roles, editable, switcher }: { kind: Kind; roles: Role
           </button>
         )}
       </div>
+      <p className="roles-desc">
+        {project
+          ? 'Granted on a project or environment; a person or service account can hold several.'
+          : 'One per person, across every project in its scope; assigned on Users.'}
+      </p>
       <ul className="role-cards" aria-label={project ? 'Project roles' : 'Global roles'}>
         {roles.map((role) => (
           <li key={role.id} className="role-card">
