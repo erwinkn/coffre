@@ -86,7 +86,13 @@ export function ActionsLog({ member }: { member: string }) {
                         )}
                       </td>
                       <td className="nowrap" data-label="Outcome">
-                        {sentence.refused ? (
+                        {lead.forged === true ? (
+                          // An entry of the sealed log the vault does not vouch for: written, or edited, around coffre.
+                          <span className="decided decided-refused" title="The vault does not vouch for this entry">
+                            <SlashCircle size={13} />
+                            Forged
+                          </span>
+                        ) : sentence.refused ? (
                           <span className="decided decided-refused">
                             <SlashCircle size={13} />
                             Refused

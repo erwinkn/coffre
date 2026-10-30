@@ -925,6 +925,8 @@ export const credentials = pgTable(
       foreignColumns: [identities.id, identities.principal, identities.generation],
     }).onDelete('restrict'),
     index('credentials_principal_idx').on(table.principal, table.generation),
+    // A member's credentials by their end, newest first, with when each was made: what a page of their uses walks (T166).
+    index('credentials_expiry_idx').on(table.principal, table.expiresAt, table.id, table.createdAt),
     // A member's credentials still live, however many have expired: a CI run
     // leaves one behind each time it signs in.
     index('credentials_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
@@ -1069,9 +1071,12 @@ export const logChanges = pgTable(
  * A use, the slim row (R53): no principal (the credential's), no
  * environment (the secret's, or `place`), no kind (the table says it).
  * Partitioned by the day of `at` (`make_day`), which retention drops whole;
- * fixed-width columns first, and eight of them, so the row pads to nothing. One index, the
- * replay's: a retried call repeats its `at` and request id, both under its
- * MAC, and lands in the same day.
+ * fixed-width columns first, and eight of them, so the row pads to nothing. The replay's
+ * index: a retried call repeats its `at` and request id, both under its
+ * MAC, and lands in the same day. And the audit pages', which list each use
+ * where 0.14's `secret.read` stood (T166): its way in's, its key's and its
+ * fork's, each newest first by when it was asked, then its number, as the
+ * pages order 0.15's log, so that a page reads as many as it shows.
  */
 export const logUses = pgTable(
   'log_uses',
@@ -1092,6 +1097,12 @@ export const logUses = pgTable(
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
+    // A member's uses, by each way in (a credential, a connection, a binding, or a person's object behind Access).
+    index('log_uses_credential_idx').on(table.credential, table.at, table.number),
+    // A key's uses: a place's, the keys it holds and those references of it hold.
+    index('log_uses_secret_idx').on(table.secret, table.at, table.number),
+    // A fork's: its inherited values' uses, read there. Few uses have a place, and only those are indexed.
+    index('log_uses_place_idx').on(table.place, table.at, table.number).where(sql`${table.place} IS NOT NULL`),
   ],
 );
 

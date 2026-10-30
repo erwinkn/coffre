@@ -47,10 +47,14 @@ BEGIN
 END
 $$;
 
--- The app reads none of it, and nobody but the vault runs the functions.
+-- The app reads the changes and the uses, for the audit pages (T156, T166), through the read functions alone of the
+-- log's, and nothing else of it; nobody but the vault runs the writing functions.
 DO $$
 BEGIN
-    IF has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
+    IF NOT has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR NOT has_table_privilege('coffre_app', 'log_changes', 'SELECT')
+       OR NOT has_function_privilege('coffre_app', 'log_uses_by(uuid, bigint, bigint, bigint, bigint, integer)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'log_uses_by(uuid, bigint, bigint, bigint, bigint, integer)', 'EXECUTE')
+       OR has_table_privilege('coffre_app', 'log_uses', 'INSERT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
        OR has_function_privilege('coffre_app', 'close_one()', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';

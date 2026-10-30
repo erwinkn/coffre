@@ -43,7 +43,7 @@ import {
   readScope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import type { PairNotes } from '@coffre/core/merkle';
+import type { LogEntry, PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -135,8 +135,11 @@ import {
   type Via,
   type TreeVerification,
   type VerifyLogInput,
+  type VouchedEntry,
+  type VouchInput,
   type WrapInput,
   type WrappedKey,
+  VOUCHED_AT_ONCE,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
@@ -153,7 +156,7 @@ import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRef
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
-import { logMacKey } from './log-entry.ts';
+import { authentic, changeEntry, logMacKey, useEntry as usedEntry } from './log-entry.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -266,6 +269,8 @@ export type PreparedVault = {
   converted: boolean;
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
+  /** What `vouch` checks an entry's MAC with: one check under each signing key, made once a call first needs them. */
+  vouchKeys?: ((entry: LogEntry) => boolean)[];
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -3914,6 +3919,24 @@ class VaultService implements Vault {
     return verdict;
   }
 
+  /**
+   * The entries of 0.15's log, as an audit page read them, whose MAC holds
+   * under none of the vault's signing keys over the columns it shows (T166):
+   * forged, or edited, around coffre. A malformed one is named too. Pure
+   * CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
+   */
+  async vouch(input: VouchInput): Promise<{ forged: string[] }> {
+    const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
+    if (!Array.isArray(entries) || entries.length > VOUCHED_AT_ONCE) throw new Error(`vouch takes up to ${VOUCHED_AT_ONCE} entries`);
+    const checks = (this.#prepared.vouchKeys ??= this.#config.signingKeys.map((seed) => authentic(logMacKey(seed))));
+    return {
+      forged: entries.flatMap((entry: VouchedEntry) => {
+        const read = vouchedEntry(entry);
+        return read !== null && checks.some((check) => check(read)) ? [] : [typeof entry?.number === 'string' ? entry.number : '?'];
+      }),
+    };
+  }
+
   async #verifierKeys(): Promise<VerifierKeys> {
     return (this.#prepared.verifier ??= await verifierKeys(this.#config.signingKeys));
   }
@@ -4604,4 +4627,22 @@ function serialisable(wrapped: { kekProvider: string; kekId: string; kekVersion:
  */
 function base64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
+}
+
+/** An entry as `vouch` was given it, as the trees take it; null for one of no shape a row has. */
+function vouchedEntry(entry: VouchedEntry): LogEntry | null {
+  const hex = (value: unknown) => (typeof value === 'string' && /^(?:[0-9a-f]{2})*$/.test(value) ? Buffer.from(value, 'hex') : null);
+  const text = (value: unknown) => typeof value === 'string';
+  if (typeof entry !== 'object' || entry === null || !text(entry.number) || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !text(entry.requestId)) return null;
+  const mac = hex(entry.mac);
+  if (mac === null) return null;
+  const number = BigInt(entry.number);
+  if (entry.tree === 'changes') {
+    const seal = entry.seal === null ? null : hex(entry.seal);
+    if (!text(entry.object) || !text(entry.actor) || !text(entry.payload) || (entry.seal !== null && seal === null)) return null;
+    return changeEntry({ number, at: entry.at, requestId: entry.requestId, object: entry.object, actor: entry.actor, payload: entry.payload, seal, mac });
+  }
+  if (entry.tree !== 'uses' || !/^[0-9]{1,19}$/.test(entry.requestId) || !text(entry.credential) || !text(entry.secret) || !Number.isSafeInteger(entry.purpose)
+    || (entry.place !== null && !text(entry.place))) return null;
+  return usedEntry({ number, at: entry.at, requestId: BigInt(entry.requestId), credential: entry.credential, secret: entry.secret, purpose: entry.purpose, place: entry.place, mac });
 }

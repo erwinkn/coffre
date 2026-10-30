@@ -1016,9 +1016,13 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   assert.equal(signedIn.log, LOG);
   assert.deepEqual(signedIn.run, { exchangeSeq: signedIn.seq, log: LOG, claims: exchange!.run });
   assert.equal(signedIn.run!.claims.run_id, '7001');
+  // Under 0.15's log the allowed read is its use, listed where 0.14's entry stood (T166), by the service, as the
+  // credential's sign-in names it though its row is gone.
   const reads = entries.filter((entry) => entry.action === 'secret.read');
-  assert.equal(reads.length, LOG === '0.15' ? 1 : 2);
+  assert.equal(reads.length, 2);
   for (const shown of reads) assert.deepEqual(shown.run, signedIn.run);
+  assert.deepEqual(reads.map((read) => [read.log, read.decision, read.actorId, read.key]),
+    [['0.14', 'deny', SERVICE, null], [LOG, 'allow', SERVICE, 'API_KEY']]);
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
 });
