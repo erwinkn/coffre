@@ -15890,26 +15890,53 @@ async function whoIsToken(origin, api, canary) {
 	expect(keys.some((key) => key.key === canary.key), `${place} holds no ${canary.key}`, keys.map((key) => key.key));
 	return {
 		detail: `${shownMember$1(member)}, reading ${place}`,
-		value: { member }
+		value: {
+			member,
+			credentialId: me.credentialId ?? null
+		}
 	};
 }
-/** Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's request. */
+/**
+* How long before a reveal 0.15's log may have logged the read it rides on:
+* a repeat of a use within a minute rides on the first one's entry (a
+* cover, R53), and the server's clock may stand a little off this one's.
+*/
+const COVERED_MS = 9e4;
+/**
+* Reveal the canary once, and find its `secret.read` in the audit log: by
+* the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
+* and names no operation (T166), the token's own read of the canary, by
+* its credential, for a reveal, of the version the token lists: the use
+* the reveal made, or the one within the minute before it that it rode on
+* (a cover is of the same credential, purpose and key).
+*/
 async function tokenReveal(api, canary, token) {
 	const path = `${canary.project}/${canary.environment}`;
+	const asked = Date.now();
 	const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
 	expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
+	const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
 	let entries;
 	try {
 		({entries} = await api.audit.list({
 			path,
 			actor: token.member,
-			limit: 50
+			limit: 50,
+			sealed: "1"
 		}));
 	} catch (error) {
 		if (error instanceof CoffreError && error.status === 403) throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
 		throw error;
 	}
 	const read = entries.filter((entry) => entry.operationId === operationId);
+	if (read.length === 0 && entries.some((entry) => entry.log === "0.15")) {
+		expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
+		const own = entries.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal");
+		const [used] = own;
+		expect(used !== void 0 && Date.parse(used.occurredAt) >= asked - COVERED_MS, `the reveal is logged 0 times, not once: no read of ${canary.key} by the token's credential since the minute before it`, own.slice(0, 3));
+		expect(used.decision === "allow" && used.forged !== true && used.version === version, `the reveal's entry is not an allowed read of the canary's version ${String(version)} the vault vouches for`, used);
+		return `one secret.read of ${canary.key}, entry ${used.seq} of 0.15's log, by the token's credential`;
+	}
 	expect(read.length === 1, `the reveal is logged ${read.length} times, not once`, entries.slice(0, 5));
 	const [entry] = read;
 	expect(entry.action === "secret.read" && entry.decision === "allow" && entry.key === canary.key && entry.requestId !== null, "the reveal's entry is not an allowed read of the canary, under a request", entry);
@@ -18362,7 +18389,8 @@ async function audit(args) {
 		].filter((part) => part !== null).join("/") || "-") + read;
 		const run = entry.run == null ? "" : ` (${runLabel(entry.run)})`;
 		const actor = `${entry.actorType === "service" ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? "" : ` via "${entry.token.label}"`}${run}`;
-		process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
+		const forged = entry.forged === true ? "  FORGED: the vault does not vouch for it" : "";
+		process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}${forged}\n`);
 	}
 }
 /**

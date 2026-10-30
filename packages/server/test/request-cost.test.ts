@@ -32,6 +32,7 @@ import {
   HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, sensitiveFrom, type ChangePoint,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
+import { useDetails, usesPage, type UseFilter } from '../src/db/uses.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import { sessionCookieName } from '../src/auth.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -101,13 +102,18 @@ class CountingPool {
    * The shared buffers `statement` touches, read or found in the cache, as
    * this login runs it again now, in a transaction rolled back: null for
    * a write of a row it made, which fails as a duplicate (23505); any other
-   * failure fails the test.
+   * failure fails the test. Run once before, and rolled back, so that a
+   * connection that has not yet planned what a function it calls runs (the
+   * audit pages' reads of 0.15's uses, T166) reads no catalog for it.
    */
   async work(statement: Statement): Promise<{ pages: number; plan: string } | null> {
     const rolledBack = new Error('rolled back');
     let work: { pages: number; plan: string } | null = null;
     await this.#pool.begin(async (tx) => {
       try {
+        await tx.unsafe('SAVEPOINT warm');
+        await tx.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.text}`, statement.values as never[]);
+        await tx.unsafe('ROLLBACK TO SAVEPOINT warm');
         const [row] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, statement.values as never[]);
         const [{ Plan: plan }] = (row as unknown as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
         work = { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
@@ -632,11 +638,13 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  // Its report reads what they read under 0.15's log, their uses (T166), beside its first reads: a statement, no trip.
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
   "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 2, vaultCalls: 3 } },
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 4, vaultCalls: 5 } },
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  // Its report reads their uses too (T166), beside its first reads.
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
   "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 3, vaultCalls: 4 } },
   "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
@@ -1351,8 +1359,147 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     );
     const origins = await originsOf(counted, [...credentials, ...tokens]);
     assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));
-    assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1' })));
+    assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
   } finally {
     await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+  }
+});
+
+test("the audit pages' reads, each a use of 0.15's log, read as many pages however many other uses the log holds (T166)", POSTGRES, async () => {
+  const counted = createDatabase(app.client);
+  const ADA = 'user:ada@acme.example';
+  const OTHER = 'user:other@acme.example';
+  // A project of 20 keys, read all day by others; Ada's few reads among them; a quiet environment, its 5 keys read
+  // once, long ago; a fork, read in; and market/busy's reference into market/dev, read through.
+  await root.projects.create('uses', { name: 'Uses' });
+  for (const path of ['uses/e', 'uses/quiet']) await root.environments.create(path, { name: path });
+  await root.secrets.set('uses/e', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`KEY_${i}`, `value-${i}`])));
+  await root.secrets.set('uses/quiet', Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`QUIET_${i}`, `value-${i}`])));
+  await root.environments.create('uses/e-eu', { name: 'e-eu', from: 'e', inherit: true });
+  for (const member of [ADA, OTHER]) await root.members.add(member);
+  const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
+  const [project] = await ids(sql`projects WHERE slug = 'uses'`);
+  const [e] = await ids(sql`environments WHERE slug = 'e' AND project_id = ${project}`);
+  const [quiet] = await ids(sql`environments WHERE slug = 'quiet' AND project_id = ${project}`);
+  const [fork] = await ids(sql`environments WHERE slug = 'e-eu'`);
+  const keys = await ids(sql`secrets WHERE environment_id = ${e} ORDER BY key`);
+  const quietKeys = await ids(sql`secrets WHERE environment_id = ${quiet}`);
+  const [holder] = await ids(sql`secrets WHERE key = 'DEV_API_KEY'`);
+  const [devKey] = await ids(sql`secrets WHERE key = 'API_KEY'`);
+  const [market] = await ids(sql`projects WHERE slug = 'market'`);
+  const [dev] = await ids(sql`environments WHERE slug = 'dev' AND project_id = ${market}`);
+  const now = Date.now();
+  // Made the day before, as the uses planted below say they were read since.
+  await db.owner.execute(sql`UPDATE secrets SET created_at = now() - interval '2 days' WHERE project_id = ${project}`);
+  await db.owner.execute(sql`UPDATE secret_references SET created_at = now() - interval '2 days'`);
+  const day = (at: number) => new Date(at).toISOString().slice(0, 10);
+  await db.owner.execute(sql`SELECT make_day(${day(now - 86_400_000)}::date), make_day(${day(now)}::date)`);
+  // Each member's credentials, made the day before and living two days, so that every use planted falls in its life.
+  const credentialsOf = async (principal: string, count: number) => (await db.owner.execute<{ id: string }>(sql`
+    INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at, created_at)
+    SELECT gen_random_uuid(), 'personal', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hint', 0, ${principal}, ${principal},
+           to_timestamp((CAST(${now} AS bigint) + 86400000) / 1000.0), to_timestamp((CAST(${now} AS bigint) - 86400000) / 1000.0)
+      FROM generate_series(1, ${count}) g
+    RETURNING CAST(id AS text) AS id`)).map((row) => row.id);
+  const adaCredentials = await credentialsOf(ADA, 20);
+  const otherCredentials = await credentialsOf(OTHER, 20);
+  const array = (values: readonly string[]) => sql.raw(`ARRAY[${values.map((value) => `'${value}'`).join(',')}]::uuid[]`);
+  let next = 5_000_000;
+  /**
+   * `count` uses numbered on from the last, asked from `from` ms ago, one every `every` ms: each by one of `credentials`,
+   * of one of `secrets`, in turn, read in `place` if one is named.
+   */
+  const plant = async (count: number, credentials: readonly string[], secretIds: readonly string[], from: number, every: number, place: string | null = null) => {
+    const first = next;
+    next += count;
+    await db.owner.execute(sql`
+      INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
+      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * ${every}, CAST(${first} AS bigint) + g, (${array(credentials)})[1 + g % ${credentials.length}], (${array(secretIds)})[1 + g % ${secretIds.length}],
+             1, decode(repeat('00', 16), 'hex'), ${place}::uuid
+        FROM generate_series(1, ${count}) g`);
+  };
+  const filters: Record<string, UseFilter> = {
+    'every use': { limit: 100 },
+    "a person's uses": { actors: [ADA], limit: 100 },
+    "a person's older page": { actors: [ADA], before: { at: now - 2 * 3_600_000 }, limit: 100 },
+    "a key's uses": { places: [{ projectIds: [], environmentIds: [], secretIds: [keys[0]!], except: [] }], limit: 100 },
+    "an environment's uses": { places: [{ projectIds: [], environmentIds: [e!], secretIds: [], except: [] }], limit: 100 },
+    "a quiet environment's uses": { places: [{ projectIds: [], environmentIds: [quiet!], secretIds: [], except: [] }], limit: 100 },
+    "a project's uses": { places: [{ projectIds: [project!], environmentIds: [], secretIds: [], except: [] }], limit: 100 },
+    "a project's uses, an environment left out": { places: [{ projectIds: [project!], environmentIds: [], secretIds: [], except: [quiet!] }], limit: 100 },
+    "a fork's uses": { places: [{ projectIds: [], environmentIds: [fork!], secretIds: [], except: [] }], limit: 100 },
+    "a source's, read through a reference": { places: [{ projectIds: [], environmentIds: [dev!], secretIds: [], except: [] }], limit: 100 },
+    'a person at a place': { actors: [ADA], places: [{ projectIds: [], environmentIds: [e!], secretIds: [], except: [] }], limit: 100 },
+  };
+  const reads: Record<string, () => Promise<unknown>> = {
+    ...Object.fromEntries(Object.entries(filters).map(([name, filter]) => [name, () => usesPage(counted, filter)])),
+    "what a page's uses read": async () => useDetails(counted, (await usesPage(counted, { limit: 100 })).rows),
+    // Whole pages through the API, every statement each makes, the vault's vouching aside.
+    'through the API, the whole log': () => root.audit.list({ sealed: '1', limit: 50 }),
+    "through the API, a person's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
+    "through the API, an environment's page": () => root.audit.list({ path: 'uses/e', sealed: '1', limit: 50 }),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const statements = [...app.recorded].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+      app.recorded = null;
+      read[name] = [];
+      for (const statement of statements) {
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_uses`);
+  try {
+    // Today's traffic: 20,000 uses of the project's keys by another member, Ada's 200 among them through the day, the
+    // quiet keys read once each, 18 hours ago, 100 reads in the fork, 50 through market/busy's reference.
+    await plant(20_000, otherCredentials, keys, 12 * 3_600_000, 2_000);
+    await plant(200, adaCredentials, keys, 10 * 3_600_000, 150_000);
+    await plant(5, otherCredentials, quietKeys, 18 * 3_600_000, 1);
+    await plant(100, otherCredentials, keys, 9 * 3_600_000, 100_000, fork!);
+    await plant(50, otherCredentials, [holder!], 8 * 3_600_000, 200_000);
+    await settle();
+    const small = await pages();
+    // Five times the traffic since, every key and place: 100,000 more uses by the other member, of the project's keys,
+    // in the fork, of market/dev's key and through the reference; and 10,000 of Ada's own, older than her page.
+    await plant(100_000, otherCredentials, [...keys, devKey!], 6 * 3_600_000, 200);
+    await plant(10_000, otherCredentials, keys, 5 * 3_600_000, 300, fork!);
+    await plant(10_000, otherCredentials, [holder!], 5 * 3_600_000, 300);
+    await plant(10_000, adaCredentials, keys, 20 * 3_600_000, 500);
+    // And 100,000 of Ada's reads elsewhere, newer than her reads of the project: what a page of hers at the project would
+    // read past, but for its scan's bound (review r1).
+    await plant(100_000, adaCredentials, [devKey!], 4 * 3_600_000, 100);
+    await settle();
+    const grown = await pages();
+    for (const [name, statements] of Object.entries(small)) {
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+      if (!name.startsWith('through the API')) assert.ok(statements.length <= 2, `${name} is one statement, or two`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the log grown, ${before} before:\n${plan}`);
+      }
+    }
+    // A member's page at a place stops where a way in's scan ran out, rather than read on: fewer than asked, or full.
+    const atPlace = await usesPage(counted, filters['a person at a place']!);
+    assert.ok(atPlace.rows.length === 100 || (atPlace.floor !== null && atPlace.more), JSON.stringify({ rows: atPlace.rows.length, floor: String(atPlace.floor?.number) }));
+    assert.ok(atPlace.rows.every((use) => adaCredentials.includes(use.credential) && keys.includes(use.secret)));
+    // And they read what was planted: Ada's newest, a key's, the quiet environment's five, the fork's, the reference's.
+    const page = (filter: UseFilter) => usesPage(counted, filter).then(({ rows }) => rows);
+    assert.ok((await page(filters["a person's uses"]!)).every((use) => adaCredentials.includes(use.credential)));
+    assert.equal((await page(filters["a person's uses"]!)).length, 100);
+    assert.ok((await page(filters["a key's uses"]!)).every((use) => use.secret === keys[0]));
+    assert.equal((await page(filters["a quiet environment's uses"]!)).length, 5);
+    assert.ok((await page(filters["a fork's uses"]!)).every((use) => use.place === fork));
+    assert.ok((await page(filters["a source's, read through a reference"]!)).some((use) => use.secret === holder));
+    assert.ok((await page(filters["a project's uses, an environment left out"]!)).every((use) => !quietKeys.includes(use.secret)));
+  } finally {
+    await db.owner.execute(sql`DELETE FROM log_uses WHERE number > 5000000`);
+    await db.owner.execute(sql`DELETE FROM credentials WHERE principal IN (${ADA}, ${OTHER})`);
   }
 });

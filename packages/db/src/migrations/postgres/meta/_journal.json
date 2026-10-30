@@ -330,6 +330,13 @@
       "when": 1793390000000,
       "tag": "0048_use_batch",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1793392180448,
+      "tag": "0049_use_audit_index",
+      "breakpoints": true
     }
   ]
 }

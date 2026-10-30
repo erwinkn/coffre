@@ -912,9 +912,11 @@ the vault's key operations and the heartbeat are detail: in the log and its
 chain, but left out of `GET /api/audit` unless `detail=1`.
 
 With `sealed=1`, which every client of 0.15 sends, a page lists what 0.15's
-log alone records too (sign-ins through trust bindings, and the tokens'
-issues, revokes and sign-outs), merged by time, and pages by `next`, which
-it sends back as `before`. Such a page counts what it leaves out only when
+log alone records too (reads, each a use; sign-ins through trust bindings,
+and the tokens' issues, revokes and sign-outs), merged by time, and pages
+by `next`, which it sends back as `before`. The vault vouches for each
+entry of 0.15's log a page lists, by its MAC, or the page marks it
+`forged`. Such a page counts what it leaves out only when
 asked, `hidden=1`: each detail action, over the page's stretch of each
 log, every one on exactly one page. It counts no more than 1,000 of 0.15's
 records, and where more lie above the next entry it would show, it stops
