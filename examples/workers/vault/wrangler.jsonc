@@ -32,10 +32,15 @@
     // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE stands in.
     { "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" },
     // The same database, as the hot path's login, coffre_vault_hot, whose
-    // lock and statement timeouts bound 0.15's uses: `wrangler hyperdrive
+    // lock and statement timeouts bound each use: `wrangler hyperdrive
     // create coffre-vault-hot --caching-disabled`, as `coffre setup` shows
-    // it. Unused until 0.15's log is the default. Locally,
-    // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HOT_HYPERDRIVE stands in.
+    // it. Locally, CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HOT_HYPERDRIVE
+    // stands in.
     { "binding": "HOT_HYPERDRIVE", "id": "replace-with-your-hot-hyperdrive-id" }
-  ]
+  ],
+  // The checkpointer, one object for the instance: it signs the audit log
+  // every half second, and remembers the last checkpoint it signed where
+  // whoever writes the database cannot. The vault starts it.
+  "durable_objects": { "bindings": [{ "name": "CHECKPOINTER", "class_name": "CoffreCheckpointer" }] },
+  "migrations": [{ "tag": "checkpointer", "new_sqlite_classes": ["CoffreCheckpointer"] }]
 }

@@ -11,8 +11,8 @@ import { logStore } from './log-store.ts';
 /**
  * The 0.15 checkpointer on Node (docs/design/audit-tree.md): one process
  * seals the log every 500 ms, its memory a file beside the vault, synced
- * before the database has the pair it holds (RememberFirst). Nothing starts
- * it until 0.15's log is switched on (plan PR 10).
+ * before the database has the pair it holds (RememberFirst). The vault's
+ * process runs it (`keepCheckpointer`, node.ts).
  */
 
 /** The signer's memory in a file: written whole, synced, renamed over the last, and the directory synced, so a power loss keeps it. */
@@ -156,4 +156,56 @@ async function readAlarms(path: string): Promise<Alarm[]> {
       return [];
     }
   });
+}
+
+/** How long after a refused open the vault's checkpointer tries again (`keepCheckpointer`). */
+const OPEN_AGAIN_MS = 10_000;
+
+export type KeptCheckpointer = Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside' | 'alarms' | 'stop'>;
+
+/**
+ * The checkpointer as the vault's process keeps it: `runCheckpointer`, tried
+ * again every `retryMs` while it cannot open (a log it refuses, as after a
+ * restore, docs/restore.md; the database out of reach), each try making the
+ * next days of uses first, so that uses go on; its failure an alarm, kept
+ * once while it stands. Meanwhile a change's seal fails with why, as on
+ * Workers, and the pair held outside is read from the file as ever.
+ */
+export async function keepCheckpointer(options: Parameters<typeof runCheckpointer>[0] & { retryMs?: number }): Promise<KeptCheckpointer> {
+  let running: RunningCheckpointer | null = null;
+  let failed: string | null = null;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const alarmsPath = `${options.memory}.alarms`;
+  const tryOpen = async (): Promise<void> => {
+    try {
+      running = await runCheckpointer(options);
+      failed = null;
+    } catch (error) {
+      const message = `the checkpointer cannot open: ${reasonOf(error)}`;
+      if (message !== failed) {
+        failed = message;
+        console.warn(`coffre audit: ${message}`);
+        await appendFile(alarmsPath, `${JSON.stringify({ at: Date.now(), message } satisfies Alarm)}\n`).catch((e: Error) => console.warn(`coffre audit: an alarm could not be kept: ${e.message}`));
+      }
+      if (!stopped) timer = setTimeout(() => void (trying = tryOpen()), options.retryMs ?? OPEN_AGAIN_MS);
+    }
+  };
+  let trying = tryOpen();
+  await trying;
+  return {
+    sealThrough: (number, deadline) => (running === null ? Promise.reject(new Error(failed ?? 'the checkpointer is not open')) : running.sealThrough(number, deadline)),
+    async heldOutside() {
+      return heldIn(await fileMemory(options.memory).last());
+    },
+    async alarms(since = 0) {
+      return running === null ? (await readAlarms(alarmsPath)).filter((a) => a.at >= since) : running.alarms(since);
+    },
+    async stop() {
+      stopped = true;
+      clearTimeout(timer);
+      await trying;
+      await running?.stop();
+    },
+  };
 }

@@ -16,7 +16,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { SigninService } from '../src/api/signin.ts';
 import { postgresOnly } from './db/engine.ts';
 import { auditLog, credentials, logChanges } from './db/tables.ts';
-import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -40,7 +40,7 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, undefined, {}, { log: '0.15', sealThrough: sealedNow }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, undefined, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
   root = clientFor(deps, ROOT);

@@ -28,7 +28,7 @@ import { replay } from '../src/log-replay.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { bindingObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
-import { emptyDatabase, ENGINE, openLocalVault, openTestDatabase, OWNER_URL, places, postgresOnly, rows, run, sealed, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, openLocalVault, openTestDatabase, OWNER_URL, places, postgresOnly, rows, run, sealed, nothingHeld, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -76,7 +76,7 @@ async function instance014() {
 
 /** A vault of 0.15's log over the same database and configuration, as a deploy starts one: not cut over yet. */
 async function vault015(config: ResolvedVaultConfig, database: Queryable = db.vault) {
-  return openRaw(database as never, config, { log: '0.15', sealThrough: sealed });
+  return openRaw(database as never, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
 }
 
 /** 0.14's head now, as the app reads it after checking its entries to it. */
@@ -224,11 +224,11 @@ test("a cutover committed and not yet sealed serves nothing: another vault that 
     sealed = true;
     return {} as Sealed;
   };
-  const first = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough });
+  const first = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld });
   const cutting = cutOver(first);
   // Committed, its seal awaited.
   await waitFor(async () => (await marker()).length === 1);
-  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough });
+  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld });
   let answered = false;
   const asked = second.cutover!().then((outcome) => ((answered = true), outcome));
   const deciding = second.setAccess({ actor: ROOT, caller: 'person', principal: ADA, changes: [] }).then(() => (answered = true), () => (answered = true));
@@ -257,11 +257,11 @@ test("a cutover committed and not yet sealed serves no use: a use by ids and one
     await held;
     return {} as Sealed;
   };
-  const first = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough });
+  const first = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld });
   const cutting = cutOver(first, { ...NONE, credentials: [vouched] as CutoverInput['credentials'] });
   await waitFor(async () => (await marker()).length === 1);
   // Another vault, as a deploy starts one, on the hot path's login: it finds the marker, and its seal not yet written.
-  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough }, async () => {}, ENGINE === 'postgres' ? await db.hot() : db.vault);
+  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld }, async () => {}, ENGINE === 'postgres' ? await db.hot() : db.vault);
   const [named] = await rows<{ project: string; environment: string; key: string }>(db.owner, sql`SELECT p.slug AS project, e.slug AS environment, s.key
     FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = e.project_id WHERE s.id = ${secret.secretId}`);
   const ask = async (deadlineMs: number) => {
@@ -395,7 +395,7 @@ test("a key whose current version is not its newest, or not its own, rolled back
 
 test("nothing of 0.15's log is written before the cutover: an Owner the deployment names, asked about, is made none until it is (review r2, AnchorHolds)", async () => {
   const w = await instance014();
-  const named = await openRaw(db.vault as never, { ...w.config, owners: [...w.config.owners, 'eve@acme.example'] }, { log: '0.15', sealThrough: sealed });
+  const named = await openRaw(db.vault as never, { ...w.config, owners: [...w.config.owners, 'eve@acme.example'] }, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   const eve = await named.access('user:eve@acme.example');
   assert.notEqual(eve.status, 'active');
   assert.deepEqual(await rows(db.owner, sql`SELECT number FROM log_changes`), []);

@@ -15,13 +15,17 @@ import { fileURLToPath } from 'node:url';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 
-import { clientFor } from './api-fixture.ts';
-import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { deps, DEV, entries, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 import { appClient, tunnelListener } from './tunnel-listener.ts';
 
-const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database, over Hyperdrive' : false;
+const skip = TEST_ENGINE !== 'postgres'
+  ? 'the tunnel reaches a Postgres database, over Hyperdrive'
+  : LOG === '0.14'
+    ? "the Worker's vault keeps 0.15's log, and the suite's instance, on 0.14's, is not cut over: its door would hold the tunnel"
+    : false;
 const NAME = 'coffre-tunnel-coffre-workers-test';
 
 let dir: string;
@@ -53,10 +57,11 @@ async function boot(): Promise<void> {
       hyperdrive: [
         { binding: 'HYPERDRIVE', id: 'coffre-app', localConnectionString: TEST_RUNTIME_DATABASE_URL },
         { binding: 'VAULT_HYPERDRIVE', id: 'coffre-vault', localConnectionString: TEST_VAULT_DATABASE_URL },
+        { binding: 'HOT_HYPERDRIVE', id: 'coffre-vault-hot', localConnectionString: TEST_HOT_DATABASE_URL },
       ],
       services: [{ binding: 'VAULT', service: NAME, entrypoint: 'Vault' }],
-      durable_objects: { bindings: [{ name: 'SOCKETS', class_name: 'CoffreSockets' }] },
-      migrations: [{ tag: 'sockets', new_sqlite_classes: ['CoffreSockets'] }],
+      durable_objects: { bindings: [{ name: 'SOCKETS', class_name: 'CoffreSockets' }, { name: 'CHECKPOINTER', class_name: 'CoffreCheckpointer' }] },
+      migrations: [{ tag: 'sockets', new_sqlite_classes: ['CoffreSockets'] }, { tag: 'checkpointer', new_sqlite_classes: ['CoffreCheckpointer'] }],
     }),
   );
   // Bundled from the packages' sources, as the tests read them.
@@ -80,15 +85,11 @@ test("a run's session in coffre's object: admitted and logged as on Node, rechec
   try {
     const client = appClient(listener.port, handle);
     assert.deepEqual([...await client.unsafe('SELECT current_user AS who')], [{ who: 'coffre_runtime' }]);
-    // One use at admission, as on Node; then the object's check, a use too, each second.
-    const admitted = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db');
-    assert.equal(admitted.length, 1);
-    assert.equal(admitted[0]!.metadata.tunnel, true);
-    for (let waited = 0; waited < 5000; waited += 100) {
-      if ((await entries('credential.use')).some((entry) => entry.metadata.recheck === true)) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    assert.ok((await entries('credential.use')).some((entry) => entry.metadata.recheck === true), 'the object rechecked the handle');
+    // One use at admission, 0.15's, as on Node (the Worker's vault keeps 0.15's log, cut over by its app's door if
+    // the suite's instance was not); then the object's check each second, a use its isolate's cover may leave
+    // unlogged: the revoke below, which a check finds, is what shows them.
+    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
 
     // Revoked from Node, as `coffre tokens revoke` does: the object's next check ends the session.
