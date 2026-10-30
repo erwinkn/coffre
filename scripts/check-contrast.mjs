@@ -92,6 +92,8 @@ const LIGHT = {
     // Sidebar states: the canvas with 5% and 8% of ink mixed in (oklab).
     navHover: [0.946, 0, 0],
     navCurrent: [0.923, 0, 0],
+    // A permission a role holds, on its card: the panel with 8% of ink mixed in, 12% in the dark.
+    held: [0.936, 0, 0],
 };
 
 const DARK = {
@@ -118,6 +120,7 @@ const DARK = {
     onFloat2: [0.8, 0, 0],
     navHover: [0.195, 0, 0],
     navCurrent: [0.219, 0, 0],
+    held: [0.281, 0, 0],
 };
 
 // [foreground, background, minimum ratio, label]
@@ -153,6 +156,9 @@ const PAIRS = [
     ['red', 'redWash', 4.5, 'red tag, deny on a denied row'],
     ['amber', 'amberWash', 4.5, 'reveal countdown, amber tag'],
     ['amber', 'panel', 4.5, 'what the person must check on an approval'],
+    ['ink', 'held', 4.5, 'a permission a role holds, on its card'],
+    ['amber', 'held', 3.0, 'the lock on one it holds outside protected environments only'],
+    ['amber', 'canvas', 3.0, 'that lock in the Roles legend'],
     ['violet', 'violetWash', 4.5, 'owner tag'],
     ['ink', 'amberWash', 4.5, 'the revealed value itself'],
     ['ink', 'accentWash', 4.5, 'text on an edited row, what the unsaved changes are'],

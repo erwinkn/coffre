@@ -196,6 +196,11 @@ The instance's roles have the same two columns (Developer as above).
 Settings → Roles: any member reads the roles, and only an Owner of the
 whole instance edits them (R1, R15):
 
+- A card per role, which opens its editor, shows every permission in the
+  same place on every card, held or not, so that roles compare at a
+  glance: Values (Read, Use, Write, Retire), Log (Read), Manage
+  (Environments, Access, Project). One held only outside protected
+  environments, as Developer's Read, carries a lock.
 - A grid per role: one row per permission, a column for normal and one for
   protected environments, and one column for project-wide permissions.
   Reading implies using, and the protected column holds no more than the
