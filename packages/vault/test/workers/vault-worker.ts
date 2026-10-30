@@ -5,19 +5,30 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { sql } from 'drizzle-orm';
 
-import { postgres, vault } from '../../src/cloudflare.ts';
+import { checkpointer, postgres, startCheckpointer, vault } from '../../src/cloudflare.ts';
 
-type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; VAULT: Record<string, (...args: unknown[]) => Promise<unknown>> };
+type Env = {
+  VAULT_HYPERDRIVE: { connectionString: string };
+  HOT_HYPERDRIVE: { connectionString: string };
+  CHECKPOINTER: Parameters<typeof startCheckpointer>[0];
+  VAULT_KEY: string;
+  VAULT: Record<string, (...args: unknown[]) => Promise<unknown>>;
+};
 
 export const Vault = vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE as never),
+  hotDatabase: postgres(env.HOT_HYPERDRIVE as never),
+  checkpointer: env.CHECKPOINTER,
   kek: { id: 'vault-workers-test', key: env.VAULT_KEY },
   owners: ['root@acme.example'],
 }));
+export const CoffreCheckpointer = checkpointer();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { method, args } = (await request.json()) as { method: string; args: unknown[] };
+    // The checkpointer's object started from outside the vault, its connection opened before the calls counted.
+    if (method === 'startCheckpointer') return Response.json({ ok: true, result: await startCheckpointer(env.CHECKPOINTER) });
     // A query on the database inside its own transaction, as no code may make: refused at once, here in workerd too.
     if (method === 'queryOutsideTransaction') {
       const pool = new HyperdrivePool(env.VAULT_HYPERDRIVE.connectionString);

@@ -14,7 +14,8 @@ Two processes, configured in code:
   which `pnpm start` runs, under srvx.
 - `src/vault.ts`, the vault: the keys, and the members and grants, which it
   keeps in the server's database through a login of its own. It answers
-  only the server, on a Unix socket.
+  only the server, on a Unix socket. It also runs the checkpointer, which
+  signs the audit log every half second: run one vault per database.
 
 Run them as two users that share a group, and the process facing the network
 never holds the vault key. For local development, the server can run the vault
@@ -49,7 +50,7 @@ administrator's connection string at a hidden prompt. A script pipes it in;
 never pass it as an argument. It
 makes the three logins coffre runs as, `coffre_runtime` for the server,
 `coffre_vault_runtime` for the vault and `coffre_vault_hot` for the vault's
-hot path, which 0.15's uses take, unused until 0.15's log is the default; and
+hot path, which every use takes; and
 `coffre_backup_login`, for backups. It migrates the database, and checks that
 each login holds only its rights.
 
@@ -71,6 +72,11 @@ server, which faces the network, never holds what decrypts a value.
   file.
 - Every URL is the same database, each through its own login. Neither
   process gets the administrator's URL.
+- `vault.env` also names `CHECKPOINTER_MEMORY`, the file where the
+  checkpointer remembers the newest checkpoint it signed, out of reach of
+  whoever writes the database. Put it on persistent storage the vault's user
+  alone may write, and never restore it with a backup of the database
+  ([restores](https://github.com/erwinkn/coffre/blob/main/docs/restore.md#on-015s-log)).
 
 With AWS KMS instead of a key of your own, the vault also needs a
 `SIGNING_KEY` ([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).

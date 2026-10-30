@@ -123,6 +123,10 @@ node --conditions=coffre:source dev/idp/server.ts >"$logs/dev-idp.log" 2>&1 &
 sleep 1
 
 log "starting coffre and its vault on :$port"
+# The seed starts the database over, 0.15's log and its checkpoints included:
+# the checkpointer's memory, in its Durable Object's storage, goes with them,
+# or it would refuse the log as one that lost what it sealed.
+rm -rf "$state_dir/v3/do/coffre-dev-vault-CoffreCheckpointer"
 # The packages' sources, for the Vite config's own imports (@coffre/ui/vite) as for the app's.
 NODE_OPTIONS="--conditions=coffre:source ${NODE_OPTIONS:-}" ./dev/node_modules/.bin/vite dev dev/deployment/app --port "$port" --strictPort >"$logs/web.log" 2>&1 &
 until curl -sf "$COFFRE_DEV_URL/livez" >/dev/null 2>&1; do sleep 1; done

@@ -3,5 +3,6 @@ node_modules
 *.db
 *.db-*
 *.sock
+checkpointer-memory*
 dist
 state

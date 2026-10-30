@@ -17,7 +17,7 @@ import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials as credentialRows, environments, logBulk, logFence, logUses, vaultGrants } from './db/tables.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
@@ -90,7 +90,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   runtime = runtimeOver(counted(deps.vault, true));
   unnamed = runtimeOver(counted(deps.vault, false));
   deps.signin = runtime.signin!;
@@ -221,7 +221,7 @@ test('revoked, someone learns nothing of a key made since, by its path or a list
   await root.access.set(`user:${GONE}`, { 'market/dev': null });
   await root.secrets.set('market/dev', { MADE_SINCE: 'made-since' });
   // The vault as it is, and one of the same instance with every call in flight taken: busy before it reads anything.
-  const busy = runtimeOver(testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, uses: { inFlight: 0 } }));
+  const busy = runtimeOver(testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, uses: { inFlight: 0 } }));
   for (const at of [runtime, busy]) {
     const logged = (await usesLogged(db.owner)).length;
     for (const ask of [(key: string) => ({ path: `market/dev/${key}` }), (key: string) => ({ path: 'market/dev', keys: [key] })]) {

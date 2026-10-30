@@ -98,12 +98,13 @@ export function waitUntil(promise: Promise<unknown>): void {
  * comes.
  */
 /**
- * Which log the suite's vaults keep (`VaultOptions.log`): 0.14's unless
- * `COFFRE_TEST_LOG` says 0.15, which runs every server test with 0.15's
- * log on too, the app's writes logged through the vault (`prepare`). Its
- * changes answer once committed here: no checkpointer runs (`sealedNow`).
+ * Which log the suite's vaults keep (`VaultOptions.log`): 0.15's, the
+ * default, the app's writes logged through the vault (`prepare`), unless
+ * `COFFRE_TEST_LOG` says 0.14, which runs every server test on 0.14's
+ * alone, as CI does beside it until 0.16 removes it. Its changes answer
+ * once committed here: no checkpointer runs (`sealedNow`).
  */
-export const LOG = process.env.COFFRE_TEST_LOG === '0.15' ? '0.15' : '0.14';
+export const LOG = process.env.COFFRE_TEST_LOG === '0.14' ? '0.14' : '0.15';
 
 /** For a test whose setup writes an input's row around the app (a session's end moved in the database), which 0.15's log refuses as not the vault's: run under 0.14's only. */
 export const LOG_014_ONLY = LOG === '0.15' ? "0.15's log refuses a row written around the app: this test's setup is 0.14's" : false;
@@ -253,13 +254,16 @@ export function hotDatabaseUrl(): string {
 /** A checkpointer that seals everything at once: what a change waits on, in a test with no tree. */
 export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => ({}) as Awaited<ReturnType<NonNullable<VaultOptions['sealThrough']>>>;
 
+/** No pair held outside, as a signer that never signed: what a vault with no checkpointer is verified against. */
+export const nothingHeld: NonNullable<VaultOptions['heldOutside']> = async () => [];
+
 export function testVault(
   owners: readonly string[],
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
   /** `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens. */
-  { cutover, ...log }: Pick<VaultOptions, 'log' | 'sealThrough' | 'uses'> & { cutover?: 'app' } = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow } : {},
+  { cutover, ...log }: Pick<VaultOptions, 'log' | 'sealThrough' | 'heldOutside' | 'uses'> & { cutover?: 'app' } = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' },
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -490,7 +494,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // A reference names its vault entry: it goes before the log.
   await owner.delete(secretReferences);
   await emptyLog(owner);
-  // 0.15's log, which the change path writes (COFFRE_TEST_LOG=0.15), gone with the rows it is of.
+  // 0.15's log, which the change path writes (unless COFFRE_TEST_LOG=0.14), gone with the rows it is of.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
   // Its uses and their cap's rows: a test's reads count from none.

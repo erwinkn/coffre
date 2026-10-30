@@ -60,7 +60,7 @@ function config() {
 }
 
 test('a first call answers while another first call waits on its own I/O', postgresOnly('a database that never answers'), async () => {
-  const prepared = await prepareVault(config());
+  const prepared = await prepareVault(config(), { log: '0.14' });
   const stuck = await neverAnswers();
   // The isolate's first call: its database never answers, so whatever it starts never settles.
   const first = openVault(stuck.database, prepared).access(ROOT).catch(() => null);
@@ -77,7 +77,7 @@ test('a first call answers while another first call waits on its own I/O', postg
 test("a first key operation answers while another waits on its own key check", postgresOnly('a database that never answers'), async () => {
   const placed = await places(db.owner);
   const [one, two] = [await placed.secret(placed.dev), await placed.secret(placed.dev)];
-  const prepared = await prepareVault(config());
+  const prepared = await prepareVault(config(), { log: '0.14' });
   // Settled once already: what is left to share is the key check before the first key operation.
   assert.equal((await openVault(db.vault, prepared).access(ROOT)).status, 'active');
   const stuck = await neverAnswers();
