@@ -12,7 +12,7 @@ import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog, type 
 import { sql } from 'drizzle-orm';
 
 import { Checkpointer } from '../src/checkpointer.ts';
-import { authentic, logMacKey } from '../src/log-entry.ts';
+import { authentic, logMacKey, type LogMacKey } from '../src/log-entry.ts';
 import { logWriter } from './log-entries.ts';
 import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
@@ -21,7 +21,7 @@ import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './databa
 let db: TestDatabase;
 let signers: PairSigners;
 let verifiers: PairVerifiers;
-let macKey: Buffer;
+let macKey: LogMacKey;
 let log: ReturnType<typeof logWriter>;
 const use = (at?: number, forged?: boolean) => log.use(at, forged);
 const change = () => log.change();

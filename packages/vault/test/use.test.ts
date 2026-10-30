@@ -84,7 +84,7 @@ test("the checkpointer seals real uses: each entry's MAC is the log's, over the 
   // The checkpointer as a host opens it: its MAC key from the vault's signing seed, as the use path's.
   const alarms: string[] = [];
   const store = logStore(db.vault);
-  const cp = await openLogCheckpointer({ store, seed: SIGNING_KEY, memory: variableMemory(), record: (alarm) => void alarms.push(alarm.message) });
+  const cp = await openLogCheckpointer({ store, signingKeys: [SIGNING_KEY], memory: variableMemory(), record: (alarm) => void alarms.push(alarm.message) });
   const tick = await cp.tick();
   assert.ok(tick.signed, tick.failures.join('; '));
   for (const number of [plain.number, through.number, kept.number]) {
@@ -497,7 +497,7 @@ test('a session\'s first call plans its four statements before it takes the fenc
       [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
     assert.equal(answer!.use.state, null);
     const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0046');
+    assert.equal(setting!.planned, '0048');
   } finally {
     await fence.end();
     await fresh.end();

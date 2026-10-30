@@ -1,6 +1,6 @@
 import { entryLeaf, leafData, type LeafValue } from './leaf.ts';
 import { MAX_NUMBER } from './note.ts';
-import { openPair, samePair, TREES, type Pair, type PairNotes, type PairVerifiers, type TreeName } from './pair.ts';
+import { openPairUnder, samePair, TREES, type Pair, type PairNotes, type PairVerifiers, type TreeName } from './pair.ts';
 import { Edge, edgeOf, nodesFrom, tileMap, tilesFor, type Tile, type TileKey } from './tiles.ts';
 import { consistencyProof, EMPTY_ROOT, inclusionProof, verifyConsistency, verifyInclusion, type Hash } from './tree.ts';
 
@@ -88,7 +88,8 @@ type Stop = { pair: Pair; notes: PairNotes; row: boolean };
 const PAGE = 100;
 
 type Options = {
-  verifiers: PairVerifiers;
+  /** The log's keys: one, or each it was under, when its signing key was rotated (T168). Which key may sign what is the caller's to hold. */
+  verifiers: PairVerifiers | readonly PairVerifiers[];
   from?: PairNotes;
   /**
    * The database's newest row, as the caller read it in the walk's own
@@ -137,11 +138,11 @@ async function walk(
   const noted = (notes: PairNotes) => `${notes.changes}\0${notes.uses}`;
   const openHeld = (notes: PairNotes) => {
     const key = noted(notes);
-    if (!held.has(key)) held.set(key, openPair(notes, opts.verifiers));
+    if (!held.has(key)) held.set(key, openPairUnder(notes, opts.verifiers));
     return held.get(key)!;
   };
   const open = async (row: StoredPair): Promise<Pair | null> => {
-    const pair = await (held.get(noted(row.notes)) ?? openPair(row.notes, opts.verifiers));
+    const pair = await (held.get(noted(row.notes)) ?? openPairUnder(row.notes, opts.verifiers));
     if (pair === null) problems.push(`checkpoint ${row.upto}: not a pair signed by the log`);
     else if (pair.upto !== row.upto) problems.push(`checkpoint ${row.upto}: its row does not match its notes (up to ${pair.upto})`);
     else return pair;

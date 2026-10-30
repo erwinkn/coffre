@@ -1486,8 +1486,13 @@ export type NamedUseOutcome =
     at: { projectId: string; environmentId: string } | null;
   };
 
-/** Why a use was not decided at all: the app answers 503, with `Retry-After`. */
-export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured';
+/**
+ * Why a use was not decided at all: the app answers 503, with `Retry-After`.
+ * `superseded`: the vault that asked holds a signing key the log moved on
+ * from (T168), as an isolate does for the moments a deploy takes; a newer
+ * one answers.
+ */
+export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured' | 'superseded';
 
 /** A value a use opened: its data key, base64, and the version it decrypts, with what its ciphertext is bound to. */
 export type UsedValue = {

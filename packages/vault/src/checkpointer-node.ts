@@ -61,7 +61,8 @@ export type RunningCheckpointer = {
  */
 export async function runCheckpointer(options: {
   database: Database;
-  seed: Uint8Array;
+  /** The vault's signing keys (`ResolvedVaultConfig.signingKeys`): the one it signs with first, then those it replaced (T168). */
+  signingKeys: readonly Uint8Array[];
   /** The memory's file. */
   memory: string;
   witnesses?: readonly Witness[];
@@ -77,7 +78,7 @@ export async function runCheckpointer(options: {
   await store.makeDays(daysAround(Date.now()));
   const checkpointer = await openLogCheckpointer({
     store,
-    seed: options.seed,
+    signingKeys: options.signingKeys,
     memory: fileMemory(options.memory),
     witnesses: options.witnesses,
     record: (alarm) => record(alarm),
@@ -96,7 +97,7 @@ export async function runCheckpointer(options: {
   }
   const keep = upkeep(checkpointer, store, {
     keepDays: options.retainDays ?? null,
-    seed: options.seed,
+    signingKey: options.signingKeys[0]!,
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
       void record({ at: Date.now(), message });

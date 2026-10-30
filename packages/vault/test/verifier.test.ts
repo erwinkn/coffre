@@ -73,7 +73,7 @@ async function instance() {
   };
   const seed = config.signingKeys[0]!;
   const memory = variableMemory();
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   // The signer's memory, where no database writer reaches: what each walk is held to.
   const heldOutside = async () => {
     await control.asked?.();
@@ -270,7 +270,7 @@ test('a retention change in the log is the log\'s own, and the uses below its cu
   const store = logStore(db.vault);
   const day = dayOf(Date.now() - 10 * DAY_MS);
   const cut = (ENGINE === 'postgres' ? await store.cutAt(Date.parse(`${day}T00:00:00Z`) + DAY_MS) : await store.newest())!;
-  const pair = (await openPair(cut.notes, (await verifierKeys([w.seed])).verifiers))!;
+  const pair = (await openPair(cut.notes, (await verifierKeys([w.seed])).current.verifiers))!;
   const at = Date.now();
   const requestId = `retention:${day}`;
   const payload = retentionPayload(day, { upto: pair.upto, at: pair.at, uses: { size: pair.uses.size, root: pair.uses.root } });

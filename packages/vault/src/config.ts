@@ -70,6 +70,13 @@ export type VaultConfig = {
    */
   signingKey?: string;
   /**
+   * Signing keys `signingKey` replaced, the newest first, each 32 bytes,
+   * base64: they verify what the vault signed under them before the
+   * rotation, and vouch for nothing after it (docs/keys.md, "Rotating a
+   * signing key"). A local KEK in `previousKeks` stands for its own.
+   */
+  previousSigningKeys?: readonly string[];
+  /**
    * At most `count` distinct data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. The
    * window is a day at most: the releases it counts are kept a day and an hour (`prune_vault_releases`).
    */
@@ -156,7 +163,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
   return {
     keks: new KekRegistry(current, previous),
     owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
-    signingKeys: signingKeys(config.signingKey, keks),
+    signingKeys: signingKeys(config.signingKey, config.previousSigningKeys ?? [], keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
   };
 }
@@ -164,13 +171,14 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
 /**
  * The key the vault signs with, then every other it verifies with. It signs
  * with `signingKey` when it is given one, and otherwise with the key the
- * primary KEK stands for. It verifies with the keys every local KEK stands
- * for too, the previous ones included: a KEK rotation changes the derived
- * signing key, and what the old one signed before the rotation must still
- * verify, for as long as the old KEK stays configured. Nothing after it does
- * (`#settle` in vault.ts).
+ * primary KEK stands for. It verifies with those `previousSigningKeys`
+ * names, and the keys every local KEK stands for too, the previous ones
+ * included: a KEK rotation changes the derived signing key, and what the
+ * old one signed before the rotation must still verify, for as long as the
+ * old key stays configured. Nothing after it does (`#settle` in vault.ts;
+ * 0.15's log, from its rotation entry: T168).
  */
-function signingKeys(given: string | undefined, keks: { provider: KekProvider; signingKey: Buffer | null }[]): Buffer[] {
+function signingKeys(given: string | undefined, previous: readonly string[], keks: { provider: KekProvider; signingKey: Buffer | null }[]): Buffer[] {
   const derived = keks.flatMap((entry) => (entry.signingKey === null ? [] : [entry.signingKey]));
   let signing: Buffer;
   if (given !== undefined) signing = key32(given, 'the signing key');
@@ -182,7 +190,8 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
         'and a key service never hands its key over. Set signingKey to 32 random bytes, base64 (openssl rand -base64 32), and keep it with the vault key.',
     );
   }
-  return [signing, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);
+  const replaced = previous.map((key, i) => key32(key, `previousSigningKeys[${i}]`));
+  return [signing, ...replaced, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);
 }
 
 

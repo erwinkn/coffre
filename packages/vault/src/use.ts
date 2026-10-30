@@ -9,7 +9,7 @@ import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
 import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
 import { noEdits, objectKey, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
-import { entryMac } from './log-entry.ts';
+import { entryMac, type LogMacKey } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { callBatch as batchPostgres, callUse as callPostgres } from './use.postgres.ts';
@@ -250,7 +250,7 @@ const SLOTS = ['e1', 'e2', 'e3', 'e4'] as const;
 export type UsePath = {
   db: Queryable;
   sealKeys: SealKeys;
-  macKey: Buffer;
+  macKey: LogMacKey;
   keks: KekRegistry;
   cache: UseCache;
   /** What a call waits for first, within its admission (`inFlight`): an isolate's first, the log's cutover (vault.ts, `#cutOverYet`). */
@@ -495,9 +495,10 @@ function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | 
   const call: UseCall = {
     credential: input.credential, secretId: input.secretId, requestId: input.requestId, at: input.at, purpose, place: input.place,
     way: WAYS.indexOf(way), principal: input.principal ?? null,
-    // No ids, no use: a call that only reads by names writes nothing, whatever its MAC (0045, `v_right`).
+    // No ids, no use: a call that only reads by names writes nothing, whatever its MAC (0045, `v_right`), which still
+    // names the key, so that a vault whose key the log moved on from is refused it too (`superseded`).
     mac: input.credential === null
-      ? Buffer.alloc(16)
+      ? Buffer.concat([path.macKey.tag, Buffer.alloc(12)])
       : entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId ?? '', purpose, place: input.place } }),
     deadline: input.deadline,
     ...(cover === undefined ? {} : { cover }),
@@ -519,7 +520,9 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
   const { cache } = path;
   const { request, key, coverKey, known } = made;
   const way = input.way ?? 'credential';
-  if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured') return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
+  if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured' || row.state === 'superseded') {
+    return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
+  }
   if (names !== undefined && row.state === 'unknown') return { unknown: true };
   if (names !== undefined && row.state === 'nowhere') return { nowhere: true };
   if (row.state !== null && !((names !== undefined && (row.state === 'moved' || row.state === 'archived')) || (row.state === 'decide' && !decided))) {

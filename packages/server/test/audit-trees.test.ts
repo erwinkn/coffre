@@ -37,7 +37,7 @@ async function sealedInstance() {
   const kek = randomBytes(32);
   const checkpointer = await runCheckpointer({
     database: await openVaultDatabase(),
-    seed: derivedSigningKey(kek),
+    signingKeys: [derivedSigningKey(kek)],
     memory: join(scratch, `memory-${running.length}-${Date.now()}`),
     intervalMs: 60_000,
   });

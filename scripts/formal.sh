@@ -387,6 +387,23 @@ REMOVALS=(
   "WaysInRemove AccountReadInUse RemovalOrdersUses"
   "WaysInRemove RemovalTakesFence RemovalOrdersUses"
   "WaysInForge SealChecked AllowedOnSealed"
+  # 0.15's log across a rotation of the vault's signing key (Rotation.tla; T168, W277). An isolate under the old key,
+  # serving on after the deploy, is refused at its write, under the lock, ordered against the rotation's entry.
+  "RotationDeploy RetiredRefused OldWritesBelowBoundary"
+  "RotationDeploy RetiredRefused LogWorks"
+  "RotationDeploy RefusedUnderLock OldWritesBelowBoundary"
+  "RotationDeploy RotateUnderLock OldWritesBelowBoundary"
+  # The signer carries its memory across, and takes the database's pair under the old key after a restore.
+  "RotationDeploy MemoryUnderPrevious LogWorks"
+  "RotationDeploy RowUnderPrevious LogWorks"
+  "RotationDeploy PendingAccepted NoFalseAlarm"
+  # Someone who holds the old key: it vouches for nothing past the rotation, in a tick or a check.
+  "RotationLeak BoundaryChecked SealedBelowBoundary"
+  "RotationLeak BoundaryChecked VerifiedSound"
+  "RotationLeak RotationProbed VerifiedSound"
+  "RotationLeak AnchorKeyHeld VerifiedSound"
+  # A config rolled back to the old key: its signer signs nothing, refused by itself or by the trigger.
+  "RotationRollback KeyNeverBack+RetiredRefused NoOldPairOverRotation"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -404,6 +421,9 @@ EXPECTED=(
   # The vault asks no issuer for keys: a binding of keys its issuer publishes takes the app's word for its
   # tokens, so a compromised app signs a run in through it with a token nobody signed (Lifecycle.tla's Fetched).
   "LifecycleFetched EverySignInOnValidToken"
+  # The rotation entry deleted before its first seal, by someone who holds the old key, who signs a pair over its
+  # place: the rotation's window, a tick long, which no check sees (Rotation.tla).
+  "RotationWindow VerifiedSound"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
@@ -414,8 +434,9 @@ EXPECTED=(
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
 # scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
 # slack and clock-skew scenarios), seal (Seal and Migration015),
-# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention and
-# SealRetentionCrash). A scenario in no case below is in `rest`.
+# seal-plugin (SealPlugin, SealCore and the key's Rotation scenarios) and
+# seal-retention (SealRetention and SealRetentionCrash). A scenario in no case
+# below is in `rest`.
 SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
 shard_of() {
   case "$1" in
@@ -425,7 +446,7 @@ shard_of() {
     HotPathOneBulk) echo hotpath-bulk ;;
     HotPathOneLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
-    SealPlugin|SealCore) echo seal-plugin ;;
+    SealPlugin|SealCore|Rotation*) echo seal-plugin ;;
     SealRetention*) echo seal-retention ;;
     Seal|Migration015*) echo seal ;;
     *) echo rest ;;

@@ -13,7 +13,7 @@ import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { entryMac, logMacKey } from '../src/log-entry.ts';
+import { entryMac, logMacKey, type LogMacKey } from '../src/log-entry.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
 import { ABOVE_NEWEST, verifierKeys, verifyTrees } from '../src/verifier.ts';
@@ -27,7 +27,7 @@ before(async () => {
 after(() => db.close());
 
 /** `n` uses, MAC'd as the use path writes them, numbered from the log's sequence, `at` now: inserted 1,000 a statement. */
-async function uses(n: number, mac: Buffer): Promise<void> {
+async function uses(n: number, mac: LogMacKey): Promise<void> {
   for (let done = 0; done < n; done += 1000) {
     const batch = Array.from({ length: Math.min(1000, n - done) }, () => {
       const row = { at: Date.now(), requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
@@ -72,7 +72,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const memory = variableMemory();
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
   const { db: vault, statements, close } = counting();
   const measured: Record<string, { statements: number; cpuMs: number }> = {};
@@ -126,7 +126,7 @@ test('review r4 (W240): more than `ABOVE_NEWEST` entries above the newest pair a
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const memory = variableMemory();
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
   await uses(100, mac);
   assert.ok((await cp.tick()).signed);

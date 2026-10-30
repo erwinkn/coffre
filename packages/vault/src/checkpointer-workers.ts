@@ -43,8 +43,8 @@ export type ObjectNamespace = {
 export type CheckpointerSettings = {
   /** The vault's Hyperdrive, its own login. */
   hyperdrive: { readonly connectionString: string };
-  /** The vault's signing seed. */
-  seed: Uint8Array;
+  /** The vault's signing keys (`ResolvedVaultConfig.signingKeys`): the one it signs with first, then those it replaced (T168). */
+  signingKeys: readonly Uint8Array[];
   witnesses?: readonly Witness[];
   /** How long its connection may sit idle before it closes; the next query opens it again. Ticking, it never is. */
   closeIdleMs?: number;
@@ -112,7 +112,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           const store = logStore(createDatabase(pool));
           const checkpointer = await openLogCheckpointer({
             store,
-            seed: s.seed,
+            signingKeys: s.signingKeys,
             memory: durableMemory(this.#state.storage),
             witnesses: s.witnesses,
             record: (alarm) => this.#record(alarm),
@@ -120,7 +120,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           this.#checkpointer = checkpointer;
           this.#upkeep = upkeep(checkpointer, store, {
             keepDays: s.retainDays ?? null,
-            seed: s.seed,
+            signingKey: s.signingKeys[0]!,
             alert: (message) => {
               console.warn(`coffre audit: ${message}`);
               void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));

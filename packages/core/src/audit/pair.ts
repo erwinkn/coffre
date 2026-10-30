@@ -64,6 +64,18 @@ export async function openPair(notes: PairNotes, verifiers: PairVerifiers): Prom
   return { upto: changes.upto, at: changes.at, floor: changes.floor, prev: changes.prev, changes, uses };
 }
 
+/**
+ * The pair two notes make under whichever of `keys` signed them: a log whose
+ * signing key was rotated has pairs under each (T168). Null if none did.
+ */
+export async function openPairUnder(notes: PairNotes, keys: PairVerifiers | readonly PairVerifiers[]): Promise<Pair | null> {
+  for (const verifiers of Array.isArray(keys) ? (keys as readonly PairVerifiers[]) : [keys as PairVerifiers]) {
+    const pair = await openPair(notes, verifiers);
+    if (pair !== null) return pair;
+  }
+  return null;
+}
+
 /** Whether two pairs are the same heads: same place, same sizes and roots in both trees. Not `at`: callers that need one signing compare it too. */
 export const samePair = (a: Pair, b: Pair) =>
   a.upto === b.upto && TREES.every((tree) => a[tree].size === b[tree].size && a[tree].root.equals(b[tree].root));

@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { Database } from '@coffre/db';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { entryMac } from '../src/log-entry.ts';
+import { entryMac, type LogMacKey } from '../src/log-entry.ts';
 import { ENGINE, rows, run } from './database.ts';
 
 /**
@@ -15,7 +15,7 @@ import { ENGINE, rows, run } from './database.ts';
  * after every number taken on SQLite. MAC'd over their tree and every
  * column but the number (log-entry.ts).
  */
-export function logWriter(owner: Database, macKey: Buffer) {
+export function logWriter(owner: Database, macKey: LogMacKey) {
   let sqliteNext = 1n;
   /** The entry `insert` makes, given its number's SQL: one transaction, a file's turn on SQLite, the fence on Postgres. */
   const append = async (insert: (number: SQL) => SQL): Promise<bigint> => {
@@ -40,7 +40,7 @@ export function logWriter(owner: Database, macKey: Buffer) {
     /** Every entry, pair and tile gone, the floor at now less the deadline, as a new log. */
     async empty(): Promise<void> {
       for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await run(owner, sql.raw(`DELETE FROM ${table}`));
-      await run(owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
+      await run(owner, ENGINE === 'postgres' ? sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}, retired = '{}'` : sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}, retired = '[]'`);
       sqliteNext = 1n;
     },
     /** Today's and tomorrow's uses (Postgres partitions them by day). */

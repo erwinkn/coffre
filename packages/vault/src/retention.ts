@@ -1,7 +1,7 @@
 import { leafData, openPair, proveConsistency, TREES, verifyConsistency, type Cut, type LogEntry, type StoredPair } from '@coffre/core/merkle';
 
 import type { Checkpointer, CheckpointStore } from './checkpointer.ts';
-import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload } from './log-entry.ts';
+import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload, type LogMacKey } from './log-entry.ts';
 
 /**
  * Retention (docs/design/0.15-plan.md, PR 7; formal/Seal.tla's retention):
@@ -81,7 +81,7 @@ type Options = {
   /** Full days of uses kept before today's: a day goes once `keepDays` days have ended after it. */
   keepDays: number;
   /** The log's MAC key (`logMacKey`): the retention change is an entry like any. */
-  macKey: Buffer;
+  macKey: LogMacKey;
   now?: () => number;
 };
 
@@ -122,7 +122,7 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
 /** One day: dropped, with the change written for it if any; or why it waits. */
 type Wait = { lock: boolean; reason: string };
 
-async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: Buffer, now: () => number): Promise<{ change: bigint | null; detached: boolean } | Wait> {
+async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: LogMacKey, now: () => number): Promise<{ change: bigint | null; detached: boolean } | Wait> {
   const end = Date.parse(`${day}T00:00:00Z`) + DAY_MS;
   const head = cp.pair.pair;
   if (head.floor < end) return { lock: false, reason: `the signer's newest pair (up to ${head.upto}) is not past the day's end yet` };

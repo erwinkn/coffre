@@ -38,6 +38,13 @@ const int64 = customType<{ data: bigint; driverData: number | bigint }>({
   fromDriver: (value) => BigInt(value),
 });
 
+/** A list of byte strings, read as Postgres's bytea[]: a JSON array of hex. */
+const byteList = customType<{ data: Buffer[]; driverData: string }>({
+  dataType: () => 'text',
+  toDriver: (value) => JSON.stringify(value.map((bytes) => bytes.toString('hex'))),
+  fromDriver: (value) => (JSON.parse(value) as string[]).map((hex) => Buffer.from(hex, 'hex')),
+});
+
 const time = (name: string) => integer(name, { mode: 'timestamp_ms' });
 const now = sql`(CAST(unixepoch('subsec') * 1000 AS INTEGER))`;
 const createdAt = () => time('created_at').notNull().default(now);
@@ -965,6 +972,8 @@ export const logFence = sqliteTable(
   {
     onlyRow: flag('only_row').primaryKey().default(true),
     atFloor: integer('at_floor', { mode: 'number' }).notNull(),
+    /** The tags of the signing keys the log moved on from (T168), hex, a JSON array. */
+    retired: byteList('retired').notNull().default(sql`'[]'`),
   },
   (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
 );

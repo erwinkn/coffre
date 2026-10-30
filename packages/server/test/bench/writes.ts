@@ -46,7 +46,7 @@ for (const log of ['0.14', '0.15'] as const) {
   const pool = postgresClient(TEST_VAULT_DATABASE_URL, { max: 4 });
   // The seed the vault signs with, from its KEK, as the vault derives it.
   const probe = testVault([ROOT], {}, { kek });
-  const checkpointer = log === '0.15' ? await runCheckpointer({ database: createDatabase(pool), seed: probe.signingKey, memory: join(dir, 'memory') }) : null;
+  const checkpointer = log === '0.15' ? await runCheckpointer({ database: createDatabase(pool), signingKeys: [probe.signingKey], memory: join(dir, 'memory') }) : null;
   const vault = testVault([ROOT], {}, { kek }, {}, checkpointer === null ? {} : { log: '0.15', sealThrough: checkpointer.sealThrough });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });

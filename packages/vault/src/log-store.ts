@@ -5,7 +5,7 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
-import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
+import { changeEntry, KEY_OBJECT, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
 import type { RetentionStore } from './retention.ts';
 
 /**
@@ -29,6 +29,9 @@ import type { RetentionStore } from './retention.ts';
  *   retention change, and a day's partition and the tiles below a cut
  *   dropped, each through its function, which holds the vault's login to
  *   what a sealed retention change cuts.
+ * - A rotation of the vault's signing key (T168, migration 0048): the
+ *   rotation entries, by their object's index, and the rotation written
+ *   with `log_rotate`, under the barrier's locks.
  *
  * On SQLite one transaction runs at a time: the fence is implicit, every
  * number committed is final, and the barrier only moves the floor. The
@@ -50,8 +53,20 @@ type Options = {
   tileRange?: number;
 };
 
-/** The checkpointer's database, with retention's part. */
-export type LogStore = CheckpointStore & RetentionStore;
+/** The log's rotations of the vault's signing key (T168), as the checkpointer reads and writes them (`Rotations`). */
+export type RotationStore = {
+  /** Every rotation entry, by number. */
+  rotations(): Promise<LogEntry[]>;
+  /**
+   * The rotation entry, under the barrier's locks (`log_rotate`), and
+   * `retire`, the tag of the key it moves the log from, added to the
+   * fence's: its number, or null if the fence holds that tag already.
+   */
+  rotate(change: { requestId: string; at: number; payload: string; mac: Buffer }, retire: Buffer): Promise<bigint | null>;
+};
+
+/** The checkpointer's database, with retention's part and the rotations'. */
+export type LogStore = CheckpointStore & RetentionStore & RotationStore;
 
 export function logStore(db: Database, options: Options = {}): LogStore {
   const range = options.tileRange ?? TILE_RANGE;
@@ -337,6 +352,13 @@ function postgresStore(db: Database, range: number): LogStore {
       const [row] = await rowsOf<{ n: string }>(db, sql`SELECT log_retention(${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea)::text AS n`);
       return BigInt(row!.n);
     },
+    async rotations() {
+      return (await one<RawEntry[]>(db, sql`SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') AS v FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid`)).map(toEntry);
+    },
+    async rotate(change, retire) {
+      const [row] = await rowsOf<{ n: string | null }>(db, sql`SELECT log_rotate(${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea, ${retire}::bytea)::text AS n`);
+      return row?.n == null ? null : BigInt(row.n);
+    },
     async dropDay(day) {
       const [row] = await rowsOf<{ state: 'detached' | 'dropped' | 'gone' }>(db, sql`SELECT drop_day(${day}::date) AS state`);
       if (row!.state !== 'detached') madeDays.delete(day);
@@ -481,6 +503,22 @@ function sqliteStore(db: Database): LogStore {
         const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
         await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
           VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${RETENTION_OBJECT}, ${RETENTION_ACTOR}, ${change.payload}, NULL, ${change.mac})`);
+        return BigInt(next!.n);
+      });
+    },
+    async rotations() {
+      return (await one<RawEntry[]>(db, sql`SELECT coalesce(json_group_array(json(${CHANGE})), '[]') AS v FROM (SELECT * FROM log_changes WHERE object = ${KEY_OBJECT} ORDER BY number) c`)).map(toEntry);
+    },
+    async rotate(change, retire) {
+      // One writer at a time: the transaction is the barrier's locks. The fence's retired tags are hex, a JSON array.
+      return db.transaction(async (tx) => {
+        const tag = retire.toString('hex');
+        const [fence] = await rowsOf<{ held: number }>(tx, sql`SELECT EXISTS (SELECT 1 FROM log_fence f, json_each(f.retired) j WHERE f.only_row AND j.value = ${tag}) AS held`);
+        if (Number(fence?.held) === 1) return null;
+        const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
+        await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+          VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${KEY_OBJECT}, 'system:vault', ${change.payload}, NULL, ${change.mac})`);
+        await rowsOf(tx, sql`UPDATE log_fence SET retired = json_insert(retired, '$[#]', ${tag}) WHERE only_row`);
         return BigInt(next!.n);
       });
     },
