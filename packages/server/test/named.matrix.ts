@@ -27,6 +27,7 @@ import { createDatabase } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
+import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute } from '../src/plugins.ts';
@@ -72,7 +73,9 @@ type Row = { asked: (typeof ASKED)[number]; lost: (typeof LOST)[number]; place: 
 type Key = (typeof KEYS)[number];
 /** A map out of date by its place's slug taken since, over each place and admission, the window passed (a use would lock). */
 const reused = (asked: Row['asked']) => asked === 'renamed, its slug reused' || asked === 'deleted, its slug reused';
-const ROWS: Row[] = [
+const labelOf = (row: Row) => `${row.asked} / ${row.lost} / ${row.place} / ${row.admission} / window ${row.window}`;
+/** Every row, generated, which CI runs in shards, a slice each (`shardOf`). */
+const ROWS: Row[] = shardOf(import.meta.url, [
   ...ASKED.flatMap((asked) => PLACES.filter((place) => place !== 'its seal replaced').flatMap((place) => ADMISSIONS.flatMap((admission) =>
     (reused(asked) ? (['passed'] as const) : WINDOWS).map((window) => ({ asked, lost: 'revoked' as const, place, admission, window }))))),
   // Standing, where a key's answer may differ, as asked at a live place: those they may not have, alike.
@@ -80,7 +83,7 @@ const ROWS: Row[] = [
   // A place whose seal a writer replaced: refused alike, and a token revoked 401 there as anywhere (review r1 of D153).
   ...(['never', 'while standing', 'after'] as const).flatMap((asked) => (['revoked', 'token revoked'] as const).flatMap((lost) => (['live', 'its seal replaced'] as const).map((place) =>
     ({ asked, lost, place, admission: 'as asked' as const, window: 'passed' as const })))).filter((row) => row.lost === 'token revoked' || row.place === 'its seal replaced'),
-];
+], labelOf);
 /** A key they may have: they stand, and it is held with its value. Its answer is theirs to know of. */
 const usable = (row: Row, key: Key) => row.lost === 'they stand' && (key === 'held' || key === 'made since' || key === 'used before');
 
@@ -472,7 +475,7 @@ test(`through the app, a person is answered alike for every key they may not hav
         } finally {
           if (row.admission === 'past the floor') await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
         }
-        const label = `${row.asked} / ${row.lost} / ${row.place} / ${row.admission} / window ${row.window}`;
+        const label = labelOf(row);
         // The keys they may not have, each answered alike (D153); a key they may have is theirs to know of.
         const refused = answers.filter((a) => !usable(row, a.key));
         const [first] = refused;

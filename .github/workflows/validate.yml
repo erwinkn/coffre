@@ -98,24 +98,77 @@ jobs:
         env:
           COFFRE_TEST_LOG: '0.15'
 
-  matrices:
+  # The generated matrices of 0.15's use by name (T158, D153): every key a caller may not have answered alike, whatever
+  # the vault's map holds, each statement slowed. Three quarters of an hour in one run, so shards, like the Formal
+  # model's: each runs a slice of every matrix's cases on one engine (`scripts/matrix-shard.ts`), from its own
+  # database, set up and analysed as the whole run's is, and reports which cases it ran; `Use matrices` is the one job
+  # Validate asks about, which holds them to running every case exactly once (`scripts/matrix-coverage.mjs`).
+  matrices-shard:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
-    # The generated matrices of 0.15's use by name (T158, D153): every key a caller may not have answered alike, whatever
-    # the vault's map holds, each statement slowed. Longer than the suites' 30 minutes, so beside them.
-    name: Use matrices
+    name: Use matrices shard (${{ matrix.engine }} ${{ matrix.shard }})
+    strategy:
+      # Every shard's failures in one run, rather than the first's.
+      fail-fast: false
+      matrix:
+        # On 2026-10-30 (#431), in one run: Postgres 46 minutes (the vault's matrix 45, the server's 41, side by side),
+        # SQLite 16 (the vault's; the server's 3). A quarter or a half each, about 12 minutes and 8, setup included.
+        include:
+          - { engine: postgres, shard: 1/4 }
+          - { engine: postgres, shard: 2/4 }
+          - { engine: postgres, shard: 3/4 }
+          - { engine: postgres, shard: 4/4 }
+          - { engine: sqlite, shard: 1/2 }
+          - { engine: sqlite, shard: 2/2 }
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 30
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/prepare
         with:
           build: 'false'
-      - name: Use matrices, Postgres
+      - name: Use matrices, ${{ matrix.engine }} ${{ matrix.shard }}
         run: pnpm test:matrices
-      - name: Use matrices, SQLite
-        run: pnpm test:matrices:sqlite
+        env:
+          COFFRE_TEST_ENGINE: ${{ matrix.engine }}
+          COFFRE_TEST_SHARD: ${{ matrix.shard }}
+          COFFRE_TEST_SHARD_REPORT: ${{ runner.temp }}/matrix-shard
+      - name: Keep the cases it ran
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: use-matrices-${{ matrix.engine }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/matrix-shard
+          if-no-files-found: error
+          retention-days: 7
+          # A re-run of the shard replaces its attempt before.
+          overwrite: true
+
+  matrices:
+    needs: [changes, matrices-shard]
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    name: Use matrices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every matrix shard
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e '.["matrices-shard"].result == "success"' <<< "$RESULTS"
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.22.1
+      - name: Fetch the cases each shard ran
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: use-matrices-*
+          path: ${{ runner.temp }}/matrix-shards
+      - name: Require every case of every matrix run exactly once, on each engine
+        run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards" postgres sqlite
 
   schema:
     needs: changes

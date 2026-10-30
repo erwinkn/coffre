@@ -64,11 +64,12 @@ test('missing or unknown detector output requires every normal job to pass', () 
 });
 
 // These job predicates use only the shared JS/GitHub boolean operators and
-// string comparisons. Evaluate the actual twelve expressions with known states:
-// the eleven jobs Validate waits on, and the Formal model's plan beside them.
+// string comparisons. Evaluate the actual expressions with known states: the
+// heavy jobs Validate waits on, and the Formal model's plan and the use
+// matrices' shards beside them.
 test('every heavy lane runs unless classification succeeds with a true output', () => {
     const predicates = [...workflow.matchAll(/    if: \$\{\{ (always\(\).*?) \}\}/g)].map((match) => match[1]);
-    assert.equal(predicates.length, jobs.length + 1);
+    assert.equal(predicates.length, jobs.length + 2);
     for (const expression of predicates) {
         const run = new Function('needs', 'always', 'cancelled', `return (${expression});`);
         assert.equal(run(needs(true), () => true, () => false), false);
@@ -119,6 +120,29 @@ test('the shards partition formal.sh and the workflow runs each of them', () => 
     assert.deepEqual([...sharded].sort(), [...all].sort());
     const tampering = list('--shard', 'tampering').stdout.trim().split('\n');
     assert.ok(tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
+});
+
+// `Use matrices` answers for its shards: every one ran and held. That each case ran in exactly one is
+// `scripts/matrix-coverage.mjs`'s, the job's last step (matrix-coverage.test.mjs).
+const matricesGate = workflow.match(/Require every matrix shard\n[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
+test('Use matrices passes on held shards, and on nothing else', () => {
+    for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
+        const run = spawnSync('jq', ['-e', matricesGate], { input: JSON.stringify({ 'matrices-shard': { result } }), encoding: 'utf8', timeout: 5000 });
+        assert.ok([0, 1].includes(run.status), run.stderr);
+        assert.equal(run.status === 0, result === 'success', result);
+    }
+});
+
+test('the use matrices run in shards 1 to n of each engine, which Use matrices checks', () => {
+    const shards = [...workflow.matchAll(/- \{ engine: ([a-z]+), shard: (\d+)\/(\d+) \}/g)].map((m) => ({ engine: m[1], shard: Number(m[2]), of: Number(m[3]) }));
+    const engines = [...new Set(shards.map((s) => s.engine))];
+    assert.deepEqual(engines, ['postgres', 'sqlite']);
+    for (const engine of engines) {
+        const mine = shards.filter((s) => s.engine === engine);
+        assert.deepEqual(mine.map((s) => s.shard), Array.from({ length: mine.length }, (_, i) => i + 1), engine);
+        assert.ok(mine.every((s) => s.of === mine.length), engine);
+    }
+    assert.ok(workflow.includes(`run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards" ${engines.join(' ')}\n`));
 });
 
 test('the plan job and every formal shard run the same exact, pinned Java', () => {
