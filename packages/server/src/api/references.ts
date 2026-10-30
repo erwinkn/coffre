@@ -286,8 +286,9 @@ export type Readable = {
   /** How its value was made, when a client generated it; a reference's is its source's business, and has none here. */
   recipe?: VersionRecipe | null;
   via?: Via;
-  /** A reference's own key, where it is held: what a use names (keys.ts, `OpenItem`). */
+  /** A reference's own key, where it is held: what a use names (keys.ts, `OpenItem`), and the place it is held in. */
   holder?: string;
+  holderAt?: { projectId: string; environmentId: string };
   /** Where a reference's source is, as grants match it. */
   source?: Place;
   through?: string;
@@ -449,6 +450,7 @@ async function valuesIn(
       plaintext: opened.plaintext,
       via: { reference: reference.row.id, seq: Number(reference.row.createdSeq) },
       holder: row.id,
+      holderAt: { projectId: reference.row.holder.projectId, environmentId: reference.row.holder.environmentId },
       source: placeOfRow(source),
     });
   }

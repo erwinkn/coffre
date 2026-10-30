@@ -3,13 +3,13 @@
 // decides on the caller as its sealed rows have them; the app checks the credential's row, its MAC over the token's
 // hash and a handle's places among it, on the rows the use answered, before any value leaves. Several keys go as before until PR B2. With
 // 0.15's log whichever log the suite runs, as a deployment of 0.15 keeps it.
-import test, { after, before } from 'node:test';
+import test, { after, before, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
-import { github, hashToken, signin } from '@coffre/core/identity';
+import { cloudflareAccess, github, google, hashToken, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
@@ -19,6 +19,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials as credentialRows, environments, logBulk, logFence, logUses, vaultGrants } from './db/tables.ts';
+import { TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -35,8 +36,9 @@ const kek = randomBytes(32);
 /** The runtime, and the same with a vault that serves nothing by name: a request as before PR B. */
 let runtime: CoffreRuntime;
 let unnamed: CoffreRuntime;
-/** The vault's calls by name, as the runtime makes them. */
+/** The vault's calls by name, as the runtime makes them, and every call of the vault's, by method. */
 let named = 0;
+const calls: string[] = [];
 /** What the proxy's upstream was sent: the key it injected, if any. */
 const sent: (string | null)[] = [];
 
@@ -50,9 +52,17 @@ const credentials = {
   ro: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}'), egress, methods: ['GET'] },
 };
 
-function runtimeOver(vault: Vault): CoffreRuntime {
+/**
+ * `auth`: the deployment's sign-in: coffre's own through GitHub, or Google once it stops configuring GitHub, or
+ * Cloudflare Access, under which no coffre token is a credential.
+ */
+function runtimeOver(vault: Vault, auth: 'github' | 'google' | 'access' = 'github'): CoffreRuntime {
   const config = resolveConfig({
-    publicUrl: ORIGIN, vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64'),
+    publicUrl: ORIGIN, vault,
+    auth: auth === 'access'
+      ? cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: 'coffre-aud' })
+      : signin({ providers: [(auth === 'github' ? github : google)({ clientId: 'a', clientSecret: 'b' })] }),
+    auditChainKey: deps.chainKey.toString('base64'),
     plugins: [credentialProxy({ credentials, cacheSeconds: 0 })],
   });
   const made = createRuntime(config, deps.db, vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
@@ -66,9 +76,10 @@ function counted(vault: Vault, serves: boolean): Vault {
     get(target, key) {
       if (key === 'useNamed' && !serves) return undefined;
       const value: unknown = Reflect.get(target, key, target);
-      if (key !== 'useNamed' || typeof value !== 'function') return value;
+      if (typeof value !== 'function') return value;
       return (...args: unknown[]) => {
-        named += 1;
+        if (key === 'useNamed') named += 1;
+        calls.push(String(key));
         return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
       };
     },
@@ -122,22 +133,29 @@ async function entriesSince(seq: bigint): Promise<string[]> {
 }
 const newest = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).reduce((max, row) => (row.seq > max ? row.seq : max), -1n);
 
-test('one key, by its path or as a list of one, a person\'s or a service\'s, is the vault\'s one call by name; several are not', async () => {
+test('one key, by its path or as a list of one, a person\'s CLI session or token or a service\'s, is the vault\'s one call by name; several are not', async () => {
   const token = await personalToken(DEV);
   const root = clientFor(deps, ROOT);
   await root.members.add('token:ci');
   await root.access.set('token:ci', { 'market/dev': 'viewer' });
   const service = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'ci', { label: 'ci', expiresInDays: 1 })).token;
+  const cli = await cliSession(DEV);
+  const browser = await browserSession(DEV);
+  // Warm: the isolate's map holds the names, so that each read below is one call whatever it held before.
+  for (const caller of [token, service, cli, browser]) await reveal(caller, { path: 'market/dev/API_KEY' });
   for (const [name, caller, body] of [
     ['its path', token, { path: 'market/dev/API_KEY' }],
     ['a list of one', token, { path: 'market/dev', keys: ['API_KEY'] }],
+    ["a CLI session's", cli, { path: 'market/dev/API_KEY' }],
+    ["a browser session's", browser, { path: 'market/dev/API_KEY' }],
     ["a service's", service, { path: 'market/dev/API_KEY' }],
   ] as const) {
     named = 0;
+    calls.length = 0;
     const read = await reveal(caller, body);
     assert.equal(read.status, 200, JSON.stringify(read.body));
     assert.deepEqual(read.body.values, { API_KEY: DEV_KEY }, name);
-    assert.equal(named, 1, `${name}: by name`);
+    assert.deepEqual(calls, ['useNamed'], `${name}: the vault's one call, by name`);
   }
   named = 0;
   const several = await reveal(token, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] });
@@ -145,16 +163,18 @@ test('one key, by its path or as a list of one, a person\'s or a service\'s, is 
   assert.equal(named, 0, 'several keys: as before, until PR B2');
 });
 
-test('a key the place does not hold, and a sensitive one a list of one leaves out, are answered and logged as before', async () => {
+test('a key the place does not hold is answered as every refusal of a key is, and logged as before; a sensitive one a list of one leaves out, as before (D153)', async () => {
   const token = await personalToken(DEV);
   for (const body of [{ path: 'market/dev/NEVER_MADE' }, { path: 'market/dev', keys: ['NEVER_MADE'] }, { path: 'market/dev', keys: ['TOKEN'] }]) {
-    const answers: unknown[] = [];
+    const answers: { status: number; values: unknown; sensitive: unknown; error: unknown; entries: string[] }[] = [];
     for (const at of [unnamed, runtime]) {
       const since = await newest();
       const read = await reveal(token, body, at);
       answers.push({ status: read.status, values: read.body.values, sensitive: read.body.sensitive, error: read.body.error, entries: await entriesSince(since) });
     }
-    assert.deepEqual(answers[1], answers[0], JSON.stringify(body));
+    const [before, now] = answers;
+    // By its path, a key never made: no such key, or no access to it, alike; the log says which, as before.
+    assert.deepEqual(now, body.path.endsWith('NEVER_MADE') ? { ...before!, error: 'not_available' } : before, JSON.stringify(body));
   }
 });
 
@@ -205,15 +225,276 @@ test('revoked, someone learns nothing of a key made since, by its path or a list
   for (const at of [runtime, busy]) {
     const logged = (await usesLogged(db.owner)).length;
     for (const ask of [(key: string) => ({ path: `market/dev/${key}` }), (key: string) => ({ path: 'market/dev', keys: [key] })]) {
+      const since = await newest();
       const made = await reveal(token, ask('MADE_SINCE'), at);
+      const recorded = await entriesSince(since);
+      const between = await newest();
       const never = await reveal(token, ask('NEVER_MADE'), at);
-      assert.equal(made.status, at === busy ? 503 : 403, JSON.stringify(made.body));
+      assert.equal(made.status, at === busy ? 503 : 404, JSON.stringify(made.body));
+      if (at !== busy) assert.deepEqual(made.body, { error: 'not_available', message: 'not available: no such key, or no access to it' });
       assert.deepEqual(made, never, 'alike');
+      // The app records each request alike, refused (R53); busy, as ever.
+      assert.deepEqual(recorded, await entriesSince(between), 'logged alike');
+      if (at !== busy) assert.ok(recorded.some((entry) => entry.includes('deny')), JSON.stringify(recorded));
     }
-    // Refused, each request of a key held is logged (R53), and none of one never made; busy, none at all.
-    assert.equal((await usesLogged(db.owner)).length - logged, at === busy ? 0 : 2);
+    // A key made since has no row of the cap's of hers: its use would take her principal's lock, so her standing decides
+    // first and refuses her there, as for the key never made, and the vault's log has no entry of either (T158).
+    assert.equal((await usesLogged(db.owner)).length - logged, 0);
   }
 });
+
+test("revoked, with their principal's lock held, someone is answered byte for byte alike, at once, for a key made since, one used before, one deleted since and one never made, by the API and the proxy (T158; review r4 of #412)", async () => {
+  const root = clientFor(deps, ROOT);
+  const PROBE = 'probe@acme.example';
+  const places = ['market/t158-used', 'market/t158-gone', 'market/t158-made', 'market/t158-never'];
+  for (const path of places) await root.environments.create(path);
+  // The proxy's credential injects `API_KEY`: each place holds it, or not, as its name says.
+  for (const path of ['market/t158-used', 'market/t158-gone']) await root.secrets.set(path, { API_KEY: 'sk_t158' });
+  await root.secrets.set('market/dev', { T158_USED: 'used', T158_GONE: 'gone' });
+  await root.members.add(`user:${PROBE}`);
+  await root.access.set(`user:${PROBE}`, Object.fromEntries([...places, 'market/dev'].map((path) => [path, 'developer' as const])));
+  const token = await personalToken(PROBE, Object.fromEntries([...places, 'market/dev'].map((path) => [path, 'developer' as const])));
+  const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, PROBE)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: places })).token;
+  // Used while they stood there, each fresh in their cap's set since.
+  for (const key of ['T158_USED', 'T158_GONE']) assert.equal((await reveal(token, { path: `market/dev/${key}` })).status, 200);
+  for (const path of ['market/t158-used', 'market/t158-gone']) assert.equal((await proxied(`/use/${path}/api/v1/thing`, handle)).status, 204);
+  await root.access.set(`user:${PROBE}`, Object.fromEntries([...places, 'market/dev'].map((path) => [path, null])));
+  await root.secrets.set('market/dev', { T158_GONE: null, T158_MADE: 'made' });
+  await root.secrets.set('market/t158-gone', { API_KEY: null });
+  await root.secrets.set('market/t158-made', { API_KEY: 'sk_t158_made' });
+  const asked = async () => {
+    const answers: { what: string; answer: unknown; ms: number }[] = [];
+    for (const key of ['T158_MADE', 'T158_USED', 'T158_GONE', 'T158_NEVER']) {
+      for (const body of [{ path: `market/dev/${key}` }, { path: 'market/dev', keys: [key] }]) {
+        const started = performance.now();
+        const answer = await reveal(token, body);
+        answers.push({ what: `${key} ${body.keys === undefined ? 'path' : 'keys'}`, answer, ms: performance.now() - started });
+      }
+    }
+    for (const path of ['market/t158-made', 'market/t158-used', 'market/t158-gone', 'market/t158-never']) {
+      const started = performance.now();
+      const answer = await proxied(`/use/${path}/api/v1/thing`, handle);
+      answers.push({ what: path, answer, ms: performance.now() - started });
+    }
+    return answers;
+  };
+  // Their principal's lock (0022: 1668244066, hashtext(principal)), held on a connection of its own: a use that took it
+  // would wait past the hot login's 1 s lock_timeout, and answer 503.
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const held = TEST_ENGINE === 'postgres'
+    ? db.owner.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${PROBE}`}))`);
+      await released;
+    })
+    : Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Twice, held all the while: the first asks with names this isolate has not read yet, the second with each mapped,
+  // an id or none; a key whose first use wrote its row of the cap's would wait no more by the second.
+  const rounds: Awaited<ReturnType<typeof asked>>[] = [];
+  try {
+    for (let round = 0; round < 2; round += 1) rounds.push(await asked());
+  } finally {
+    release();
+    await held;
+  }
+  for (const answers of rounds) {
+    const api = answers.filter(({ what }) => what.startsWith('T158_'));
+    const proxy = answers.filter(({ what }) => what.startsWith('market/'));
+    assert.equal((api[0]!.answer as { status: number }).status, 404, JSON.stringify(api[0]));
+    assert.equal((proxy[0]!.answer as { status: number }).status, 404, JSON.stringify(proxy[0]));
+    for (const { what, answer } of api) assert.deepEqual(answer, api[what.endsWith('path') ? 0 : 1]!.answer, what);
+    for (const { what, answer } of proxy) assert.deepEqual(answer, proxy[0]!.answer, what);
+    for (const { what, ms } of answers) assert.ok(ms < 900, `${what}: ${Math.round(ms)} ms, no lock waited for`);
+  }
+});
+
+// D154 (R64): the one exception to answering every key alike, pinned so that a change to it is deliberate. A credential
+// is checked twice: the vault checks its own seal over the row (`routeOf`), the app its MAC (APP_KEY) on the rows the
+// vault's named call answered, after that call. A row whose seal holds and whose MAC does not, which only a database
+// writer can make, is decided by the vault first: a held key its caller has not used this window takes the principal's
+// lock, a key never made does not. So under contention the one answers 503, the other 401. Such a writer reads every
+// key's name in the database already; what must hold is that the request fails closed, 401 and no value, whatever the key.
+test("a credential whose MAC a writer broke, its seal intact, is refused 401 for every key and reads nothing; only under its principal's lock does a held key's 503 differ (D154, R64)", async () => {
+  const root = clientFor(deps, ROOT);
+  const PINNED = 'pinned@acme.example';
+  await root.members.add(`user:${PINNED}`);
+  await root.access.set(`user:${PINNED}`, { 'market/dev': 'developer' });
+  const token = await personalToken(PINNED);
+  await db.owner.update(credentialRows).set({ authMac: randomBytes(32) }).where(eq(credentialRows.tokenHash, hashToken(token)));
+  const ask = async (key: string) => {
+    const read = await reveal(token, { path: `market/dev/${key}` });
+    assert.ok(!JSON.stringify(read.body).includes(DEV_KEY), `${key}: no value`);
+    return read.status;
+  };
+  if (TEST_ENGINE === 'postgres') {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const held = db.owner.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${PINNED}`}))`);
+      await released;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      assert.deepEqual([await ask('API_KEY'), await ask('NEVER_MADE')], [503, 401], "the held key waits for the lock, before the app's check");
+    } finally {
+      release();
+      await held;
+    }
+  }
+  const logged = (await usesLogged(db.owner)).length;
+  assert.deepEqual([await ask('API_KEY'), await ask('NEVER_MADE')], [401, 401]);
+  // The vault made the held key's use before the app's check refused the request: its entry, and nothing else.
+  assert.equal((await usesLogged(db.owner)).length - logged, 1, "the held key's use, in the vault's log");
+});
+
+// Reviews r6 and r7 of D153 (formal/Probing.tla, AcceptedFirst): the vault's "authenticated" is the app's. The named
+// call carries what the deployment's config accepts of a credential, and the vault holds the token's to it first: a
+// browser session whose sign-in provider the deployment no longer configures, or any coffre token once it signs in
+// through Cloudflare Access, is answered as a token no credential has, in that one call, alike for every key, its
+// principal's lock held or not: nothing of the key read, no lock waited for, no use made.
+async function heldAlike(at: CoffreRuntime, ask: (key: string) => Promise<{ status: number }>, person: string) {
+  const asked = async () => {
+    const answers = [];
+    const work = [];
+    for (const key of ['API_KEY', 'NEVER_MADE']) {
+      calls.length = 0;
+      const started = performance.now();
+      answers.push(await ask(key));
+      work.push({ calls: [...calls], fast: performance.now() - started < 900 });
+    }
+    return { answers, work };
+  };
+  // Warm, as an isolate that served one already: what it keeps of the log's version and of the caller, asked once.
+  await ask('WARM');
+  const logged = (await usesLogged(db.owner)).length;
+  const rounds = [];
+  if (TEST_ENGINE === 'postgres') {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const held = db.owner.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${person}`}))`);
+      await released;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      rounds.push(await asked());
+    } finally {
+      release();
+      await held;
+    }
+  }
+  rounds.push(await asked());
+  for (const { answers, work } of rounds) {
+    assert.equal(answers[0]!.status, 401, JSON.stringify(answers[0]));
+    assert.deepEqual(answers[1], answers[0], 'the held key and one never made alike');
+    assert.deepEqual(work[1], work[0], 'in the same calls of the vault, none waiting');
+    assert.ok(work[0]!.fast, 'no lock waited for');
+    assert.ok(!work[0]!.calls.some((method) => method === 'use' || method === 'unwrap'), `nothing used by ids: ${work[0]!.calls.join(', ')}`);
+  }
+  assert.equal((await usesLogged(db.owner)).length, logged, 'no use made');
+}
+
+test("a browser session whose sign-in provider the deployment no longer configures is refused 401 alike for every key, by the vault's one call, before anything of the key (review r6 of D153)", async () => {
+  // Someone who has used no key yet, so that a use of API_KEY would take their principal's lock.
+  const SIGNED = 'signed@acme.example';
+  const root = clientFor(deps, ROOT);
+  await root.members.add(`user:${SIGNED}`);
+  await root.access.set(`user:${SIGNED}`, { 'market/dev': 'developer' });
+  const session = await browserSession(SIGNED);
+  const google = runtimeOver(counted(deps.vault, true), 'google');
+  await heldAlike(google, (key) => reveal(session, { path: `market/dev/${key}` }, google), SIGNED);
+  // Its provider configured, it is served by name, as every other kind.
+  named = 0;
+  const live = await reveal(session, { path: 'market/dev/API_KEY' });
+  assert.deepEqual([live.status, live.body.values, named], [200, { API_KEY: DEV_KEY }, 1]);
+});
+
+test("behind Cloudflare Access, no coffre token is a credential: a handle at the proxy is refused 401 alike for every key, before anything of the key (review r7 of D153)", async () => {
+  const PROXIED = 'proxied@acme.example';
+  const root = clientFor(deps, ROOT);
+  for (const path of ['market/r7-held', 'market/r7-never']) await root.environments.create(path);
+  await root.members.add(`user:${PROXIED}`);
+  await root.access.set(`user:${PROXIED}`, { 'market/r7-held': 'developer', 'market/r7-never': 'developer' });
+  await root.secrets.set('market/r7-held', { API_KEY: 'sk_r7' });
+  const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, PROXIED)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: ['market/r7-held', 'market/r7-never'] })).token;
+  // A handle the deployment took under its sign-in, which has used no key yet: a use of API_KEY would take its
+  // principal's lock.
+  assert.equal((await proxied('/use/market/r7-never/api/v1/thing', handle)).status, 404, 'checked under sign-in');
+  const access = runtimeOver(counted(deps.vault, true), 'access');
+  await heldAlike(access, (key) => proxied(`/use/market/${key === 'API_KEY' ? 'r7-held' : 'r7-never'}/api/v1/thing`, handle, access), PROXIED);
+});
+
+// Review r8 of D153 (formal/Probing.tla, OneClock): the vault judges a credential's end at the use's `at`, and the app's
+// own check after it judges its expiry at that same instant. A token live when its request began is that request's:
+// every key is answered as for a live credential, the held one served and one never made refused as any, never the
+// vault's work for a use followed by the app's 401 (a key held, its use made and logged, then refused) beside a key
+// never made refused at once. Here the clock passes the token's expiry between the vault's call and the app's check.
+test("a token that expires during its request is that request's, judged at its one instant by the vault and the app alike: every key answered as for a live credential (review r8 of D153)", async () => {
+  const EXPIRING = 'expiring@acme.example';
+  const root = clientFor(deps, ROOT);
+  await root.members.add(`user:${EXPIRING}`);
+  await root.access.set(`user:${EXPIRING}`, { 'market/dev': 'developer' });
+  const issued = await runtime.signin!.issuePersonalToken(await contextFor(deps, EXPIRING), { label: 'expiring', expiresInMinutes: 1, scope: { 'market/dev': 'developer' } });
+  const expiresAt = Date.parse(issued.expiresAt);
+  const real = deps.vault.useNamed!;
+  const ask = async (key: string) => {
+    // Just before its expiry when the request begins, and past it once the vault has answered.
+    mock.timers.enable({ apis: ['Date'], now: expiresAt - 300 });
+    deps.vault.useNamed = async (input) => {
+      const answered = await real.call(deps.vault, input);
+      mock.timers.setTime(expiresAt + 700);
+      return answered;
+    };
+    try {
+      return await reveal(issued.token, { path: `market/dev/${key}` });
+    } finally {
+      deps.vault.useNamed = real;
+      mock.timers.reset();
+    }
+  };
+  const logged = (await usesLogged(db.owner)).length;
+  const asked = [await ask('API_KEY'), await ask('NEVER_MADE')];
+  assert.deepEqual([asked[0]!.status, asked[0]!.body.values], [200, { API_KEY: DEV_KEY }], JSON.stringify(asked[0]));
+  assert.deepEqual([asked[1]!.status, asked[1]!.body.error], [404, 'not_available'], JSON.stringify(asked[1]));
+  assert.equal((await usesLogged(db.owner)).length, logged + 1, 'the held key used, as the vault decided');
+});
+
+// Review r12 of D153: a key revealed while its grant stood, then refused once it is revoked, is refused as a key never
+// made is, request after request: the vault's named call never runs the cached form an earlier use's seals would choose
+// (use-named.test.ts holds the form; the matrices its buffers). Byte for byte, in one call by name each.
+test("after a key's reveal and its grant's revoke, it and a key never made are refused alike, request after request (review r12 of D153)", async () => {
+  const REVEALED = 'revealed@acme.example';
+  const root = clientFor(deps, ROOT);
+  await root.members.add(`user:${REVEALED}`);
+  await root.access.set(`user:${REVEALED}`, { 'market/dev': 'developer' });
+  const token = await personalToken(REVEALED);
+  assert.deepEqual((await reveal(token, { path: 'market/dev/API_KEY' })).body.values, { API_KEY: DEV_KEY });
+  await root.access.set(`user:${REVEALED}`, { 'market/dev': null });
+  for (let round = 0; round < 3; round += 1) {
+    named = 0;
+    const [held, missing] = [await reveal(token, { path: 'market/dev/API_KEY' }), await reveal(token, { path: 'market/dev/NEVER_MADE' })];
+    assert.equal(held.status, 404, JSON.stringify(held));
+    assert.deepEqual(held, missing, `round ${round}`);
+    assert.equal(named, 2, 'each one call by name');
+  }
+});
+
+/** A person's browser session, signed in through GitHub. */
+async function browserSession(person: string): Promise<string> {
+  const signed = await runtime.signin!.completeSignin({ provider: 'github', subject: `browser-${person}`, emails: [person], name: null }, { requestId: crypto.randomUUID(), sourceIp: null, label: 'Firefox' });
+  assert.ok(signed.ok);
+  return signed.credential.token;
+}
+
+/** A person's CLI session, from a device login they approved. */
+async function cliSession(person: string): Promise<string> {
+  const started = await runtime.signin!.startDevice({ clientLabel: 'laptop', sourceIp: null });
+  await runtime.signin!.decideDevice(await contextFor(deps, person), started.userCode, true);
+  const polled = await runtime.signin!.pollDevice(started.deviceCode, { requestId: crypto.randomUUID(), sourceIp: null });
+  if (polled.status !== 'approved') throw new Error('the device login was not approved');
+  return polled.credential.token;
+}
 
 /** A request through the proxy with a handle: its status and body. */
 async function proxied(url: string, handle: string, at: CoffreRuntime = runtime): Promise<{ status: number; body: string }> {
@@ -231,7 +512,7 @@ async function both<T>(ask: (at: CoffreRuntime) => Promise<T>): Promise<{ answer
   return answers;
 }
 
-test('a grant a writer put back after its revoke stands for nothing: the request asks the vault, and is answered as before (review r1 of #412)', async () => {
+test('a grant a writer put back after its revoke stands for nothing: the request asks the vault, and is answered as before, and reported (review r1 of #412)', async () => {
   const token = await personalToken(FORGED);
   assert.equal((await reveal(token, { path: 'market/dev/API_KEY' })).status, 200);
   const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${FORGED}`));
@@ -248,7 +529,7 @@ test('a grant a writer put back after its revoke stands for nothing: the request
   assert.ok((await entriesSince(since)).includes('vault.tampered deny mac'), 'the forged grant reported');
 });
 
-test("the proxy's use of a plain value, or of a key its environment does not hold, is logged as before (review r1 of #412)", async () => {
+test("the proxy's use of a plain value is answered and logged as before; of a key its environment does not hold, as every refusal of a key is (review r1 of #412; D153)", async () => {
   const root = clientFor(deps, ROOT);
   for (const path of ['market/plain', 'market/empty']) await root.environments.create(path);
   await root.secrets.set('market/plain', { API_KEY: { value: 'pk_public_0123', sensitivity: 'plain' } });
@@ -258,14 +539,16 @@ test("the proxy's use of a plain value, or of a key its environment does not hol
     const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: [`market/${env}`] })).token;
     for (const url of [`/use/market/${env}/api/v1/thing`, '/use/api/v1/thing']) {
       const [before, now] = await both((at) => proxied(url, handle, at));
-      assert.deepEqual(now, before, `${env}: ${url}`);
+      if (env === 'plain') assert.deepEqual(now, before, `${env}: ${url}`);
+      // Its credential's key not held there: no such key, or no access to it, logged as a refusal of it.
+      else assert.deepEqual(now, { answer: { status: 404, body: '{"error":"credential_proxy","message":"not available: no such key, or no access to it","reason":"not_available"}' }, entries: ['secret.read deny'] }, `${env}: ${url}`);
       // Its entry names the credential, its host, and the egress it left through (review r2 of #412).
       if (now!.answer.status === 204) assert.ok(now!.entries.some((entry) => entry.startsWith('credential.use') && entry.includes('"egress":true')), `${env}: ${url}: ${JSON.stringify(now)}`);
     }
   }
 });
 
-test("a handle whose person lost their grant is refused by the use, logged, as before: the handle's check decides nothing of what they may do (review r1 of #412)", async () => {
+test("a handle whose person lost their grant is refused by the use, as every refusal of a key is, and logged: the handle's check decides nothing of what they may do (review r1 of #412; D153)", async () => {
   const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, LEFT)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: ['market/dev'] })).token;
   assert.equal((await proxied('/use/api/v1/thing', handle)).status, 204);
   await clientFor(deps, ROOT).access.set(`user:${LEFT}`, { 'market/dev': null });
@@ -273,8 +556,9 @@ test("a handle whose person lost their grant is refused by the use, logged, as b
   // its handle's check first, `handle`, then the use).
   for (const url of ['/use/market/dev/api/v1/thing', '/use/api/v1/thing', '/use/api/thing']) {
     const [before, now] = await both((at) => proxied(url, handle, at));
-    assert.deepEqual(now, before, url);
+    assert.deepEqual(now!.entries, before!.entries, `${url}: logged as before`);
     assert.ok(now!.entries.some((entry) => entry.includes('deny')), `${url}: the refusal logged: ${JSON.stringify(now)}`);
+    assert.deepEqual(now!.answer, { status: 404, body: '{"error":"credential_proxy","message":"not available: no such key, or no access to it","reason":"not_available"}' }, url);
   }
 });
 

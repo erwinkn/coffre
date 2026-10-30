@@ -7,7 +7,7 @@ import { EVERYWHERE, type CallerKind, type InstanceRole } from '@coffre/core/acc
 import type { Purpose } from '@coffre/core/vault';
 
 import { refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS, type BulkRows } from '../src/bulk.ts';
-import { decideUse, useEnvironments, type UseCode, type UseRequest, type UseView } from '../src/decide.ts';
+import { checkSeals, decideUse, standingRefusal, useEnvironments, type UseCode, type UseRequest, type UseView } from '../src/decide.ts';
 import { limitOp, objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
 import { emptyReplay, readUse, replay } from '../src/log-replay.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -239,8 +239,11 @@ test(`rows that are not the replay's change a decision only to stale or tampered
   const truth = decideUse(SEAL_KEYS, replayView, request);
   const capOnly = bulkMoved && (live === null || live === 'bulk_limit') && (truth === null || truth === 'bulk_limit');
   if (live !== truth) assert.ok(live === 'stale' || live === 'tampered' || capOnly, `live ${live}, the replay ${truth}`);
-  // The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught.
-  const weighed = inputsOf(replayView, request);
+  // The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught. The key's own
+  // only once the caller's standing, which comes first, lets it on (T158, review d5 of #416): a caller it refuses is
+  // refused alike whatever the key's rows, which the log refuses too.
+  const stands = standingRefusal(checkSeals(SEAL_KEYS, replayView, request), request) === null;
+  const weighed = stands ? inputsOf(replayView, request) : standingInputsOf(replayView, request);
   if (weighed.some((key) => perturbed.has(key))) assert.ok(live === 'stale' || live === 'tampered', `a weighed input was not the log's, and live answered ${live}`);
 }, settings));
 
@@ -258,6 +261,20 @@ function edited(row: Input): Input {
 }
 
 /** The object keys a decision on `view` weighs, in its order. */
+/** The inputs the caller's standing weighs: theirs, the roles, the policy, the key's row, the place where it is held or sought. */
+function standingInputsOf(view: UseView, request: UseRequest): string[] {
+  const credential = view.credential.row;
+  const stand = view.secret.row === null ? request.place : view.secret.row.environmentId;
+  const place = stand === null ? null : view.environments.get(stand)?.row ?? null;
+  return [
+    objectKey({ kind: 'credential', id: request.credential }),
+    ...(credential === null ? [] : [objectKey({ kind: 'principal', id: credential.principal })]),
+    objectKey(ROLES_REF), objectKey(POLICY_REF), objectKey({ kind: 'secret', id: request.secretId }),
+    ...(stand === null ? [] : [objectKey({ kind: 'environment', id: stand })]),
+    ...(place?.owner != null && place.parentId !== null ? [objectKey({ kind: 'environment', id: place.parentId })] : []),
+  ];
+}
+
 function inputsOf(view: UseView, request: UseRequest): string[] {
   const credential = view.credential.row;
   const secret = view.secret.row;

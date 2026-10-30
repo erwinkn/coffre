@@ -489,15 +489,90 @@ window of fifteen minutes. #292's review.
 
 ### Probing.tla
 
-What someone whose grant was revoked learns of a place's keys by asking
-for them: nothing. Two runs go side by side, alike but for one thing: in
-run A someone makes `API_KEY` after the revoke, a sealed value or a plain
-one; in run B nobody does. Ada asks for it, by its path or the proxy,
-while the vault comes and goes from overload, and every answer she gets
-must be the same in both runs (`SameAnswer`), a self-composition: what
-would tell them apart is a key she may not know of. Review r2 of #406
-found the hole this closes: a busy use's 503 for a key made since beside
-a 403 for one never made.
+What someone learns of a place's keys she may not use, by asking for them:
+nothing, neither from what she is answered nor from how long it takes
+(D153: one path decides whether the key exists and she may have it; yes,
+the value; no, one answer, whatever the reason). Two runs go side by side,
+alike in everything but the keys: in run A, `API_KEY` is a key someone
+makes, a sealed value or a plain one, before her grant is revoked or
+after, deletes and makes again, or whose value goes while it is held (a
+reference whose source is deleted, or that has ended); in run B nobody
+ever makes one. Ada asks for it, by its path or the proxy, while the vault
+comes and goes from overload and another call may hold her principal's
+lock; her grant may be revoked, lapse, or let her use values and not read
+them. Whenever she may use the key in neither run, the answers must be the
+same (`NoIsFixed`), a self-composition: its status, how many of the
+vault's calls it took, and whether one of them waited for a lock. Once she
+may use it, the key is hers to know of, and what follows may vary. Review
+r2 of #406 found the first hole this closes, a busy use's 503 for a key
+made since beside a 403 for one never made; reviews r1 to r4 of #412 found
+it again each round, through the bulk cap's row, until T158 decided before
+the lock (`NoLockForNo`: no `no` waits for her principal's lock); review
+d5 of #416 found it in the reasons themselves, `ended` for a reference
+whose source was deleted beside `no_grant` for a key never made, which
+D153 answers alike; review r2 of D153 found it in the route, a reference
+whose source was pointed elsewhere around the log sent to the app's path,
+three calls and a lock wait, where a key never made took one call by name
+(`OneRoute`: every request takes the same route whatever the key is and
+whatever the isolate holds, its map and its seals).
+
+W259's buffer counts found it once more inside the one call, where no
+answer shows it: the call read the key by its name, its row, a reference
+and its source, before the vault decided her standing on what it read, so
+a refusal of a reference cost 83 to 110 buffers beside 42 to 54 for a key
+never made (D150's fallback D, W268). Each answer now carries what its
+calls read before deciding (`work`): nothing, only rows no key decides
+(`caller`: her credential, account, grants, the roles, the place), or the
+key as the run holds it. Whenever she has no standing for what she asks
+there, neither run's call read anything of the key (`NoKeyBeforeStanding`):
+no name's index, no row of a key, a reference or a source. An absolute,
+not run A against run B, whose key is never made: compared, both runs
+could probe the name's index alike. A caller with standing may see a key's
+shape in what its refusal costs: she may know the place's key names (R6).
+
+The isolate's map of a request's names to ids (`UseCache`) is anything at
+all, chosen anew for each request and for each run on its own (D150 after
+review d4 of #416, D153): nothing yet; her credential's id or another's;
+the place the request names now (`here`), another (`there`: the one
+renamed away from those slugs, its slug taken by a new one, or any other,
+where Ada may stand and run A makes and deletes a key of that name too),
+or one archived or never made; and the key's id, none, `API_KEY`'s in
+`here`, one no key has, or the key of that name in `there`. So what a
+`no` costs may hang on neither the key nor the map, and no list of stale
+states is left to miss one. `AnsweredAsNamed` holds that the map costs
+calls and never another decision (a busy answer aside, which decides
+nothing).
+
+The vault's "authenticated" is the app's (reviews r6 and r7 of D153). The
+app checks a named request's credential after the vault's one call, on the
+rows it answered, so nothing that call does may hang on the key until the
+credential is settled: the leak is the wait, not the answer. So every check
+the app makes of a credential is one of these, and a new one goes in the
+first or the vault learns it:
+
+- what the deployment's config accepts, which the call carries
+  (`NamedUseInput.accepts`) and the statement holds the credential to before
+  it reads anything else, answering one the app would refuse as a token no
+  credential has (`AcceptedFirst`): coffre's own sign-in (under Cloudflare
+  Access no coffre token is a credential), and for a browser session a
+  sign-in provider the deployment configures;
+- the token's kind, decided before any call (`NAMED_KINDS`, `refusedByKind`);
+- a fact the vault decides on itself before any lock: revoked, expired, an
+  earlier generation (`credentialEnded`), an identity unlinked or a trust
+  binding ended, which each revoke the credential in the same change. Its
+  expiry, the one that hangs on the clock, the app judges at the use's
+  `at`, the vault's instant (`OneClock`; review r8): a token live when its
+  request began is that request's, which the use's 3 s deadline bounds;
+  revocation and generation stay live checks (`credentialStill`);
+- a row forged around the app, its MAC broken and its seal whole: D154's
+  exception, the request refused 401 whatever the key
+  ([Limits](architecture.md#limits)).
+
+The model's credential may be a browser session, whose provider the
+deployment may stop configuring (`Unconfigure`), and the deployment may
+move to Cloudflare Access (`BehindAccess`); `ProbingProvider` and
+`ProbingAccess` take each alone. Any request's credential may expire
+while it is under way (`Expiries`).
 
 One step is one request, whole. `CallerFromUse` is the code's shape, not a
 protection: before PR B, an answer about Ada kept from an earlier request
@@ -507,24 +582,51 @@ is, sealed (`useByName`, `Vault.useNamed`).
 
 | Protection, in the code | Turned off, TLC finds |
 |---|---|
-| A key the place does not hold is decided by the vault, on Ada's standing where it was sought first, `missing` only if she may act there (`decideChecked`) | a 403 for a key made since, a 404 for one never made (`SameAnswer`, `Probing`) |
-| A plain value goes back only once the vault has decided on her standing, as a missing key does (`decideChecked`) | a plain value made since handed back, a 404 for one never made (`SameAnswer`, `Probing`) |
-| That decision is admitted as a use is, and busy as one is, before anything is read (`useNamed`) | a 503 for a key made since, a 403 or 404 for one never made (`SameAnswer`, `Probing`) |
-| A use late once admitted (it waited for Ada's principal's lock, for the cap's row of a key she has not used in the window, which a key never made never does) first asks the vault for her standing at the place, in a call that waits for no lock and reads no key: refused there, it is refused as any key is (`useNamed`) | her principal's lock held past the deadline by another call: a 503 for a key made since, before a request of hers for it writes its cap's row, a 403 for one never made, and the reverse after (`SameAnswer`, `Probing`; reviews r1 and r2 of #412) |
-| That call runs within the place in admission the late use held, once the use's own call, left behind at its deadline, has let it go (`useNamed`, `leftBehind`) | admission full, the late use's own call holding the last place: its standing refused busy, a 503 for a key made since, a 403 for one never made (`SameAnswer`, `Probing`; review r3 of #412) |
+| Every refusal of the key she asked for is one answer, `not_available` (404): no standing, none to read, no such key, a reference ended or whose source is gone, a row put back; the reason goes to the audit log alone (`refusedAlike`, `notAvailable`; D153) | a reference ended `ended`, a key never made `missing`, to someone who may use neither (`NoIsFixed`, `Probing`; review d5 of #416) |
+| A named use's first call reads what the request names by its names (its credential by its token's hash, the place by its slugs or a handle's own, the key by its name there), whatever the isolate's map holds; the map's ids only let that call write the use's entry and take the lock, when they are the names' now (`use_credential`, migration 0045, `v_right`; `useNamed`; D153) | a name the map has not read costs its read first, a `no` 2 calls where a mapped one takes 1; ids out of date, read again (`NoIsFixed`, `Probing`) |
+| A key the place does not hold is decided by the vault, on Ada's standing where it was sought, in the same call (`decideChecked`) | a 403 for a key made since, a 404 for one never made (`NoIsFixed`, `Probing`) |
+| A plain value goes back only once the vault has decided the use, as a missing key does (`decideChecked`) | a plain value made since handed back, a 404 for one never made (`NoIsFixed`, `Probing`, with W268's gate, below, off too: it refuses her before any plain value is reached) |
+| That decision is admitted as a use is, and busy as one is, before anything is read (`useNamed`) | a 503 for a key made since, a 403 or 404 for one never made (`NoIsFixed`, `Probing`) |
+| A use whose key would take Ada's principal's lock (it has no fresh row of the cap's of hers, which a key never made never needs) takes it only on its use decided first, key and all, in the same request: the call locks and writes nothing and answers `decide`, the vault refuses her on its rows as for any key, and only a use it allows is made, by a second call (`use_credential`, migration 0045, `p_decided`; `useOnce`; T158, D153) | her principal's lock held by another call: a use of a key made since waits for it, 503 past its deadline, or a refusal a lock wait later, beside one at once for a key never made (`NoIsFixed`, `NoLockForNo`, `Probing`; reviews r1 to r4 of #412) |
+| Every such use decides, each time: the isolate keeps no use it allowed for a later one to take the lock on in its first call (`DecideEachLock`; D153, which dropped T158's `stood`, a yes kept per purpose that needed four protections of its own: the log's newest change, the ends no change records, a digest of every row it read, the purpose) | a yes kept until a change of the log's: a write around it (0.14's, mid-upgrade, or a version's nature written beside its row) or a grant's end leaves it standing, and her refused use waits for the lock where a key never made is refused at once (`NoIsFixed`, `NoLockForNo`, `Probing`; review d1 of #416 found the digest missing a field) |
+| The route a named request takes (by the vault's decision, or by the credential's own check, the app's path) is picked on her credential and her account alone, as their seals bear them out (`routeOf`, a function that sees nothing else); a key's rows not as the isolate's seals of them say are one more refusal of the key, by name (`viewOf`, each input's identity on its own; review r2 of D153) | a reference whose source a writer pointed elsewhere around the log, the isolate's seals of it older: the app's path, `access` and a use by ids, three calls, beside one for a key never made, and a lock wait on that path (`OneRoute`, `NoIsFixed`, `Probing`) |
+| A use by ids, the app's path's, decides before her principal's lock as a named one does (migration 0045; `use`), its refusal unlogged by the vault and logged by the app (`UnloggedRefusal`, `recorded`) | with the route above off too: that path's refusal waits for the lock (`NoLockForNo`, `Probing`; the two each keep it) |
+| A key that reads an archived place (a reference whose source's environment, or its project, is archived) is refused by the vault, by name, in the named call, as every refusal of the key; the call answers `archived`, writing and locking nothing, and nothing falls back to the app's path after the vault's decision (`use_credential`, migration 0045; `useOnce`, `readsArchived`; review r4 of D153) | before r4 (`unnamed`): her standing found, the request went to the app's path, `access` a call more, the app's reads refusing it: 2 calls by the app route beside 1 by name for a key never made (`NoIsFixed`, `OneRoute`, `Probing`) |
+| A named use refused on its cover (a repeat riding an allowed use's entry, no change since) is answered as it is, in its one call, the app's entry recording it | her grant's end passed with her cover still held: two calls for the key held, one for a key never made (`NoIsFixed`, `Probing`; review d1 of #416) |
+| One order for every named call, in every form of the statement (0045, and SQLite's): first what no key decides (the deadline, the floor of `at`, the clock, the cap's config; a place named archived, which ends the request as the app answers it), then the names, the key and the lock | the floor past the request: a name out of date refused, a current one late (`NoIsFixed`, `ProbingFloor`); the place archived: the same against not found (`NoIsFixed`, `ProbingArchived`; review d3 of #416) |
+| The named call carries what the deployment's config accepts of a credential (`accepts`: coffre's own sign-in, the providers' issuers), and the statement holds the token's credential to it first, answering one the app would refuse as a token no credential has, before the place, the key or any lock (migration 0045, `p_signin`, `p_issuers`; reviews r6 and r7 of D153) | her browser session's provider gone, or the deployment moved to Access: a 401 after the vault's two calls and her principal's lock for a key her grant covers, a 401 after one call for a key never made (`NoIsFixed`, `Probing`, `ProbingProvider`, `ProbingAccess`) |
+| One clock: the app's own check of the credential, after the vault's call, judges its expiry at the use's `at`, the instant the vault judged its end at (`authenticateRequest`, `verify`'s `at`; review r8 of D153) | her token expiring between the request's start and the app's check: a 401 after the vault's two calls and her principal's lock for a key her grant covers, a 401 after one call for a key never made (`NoIsFixed`, `Probing`) |
+| A named call decides her standing at the place, for what she asks, from rows no key decides, before it reads anything of the key's; without standing she is answered on the place alone, as for a key it does not hold, by the same statement, no cover or seals of the isolate's weighed (`use_credential` and `use_stands`, migration 0045, `v_stands`; SQLite's `standsAt`; `namedStanding`, which `use-stands.test.ts` holds the gate to; W268) | a refusal's call reads the key by its name, a reference and its source, before deciding: its work inside hangs on the key's shape (`NoKeyBeforeStanding`, `Probing`, `ProbingFloor`); and with it, a plain value goes back on its own read again (`NoIsFixed`, `Probing`, with `PlainByStanding` off too: the gate refuses her before any plain value is reached) |
 | Before PR B, a busy refusal on a kept answer confirms it first (`Recalled.confirm`) | the same 503 against 403 (`SameAnswer`, `ProbingKept`) |
 
-The app checks her standing too, the vault's answer, before it reads
-anything (`need`): with either side alone the answers are the same.
-`packages/vault/test/use-named.test.ts` holds the vault's,
-`packages/server/test/named-reveal.test.ts` and
-`proxy-handle-check.test.ts` the app's. What it abstracts: the load
-itself (busy is a choice of TLC's, the same in both runs, as admission
-reads nothing a request names; so is a lock held on Ada's principal, which
-a use waits for only once admitted, and only for a key with no fresh row
-of the cap's, which any request of hers for it writes), timing (a key cached in the isolate's map
-answers a read sooner than one never made, which costs its resolution:
-not closed), and every other refusal, which reads no key.
+`refusedHere`, which reviews d2 and d4 of #416 needed (a map out of date
+decided on its caller's standing, at the place the request names now:
+`MovedByStanding`, `DecideAtNamedPlace`), is gone with D153: a named call
+reads only what its names name, so no row the map points to is ever
+decided on. `decideChecked` still decides the caller's standing before
+anything of the key's own (review d5 of #416), but with one answer for
+every refusal that order is no longer a protection of this claim: the
+caller sees none of it. `packages/vault/test/use-named.test.ts` holds the
+vault's, `packages/server/test/named-reveal.test.ts` and
+`proxy-handle-check.test.ts` the app's. The model's claim is held, cell by
+cell, by two generated matrices, which a reviewer need not sample:
+`packages/vault/test/use.matrix.ts` (both engines: a key's eight states,
+a reference's and a row put back's among them, in every row of what the
+isolate's map holds, how they lost their standing or kept it, the place,
+the request's admission and the cap's window, each cell its own world, on
+Postgres with the principal's lock held and every statement slowed; for
+every key they may not have, the same answer, the same number of the
+vault's calls, no row of the cap's, and its request's entry only where its
+key's row of the cap's is fresh) and `packages/server/test/named.matrix.ts`
+(the same through the app, by the API and the proxy, byte for byte); both
+run as CI's `Use matrices` job (`pnpm test:matrices`). What it abstracts:
+the load itself (busy is a choice of TLC's, the same in both runs, as
+admission reads nothing a request names; so is a lock held on Ada's
+principal), the calls' own costs (each call, one statement, costs the same
+whatever it reads; inside one, the statement may run another form, a
+reference's whole one or a probe after a cached read, as SQLite's twin
+runs other statements for other keys in its writer's turn), and every
+other refusal, which reads no key.
 
 ### Naming.tla
 
@@ -570,8 +672,12 @@ name.
 | `Revoking015` | `Revoking` with 0.15's reads: each one use, deciding on the rows as they are and logging its request. It states no `NoReadOnStaleAnswer`: a kept answer is no input of a use, whose entry is the request whatever it decides | 82 thousand |
 | `Revoking015Folded` | `Revoking015`, each use deciding on the generations too, and the app reading nothing after it (T145) | 62 thousand |
 | `Revoking015Caller` | `Revoking015Folded`, the caller decided by the use itself, nothing asked of the vault before it (T145, PR B) | 33 thousand |
-| `Probing` | Ada, revoked, asks for a key made since or never made, a sealed value or a plain one, by its path or the proxy, while the vault comes and goes from overload and another call holds her principal's lock; each answer the vault's, decided on her standing (T145, PR B) | 128 |
-| `ProbingKept` | The same before PR B: decided on an answer about Ada kept from before the revoke, which a refusal confirms first (#406 r2) | 40 |
+| `Probing` | Ada, revoked, lapsed, a Contributor asking to read, or standing, asks for a key made before or since, deleted, never made or whose value is gone, a sealed value or a plain one, here or in another place, to use or to read, with a token or a browser session whose sign-in provider the deployment may stop configuring, or behind Cloudflare Access once the deployment moves there, whatever the isolate's map of her names holds in each run, while the vault comes and goes from overload, another call holds her principal's lock, the floor of `at` passes her requests and the place is archived; every `no` alike (T145, PR B; T158; D150; D153), five requests | 239 thousand |
+| `ProbingFloor` | `Probing` with the checkpointer's floor of `at` passing a request and no place archived, three requests: what `AdmissionBeforeKey` keeps (T158) | 75 thousand |
+| `ProbingArchived` | `Probing` with the place archived and no floor passing a request, three requests: the same (T158) | 109 thousand |
+| `ProbingKept` | The same before PR B: decided on an answer about Ada kept from before the revoke, which a refusal confirms first (#406 r2) | 114 thousand |
+| `ProbingProvider` | `Probing` with her browser session's sign-in provider removed from the deployment's config and nothing else of the deployment's changing, three requests: every `no` alike (review r6 of D153) | 62 thousand |
+| `ProbingAccess` | `Probing` with the deployment moving its sign-in to Cloudflare Access, three requests: the same (review r7 of D153) | 84 thousand |
 | `Naming` | One request's key name mapped to its id once, while the key is renamed and another named so (T145, PR B) | 31 |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
@@ -1264,10 +1370,25 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | an issue takes the issue lock, not the fence shared (IssueOwnLock); the barrier takes the issue lock before the fence (BarrierIssueFirst). With either off, a use waits on a sign-in, directly, or behind a barrier that holds the fence while it waits for an issue (HotPathOneIssue). IssueOwnLock's break is by definition (an issuer holding the fence): the harm, a barrier and then every use queued behind issuers, is Postgres's lock queue, which the model leaves out and the bench measures | `UsesNeverWaitOnIssues` (R58) |
 | the barrier waits for the issues in flight on the issue lock, exclusive (BarrierWaitsIssues); an issue's number taken under that lock (IssueNumberUnderLock) | `CheckpointsHold`: a checkpoint closed over an issue that commits after it |
 | a credential named by a use only once its issue has committed (NamedAfterIssue: its token is handed out after) | `ReplayAgrees`: a use numbered after the issue that did not see it, refused live and allowed by the replay |
+| a use asks for the principal's lock only on its caller's standing decided (DecideBeforeLock, T158): its second call, once the Worker decided the first's rows; the first call locks and writes nothing, and no standing is kept for a later use (D153). The ghost `standing` is the log's truth about the caller when the use asked; a revoke after that may still find it waiting, who stood when it asked (formal/Probing.tla says what a lock taken first would tell) | `NoLockWithoutStanding` (HotPathOneStaleBulk) |
 
 **HotPathOneStaleBulk** checks the two halves together: a use refused
 `stale` still moves the cap's row exactly as the replay does, and a repeat
-after a change is logged again and counted.
+after a change is logged again and counted. A use refused before the
+principal's lock (T158) writes no entry and no row, so the replay, which
+counts the entries, has nothing to count: the bulk invariants hold with
+it on in every bulk scenario.
+
+**Symmetry.** No step, invariant or constant names one use over another,
+nor one key, and no `CHOOSE` breaks a tie between them: each picks a log
+entry by its number, which `NumbersUnique` holds unique. Uses and keys are
+told apart only by what they do. The three bulk scenarios
+(`HotPathOneBulk`, `HotPathOneBulkSlack`, `HotPathOneBulkSkew`), three uses
+and two keys each, name them as model values and check one state of each
+set alike but for those names (`SYMMETRY Alike`), `NumbersUnique` among
+their invariants: `HotPathOneBulk` is 2.5 million states rather than 30, a
+twelfth, the most the 3! × 2! orderings allow. A scenario with `PROPERTIES`
+cannot: TLC's liveness checking is unsound under symmetry.
 
 **Liveness** (`HotPathOneLive`, `FairSpec`: weak fairness on every protocol
 step and on the clock; failures, crashes, tampering and restores are
@@ -1612,7 +1733,7 @@ shortest one.
 
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
-tests do; skipped, seconds. With 0.15's models the suite is 275 TLC runs in
+tests do; skipped, seconds. With 0.15's models the suite is 370 TLC runs in
 ten shards; the seven new ones are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
@@ -1736,6 +1857,9 @@ the code.
 | `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
 | `allowed_sealed`, `allowed_credential_sealed` | A 0.15 use is allowed only if every input it weighs (credential, principal, roles, policy, key, a reference's source, each environment) was read as its object's newest change left it, under the vault's seal. |
 | `stale_credential_refused` | A credential row that is not the log's newest refuses the use `stale` or `tampered`, whatever the row says: never a refusal the replay would give too (HotPathOne's `StaleFirst`). |
+| `refused_by_standing` | A use whose caller the standing refuses (the seals of what it reads, the key's row, which says where it is held, among them; the credential; 0.14's rules where the key is held or sought, a personal config's parent with it) is refused so, whatever the rest of the key's rows say: a reference ended or its source gone, a key with no value (T158, review d5 of #416). |
+| `standingAt_keyless` | The model's standing at a place reads nothing of a key's: the view with any key and source, or none, decides it alike, by construction (W268). The named statement's gate is held to the rule it models by `use-stands.test.ts`, not by a proof. |
+| `refused_without_standing` | Where the caller does not stand, by 0.14's rules, at the place the use's standing is decided at, the use is refused, whatever its seals and its key: the gate refuses only uses the decision refuses (W268). |
 | `allowed_keyread` | A 0.15 use allowed is one `KeyRead.decide`, 0.14's rules, allows on the reader its sealed inputs make. |
 | `allowed_within_cap`, `bulkRule_writes_admitted` | An allowed use's key is in its principal's set, or fewer than the log's count of other keys count; the cap's rule writes a key's row only for a request it admits, at the start of its refresh period, less than a refresh before its time (`periodOf_lags`). |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |

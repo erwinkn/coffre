@@ -428,8 +428,8 @@ test('rule 2: a reveal of plain values, which the app opens itself, weighed befo
   // No vault call opens a plain value: the app's fence, under the head, is all that sees prod protected meanwhile.
   meanwhileOn('access', (asked) => asked === ADA, () => maya.environments.protect('market/prod'));
   assert.deepEqual(await refusal(ada.secrets.reveal('market/prod/REGION')), { status: 409, reason: 'policy_changed' });
-  // Asked again, it is decided as the policy is now: Ada only uses prod.
-  assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 403);
+  // Asked again, it is decided as the policy is now: Ada only uses prod, and a key's refusal is the one "no" (D153).
+  assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 404);
 });
 
 test('rule 3: a personal token holds no more than its person held when it was issued, in both columns: Developer widened later, her viewer token still only uses prod', async () => {
@@ -519,7 +519,7 @@ test("a reference to a sensitive source is use-only where it lives, a plain one 
   assert.equal(read.values.REGION, 'eu-west-3');
   assert.equal(read.values.STRIPE_KEY, undefined);
   assert.ok(read.sensitive.includes('STRIPE_KEY'));
-  assert.equal(await status(vic.secrets.reveal('market/dev/STRIPE_KEY')), 403);
+  assert.equal(await status(vic.secrets.reveal('market/dev/STRIPE_KEY')), 404);
 });
 test("a value is made live only by whoever could have read it, or typed it: a write-only restore of a secret is refused, a reference to it or not", async () => {
   await maya.environments.protect('market/prod');

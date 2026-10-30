@@ -5,7 +5,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import type { Through, UseInput, UseOutcome, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
@@ -128,6 +128,18 @@ export async function usesLogged(owner: Database): Promise<{ credential: string;
   return owner.select({ credential: logUses.credential, secret: logUses.secret, purpose: logUses.purpose, place: logUses.place }).from(logUses).orderBy(logUses.number);
 }
 
+/**
+ * The reason the newest refusal of a read gives: a key's one "no" says none (D153), its entry does. The app's entry,
+ * or, where the vault refused by its own path and logged it, the vault's code: one of them, never both.
+ */
+export async function refusedIn(owner: Database): Promise<string | null> {
+  const { auditLog } = tablesOf(owner);
+  const [newest] = await owner.select({ author: auditLog.author, code: auditLog.code, metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(desc(auditLog.seq)).limit(1);
+  if (newest === undefined) return null;
+  return newest.author === 'vault' ? newest.code : ((JSON.parse(newest.metadata) as { reason?: string }).reason ?? null);
+}
+
 /** A sign-in through a trust binding, as its log records it (`signInsLogged`). */
 export type LoggedSignIn = { actor: string; credentialId: string; bindingId: string; run: Record<string, unknown>; record: Record<string, unknown> };
 
@@ -219,7 +231,7 @@ export function watchUses(vault: TestVault): { asked: UseInput[]; answered: UseO
   vault.useNamed = async (input) => {
     const outcome = await named(input);
     if (outcome.served && !(outcome.outcome.ok && 'plain' in outcome.outcome)) {
-      asked.push({ credential: '', secretId: outcome.secretId ?? '', place: null, purpose: input.purpose, requestId: input.requestId, at: input.at, deadline: input.deadline });
+      asked.push({ credential: '', secretId: outcome.route === 'name' ? outcome.secretId ?? '' : '', place: null, purpose: input.purpose, requestId: input.requestId, at: input.at, deadline: input.deadline });
       answered.push(outcome.outcome as UseOutcome);
     }
     return outcome;

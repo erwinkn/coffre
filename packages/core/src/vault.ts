@@ -1344,7 +1344,12 @@ export type UseCode =
   /** No such key. */
   | 'missing'
   /** The log holds no policy, so no cap: never served, as the vault writes one before its first use. */
-  | 'no_policy';
+  | 'no_policy'
+  /**
+   * A use by name of a key that reads an archived place, a reference's source's: it reads nothing until that place is
+   * back (review r4 of D153). Decided before anything is written, never logged as a use: the app logs the request.
+   */
+  | 'archived';
 
 /** What a use's refusal says: the rules' as `REFUSAL_MESSAGES`, and those of sealed inputs. */
 export function useRefusalMessage(code: UseCode): string {
@@ -1357,6 +1362,8 @@ export function useRefusalMessage(code: UseCode): string {
       return 'no such key';
     case 'no_policy':
       return "the vault's log holds no bulk cap yet";
+    case 'archived':
+      return 'what it reads is archived';
     default:
       return REFUSAL_MESSAGES[code];
   }
@@ -1376,6 +1383,14 @@ export type NamedUseInput = {
   unless?: readonly { project: string; environment: string }[];
   /** The key, by name; null for none: the caller's standing at the place alone, as for a key it does not hold. */
   key: string | null;
+  /**
+   * The credentials the app's config accepts (review r6 and r7 of D153): `signin`, whether the deployment signs in
+   * through coffre's own sign-in (under Cloudflare Access no coffre token is a credential); `issuers`, each sign-in
+   * provider it configures, `<provider id>:<issuer hash>`, which a browser session's identity must name. The call
+   * holds the token's credential to them first, before anything else it reads: one the app would refuse is answered
+   * as a token no credential has, whatever the request names.
+   */
+  accepts: CredentialAcceptance;
   purpose: Purpose;
   keepsSensitive?: boolean;
   requestId: string;
@@ -1383,19 +1398,32 @@ export type NamedUseInput = {
   deadline: number;
 };
 
+/** What a named use's credential must be for the app to take it (`NamedUseInput.accepts`). */
+export type CredentialAcceptance = { signin: boolean; issuers: readonly string[] };
+
 /**
  * A named use's answer. `served: false`: none the vault serves this way (a fork, a personal config, a handle of
- * several environments), and the app reads it as ever. Otherwise the use's outcome, a plain value's text where one
- * was allowed; the rows the app checks before anything leaves (the credential's with its MAC, the place's, the key's),
- * as `app_read` answers them, JSON; the key's id (null for none held); the place, by slugs; and the caller as the vault
- * decided them, from the sealed rows the use read: null when it decided nothing about them (busy, or a credential ended).
+ * several environments, or a place its stable URL does not mean), and the app reads it as ever. Otherwise the route
+ * the request takes, which the vault picks on the credential and its account alone (`routeOf`; D153, review r2):
+ *
+ * - `credential`: the credential's own check answers (401; a token of 0.10's sealed first): no credential its seals
+ *   bear out, or one ended. `outcome`, the vault's refusal, which the app does not answer with.
+ * - `busy`: nothing decided, admission's answer, whatever the request names.
+ * - `name`: the use's outcome, a plain value's text where one was allowed, and every refusal of the key alike; the rows
+ *   the app checks before anything leaves (the credential's with its MAC, the place's, the key's), as `app_read`
+ *   answers them, JSON; the key's id (null for none held); the place, by slugs; and the caller as the vault decided
+ *   them, from the sealed rows the use read (one who holds nothing where roles, policy or place were not as sealed).
  */
 export type NamedUseOutcome =
   | { served: false }
+  | { served: true; route: 'credential'; outcome: Extract<UseOutcome, { code: UseCode }> }
+  | { served: true; route: 'busy'; outcome: Extract<UseOutcome, { busy: UseBusy }> }
   | {
-    served: true; secretId: string | null; outcome: UseOutcome | { ok: true; plain: string; versionId: string }; app: string | null; standing: Access | null;
-    /** The place the use was at, by its slugs as the vault read them: the one named, or the handle's own; null if read at none (busy, an unknown token). */
+    served: true; route: 'name'; secretId: string | null; outcome: UseOutcome | { ok: true; plain: string; versionId: string }; app: string | null; standing: Access;
+    /** The place the use was at, by its slugs as the vault read them: the one named, or the handle's own. */
     place: { project: string; environment: string } | null;
+    /** The same place by its ids, as the vault's own rows read it, on either engine: where a refusal is logged. */
+    at: { projectId: string; environmentId: string } | null;
   };
 
 /** Why a use was not decided at all: the app answers 503, with `Retry-After`. */

@@ -16,7 +16,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
 import { replayStored } from '@coffre/vault/node';
-import { clientFor, LOG, testVault } from './api-fixture.ts';
+import { clientFor, LOG, refusedIn, testVault } from './api-fixture.ts';
 import { withTriggersLifted } from './db/engine.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { secretVersions } from './db/tables.ts';
@@ -76,11 +76,16 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
   try {
     await promise;
   } catch (error) {
-    const { status, reason, message } = error as { status: number; reason?: string; message: string };
+    const { status, code, reason, message } = error as { status: number; code?: string; reason?: string; message: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    if (code === 'not_available') return { status, reason: await refusedFor(), message };
     return { status, reason: reason ?? null, message };
   }
   throw new Error('it was not refused');
 }
+
+/** The reason the newest refusal of a read gives (`refusedIn`). */
+const refusedFor = () => refusedIn(db.owner);
 
 const levels = async (path: string, as = root) => Object.fromEntries((await as.secrets.list(path)).keys.map((entry) => [entry.key, entry.sensitivity]));
 const history = async (path: string) => (await root.secrets.history(path)).versions.map(({ version, sensitivity }) => [version, sensitivity]);
@@ -146,21 +151,23 @@ test('a person reads every value of an environment but its sensitive ones, which
     const read = await person.secrets.reveal('market/dev');
     assert.deepEqual(read.values, { REGION: 'eu-west-3', WEBHOOK });
     assert.deepEqual([...read.sensitive].sort(), ['API_KEY', 'DB_PASSWORD']);
+    // One key's refusal, as every one (D153): its reason the log's.
     assert.deepEqual(await refusal(person.secrets.reveal('market/dev/API_KEY')), {
-      status: 403,
+      status: 404,
       reason: 'sensitive',
-      message: 'a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it',
+      message: 'not available: no such key, or no access to it',
     });
   }
-  // The vault refused each read of one, and logged it, by the person and the version. Under 0.15's log, as a use, the
-  // request, which the replay of the log refuses as live did.
+  // The vault refused each read of one, and logged it, by the person and the version. Under 0.15's log, a "no" is
+  // decided before the use, which writes nothing (D153): the app's entry of the request logs it, by the person.
   if (LOG === '0.14') {
     const refused = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'deny');
     assert.deepEqual(refused.map((entry) => [entry.actor, entry.code]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
     assert.ok(refused.every((entry) => entry.secretVersionId !== null));
   } else {
-    const codes = [...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null);
-    assert.deepEqual(codes, ['sensitive', 'sensitive', 'sensitive']);
+    const refused = (await entries('secret.read')).filter((entry) => entry.author !== 'vault' && entry.decision === 'deny');
+    assert.deepEqual(refused.map((entry) => [entry.actor, entry.metadata.reason]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
+    assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
   }
 
   const read = await ci.secrets.reveal('market/dev');
@@ -594,7 +601,7 @@ for (const [email, role] of [[ROOT, 'owner'], [DEV, 'developer'], ['contributor@
     // Their own sensitive values are used, never read: by the app and by the vault.
     for (const key of ['API_KEY', 'MINE']) {
       const refused = await refusal(person.secrets.reveal(`market/local@me/${key}`));
-      assert.deepEqual([refused.status, refused.reason], [403, 'sensitive'], key);
+      assert.deepEqual([refused.status, refused.reason], [404, 'sensitive'], key);
     }
     // One of their own stays sensitive, written again saying nothing; looser only by saying so, as anywhere.
     await person.secrets.set('market/local@me', { MINE: `mine_${role}_again_0123456789` });
@@ -704,7 +711,7 @@ test('a sensitive column flipped around coffre opens nothing: the wrap of its ke
   assert.equal((await levels('market/dev')).API_KEY, 'secret', 'the listing believes the column');
   for (const reader of [clientFor(deps, DEV), ci]) {
     const refused = await refusal(reader.secrets.reveal('market/dev/API_KEY'));
-    assert.deepEqual([refused.status, refused.reason], [403, 'bad_claim']);
+    assert.deepEqual([refused.status, refused.reason], [404, 'bad_claim']);
     assert.equal(refused.message.includes(API_KEY), false);
   }
   assert.equal((await refusal(ci.secrets.reveal('market/dev/WEBHOOK'))).reason, 'bad_claim');

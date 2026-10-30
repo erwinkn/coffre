@@ -129,19 +129,18 @@ audit entry for each environment it opens values in, naming the keys:
 one for a plain environment, plus one per parent for a fork that
 inherits, and per source for references into another environment.
 
-A secret that is not there answers 404. That happens for an environment or
-a key that does not exist, or one that was archived or deleted. ESO reads a
-404 as the secret gone, and with `deletionPolicy: Delete` it deletes its
-target. A `property` the environment lacks is different: the read of
-`market/prod` succeeds, and ESO reports that the property is missing and
-keeps the target. To have a key's archiving remove it from the target,
-read the key by its own path, so that its absence is the 404:
-
-```yaml
-  data:
-    - secretKey: stripe
-      remoteRef: { key: market/prod/STRIPE_KEY, property: STRIPE_KEY }
-```
+An environment that is not there answers 404: one that does not exist, or
+was archived or deleted. ESO reads a 404 as the secret gone, and with
+`deletionPolicy: Delete` it deletes its target. A key read by its own path
+(`market/prod/STRIPE_KEY`) never answers 404: a key that is not there and
+a key the token may not have are one answer, 403 `permission denied`, so
+that nobody learns which keys exist by asking. Were that answer 404, ESO
+would delete its target whenever its token lost a key, a grant revoked or
+the key made sensitive. So ESO reports an error and keeps the target. A
+`property` the environment lacks is the same: the read of `market/prod`
+succeeds, and ESO reports that the property is missing and keeps the
+target. Archiving a key removes it from a target that reads the whole
+environment (`dataFrom`), at the next refresh.
 
 Nothing else answers 404. A wrong path, a query, or anything coffre
 does not serve answers 400 or 405, and an outage answers 503, so ESO

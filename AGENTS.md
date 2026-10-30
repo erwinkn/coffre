@@ -212,6 +212,12 @@ unsupported diff select full validation.
 - `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
   `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
   for tests and local development; deployed app databases use Postgres.
+- `pnpm test:matrices` runs the generated matrices of 0.15's use by name
+  (`packages/vault/test/use.matrix.ts`, `packages/server/test/named.matrix.ts`):
+  every key a caller may not have answered alike, whatever the vault's map
+  holds, each statement slowed. They take about half an hour, so `pnpm test`
+  leaves them out and CI runs them as a job of their own;
+  `pnpm test:matrices:sqlite` runs the vault's on SQLite. Needs Postgres.
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,
   checks TLS trust and hostname verification, and runs `coffre setup` against
@@ -272,7 +278,7 @@ unsupported diff select full validation.
   jar once, checked against its pinned SHA-256. A change to the locks a flow
   takes, or what it re-checks under the head, changes the model too. CI skips
   it when the model's inputs are unchanged (`scripts/formal-key.sh`), and
-  otherwise runs it as three shards (`scripts/formal.sh --shard`;
+  otherwise runs it as ten shards (`scripts/formal.sh --shard`;
   `docs/formal.md`, "In CI").
 - `pnpm formal:lean` checks the Lean proofs in `formal/lean` (`docs/formal.md`,
   "Proofs in Lean") and holds their model to `@coffre/core/access`, the

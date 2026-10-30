@@ -102,11 +102,8 @@ async function appDenials(action: string): Promise<unknown[]> {
 test('an app permission bug does not reach prod: the vault refuses and logs the claim', async () => {
   const buggy = buggyClientFor(deps, DEV);
   assert.equal((await buggy.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'sk_test');
-  await assert.rejects(buggy.secrets.reveal('market/prod/API_KEY'), {
-    status: 403,
-    code: 'vault_refused',
-    reason: 'no_grant',
-  });
+  // A key's one refusal (D153): the vault's reason in its entry alone.
+  await assert.rejects(buggy.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available', reason: undefined });
 
   const [refused] = await vaultEntries();
   const { actorId, action, decision, reason, project, environment, key } = refused;
@@ -124,12 +121,9 @@ test('an expired grant refuses: in the app, and in the vault if the app were wro
   assert.equal((await developer.secrets.reveal('market/prod/API_KEY')).values.API_KEY, 'sk_live');
 
   deps.vault.advance(120_000);
-  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403, code: 'forbidden' });
-  await assert.rejects(buggyClientFor(deps, DEV).secrets.reveal('market/prod/API_KEY'), {
-    status: 403,
-    code: 'vault_refused',
-    reason: 'expired',
-  });
+  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available' });
+  assert.deepEqual(await appDenials('secret.read'), ['missing_secret_read']);
+  await assert.rejects(buggyClientFor(deps, DEV).secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available', reason: undefined });
   assert.equal((await vaultEntries())[0].reason, 'expired');
 });
 
@@ -252,13 +246,15 @@ test('a removed member stays out despite a live session, until the vault admits 
   // What to rotate: what they read.
   const { report } = await root.members.remove(`user:${DEV}`);
   assert.deepEqual(report!.exposed.map(({ environment, key, how }) => [environment, key, how]), [['dev', 'API_KEY', 'read']]);
+  // No member: told so, whatever the key (D153 keeps an answer that tells nothing of it).
   assert.equal((await reveal()).status, 403);
   const removal = (await vaultEntries()).find((entry) => entry.action === 'member.remove');
   assert.equal(removal?.subject, `user:${DEV}`);
 
   // Only the vault brings them back, and with nothing: access starts over.
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: `user:${DEV}` })).ok, true);
-  assert.equal((await reveal()).status, 403);
+  // A member with no grant: the key's one refusal.
+  assert.equal((await reveal()).status, 404);
   await root.access.set(`user:${DEV}`, { 'market/dev': 'viewer' });
   assert.equal((await reveal()).status, 200);
 });
@@ -280,7 +276,7 @@ test('a grant forged in the database lists as stored until the vault meets it, w
   // The scheduled checkpoint checks every row, and finds it: the list says so, and the vault refuses them.
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet), true);
   assert.deepEqual(await listed(), { tampered: true, roles: [] });
-  await assert.rejects(developer.secrets.reveal('market/dev/API_KEY'), { status: 403 });
+  await assert.rejects(developer.secrets.reveal('market/dev/API_KEY'), { status: 404, code: 'not_available' });
   // An owner removes them, which starts them over, and the mark goes with it.
   await root.members.remove(`user:${DEV}`);
   await root.members.add(`user:${DEV}`);

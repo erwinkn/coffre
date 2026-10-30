@@ -150,10 +150,13 @@ test("the checkpointer seals real uses: each entry's MAC is the log's, over the 
   assert.ok(alarms.some((alarm) => /MAC does not hold/.test(alarm)), alarms.join());
 });
 
-test('a use the rules refuse is logged as its request all the same, and refused by the replay too', async () => {
+test("a use the rules refuse is logged as its request all the same, and refused by the replay too; one that would take its principal's lock is decided first, and logs nothing (review r2 of D153)", async () => {
   const w = await world();
   const id = await w.key();
+  const other = await w.key();
   const { use } = await isolate();
+  // Its key in the principal's set: its use takes no lock, and is logged whatever it finds.
+  assert.ok(heard(await use(ask(w, id))).ok);
   // Revoke the grant: a change to the principal (PR 4's access.revoke, played here).
   const revoked = { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } }, revoked, async (tx, value) => {
@@ -162,8 +165,12 @@ test('a use the rules refuse is logged as its request all the same, and refused 
   });
   const outcome = heard(await use(ask(w, id)));
   assert.equal(!outcome.ok && 'code' in outcome && outcome.code, 'no_grant');
-  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 1, 'a refusal is a request like any other');
-  assert.equal(await replayAgrees(), 1);
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2, 'a refusal is a request like any other');
+  assert.equal(await replayAgrees(), 2);
+  // A key not in the set would take the lock: refused on the rows of its first call, nothing written, the app's to log.
+  const first = heard(await use(ask(w, other)));
+  assert.deepEqual(first, { ok: false, code: 'no_grant', number: null });
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2);
 });
 
 test('StatementSnapshot: a use that waits behind a change reads what the change wrote, where a bare CTE reads what was before', postgresOnly('the fence'), async () => {
@@ -193,7 +200,8 @@ test('StatementSnapshot: a use that waits behind a change reads what the change 
   const outcome = heard(await using);
   assert.equal(!outcome.ok && 'code' in outcome && outcome.code, 'credential', 'the function read the revoke');
   assert.equal((await bare)[0]!.revoked, false, 'the bare CTE read the credential as before the revoke, numbered after it');
-  assert.equal(await replayAgrees(), 1);
+  // Refused on the rows its first call read, before its principal's lock: no entry (review r2 of D153).
+  assert.equal(await replayAgrees(), 0);
 });
 
 async function waitForFence(): Promise<void> {
@@ -336,13 +344,19 @@ test('the roles and the policy: a row put back is stale; the cap is the policy\'
   const first = await w.key();
   const second = await w.key();
   const { use } = await isolate();
-  // Its row says 99, its newest change 1: the second key is refused, and the use stale before anything (StaleFirst).
+  // Its row says 99, its newest change 1: the use is refused before anything (StaleFirst), on the rows of its first
+  // call, its key not in the set, and nothing is written (review r2 of D153).
   await run(db.owner, sql`UPDATE log_config SET value = ${JSON.stringify({ kind: 'policy', bulk: { count: 99, windowMs: DAY } })} WHERE name = 'policy'`);
   assert.equal(code(heard(await use(ask(w, first)))), 'tampered', 'its seal is not over the row any more');
-  const rows2 = await rows<{ last: unknown }>(db.owner, sql`SELECT last FROM log_bulk`);
-  assert.equal(rows2.length, 1, 'the cap moved as the newest change says: one key in');
+  assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 0);
+  // A call made as decided, a row put back between its two calls: the cap is still the newest change's, one key in.
+  if (ENGINE === 'postgres') {
+    assert.equal((await call(db.owner, w, first, Date.now())).state, null);
+    assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 1, 'the cap moved as the newest change says: one key in');
+    await call(db.owner, w, second, Date.now());
+    assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 1, 'and the second was not let in');
+  }
   assert.equal(code(heard(await use(ask(w, second)))), 'tampered');
-  assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 1, 'and the second was not let in');
   await replayAgrees();
 });
 
@@ -359,9 +373,10 @@ test('the bulk cap at count 10 over a day: ten keys in, the eleventh refused, re
 });
 
 /** One call of `use_credential` in the transaction `tx`, as the vault makes it, stamped `at`: what it answers. */
+/** A use's call as the vault makes it once it has decided the use (`p_decided`): the one that takes the principal's lock. */
 async function call(tx: Queryable, w: { credentialId: string }, secretId: string, at: number): Promise<{ state: string | null }> {
   const [row] = await rows<{ use: { state: string | null } }>(tx, sql`SELECT use_credential(${w.credentialId}, ${secretId}, ${newRequestId()}, ${at},
-    4::smallint, NULL, ${randomBytes(16)}, ${at + 3000}) AS use`);
+    4::smallint, NULL, ${randomBytes(16)}, ${at + 3000}, p_decided => true) AS use`);
   return row!.use;
 }
 
@@ -522,11 +537,11 @@ test('a session\'s first call plans its four statements before it takes the fenc
     // Its next call, now the fence is free, is answered; the setting says the plans are made.
     await fresh.unsafe(`SET lock_timeout = 0`);
     const again = Date.now();
-    const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6) AS use`,
+    const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, p_decided => true) AS use`,
       [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
     assert.equal(answer!.use.state, null);
     const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0044');
+    assert.equal(setting!.planned, '0045');
   } finally {
     await fence.end();
     await fresh.end();
@@ -770,24 +785,39 @@ test('CacheSameChange: a newest change of the same number but another MAC (a log
   assert.equal(code(await use(ask(w, id, { purpose: 'reveal' }))), 'credential');
 });
 
-test('a repeat its cover would carry, but the rows now refuse (its grant lapsed), is asked again uncovered and logged', async () => {
-  const w = await world();
-  const id = await w.key();
-  // The principal's one grant made to lapse shortly: a change, as PR 4's access.grant writes it.
-  const lapses = Date.now() + 400;
-  const before = w.objects.principal as Extract<Input, { kind: 'principal' }>;
-  const lapsing = { ...before.grants[0]!, expiresAt: lapses };
-  const after = { ...before, grants: [lapsing] };
-  await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: lapsing }, after, async (tx, value) => {
-    await run(tx, sql`UPDATE vault_grants SET expires_at = ${lapses} WHERE principal = ${w.principal}`);
-    await seal('vault_members', 'principal', w.principal)(tx, value);
+for (const period of ['the same', 'passed'] as const) {
+  const then = period === 'the same' ? "in its key's period, logged" : "its key's period passed, decided first and logged by the app (review r3 of D153)";
+  test(`a repeat its cover would carry, but the rows now refuse (its grant lapsed), is asked again uncovered: ${then}`, async () => {
+    const w = await world();
+    const id = await w.key();
+    // Within one refresh period (a minute, at the default window), with time to spare: the repeat's key needs no move.
+    const left = 60_000 - (Date.now() % 60_000);
+    if (left < 5_000) await sleep(left + 50);
+    // The principal's one grant made to lapse shortly: a change, as PR 4's access.grant writes it.
+    const lapses = Date.now() + 400;
+    const before = w.objects.principal as Extract<Input, { kind: 'principal' }>;
+    const lapsing = { ...before.grants[0]!, expiresAt: lapses };
+    const after = { ...before, grants: [lapsing] };
+    await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: lapsing }, after, async (tx, value) => {
+      await run(tx, sql`UPDATE vault_grants SET expires_at = ${lapses} WHERE principal = ${w.principal}`);
+      await seal('vault_members', 'principal', w.principal)(tx, value);
+    });
+    const { use } = await isolate();
+    assert.ok(heard(await use(ask(w, id))).ok);
+    await sleep(500);
+    // Its key's row from two periods back: asked again uncovered, the use would move it on, which takes the lock.
+    if (period === 'passed') await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+    const repeat = heard(await use(ask(w, id)));
+    assert.equal(code(repeat), 'expired');
+    if (period === 'the same') {
+      assert.ok(!repeat.ok && 'number' in repeat && repeat.number !== null, 'logged as an entry of its own');
+      assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2);
+      assert.equal(await replayAgrees(), 2);
+    } else {
+      // A refusal takes no lock: decided on the rows of its first call, nothing written, the app's to log (`UnloggedRefusal`).
+      assert.ok(!repeat.ok && 'number' in repeat && repeat.number === null, 'decided first');
+      assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 1);
+      assert.equal(await replayAgrees(), 1);
+    }
   });
-  const { use } = await isolate();
-  assert.ok(heard(await use(ask(w, id))).ok);
-  await sleep(500);
-  const repeat = heard(await use(ask(w, id)));
-  assert.equal(code(repeat), 'expired');
-  assert.ok(!repeat.ok && 'number' in repeat && repeat.number !== null, 'logged as an entry of its own');
-  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2);
-  assert.equal(await replayAgrees(), 2);
-});
+}

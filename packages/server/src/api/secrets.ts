@@ -40,10 +40,10 @@ import {
 import { can, lists, permissionsAt, placeOf, type Caller } from './caller.ts';
 import { protectedFor, unprotects } from './roles.ts';
 import { AppChanges, ObjectMoved, retrying, secretChange, uses015, versionColumns, writtenSecret } from './changes.ts';
-import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, vaultRefusal, withRefusals, type ApiContext } from './context.ts';
+import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, unlogged, vaultRefusal, withRefusals, type ApiContext, type EntryFields } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
-import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { ApiError, badRequest, conflict, forbidden, notAvailable, notFound, UnloggedRefusal, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
 import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord, type Decided } from './keys.ts';
@@ -1772,12 +1772,13 @@ export async function reveal(
   only?: readonly string[],
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
-  return recorded(ctx, async (log, fence, at, stood) => {
+  // A request's one key, used by name already (`useByName`): its rows are the use's, and its outcome the value's.
+  const decided = use?.decided ?? ctx.named?.decided;
+  const one = path.key ?? (use?.only === true && Array.isArray(use.keys) && use.keys.length === 1 ? use.keys[0]! : null);
+  return recorded(ctx, refusedAlike(ctx, decided, operationId, path, one, async (log, fence, at, stood) => {
     // The place and its keys in one call where it can (`readValues`); the proxy's read them with the handle already.
     // Of a use, its keys alone when it reads no other (`UseAsked.only`): it answers every key the environment holds.
     const reads = use === undefined ? only : use.only === true && Array.isArray(use.keys) ? use.keys : undefined;
-    // A request's one key, used by name already (`useByName`): its rows are the use's, and its outcome the value's.
-    const decided = use?.decided ?? ctx.named?.decided;
     const given = use?.ahead !== undefined ? use.ahead : ctx.named?.ahead;
     const ahead = given !== undefined ? given : await readValues(ctx, path, reads);
     // `market/dev@me`: your personal config of dev, or dev while you have none.
@@ -1919,7 +1920,81 @@ export async function reveal(
     }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
     return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
-  });
+  }));
+}
+
+/**
+ * A read of a request's one key, refused, answered one way, whatever refused it (D153): `not_available`, as for a key
+ * never made, with the same status, body and headers. What refused it goes to the audit log alone: the app's refusal,
+ * as it logs it, or the vault's, as its code.
+ *
+ * - **By name** (`useByName`), the vault decided. Refused, the request is answered at once, the app reading nothing
+ *   of the key (review r3 of D153): the vault's reason in the entry, at the place the vault's own statement read
+ *   (`ahead`). Allowed, every one of the app's checks after it, the read refused even where it would go on without the
+ *   key (the proxy's, then refused for a key its credential needs). A refusal the caller may know of is answered as it
+ *   is: a credential ended (401), the vault busy (503), the bulk cap of a use it allowed.
+ * - **Not by name** (a fork, a personal config, SQLite's vault, 0.14's log), a request that names its one key (`one`),
+ *   by its path or as the proxy's one: every refusal of the app's that is the key's, not a place's that is none
+ *   (`unknown_environment`), a credential's (401), a busy one (503), the bulk cap's, or a read to ask again (`changed`);
+ *   and a read that goes on without the key, which the environment does not hold. The vault's own refusal there is in
+ *   its log already, and the app writes no copy; one it decided before writing anything, the app logs
+ *   (`UnloggedRefusal`). Its work is still the app's own path's, which B2 brings to the vault's one call.
+ *
+ * Every other read, a use allowed, a list of keys and a whole environment's included, is answered as ever.
+ */
+function refusedAlike<T extends { values: Record<string, string> }>(
+  ctx: ApiContext,
+  decided: Decided | undefined,
+  operationId: string,
+  path: Path,
+  one: string | null,
+  work: Parameters<typeof recorded<T>>[1],
+): Parameters<typeof recorded<T>>[1] {
+  const outcome = decided?.outcome;
+  if (outcome === undefined ? one === null : outcome.ok || 'busy' in outcome || outcome.code === 'credential' || outcome.code === 'bulk_limit') return work;
+  // The vault's own reason, when it decided.
+  const code = outcome !== undefined && !outcome.ok && 'code' in outcome ? outcome.code : undefined;
+  // By name, a read of one key refused: the vault decided on what the request names, and the app reads nothing more of
+  // the key, whatever it is (reviews r3 and r4 of D153): the one `no`, logged with the vault's reason, at the place and
+  // key its own rows read, on either engine. A whole environment's read of the keys it lists goes on: what it leaves
+  // out, and why, is its answer.
+  if (code !== undefined && one !== null) {
+    return async () => {
+      throw new Refusal(notAvailable(), denied(ctx, 'secret.read', code, {
+        ...(decided!.at ?? {}), ...(decided!.secretId === null ? {} : { secretId: decided!.secretId }), operationId,
+        metadata: { path: formatPath(path), key: one },
+      }));
+    };
+  }
+  const keys = (error: ApiError, reason: unknown) => !['unauthenticated', 'unavailable', 'bulk_limit', 'registration_required', 'migrating', 'rotating', 'app_key'].includes(error.code)
+    && reason !== 'unknown_environment' && error.reason !== 'changed';
+  return async (log, fence, at, stood) => {
+    let where: EntryFields = {};
+    const no = (reason: string) => denied(ctx, 'secret.read', reason, { ...where, operationId, metadata: path.key === undefined ? {} : { key: path.key } });
+    let read: T;
+    try {
+      read = await work(log, fence, (fields) => at((where = fields)), stood);
+    } catch (error) {
+      if (error instanceof Refusal) {
+        if (outcome === undefined && !(error.error instanceof ApiError && keys(error.error, error.entry.metadata?.reason))) throw error;
+        throw new Refusal(notAvailable(), error.entry);
+      }
+      if (!(error instanceof ApiError) || (outcome === undefined && !keys(error, undefined))) throw error;
+      // The vault's own refusal, by its own path, is in its log already (0.14's unwrap, or a use by ids it wrote): no
+      // copy. One it decided before writing anything, the app's entry records.
+      if (outcome === undefined && error.code === 'vault_refused' && !(error instanceof UnloggedRefusal)) throw notAvailable();
+      // One it decided before writing anything is logged as it was: where the use was (a reference's holder's place),
+      // its key and purpose (review r5 of D153); only its answer is the one `no`.
+      if (error instanceof UnloggedRefusal) {
+        error.fields.operationId ??= operationId;
+        throw new Refusal(notAvailable(), unlogged(ctx, error, code ?? error.reason ?? error.code));
+      }
+      throw new Refusal(notAvailable(), no(code ?? error.reason ?? error.code));
+    }
+    if (code !== undefined && one !== null) throw new Refusal(notAvailable(), no(code));
+    if (outcome === undefined && one !== null && !Object.hasOwn(read.values, one)) throw new Refusal(notAvailable(), no('unknown_secret'));
+    return read;
+  };
 }
 
 /**

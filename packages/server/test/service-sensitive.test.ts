@@ -10,7 +10,7 @@ import { generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } fro
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { generateToken, github, hashToken, signin, tokenHint, type BindingClaims } from '@coffre/core/identity';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
 import { unsealedCredentials } from '@coffre/db/grants';
@@ -109,9 +109,18 @@ async function read(token: string, path: string): Promise<string> {
     const { values } = await bearer(token).secrets.reveal(path);
     return Object.values(values).join();
   } catch (error) {
-    const { status, reason } = error as { status: number; reason?: string };
+    const { status, code, reason } = error as { status: number; code?: string; reason?: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    if (code === 'not_available') return `${status} ${await refusedFor()}`;
     return `${status} ${reason ?? ''}`.trim();
   }
+}
+
+/** The reason the newest refusal of a read logs. */
+async function refusedFor(): Promise<string> {
+  const [entry] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(desc(auditLog.seq)).limit(1);
+  return (JSON.parse(entry!.metadata) as { reason: string }).reason;
 }
 
 /** A run's ID token as GitHub would sign it for `deploy.yml` on main, for this instance. */
@@ -146,17 +155,18 @@ test("a Developer's service account reads every value of backend/dev but its sen
   assert.deepEqual(issued.withheld, ['backend/dev']);
   assert.deepEqual(await stored(credentials, issued.id), [{ role: 'viewer', sensitive: false }]);
   assert.equal(await read(issued.token, 'backend/dev/API_URL'), 'https://api.dev.acme.example');
-  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   await assert.rejects(bearer(issued.token).secrets.reveal('backend/dev'), {
     status: 403,
     message: 'backend/dev holds STRIPE_SECRET_KEY, sensitive: a service account reads it only on a token or trust binding an Owner of backend issued',
   });
-  // The app refused it, before the vault was asked: logged once, by the app, naming the key.
+  // Refused, and logged once each, by the app, naming the key: the app's own refusal, or, the key's read by name (0.15's
+  // log), the vault's, which the app logs reading nothing more of the key (D153).
   const refused = await db.owner.select({ author: auditLog.author, actor: auditLog.actor, metadata: auditLog.metadata })
     .from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(asc(auditLog.seq));
   assert.deepEqual(refused.map((entry) => {
-    const { reason, keys } = JSON.parse(entry.metadata) as { reason: string; keys: string[] };
-    return [entry.author, entry.actor, reason, keys];
+    const { reason, keys, key } = JSON.parse(entry.metadata) as { reason: string; keys?: string[]; key?: string };
+    return [entry.author, entry.actor, reason, keys ?? [key]];
   }), [
     ['app', CI, 'not_owner_issued', ['STRIPE_SECRET_KEY']],
     ['app', CI, 'not_owner_issued', ['STRIPE_SECRET_KEY']],
@@ -170,7 +180,7 @@ test('a value made sensitive after a Developer issued the token is refused to it
   assert.deepEqual(issued.withheld, ['backend/dev'], 'backend/staging holds no sensitive value yet');
   assert.equal(await read(issued.token, 'backend/staging/API_URL'), 'https://api.staging.acme.example');
   await root.secrets.set('backend/staging', { API_URL: { sensitivity: 'sensitive' } });
-  assert.equal(await read(issued.token, 'backend/staging/API_URL'), '403 not_owner_issued');
+  assert.equal(await read(issued.token, 'backend/staging/API_URL'), '404 not_owner_issued');
   assert.equal(await read(issued.token, 'backend/staging'), '403 not_owner_issued');
 });
 
@@ -190,7 +200,7 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   const issued = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
   assert.deepEqual(issued.withheld, ['backend/dev']);
   assert.equal(await read(issued.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789');
-  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   // A token's record says, place by place, whether it reads them: 0.14's entry, or with 0.15's log the vault's change (T149, D147).
   const entries = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'))).orderBy(asc(auditLog.seq));
@@ -227,7 +237,7 @@ test('an Owner demoted while issuing a token gives it no sensitive value: weighe
   // Asked again, he is weighed as he is now: a Developer's token, which reads none.
   const issued = await owen.tokens.issue(CI, { expiresInDays: 30 });
   assert.deepEqual(await stored(credentials, issued.id), [{ role: 'viewer', sensitive: false }, { role: 'viewer', sensitive: false }]);
-  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
 });
 
 test('an issuer removed and admitted again while issuing issues nothing: the request came in as a membership that ended', async () => {
@@ -261,7 +271,7 @@ test("a reference takes its source's nature: a Developer's token reads no refere
   await root.secrets.set('backend/staging', { STRIPE_SECRET_KEY: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
   const theirs = await ada.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/staging': 'viewer' } });
   assert.deepEqual(theirs.withheld, ['backend/staging'], 'a reference to a sensitive value counts where it is held');
-  assert.equal(await read(theirs.token, 'backend/staging/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(theirs.token, 'backend/staging/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   const owners = await owen.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/staging': 'viewer' } });
   assert.equal(await read(owners.token, 'backend/staging/STRIPE_SECRET_KEY'), STRIPE, "backend's Owner issued it: backend/dev itself need not be in its scope");
 });
@@ -274,7 +284,7 @@ test("a reference into another project lends its sensitive value only on a crede
   const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
   assert.deepEqual(his.withheld, ['billing/dev'], "billing/dev lends a value of backend's, which no Owner of backend issued it");
   assert.equal(await read(his.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789', "billing's own, which its Owner issued it");
-  assert.equal(await read(his.token, 'billing/dev/LEAK'), '403 not_owner_issued');
+  assert.equal(await read(his.token, 'billing/dev/LEAK'), '404 not_owner_issued');
   await assert.rejects(bearer(his.token).secrets.reveal('billing/dev'), {
     status: 403,
     message: 'billing/dev holds LEAK, sensitive: a service account reads it only on a token or trust binding an Owner of the project each value is from issued',
@@ -287,7 +297,7 @@ test("a reference into another project lends its sensitive value only on a crede
   // Scoped to billing alone, even an Owner of the whole instance's says nothing for backend.
   const narrow = await root.tokens.issue('token:bo-ci', { expiresInDays: 30, scope: { 'billing/dev': 'viewer' } });
   assert.deepEqual(narrow.withheld, ['billing/dev']);
-  assert.equal(await read(narrow.token, 'billing/dev/LEAK'), '403 not_owner_issued');
+  assert.equal(await read(narrow.token, 'billing/dev/LEAK'), '404 not_owner_issued');
 });
 
 test("forking a reference to another project's sensitive value keeps it a reference: a copy would move it into the fork's project, past R16/R32", async () => {
@@ -298,13 +308,13 @@ test("forking a reference to another project's sensitive value keeps it a refere
   assert.equal(made.forked?.references, 1, 'the sensitive reference is carried as a reference, not copied by value');
   // R16: Bo cannot loosen it in place (it is a reference, its nature is its source's, R23) and cannot reveal it as a person.
   await assert.rejects(bo.secrets.set('billing/dev2', { LEAK: { sensitivity: 'secret' } }), /reference/);
-  await assert.rejects(bo.secrets.reveal('billing/dev2/LEAK'), { status: 403 });
+  await assert.rejects(bo.secrets.reveal('billing/dev2/LEAK'), { status: 404, code: 'not_available' });
   // R32: a service token of billing's, issued by Bo, does not read it: the value is still backend's.
   await bo.members.add('token:bo-ci');
   await bo.access.set('token:bo-ci', { 'billing/dev2': 'viewer' });
   const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
   assert.deepEqual(his.withheld, ['billing/dev2']);
-  assert.equal(await read(his.token, 'billing/dev2/LEAK'), '403 not_owner_issued');
+  assert.equal(await read(his.token, 'billing/dev2/LEAK'), '404 not_owner_issued');
   // The value is still backend's: a credential an Owner of backend issued, with backend in scope, reads it through the reference.
   await root.access.set('token:bo-ci', { 'billing/dev2': 'viewer', 'backend/dev': 'viewer' });
   const owners = await root.tokens.issue('token:bo-ci', { expiresInDays: 30 });
@@ -329,7 +339,7 @@ test("a fork's inherited sensitive value is decided where it is held, its parent
   await root.access.set(CI, { 'backend/dev-eu': 'viewer' });
   const theirs = await ada.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/dev': 'viewer', 'backend/dev-eu': 'viewer' } });
   assert.deepEqual(theirs.withheld, ['backend/dev', 'backend/dev-eu'], 'backend/dev-eu holds none of its own, but inherits one');
-  assert.equal(await read(theirs.token, 'backend/dev-eu/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(theirs.token, 'backend/dev-eu/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   assert.equal(await read(theirs.token, 'backend/dev-eu/API_URL'), 'https://api.dev.acme.example');
   const owners = await root.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/dev': 'viewer', 'backend/dev-eu': 'viewer' } });
   assert.deepEqual(owners.withheld, []);
@@ -341,14 +351,14 @@ test("a binding's runs read the sensitive values only where an Owner bound it; o
   assert.deepEqual(planned.withheld, ['backend/dev']);
   const theirs = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' } });
   assert.deepEqual(await stored(serviceBindings, theirs.binding.id), [{ role: 'viewer', sensitive: false }]);
-  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
 
   const owners = await root.bindings.create(CI, { profile: 'github', claims: DEPLOY, scope: { 'backend/dev': 'viewer' }, replaces: [theirs.binding.id] });
   assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
   // Ada trusts the workload again in its place, inheriting its scope: the narrower of the two, which reads no sensitive value.
   const again = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [owners.binding.id] });
   assert.deepEqual(await stored(serviceBindings, again.binding.id), [{ role: 'viewer', sensitive: false }]);
-  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
 });
 
 test("a binding an older release made, replaced before anything sealed it, is sealed first: its Owner's say is kept, never dropped", async () => {
@@ -411,7 +421,7 @@ test('tokens and bindings issued before 0.11 are sealed once by who issued them:
 
   // The first credential this configuration checks seals them all, before it reads anything.
   assert.equal(await read(owners.token, 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
-  assert.equal(await read(theirs.token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(theirs.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   assert.equal(await read(theirs.token, 'backend/dev/API_URL'), 'https://api.dev.acme.example');
   assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), STRIPE, 'bound by an Owner of backend');
   assert.deepEqual(await stored(credentials, owners.id), [{ role: 'viewer', sensitive: true }]);
@@ -446,6 +456,6 @@ test('an Owner demoted while their older token is sealed seals it reading nothin
   onNextAccess(`user:${OWEN}`, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }), { after: true });
   assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '503');
   // The next use seals it as he is now: a Developer's, which reads none.
-  assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '403 not_owner_issued');
+  assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   assert.deepEqual(await stored(credentials, row.id), [{ role: 'viewer', sensitive: false }]);
 });

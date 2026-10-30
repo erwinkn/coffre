@@ -155,19 +155,18 @@ const NAMED = `${ORIGIN}/use/market/dev/api/v1/charges`;
 const STABLE = `${ORIGIN}/use/api/v1/charges`;
 const shown = (ran: Statement[]) => ran.map(({ text }) => text.replace(/\s+/g, ' ').slice(0, 32));
 
-test("a handle's /use is the vault's one call, at its environment's URL or the stable one: its use by the ids it keeps, warm, and one read of them before it, cold; the app runs nothing (T145)", POSTGRES, async () => {
+test("a handle's /use is the vault's one call, at its environment's URL or the stable one: its use by the ids it keeps, warm, and, cold, a read by its names, then the use by the ids read; the app runs nothing (T145, D153)", POSTGRES, async () => {
   const use = 'SELECT use_credential( $1::uuid,';
-  const resolve = 'SELECT use_resolve($1::bytea, $2';
   const named = await statements(NAMED);
   assert.deepEqual(shown(named.app), [], 'the named URL: no statement of the app');
   assert.deepEqual(shown(named.hot), [use], 'warm: the use alone, by the ids its isolate keeps');
   assert.deepEqual(named.vault, [], "no vault statement but the use's: nothing asked about the person, nothing kept");
-  // Cold: a handle the vault's isolate has not seen, its ids read once, then used.
+  // Cold: a handle the vault's isolate has not seen, its names read by the use's own statement, then used by their ids.
   const fresh = (await setupRuntime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'cold', expiresInMinutes: 600, paths: ['market/dev'] })).token;
   const cold = await statements(NAMED, fresh, { warm: false });
   // But a credential's first use in five minutes, which notes when it was last used (`verify`'s touch): not a request's cost.
   assert.deepEqual(shown(cold.app), ['update "credentials" set "last_u'], 'cold: no read of the app, the touch of a new credential alone');
-  assert.deepEqual(shown(cold.hot), [resolve, use]);
+  assert.deepEqual(shown(cold.hot), [use, use]);
   // The stable URL: the use of its one key at the environment the handle was made for, which the vault finds itself, in
   // its one call: one statement, and nothing of `access`.
   const stable = await statements(STABLE);

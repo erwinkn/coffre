@@ -64,7 +64,7 @@ async function lastAudit(action: string): Promise<{ decision: string; reason: un
 test('an auditor reads audit data without being able to read secrets', async () => {
   await root.access.set(AUDITOR, { market: 'auditor' });
   assert.ok((await auditor.audit.list()).entries.length > 0);
-  await assert.rejects(auditor.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(auditor.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available' });
   await assert.rejects(auditor.secrets.reveal('market/prod'), { status: 403 });
   await assert.rejects(auditor.secrets.list('market/prod'), { status: 403 });
 });
@@ -94,7 +94,7 @@ test('an access manager grants access without being able to read secrets', async
   await accessManager.access.set(DEVELOPER, { market: 'developer' });
   const { members } = await accessManager.members.list();
   assert.equal(members.find((entry) => entry.member === DEVELOPER)?.grants[0].project, 'market');
-  await assert.rejects(accessManager.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(accessManager.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available' });
   await assert.rejects(accessManager.secrets.list('market/prod'), { status: 403 });
 });
 
@@ -134,7 +134,7 @@ test('an auditor sees only projects on which they hold audit.read', async () => 
 test('the log lists only the denied entries when asked, to an owner and to an auditor', async () => {
   await root.access.set(AUDITOR, { market: 'auditor' });
   // The developer holds nothing on market: each read is refused, and logged.
-  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available' });
   await assert.rejects(developer.secrets.reveal('market/prod'), { status: 403 });
   for (const reader of [root, auditor]) {
     const { entries, hidden } = await reader.audit.list({ limit: 200, decision: 'deny' });
@@ -179,7 +179,7 @@ test('an expired grant confers nothing while a live grant works', async () => {
   await root.access.set(DEVELOPER, { market: { role: 'viewer', until } });
   // Two minutes later, by the vault's clock, which is the one that counts.
   deps.vault.advance(120_000);
-  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 403 });
+  await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available' });
   // Lists read the rows by the clock of whoever lists: two minutes on, it has lapsed there too.
   const [listed] = await members(db.runtime, deps.chainKey, { member: { type: 'user', id: 'dev@acme.example' } }, new Date(Date.now() + 120_000));
   assert.deepEqual(listed.grants, []);

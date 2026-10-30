@@ -6,7 +6,7 @@ import test from 'node:test';
 // Exercise the expression the real final job runs, including rejected states.
 const workflow = readFileSync(new URL('../.github/workflows/validate.yml', import.meta.url), 'utf8');
 const expression = workflow.match(/Require full validation[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
-const jobs = ['checks', 'tests', 'tests-015', 'schema', 'formal', 'proofs', 'workers', 'node', 'consumer', 'compat', 'image'];
+const jobs = ['checks', 'tests', 'tests-015', 'matrices', 'schema', 'formal', 'proofs', 'workers', 'node', 'consumer', 'compat', 'image'];
 function needs(fast) {
     return {
         changes: { result: 'success', outputs: { version_only: String(fast) } },

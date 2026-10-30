@@ -16,7 +16,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
 import { clientFor } from './api-fixture.ts';
-import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { environments, secrets, secretVersions } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
@@ -83,7 +83,9 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
   try {
     await promise;
   } catch (error) {
-    const { status, reason, message } = error as { status: number; reason?: string; message: string };
+    const { status, code, reason, message } = error as { status: number; code?: string; reason?: string; message: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does.
+    if (code === 'not_available') return { status, reason: await refusedFor(), message };
     return { status, reason: reason ?? null, message };
   }
   throw new Error('it was not refused');
@@ -257,6 +259,6 @@ test("a listing shows no plain value from past a parent archived around coffre, 
   assert.equal((await valuesIn(root, 'market/leaf')).REGION, 'eu-west-3');
   const [middle] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.slug, 'middle'));
   await db.owner.update(environments).set({ archivedAt: new Date() }).where(eq(environments.id, middle!.id));
-  assert.equal((await refusal(root.secrets.reveal('market/leaf/REGION'))).status, 409);
+  assert.equal((await refusal(root.secrets.reveal('market/leaf/REGION'))).status, 404);
   assert.equal((await valuesIn(root, 'market/leaf')).REGION, null);
 });

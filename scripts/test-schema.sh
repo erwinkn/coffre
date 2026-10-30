@@ -179,7 +179,7 @@ owner_psql -c "SELECT pg_advisory_lock(1668244066, hashtext('token:deploy')), pg
 holders+=($!)
 held 1668244066
 vault_psql -At >"$scratch/late.log" 2>&1 <<'SQL' &
-SELECT use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 40, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 1500) ->> 'state'
+SELECT use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 40, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 1500, p_decided => true) ->> 'state'
   FROM (SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS t) now;
 SQL
 late=$!

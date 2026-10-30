@@ -238,6 +238,50 @@ test("a cutover committed and not yet sealed serves nothing: another vault that 
   assert.ok(sealed);
 });
 
+test("a cutover committed and not yet sealed serves no use: a use by ids and one by name each wait for its seal within their deadline, and are served once it is (R51; review r10 of D153)", async () => {
+  const w = await instance014();
+  const secret = await w.key(w.dev);
+  // A CLI session of the Owner's, the app's MAC aside (the vault never reads it), which the app vouches for at the cutover.
+  const { credentials } = tablesOf(db.owner);
+  const id = randomUUID();
+  const tokenHash = randomBytes(32);
+  const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 3_600_000);
+  await db.owner.insert(credentials).values({ id, kind: 'cli', tokenHash, tokenHint: 'hint', generation: 0, principal: ROOT, createdBy: ROOT, expiresAt, authMac: Buffer.alloc(32) });
+  const vouched = { id, principal: ROOT, kind: 'cli', scope: null, revoked: false, expiresAt: expiresAt.getTime(), generation: 0 };
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const sealThrough = async () => {
+    await held;
+    return {} as Sealed;
+  };
+  const first = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough });
+  const cutting = cutOver(first, { ...NONE, credentials: [vouched] as CutoverInput['credentials'] });
+  await waitFor(async () => (await marker()).length === 1);
+  // Another vault, as a deploy starts one, on the hot path's login: it finds the marker, and its seal not yet written.
+  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough }, async () => {}, ENGINE === 'postgres' ? await db.hot() : db.vault);
+  const [named] = await rows<{ project: string; environment: string; key: string }>(db.owner, sql`SELECT p.slug AS project, e.slug AS environment, s.key
+    FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = e.project_id WHERE s.id = ${secret.secretId}`);
+  const ask = async (deadlineMs: number) => {
+    const at = Date.now();
+    const byIds = await second.use!({ credential: id, secretId: secret.secretId, place: null, purpose: 'reveal', requestId: String(900_000 + Math.floor(Math.random() * 1e6)), at, deadline: at + deadlineMs });
+    const namedAt = Date.now();
+    const byName = await second.useNamed!({
+      tokenHash: tokenHash.toString('base64'), place: { project: named!.project, environment: named!.environment }, key: named!.key, accepts: { signin: true, issuers: [] },
+      purpose: 'reveal', requestId: String(900_000 + Math.floor(Math.random() * 1e6)), at: namedAt, deadline: namedAt + deadlineMs,
+    });
+    return { byIds, byName };
+  };
+  const waiting = await ask(500);
+  // Neither reads anything before the seal: each waits for it, within its admission, until its deadline.
+  assert.deepEqual(waiting.byIds, { ok: false, busy: 'late', retryAfter: 1 }, JSON.stringify(waiting.byIds));
+  assert.equal(waiting.byName.served && waiting.byName.route, 'busy', JSON.stringify(waiting.byName));
+  release();
+  assert.deepEqual(await cutting, { ok: true, done: true });
+  const served = await ask(3000);
+  assert.equal(served.byIds.ok, true, JSON.stringify(served.byIds));
+  assert.equal(served.byName.served && served.byName.route === 'name' && served.byName.outcome.ok, true, JSON.stringify(served.byName));
+});
+
 test("places 0.14 deleted: a deleted project's standing environment becomes `dev~deleted`, sealed deleted, its keys archived with no object; an environment deleted alone sealed deleted (T130)", async () => {
   const w = await instance014();
   const { environments, projects, secrets, secretVersions } = tablesOf(db.owner);

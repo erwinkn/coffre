@@ -2,6 +2,8 @@
 # Each test process gets a clone of one migrated template. Cases within a
 # file still run sequentially and retain all their resets and transaction guards.
 # COFFRE_TEST_DATABASE is the base name; a random suffix isolates each run.
+# `--files <file>...` runs those files alone, on the same footing: the use
+# matrices (`pnpm test:matrices`), which run as a CI job of their own.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -31,4 +33,10 @@ case "$COFFRE_TEST_ENGINE" in
         ;;
 esac
 
-node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"
+files=("scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
+if [ "${1:-}" = --files ]; then
+    shift
+    files=("$@")
+    set --
+fi
+node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "${files[@]}"

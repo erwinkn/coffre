@@ -273,7 +273,7 @@
 (* never starves a change (Postgres queues an exclusive lock request ahead *)
 (* of later shared ones; the model's uses are finite).                     *)
 (***************************************************************************)
-EXTENDS Integers, FiniteSets, Sequences
+EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS
     Uses,            \* the uses, each one request, one call
@@ -305,7 +305,8 @@ CONSTANTS
     PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, Slack, DeadlineSlack,
     AheadSlack, CapFromPolicy, CapSealed,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
-    IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue
+    IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue,
+    DecideBeforeLock
 
 None == "none"
 Change == "change"
@@ -391,6 +392,17 @@ Code(read, newest) ==
 AllTrue == [i \in Inputs |-> TRUE]
 NoCover == [seq |-> 0, id |-> None]
 NoCache == [on |-> FALSE, seals |-> AllTrue, change |-> NoChange]
+\* The credentials a use may name: an old one (None), or issuer i's.
+Credentials == {None} \cup Issuers
+\* The truth, for the invariants: whether the log allows the use's caller, as its changes left every
+\* input and, for a new credential, once its issue is in.
+Stands(f) == Content(Newest) /\ (f = None \/ IssuedIn(log, f))
+\* No step, invariant or constant names one use over another, nor one key, and no CHOOSE breaks a
+\* tie between them (each picks an entry by its number, which NumbersUnique holds unique): a scenario
+\* whose uses and keys are model values checks each set of states alike but for those names once
+\* (SYMMETRY Alike), and lists NumbersUnique. Not one with PROPERTIES: TLC's liveness checking is
+\* unsound under symmetry.
+Alike == Permutations(Uses) \cup Permutations(Keys)
 \* The keys a use may ask for: with no bulk cap, one, which no bulk row tracks.
 KeysOr == IF Keys = {} THEN {None} ELSE Keys
 
@@ -464,7 +476,8 @@ IdleUse == [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTr
             snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
             probed |-> FALSE, newest |-> AllTrue, newestChange |-> NoChange,
             key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE, write |-> NoTime,
-            replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE, mode |-> None, enters |-> FALSE]
+            replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE, mode |-> None, enters |-> FALSE,
+            second |-> FALSE, standing |-> FALSE, firstAllows |-> FALSE]
 \* A cover or a cache entry is the isolate's for one credential and key: a use's slot.
 Slots == KeysOr \X ({None} \cup Issuers)
 Slot(x) == <<u[x].key, u[x].fresh>>
@@ -569,15 +582,44 @@ UseLock(x) ==
 \* Statement A: the key's bulk row, as committed, and the policy's window (which no change can move
 \* while the use holds the lock shared). A key that must enter the set asks for the principal's lock
 \* exclusive; one in the set that must be moved on, shared (or exclusive, without RefreshShared).
+\* With DecideBeforeLock (T158, D153), a use that would ask for the principal's lock asks for it
+\* only once the Worker decided the use, in its second call: no decision is kept for a later use to
+\* take the lock on. Otherwise the call takes no lock, writes nothing and ends, answering the rows it
+\* read, which the Worker decides on (UseDecide). `standing` is the truth when the use asks for the
+\* lock, or, for a second call, when its first read what the Worker decided on: whether the log allows
+\* its caller.
 UseRead(x) ==
     /\ u[x].pc = "locked"
     /\ LET k == u[x].key
            t == u[x].at
+           f == u[x].fresh
            enters == k /= None /\ ~InSet(bulk, k, t, WindowIn(log))
            moves == k /= None /\ ~enters /\ ~Fresh(bulk, k, t)
            waits == PrincipalLocks /\ (enters \/ (moves /\ RefreshLocks))
-       IN u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF waits THEN "waiting" ELSE "read", !.enters = enters,
-                                          !.mode = IF ~waits THEN None ELSE IF moves /\ RefreshShared THEN "s" ELSE "x"]]
+           decides == DecideBeforeLock /\ waits /\ ~u[x].second
+       IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF decides THEN "deciding" ELSE IF waits THEN "waiting" ELSE "read",
+                                             !.enters = enters,
+                                             !.mode = IF ~waits THEN None ELSE IF moves /\ RefreshShared THEN "s" ELSE "x",
+                                             \* Asking for the lock in its second call, the truth when the Worker decided its first.
+                                             !.standing = waits /\ IF u[x].second THEN @ ELSE Stands(f),
+                                             \* What the Worker will decide on the rows this first call read.
+                                             !.firstAllows = decides /\ (f = None \/ IssuedIn(log, f)) /\ Code(Rows, Newest) = "allow",
+                                             !.second = FALSE]]
+          /\ shared' = IF decides THEN shared \ {x} ELSE shared
+    /\ UNCHANGED <<log, nextSeq, holder, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
+
+\* The Worker decides the first call's rows (T158): a caller refused there is answered so, nothing
+\* written, no lock taken; one allowed makes the use, a second call, which asks for the lock whatever
+\* it finds then (a revoke since waits, then refuses).
+UseDecide(x) ==
+    /\ u[x].pc = "deciding"
+    /\ LET allow == u[x].firstAllows
+           f == u[x].fresh
+       IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF allow THEN "started" ELSE "done", !.replied = @ \/ ~allow,
+                                             !.second = allow, !.standing = @ /\ allow, !.firstAllows = FALSE,
+                                             !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest,
+                                             !.snapNewestChange = NewestChange, !.snapIssued = f /= None /\ IssuedIn(log, f)]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
@@ -1011,7 +1053,7 @@ Restore ==
 -----------------------------------------------------------------------------
 
 UseStep(x) ==
-    \/ UseLock(x) \/ UseRead(x) \/ UsePrincipalLock(x) \/ UseLate(x) \/ UseRun(x) \/ UseCommit(x) \/ UseRelease(x)
+    \/ UseLock(x) \/ UseRead(x) \/ UseDecide(x) \/ UsePrincipalLock(x) \/ UseLate(x) \/ UseRun(x) \/ UseCommit(x) \/ UseRelease(x)
     \/ WorkerGivesUp(x)
 ChangeStep(h) ==
     ChangeStart(h) \/ ChangeReread(h) \/ ChangeLock(h) \/ ChangeRun(h) \/ ChangeCommit(h) \/ ChangeAnswer(h)
@@ -1123,6 +1165,12 @@ BulkReplayAgrees ==
 RefreshesNeverQueue ==
     \A x \in Uses : (u[x].pc = "waiting" /\ ~u[x].enters) =>
         \A y \in Uses \ {x} : (plock.ex = y \/ (u[y].pc = "waiting" /\ u[y].mode = "x")) => u[y].enters
+
+\* T158: a use asks for its principal's lock, and holds it, only for a caller the log allowed when it
+\* asked: a caller with no standing, which a key never made never makes wait, never waits for one held
+\* (formal/Probing.tla says what that would tell her). A revoke after the ask may still find it waiting.
+NoLockWithoutStanding ==
+    \A x \in Uses : (u[x].pc = "waiting" \/ plock.ex = x \/ x \in plock.sh) => u[x].standing
 
 \* A use holding the principal's lock shared finds its key still in the set at its statement: a key
 \* only ever moves later, and the window cannot change under the fence. So the statement never needs

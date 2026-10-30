@@ -451,6 +451,8 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
     const next = detail === null ? null : (hint?.(response.status, typeof body.reason === 'string' ? body.reason : null) ?? null);
     if (next !== null) fail(`${detail}: ${next}`);
     if (response.status === 403) fail(`forbidden: ${detail ?? 'you do not have a grant for that environment'}`);
+    // A key a request named that it may not have, whatever the reason (D153): said as coffre says it.
+    if (response.status === 404 && body.error === 'not_available' && detail !== null) fail(detail);
     if (response.status === 404) fail(detail === null ? 'not found' : `not found: ${detail}`);
     const status = `request failed with status ${response.status}`;
     if (detail !== null) fail(`${status}: ${detail}`);

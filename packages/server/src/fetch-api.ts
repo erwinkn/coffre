@@ -15,6 +15,7 @@ import {
   headerToken,
   readCookie,
   accessTampered,
+  refusedByKind,
   registrationRequired,
   sessionCookie,
   sessionCookieName,
@@ -262,10 +263,13 @@ export async function fetchApi(
       ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, recall ? { recall: true } : { shows: 'caller' })
       : options.authenticate;
     // A reveal of one key, by its path or as a list of one, with a coffre credential: the vault's one call by name, which
-    // decides on the caller as they are (`useByName`, T145, PR B). Its body is read first, to know the key.
+    // decides on the caller as they are (`useByName`, T145, PR B). Its body is read first, to know the key; only for a
+    // credential of a kind it serves by name and not refused for its kind alone, read before anything else is.
     let body: Uint8Array<ArrayBuffer> | null = null;
     let named: ApiContext['named'];
-    if (recall && runtime.vault.useNamed !== undefined && apiCredential(request, runtime.auth) !== null) {
+    const credential = recall && runtime.vault.useNamed !== undefined ? apiCredential(request, runtime.auth) : null;
+    const kind = credential === null ? null : tokenKind(credential.token);
+    if (credential !== null && kind !== null && NAMED_KINDS.includes(kind) && refusedByKind(runtime, credential.token) === null) {
       const read = await bytes();
       if (read instanceof Response) return read;
       body = read;

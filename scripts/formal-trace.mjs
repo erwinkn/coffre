@@ -8,7 +8,7 @@
 
 import { readFileSync } from 'node:fs';
 
-/** A TLA+ value as TLC prints it: records, functions (a function of tuples, say, as `(d :> v @@ …)`), tuples, sets, strings, numbers, booleans. */
+/** A TLA+ value as TLC prints it: records, functions (a function of tuples, say, as `(d :> v @@ …)`), tuples, sets, strings, numbers, booleans, model values. */
 function parse(text) {
   let i = 0;
   const space = () => {
@@ -80,10 +80,12 @@ function parse(text) {
       i = end + 1;
       return string;
     }
-    const atom = /^(TRUE|FALSE|-?\d+)/.exec(text.slice(i));
+    // A boolean, a number, or a model value (`u1`, a scenario's under SYMMETRY), kept as its name.
+    const atom = /^(TRUE|FALSE|-?\d+|[A-Za-z_]\w*)/.exec(text.slice(i));
     if (atom === null) throw new Error(`unexpected value at ${i}: ${text.slice(i, i + 40)}`);
     i += atom[0].length;
-    return atom[0] === 'TRUE' ? true : atom[0] === 'FALSE' ? false : Number(atom[0]);
+    if (atom[0] === 'TRUE' || atom[0] === 'FALSE') return atom[0] === 'TRUE';
+    return /^-?\d/.test(atom[0]) ? Number(atom[0]) : atom[0];
   };
   return value();
 }

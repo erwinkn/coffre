@@ -15,7 +15,7 @@ import { DfnsApiClient, type CredentialSigner, type KeyAssertion, type UserActio
 import { credential, type ProxiedCredential } from '@coffre/client/credential';
 
 import { clientFor, keyIds, LOG, watchUses } from './api-fixture.ts';
-import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, entries, NO, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header, jwt, privateKey } from '../src/plugins/credential-proxy.ts';
@@ -200,7 +200,9 @@ test('refused: no handle, an unknown signer, a key the environment lacks, a mess
   assert.equal((await post({ sign: { credential: 'dfns-key', message: 'aGk' } }, 'Bearer nope')).status, 401);
   assert.equal((await post({ sign: { credential: 'nope', message: 'aGk' } })).status, 404);
   assert.equal((await post({ sign: { credential: 'dfns', message: 'aGk' } })).status, 404, 'a credential with an upstream signs nothing');
-  assert.equal((await post({ sign: { credential: 'absent', message: 'aGk' } })).status, 409);
+  // A key the environment lacks: the one "no" of a key (D153), its reason in the app's entry.
+  const absent = await post({ sign: { credential: 'absent', message: 'aGk' } });
+  assert.deepEqual([absent.status, await absent.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'missing' : 'unknown_secret']);
   assert.equal((await post({ sign: { credential: 'dfns-key', message: 'a+b/' } })).status, 400);
   assert.equal((await post({ sign: { credential: 'dfns-key' } })).status, 400);
   assert.equal((await post({ nothing: true })).status, 400);

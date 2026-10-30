@@ -178,8 +178,9 @@ export async function authenticateRequest(
    * `shows`: what the request shows of its caller, which the app reads from the vault's rows with the credential (`Shows`):
    * `'caller'`, all of it, asking nothing of the vault, a caller `unchecked`, which nothing decides on.
    * `standing`: the caller as the vault's named use decided them (`Vault.useNamed`, T145): nothing asked or kept.
+   * `at`: the instant that use was asked at, at which its credential's expiry is judged, as the vault judged it (one clock).
    */
-  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access } = {},
+  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   const kind = tokenKind(token);
@@ -205,7 +206,10 @@ export async function authenticateRequest(
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
   try {
-    const asked = { sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }) };
+    const asked = {
+      sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }),
+      ...(options.at === undefined ? {} : { at: options.at }),
+    };
     // Only coffre's own credentials are read ahead: Access's verifier reads none.
     const verifying = options.ahead !== undefined && runtime.verifier instanceof SigninService
       ? runtime.verifier.verify(token, { ...asked, ahead: options.ahead })
