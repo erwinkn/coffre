@@ -80,6 +80,7 @@ node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
 postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
+hot_runtime=postgresql://coffre_vault_hot:local-hot-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 store="$(pnpm --dir "$root" store path)"
 
 # What applies the schema: this checkout's migrations, from its sources, or
@@ -169,7 +170,10 @@ conformance() {
     rm -f "$work/migrated"
     local code=0
     if [[ "$kind" == workers ]]; then
-        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --port "$port" >"$log" 2>&1 || code=$?
+        # The hot path's login, for a release whose harness takes it, as it requires it; one before refuses the flag.
+        local hot=()
+        if grep -rqs -- 'hot-runtime' "$project/node_modules/@coffre/conformance/dist"; then hot=(--hot-runtime "$hot_runtime"); fi
+        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" ${hot[@]+"${hot[@]}"} --port "$port" >"$log" 2>&1 || code=$?
     else
         pnpm --dir "$project" conformance --port "$port" >"$log" 2>&1 || code=$?
     fi

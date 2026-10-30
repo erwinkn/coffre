@@ -647,6 +647,18 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   assert.match(outranked.stderr, /✗ Checking the database is up to date\n\s+the database is at the migrated schema, but reasserting its privileges failed: coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path's: run ALTER ROLE coffre_vault_hot IN DATABASE setup_hot RESET ALL/);
   assert.equal(outranked.stdout, '', 'no URL shown for a login without its bounds');
 
+  // Remade with a membership that may grant coffre_vault, to the app's login say: refused, as 0022 refuses it.
+  await asSuperuser('setup_hot', async (client) => {
+    await client.unsafe('DROP ROLE coffre_vault_hot');
+    await client.unsafe('CREATE ROLE coffre_vault_hot NOLOGIN');
+    await client.unsafe('GRANT coffre_vault_hot TO setup_owner WITH ADMIN TRUE');
+    await client.unsafe('GRANT coffre_vault TO coffre_vault_hot WITH ADMIN TRUE, INHERIT TRUE, SET FALSE');
+  });
+  const granting = setup(['--json'], { stdin: `${url}\n` });
+  assert.equal(granting.status, 1);
+  assert.match(granting.stderr, /reasserting its privileges failed: coffre_vault_hot may set or grant coffre_vault: have its grantor run REVOKE coffre_vault FROM coffre_vault_hot/);
+  assert.equal(granting.stdout, '');
+
   // One another role made, unable to log in: on Postgres 16, the owner may not change it without its ADMIN. Said so, before the app's and the vault's change.
   await asSuperuser('setup_hot', async (client) => {
     await client.unsafe('DROP ROLE coffre_vault_hot');
