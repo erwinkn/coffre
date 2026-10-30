@@ -1,7 +1,8 @@
 // Each component's database login writes its own tables and nothing else:
 // the app cannot write members, grants or the vault's entries, the vault
-// cannot write the app's tables, and neither can rewrite the log. Postgres
-// only: SQLite has no logins.
+// cannot write the app's tables, and neither can rewrite the log. The
+// vault's hot path's login, 0.15's uses', holds the vault's rights and no
+// more, under its own timeouts. Postgres only: SQLite has no logins.
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
@@ -84,24 +85,53 @@ export async function appLogin(deployment: Deployment): Promise<string> {
 export async function vaultLogin(deployment: Deployment): Promise<string> {
   if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
   expect(deployment.vaultRuntime !== null, 'the vault runtime login is missing');
-  const appTables = (await using(deployment.database(), tables)).filter((name) =>
-    !['vault_members', 'vault_grants', 'audit_log', 'audit_chain_head'].includes(name));
-  return using(deployment.vaultRuntime(), async (sql) => {
-    await noWrites(sql, appTables);
-    const [head] = await sql.query<{ insertable: boolean; deletable: boolean; identity_updatable: boolean; truncatable: boolean }>(`SELECT
-      has_table_privilege(current_user, 'audit_chain_head', 'INSERT') AS insertable,
-      has_table_privilege(current_user, 'audit_chain_head', 'DELETE') AS deletable,
-      has_table_privilege(current_user, 'audit_chain_head', 'TRUNCATE') AS truncatable,
-      has_column_privilege(current_user, 'audit_chain_head', 'only_row', 'UPDATE') AS identity_updatable`);
-    expect(!head.insertable && !head.deletable && !head.truncatable && !head.identity_updatable, 'the vault can replace the head row', head);
-    const statements = [...IMMUTABLE, appendAs('app'), 'SET ROLE coffre_app',
-      'UPDATE audit_chain_head SET only_row = only_row', 'DELETE FROM audit_chain_head', 'TRUNCATE audit_chain_head',
-      'UPDATE vault_members SET principal = principal', 'UPDATE vault_grants SET role = role'];
-    for (const table of appTables) {
-      const column = APP_COLUMNS[table];
-      if (column !== undefined) statements.push(`UPDATE ${quoted(table)} SET ${column} = ${column}`);
-    }
-    const count = await refuses(sql, statements);
-    return `${count} writes and bypasses refused; app tables have no write privileges`;
+  const appTables = await vaultReadOnly(deployment);
+  return using(deployment.vaultRuntime(), (sql) => vaultRefuses(sql, appTables));
+}
+
+/**
+ * The hot path's login, which nothing uses until 0.15's log is the default:
+ * the one the harness was given logs in, as coffre_vault_hot, with the
+ * timeouts and generic plans 0022 gives it, and holds what the vault's
+ * login holds, no more.
+ */
+export async function hotLogin(deployment: Deployment): Promise<string> {
+  if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
+  expect(deployment.hotRuntime !== null, 'the hot path login is missing');
+  const appTables = await vaultReadOnly(deployment);
+  return using(deployment.hotRuntime(), async (sql) => {
+    const [login] = await sql.query<{ name: string; lock: string; statement: string; plans: string; members: boolean }>(`SELECT current_user AS name,
+      current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement, current_setting('plan_cache_mode') AS plans,
+      has_table_privilege(current_user, 'vault_members', 'INSERT') AS members`);
+    expect(login.name === 'coffre_vault_hot', `the hot path's URL logs in as ${login.name}, not coffre_vault_hot`);
+    expect(login.lock === '1s' && login.statement === '2s' && login.plans === 'force_generic_plan', "the hot path's login lacks its timeouts or generic plans", login);
+    expect(login.members, "the hot path's login cannot write members, as the vault's can");
+    return `as coffre_vault_hot, lock 1s, statement 2s, generic plans; ${await vaultRefuses(sql, appTables)}`;
   });
+}
+
+/** The tables only the app writes: every one but the vault's and the log's. */
+async function vaultReadOnly(deployment: Deployment): Promise<string[]> {
+  return (await using(deployment.database(), tables)).filter((name) =>
+    !['vault_members', 'vault_grants', 'audit_log', 'audit_chain_head'].includes(name));
+}
+
+/** What a vault login may not do: write the app's tables, replace the log's head, rewrite the log or act as the app. */
+async function vaultRefuses(sql: Sql, appTables: readonly string[]): Promise<string> {
+  await noWrites(sql, appTables);
+  const [head] = await sql.query<{ insertable: boolean; deletable: boolean; identity_updatable: boolean; truncatable: boolean }>(`SELECT
+    has_table_privilege(current_user, 'audit_chain_head', 'INSERT') AS insertable,
+    has_table_privilege(current_user, 'audit_chain_head', 'DELETE') AS deletable,
+    has_table_privilege(current_user, 'audit_chain_head', 'TRUNCATE') AS truncatable,
+    has_column_privilege(current_user, 'audit_chain_head', 'only_row', 'UPDATE') AS identity_updatable`);
+  expect(!head.insertable && !head.deletable && !head.truncatable && !head.identity_updatable, 'the vault can replace the head row', head);
+  const statements = [...IMMUTABLE, appendAs('app'), 'SET ROLE coffre_app',
+    'UPDATE audit_chain_head SET only_row = only_row', 'DELETE FROM audit_chain_head', 'TRUNCATE audit_chain_head',
+    'UPDATE vault_members SET principal = principal', 'UPDATE vault_grants SET role = role'];
+  for (const table of appTables) {
+    const column = APP_COLUMNS[table];
+    if (column !== undefined) statements.push(`UPDATE ${quoted(table)} SET ${column} = ${column}`);
+  }
+  const count = await refuses(sql, statements);
+  return `${count} writes and bypasses refused; app tables have no write privileges`;
 }

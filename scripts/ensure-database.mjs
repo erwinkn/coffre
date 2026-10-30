@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Create a local database, and the restricted logins the app and the vault
-// run as and backups take, unless they exist:
+// Create a local database, and the restricted logins the app, the vault and
+// its hot path run as and backups take, unless they exist:
 // `node --conditions=coffre:source scripts/ensure-database.mjs coffre`.
 // Connects to the local Postgres as its owner; nothing here is for anywhere
 // else.
@@ -24,7 +24,14 @@ try {
     // transaction; ending this client releases it, including on failure.
     await client.unsafe("SELECT pg_advisory_lock(hashtextextended('coffre:local-roles', 0))");
     const options = 'LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS';
-    for (const [login, password] of [['coffre_runtime', 'local-runtime-only'], ['coffre_vault_runtime', 'local-vault-only'], ['coffre_backup_login', 'local-backup-only']]) {
+    const logins = [
+        ['coffre_runtime', 'local-runtime-only'],
+        ['coffre_vault_runtime', 'local-vault-only'],
+        // 0.15's hot path's: made here as a login, as `coffre setup` makes it, before 0022 grants it coffre_vault.
+        ['coffre_vault_hot', 'local-hot-only'],
+        ['coffre_backup_login', 'local-backup-only'],
+    ];
+    for (const [login, password] of logins) {
         const role = await client.unsafe('SELECT 1 FROM pg_roles WHERE rolname = $1', [login]);
         await client.unsafe(`${role.length === 0 ? 'CREATE' : 'ALTER'} ROLE ${login} ${options} PASSWORD '${password}'`);
     }

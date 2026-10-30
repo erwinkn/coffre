@@ -426,9 +426,12 @@ workerd restarted each time (25 runs, per-thread CPU from schedstat).
   app's in 0.14, entries the vault cannot authenticate. Their late 0.14
   writes leave their rows stale until adopted (fail closed), and a row put
   back over one is PR 9's to refuse.
-- **`coffre setup` does not give `coffre_vault_hot` a password yet.** The
-  host does, as for any login (docs/deploy.md). The suite's
-  `setup-test-database.sh` gives it one.
+- **`coffre setup` makes `coffre_vault_hot` a login (PR 10a).** It makes
+  the role with a password before the migrations, or gives 0022's one a
+  password, unasked; on Workers, a third Hyperdrive config,
+  `<vault Worker>-hot`, bound as `HOT_HYPERDRIVE` (docs/deploy.md). The
+  suite's `setup-test-database.sh` and `ensure-database.mjs` make it as
+  setup does.
 
 ### The driver: postgres.js at node-postgres's round trips (W221)
 

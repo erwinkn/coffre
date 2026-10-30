@@ -7,8 +7,9 @@ through it, and checks, among others, that no value leaks into any page,
 table or log, that every read has the vault's entry in the shared log, every stored
 version has the app's entry naming its vault wrap, and that
 tampering with either author's entries is caught. Workers takes
-`--postgres <owner URL>`, `--runtime <coffre_runtime URL>` and
-`--vault-runtime <coffre_vault_runtime URL>` on a local Postgres server;
+`--postgres <owner URL>`, `--runtime <coffre_runtime URL>`,
+`--vault-runtime <coffre_vault_runtime URL>` and
+`--hot-runtime <coffre_vault_hot URL>` on a local Postgres server;
 it creates and drops its own database. Node uses one temporary SQLite file
 for both processes. Neither run uses the deployment's real database or keys. A running
 instance is checked from outside by the CLI, `coffre verify instance`

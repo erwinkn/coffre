@@ -62,8 +62,8 @@ if ! postgres_ready; then
     exit 1
 fi
 
-# The app's login and the vault's.
-for login in coffre_runtime:local-runtime-only coffre_vault_runtime:local-vault-only; do
+# The app's login, the vault's and its hot path's.
+for login in coffre_runtime:local-runtime-only coffre_vault_runtime:local-vault-only coffre_vault_hot:local-hot-only; do
     name="${login%%:*}" password="${login#*:}"
     if ! docker compose exec -T postgres psql -U coffre_owner -d postgres -tAc \
         "SELECT 1 FROM pg_roles WHERE rolname = '$name'" | grep -q 1; then

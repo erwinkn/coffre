@@ -22,7 +22,7 @@ import { deviceLogin, personaOn, signIn, signInAdmin } from '../src/checks/peopl
 import { boot, type Deployment, type Kind } from '../src/harness.ts';
 
 const USAGE = `usage: bench.ts workers|node <dir> [--entries <n>] [--members <n>] [--keys <n>] [--warm <n>] [--cold <n>] [--port <n>]
-  [--postgres <url> --runtime <url> --vault-runtime <url>]   workers: as coffre-conformance takes them`;
+  [--postgres <url> --runtime <url> --vault-runtime <url> --hot-runtime <url>]   workers: as coffre-conformance takes them`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -37,6 +37,7 @@ const { values, positionals } = parseArgs({
     postgres: { type: 'string' },
     runtime: { type: 'string' },
     'vault-runtime': { type: 'string' },
+    'hot-runtime': { type: 'string' },
   },
 });
 const [kind, dir] = positionals as [Kind, string];
@@ -235,6 +236,7 @@ const deployment = await boot(kind, resolve(dir), {
   postgres: values.postgres,
   runtime: values.runtime,
   vaultRuntime: values['vault-runtime'],
+  hotRuntime: values['hot-runtime'],
 });
 try {
   const people = await populate(deployment);

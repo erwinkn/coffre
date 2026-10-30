@@ -1,6 +1,6 @@
 // `coffre setup`: a deployment's database and keys, in one go. It asks for
 // the database administrator's connection string, never on the command line;
-// makes the two runtime logins and the backup login, with fresh passwords
+// makes the three runtime logins and the backup login, with fresh passwords
 // that reach the database only as SCRAM verifiers; migrates as the
 // administrator, with the migrations this CLI was built with, granting the
 // backup login its read-only group; checks the boundary by connecting as
@@ -29,19 +29,25 @@ import { type GuideBlock, type Screen, showSecrets, type Value } from './secrets
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
-import { Cloudflare, type Database, deployedSummary, Later } from './workers.ts';
+import { Cloudflare, configName, type Database, deployedSummary, Later, OWNED } from './workers.ts';
 
 /**
- * The two runtime roles, as the migration names them, and the Hyperdrive
- * config each gets on Workers; and the backup login, which `coffre_backup`
- * lets read every row for `coffre backup`, and which no Worker uses.
+ * The three runtime roles, as the migrations name them, each with a
+ * Hyperdrive config of its own on Workers: the app's, the vault's, and the
+ * vault's hot path's, 0.15's uses, which 0022 makes unable to log in. And
+ * the backup login, which `coffre_backup` lets read every row for `coffre
+ * backup`, and which no Worker uses.
  */
-const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime', backup: 'coffre_backup_login' } as const;
-const HYPERDRIVE = { app: 'coffre', vault: 'coffre-vault' } as const;
+const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime', hot: 'coffre_vault_hot', backup: 'coffre_backup_login' } as const;
 type Component = keyof typeof ROLES;
-const COMPONENTS = ['app', 'vault', 'backup'] as const;
-/** The components that run, each with a database login of its own. */
+const COMPONENTS = ['app', 'vault', 'hot', 'backup'] as const;
+/** The template's Workers, after which the configs the screen's commands make are named (`configName`). */
+const TEMPLATE = { app: 'coffre', vault: 'coffre-vault' } as const;
+/** The logins that run. */
 type Runtime = Exclude<Component, 'backup'>;
+const RUNTIMES = ['app', 'vault', 'hot'] as const;
+/** The logins a run gives a password unasked when they cannot log in: nothing logs in as them yet (`provision`). */
+const UNASKED = new Set<Component>(['hot', 'backup']);
 
 /** What happened to a login's password: set on a new login, set again on one that existed, or left alone. */
 export type Password = 'created' | 'reset' | 'kept';
@@ -59,6 +65,7 @@ export type SetupResult = {
   keys: Keys | null;
   app: Login;
   vault: Login;
+  hot: Login;
   backup: Login;
   version: string;
   /** What the database lets in, which each Hyperdrive config's limit is a share of (`hyperdriveLimit`). */
@@ -259,7 +266,7 @@ type Inspected = { connections: Connections; used: boolean; existing: ReadonlyMa
 /**
  * The database, read before anything changes it or Cloudflare: the
  * administrator connects, and may create roles; a Workers deployment's
- * has room for both Hyperdrive configs. Each refusal comes before
+ * has room for all three Hyperdrive configs. Each refusal comes before
  * Cloudflare's questions, its domain added or a custom hostname made, and
  * before any login gets a new password its config would never have.
  */
@@ -292,7 +299,7 @@ async function inspect(administrator: URL, workers: boolean, out: Output, clean:
       await steps.run(2, async () => {
         const limit = hyperdriveLimit(inspected.connections);
         if (limit === null) throw new SetupError(tooFewConnections(inspected.connections));
-        return `${where} has room for both Hyperdrive configs, with a connection limit of ${limit} each`;
+        return `${where} has room for the three Hyperdrive configs, with a connection limit of ${limit} each`;
       });
     }
   } finally {
@@ -335,7 +342,7 @@ async function run(
   const steps = new Steps(
     out,
     [
-      'Make the three logins',
+      'Make the four logins',
       'Migrate the database',
       "Check each login's rights",
       ...(cloudflare === null ? [] : Cloudflare.TITLES),
@@ -353,8 +360,8 @@ async function run(
       const reset =
         cloudflare === null
           ? async (existing: ReadonlyMap<string, boolean>) => {
-              // A backup login that cannot log in gets a password unasked (`provision`).
-              const asked = COMPONENTS.map((component) => ROLES[component]).filter((role) => existing.has(role) && !(role === ROLES.backup && !existing.get(role)));
+              // A hot path's or backup login that cannot log in gets a password unasked (`provision`).
+              const asked = COMPONENTS.filter((component) => existing.has(ROLES[component]) && !(UNASKED.has(component) && !existing.get(ROLES[component]))).map((component) => ROLES[component]);
               const all =
                 options.resetPasswords ||
                 (asked.length > 0 && (await progress.ask(`${listed(asked, 'and')} ${asked.length === 1 ? 'exists' : 'exist'} already. Set new passwords?`)));
@@ -395,6 +402,7 @@ async function run(
         const login = logins[component];
         const allowed = login.url === null ? await granted(client, login.role) : await probed(login.url);
         details.push(checked(component, login, allowed));
+        if (component === 'hot' && login.url !== null) await holdsHotSettings(login);
       }
       const kept = COMPONENTS.map((component) => logins[component]).filter((login) => login.url === null && login.password === 'kept');
       if (kept.length > 0) details.push(`${listed(kept.map(({ role }) => role), 'and')}: from the catalog, with no new password to log in with`);
@@ -413,14 +421,16 @@ async function run(
       });
       // Printed whole, to copy: a step's lines are cut to the terminal's width.
       if (low.length > 0) {
-        const [one, other] = low;
-        const below = other === undefined
-          ? `${one!.name} is at ${one!.limit} connections, below its share of ${limit}`
-          : `${one!.name} and ${other.name} are at ${one!.limit === other.limit ? `${one!.limit} connections each` : `${one!.limit} and ${other.limit} connections`}, below their share of ${limit}`;
+        const one = low.length === 1;
+        const names = listed(low.map(({ name }) => name), 'and');
+        const limits = [...new Set(low.map(({ limit }) => limit))];
+        const below = one
+          ? `${names} is at ${low[0]!.limit} connections, below its share of ${limit}`
+          : `${names} are at ${limits.length === 1 ? `${limits[0]} connections each` : `${listed(low.map(({ limit }) => String(limit)), 'and')} connections`}, below their share of ${limit}`;
         steps.aside(
           `${below}. Hyperdrive splits a config's connections among its shards, and a transaction holds one to its commit, a wait ` +
             'for a lock included: with few connections, one call waiting on the audit log stops every other on its shard. Unless the ' +
-            `database serves more than coffre, raise ${other === undefined ? 'it' : 'them'}:`,
+            `database serves more than coffre, raise ${one ? 'it' : 'them'}:`,
         );
         for (const { id } of low) steps.print(`  pnpm exec wrangler hyperdrive update ${id} --origin-connection-limit=${limit}`);
       }
@@ -453,8 +463,12 @@ async function holdsData(client: PostgresClient): Promise<boolean> {
 /** The database as Cloudflare's checks take it (`Database`). */
 function asRead(administrator: URL, used: boolean, existing: ReadonlyMap<string, boolean>): Database {
   const user = decodeURIComponent(administrator.username);
-  const login = (component: Runtime) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
-  return { administrator, used, logins: { app: login('app'), vault: login('vault') } };
+  const login = (component: Runtime) => ({
+    login: loginFor(ROLES[component], user),
+    exists: existing.has(ROLES[component]),
+    unlocks: UNASKED.has(component) && existing.get(ROLES[component]) === false,
+  });
+  return { administrator, used, logins: { app: login('app'), vault: login('vault'), hot: login('hot') } };
 }
 
 /** Coffre's logins that exist, by role, and whether each may log in. */
@@ -467,10 +481,14 @@ async function existingLogins(client: PostgresClient): Promise<Map<string, boole
  * Each login, created with a fresh password, or, if it exists, its
  * password set again when `reset`, given the logins that exist, says so;
  * otherwise left as it is. A backup login that cannot log in gets a
- * password too: a run that made it never showed one. With `later`, on
- * Cloudflare, the backup login's password waits until the screen has
- * shown it and it is saved (`activate`): one made now cannot log in, and
- * one that exists keeps its password, until then.
+ * password too: a run that made it never showed one. So does the hot
+ * path's, which 0022 made unable to log in: it is made a login, and said
+ * created, as no Hyperdrive config can have logged in as it yet. The
+ * hot path's made here, before the migrations, is one 0022 takes as a
+ * host's, and grants coffre_vault. With `later`, on Cloudflare, the
+ * backup login's password waits until the screen has shown it and it is
+ * saved (`activate`): one made now cannot log in, and one that exists
+ * keeps its password, until then.
  */
 async function provision(
   client: PostgresClient,
@@ -483,12 +501,12 @@ async function provision(
   const existing = await existingLogins(client);
   const resets = await reset(existing);
   const logins = {} as Record<Component, Login>;
-  // The backup login first: the one another role may have made, which this administrator may not change, refused before the others change.
-  for (const component of ['backup', 'app', 'vault'] as const) {
+  // The backup login and the hot path's first: the ones another role may have made, which this administrator may not change, refused before the others change.
+  for (const component of ['backup', 'hot', 'app', 'vault'] as const) {
     const role = ROLES[component];
     const create = !existing.has(role);
-    const locked = component === 'backup' && existing.get(role) === false;
-    const login: Login = { role, login: loginFor(role, user), password: create ? 'created' : 'reset', url: null };
+    const locked = UNASKED.has(component) && existing.get(role) === false;
+    const login: Login = { role, login: loginFor(role, user), password: create || (locked && component === 'hot') ? 'created' : 'reset', url: null };
     const sql = (attributes: string) =>
       `${create ? 'CREATE' : 'ALTER'} ROLE ${quoteIdentifier(role)} ${attributes}${create ? ' INHERIT NOCREATEDB NOCREATEROLE' : ''}`;
     if (!create && !locked && !resets(component)) {
@@ -501,7 +519,8 @@ async function provision(
       const password = newPassword();
       secrets.push(password);
       await changeRole(client, user, role, sql(`LOGIN PASSWORD ${quoteLiteral(scramVerifier(password))}`));
-      logins[component] = { ...login, url: loginUrl(administrator, login.login, password) };
+      const url = loginUrl(administrator, login.login, password);
+      logins[component] = { ...login, url: component === 'hot' ? withoutHotSettings(url) : url };
     }
   }
   return logins;
@@ -586,13 +605,14 @@ const BOUNDARY = [
   {
     // The backup login's, through coffre_backup: --backup-login granted it.
     what: 'read the log',
-    expected: { app: true, vault: true, backup: true },
+    expected: { app: true, vault: true, hot: true, backup: true },
     sql: 'SELECT 1 FROM audit_log LIMIT 1',
     privilege: "has_table_privilege($1, 'public.audit_log', 'SELECT')",
   },
   {
     what: 'write members',
-    expected: { app: false, vault: true, backup: false },
+    // The hot path's, through coffre_vault, as the vault's.
+    expected: { app: false, vault: true, hot: true, backup: false },
     // A whole row, so that only a privilege can refuse it.
     sql: `INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
           VALUES ('user:coffre-setup@probe.invalid', 'active', false, 0, 0, 'system:coffre-setup', 0, 'system:coffre-setup', 0, decode(repeat('00', 32), 'hex'))`,
@@ -600,17 +620,55 @@ const BOUNDARY = [
   },
   {
     what: 'delete log entries',
-    expected: { app: false, vault: false, backup: false },
+    expected: { app: false, vault: false, hot: false, backup: false },
     sql: 'DELETE FROM audit_log',
     privilege: "has_table_privilege($1, 'public.audit_log', 'DELETE')",
   },
   {
     what: 'create tables',
-    expected: { app: false, vault: false, backup: false },
+    expected: { app: false, vault: false, hot: false, backup: false },
     sql: 'CREATE TABLE coffre_setup_probe (probe integer)',
     privilege: "has_schema_privilege($1, 'public', 'CREATE') OR has_database_privilege($1, current_database(), 'CREATE')",
   },
 ] as const;
+
+/** The settings 0022 gives the hot path's login, which bound a use, as Postgres reports them. */
+const HOT_SETTINGS = { lock_timeout: '1s', statement_timeout: '2s', plan_cache_mode: 'force_generic_plan' } as const;
+
+/**
+ * A hot path's URL without the administrator's own values of its settings:
+ * the driver sends a URL's parameters as the session's, which outrank the
+ * role's at login. Its TLS settings and the rest stay.
+ */
+function withoutHotSettings(url: string): string {
+  const parsed = new URL(url);
+  for (const name of Object.keys(HOT_SETTINGS)) parsed.searchParams.delete(name);
+  return parsed.href;
+}
+
+/**
+ * The hot path's login, through the URL shown, has its own settings: one
+ * the URL still overrides, through `options` say, is refused before it is
+ * shown.
+ */
+async function holdsHotSettings(login: Login): Promise<void> {
+  const client = postgresSession(login.url!, { application_name: 'coffre-setup' });
+  try {
+    const [held] = await client.unsafe<Record<keyof typeof HOT_SETTINGS, string>[]>(
+      `SELECT ${Object.keys(HOT_SETTINGS).map((name) => `current_setting('${name}') AS ${name}`).join(', ')}`,
+    );
+    const wrong = Object.entries(HOT_SETTINGS).filter(([name, value]) => held![name as keyof typeof HOT_SETTINGS] !== value);
+    if (wrong.length > 0) {
+      throw new SetupError(
+        `${login.role} logs in with ${listed(wrong.map(([name]) => `${name} ${held![name as keyof typeof HOT_SETTINGS]}`), 'and')}, not the hot path's ` +
+          `${listed(wrong.map(([name, value]) => `${name} ${value}`), 'and')}: the administrator's connection string sets ${wrong.length === 1 ? 'it' : 'them'}, in its options. ` +
+          'Nothing is shown: take them out, then run coffre setup again with --reset-passwords.',
+      );
+    }
+  } finally {
+    await client.end();
+  }
+}
 
 /** Each probe, tried as the login in a transaction rolled back: allowed, or refused for want of a privilege. */
 async function probed(url: string): Promise<boolean[]> {
@@ -677,23 +735,28 @@ export function backupValues(backup: Login): Value[] {
       ];
 }
 
-/** The values to save, by component: the app's key and URL, the vault's ID, key and URL, and the backup's URL, as this run made them. */
-export function setupValues({ keys, app, vault, backup }: SetupResult): Record<Component, Value[]> {
+/** Each runtime login's URL, as the screen names it, and where it goes on Node: its file, under its variable. */
+const RUNTIME_URLS = {
+  app: { label: 'App database URL', file: '.env', variable: 'DATABASE_URL', about: "The app's own database login. Goes in the app: its Hyperdrive config, or DATABASE_URL." },
+  vault: { label: 'Vault database URL', file: 'vault.env', variable: 'DATABASE_URL', about: "The vault's own database login. Goes in the vault: its Hyperdrive config, or DATABASE_URL." },
+  hot: {
+    label: 'Hot path database URL',
+    file: 'vault.env',
+    variable: 'HOT_DATABASE_URL',
+    about: "The vault's login for 0.15's uses, unused until 0.15's log is the default. Goes in the vault: its second Hyperdrive config, HOT_HYPERDRIVE, or HOT_DATABASE_URL.",
+  },
+} as const satisfies Record<Runtime, { label: string; file: string; variable: string; about: string }>;
+
+/** The values to save, by section: the app's key and URL, the vault's ID, key and its two URLs, and the backup's URL, as this run made them. */
+export function setupValues({ keys, app, vault, hot, backup }: SetupResult): Record<'app' | 'vault' | 'backup', Value[]> {
   const made = keys === null ? { app: [], vault: [] } : keyValues(keys);
-  const database = (login: Login, component: Runtime): Value[] =>
-    login.url === null
-      ? []
-      : [
-          {
-            label: `${component === 'app' ? 'App' : 'Vault'} database URL`,
-            value: login.url,
-            mask: 'password',
-            about: `The ${component}'s own database login. Goes in the ${component}: its Hyperdrive config, or DATABASE_URL.`,
-          },
-        ];
+  const database = (login: Login, component: Runtime): Value[] => {
+    const { label, about } = RUNTIME_URLS[component];
+    return login.url === null ? [] : [{ label, value: login.url, mask: 'password', about }];
+  };
   return {
     app: [...made.app, ...database(app, 'app')],
-    vault: [...made.vault, ...database(vault, 'vault')],
+    vault: [...made.vault, ...database(vault, 'vault'), ...database(hot, 'hot')],
     backup: backupValues(backup),
   };
 }
@@ -709,14 +772,16 @@ export const BACKUP_GUIDE: GuideBlock = {
 /** The screen: the values, and where each goes, with the Hyperdrive commands to copy. */
 export function setupScreen(result: SetupResult): Screen {
   const { app, vault, backup } = setupValues(result);
-  const set = (['app', 'vault'] as const).filter((component) => result[component].url !== null);
+  const set = RUNTIMES.filter((component) => result[component].url !== null);
   const created = set.some((component) => result[component].password === 'created');
   const keys = keyGuide();
   const limit = hyperdriveLimit(result.connections);
   const updated = set.filter((component) => result[component].password !== 'created');
+  // A config this run gave no new password: a share of fewer configs may have set its limit, above what each of three gets now.
+  const kept = RUNTIMES.filter((component) => result[component].url === null);
   const hyperdrive = set.map((component) => {
     const login = result[component];
-    const target = login.password === 'created' ? `create ${HYPERDRIVE[component]} --caching-disabled` : `update <the ${component}'s config id>`;
+    const target = login.password === 'created' ? `create ${configName(component, TEMPLATE)} --caching-disabled` : `update <${OWNED[component]} config id>`;
     // Setup can't see what a config allows now, so an update sets the limit too (`cappedLimit`), and says so.
     return { command: hyperdriveCommand(target, limit === null ? null : cappedLimit(null, limit)) };
   });
@@ -732,16 +797,22 @@ export function setupScreen(result: SetupResult): Screen {
               : [
                   `Setup can't see the limit each config has now, and the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}. Below that, a call waiting on a lock stops the others on its Hyperdrive shard: leave --origin-connection-limit out only for a config you keep lower because its database serves more than coffre (pnpm exec wrangler hyperdrive get <id> shows its limit).`,
                 ]),
-            ...hyperdrive.flatMap((command, i) => [`The ${set[i]} database URL:`, command]),
-            `Each command sets its config's connection limit to ${limit}, so that both fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
+            ...hyperdrive.flatMap((command, i) => [`The ${lowered(RUNTIME_URLS[set[i]!].label)}:`, command]),
+            `Each command sets its config's connection limit to ${limit}, so that all three configs fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
+            ...(kept.length === 0
+              ? []
+              : [
+                  `${listed(kept.map((component) => OWNED[component]), 'and').replace(/^t/, 'T')} ${kept.length === 1 ? 'config keeps its password, and its limit' : 'configs keep their passwords, and their limits'}, which setup can't see: one a share of two configs set may be above ${limit}. Lower ${kept.length === 1 ? 'it' : 'each'} to ${limit}, unless it is there or below already:`,
+                  ...kept.map((component) => ({ command: `pnpm exec wrangler hyperdrive update <${OWNED[component]} config id> --origin-connection-limit=${limit}` })),
+                ]),
             'Or make them in the Cloudflare dashboard, under Hyperdrive.',
-            ...(created ? ['Their ids go under hyperdrive, in app/wrangler.jsonc and vault/wrangler.jsonc.'] : []),
+            ...(created ? ["Their ids go under hyperdrive: the app's in app/wrangler.jsonc, at HYPERDRIVE; the vault's and the hot path's in vault/wrangler.jsonc, at VAULT_HYPERDRIVE and HOT_HYPERDRIVE."] : []),
           ]),
     ...(result.keys === null ? [] : keys.workers),
   ];
   const node = [
     ...(result.keys === null ? [] : keys.node),
-    ...set.map((component) => `${component === 'app' ? '.env' : 'vault.env'} takes the ${component} database URL, as DATABASE_URL.`),
+    ...set.map((component) => `${RUNTIME_URLS[component].file} takes the ${lowered(RUNTIME_URLS[component].label)}, as ${RUNTIME_URLS[component].variable}.`),
     'Keep each file readable only by its process (chmod 600).',
   ];
   return {
@@ -765,33 +836,51 @@ export function setupScreen(result: SetupResult): Screen {
 
 /** What the values were, by name, for the --json warning. */
 function shownNames(result: SetupResult): string[] {
-  return Object.values(setupValues(result)).flat().filter(({ mask }) => mask !== 'none').map(({ label }) => `the ${label.replace(/^[A-Z]/, (c) => c.toLowerCase())}`);
+  return Object.values(setupValues(result)).flat().filter(({ mask }) => mask !== 'none').map(({ label }) => `the ${lowered(label)}`);
 }
 
 /** The same values, for a script: each component's, under the examples' names, and what happened to each login. */
-export function asJson({ keys, app, vault, backup }: SetupResult) {
+export function asJson({ keys, app, vault, hot, backup }: SetupResult) {
   const database = (login: Login) => (login.url === null ? {} : { DATABASE_URL: login.url });
   return {
     app: { ...(keys === null ? {} : { APP_KEY: keys.APP_KEY }), ...database(app) },
-    vault: { ...(keys === null ? {} : { VAULT_KEY_ID: keys.VAULT_KEY_ID, VAULT_KEY: keys.VAULT_KEY }), ...database(vault) },
+    vault: {
+      ...(keys === null ? {} : { VAULT_KEY_ID: keys.VAULT_KEY_ID, VAULT_KEY: keys.VAULT_KEY }),
+      ...database(vault),
+      ...(hot.url === null ? {} : { HOT_DATABASE_URL: hot.url }),
+    },
     backup: database(backup),
-    logins: Object.fromEntries([app, vault, backup].map(({ role, login, password }) => [role, { login, password }])),
+    logins: Object.fromEntries([app, vault, hot, backup].map(({ role, login, password }) => [role, { login, password }])),
   };
 }
 
 /** After the screen: what happened, and what comes next, with no secret in it. */
 export function summary(result: SetupResult, out: Output): string {
   const s = style(out);
-  const names = Object.values(setupValues(result)).flat().filter(({ mask }) => mask !== 'none').map(({ label }) => label.replace(/^[A-Z]/, (c) => c.toLowerCase()));
-  const created = result.app.password === 'created' || result.vault.password === 'created';
-  const reset = result.app.password === 'reset' || result.vault.password === 'reset';
+  const names = Object.values(setupValues(result)).flat().filter(({ mask }) => mask !== 'none').map(({ label }) => lowered(label));
+  const set = RUNTIMES.filter((component) => result[component].url !== null);
+  const created = set.filter((component) => result[component].password === 'created');
+  const reset = set.filter((component) => result[component].password === 'reset');
   const workers = [
-    ...(created ? ['a Hyperdrive config for each database URL, with caching off'] : reset ? ['each Hyperdrive config updated with its new database URL'] : []),
+    ...(created.length === 0
+      ? []
+      : [`a Hyperdrive config for ${created.length === RUNTIMES.length ? 'each database URL' : `the ${listed(created.map((component) => lowered(RUNTIME_URLS[component].label)), 'and')}`}, with caching off`]),
+    ...(reset.length === 0
+      ? []
+      : [reset.length === RUNTIMES.length
+          ? 'each Hyperdrive config updated with its new database URL'
+          : `${listed(reset.map((component) => OWNED[component]), 'and')} ${reset.length === 1 ? 'config updated with its new database URL' : 'configs updated with their new database URLs'}`]),
     ...(result.keys === null ? [] : ['VAULT_KEY_ID under vars', 'APP_KEY and VAULT_KEY as secrets']),
   ];
-  const fresh = created || result.keys !== null;
+  const fresh = created.length > 0 || result.keys !== null;
+  // A new deployment's files, whole; else each URL that changed, and the processes that read it.
+  const restarted = set.includes('app') ? (set.length === 1 ? 'the server' : 'both processes') : 'the vault';
+  const node =
+    result.keys !== null || created.includes('app') || created.includes('vault')
+      ? '.env and vault.env, then pnpm vault and pnpm start.'
+      : `${listed(set.map((component) => `${RUNTIME_URLS[component].variable} in ${RUNTIME_URLS[component].file}`), 'and')} updated, then ${restarted} restarted.`;
   // Only the backup login's URL, new: the app and the vault go on as they were.
-  const runtime = result.keys !== null || result.app.url !== null || result.vault.url !== null;
+  const runtime = result.keys !== null || set.length > 0;
   return [
     '',
     `  ${s.green('✓')} ${s.bold(`The ${listed(names, 'and')} ${names.length === 1 ? 'was' : 'were'} shown once.`)}`,
@@ -802,7 +891,7 @@ export function summary(result: SetupResult, out: Output): string {
     ...(runtime
       ? [
           row(out, s, 'Workers', `${workers.join('; ')}${fresh ? '; then pnpm run deploy' : ', which needs no redeploy'}.`),
-          row(out, s, 'Node', fresh ? '.env and vault.env, then pnpm vault and pnpm start.' : 'each DATABASE_URL updated, then both processes restarted.'),
+          row(out, s, 'Node', node),
         ]
       : []),
     ...(result.backup.url === null ? [] : [row(out, s, 'Backups', "the backup database URL in your backup job's secrets, for coffre backup: docs/restore.md.")]),
@@ -834,6 +923,11 @@ function nothingToSave(out: Output): string {
 /** An error's text without any secret in it: a driver may quote what it was given. */
 function redact(text: string, secrets: readonly string[]): string {
   return secrets.filter((secret) => secret.length >= 4).reduce((out, secret) => out.split(secret).join('…'), text);
+}
+
+/** A label as a sentence's middle takes it: `the app database URL`. */
+function lowered(label: string): string {
+  return label.replace(/^[A-Z]/, (c) => c.toLowerCase());
 }
 
 function count(n: number, noun: string): string {

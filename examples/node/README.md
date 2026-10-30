@@ -47,11 +47,13 @@ That is the CLI this project pins: it migrates with the migrations of the
 `@coffre/server` beside it. It asks for the database
 administrator's connection string at a hidden prompt. A script pipes it in;
 never pass it as an argument. It
-makes the two logins coffre runs as, `coffre_runtime` for the server and
-`coffre_vault_runtime` for the vault, migrates the database, and checks that
+makes the three logins coffre runs as, `coffre_runtime` for the server,
+`coffre_vault_runtime` for the vault and `coffre_vault_hot` for the vault's
+hot path, which 0.15's uses take, unused until 0.15's log is the default; and
+`coffre_backup_login`, for backups. It migrates the database, and checks that
 each login holds only its rights.
 
-Then it shows five values on a screen of their own, which leaves nothing
+Then it shows seven values on a screen of their own, which leaves nothing
 behind in your scrollback. Copy each with `c` into your password manager,
 beside the GitHub client secret, then into its file; `w` shows where each
 goes. Nothing keeps a copy. There is one key for each process, so that the
@@ -61,18 +63,21 @@ server, which faces the network, never holds what decrypts a value.
   `DATABASE_URL`. The app key signs the server's log entries, sessions and
   tokens. Lose it, and everyone is signed out and the log stops verifying.
 - `vault.env` takes the vault ID, `VAULT_KEY_ID`, the vault key, `VAULT_KEY`,
-  and the vault's database URL, as `DATABASE_URL`. The vault key decrypts
-  every value, and the vault derives from it the key it signs its records
-  with. Lose it, and every value is lost. The vault ID only names it.
-- Both URLs are the same database, each through its process's own login.
-  Neither process gets the administrator's URL.
+  the vault's database URL, as `DATABASE_URL`, and its hot path's, as
+  `HOT_DATABASE_URL`. The vault key decrypts every value, and the vault
+  derives from it the key it signs its records with. Lose it, and every
+  value is lost. The vault ID only names it.
+- The backup database URL goes where `coffre backup` runs, never in either
+  file.
+- Every URL is the same database, each through its own login. Neither
+  process gets the administrator's URL.
 
 With AWS KMS instead of a key of your own, the vault also needs a
 `SIGNING_KEY` ([keys](https://github.com/erwinkn/coffre/blob/main/docs/keys.md#aws-kms)).
 To do the same by hand, see
 [deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
 
-For tests and local development only, both URLs may instead name the same
+For tests and local development only, all three URLs may instead name the same
 absolute SQLite file, e.g. `file:/tmp/coffre-local.db`; migrate that URL once
 with `pnpm exec coffre-server migrate file:/tmp/coffre-local.db`, and make the
 keys with `pnpm exec coffre keys`. SQLite

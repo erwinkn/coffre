@@ -316,14 +316,14 @@ test("DNS elsewhere, an administrator who can't create roles: setup refuses befo
   }
 });
 
-test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and neither login was changed, as it says", { skip }, async () => {
+test("DNS elsewhere, on the server of another deployment, whose login this one would take: setup refuses before it makes a fallback origin, DNS record or custom hostname, and no login was changed, as it says", { skip }, async () => {
   await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_domain_shared'));
   const held = await verifiers();
   const { text, code, writes } = await refused('shared', `${CLUSTER}/setup_domain_shared`, 'shared.example.org', 0, 'is also the login of');
   assert.deepEqual(writes, [], 'nothing written to Cloudflare');
   assert.equal(code, 1, text);
   assert.match(text, /✗ coffre_runtime is also the login of the Hyperdrive config coffre, another deployment's, on this database server/);
-  assert.match(text, /Neither\s+login\s+was\s+changed\./);
+  assert.match(text, /No\s+login\s+was\s+changed\./);
   assert.deepEqual(await verifiers(), held, "the first deployment's logins keep their passwords");
 });
 
@@ -348,7 +348,7 @@ test('a database that comes to hold data while setup asks its questions: setup r
       OTHER_CLUSTER),
     );
     assert.equal(code, 1, text);
-    assert.match(text, /✗ Make the three logins\n\s+The app Worker coffre-late-used has no APP_KEY, but the database already holds data/);
+    assert.match(text, /✗ Make the four logins\n\s+The app Worker coffre-late-used has no APP_KEY, but the database already holds data/);
     assert.deepEqual(writes, [], 'no Hyperdrive config, and no Worker deployed with a new key');
     assert.deepEqual(deploys(), []);
     assert.deepEqual(await verifiers(OTHER_CLUSTER), held, 'the logins keep their passwords');
@@ -378,7 +378,7 @@ test("another deployment's logins made on this server while setup asks its quest
       held = await verifiers(OTHER_CLUSTER);
     });
     assert.equal(code, 1, text);
-    assert.match(text, /✗ Make the three logins\n\s+coffre_runtime is also the login of the Hyperdrive config elsewhere, another deployment's, on this database server/);
+    assert.match(text, /✗ Make the four logins\n\s+coffre_runtime is also the login of the Hyperdrive config elsewhere, another deployment's, on this database server/);
     assert.equal(held.length, 2);
     assert.deepEqual(await verifiers(OTHER_CLUSTER), held, "the other deployment's logins keep their passwords");
     assert.deepEqual(writes, [], 'no Hyperdrive config made');
@@ -473,7 +473,7 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
 });
 
 /**
- * Setup on a database too small for both Hyperdrive configs, `answers` given
+ * Setup on a database too small for the three Hyperdrive configs, `answers` given
  * to whatever Cloudflare questions it asks first: what it showed, its exit,
  * and what it asked of Cloudflare.
  */
@@ -494,7 +494,7 @@ async function tooSmall(where: string, answers: Record<string, string>) {
 const smallSkip = skip || (SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh');
 const REFUSED = /✗ Check 127\.0\.0\.1\/setup_domain_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved/;
 
-test("DNS elsewhere, on a database too small for both Hyperdrive configs: setup stops before Cloudflare's questions, with no fallback origin, DNS record or custom hostname made", { skip: smallSkip }, async () => {
+test("DNS elsewhere, on a database too small for the three Hyperdrive configs: setup stops before Cloudflare's questions, with no fallback origin, DNS record or custom hostname made", { skip: smallSkip }, async () => {
   cloudflare.state.denied.clear();
   const { text, code, requests } = await tooSmall('small-saas', {
     'Set Cloudflare up too?': '\r',
@@ -511,7 +511,7 @@ test("DNS elsewhere, on a database too small for both Hyperdrive configs: setup 
   assert.deepEqual(requests, [], 'nor anything read');
 });
 
-test("no domain on the account, on a database too small for both Hyperdrive configs: setup stops before Cloudflare's questions, the domain not added", { skip: smallSkip }, async () => {
+test("no domain on the account, on a database too small for the three Hyperdrive configs: setup stops before Cloudflare's questions, the domain not added", { skip: smallSkip }, async () => {
   cloudflare.state.denied.clear();
   const { text, code, requests } = await tooSmall('small-home', {
     'Set Cloudflare up too?': '\r',

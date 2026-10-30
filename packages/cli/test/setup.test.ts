@@ -53,7 +53,7 @@ function json(run: Run) {
   assert.match(run.stderr, /--json prints .* to stdout/);
   return JSON.parse(run.stdout) as {
     app: { APP_KEY?: string; DATABASE_URL?: string };
-    vault: { VAULT_KEY_ID?: string; VAULT_KEY?: string; DATABASE_URL?: string };
+    vault: { VAULT_KEY_ID?: string; VAULT_KEY?: string; DATABASE_URL?: string; HOT_DATABASE_URL?: string };
     backup: { DATABASE_URL?: string };
     logins: Record<string, { login: string; password: string }>;
   };
@@ -129,9 +129,10 @@ const made: SetupResult = {
   keys: { APP_KEY: 'A'.repeat(43) + '=', VAULT_KEY_ID: 'vault-2026-10-02-abcdef', VAULT_KEY: 'K'.repeat(43) + '=' },
   app: { role: 'coffre_runtime', login: 'coffre_runtime', password: 'created', url: 'postgresql://coffre_runtime:p1@db.example.com:5432/coffre?sslmode=verify-full' },
   vault: { role: 'coffre_vault_runtime', login: 'coffre_vault_runtime', password: 'created', url: 'postgresql://coffre_vault_runtime:p2@db.example.com:5432/coffre?sslmode=verify-full' },
+  hot: { role: 'coffre_vault_hot', login: 'coffre_vault_hot', password: 'created', url: 'postgresql://coffre_vault_hot:p4@db.example.com:5432/coffre?sslmode=verify-full' },
   backup: { role: 'coffre_backup_login', login: 'coffre_backup_login', password: 'created', url: 'postgresql://coffre_backup_login:p3@db.example.com:5432/coffre?sslmode=verify-full' },
   version: '0.1.3',
-  // PlanetScale's smallest cluster, by the count third parties give: 9 connections for each config.
+  // PlanetScale's smallest cluster, by the count third parties give: 6 connections for each config.
   connections: { max: 25, reserved: 3 },
 };
 
@@ -145,11 +146,12 @@ test('--json carries the same values as the screen, under the names the examples
     'Vault ID': printed.vault.VAULT_KEY_ID,
     'Vault key': printed.vault.VAULT_KEY,
     'Vault database URL': printed.vault.DATABASE_URL,
+    'Hot path database URL': printed.vault.HOT_DATABASE_URL,
     'Backup database URL': printed.backup.DATABASE_URL,
   });
   assert.deepEqual(setupScreen(made).sections.map(({ title, values }) => [title, values.map(({ label }) => label)]), [
     ['App', ['App key', 'App database URL']],
-    ['Vault', ['Vault ID', 'Vault key', 'Vault database URL']],
+    ['Vault', ['Vault ID', 'Vault key', 'Vault database URL', 'Hot path database URL']],
     ['Backup', ['Backup database URL']],
   ]);
   assert.deepEqual(setupScreen(made).guide.map(({ title }) => title), ['On Cloudflare Workers', 'On Node', 'Backups']);
@@ -157,7 +159,7 @@ test('--json carries the same values as the screen, under the names the examples
 
 test("only the backup login new, as when a deployment set up before it reruns setup: its URL alone, and where it goes, with nothing to do to the app or the vault", () => {
   const kept = (login: SetupResult['app']) => ({ ...login, password: 'kept' as const, url: null });
-  const later: SetupResult = { ...made, keys: null, app: kept(made.app), vault: kept(made.vault) };
+  const later: SetupResult = { ...made, keys: null, app: kept(made.app), vault: kept(made.vault), hot: kept(made.hot) };
   const screen = setupScreen(later);
   assert.deepEqual(screen.sections.map(({ title, values }) => [title, values.map(({ label }) => label)]), [['Backup', ['Backup database URL']]]);
   assert.deepEqual(screen.guide.map(({ title }) => title), ['Backups']);
@@ -168,6 +170,7 @@ test("only the backup login new, as when a deployment set up before it reruns se
     logins: {
       coffre_runtime: { login: 'coffre_runtime', password: 'kept' },
       coffre_vault_runtime: { login: 'coffre_vault_runtime', password: 'kept' },
+      coffre_vault_hot: { login: 'coffre_vault_hot', password: 'kept' },
       coffre_backup_login: { login: 'coffre_backup_login', password: 'created' },
     },
   });
@@ -180,46 +183,87 @@ test("only the backup login new, as when a deployment set up before it reruns se
 test('where the values go: new Hyperdrive configs, or after a reset, the ones to update, never with a password in the command', () => {
   const commands = (result: SetupResult) =>
     setupScreen(result).guide.flatMap(({ lines }) => lines.flatMap((line) => (typeof line === 'string' ? [] : [line.command])));
-  assert.deepEqual(commands(made).slice(0, 2), [
-    hyperdriveCommand('create coffre --caching-disabled', 9),
-    hyperdriveCommand('create coffre-vault --caching-disabled', 9),
+  assert.deepEqual(commands(made).slice(0, 3), [
+    hyperdriveCommand('create coffre --caching-disabled', 6),
+    hyperdriveCommand('create coffre-vault --caching-disabled', 6),
+    hyperdriveCommand('create coffre-vault-hot --caching-disabled', 6),
   ]);
-  const reset = { ...made, keys: null, app: { ...made.app, password: 'reset' as const }, vault: { ...made.vault, password: 'reset' as const }, backup: { ...made.backup, password: 'reset' as const } };
-  assert.deepEqual(commands(reset), [hyperdriveCommand("update <the app's config id>", 9), hyperdriveCommand("update <the vault's config id>", 9)]);
-  for (const command of commands(reset)) assert.match(command, / --origin-connection-limit=9 /);
+  const reset = {
+    ...made,
+    keys: null,
+    app: { ...made.app, password: 'reset' as const },
+    vault: { ...made.vault, password: 'reset' as const },
+    hot: { ...made.hot, password: 'reset' as const },
+    backup: { ...made.backup, password: 'reset' as const },
+  };
+  assert.deepEqual(commands(reset), [
+    hyperdriveCommand("update <the app's config id>", 6),
+    hyperdriveCommand("update <the vault's config id>", 6),
+    hyperdriveCommand("update <the hot path's config id>", 6),
+  ]);
+  for (const command of commands(reset)) assert.match(command, / --origin-connection-limit=6 /);
   // Setup can't see what each config allows now: the screen says the updates set it, why that matters, and when to keep one lower.
   const lines = (result: SetupResult) => setupScreen(result).guide[0]!.lines.filter((line): line is string => typeof line === 'string');
-  const check = "Setup can't see the limit each config has now, and the update commands set it to 9. Below that, a call waiting on a lock stops the others on its Hyperdrive shard: leave --origin-connection-limit out only for a config you keep lower because its database serves more than coffre (pnpm exec wrangler hyperdrive get <id> shows its limit).";
+  const check = "Setup can't see the limit each config has now, and the update commands set it to 6. Below that, a call waiting on a lock stops the others on its Hyperdrive shard: leave --origin-connection-limit out only for a config you keep lower because its database serves more than coffre (pnpm exec wrangler hyperdrive get <id> shows its limit).";
   // Said before the commands, so that one kept lower on purpose is not raised by copying them as they are.
   const guide = setupScreen(reset).guide[0]!.lines;
   assert.ok(guide.includes(check) && guide.indexOf(check) < guide.findIndex((line) => typeof line !== 'string'));
   assert.ok(!lines(made).some((line) => line.startsWith("Setup can't see")), 'new configs have no limit yet');
-  // A database too small for both configs: no command that would leave Cloudflare's default in place, but why not.
+  // A database too small for the three configs: no command that would leave Cloudflare's default in place, but why not.
   const small = { ...made, connections: { max: 15, reserved: 3 } };
   assert.ok(!commands(small).some((command) => command.includes('hyperdrive')));
   assert.deepEqual(lines(small).slice(0, 1), [`No Hyperdrive config for each database URL: ${tooFewConnections(small.connections)}.`]);
-  for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|postgresql:/.test(command), command);
-  assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL', 'Backup database URL']);
+  for (const command of [...commands(made), ...commands(reset)]) assert.ok(!/p1|p2|p4|postgresql:/.test(command), command);
+  assert.deepEqual(setupScreen(reset).sections.flatMap(({ values }) => values.map(({ label }) => label)), ['App database URL', 'Vault database URL', 'Hot path database URL', 'Backup database URL']);
+  // Only the hot path's login new, as after an upgrade: its config to make, and the two kept configs' limits lowered to a third,
+  // with no password in the commands, since a share of two may have set them above it.
+  const kept = (login: SetupResult['app']) => ({ ...login, password: 'kept' as const, url: null });
+  const upgraded = { ...made, keys: null, app: kept(made.app), vault: kept(made.vault), backup: kept(made.backup) };
+  assert.deepEqual(commands(upgraded), [
+    hyperdriveCommand('create coffre-vault-hot --caching-disabled', 6),
+    "pnpm exec wrangler hyperdrive update <the app's config id> --origin-connection-limit=6",
+    "pnpm exec wrangler hyperdrive update <the vault's config id> --origin-connection-limit=6",
+  ]);
+  assert.ok(lines(upgraded).includes("The app's and the vault's configs keep their passwords, and their limits, which setup can't see: one a share of two configs set may be above 6. Lower each to 6, unless it is there or below already:"));
+  // Where each goes: the hot path's into vault.env too, under a name of its own, and its config's id beside the vault's.
+  const node = setupScreen(made).guide[1]!.lines;
+  assert.ok(node.includes('vault.env takes the vault database URL, as DATABASE_URL.') && node.includes('vault.env takes the hot path database URL, as HOT_DATABASE_URL.'));
+  assert.ok(lines(made).includes("Their ids go under hyperdrive: the app's in app/wrangler.jsonc, at HYPERDRIVE; the vault's and the hot path's in vault/wrangler.jsonc, at VAULT_HYPERDRIVE and HOT_HYPERDRIVE."));
+});
+
+test("what comes next, after a run that made only the hot path's login, as one after an upgrade does", () => {
+  const kept = (login: SetupResult['app']) => ({ ...login, password: 'kept' as const, url: null });
+  const text = (result: SetupResult) => summary(result, { write: () => true, isTTY: false, columns: 400 } as never);
+  const upgraded = text({ ...made, keys: null, app: kept(made.app), vault: kept(made.vault), backup: kept(made.backup) });
+  assert.match(upgraded, /✓ The hot path database URL was shown once\./);
+  assert.match(upgraded, /Workers\s+a Hyperdrive config for the hot path database URL, with caching off; then pnpm run deploy\./);
+  assert.match(upgraded, /Node\s+HOT_DATABASE_URL in vault\.env updated, then the vault restarted\./);
+  // With --reset-passwords, the others' configs updated beside it.
+  const reset = text({ ...made, keys: null, app: { ...made.app, password: 'reset' }, vault: { ...made.vault, password: 'reset' }, backup: kept(made.backup) });
+  assert.match(reset, /Workers\s+a Hyperdrive config for the hot path database URL, with caching off; the app's and the vault's configs updated with their new database URLs; then pnpm run deploy\./);
+  assert.match(reset, /Node\s+DATABASE_URL in \.env, DATABASE_URL in vault\.env and HOT_DATABASE_URL in vault\.env updated, then both processes restarted\./);
+  assert.match(text(made), /Node\s+\.env and vault\.env, then pnpm vault and pnpm start\./);
 });
 
 test("each Hyperdrive config's connection limit is an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
   // PlanetScale's smallest cluster: max_connections 25, 3 kept for superusers.
-  // Left at Cloudflare's default, 60 each, both configs opened more than its
-  // 22, and a page's parallel reads failed with 53300 (T78).
+  // Left at Cloudflare's default, 60 each, the configs opened more than its
+  // 22, and a page's parallel reads failed with 53300 (T78). Three configs
+  // now, the app's, the vault's and the hot path's, share it.
   const small = { max: 25, reserved: 3 };
-  assert.equal(hyperdriveLimit(small), 9);
-  assert.equal(limitReason(small, 9), 'max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each');
+  assert.equal(hyperdriveLimit(small), 6);
+  assert.equal(limitReason(small, 6), 'max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 6 each');
   // Postgres's default: no more than Free allows, which a query that holds a connection only while it runs never needs.
   const standard = { max: 100, reserved: 3 };
   assert.equal(hyperdriveLimit(standard), 20);
-  assert.equal(limitReason(standard, 20), 'max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 47 each, capped at 20');
+  assert.equal(limitReason(standard, 20), 'max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 31 each, capped at 20');
   // The fewest Hyperdrive takes is 5 per config: below it, setup refuses rather than write a smaller limit.
-  assert.equal(hyperdriveLimit({ max: 16, reserved: 3 }), 5);
-  assert.equal(hyperdriveLimit({ max: 15, reserved: 3 }), null);
-  assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's two configs.*raise max_connections to 16 or more/);
+  assert.equal(hyperdriveLimit({ max: 21, reserved: 3 }), 5);
+  assert.equal(hyperdriveLimit({ max: 20, reserved: 3 }), null);
+  assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's three configs.*raise max_connections to 21 or more/);
   // The guide on setup's screen says what the commands' limit is for, and how it came to it.
   assert.ok(setupScreen(made).guide[0]!.lines.includes(
-    "Each command sets its config's connection limit to 9, so that both fit under the database's max_connections, with some left for migrations (max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each).",
+    "Each command sets its config's connection limit to 6, so that all three configs fit under the database's max_connections, with some left for migrations (max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 6 each).",
   ));
 });
 
@@ -238,14 +282,14 @@ test('a Hyperdrive command reads the URL without echo, and hands wrangler it wit
     writeFileSync(join(dir, 'pnpm'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv"\n`);
     chmodSync(join(dir, 'pnpm'), 0o755);
     const url = 'postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre?sslmode=verify-full&sslrootcert=system';
-    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled', 9)}; echo "left:[$COFFRE_DB_URL]"`], {
+    const run = spawnSync('bash', ['-c', `${hyperdriveCommand('create coffre --caching-disabled', 6)}; echo "left:[$COFFRE_DB_URL]"`], {
       input: `${url}\n`,
       env: { PATH: `${dir}:${process.env.PATH}` },
       encoding: 'utf8',
     });
     assert.equal(run.stdout, 'left:[]\n', 'nothing echoed, and the variable gone');
     assert.deepEqual(readFileSync(join(dir, 'argv'), 'utf8').trim().split('\n'), [
-      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled', '--origin-connection-limit=9',
+      'exec', 'wrangler', 'hyperdrive', 'create', 'coffre', '--caching-disabled', '--origin-connection-limit=6',
       '--connection-string=postgresql://coffre_runtime.x7k2:s3cret@eu.pg.psdb.cloud:5432/coffre',
     ]);
   } finally {
@@ -349,6 +393,19 @@ function membership(name: string) {
   );
 }
 
+/** coffre_vault_hot's membership in coffre_vault, and its settings, which 0022 gives it. */
+function hotRole(name: string) {
+  return asSuperuser(name, async (client) => ({
+    member: [...await client.unsafe<{ admin: boolean; inherit: boolean; set: boolean }[]>(
+      `SELECT admin_option AS admin, inherit_option AS inherit, set_option AS set FROM pg_auth_members
+        WHERE roleid = 'coffre_vault'::regrole AND member = 'coffre_vault_hot'::regrole`,
+    )],
+    settings: [...(await client.unsafe<{ setconfig: string[] }[]>(
+      "SELECT setconfig FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0",
+    ))[0]?.setconfig ?? []].filter((setting) => !setting.startsWith('jit=')).sort(),
+  }));
+}
+
 /** The log's entries, by action, as `url`'s login sees them. */
 async function logEntries(url: string): Promise<string[]> {
   const client = postgresClient(url, { max: 1 });
@@ -369,19 +426,24 @@ for (const as of ['superuser', 'owner'] as const) {
     const first = setup(['--json'], { stdin: `${url}\n` });
     const shown = json(first);
     assertNoAdministrator(first, url);
-    assert.match(first.stderr, /✓ Created coffre_runtime, coffre_vault_runtime and coffre_backup_login\n/);
+    assert.match(first.stderr, /✓ Created coffre_runtime, coffre_vault_runtime, coffre_vault_hot and coffre_backup_login\n/);
     const count = KNOWN_MIGRATIONS.postgres.length;
     assert.match(first.stderr, new RegExp(`✓ Migrated the database to coffre \\S+'s schema: ${count} migration${count === 1 ? '' : 's'} applied\n`));
     assert.match(first.stderr, /\n\s+coffre_backup_login is a member of coffre_backup, which reads every row and writes none\n/);
     assert.match(
       first.stderr,
-      /coffre_runtime\s+can read the log; cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/,
+      /coffre_runtime\s+can read the log; cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_vault_hot\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/,
     );
     assert.deepEqual(shown.logins, {
       coffre_runtime: { login: 'coffre_runtime', password: 'created' },
       coffre_vault_runtime: { login: 'coffre_vault_runtime', password: 'created' },
+      coffre_vault_hot: { login: 'coffre_vault_hot', password: 'created' },
       coffre_backup_login: { login: 'coffre_backup_login', password: 'created' },
     });
+    // The hot path's login, made before the migrations, which took it as a host's: the vault's, with the hot path's settings.
+    assert.equal(new URL(shown.vault.HOT_DATABASE_URL!).username, 'coffre_vault_hot');
+    assert.ok(await connects(shown.vault.HOT_DATABASE_URL!));
+    assert.deepEqual(await hotRole(`setup_${as}`), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
     assert.equal(new URL(shown.backup.DATABASE_URL!).username, 'coffre_backup_login');
     assert.ok(await connects(shown.backup.DATABASE_URL!));
     assert.deepEqual(await membership(`setup_${as}`), [{ admin: false, inherit: true, set: false }], 'a member of coffre_backup, as --backup-login grants it');
@@ -393,11 +455,11 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.ok(await connects(shown.vault.DATABASE_URL!));
     const stored = await asSuperuser(`setup_${as}`, async (client) => ({
       verifiers: (await client.unsafe<{ rolpassword: string }[]>(
-        "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_backup_login') ORDER BY rolname",
+        "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot', 'coffre_backup_login') ORDER BY rolname",
       )).map((row) => row.rolpassword),
       migrations: (await client.unsafe('SELECT hash FROM drizzle.__drizzle_migrations')).count,
     }));
-    assert.equal(stored.verifiers.length, 3);
+    assert.equal(stored.verifiers.length, 4);
     for (const verifier of stored.verifiers) assert.match(verifier, /^SCRAM-SHA-256\$4096:/);
     assert.ok(stored.migrations! > 0);
 
@@ -410,17 +472,18 @@ for (const as of ['superuser', 'owner'] as const) {
       logins: {
         coffre_runtime: { login: 'coffre_runtime', password: 'kept' },
         coffre_vault_runtime: { login: 'coffre_vault_runtime', password: 'kept' },
+        coffre_vault_hot: { login: 'coffre_vault_hot', password: 'kept' },
         coffre_backup_login: { login: 'coffre_backup_login', password: 'kept' },
       },
     });
-    assert.match(again.stderr, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_backup_login, with their passwords/);
+    assert.match(again.stderr, /✓ Kept coffre_runtime, coffre_vault_runtime, coffre_vault_hot and coffre_backup_login, with their passwords/);
     assert.match(again.stderr, /✓ The database is up to date/);
-    assert.match(again.stderr, /coffre_runtime, coffre_vault_runtime and coffre_backup_login: from the catalog, with no new password to log in with/);
+    assert.match(again.stderr, /coffre_runtime, coffre_vault_runtime, coffre_vault_hot and coffre_backup_login: from the catalog, with no new password to log in with/);
     assertNoAdministrator(again, url);
     assert.deepEqual(
       await asSuperuser(`setup_${as}`, async (client) => ({
         verifiers: (await client.unsafe<{ rolpassword: string }[]>(
-          "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_backup_login') ORDER BY rolname",
+          "SELECT rolpassword FROM pg_authid WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot', 'coffre_backup_login') ORDER BY rolname",
         )).map((row) => row.rolpassword),
         migrations: (await client.unsafe('SELECT hash FROM drizzle.__drizzle_migrations')).count,
       })),
@@ -435,6 +498,9 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.equal(reset.logins.coffre_backup_login!.password, 'reset');
     assert.ok(await connects(reset.app.DATABASE_URL!));
     assert.ok(await connects(reset.vault.DATABASE_URL!));
+    assert.equal(reset.logins.coffre_vault_hot!.password, 'reset');
+    assert.ok(await connects(reset.vault.HOT_DATABASE_URL!));
+    assert.equal(await connects(shown.vault.HOT_DATABASE_URL!), false);
     assert.ok(await connects(reset.backup.DATABASE_URL!));
     assert.equal(await connects(shown.app.DATABASE_URL!), false);
     assert.equal(await connects(shown.backup.DATABASE_URL!), false);
@@ -442,8 +508,8 @@ for (const as of ['superuser', 'owner'] as const) {
   });
 }
 
-test("a Workers deployment whose database can't hold both Hyperdrive configs: setup refuses before anything else, and every login keeps its password", { skip: SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh' }, async () => {
-  // 15 connections, 3 of them for superusers: 4 for each config, short of Hyperdrive's 5.
+test("a Workers deployment whose database can't hold the three Hyperdrive configs: setup refuses before anything else, and every login keeps its password", { skip: SMALL_CLUSTER === undefined && 'needs the small cluster: scripts/test-setup.sh' }, async () => {
+  // 15 connections, 3 of them for superusers: 3 for each config, short of Hyperdrive's 5.
   await emptyCluster(SMALL_CLUSTER);
   await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_small'), SMALL_CLUSTER);
   const url = `${SMALL_CLUSTER}/setup_small`;
@@ -456,7 +522,7 @@ test("a Workers deployment whose database can't hold both Hyperdrive configs: se
     // A fresh database: nothing made, nothing migrated, and the commands it would show never shown.
     const fresh = setup(['--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(fresh.status, 1, fresh.stderr);
-    assert.match(fresh.stderr, /✗ Check 127\.0\.0\.1\/setup_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's two configs, .*raise max_connections to 16 or more/s);
+    assert.match(fresh.stderr, /✗ Check 127\.0\.0\.1\/setup_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's three configs, .*raise max_connections to 21 or more/s);
     assert.equal(fresh.stdout, '');
     assert.deepEqual(await verifiers(), []);
     assertNoAdministrator(fresh, url);
@@ -471,7 +537,7 @@ test("a Workers deployment whose database can't hold both Hyperdrive configs: se
     // keeps logging in with the ones it has.
     const reset = setup(['--reset-passwords', '--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(reset.status, 1, reset.stderr);
-    assert.match(reset.stderr, /✗ Check .*raise max_connections to 16 or more/s);
+    assert.match(reset.stderr, /✗ Check .*raise max_connections to 21 or more/s);
     assert.doesNotMatch(reset.stderr, /✓ (Set new passwords|Created|Kept|Migrated|The database is up to date)/, 'no step after it ran');
     assert.deepEqual(await verifiers(), before);
     assert.ok(await connects(node.app.DATABASE_URL!));
@@ -490,7 +556,7 @@ test('a database that holds data gets new passwords but no keys: its keys are th
   await vault.end();
   const after = json(setup(['--reset-passwords', '--json'], { stdin: `${url}\n` }));
   assert.deepEqual(Object.keys(after.app), ['DATABASE_URL']);
-  assert.deepEqual(Object.keys(after.vault), ['DATABASE_URL']);
+  assert.deepEqual(Object.keys(after.vault), ['DATABASE_URL', 'HOT_DATABASE_URL']);
   assert.ok(await connects(after.vault.DATABASE_URL!));
   // The backup login reads the vault's entry, through coffre_backup's policy on the log.
   assert.deepEqual(await logEntries(after.backup.DATABASE_URL!), ['key.check']);
@@ -503,7 +569,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   await asSuperuser('setup_later', (client) => client.unsafe('DROP ROLE coffre_backup_login'));
   const made = setup(['--json'], { stdin: `${url}\n` });
   const shown = json(made);
-  assert.match(made.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; created coffre_backup_login\n/);
+  assert.match(made.stderr, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_vault_hot, with their passwords; created coffre_backup_login\n/);
   assert.deepEqual(Object.keys(shown.app), [], 'no key for a deployment that has its own');
   assert.deepEqual(Object.keys(shown.vault), []);
   assert.deepEqual(Object.keys(shown.backup), ['DATABASE_URL']);
@@ -515,7 +581,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   await asSuperuser('setup_later', (client) => client.unsafe('ALTER ROLE coffre_backup_login NOLOGIN'));
   const locked = setup(['--json'], { stdin: `${url}\n` });
   const unlocked = json(locked);
-  assert.match(locked.stderr, /✓ Kept coffre_runtime and coffre_vault_runtime, with their passwords; set a new password for coffre_backup_login\n/);
+  assert.match(locked.stderr, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_vault_hot, with their passwords; set a new password for coffre_backup_login\n/);
   assert.deepEqual(Object.keys(unlocked.backup), ['DATABASE_URL']);
   assert.deepEqual(await logEntries(unlocked.backup.DATABASE_URL!), []);
   assert.equal(await connects(shown.backup.DATABASE_URL!), false, 'the password the run before set, replaced');
@@ -538,9 +604,96 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   await asSuperuser('setup_later', (client) => client.unsafe('ALTER ROLE coffre_backup_login NOLOGIN'));
   const refused = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
   assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /✗ Make the three logins\n\s+setup_owner may not change coffre_backup_login, which another role made: have that role grant setup_owner ADMIN on coffre_backup_login, or drop coffre_backup_login, then run coffre setup again/);
+  assert.match(refused.stderr, /✗ Make the four logins\n\s+setup_owner may not change coffre_backup_login, which another role made: have that role grant setup_owner ADMIN on coffre_backup_login, or drop coffre_backup_login, then run coffre setup again/);
   assert.ok(await connects(first.app.DATABASE_URL!), 'the app keeps its password');
   assert.ok(await connects(first.vault.DATABASE_URL!), 'the vault keeps its password');
+});
+
+test("a deployment migrated before setup made the hot path's login: 0022 made it unable to log in, and a rerun makes it one, the others kept", needsCluster, async () => {
+  const url = await database('setup_hot', 'owner');
+  const first = json(setup(['--json'], { stdin: `${url}\n` }));
+  // As 0022 leaves it on a database set up before: a role that cannot log in, and has no password.
+  await asSuperuser('setup_hot', (client) => client.unsafe('ALTER ROLE coffre_vault_hot NOLOGIN PASSWORD NULL'));
+  const made = setup(['--json'], { stdin: `${url}\n` });
+  const shown = json(made);
+  // Unasked, and said made: no Hyperdrive config can have logged in as it, so its config is to make, not update.
+  assert.match(made.stderr, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_backup_login, with their passwords; created coffre_vault_hot\n/);
+  assert.match(made.stderr, /coffre_vault_hot\s+can read the log and write members; cannot delete log entries or create tables\n/);
+  assert.deepEqual(Object.keys(shown.app), [], 'no key for a deployment that has its own');
+  assert.deepEqual(Object.keys(shown.vault), ['HOT_DATABASE_URL']);
+  assert.ok(await connects(shown.vault.HOT_DATABASE_URL!));
+  assert.ok(await connects(first.app.DATABASE_URL!), 'the app keeps its password');
+  assert.ok(await connects(first.vault.DATABASE_URL!), 'the vault keeps its password');
+  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
+
+  // Dropped after 0022 ran, which never runs again: setup makes it, and the migrate run gives it its group and settings, so every new password works.
+  await asSuperuser('setup_hot', (client) => client.unsafe('DROP ROLE coffre_vault_hot'));
+  const remade = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
+  const again = json(remade);
+  assert.match(remade.stderr, /coffre_vault_hot\s+can read the log and write members; cannot delete log entries or create tables\n/);
+  assert.equal(again.logins.coffre_vault_hot!.password, 'created');
+  for (const each of [again.app.DATABASE_URL!, again.vault.DATABASE_URL!, again.vault.HOT_DATABASE_URL!]) assert.ok(await connects(each));
+  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
+
+  // Remade with a setting for this database alone, which would outrank the hot path's at login: refused, as 0022 refuses it, saying what to run.
+  await asSuperuser('setup_hot', async (client) => {
+    await client.unsafe('DROP ROLE coffre_vault_hot');
+    await client.unsafe('CREATE ROLE coffre_vault_hot NOLOGIN');
+    await client.unsafe('GRANT coffre_vault_hot TO setup_owner WITH ADMIN TRUE');
+    await client.unsafe('ALTER ROLE coffre_vault_hot IN DATABASE setup_hot SET statement_timeout = 0');
+  });
+  const outranked = setup(['--json'], { stdin: `${url}\n` });
+  assert.equal(outranked.status, 1);
+  assert.match(outranked.stderr, /✗ Checking the database is up to date\n\s+the database is at the migrated schema, but reasserting its privileges failed: coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path's: run ALTER ROLE coffre_vault_hot IN DATABASE setup_hot RESET ALL/);
+  assert.equal(outranked.stdout, '', 'no URL shown for a login without its bounds');
+
+  // Remade with a membership that may grant coffre_vault, to the app's login say: refused, as 0022 refuses it.
+  await asSuperuser('setup_hot', async (client) => {
+    await client.unsafe('DROP ROLE coffre_vault_hot');
+    await client.unsafe('CREATE ROLE coffre_vault_hot NOLOGIN');
+    await client.unsafe('GRANT coffre_vault_hot TO setup_owner WITH ADMIN TRUE');
+    await client.unsafe('GRANT coffre_vault TO coffre_vault_hot WITH ADMIN TRUE, INHERIT TRUE, SET FALSE');
+  });
+  const granting = setup(['--json'], { stdin: `${url}\n` });
+  assert.equal(granting.status, 1);
+  assert.match(granting.stderr, /reasserting its privileges failed: coffre_vault_hot may set or grant coffre_vault: have its grantor run REVOKE coffre_vault FROM coffre_vault_hot/);
+  assert.equal(granting.stdout, '');
+
+  // One another role made, unable to log in: on Postgres 16, the owner may not change it without its ADMIN. Said so, before the app's and the vault's change.
+  await asSuperuser('setup_hot', async (client) => {
+    await client.unsafe('DROP ROLE coffre_vault_hot');
+    await client.unsafe('CREATE ROLE coffre_vault_hot NOLOGIN');
+  });
+  const refused = setup(['--reset-passwords', '--json'], { stdin: `${url}\n` });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /✗ Make the four logins\n\s+setup_owner may not change coffre_vault_hot, which another role made: have that role grant setup_owner ADMIN on coffre_vault_hot, or drop coffre_vault_hot, then run coffre setup again/);
+  assert.ok(await connects(again.app.DATABASE_URL!), 'the app keeps its password');
+  assert.ok(await connects(again.vault.DATABASE_URL!), 'the vault keeps its password');
+});
+
+test("the hot path's URL logs in under its own bounds: the administrator's session settings are left out of it, and one it cannot leave out is refused", needsCluster, async () => {
+  const url = await database('setup_hot_url', 'superuser');
+  const loose = new URL(url);
+  loose.searchParams.set('statement_timeout', '0');
+  loose.searchParams.set('lock_timeout', '0');
+  const shown = json(setup(['--json'], { stdin: `${loose.href}\n` }));
+  const hot = new URL(shown.vault.HOT_DATABASE_URL!);
+  assert.deepEqual([hot.searchParams.has('statement_timeout'), hot.searchParams.has('lock_timeout')], [false, false]);
+  assert.equal(new URL(shown.vault.DATABASE_URL!).searchParams.get('statement_timeout'), '0', "the vault's URL, as the administrator's");
+  const client = postgresClient(hot.href, { max: 1 });
+  try {
+    const [held] = await client.unsafe<{ statement: string; lock: string }[]>("SELECT current_setting('statement_timeout') AS statement, current_setting('lock_timeout') AS lock");
+    assert.deepEqual(held, { statement: '2s', lock: '1s' });
+  } finally {
+    await client.end();
+  }
+  // A setting in its options, which a URL's own parameters cannot say apart from a host's: refused before anything is shown.
+  const options = new URL(url);
+  options.searchParams.set('options', '-c plan_cache_mode=auto');
+  const refused = setup(['--reset-passwords', '--json'], { stdin: `${options.href}\n` });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /coffre_vault_hot logs in with plan_cache_mode auto, not the hot path's plan_cache_mode force_generic_plan/);
+  assert.equal(refused.stdout, '');
 });
 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
@@ -582,16 +735,16 @@ test('on a terminal: the steps on the main screen, the values on the alternate s
     terminal.send('R');
     await terminal.waitFor('Vault database URL');
     terminal.send('q');
-    await terminal.waitFor('Have you saved all six values?');
+    await terminal.waitFor('Have you saved all 7 values?');
     terminal.send('y');
     await terminal.waitFor('were shown once');
   }));
   assert.equal(code, 0);
   const { main, alternate } = screens(output);
   assert.match(visible(main), /✓ Each login holds only its rights/);
-  const urls = [...new Set(visible(alternate).match(/postgresql:\/\/coffre_(?:(?:vault_)?runtime|backup_login):[A-Za-z0-9_-]{32}@[^\s']+/g))];
+  const urls = [...new Set(visible(alternate).match(/postgresql:\/\/coffre_(?:(?:vault_)?runtime|vault_hot|backup_login):[A-Za-z0-9_-]{32}@[^\s']+/g))];
   const keys = [...new Set(visible(alternate).match(/[A-Za-z0-9+/]{43}=/g))];
-  assert.equal(urls.length, 3);
+  assert.equal(urls.length, 4);
   assert.equal(keys.length, 2);
   for (const secret of [...urls.map((each) => new URL(each).password), ...keys]) assert.ok(!main.includes(secret), 'a secret on the main screen');
   for (const each of urls) assert.ok(await connects(each), 'a URL shown that does not connect');

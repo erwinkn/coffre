@@ -65,8 +65,9 @@ workspace's or deployments' Node 24 requirement.
 which `scripts/ensure-postgres.sh` passes so that it can read what compose says).
 
 **Database.** Postgres runs in Docker via `docker compose` on **:55432** (owner
-`coffre_owner`, restricted runtime logins `coffre_runtime` for the app and
-`coffre_vault_runtime` for the vault). The running app and all the
+`coffre_owner`, restricted runtime logins `coffre_runtime` for the app,
+`coffre_vault_runtime` for the vault and `coffre_vault_hot` for its hot path,
+0.15's uses). The running app and all the
 DB-backed tests need it up. Export `COMPOSE_PROJECT_NAME=coffre` whenever you invoke
 `docker compose` directly. A Postgres of your own, beside the shared one, is a
 project and a port of its own: `COMPOSE_PROJECT_NAME=coffre_mine

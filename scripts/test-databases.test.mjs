@@ -24,7 +24,7 @@ test('a clone preserves schema grants and restricts its new database ACL', async
     const { queries, connected, closed } = owner(t);
     const restriction = [];
     await restrictDatabase({ unsafe: async (sql) => { restriction.push(sql); } });
-    assert.equal(restriction.length, 2);
+    assert.equal(restriction.length, 3);
     await cloneDatabase('coffre_template', 'coffre_worker');
     assert.deepEqual(queries, [
         'CREATE DATABASE "coffre_worker" TEMPLATE "coffre_template"',

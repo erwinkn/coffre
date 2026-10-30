@@ -8,7 +8,7 @@ import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValu
 import { earlierCheckpoint } from './checks/checkpoints.ts';
 import { deletion } from './checks/deletion.ts';
 import { folders, forks, inheritance, loosening, missingKeys, personalConfigs, references } from './checks/environments.ts';
-import { appLogin, vaultLogin } from './checks/logins.ts';
+import { appLogin, hotLogin, vaultLogin } from './checks/logins.ts';
 import { mcpRead, mcpChanges, mcpConnect, mcpValues } from './checks/mcp.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
@@ -100,6 +100,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('checkpoint missing', {}, () => missingCheckpoint(deployment));
   await report.check('app login', {}, () => appLogin(deployment));
   await report.check('vault login', {}, () => vaultLogin(deployment));
+  await report.check('hot login', {}, () => hotLogin(deployment));
   await report.check('forged grant', { people }, ({ people }) => memberTampering(deployment, people, 'grant'));
   await report.check('forged member', { people }, ({ people }) => memberTampering(deployment, people, 'member'));
   await report.check('stale member', { people }, ({ people }) => memberTampering(deployment, people, 'stale'));

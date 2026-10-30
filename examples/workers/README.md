@@ -40,13 +40,16 @@ That is the CLI this project pins, once `pnpm install` has run: it migrates
 with the migrations of the `@coffre/server` beside it. It asks for the database
 administrator's connection string at a hidden prompt. A script pipes it in;
 never pass it as an argument. It
-makes the two logins coffre runs as, `coffre_runtime` for the app and
-`coffre_vault_runtime` for the vault, migrates the database, and checks that
+makes the three logins coffre runs as, `coffre_runtime` for the app,
+`coffre_vault_runtime` for the vault and `coffre_vault_hot` for the vault's
+hot path, which 0.15's uses take, unused until 0.15's log is the default; and
+`coffre_backup_login`, for backups. It migrates the database, and checks that
 each login holds only its rights.
 
-Then it shows five values on a screen of their own, which leaves nothing
-behind in your scrollback: the app key and the app's database URL, and the
-vault ID, the vault key and the vault's database URL. Copy each into your
+Then it shows seven values on a screen of their own, which leaves nothing
+behind in your scrollback: the app key and the app's database URL; the
+vault ID, the vault key, the vault's database URL and its hot path's; and
+the backup login's database URL, which no Worker gets. Copy each into your
 password manager with `c`, beside the GitHub client secret; `w` shows where
 each one goes. Nothing keeps a copy. There is one key for each Worker, so
 that the app, which faces the network, never holds what decrypts a value:
@@ -72,18 +75,19 @@ Actions secrets, which its deploy workflow reads.
 
 ## 3. Hyperdrive and secrets
 
-Run the two `wrangler hyperdrive create` commands from setup's screen: one
-config per login, each `--caching-disabled`. Hyperdrive otherwise caches
+Run the three `wrangler hyperdrive create` commands from setup's screen: one
+config per runtime login, each `--caching-disabled`. Hyperdrive otherwise caches
 reads for up to a minute, and a revoked token or a signed-out session could
 keep working that long. `wrangler.jsonc` cannot set it, so for a config made
 another way, check `caching` in `wrangler hyperdrive get <id>`. Each
-command also caps the connections its config opens, so that both fit under
-the database's `max_connections`: past it, the database refuses them, and
+command also caps the connections its config opens, so that all three fit
+under the database's `max_connections`: past it, the database refuses them, and
 requests fail.
 
-Put the ids they print under `hyperdrive`, the first in
-`app/wrangler.jsonc` and the second in `vault/wrangler.jsonc`, and
-`VAULT_KEY_ID` in `vault/wrangler.jsonc`. Then set the secrets; each command
+Put the ids they print under `hyperdrive`: the first in
+`app/wrangler.jsonc`, the second and the third in `vault/wrangler.jsonc`, at
+`VAULT_HYPERDRIVE` and `HOT_HYPERDRIVE`; and `VAULT_KEY_ID` in
+`vault/wrangler.jsonc`. Then set the secrets; each command
 prompts for the saved value:
 
 ```sh
@@ -145,9 +149,10 @@ migration has run, the new version answers 503, `migrating`
 `pnpm dev` runs both Workers under `vite dev`, the vault beside the app, and
 reloads the app as you edit it. Put local secrets in `app/.dev.vars` and `vault/.dev.vars`, and point Hyperdrive at a local
 database with `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`,
-for the app's login, and
+for the app's login,
 `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE`, for the
-vault's.
+vault's, and `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HOT_HYPERDRIVE`,
+for its hot path's.
 `pnpm typecheck` checks the configuration against coffre's types, and
 `pnpm build` builds both Workers without deploying them.
 
@@ -162,7 +167,8 @@ them with coffre's packages.
 pnpm conformance \
   --postgres "postgres://owner:…@127.0.0.1:5432" \
   --runtime "postgres://coffre_runtime:…@127.0.0.1:5432" \
-  --vault-runtime "postgres://coffre_vault_runtime:…@127.0.0.1:5432"
+  --vault-runtime "postgres://coffre_vault_runtime:…@127.0.0.1:5432" \
+  --hot-runtime "postgres://coffre_vault_hot:…@127.0.0.1:5432"
 ```
 
 builds the app, runs both Workers under `wrangler dev`, on a database of their own that it

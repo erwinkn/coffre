@@ -14,7 +14,9 @@ docker compose exec -T postgres \
 DROP DATABASE IF EXISTS :"database" WITH (FORCE);
 CREATE DATABASE :"database";
 
--- The app's login, the vault's and the backups', as a deployment provisions them.
+-- The app's login, the vault's, its hot path's and the backups', as a
+-- deployment provisions them: the hot path's a login before 0022 grants it
+-- coffre_vault, as `coffre setup` makes it.
 DO $$
 DECLARE
     login record;
@@ -23,7 +25,8 @@ BEGIN
     -- lock in ensure-database.mjs rather than racing ALTER ROLE.
     PERFORM pg_advisory_xact_lock(hashtextextended('coffre:local-roles', 0));
     FOR login IN
-        SELECT * FROM (VALUES ('coffre_runtime', 'local-runtime-only'), ('coffre_vault_runtime', 'local-vault-only'), ('coffre_backup_login', 'local-backup-only'))
+        SELECT * FROM (VALUES ('coffre_runtime', 'local-runtime-only'), ('coffre_vault_runtime', 'local-vault-only'),
+                              ('coffre_vault_hot', 'local-hot-only'), ('coffre_backup_login', 'local-backup-only'))
             AS logins (name, password)
     LOOP
         EXECUTE format(
@@ -39,15 +42,3 @@ SQL
 
 DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database" \
     pnpm --filter @coffre/db run db:migrate --backup-login coffre_backup_login >/dev/null
-
-# 0.15's hot path's login, which 0022 makes unable to log in: the tests log in
-# as it, as a deployment's host gives it a password (docs/deploy.md).
-docker compose exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U coffre_owner -d postgres <<'SQL' >/dev/null
-DO $$
-BEGIN
-    PERFORM pg_advisory_xact_lock(hashtextextended('coffre:local-roles', 0));
-    ALTER ROLE coffre_vault_hot LOGIN PASSWORD 'local-hot-only';
-END
-$$;
-SQL
