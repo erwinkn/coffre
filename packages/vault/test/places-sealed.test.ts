@@ -12,12 +12,14 @@ import { issuedGrant, storedScope, type CredentialScope } from '@coffre/core/acc
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { IssueTokenInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
+import { postgresSession } from '@coffre/db/connect';
 import { count, sql } from 'drizzle-orm';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openRawVault } from '../src/local.ts';
-import { newestSealsQuery } from '../src/store.ts';
-import { changePlace, emptyDatabase, ENGINE, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { newestSeals, newestSealsQuery } from '../src/store.ts';
+import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -258,4 +260,61 @@ test('on SQLite, the newest changes of several places are one probe each, howeve
   assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
   assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
   assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
+  // However many: a member with 600 grants on places is read as one with 6 (review r2: a compound SELECT stops at 500).
+  const many = Array.from({ length: 600 }, () => ({ kind: 'environment' as const, id: randomUUID() }));
+  assert.deepEqual(await newestSeals(db.vault, many), new Map());
+});
+
+test('a protected place in a project whose tombstone a writer set around the log stays protected: its own object says it lives (review r2)', async () => {
+  const w = await world();
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev], protected: true } })).ok);
+  const [{ slug }] = await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM projects WHERE id = ${w.project}`) as [{ slug: string }];
+  await run(db.owner, sql`UPDATE projects SET slug = ${`${slug}~deleted-1`} WHERE id = ${w.project}`);
+  const { policy } = await w.vault.access(ADA);
+  assert.ok(policy!.protected.includes(w.dev));
+  assert.deepEqual(policy!.protectedIn[w.project], [{ environmentId: w.dev, slug: null }]);
+  assert.deepEqual((await w.vault.access(ADA)).grants, [], 'nor does a grant there hold');
+});
+
+test('a person scoped to a slug no place has sets up no service account once a writer renames a place to it (review r2)', async () => {
+  const w = await world();
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: MAYA, role: 'developer', scope: { projects: 'all', environments: { only: ['staging'] } } })).ok);
+  const refused = await w.vault.admit({ actor: MAYA, caller: 'person', principal: CI });
+  assert.equal(!refused.ok && refused.refusal.code, 'not_allowed');
+  await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${w.dev}`);
+  const again = await w.vault.admit({ actor: MAYA, caller: 'person', principal: CI });
+  assert.equal(!again.ok && again.refusal.code, 'not_allowed');
+});
+
+test("an issue weighed on the account's places by slug is refused when one is renamed while its write waits: those slugs are held under the issue lock too (review r2)", postgresOnly('row locks'), async () => {
+  const w = await world();
+  const slugOf = async (id: string) => (await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM environments WHERE id = ${id}`))[0]!.slug;
+  // Maya, a Developer of dev and prod by slug, manages CI, a Viewer of both, and issues it a token on prod.
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: MAYA, role: 'developer', scope: { projects: 'all', environments: { only: [await slugOf(w.dev), await slugOf(w.prod)] } } })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
+  assert.ok((await w.vault.setAccess({
+    actor: ROOT, caller: 'person', principal: CI,
+    changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }, { projectId: w.project, environmentId: w.prod, role: 'viewer', expiresAt: null }],
+  })).ok);
+  const input = await issueOn(w.vault, issue(MAYA, [issuedGrant({ projectId: w.project, environmentId: w.prod, role: 'viewer' })]));
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // The account's row held: the issue's read is done, its write waits; meanwhile dev is renamed, as the app renames one.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    const issuing = w.vault.issueToken!(input);
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
+    for (let tries = 0; (await waits()) === 0; tries += 1) {
+      assert.ok(tries < 200, 'the write waits on the row');
+      await sleep(10);
+    }
+    await changePlace(db.owner, w.dev, { slug: 'renamed' });
+    await holder.unsafe('COMMIT');
+    const outcome = await issuing;
+    assert.deepEqual(outcome, { ok: false, refused: 'policy' });
+  } finally {
+    await holder.end();
+  }
+  // Asked again, on the account as it is now: Maya manages it no more.
+  assert.equal((await w.vault.issueToken!(await issueOn(w.vault, { ...input, credential: { ...input.credential, id: randomUUID() } }))).ok, false);
 });

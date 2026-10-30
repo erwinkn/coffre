@@ -350,13 +350,14 @@ export async function newestSeals(db: Queryable, refs: readonly Ref[]): Promise<
 }
 
 /**
- * `newestSeals`' statement: from the keys asked, each its newest change by one probe of `log_changes_object_idx`
- * (its `max`), then that row by the same index. The same work however long each object's history (R48).
+ * `newestSeals`' statement, on SQLite: from the keys asked, one JSON list however many (a compound SELECT stops at 500
+ * terms, review r2), each its newest change's number by one probe of `log_changes_object_idx` (its `max`), then that
+ * row by its number. The same work however long each object's history (R48).
  */
 export function newestSealsQuery(refs: readonly Ref[]): SQL {
-  const keys = sql.join([...new Set(refs.map((ref) => objectKey(ref)))].map((key) => sql`SELECT ${key} AS object`), sql` UNION ALL `);
-  return sql`SELECT c.object, c.seal FROM (${keys}) k
-    JOIN log_changes c ON c.object = k.object AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.object)`;
+  const keys = JSON.stringify([...new Set(refs.map((ref) => objectKey(ref)))]);
+  return sql`SELECT c.object, c.seal FROM json_each(${keys}) k
+    JOIN log_changes c ON c.object = k.value AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.value)`;
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
