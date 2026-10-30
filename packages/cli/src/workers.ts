@@ -1,5 +1,6 @@
 // `coffre setup` on a Workers deployment, the Cloudflare half: it signs in
-// to Cloudflare through wrangler, points a Hyperdrive config at each login,
+// to Cloudflare through wrangler, points a Hyperdrive config at each runtime
+// login (the app's, the vault's, and the vault's hot path's, all three),
 // makes the GitHub App people sign in with, fills in both wrangler.jsonc,
 // and, once the keys have been shown, deploys both Workers with them as
 // secrets. Nothing is written but the two configs. Cloudflare and the
@@ -47,6 +48,26 @@ import { hiddenLine, type Keyboard, listed, type Output, paragraph, row, select,
 export type Component = 'app' | 'vault';
 const COMPONENTS = ['app', 'vault'] as const;
 
+/**
+ * The Hyperdrive configs, one per runtime login: the app's, the vault's,
+ * and the hot path's, 0.15's uses, which the vault Worker binds beside its
+ * own. Each is its Worker's, under a binding of its own, and named after
+ * it: `coffre`, `coffre-vault` and `coffre-vault-hot` for the template's.
+ */
+export type Config = 'app' | 'vault' | 'hot';
+export const CONFIGS = ['app', 'vault', 'hot'] as const;
+const BOUND = {
+  app: { worker: 'app', binding: 'HYPERDRIVE', suffix: '' },
+  vault: { worker: 'vault', binding: 'VAULT_HYPERDRIVE', suffix: '' },
+  hot: { worker: 'vault', binding: 'HOT_HYPERDRIVE', suffix: '-hot' },
+} as const satisfies Record<Config, { worker: Component; binding: string; suffix: string }>;
+/** Whose each config is, in an error's words. */
+const OWNED = { app: "the app's", vault: "the vault's", hot: "the hot path's" } as const;
+
+/** A config's name, from its Worker's. */
+export const configName = (config: Config, names: Record<Component, string>) => `${names[BOUND[config].worker]}${BOUND[config].suffix}`;
+const namesOf = (workers: Record<Component, WorkerConfig>) => ({ app: workers.app.name, vault: workers.vault.name });
+
 /** How long a new deployment has to answer, its domain's certificate perhaps still on its way. */
 const ANSWER_WITHIN_MS = 90_000;
 
@@ -80,7 +101,7 @@ export class Later extends Error {}
 export type Serving = { kind: 'domain' } | ({ kind: 'saas' } & Served) | { kind: 'workers.dev' };
 
 /** What this directory's wrangler.jsonc records of the deployment it is: the Hyperdrive configs it binds, and a vault ID setup made. */
-export type Records = { hyperdrive: Record<Component, string | null>; vaultKeyId: string | null };
+export type Records = { hyperdrive: Record<Config, string | null>; vaultKeyId: string | null };
 
 /** A vault ID as setup makes them, which names one vault; not the template's `vault-1`, which any deployment may keep. */
 const MADE_VAULT_ID = /^vault-\d{4}-\d{2}-\d{2}-[a-z2-7]{6}$/;
@@ -88,15 +109,15 @@ const MADE_VAULT_ID = /^vault-\d{4}-\d{2}-\d{2}-[a-z2-7]{6}$/;
 export function recordsOf(workers: Record<Component, WorkerConfig>): Records {
   const id = workers.vault.vars.VAULT_KEY_ID;
   return {
-    hyperdrive: { app: workers.app.hyperdrive, vault: workers.vault.hyperdrive },
+    hyperdrive: Object.fromEntries(CONFIGS.map((config) => [config, workers[BOUND[config].worker].hyperdrive[BOUND[config].binding] ?? null])) as Record<Config, string | null>,
     vaultKeyId: id !== undefined && MADE_VAULT_ID.test(id) ? id : null,
   };
 }
 
 /** Whether a Worker that exists is this deployment's: it binds a Hyperdrive config this directory records, or, the vault, its vault ID. */
 export function isOurs(component: Component, bindings: readonly Binding[], records: Records): boolean {
-  const config = records.hyperdrive[component];
-  if (config !== null && bindings.some(({ type, id }) => type === 'hyperdrive' && id === config)) return true;
+  const recorded = CONFIGS.filter((config) => BOUND[config].worker === component).map((config) => records.hyperdrive[config]);
+  if (bindings.some(({ type, id }) => type === 'hyperdrive' && id !== undefined && recorded.includes(id))) return true;
   return (
     component === 'vault' &&
     records.vaultKeyId !== null &&
@@ -110,8 +131,8 @@ export function sameDatabase(origin: HyperdriveConfig['origin'], administrator: 
 }
 
 /**
- * A Worker's Hyperdrive config: the one this directory records; else one
- * named after the Worker that points at this run's database, made by a
+ * A Hyperdrive config of this deployment's: the one this directory records;
+ * else one under its name that points at this run's database, made by a
  * run that stopped before recording it. One under the name that points
  * elsewhere is another deployment's.
  */
@@ -149,10 +170,10 @@ export function ownersVar(vars: Record<string, string | undefined>): OwnersVar {
 
 /**
  * The database, as setup read it: its administrator, whether it holds
- * data, and each runtime login, by what it logs in as, and whether it
- * exists.
+ * data, and each config's runtime login, by what it logs in as, and
+ * whether it exists.
  */
-export type Database = { administrator: URL; used: boolean; logins: Record<Component, { login: string; exists: boolean }> };
+export type Database = { administrator: URL; used: boolean; logins: Record<Config, { login: string; exists: boolean }> };
 
 /** What setup found on Cloudflare, before it changes anything. */
 type Found = {
@@ -180,9 +201,11 @@ async function othersUnder(
   for (const component of COMPONENTS) {
     const bindings = await api.bindings(account, names[component]);
     if (bindings !== null && !isOurs(component, bindings, records)) others.push(`the Worker ${names[component]}`);
-    const named = configs.find(({ name }) => name === names[component]);
-    if (named !== undefined && named !== ourConfig(configs, names[component], records.hyperdrive[component], administrator)) {
-      others.push(`the Hyperdrive config ${names[component]}`);
+    // Then its configs: the vault's two.
+    for (const config of CONFIGS.filter((each) => BOUND[each].worker === component)) {
+      const name = configName(config, names);
+      const named = configs.find((each) => each.name === name);
+      if (named !== undefined && named !== ourConfig(configs, name, records.hyperdrive[config], administrator)) others.push(`the Hyperdrive config ${name}`);
     }
   }
   return others;
@@ -202,23 +225,24 @@ function sameServer(origin: HyperdriveConfig['origin'], administrator: URL): boo
  * database's, and that deployment would be cut off. On PlanetScale, a
  * login names its branch, and never is.
  */
-function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Component, boolean> {
+function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Config, boolean> {
   const { administrator } = database;
-  const ourOwn = (component: Component) => ourConfig(configs, workers[component].name, workers[component].hyperdrive, administrator);
-  const ours = new Set(COMPONENTS.map(ourOwn));
-  const resets = {} as Record<Component, boolean>;
-  // Both checked before either changes.
-  for (const component of COMPONENTS) {
-    const { login, exists } = database.logins[component];
-    const origin = ourOwn(component)?.origin;
-    resets[component] = all || origin === undefined || !sameServer(origin, administrator) || !sameDatabase(origin, administrator) || origin.user !== login;
-    if (!resets[component] || !exists) continue;
-    const other = configs.find((config) => !ours.has(config) && sameServer(config.origin, administrator) && config.origin.user === login);
+  const records = recordsOf(workers);
+  const ourOwn = (config: Config) => ourConfig(configs, configName(config, namesOf(workers)), records.hyperdrive[config], administrator);
+  const ours = new Set(CONFIGS.map(ourOwn));
+  const resets = {} as Record<Config, boolean>;
+  // All checked before any changes.
+  for (const config of CONFIGS) {
+    const { login, exists } = database.logins[config];
+    const origin = ourOwn(config)?.origin;
+    resets[config] = all || origin === undefined || !sameServer(origin, administrator) || !sameDatabase(origin, administrator) || origin.user !== login;
+    if (!resets[config] || !exists) continue;
+    const other = configs.find((each) => !ours.has(each) && sameServer(each.origin, administrator) && each.origin.user === login);
     if (other === undefined) continue;
     throw new Error(
       `${login} is also the login of the Hyperdrive config ${other.name}, another deployment's, on this database server: ` +
-        `a new password for the ${component}'s config would cut that deployment off. Two deployments can't share a server's logins: ` +
-        'give this one a server of its own. Neither login was changed.',
+        `a new password for ${OWNED[config]} config would cut that deployment off. Two deployments can't share a server's logins: ` +
+        'give this one a server of its own. No login was changed.',
     );
   }
   return resets;
@@ -249,7 +273,7 @@ function checked(found: Found, workers: Record<Component, WorkerConfig>, databas
   return { missing: missingKeys(workers, found.secrets, database.used), newPasswords: newPasswords(found.configs, workers, database, all) };
 }
 
-type Checked = { missing: Record<Component, boolean>; newPasswords: Record<Component, boolean> };
+type Checked = { missing: Record<Component, boolean>; newPasswords: Record<Config, boolean> };
 
 export class Cloudflare {
   readonly #dir: string;
@@ -267,8 +291,8 @@ export class Cloudflare {
   /** The keys this run makes, for the Workers without theirs. */
   readonly keys: Keys | null;
   readonly #missing: Record<Component, boolean>;
-  /** Which logins this run gives a new password (`newPasswords`). */
-  readonly newPasswords: Record<Component, boolean>;
+  /** Which configs' logins this run gives a new password (`newPasswords`). */
+  readonly newPasswords: Record<Config, boolean>;
   /** Whether every login gets a new password: --reset-passwords. */
   readonly #resetPasswords: boolean;
   /** The GitHub App's client secret, when this run has it to install. */
@@ -446,10 +470,9 @@ export class Cloudflare {
     checked(this.#found, this.workers, database, this.#resetPasswords);
   }
 
-  /** A Worker's Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
-  #config(component: Component): HyperdriveConfig | undefined {
-    const worker = this.workers[component];
-    return ourConfig(this.#found.configs, worker.name, worker.hyperdrive, this.#administrator);
+  /** A Hyperdrive config, when there is one of this deployment's (`ourConfig`). */
+  #config(config: Config): HyperdriveConfig | undefined {
+    return ourConfig(this.#found.configs, configName(config, namesOf(this.workers)), recordsOf(this.workers).hyperdrive[config], this.#administrator);
   }
 
   /** What each Cloudflare step does while it runs. */
@@ -474,23 +497,25 @@ export class Cloudflare {
   }
 
   /**
-   * A Hyperdrive config for each login, made, given its new password, or
-   * kept; with caching off, always, and opening at most `limit` connections
-   * to the database, or fewer when someone set it lower. Setup listed the
-   * configs as it began: one deleted since is made again when its login has
-   * a new password, and stops the run when it does not, Hyperdrive needing
-   * a password setup can't read.
+   * A Hyperdrive config for each runtime login, made, given its new
+   * password, or kept; with caching off, always, and opening at most
+   * `limit` connections to the database, or fewer when someone set it
+   * lower. Setup listed the configs as it began: one deleted since is made
+   * again when its login has a new password, and stops the run when it
+   * does not, Hyperdrive needing a password setup can't read.
    */
-  async hyperdrive(logins: Record<Component, Login>, limit: number): Promise<{ text: string; details: string[]; low: { name: string; id: string; limit: number }[] }> {
+  async hyperdrive(logins: Record<Config, Login>, limit: number): Promise<{ text: string; details: string[]; low: { name: string; id: string; limit: number }[] }> {
     const { api, account } = this.#found;
-    const width = Math.max(...COMPONENTS.map((component) => this.workers[component].name.length)) + 2;
+    const names = Object.fromEntries(CONFIGS.map((each) => [each, configName(each, namesOf(this.workers))])) as Record<Config, string>;
+    const width = Math.max(...CONFIGS.map((each) => names[each].length)) + 2;
     const details: string[] = [];
-    /** Each config's connection limit, as this run leaves it. */
-    const limits = {} as Record<Component, number>;
-    for (const component of COMPONENTS) {
-      const { name } = this.workers[component];
-      const login = logins[component];
-      let config = this.#config(component);
+    /** Each config's connection limit, as this run leaves it; and its id. */
+    const limits = {} as Record<Config, number>;
+    const ids = {} as Record<Config, string>;
+    for (const each of CONFIGS) {
+      const name = names[each];
+      const login = logins[each];
+      let config = this.#config(each);
       let what: string;
       if (login.url !== null) {
         const origin = originOf(login.url);
@@ -498,11 +523,11 @@ export class Cloudflare {
         const kept = cappedLimit(config?.origin_connection_limit, limit) ?? config?.origin_connection_limit ?? limit;
         if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin, kept))) {
           what = `given ${login.login}'s new password`;
-          limits[component] = kept;
+          limits[each] = kept;
         } else {
           what = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
           config = { id: await api.createHyperdrive(account.id, name, origin, limit), name, origin };
-          limits[component] = limit;
+          limits[each] = limit;
         }
       } else {
         const now = config === undefined ? null : await api.hyperdriveConfig(account.id, config.id);
@@ -521,21 +546,39 @@ export class Cloudflare {
             ...(lower ? { origin_connection_limit: limit } : {}),
           });
         }
-        limits[component] = lower ? limit : config.origin_connection_limit!;
+        limits[each] = lower ? limit : config.origin_connection_limit!;
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
         what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
-      if (limits[component] < limit) what += `, ${limits[component]} of ${limit}`;
+      if (limits[each] < limit) what += `, ${limits[each]} of ${limit}`;
       details.push(`${name.padEnd(width)}${what}`);
-      this.#edit(component, [{ path: ['hyperdrive', 0, 'id'], value: config.id, what: 'Hyperdrive' }]);
-      this.workers[component].hyperdrive = config.id;
+      this.#bind(each, config.id);
+      ids[each] = config.id;
     }
     // A limit someone set lower is kept: each config's own, then. It may be theirs, for a database that serves more than
     // coffre, or setup's own, made for a smaller one: the caller says how to raise it.
-    const low = COMPONENTS.filter((component) => limits[component] < limit)
-      .map((component) => ({ name: this.workers[component].name, id: this.workers[component].hyperdrive!, limit: limits[component] }));
-    const each = limits.app === limits.vault ? `a connection limit of ${limits.app} each` : `connection limits of ${limits.app} and ${limits.vault}`;
-    return { text: `Hyperdrive configs ${this.workers.app.name} and ${this.workers.vault.name}, caching off, ${each}`, details, low };
+    const low = CONFIGS.filter((each) => limits[each] < limit).map((each) => ({ name: names[each], id: ids[each], limit: limits[each] }));
+    const all = CONFIGS.map((each) => limits[each]);
+    const said = new Set(all).size === 1 ? `a connection limit of ${limits.app} each` : `connection limits of ${listed(all.map(String), 'and')}`;
+    return { text: `Hyperdrive configs ${listed(CONFIGS.map((each) => names[each]), 'and')}, caching off, ${said}`, details, low };
+  }
+
+  /**
+   * A config's id, under its binding in its Worker's wrangler.jsonc. A vault
+   * whose file a release before the hot path's wrote has no HOT_HYPERDRIVE:
+   * its list is written again with it after its own, on one line as that
+   * release wrote it, the vault's own id set just before (CONFIGS' order).
+   */
+  #bind(config: Config, id: string): void {
+    const { worker, binding } = BOUND[config];
+    const bound = this.workers[worker].hyperdrive;
+    const at = Object.keys(bound).indexOf(binding);
+    bound[binding] = id;
+    this.#edit(worker, [
+      at === -1
+        ? { path: ['hyperdrive'], value: Object.entries(bound).map(([name, each]) => ({ binding: name, id: each })), what: 'Hyperdrive' }
+        : { path: ['hyperdrive', at, 'id'], value: id, what: 'Hyperdrive' },
+    ]);
   }
 
   /**

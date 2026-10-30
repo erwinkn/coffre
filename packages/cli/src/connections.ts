@@ -3,7 +3,7 @@
 // reads as it connects, before it changes anything, and gives each config.
 import type { PostgresClient } from '@coffre/db/connect';
 
-/** Connections the two Hyperdrive configs leave free: for the administrator, `coffre migrate` and the host's own tools. */
+/** Connections the Hyperdrive configs leave free: for the administrator, `coffre migrate` and the host's own tools. */
 const HELD_BACK = 3;
 
 /** The fewest connections Hyperdrive takes per config, and the most Free allows, which is plenty for coffre. */
@@ -12,16 +12,19 @@ const HYPERDRIVE_CONNECTIONS = { fewest: 5, most: 20 } as const;
 /** What the database lets in: `max_connections`, and the slots it reserves for superusers and `pg_use_reserved_connections`. */
 export type Connections = { max: number; reserved: number };
 
+/** coffre's Hyperdrive configs, one per runtime login: the app's, the vault's, and the vault's hot path's. */
+const CONFIGS = 3;
+
 /** Each config's even share of what the database lets coffre's logins open, less what is held back. */
 function share({ max, reserved }: Connections): number {
-  return Math.floor((max - reserved - HELD_BACK) / 2);
+  return Math.floor((max - reserved - HELD_BACK) / CONFIGS);
 }
 
 /**
- * The most connections each of the two Hyperdrive configs may open: an even
- * share of what the database lets its logins open, less what is held back.
- * Hyperdrive opens connections up to its limit before it queues a query,
- * and left at Cloudflare's default, 60 on Paid, the two configs outgrow a
+ * The most connections each of the three Hyperdrive configs may open: an
+ * even share of what the database lets its logins open, less what is held
+ * back. Hyperdrive opens connections up to its limit before it queues a
+ * query, and left at Cloudflare's default, 60 on Paid, the configs outgrow a
  * small database, such as PlanetScale's smallest: it refuses the
  * connection a burst of requests needs ("remaining connection slots are
  * reserved", 53300), and they fail. Under the limit, a query waits its turn
@@ -54,10 +57,10 @@ export function limitReason(connections: Connections, limit: number): string {
 
 /** Why a database letting in `connections` can have no Hyperdrive config for each login. */
 export function tooFewConnections(connections: Connections): string {
-  const needed = 2 * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK + connections.reserved;
+  const needed = CONFIGS * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK + connections.reserved;
   return (
     `the database's max_connections is ${connections.max}, ${connections.reserved} of them reserved; Hyperdrive takes at least ${HYPERDRIVE_CONNECTIONS.fewest} ` +
-    `for each of coffre's two configs, and setup keeps ${HELD_BACK} for the administrator and migrations: raise max_connections to ${needed} or more, or move to a larger plan`
+    `for each of coffre's three configs, and setup keeps ${HELD_BACK} for the administrator and migrations: raise max_connections to ${needed} or more, or move to a larger plan`
   );
 }
 

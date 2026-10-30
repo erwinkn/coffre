@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **`coffre setup` makes the hot path's login, and its Hyperdrive config.**
+  `coffre_vault_hot`, the login 0.15's uses run as, under its own lock and
+  statement timeouts, is a deployment's third runtime login. Setup makes it
+  with a fresh password, before the migrations, which grant it
+  `coffre_vault`; on a database migrated before, where 0022 made it unable
+  to log in, setup's next run gives it a password unasked, and
+  `--reset-passwords` resets it with the others. It checks the login holds
+  the vault's rights. On Workers, setup makes a third Hyperdrive config,
+  `<vault Worker>-hot` (`coffre-vault-hot`), caching off, finds it again on
+  a second run, and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
+  adding the binding to a file an earlier release wrote; the database's
+  connections are now split three ways, so each config gets a third of
+  what is left, 6 on a `max_connections` of 25, where it got 9. On Node,
+  its screen, summary and `--json` give the URL for `vault.env`, as
+  `HOT_DATABASE_URL`. The examples pass it as `hotDatabase`: the vault
+  Worker binds `HOT_HYPERDRIVE`, and the Node vault reads
+  `HOT_DATABASE_URL`, the same `file:` URL as `DATABASE_URL` on SQLite.
+  Conformance on Workers takes `--hot-runtime <coffre_vault_hot URL>`. The
+  hot path stays unused until 0.15's log is the default: a deployment sees
+  no change but the login and its config. To have them, run `coffre setup`
+  again in the deployment's directory; a deployment made before passes
+  `hotDatabase` in its vault's entry as the examples now do.
 - **A role's card shows every permission, in the same place on every card.**
   Three rows, Values (Read, Use, Write, Retire), Log (Read) and Manage
   (Environments, Access, Project): a permission the role holds is solid,

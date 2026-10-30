@@ -24,10 +24,18 @@
     // vault derives the key it signs its records with from it.
     "required": ["VAULT_KEY"]
   },
-  // The app's database, as the vault's own login: `wrangler hyperdrive
-  // create coffre-vault --caching-disabled`, as `coffre setup` shows it,
-  // prints the id. Its own config, not the app's: the vault writes
-  // members and grants, which the app's login may only read. Locally,
-  // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE stands in.
-  "hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" }]
+  "hyperdrive": [
+    // The app's database, as the vault's own login: `wrangler hyperdrive
+    // create coffre-vault --caching-disabled`, as `coffre setup` shows it,
+    // prints the id. Its own config, not the app's: the vault writes
+    // members and grants, which the app's login may only read. Locally,
+    // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE stands in.
+    { "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" },
+    // The same database, as the hot path's login, coffre_vault_hot, whose
+    // lock and statement timeouts bound 0.15's uses: `wrangler hyperdrive
+    // create coffre-vault-hot --caching-disabled`, as `coffre setup` shows
+    // it. Unused until 0.15's log is the default. Locally,
+    // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HOT_HYPERDRIVE stands in.
+    { "binding": "HOT_HYPERDRIVE", "id": "replace-with-your-hot-hyperdrive-id" }
+  ]
 }

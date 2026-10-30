@@ -66,6 +66,7 @@ node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
 postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 runtime=postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
+hot_runtime=postgresql://coffre_vault_hot:local-hot-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 
 echo '==> build and pack'
 pnpm --dir "$root" build
@@ -162,7 +163,7 @@ for kind in "${kinds[@]}"; do
 
     echo "==> conformance of coffre-$kind"
     if [[ "$kind" == workers ]]; then
-        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime"
+        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --hot-runtime "$hot_runtime"
     else
         pnpm --dir "$project" conformance
     fi

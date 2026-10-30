@@ -5,6 +5,7 @@ import { postgres, vault } from '@coffre/vault/cloudflare';
 
 type Env = {
   VAULT_HYPERDRIVE: Hyperdrive;
+  HOT_HYPERDRIVE: Hyperdrive;
   VAULT_KEY_ID: string;
   VAULT_KEY: string;
   OWNERS: string;
@@ -12,6 +13,8 @@ type Env = {
 
 export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
+  // 0.15's uses, as their own login, under its timeouts: unused until 0.15's log is the default.
+  hotDatabase: postgres(env.HOT_HYPERDRIVE),
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   // After a rotation, the vault keys before it, so the data keys they wrapped
   // still open and the records signed under them before it still verify:

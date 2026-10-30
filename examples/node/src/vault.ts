@@ -14,6 +14,8 @@ function env(name: string): string {
 const vault = await serveVault({
   socket: env('VAULT_SOCKET'),
   database: env('DATABASE_URL'),
+  // 0.15's uses, as their own login, under its timeouts: unused until 0.15's log is the default.
+  hotDatabase: env('HOT_DATABASE_URL'),
   kek: { id: env('VAULT_KEY_ID'), key: env('VAULT_KEY') },
   // After a rotation, the vault keys before it, so the data keys they wrapped
   // still open and the records signed under them before it still verify:

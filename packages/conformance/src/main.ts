@@ -11,7 +11,7 @@ import { conform } from './suite.ts';
 
 const USAGE = `usage:
   coffre-conformance workers [<dir>] --postgres <owner URL> --runtime <coffre_runtime URL>
-                    --vault-runtime <coffre_vault_runtime URL> [options]
+                    --vault-runtime <coffre_vault_runtime URL> --hot-runtime <coffre_vault_hot URL> [options]
   coffre-conformance node [<dir>] [options]
 
   <dir>             the deployment, as \`coffre init\` wrote it (default: here)
@@ -23,6 +23,8 @@ const USAGE = `usage:
   --runtime <url>   workers: the same server as coffre_runtime, the login the app runs as
   --vault-runtime <url>
                     workers: the same server as coffre_vault_runtime, the login the vault runs as
+  --hot-runtime <url>
+                    workers: the same server as coffre_vault_hot, the login 0.15's uses run as
 
 To check an instance that is running already, from outside, use the CLI:
 \`coffre verify instance\`.`;
@@ -36,6 +38,7 @@ const { values, positionals } = parseArgs({
     postgres: { type: 'string' },
     runtime: { type: 'string' },
     'vault-runtime': { type: 'string' },
+    'hot-runtime': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -58,6 +61,7 @@ try {
     postgres: values.postgres,
     runtime: values.runtime,
     vaultRuntime: values['vault-runtime'],
+    hotRuntime: values['hot-runtime'],
   });
 } catch (error) {
   const detail = error instanceof Failure && error.detail !== undefined ? `\n${String(error.detail)}` : '';

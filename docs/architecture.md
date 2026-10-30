@@ -88,7 +88,9 @@ local development and tests.
 exactly, including the Workers' `wrangler.jsonc` files (Hyperdrive, the
 service binding, the Cron trigger and the UI's static files). Both Workers
 use one Postgres database: `HYPERDRIVE` connects as `coffre_runtime`,
-`VAULT_HYPERDRIVE` as `coffre_vault_runtime`, with caching disabled on both.
+`VAULT_HYPERDRIVE` as `coffre_vault_runtime`, and `HOT_HYPERDRIVE`, the
+vault's second, as `coffre_vault_hot`, for 0.15's uses, with caching
+disabled on all three.
 
 ## Packages
 

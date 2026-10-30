@@ -70,7 +70,7 @@ role logs in to the new branch as `<role>.<new branch id>`.
    pnpm exec coffre setup --reset-passwords
    ```
 
-   It sets the three logins' passwords again, which the restore reset,
+   It sets the four logins' passwords again, which the restore reset,
    and shows each login's new connection string, under the new branch id:
    the backup login's goes in your backup job's secrets, in place of the
    old one.
@@ -78,7 +78,7 @@ role logs in to the new branch as `<role>.<new branch id>`.
    privileges reasserted, on every run, even when the schema is current; a
    database a newer release migrated is refused. It checks the boundary as
    each login. It makes no keys: the restored database has its own.
-4. Point both Hyperdrive configs at the new branch, with the
+4. Point the three Hyperdrive configs at the new branch, with the
    `wrangler hyperdrive update` commands it shows, and check that caching
    stays disabled:
 
@@ -87,13 +87,14 @@ role logs in to the new branch as `<role>.<new branch id>`.
    ```
 
    Each update reads its database URL at a silent prompt, as in
-   [deploy.md](deploy.md#2-two-hyperdrive-configs), so the password stays
+   [deploy.md](deploy.md#2-three-hyperdrive-configs), so the password stays
    out of your shell's history; the Cloudflare dashboard's Hyperdrive page
    does the same.
 
-   By hand, steps 3 and 4 are `\password` for the three logins as the
-   owner, the two updates with `coffre_runtime.<branch id>` and
-   `coffre_vault_runtime.<branch id>`, and `pnpm exec coffre migrate`, in
+   By hand, steps 3 and 4 are `\password` for the four logins as the
+   owner, the three updates with `coffre_runtime.<branch id>`,
+   `coffre_vault_runtime.<branch id>` and `coffre_vault_hot.<branch id>`,
+   and `pnpm exec coffre migrate`, in
    the deployment's directory, with the owner's URL for the new branch.
 5. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
    a fresh deployment remembers no log head.
@@ -205,8 +206,10 @@ a drill, on your own machine.
    ```sql
    CREATE ROLE coffre_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
    CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+   CREATE ROLE coffre_vault_hot LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
    \password coffre_runtime
    \password coffre_vault_runtime
+   \password coffre_vault_hot
    ```
 
    The group roles, `coffre_app`, `coffre_vault` and `coffre_backup`, and
@@ -278,8 +281,8 @@ a drill, on your own machine.
    ```
 
 6. Point both components at the restored database, each with its own login:
-   both Hyperdrive configs on Workers, or `DATABASE_URL` in `.env` and
-   `vault.env` on Node. Keep the same keys and settings.
+   the three Hyperdrive configs on Workers, or `DATABASE_URL` in `.env` and
+   `vault.env`, and `HOT_DATABASE_URL` in `vault.env`, on Node. Keep the same keys and settings.
 7. Restart both processes, or redeploy both Workers.
 
 A dump `pg_dump` made by hand, without a manifest, restores with

@@ -5,7 +5,7 @@ them in code. It runs an app and a vault, as two Workers or two Node
 processes. Both use one Postgres database, each through its own login.
 
 ```sh
-coffre init --workers acme-secrets   # two Workers, two Hyperdrive configs
+coffre init --workers acme-secrets   # two Workers, three Hyperdrive configs
 coffre init --node acme-secrets      # two Node processes, one Unix socket
 cd acme-secrets
 pnpm install
@@ -38,25 +38,29 @@ the deployment's `@coffre/server`. It asks for the connection string at a hidden
 pipes it in, or redirects a file to it. It never takes it as an argument or a
 flag, where the shell's history and other users could read it. Then:
 
-1. It makes three logins, each with a fresh password that reaches the
-   database only as a SCRAM verifier: the two runtime logins,
-   `coffre_runtime` for the app and `coffre_vault_runtime` for the vault,
-   and `coffre_backup_login`, for backups
+1. It makes four logins, each with a fresh password that reaches the
+   database only as a SCRAM verifier: the three runtime logins,
+   `coffre_runtime` for the app, `coffre_vault_runtime` for the vault and
+   `coffre_vault_hot` for the vault's hot path, 0.15's uses; and
+   `coffre_backup_login`, for backups
    ([restore.md](restore.md#backing-up)). On PlanetScale Postgres they log
    in as `<login>.<branch id>`, `coffre_runtime.<branch id>` say, the
-   branch taken from the administrator's own login.
+   branch taken from the administrator's own login. The hot path's login is
+   unused until 0.15's log is the default; the migrations make it unable to
+   log in when setup has not run, and setup's next run gives it a
+   password, unasked.
 2. It migrates the database as the administrator, as
    `coffre migrate --backup-login coffre_backup_login` does: the backup
    login becomes a member of `coffre_backup`, which reads every row and
    writes none.
 3. It connects as each login and checks the boundary, in transactions it
-   rolls back: each can read the log; the vault's login can write members,
-   and neither of the others can; none can delete log entries or create
-   tables.
-4. It shows six values on a screen of their own, the terminal's alternate
+   rolls back: each can read the log; the vault's login and the hot
+   path's can write members, and neither of the others can; none can
+   delete log entries or create tables.
+4. It shows seven values on a screen of their own, the terminal's alternate
    screen, which leaves nothing in the scrollback. For the app, the app key
-   and its database URL. For the vault, the vault ID, the vault key and its
-   database URL. For backups, the backup login's database URL. Each is
+   and its database URL. For the vault, the vault ID, the vault key, its
+   database URL and its hot path's. For backups, the backup login's database URL. Each is
    masked until you reveal it with `r`, and `c` copies it; `w` shows where
    each goes, on Workers and on Node, with the commands to copy. When setup
    does Cloudflare too ([below](#setup-does-cloudflare-too)), the runtime
@@ -74,7 +78,8 @@ secret.
 Run again, setup changes nothing it need not. Logins that exist keep their
 passwords, unless you agree to new ones at its prompt or pass
 `--reset-passwords`; a backup login that cannot log in, as a run stopped
-before you saved its password leaves it, gets one. A migrated database
+before you saved its password leaves it, gets one, and so does a hot
+path's login that cannot log in, as the migrations make it. A migrated database
 stays as it is. Keys come only with new passwords, and only for a database
 that holds no data yet; one that does has its keys already. Without a terminal, setup refuses rather than print
 the values; `--json` prints them to stdout for a script, with a warning on
@@ -100,17 +105,23 @@ The migrations create three group roles, and grant the first two to their logins
 |---|---|---|
 | `coffre_runtime` | `coffre_app` | app data and sessions; app entries in the log; read-only access to members and grants |
 | `coffre_vault_runtime` | `coffre_vault` | members and grants; read the secret context it decides on; vault entries in the log |
+| `coffre_vault_hot` | `coffre_vault` | the vault's, for 0.15's uses, under the hot path's own settings (below) |
 | `coffre_backup_login`, or yours | `coffre_backup` | read every row, the log's included, for `coffre backup` ([restore.md](restore.md#backing-up)); write nothing |
 
 Neither runtime login owns tables or may change or delete audit entries.
 Row-level security permits each to append only as its own author. Do not run
 either component as the owner or give the runtime logins additional roles.
 
-They also make `coffre_vault_hot`, a member of `coffre_vault` with its own
-lock and statement timeouts and generic plans, for 0.15's hot path. It
-cannot log in, and nothing uses it yet.
+They also make `coffre_vault_hot`, the third runtime login, when it is
+missing: a member of `coffre_vault` with its own lock and statement
+timeouts (1 s and 2 s) and generic plans, for 0.15's hot path, which
+answers a use within those bounds or not at all. The migrations make it
+unable to log in; `coffre setup` makes it beforehand as a login, or gives
+it a password after, and the vault reaches it through a pool of its own:
+`HOT_HYPERDRIVE` on Workers, `HOT_DATABASE_URL` on Node. Nothing uses it
+until 0.15's log is the default.
 
-Every migrate run also sets `jit = off` on these three logins
+Every migrate run also sets `jit = off` on the three runtime logins
 (`ALTER ROLE … SET jit = off`), when they lack it. Past
 `jit_above_cost` Postgres compiles a statement's plan at every execution, and a
 statement's estimate grows with its tables: a use that costs 2 ms took 150.
@@ -288,8 +299,8 @@ acme-secrets/
   app/src/routes/_solo.tsx     the sign-in pages' frame, { ...solo }; its pages in _solo/
   app/vite.config.ts           cloudflare(…), tanstackStart(), viteReact(), coffre()
   app/wrangler.jsonc           HYPERDRIVE, VAULT service binding, Cron
-  vault/src/worker.ts          vault(env => ({ database, kek, owners }))
-  vault/wrangler.jsonc         VAULT_HYPERDRIVE; no public route
+  vault/src/worker.ts          vault(env => ({ database, hotDatabase, kek, owners }))
+  vault/wrangler.jsonc         VAULT_HYPERDRIVE and HOT_HYPERDRIVE; no public route
 ```
 
 The app is a TanStack Start app of its own, coffre's routes and pages among
@@ -405,7 +416,8 @@ of this section itself. Say yes, and it:
    there under Display information;
 5. fills in both `wrangler.jsonc`: the account, the Hyperdrive ids, the
    address and its route, GitHub's client ID, the Owner's email and the
-   vault ID;
+   vault ID; a vault whose file an earlier release wrote gets its
+   `HOT_HYPERDRIVE` binding;
 6. shows the keys on their screen, then deploys the vault and the app with
    them as secrets, on wrangler's stdin;
 7. when the deployment is a GitHub repository, makes the Cloudflare token
@@ -433,9 +445,10 @@ this run's database, the same host and database. Setup never deploys over
 another deployment's Worker, nor touches its config. When one already holds
 this deployment's names, setup says which, and asks for a name of its own,
 offering `coffre-` and the address's first label: `coffre-secrets` for
-`secrets.example.com`, and `coffre-try` for `coffre-try.example.com`. Both Workers, `<name>` and `<name>-vault`, both
-Hyperdrive configs and the app's binding to its vault take it, and both
-`wrangler.jsonc` record it.
+`secrets.example.com`, and `coffre-try` for `coffre-try.example.com`. Both Workers, `<name>` and `<name>-vault`, the
+three Hyperdrive configs, `<name>`, `<name>-vault` and `<name>-vault-hot`,
+and the app's binding to its vault take it, and both `wrangler.jsonc`
+record it.
 
 **Run again**, setup finds what it made and keeps it: the Hyperdrive configs,
 by the ids in `wrangler.jsonc`, or by the Workers' names on this run's
@@ -557,43 +570,46 @@ every deploy, and the way back in if every Owner is locked out
 For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
 ([deployment-auth.md](deployment-auth.md)).
 
-### 2. Two Hyperdrive configs
+### 2. Three Hyperdrive configs
 
-One config per runtime login, both pointing to the same database. Each
+One config per runtime login, all three pointing to the same database. Each
 command reads its login's database URL at a silent prompt, so that the
 password stays out of your shell's history: run it, paste the URL from
-`coffre setup`'s screen, then press Enter. `coffre setup` shows both
+`coffre setup`'s screen, then press Enter. `coffre setup` shows the three
 commands, ready to copy.
 
 ```sh
 read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre --caching-disabled --origin-connection-limit=20 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
 read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault --caching-disabled --origin-connection-limit=20 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
+read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault-hot --caching-disabled --origin-connection-limit=20 --connection-string="${COFFRE_DB_URL%%[?]*}"; unset COFFRE_DB_URL
 ```
 
-The first takes the app's database URL, the second the vault's. They drop
+The first takes the app's database URL, the second the vault's, the third
+the vault's hot path's, unused until 0.15's log is the default. They drop
 the URL's TLS parameters: Hyperdrive always connects over TLS, and checks
 the certificate against public CAs. The Cloudflare dashboard's Hyperdrive
 page makes the same configs, without a shell.
 
 Put the first id in `app/wrangler.jsonc`, under the `HYPERDRIVE` binding,
-and the second in `vault/wrangler.jsonc`, under `VAULT_HYPERDRIVE`. The app's
+and the second and third in `vault/wrangler.jsonc`, under `VAULT_HYPERDRIVE`
+and `HOT_HYPERDRIVE`. The app's
 `VAULT` service binding names the vault Worker. The vault has no public URL.
 
-Keep `--caching-disabled` on **both** configs. A cached session or grant
+Keep `--caching-disabled` on **every** config. A cached session or grant
 could otherwise survive its revocation. `wrangler.jsonc` cannot set this:
 check `caching` with `wrangler hyperdrive get <id>`. Fix an existing config
 with `wrangler hyperdrive update <id> --caching-disabled`.
 
-Keep both configs' connections under the database's. Hyperdrive opens
+Keep the configs' connections under the database's. Hyperdrive opens
 connections up to its `origin_connection_limit`, 60 by default on Paid,
 before it makes a query wait (a soft limit, which a network failure can
 briefly exceed), and the database refuses any past its
 `max_connections`: a page's parallel reads then fail with "remaining
 connection slots are reserved" (53300). `coffre setup` reads the database's
 `max_connections`, less the slots it reserves for superusers, keeps 3 for
-the administrator and `coffre migrate`, and gives each config half the rest,
-at most 20; the commands it shows carry that number, here 20, for a
-`max_connections` of 100 (47 each, capped at 20), and 9 for one of 25. Fix
+the administrator and `coffre migrate`, and gives each config a third of
+the rest, at most 20; the commands it shows carry that number, here 20, for
+a `max_connections` of 100 (31 each, capped at 20), and 6 for one of 25. Fix
 an existing config with
 `wrangler hyperdrive update <id> --origin-connection-limit=<n>`.
 
@@ -660,7 +676,7 @@ acme-secrets/
   app/src/server.ts      { fetch: Start's handler, coffre.request(request) its context }; coffre.schedule()
   app/src/routes/        the root and coffre's routes, as on Workers
   app/vite.config.ts     tanstackStart(), viteReact(), coffre()
-  src/vault.ts           serveVault({ socket, database, kek, owners })
+  src/vault.ts           serveVault({ socket, database, hotDatabase, kek, owners })
   .env.example           app settings
   vault.env.example      vault settings
 ```
@@ -687,15 +703,17 @@ Fill in `PUBLIC_URL`, the GitHub OAuth settings and `OWNERS`, then
 the values from `coffre setup`'s screen ([step 3 above](#3-keys-and-secrets)
 says what each key is for). `.env` takes the app key, `APP_KEY`, and
 the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,
-`VAULT_KEY_ID`, the vault key, `VAULT_KEY`, and the vault's database URL.
-Both URLs name one database, through different logins, with the TLS
-settings the administrator's connection string had:
+`VAULT_KEY_ID`, the vault key, `VAULT_KEY`, the vault's database URL, and
+its hot path's, as `HOT_DATABASE_URL`. The URLs name one database, through
+different logins, with the TLS settings the administrator's connection
+string had:
 
 ```dotenv
 # .env
 DATABASE_URL=postgresql://coffre_runtime:…@db.example.com:5432/coffre?sslmode=verify-full
 # vault.env
 DATABASE_URL=postgresql://coffre_vault_runtime:…@db.example.com:5432/coffre?sslmode=verify-full
+HOT_DATABASE_URL=postgresql://coffre_vault_hot:…@db.example.com:5432/coffre?sslmode=verify-full
 ```
 
 Run the processes as
@@ -714,7 +732,7 @@ The server listens on `127.0.0.1:PORT`. Put a TLS-terminating proxy in front
 of it and forward requests to that address. Its scheduled job runs in the
 server process.
 
-For tests and local development only, both URLs can name the same absolute
+For tests and local development only, every URL can name the same absolute
 SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm exec
 coffre-server migrate file:/tmp/coffre-local.db`. SQLite has no per-login privileges. The deployed example
 uses Postgres; Node conformance uses SQLite to exercise the local option.
@@ -1275,8 +1293,9 @@ rewritten, the vault finds its key wrong, or the anchor cannot be reached
 ## Conformance
 
 Before deploying a changed configuration, run its `pnpm conformance`.
-Workers needs three local Postgres URLs: `--postgres` for the owner,
-`--runtime` for the app and `--vault-runtime` for the vault. The harness
+Workers needs four local Postgres URLs: `--postgres` for the owner,
+`--runtime` for the app, `--vault-runtime` for the vault and `--hot-runtime`
+for its hot path. The harness
 creates, migrates and drops its own database. Node uses a temporary SQLite
 file shared by both processes. Both use test keys and a stand-in GitHub,
 not your live credentials. [conformance.md](conformance.md) lists the checks,
@@ -1291,25 +1310,30 @@ fit. Connect to the database as its administrator with `psql`:
 psql "postgres://owner@db.example.com:5432/coffre?sslmode=verify-full"
 ```
 
-Create two plain logins. `\password` prompts for passwords without putting
+Create three plain logins. `\password` prompts for passwords without putting
 them in SQL statements or shell history. Use different generated passwords
 and keep them in your password manager. On PlanetScale Postgres, these logins
-connect as `coffre_runtime.<branch id>` and `coffre_vault_runtime.<branch id>`;
-use those names in their connection strings.
+connect as `coffre_runtime.<branch id>`, `coffre_vault_runtime.<branch id>`
+and `coffre_vault_hot.<branch id>`; use those names in their connection
+strings. The migrations grant the third `coffre_vault`, and the hot path's
+settings; made after them, it is `ALTER ROLE coffre_vault_hot LOGIN`
+instead of its `CREATE`.
 
 ```sql
 CREATE ROLE coffre_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
 CREATE ROLE coffre_vault_runtime LOGIN INHERIT NOCREATEDB NOCREATEROLE;
+CREATE ROLE coffre_vault_hot LOGIN INHERIT NOCREATEDB NOCREATEROLE;
 \password coffre_runtime
 \password coffre_vault_runtime
+\password coffre_vault_hot
 \q
 ```
 
-To back up with `pg_dump`, make a third login the same way, say
+To back up with `pg_dump`, make a fourth login the same way, say
 `coffre_backup_login`, and add `--backup-login coffre_backup_login` to the
 migrate command below, which then grants it the group that reads every row
 ([restore.md](restore.md#on-plain-postgres)). Nothing checks that login's
-own rights: keep it as plain as the two above. The grant needs `ADMIN
+own rights: keep it as plain as the three above. The grant needs `ADMIN
 OPTION` on `coffre_backup`, which the login that made the group holds, and
 nothing on the login it names. Any role holding that `ADMIN OPTION` may
 grant the group too.

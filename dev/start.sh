@@ -65,6 +65,7 @@ export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE="postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
+export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HOT_HYPERDRIVE="postgresql://coffre_vault_hot:local-hot-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 
 # The dev IdP's GitHub App's private key, PKCS #1 as GitHub downloads one:
 # made once, local, and handed to the dev IdP and to the app.
