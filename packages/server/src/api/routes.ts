@@ -39,6 +39,9 @@ import {
   type SetResult,
 } from './secrets.ts';
 
+/** A reveal's body, which `fetchApi` reads first for one key's (`namedReveal`). */
+export const revealInput = z.object({ path: z.string().max(400), keys: z.array(secretKey).min(1).max(2000).optional() });
+
 /** A permission at the route's place, or at its project for project-wide ones. */
 export type Check = Permission | { permission: Permission; on: 'project' } | { anyOf: readonly Permission[] };
 
@@ -459,7 +462,7 @@ export const routes = {
   }),
   ...route('POST /reveals', {
     // `keys`: of an environment, these only, as `coffre export --keys` reads them: the rest is neither opened nor logged.
-    input: z.object({ path: z.string().max(400), keys: z.array(secretKey).min(1).max(2000).optional() }),
+    input: revealInput,
     run: async (ctx, { input }) => {
       const path = parsePath(input.path, [2, 3]);
       if (input.keys !== undefined && path.key !== undefined) throw badRequest('keys names keys of an environment: give its path, <project>/<environment>');

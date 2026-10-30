@@ -41,8 +41,8 @@ let handle: string;
 /** Each connection the listener carried. */
 const carried: Socket[] = [];
 
-/** How the vault opens a value, which a case holds up: 0.14's unwrap, or 0.15's use. */
-const OPENS = LOG === '0.15' ? 'use' : 'unwrap';
+/** How the vault opens a value, which a case holds up: 0.14's unwrap, or 0.15's use of the tunnel's one key, by name (T145). */
+const OPENS = LOG === '0.15' ? 'useNamed' : 'unwrap';
 type Opens = (...args: unknown[]) => Promise<unknown>;
 const opens = (): Opens => deps.vault[OPENS] as Opens;
 const openWith = (open: Opens) => void ((deps.vault as unknown as Record<string, unknown>)[OPENS] = open);

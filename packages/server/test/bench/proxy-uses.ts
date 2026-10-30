@@ -42,6 +42,12 @@ export type ProxyLoad = {
   cacheSeconds: number;
   /** The stable URL, `/use/<credential>/…`, as an app's own config names it (R14), which asks first which environment the handle was made for; else the environment's. */
   stable: boolean;
+  /**
+   * 0.15's vault's map of names (T145, `UseLimits.names`), its cap: 0, every request reads its ids first (`use_resolve`),
+   * the worst case; under the handles a thread sends, each picked at random, that share of them misses. Unset, its
+   * default, and the handles in turn: every request warm.
+   */
+  names?: number;
 };
 
 const load = workerData as ProxyLoad;
@@ -62,7 +68,7 @@ await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
 const vault = await localVault(
   { database: createDatabase(vaultPool), ...(load.log === '0.15' ? { hotDatabase: createDatabase(hotPool) } : {}), kek: { id: 'test-kek-1', key: load.kek }, owners: [load.owner], bulkLimit: { count: 1_000_000, windowMinutes: 1 } },
   // This thread changes nothing but the policy at its start: the main thread's checkpointer seals it on its next tick.
-  load.log === '0.15' ? { log: '0.15', sealThrough: async () => ({}) as never } : {},
+  load.log === '0.15' ? { log: '0.15', sealThrough: async () => ({}) as never, ...(load.names === undefined ? {} : { uses: { names: load.names } }) } : {},
 );
 const config = resolveConfig({
   publicUrl: load.origin,
@@ -89,9 +95,11 @@ const inflight = new Set<Promise<void>>();
 let next = 0;
 
 const use = async (phase: Phase, due: number) => {
-  const handle = load.handles[next++ % load.handles.length]!;
+  // At random under a map smaller than the handles: in turn, each would be the one just dropped.
+  const handle = load.handles[load.names === undefined ? next++ % load.handles.length : Math.floor(Math.random() * load.handles.length)]!;
   try {
-    const url = load.stable ? `${load.origin}/use/api/thing` : `${load.origin}/use/${load.path}/api/thing`;
+    // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
+    const url = load.stable ? `${load.origin}/use/api/v1/thing` : `${load.origin}/use/${load.path}/api/v1/thing`;
     const response = await answer(new Request(url, { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
       const why = `${response.status} ${(await response.text()).slice(0, 80)}`;

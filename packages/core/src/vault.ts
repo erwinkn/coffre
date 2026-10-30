@@ -247,6 +247,14 @@ export interface Vault {
   use?(input: UseInput): Promise<UseOutcome>;
 
   /**
+   * 0.15's use as the request names it, one call (T145, PR B; formal/Probing.tla): the vault finds the ids of what it
+   * names, from its own cache or with one read on a miss, uses the key by them, and answers with the rows the app checks
+   * (`NamedUseOutcome.app`) and what it decided the caller holds (`standing`). A key the place does not hold, and a plain
+   * value, it decides on the caller's standing there, logging nothing. Absent from a vault without 0.15's uses.
+   */
+  useNamed?(input: NamedUseInput): Promise<NamedUseOutcome>;
+
+  /**
    * 0.15's log (docs/design/0.15-plan.md, "As built: PR 4b"): the changes
    * the app is about to write to objects its own rows hold (credentials,
    * keys, environments), each sealed, as entries the app's transaction
@@ -1353,6 +1361,42 @@ export function useRefusalMessage(code: UseCode): string {
       return REFUSAL_MESSAGES[code];
   }
 }
+
+/** A use as the request names it (`Vault.useNamed`). */
+export type NamedUseInput = {
+  /** The token the request came in on, hashed as its credential's row holds it, base64. */
+  tokenHash: string;
+  /** Where, by slugs; null for the one environment a handle was made for (the credential proxy's stable URL). */
+  place: { project: string; environment: string } | null;
+  /**
+   * With `place` null, the environments the request does not mean, by slugs: served not by name when the handle's is
+   * one (the stable URL's segments that name an environment of the handle's instead, one the proxy reads as its
+   * person's own config).
+   */
+  unless?: readonly { project: string; environment: string }[];
+  /** The key, by name; null for none: the caller's standing at the place alone, as for a key it does not hold. */
+  key: string | null;
+  purpose: Purpose;
+  keepsSensitive?: boolean;
+  requestId: string;
+  at: number;
+  deadline: number;
+};
+
+/**
+ * A named use's answer. `served: false`: none the vault serves this way (a fork, a personal config, a handle of
+ * several environments), and the app reads it as ever. Otherwise the use's outcome, a plain value's text where one
+ * was allowed; the rows the app checks before anything leaves (the credential's with its MAC, the place's, the key's),
+ * as `app_read` answers them, JSON; the key's id (null for none held); the place, by slugs; and the caller as the vault
+ * decided them, from the sealed rows the use read: null when it decided nothing about them (busy, or a credential ended).
+ */
+export type NamedUseOutcome =
+  | { served: false }
+  | {
+    served: true; secretId: string | null; outcome: UseOutcome | { ok: true; plain: string; versionId: string }; app: string | null; standing: Access | null;
+    /** The place the use was at, by its slugs as the vault read them: the one named, or the handle's own; null if read at none (busy, an unknown token). */
+    place: { project: string; environment: string } | null;
+  };
 
 /** Why a use was not decided at all: the app answers 503, with `Retry-After`. */
 export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured';

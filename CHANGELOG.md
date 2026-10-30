@@ -210,6 +210,23 @@
   checkpointer keeps, so the first use needs nothing made. It adds only
   partitions, which the previous release never touches, and costs a use
   nothing. SQLite does not partition.
+- **0.15's use of one key is one call of the vault's, behind its switch.**
+  A proxy `/use`, a handle's stable URL, and a reveal of one key (its path,
+  or `keys` naming one, as `coffre export --keys API_KEY` sends) now hand
+  the vault what the request names: the token's hash, the place's slugs
+  and the key's name. The vault maps them to ids in its isolate, reading
+  them once on a miss (`use_resolve`, migration 0044), decides on the
+  caller as its sealed rows have them, and answers the rows the app checks
+  in the same statement. The app runs no statement of its own and keeps no
+  answer about the caller, so a busy vault answers 503 at once, the same
+  for a key made after someone's revocation as for one never made. A key
+  the place does not hold, and a plain value, are decided on the caller's
+  standing there and leave no entry. Requests of several keys go as
+  before, until their batched use. With the proxy's cache off, on a
+  2 vCPU Postgres at 20 ms a round trip, a `/use` answers in 27 ms at
+  1,000 a second (p99 49 with 4% of requests cold), nothing refused, at
+  0.73 ms of Postgres CPU, where 0.15 before it collapsed below 1,000 a
+  second, and the stable URL below 600.
 - **0.15's `/use` checks its credential in the use itself, behind its
   switch.** After a use, the app read the credential and its account's
   generation again (`credentialStill`), a statement and a round trip on

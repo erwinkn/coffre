@@ -80,7 +80,8 @@ const probe: CoffrePlugin = {
           await coffre.use(request.headers.get('x-other')!, { path: 'market/dev', keys: ['API_KEY'], purpose: 'use', logged: {}, only: true });
           return Response.json(checked);
         }
-        const used = await coffre.use(handle, { path: 'market/dev', keys: [url.searchParams.get('key') ?? 'API_KEY'], purpose: 'use', logged: {}, ...(url.searchParams.has('only') ? { only: true } : {}) });
+        const named = url.searchParams.getAll('key');
+        const used = await coffre.use(handle, { path: 'market/dev', keys: named.length > 0 ? named : ['API_KEY'], purpose: 'use', logged: {}, ...(url.searchParams.has('only') ? { only: true } : {}) });
         return Response.json({ keys: used.keys });
       } catch (error) {
         if (error instanceof CoffreError) return Response.json({ error: error.code }, { status: error.status });
@@ -227,17 +228,24 @@ test("revoked since their answer was kept, someone learns nothing of a key made 
   const root = clientFor(deps, ROOT);
   for (const person of [SEVENTH, EIGHTH]) await root.access.set(`user:${person}`, { market: null });
   await root.secrets.set('market/dev', { MADE_SINCE: 'made-since' });
-  const use = deps.vault.use!;
+  const [use, useNamed] = [deps.vault.use!, deps.vault.useNamed!];
+  // Busy, by ids or by name (T145): a request of one key is the vault's use by name, which answers busy before it reads
+  // anything, whatever the key; the app's answer kept, refused, asks the vault again first (`Recalled.confirm`).
   deps.vault.use = async () => ({ ok: false, busy: 'overloaded', retryAfter: 1 });
+  deps.vault.useNamed = async () => ({ served: true, secretId: null, outcome: { ok: false, busy: 'overloaded', retryAfter: 1 }, app: null, standing: null, place: null });
   try {
-    // A key made since and one that never was: answered alike, as to someone with no access.
+    // A key made since and one that never was: answered alike, busy.
     const made = await reveal('market/dev/MADE_SINCE');
     const never = await reveal('market/dev/NEVER_MADE');
-    assert.deepEqual([made.status, never.status], [403, 403], `the API: ${await made.text()} / ${await never.text()}`);
+    assert.deepEqual([made.status, never.status], [503, 503], `the API: ${await made.text()} / ${await never.text()}`);
     const used = await fetched('/probe/use?only&key=MADE_SINCE', eighth);
     const unused = await fetched('/probe/use?only&key=NEVER_MADE', eighth);
-    assert.deepEqual([used.status, unused.status], [403, 403], `the proxy: ${await used.text()} / ${await unused.text()}`);
+    assert.deepEqual([used.status, unused.status], [503, 503], `the proxy: ${await used.text()} / ${await unused.text()}`);
+    // Two keys, as before PR B2: on the answer kept, which the busy refusal confirms, as to someone with no access.
+    const both = await fetched('/probe/use?only&key=MADE_SINCE&key=OTHER', eighth);
+    const neither = await fetched('/probe/use?only&key=NEVER_MADE&key=OTHER', eighth);
+    assert.deepEqual([both.status, neither.status], [403, 403], `the proxy, two keys: ${await both.text()} / ${await neither.text()}`);
   } finally {
-    deps.vault.use = use;
+    Object.assign(deps.vault, { use, useNamed });
   }
 });

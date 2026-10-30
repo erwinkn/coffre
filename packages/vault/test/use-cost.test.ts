@@ -85,21 +85,26 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   // eight or so buffers more (50 and 51 where 41 and 42 are the rule, one run in 400), which no size of history
   // moves. The first run is the cold one, and it costs thousands.
   const client = postgresClient(HOT_URL, { max: 1 });
-  const buffers = async (cached: boolean): Promise<number> => {
+  // What a named use names (T145, 0034): its token's hash, its place's slugs and its key's name, for which the call
+  // also reads the rows the app checks.
+  const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
+    FROM credentials c, secrets s JOIN projects p ON p.id = s.project_id WHERE c.id = ${w.credentialId} AND s.id = ${id}`);
+  const buffers = async (cached: boolean, named = false): Promise<number> => {
     let least = Infinity;
     for (let i = 0; i < 6; i += 1) {
       const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);
       const at = Date.now();
       const requestId = newRequestId();
       const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
-      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10)`,
-        [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null] as never[]);
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null,
+          named ? names!.token_hash : null, named ? names!.project : null, named ? 'dev' : null, named ? names!.key : null] as never[]);
       const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
       least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
     }
     return least;
   };
-  const at = async (size: number) => ({ size, probing: await buffers(false), cached: await buffers(true) });
+  const at = async (size: number) => ({ size, probing: await buffers(false), cached: await buffers(true), named: await buffers(true, true) });
   await grow(10_000);
   const small = await at(10_000);
   await grow(990_000);
@@ -108,7 +113,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   console.log(JSON.stringify({ small, large }));
   // Flat: no statement reads history, only probes it by index. Of the indexes a use reads, only the uses' own
   // (at, request_id) grows a level from 10k to 1M here: its insert and a cover's probe of it, a buffer each at most.
-  for (const form of ['probing', 'cached'] as const) {
+  for (const form of ['probing', 'cached', 'named'] as const) {
     assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 10k, ${large[form]} at 1M`);
   }
 });

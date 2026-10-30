@@ -5,10 +5,11 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { periodOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
 import { objectKey, type Kind } from './inputs.ts';
-import type { UseCall, UseRow } from './use.ts';
+import type { Resolved, UseCall, UseRow } from './use.ts';
+import { resolvedOf } from './use.postgres.ts';
 
 /**
- * `use_credential` (0024's, as 0033 has it) on SQLite, for tests and local development
+ * `use_credential` (0024's, as 0044 has it) on SQLite, for tests and local development
  * (docs/design/0.15-plan.md, "Postgres serves; SQLite is for tests"): the
  * same reads and writes, the same row, in one transaction. SQLite runs one
  * writer at a time (`BEGIN IMMEDIATE`, @coffre/db/connect), so the fence and
@@ -41,8 +42,8 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   if (typeof cap.count !== 'number' || typeof cap.windowMs !== 'number') return nothing('unconfigured');
   const limit = { count: cap.count, windowMs: cap.windowMs };
 
-  const c = await one<{ principal: string; kind: string; scope: string | null; revoked_at: number | null; expires_at: number; not_after: number | null; seal: Buffer | null; generation: number }>(
-    sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation FROM credentials WHERE id = ${call.credential}`);
+  const c = await one<{ principal: string; kind: string; scope: string | null; revoked_at: number | null; expires_at: number; not_after: number | null; seal: Buffer | null; generation: number; token_hash: Buffer }>(
+    sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation, token_hash FROM credentials WHERE id = ${call.credential}`);
   const m = c === undefined ? undefined : await one<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null; generation: number }>(
     sql`SELECT status, owner, role, scope, seal, generation FROM vault_members WHERE principal = ${c.principal}`);
   const grants = m === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
@@ -51,8 +52,10 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   const config = await rowsOf<{ name: string; value: string; seal: Buffer | null }>(tx, sql`SELECT name, value, seal FROM log_config`);
   const roles = config.find((row) => row.name === 'roles');
   const policyRow = config.find((row) => row.name === 'policy');
-  type SecretRow = { id: string; project_id: string; environment_id: string; current_version_id: string | null; seal: Buffer | null };
-  const secretOf = (id: string) => one<SecretRow>(sql`SELECT id, project_id, environment_id, current_version_id, seal FROM secrets WHERE id = ${id} AND archived_at IS NULL`);
+  type SecretRow = { id: string; project_id: string; environment_id: string; current_version_id: string | null; seal: Buffer | null; key: string };
+  const secretOf = (id: string | null) => id === null
+    ? Promise.resolve(undefined)
+    : one<SecretRow>(sql`SELECT id, project_id, environment_id, current_version_id, seal, key FROM secrets WHERE id = ${id} AND archived_at IS NULL`);
   // Its newest reference row's source and id, unless that row has ended.
   const referenceOf = async (secret: SecretRow | undefined) => secret === undefined || secret.current_version_id !== null
     ? undefined
@@ -84,6 +87,21 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   const own = sSource === null || (x !== undefined && ids[2] === null) ? e[1] : e[2];
   ids.push(own?.owner != null ? own.parent_id : null);
   e.push(await environmentOf(ids[3]!));
+  // What the request named, as 0044 holds the rows to it: `moved`, nothing written, if they are no longer those.
+  const names = call.names;
+  if (names !== undefined) {
+    const named = e[0] ?? e[1];
+    const project = named === undefined ? undefined : await one<{ slug: string }>(sql`SELECT slug FROM projects WHERE id = ${named.project_id}`);
+    if ((c !== undefined && !Buffer.from(c.token_hash).equals(names.tokenHash)) || c === undefined
+      || (s !== undefined && s.key !== names.key)
+      || (names.environment !== null && named?.slug !== names.environment)
+      || (names.project !== null && project?.slug !== names.project)) return nothing('moved');
+    // A place it reads archived, its own, the key's or a reference's source's: the app answers it, as ever (0044's `unnamed`).
+    if (e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived)))) return nothing('unnamed');
+  }
+  // Named, a key the place does not hold, and a plain value: decided, never used, so neither an entry nor a cap's row
+  // (0044). A use by ids logs its request whatever it finds, as before.
+  const uses = names === undefined || (s !== undefined && (v === undefined || v.plaintext === null));
 
   const last = (kind: Kind, id: string | null) => (cached ? Promise.resolve(undefined) : newestOf(kind, id));
   const [lc, lm, lr, ls, lx, ...le] = await Promise.all([
@@ -98,7 +116,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   // The cap's rule (bulk.ts, as 0022 and 0024 write it): the key's row, and the others only for a key not in the set.
   const refresh = refreshMs(limit);
   const period = periodOf(call.at, refresh);
-  const b = c === undefined ? undefined : await one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${c.principal} AND secret = ${call.secretId}`);
+  const b = c === undefined || call.secretId === null ? undefined : await one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${c.principal} AND secret = ${call.secretId}`);
   const inSet = b !== undefined && b.last > call.at - limit.windowMs - refresh;
   const stale = b === undefined || b.last < period;
   const others = c === undefined || inSet ? 0 : Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
@@ -108,7 +126,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     && (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
       AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined;
   let number: string | null = null;
-  if (!covered) {
+  if (!covered && uses) {
     const next = BigInt((await one<{ n: string }>(sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`))!.n);
     try {
       await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
@@ -120,7 +138,7 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     }
     number = String(next);
   }
-  if (c !== undefined && !covered && stale && (inSet || others < limit.count)) {
+  if (c !== undefined && uses && !covered && stale && (inSet || others < limit.count)) {
     await rowsOf(tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${c.principal}, ${call.secretId}, ${period})
       ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
   }
@@ -160,7 +178,40 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
     v_sensitive: v === undefined ? null : Boolean(v.sensitive), v_plain: v === undefined ? null : v.plaintext !== null, v_plaintext: v?.plaintext ?? null,
     ...slot(0), ...slot(1), ...slot(2), ...slot(3),
     in_set: inSet, others,
+    // SQLite's app reads its own rows, as it always has (`app_read` is Postgres's).
+    c_token_hash: blob(c?.token_hash), app: null,
   } as UseRow;
+}
+
+/** `use_resolve` (0044) on SQLite: the ids of what a request names, its credential by its token's hash, its place, its keys. */
+export async function callResolve(db: Queryable, asked: { tokenHash: Buffer; place: { project: string; environment: string } | null; keys: readonly string[] }): Promise<Resolved> {
+  const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(db, query))[0];
+  const credential = await one<{ id: string; places: string | null }>(sql`SELECT id, places FROM credentials WHERE token_hash = ${asked.tokenHash}`);
+  if (credential === undefined) return resolvedOf({ credential: null });
+  type Place = { project_id: string; id: string; parent_id: string | null; owner: string | null; project_slug: string; slug: string };
+  let place: Place | undefined;
+  if (asked.place !== null) {
+    place = await one<Place>(sql`SELECT e.project_id, e.id, e.parent_id, e.owner, p.slug AS project_slug, e.slug FROM projects p JOIN environments e ON e.project_id = p.id AND e.slug = ${asked.place.environment}
+      AND e.slug NOT LIKE '%~%' AND e.archived_at IS NULL WHERE p.slug = ${asked.place.project} AND p.slug NOT LIKE '%~%' AND p.archived_at IS NULL`);
+  } else {
+    const places = credential.places === null ? [] : (JSON.parse(credential.places) as { environmentId: string; personal?: boolean }[]);
+    if (places.length === 1 && places[0]!.personal !== true) {
+      place = await one<Place>(sql`SELECT e.project_id, e.id, e.parent_id, e.owner, p.slug AS project_slug, e.slug FROM environments e JOIN projects p ON p.id = e.project_id AND p.archived_at IS NULL
+        WHERE e.id = ${places[0]!.environmentId} AND e.archived_at IS NULL AND e.slug NOT LIKE '%~%' AND p.slug NOT LIKE '%~%'`);
+    }
+  }
+  const shared = place !== undefined && (place.parent_id !== null || place.owner !== null);
+  const keys: Record<string, string> = {};
+  if (place !== undefined && !shared) {
+    for (const key of asked.keys) {
+      const found = await one<{ id: string }>(sql`SELECT id FROM secrets WHERE project_id = ${place.project_id} AND environment_id = ${place.id} AND key = ${key} AND archived_at IS NULL`);
+      if (found !== undefined) keys[key] = found.id;
+    }
+  }
+  return resolvedOf({
+    credential: credential.id, project: place?.project_id ?? null, environment: place?.id ?? null, shared, keys,
+    slugs: place === undefined ? null : { project: place.project_slug, environment: place.slug },
+  });
 }
 
 function oldOf(payload: string): string | null {

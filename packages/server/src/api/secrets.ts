@@ -46,7 +46,7 @@ import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
-import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord } from './keys.ts';
+import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord, type Decided } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
@@ -1761,7 +1761,7 @@ export async function reveal(
    * all; a path that resolves to another (renamed meanwhile) is refused
    * before anything is logged or opened.
    */
-  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string; ahead?: ReadAhead | null; only?: boolean },
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string; ahead?: ReadAhead | null; only?: boolean; decided?: Decided },
   /**
    * Of a whole environment, these keys only (`coffre export --keys`): read
    * as the whole is, and what it leaves out named as the whole's would be,
@@ -1776,7 +1776,10 @@ export async function reveal(
     // The place and its keys in one call where it can (`readValues`); the proxy's read them with the handle already.
     // Of a use, its keys alone when it reads no other (`UseAsked.only`): it answers every key the environment holds.
     const reads = use === undefined ? only : use.only === true && Array.isArray(use.keys) ? use.keys : undefined;
-    const ahead = use?.ahead !== undefined ? use.ahead : await readValues(ctx, path, reads);
+    // A request's one key, used by name already (`useByName`): its rows are the use's, and its outcome the value's.
+    const decided = use?.decided ?? ctx.named?.decided;
+    const given = use?.ahead !== undefined ? use.ahead : ctx.named?.ahead;
+    const ahead = given !== undefined ? given : await readValues(ctx, path, reads);
     // `market/dev@me`: your personal config of dev, or dev while you have none.
     const place = ahead?.place !== undefined ? ahead.place : await resolveRead(ctx, path);
     const environment = place === null ? null : liveEnvironment(place);
@@ -1892,7 +1895,7 @@ export async function reveal(
     // Which credential the values go into, and where: the vault's entry names the keys, this one what they were for. The
     // vault appends it beside its reads, under the head it holds for them; an older vault, or no vault call, leaves it to us.
     const used = use === undefined ? null : allowed(ctx, 'credential.use', { ...environment, operationId, metadata: { purpose: use.purpose, keys: rows.map((row) => row.key), ...use.logged } });
-    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, credentialRow: ctx.credentialId }, rows, ctx.caller.recalled, used === null ? undefined : useRecord(used));
+    const opened = await openValues(ctx.vault, { ...asking(ctx, operationId), purpose, credentialRow: ctx.credentialId }, rows, ctx.caller.recalled, used === null ? undefined : useRecord(used), decided);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const values: Record<string, string> = Object.create(null);
@@ -1900,7 +1903,8 @@ export async function reveal(
     // The keys whose values are plain: no secret, for the proxy to hand on as they are and leave unredacted. The app
     // opened them itself, as no vault call did: handed back only as the policy is now (`fenced`).
     const plainKeys = rows.filter(plain).map((row) => row.key);
-    if (plainKeys.length > 0) fence();
+    // The vault decided a named use's plain value, on the policy as its statement read it: no read after it (T145).
+    if (plainKeys.length > 0 && decided === undefined) fence();
     if (opened.stood === true) stood();
     if (used !== null) {
       // Appended by the vault already, the app has nothing to append: its fence takes no lock (`recorded`).

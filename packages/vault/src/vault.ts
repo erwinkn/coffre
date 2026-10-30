@@ -124,6 +124,8 @@ import {
   USE_METADATA_LENGTH,
   type Unwrapped,
   type UseInput,
+  type NamedUseInput,
+  type NamedUseOutcome,
   type UseOutcome,
   type UseRecord,
   type Wrapped,
@@ -158,7 +160,7 @@ import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
-import { use, UseCache, useLimits, type UseLimits } from './use.ts';
+import { use, UseCache, useLimits, useNamed, type UseLimits } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
 
@@ -611,6 +613,14 @@ class VaultService implements Vault {
     // An isolate's first uses read the cutover's marker (`#cutOverYet`) within their admission, as any call holds a connection.
     const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
     return use({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }) }, input);
+  }
+
+  /** 0.15's use as the request names it (use.ts, `useNamed`), on the hot path's login. */
+  async useNamed(input: NamedUseInput): Promise<NamedUseOutcome> {
+    const { log015, uses: cache } = this.#prepared;
+    if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
+    if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
+    return useNamed({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache }, input);
   }
 
   async #now(db: Queryable): Promise<number> {

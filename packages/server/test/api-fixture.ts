@@ -205,6 +205,7 @@ export async function revokesLogged(owner: Database): Promise<{ actor: string; r
  */
 export function watchUses(vault: TestVault): { asked: UseInput[]; answered: UseOutcome[]; stop(): void } {
   const use = vault.use!;
+  const named = vault.useNamed!;
   const asked: UseInput[] = [];
   const answered: UseOutcome[] = [];
   vault.use = async (input) => {
@@ -213,7 +214,17 @@ export function watchUses(vault: TestVault): { asked: UseInput[]; answered: UseO
     answered.push(outcome);
     return outcome;
   };
-  return { asked, answered, stop: () => void (vault.use = use) };
+  // A request's one key, used by name (T145): as the use by ids it made, its key's id the vault's answer. Not a plain
+  // value's, which opens nothing, as when the app handed it back itself; nor one the vault serves not by name.
+  vault.useNamed = async (input) => {
+    const outcome = await named(input);
+    if (outcome.served && !(outcome.outcome.ok && 'plain' in outcome.outcome)) {
+      asked.push({ credential: '', secretId: outcome.secretId ?? '', place: null, purpose: input.purpose, requestId: input.requestId, at: input.at, deadline: input.deadline });
+      answered.push(outcome.outcome as UseOutcome);
+    }
+    return outcome;
+  };
+  return { asked, answered, stop: () => void Object.assign(vault, { use, useNamed: named }) };
 }
 
 /** The ids of the keys named `key`, in any environment: what a use names (`watchUses`). */
@@ -297,6 +308,8 @@ export function testVault(
     verifyTrees: call('verifyTrees'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),
+    // And its use by name (T145, PR B): a reveal's or a handle's one key, which the vault resolves and uses in one call.
+    useNamed: call('useNamed'),
     kek,
     signingKey,
     advance: (ms: number) => void (offset += ms),

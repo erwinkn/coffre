@@ -68,6 +68,18 @@ REMOVALS=(
   # The check in the use itself (T145): it decides on the generations, sealed, and the app reads nothing after it.
   "Revoking015Folded UseDecidesGeneration NoReleaseAfterEnd"
   "Revoking015Folded RevokeIssuedCredentials NoReleaseAfterEnd"
+  # PR B: the use is the vault's one call, nothing asked or kept about the account before it.
+  "Revoking015Caller UseDecidesGeneration NoReleaseAfterEnd"
+  "Revoking015Caller RevokeIssuedCredentials NoReleaseAfterEnd"
+  # What a caller with no access learns of keys by asking (Probing.tla; T145 PR B, #406 r2): nothing, under any load.
+  "Probing MissingByStanding SameAnswer"
+  "Probing PlainByStanding SameAnswer"
+  "Probing StandingSharesAdmission SameAnswer"
+  "Probing ConfirmStandingOnLate SameAnswer"
+  "Probing ConfirmReserved SameAnswer"
+  "ProbingKept ConfirmOnBusy SameAnswer"
+  # A use by name holds its rows to the names (Naming.tla; review r2 of #412): an id kept is used only while it is still named so.
+  "Naming HeldToNames UsedAsNamed"
   "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"
   "Proxying CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials+BindingCheckedAtUse UnboundStayUnusable"

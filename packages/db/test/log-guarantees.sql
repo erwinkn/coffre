@@ -140,7 +140,10 @@ BEGIN
               FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0) THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot lacks the hot path''s settings';
     END IF;
-    IF NOT has_function_privilege('coffre_vault_hot', 'use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint)', 'EXECUTE')
+    -- 0044's: the use by what a request names, and the read of the ids it names, the vault's alone.
+    IF NOT has_function_privilege('coffre_vault_hot', 'use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text)', 'EXECUTE')
+       OR NOT has_function_privilege('coffre_vault_hot', 'use_resolve(bytea, text, text, text[])', 'EXECUTE')
+       OR has_function_privilege('coffre_app', 'use_resolve(bytea, text, text, text[])', 'EXECUTE')
        OR has_database_privilege('coffre_vault_hot', current_database(), 'CREATE') OR has_database_privilege('coffre_vault_hot', current_database(), 'TEMPORARY') THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;

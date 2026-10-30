@@ -748,8 +748,10 @@ export class SigninService {
     /**
      * `ahead`: the credential as `app_read` read it already for this request (db/read-ahead.ts), null for none.
      * `shows`: what the request shows of its caller, read with the credential from the vault's rows (`Shows`).
+     * `standing`: the caller as the vault's named use decided them, from the sealed rows it read (`Vault.useNamed`,
+     * T145): taken as the vault's answer, nothing asked or kept.
      */
-    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows } = { sourceIp: null },
+    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access } = { sourceIp: null },
   ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
@@ -777,6 +779,8 @@ export class SigninService {
       const recall = request.recall === true && row !== null && !unsealed;
       // Only shown, read from the vault's rows, for an active member (`shownActive`); a scope still to be sealed is sealed from the vault's answer, asked.
       if (shown !== null && !unsealed && shownActive(shown.access)) [access, unchecked] = [shown.access, true];
+      // Decided by the use this request made, on the sealed rows (a token still to be sealed asks, as it seals from the answer).
+      else if (row !== null && request.standing !== undefined && !unsealed) access = request.standing;
       else if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
       // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
       if (row !== null && access !== null && this.#unsealed(row, access, now)) {
