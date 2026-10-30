@@ -15,11 +15,12 @@ import type { AddressInfo } from 'node:net';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { credential } from '@coffre/client/credential';
+import { hashToken } from '@coffre/core/identity';
 import { replayStored } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
 
 import { clientFor, contextFor, issuesLogged, LOG, usesLogged } from './api-fixture.ts';
-import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, NO, refusedFor, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { credentials, environments } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
 import { authMac } from '../src/auth-rows.ts';
@@ -220,7 +221,9 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
   try {
     await promise;
   } catch (error) {
-    const { status, reason } = error as { status: number; reason?: string };
+    const { status, code, reason } = error as { status: number; code?: string; reason?: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does.
+    if (code === 'not_available') return { status, reason: await refusedFor() };
     return { status, reason: reason ?? null };
   }
   throw new Error('it was not refused');
@@ -259,12 +262,12 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   assert.deepEqual([...whole.sensitive].sort(), sensitive);
   assert.equal(whole.values.SCHUMANN_API_KEY, undefined);
   assert.equal(whole.values.WEBHOOK_SECRET, WEBHOOK);
-  assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 403, reason: 'sensitive' });
+  assert.deepEqual(await refusal(bearer(session).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 404, reason: 'sensitive' });
   const pat = await bearer(session).tokens.issue(`user:${DEV}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   assert.deepEqual([...(await bearer(pat.token).secrets.reveal('market/dev')).sensitive].sort(), sensitive);
-  assert.deepEqual(await refusal(bearer(pat.token).secrets.reveal('market/dev/U_PASS')), { status: 403, reason: 'sensitive' });
+  assert.deepEqual(await refusal(bearer(pat.token).secrets.reveal('market/dev/U_PASS')), { status: 404, reason: 'sensitive' });
   // The Owner too: no person's credential is an exception.
-  assert.deepEqual(await refusal(bearer(await sessionFor(ROOT)).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 403, reason: 'sensitive' });
+  assert.deepEqual(await refusal(bearer(await sessionFor(ROOT)).secrets.reveal('market/dev/SCHUMANN_API_KEY')), { status: 404, reason: 'sensitive' });
   // Nor does a dry run say whether a guess was right: the right one is `changed` too.
   assert.deepEqual({ ...(await bearer(session).secrets.dryRun('market/dev', { SCHUMANN_API_KEY: KEY })).keys }, { SCHUMANN_API_KEY: 'changed' });
   const mcp = await connect(DEV, 'read reveal');
@@ -275,7 +278,9 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   const one = await callRaw(mcp, 'reveal_secret_values', { path: 'market/dev/SCHUMANN_API_KEY' });
   assert.equal(one.body.result!.isError, true);
   assert.equal(JSON.stringify(one.body).includes(KEY), false);
-  assert.match(JSON.stringify(one.body), /sensitive/);
+  // A key's one refusal through MCP too (D153), its reason in the app's entry.
+  assert.deepEqual(one.body.result!.content, [{ type: 'text', text: 'not available: no such key, or no access to it' }]);
+  assert.equal(await refusedFor(), 'sensitive');
 
   // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this. Through MCP,
   // which comes in on no credential, as 0.14's read under either log.
@@ -283,9 +288,11 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   assert.ok(refused.length >= (LOG === '0.14' ? 4 : 1));
   assert.ok(refused.every((entry) => entry.code === 'sensitive'));
   if (LOG === '0.15') {
-    // On a credential, 0.15's uses: each logged as its request, and refused, as the replay of the log says.
-    const refusedUses = [...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null);
-    assert.ok(refusedUses.length >= 3 && refusedUses.every((code) => code === 'sensitive'), JSON.stringify(refusedUses));
+    // On a credential, 0.15's "no" is decided before the use, which writes nothing (D153): the app's entry of each
+    // request logs it, by the person.
+    const app = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author !== 'vault');
+    assert.ok(app.length >= 3 && app.every((entry) => entry.metadata.reason === 'sensitive'), JSON.stringify(app.map((entry) => entry.metadata)));
+    assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
   }
 
   // A service account's reads are values, as in CI.
@@ -685,6 +692,18 @@ test('a handle for a fork reads what it inherits, and one for dev@me stands in f
   assert.equal(plan.env.WEBHOOK_SECRET, WEBHOOK, "dev's secret, which its owner reads through dev anyway");
 });
 
+test("a handle whose places a writer rewrote around its MAC, into no place at all, is refused 401 on its stable URL, never an error (review r2 of D153)", async () => {
+  const handle = await handleFor();
+  const sent = received.length;
+  for (const places of ['[{"environmentId":"not-a-uuid","personal":false}]', 'not json', '[1]']) {
+    await db.owner.update(credentials).set({ places }).where(eq(credentials.tokenHash, hashToken(handle)));
+    const refused = await route('/use/schumann/companies', { headers: { 'x-api-key': handle } });
+    assert.equal(refused.status, 401, places);
+    assert.equal(refused.headers.get('coffre-proxy'), 'refused');
+  }
+  assert.equal(received.length, sent, 'nothing reached an upstream');
+});
+
 test("the stable URL, /use/<credential>, is the handle's environment's: a fork's, a personal config's, or a refusal that names the environment's", async () => {
   const handle = await handleFor();
   const stable = (path: string, token = handle, init: RequestInit = {}) => route(`/use/schumann${path}`, { ...init, headers: { 'x-api-key': token, ...(init.headers as Record<string, string> | undefined) } });
@@ -875,10 +894,13 @@ test("a handle made for dev reads its reference into a protected prod through de
   const response = await route('/use/market/dev', { headers: { authorization: `Bearer ${made.token}` } });
   assert.equal(response.status, 200, await response.clone().text());
   assert.equal(((await response.json()) as { env: Record<string, string> }).env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
-  // Prod itself, its plan or a credential of it, is no place the handle was made for.
+  // Prod itself, its plan or a credential of it, is no place the handle was made for: its plan says so, and a
+  // credential's one key is the one "no" (D153), its reason in the app's entry.
   const sent = received.length;
   assert.equal((await route('/use/market/prod', { headers: { authorization: `Bearer ${made.token}` } })).status, 403);
-  assert.equal((await route(`/use/market/prod/maps/geocode?address=paris&key=${made.token}`)).status, 403);
+  const key = await route(`/use/market/prod/maps/geocode?address=paris&key=${made.token}`);
+  // Its reason: the app's, or, by name (0.15's log), the vault's own, the app reading nothing more of the key (D153).
+  assert.deepEqual([key.status, await key.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'no_grant' : 'missing_secret_use']);
   assert.equal(received.length, sent, 'nothing reached an upstream');
 });
 
@@ -901,7 +923,7 @@ test("a key named as an object's own property is still missing when the environm
   runtime.plugins = checkPlugins([credentialProxy({ credentials: { odd: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{constructor}') } }, insecureUpstreams: true })]);
   const handle = await handleFor();
   const missing = await route('/use/market/dev/odd/companies', { headers: { 'x-api-key': handle } });
-  assert.equal(missing.status, 409);
+  assert.deepEqual([missing.status, await missing.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'missing' : 'unknown_secret']);
   assert.equal(received.length, 0);
 });
 

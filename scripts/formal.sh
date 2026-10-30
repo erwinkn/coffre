@@ -71,13 +71,37 @@ REMOVALS=(
   # PR B: the use is the vault's one call, nothing asked or kept about the account before it.
   "Revoking015Caller UseDecidesGeneration NoReleaseAfterEnd"
   "Revoking015Caller RevokeIssuedCredentials NoReleaseAfterEnd"
-  # What a caller with no access learns of keys by asking (Probing.tla; T145 PR B, #406 r2): nothing, under any load.
-  "Probing MissingByStanding SameAnswer"
-  "Probing PlainByStanding SameAnswer"
-  "Probing StandingSharesAdmission SameAnswer"
-  "Probing ConfirmStandingOnLate SameAnswer"
-  "Probing ConfirmReserved SameAnswer"
+  # What a caller with no access learns of keys by asking (Probing.tla; T145 PR B, #406 r2, T158): nothing, under any load, nor from how long it takes.
+  "Probing OneNo NoIsFixed"
+  "Probing ResolveByName NoIsFixed"
+  "Probing MissingByStanding NoIsFixed"
+  # A plain value goes back only on the vault's standing (PR B), which W268's gate decides before the key is read: each covers the other.
+  "Probing PlainByStanding+StandingFirst NoIsFixed"
+  "Probing StandingSharesAdmission NoIsFixed"
+  "Probing DecideBeforeLock NoIsFixed"
+  "Probing DecideBeforeLock NoLockForNo"
+  "Probing DecideEachLock NoIsFixed"
+  "Probing DecideEachLock NoLockForNo"
+  "Probing CoveredRefusalAnswered NoIsFixed"
+  # Review r2 of D153: the route is the credential's and its account's; a use by ids decides before the lock too.
+  "Probing RouteByCredential OneRoute"
+  "Probing RouteByCredential NoIsFixed"
+  "Probing RouteByCredential+DecideBeforeLockById NoLockForNo"
+  # Review r4 of D153: a key that reads an archived place is the vault's refusal, by name, never the app's path.
+  "Probing ArchivedByName NoIsFixed"
+  "Probing ArchivedByName OneRoute"
+  # Reviews r6 and r7 of D153: the vault holds the credential first to what the app's config accepts, for a provider removed and for a move to Access each.
+  "Probing AcceptedFirst NoIsFixed"
+  "ProbingProvider AcceptedFirst NoIsFixed"
+  "ProbingAccess AcceptedFirst NoIsFixed"
+  # Review r8 of D153: one clock, the app judging the credential's expiry at the request's `at`, as the vault does.
+  "Probing OneClock NoIsFixed"
+  "ProbingFloor AdmissionBeforeKey NoIsFixed"
+  "ProbingArchived AdmissionBeforeKey NoIsFixed"
   "ProbingKept ConfirmOnBusy SameAnswer"
+  # D150 (fallback D), W268: her standing decided from rows no key decides, before any of the key's is read.
+  "Probing StandingFirst NoKeyBeforeStanding"
+  "ProbingFloor StandingFirst NoKeyBeforeStanding"
   # A use by name holds its rows to the names (Naming.tla; review r2 of #412): an id kept is used only while it is still named so.
   "Naming HeldToNames UsedAsNamed"
   "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"
@@ -185,6 +209,8 @@ REMOVALS=(
   "HotPathOneClock FloorChecked CheckpointsHold"
   "HotPathOneClock DeadlineChecked NoLateWork"
   "HotPathOneClock WorkerHonoursDeadline ReleaseByDeadline"
+  # T158: the principal's lock only once the caller's standing is decided, before it (Probing.tla says why).
+  "HotPathOneStaleBulk DecideBeforeLock NoLockWithoutStanding"
   "HotPathOneBulk PrincipalLocks BulkCapHolds"
   "HotPathOneBulk PrincipalLocks BulkReplayAgrees"
   "HotPathOneBulk RefreshOnUse BulkCapHolds"

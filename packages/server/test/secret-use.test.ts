@@ -15,7 +15,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 
 import { replayStored } from '@coffre/vault/node';
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
-import { db, deps, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
@@ -59,11 +59,15 @@ function bearer(token: string): CoffreClient {
   return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
 }
 
+const NOT_AVAILABLE = 'not available: no such key, or no access to it';
+
 async function refusal(promise: Promise<unknown>): Promise<{ status: number; reason: string | null; message: string }> {
   try {
     await promise;
   } catch (error) {
-    const { status, reason, message } = error as { status: number; reason?: string; message: string };
+    const { status, code, reason, message } = error as { status: number; code?: string; reason?: string; message: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    if (code === 'not_available') return { status, reason: await refusedFor(), message };
     return { status, reason: reason ?? null, message };
   }
   throw new Error('it was not refused');
@@ -85,11 +89,11 @@ test('a Contributor lists the keys and writes values, and is refused every value
   assert.ok(typeof (await contributor.environments.version('market/dev')).version === 'string');
   // A value of their own, written without reading the one before.
   assert.deepEqual((await contributor.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' })).keys, { WEBHOOK: { version: 2, sensitivity: 'secret' } });
-  for (const path of ['market/dev', 'market/dev/WEBHOOK']) {
-    const refused = await refusal(contributor.secrets.reveal(path));
-    assert.equal(refused.status, 403, path);
-    assert.match(refused.message, /without reading them \(secret\.use\)/);
-  }
+  // The environment's read says why; a key's is the one "no" (D153), the why in the app's entry.
+  const whole = await refusal(contributor.secrets.reveal('market/dev'));
+  assert.equal(whole.status, 403);
+  assert.match(whole.message, /without reading them \(secret\.use\)/);
+  assert.deepEqual(await refusal(contributor.secrets.reveal('market/dev/WEBHOOK')), { status: 404, reason: 'missing_secret_read', message: NOT_AVAILABLE });
   const listedProjects = (await contributor.projects.list()).projects.find((project) => project.slug === 'market')!;
   assert.equal(listedProjects.environments.find((environment) => environment.slug === 'dev')!.accessible, true);
 });
@@ -143,7 +147,7 @@ test("a Contributor's dev@me lists their own value readable, and dev's inherited
   // Dev's key, its version and age told, as to a lister of dev; its value read only by a reader of dev.
   const inherited = listed.get('API_KEY')!;
   assert.deepEqual([inherited.parent?.state, inherited.version, inherited.readable], ['inherited', 1, false]);
-  assert.equal((await refusal(contributor.secrets.reveal('market/dev@me/API_KEY'))).status, 403);
+  assert.deepEqual(await refusal(contributor.secrets.reveal('market/dev@me/API_KEY')), { status: 404, reason: 'parent_unreadable', message: NOT_AVAILABLE });
   // A plain value is listed, and is its own read.
   assert.deepEqual([listed.get('REGION')!.value, listed.get('REGION')!.readable], ['eu-west-3', true]);
   const own = listed.get('WEBHOOK')!;
@@ -161,7 +165,8 @@ test('a personal token of a Contributor names contributor, and reaches no read',
   const token = await bearer(session).tokens.issue(`user:${CONTRIBUTOR}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'contributor' } });
   const agent = bearer(token.token);
   assert.deepEqual((await agent.secrets.list('market/dev')).keys.map((entry) => entry.key), ['API_KEY', 'REGION', 'WEBHOOK']);
-  assert.equal((await refusal(agent.secrets.reveal('market/dev/API_KEY'))).status, 403);
+  // Its reason: the app's, or, by name (0.15's log), the vault's own (D153).
+  assert.deepEqual(await refusal(agent.secrets.reveal('market/dev/API_KEY')), { status: 404, reason: LOG === '0.15' ? 'no_grant' : 'missing_secret_read', message: NOT_AVAILABLE });
 });
 
 test("a Contributor's handle reads their own values in dev@me, and nothing of dev's", async () => {
@@ -216,7 +221,7 @@ test("a Viewer of base who contributes to its fork dev reads none of base's secr
   // A read of dev-base needs read on dev-base, and on base for what it inherits: the first is missing.
   const shared = listed.get('SHARED')!;
   assert.deepEqual([shared.parent?.state, shared.readable], ['inherited', false]);
-  assert.equal((await refusal(contributor.secrets.reveal('market/dev-base/SHARED'))).status, 403);
+  assert.deepEqual(await refusal(contributor.secrets.reveal('market/dev-base/SHARED')), { status: 404, reason: 'missing_secret_read', message: NOT_AVAILABLE });
   assert.equal((await contributor.secrets.reveal('market/base/SHARED')).values.SHARED, 'shared_0123456789');
   assert.deepEqual([listed.get('ZONE')!.value, listed.get('ZONE')!.readable], ['eu', true]);
   // Override: a value of dev-base's own, written unread.

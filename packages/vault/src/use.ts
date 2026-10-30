@@ -1,18 +1,19 @@
+import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
-import { newUseRequestId, type Access, type NamedUseInput, type NamedUseOutcome, type UseBusy, type UseInput, type UseOutcome, type UsedValue } from '@coffre/core/vault';
+import { type Access, type CredentialAcceptance, type NamedUseInput, type NamedUseOutcome, type UseBusy, type UseInput, type UseOutcome, type UsedValue } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
-import { checkSeals, decideChecked, readerOf, type CheckedView, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
-import type { EnvironmentInput, Input, InputGrant, PolicyInput, RolesInput, SealKeys } from './inputs.ts';
+import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, type CheckedView, type Read, type UseCode, type UseRequest, type UseView } from './decide.ts';
+import { noEdits, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys } from './inputs.ts';
 import { entryMac } from './log-entry.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode } from './log-replay.ts';
-import { callResolve as resolvePostgres, callUse as callPostgres } from './use.postgres.ts';
-import { callResolve as resolveSqlite, callUse as callSqlite } from './use.sqlite.ts';
+import { callUse as callPostgres } from './use.postgres.ts';
+import { callUse as callSqlite } from './use.sqlite.ts';
 
 /**
  * 0.15's use (docs/design/0.15-plan.md, PR 5; hot-path-one.md, "A use";
@@ -35,7 +36,11 @@ import { callResolve as resolveSqlite, callUse as callSqlite } from './use.sqlit
  *   names so that its statement probes nothing while that change is still
  *   the newest (CacheChecked, CacheSameChange);
  * - **covers:** a repeat of an allowed use rides its entry, writing none,
- *   while no input changed since and the key's bulk row is fresh.
+ *   while no input changed since and the key's bulk row is fresh;
+ * - **no decision** for a use to take its principal's lock on (T158, D153):
+ *   a named use that would take it makes a call that locks and writes
+ *   nothing, decides the use on its rows (`decide`), and only then makes it,
+ *   in a second call (DecideBeforeLock, DecideEachLock).
  */
 
 export type { UseInput, UseOutcome, UsedValue };
@@ -52,10 +57,13 @@ export type CachedSeals = {
   cap: BulkLimit;
   /** The newest change of any input then: a cover after it holds. */
   inputs: string | null;
-  /** Which objects each seal is of, as the rows named them: a row that names others now reads nothing from here. */
-  ids: string;
+  /** Which object each seal is of, as the rows named them: an input whose row names another now reads nothing from here. */
+  ids: Identities;
   last: Lasts;
 };
+
+/** Which object each input's row is of (the credential, its principal, the key, its source, each place): the seals' keys. */
+type Identities = Record<'c' | 'm' | 's' | 'x' | (typeof SLOTS)[number], string | null>;
 
 /** Each input's newest change's seal, and the 0.14 entry the principal's accounts for. */
 type Lasts = {
@@ -64,9 +72,6 @@ type Lasts = {
 };
 
 export type Cover = { number: string; at: number; requestId: string; until: number };
-
-/** How long the standing a late named use asks after may take: a call that waits for no lock (`useNamed`). */
-const STANDING_MS = 1_000;
 
 /**
  * The settings of an isolate's uses: how many calls in flight at once, how long a cover holds, and how many requests'
@@ -91,14 +96,15 @@ export class UseCache {
   readonly covers = new Map<string, Cover>();
   /**
    * What a request names, by its token's hash and place, mapped to ids (`useNamed`): ids only, never an answer, and
-   * no key's (`keyIds`). The least recently used goes first past `limits.names` (`named`, `name`).
+   * no key's (`keyIds`). The least recently used goes first past `limits.names` (`named`, `name`). They only let a
+   * named use's first call make the use: what it reads, it reads by the request's names (D153).
    */
   readonly names = new Map<string, Resolved>();
   /**
-   * Each key's id by its environment and name, whoever asks (`keyed`, `key`): bounded on its own, so that names asked
-   * and dropped leave none behind (review r3 of #412).
+   * Each key's id by its environment and name, whoever asks (`keyed`, `key`), or null for a name the environment held
+   * no key of when read: bounded on its own, so that names asked and dropped leave none behind (review r3 of #412).
    */
-  readonly keyIds = new Map<string, string>();
+  readonly keyIds = new Map<string, string | null>();
   readonly limits: UseLimits;
   readonly max: number;
 
@@ -122,13 +128,13 @@ export class UseCache {
     remember(this.names, key, ids, this.limits.names);
   }
 
-  /** The id of the key named `key` in `environment`, if mapped, made the most recently used. */
-  keyed(environment: string, key: string): string | undefined {
+  /** The id of the key named `key` in `environment`, or null for none, if mapped, made the most recently used. */
+  keyed(environment: string, key: string): string | null | undefined {
     return recall(this.keyIds, `${environment}\n${key}`);
   }
 
-  /** Maps a key's name in `environment` to its id, the least recently used dropped past the cap. */
-  key(environment: string, key: string, id: string): void {
+  /** Maps a key's name in `environment` to its id, or null for none, the least recently used dropped past the cap. */
+  key(environment: string, key: string, id: string | null): void {
     remember(this.keyIds, `${environment}\n${key}`, id, this.limits.names);
   }
 
@@ -156,29 +162,41 @@ function remember<T>(map: Map<string, T>, key: string, value: T, cap: number): v
   map.set(key, value);
 }
 
-/** One call of `use_credential` as the vault makes it: the request, its MAC, a cover and the cache, if any; `names`, what the request named. */
+/**
+ * One call of `use_credential` as the vault makes it: the request, its MAC, a cover and the cache, if any; `names`,
+ * what the request named, which a named call reads by. Its credential none: the isolate's map holds no ids for the
+ * names, and the call makes no use, only reads them (D153).
+ */
 export type UseCall = {
-  credential: string; secretId: string | null; requestId: string; at: number; purpose: number; place: string | null; mac: Buffer; deadline: number;
+  credential: string | null; secretId: string | null; requestId: string; at: number; purpose: number; place: string | null; mac: Buffer; deadline: number;
   cover?: Cover;
   known?: Pick<CachedSeals, 'newest' | 'newestMac' | 'cap'>;
   names?: Names;
+  /** The call a named use makes once the vault has decided the use on the rows of one that answered `decide` or `moved`. */
+  decided?: true;
 };
-
-/** What a request named, which the statement holds its rows to (`moved`), and answers the app's rows for (0044). */
-export type Names = { tokenHash: Buffer; project: string | null; environment: string | null; key: string | null };
 
 /**
- * The ids of what a request names, as `use_resolve` read them: its credential, its place, and each key it named
- * there. `shared`: a fork or a personal config, which the app reads as ever. Kept per token and place without its keys,
- * which `UseCache.keyIds` keeps by environment and name, each map's least recently used dropped past `UseLimits.names`:
- * about 250 and 120 bytes an entry, some 4 MB with both full at 10,000.
+ * What a request named, which a named call reads by (0045, D153), and answers the app's rows for (0044). `handle`: it
+ * named no place, and means its handle's own.
  */
-export type Resolved = {
-  credential: string | null; project: string | null; environment: string | null;
-  /** The place's slugs as read, which a use with no place named is held to (`moved`) and the request told. */
-  slugs: { project: string; environment: string } | null;
-  shared: boolean; keys: Map<string, string>;
+/**
+ * What a named call names (0045): its token's hash, its place by slugs, or the handle's own (`handle`), and its key.
+ * `unless`, a handle's: the places, `project/environment`, its request does not mean, which the call judges against the
+ * slugs it reads (never the map's), answering them as none, the app's.
+ */
+export type Names = {
+  tokenHash: Buffer; project: string | null; environment: string | null; key: string | null; handle: boolean; unless: readonly string[];
+  /** What the app's config accepts of a credential (`NamedUseInput.accepts`), which the call holds the token's to first. */
+  accepts: CredentialAcceptance;
 };
+
+/**
+ * The ids of what a request names, as a named call read them: its credential and its place, and the place's slugs.
+ * Kept per token and place without its keys, which `UseCache.keyIds` keeps by environment and name, each map's least
+ * recently used dropped past `UseLimits.names`: about 200 and 120 bytes an entry, some 3 MB with both full at 10,000.
+ */
+export type Resolved = { credential: string; environment: string; slugs: { project: string; environment: string } };
 
 /** What `use_credential` answers (schema 0024's `use_row`), as node-postgres reads it; the SQLite twin answers the same. */
 export type UseRow = {
@@ -196,6 +214,13 @@ export type UseRow = {
   in_set: boolean | null; others: number | null;
   /** The credential's token hash, and the rows the app checks, when the call named them (0044). */
   c_token_hash: Buffer | null; app: unknown;
+  /** What a named call's names name now: its credential, key and place, by id, and the place's slugs (0045, D153). */
+  n_credential: string | null; n_secret: string | null; n_place: string | null; n_project: string | null; n_environment: string | null;
+  /**
+   * Whether a named call found its caller standing at the place, for its purpose, and so read its key (`use_stands`,
+   * W268): false, it read no key and answered on the place alone, as for a key the place does not hold.
+   */
+  n_standing: boolean | null;
 } & Slot<'e1'> & Slot<'e2'> & Slot<'e3'> & Slot<'e4'>;
 
 type Slot<N extends string> = {
@@ -244,44 +269,62 @@ const busy = (why: UseBusy, retryAfter = 1): Extract<UseOutcome, { busy: UseBusy
 export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
   checkInput(input);
   checkIds(input);
-  const used = await useOnce(path, input);
-  if ('moved' in used || 'unnamed' in used) throw new Error('use_credential answered a named state to a use that named nothing');
-  // A plain value is the app's to hand back on a use by ids, as 0.14's vault never decides one: only a named use hands one back.
-  if ('plain' in used.outcome) return { ok: false, code: 'bad_claim', number: null };
+  let used = await useOnce(path, input);
+  // Its key would take its principal's lock: decided first, as a named use is, and made by a second call once allowed;
+  // refused, nothing written, which the app logs (`number` null; review r2 of D153, DecideBeforeLock).
+  if ('again' in used) used = await useOnce(path, input, undefined, true);
+  if (!('outcome' in used)) throw new Error('use_credential answered a named state to a use that named nothing');
+  // A plain value is the app's to hand back on a use by ids, as 0.14's vault never decides one: `decideChecked` refuses
+  // it, `bad_claim`, live and replayed alike; only a named use hands one back.
+  if ('plain' in used.outcome) throw new Error('a use by ids was handed a plain value');
   return used.outcome;
 }
 
-/**
- * A use's answer inside the vault: its outcome, its row, the view it decided on, if it got that far; or `moved`; or
- * `unnamed`, a place it reads archived, which the app answers itself.
- */
-type Used = { moved: true } | { unnamed: true } | { outcome: UseOutcome | { ok: true; plain: string; versionId: string }; row: UseRow | null; checked: CheckedView | null; request: UseRequest };
+/** A use's request as the vault makes it: by its ids. */
+type Ids = { credential: string; secretId: string | null; place: string | null };
 
 /**
- * One call of `use_credential`, by ids, and the decision on its row. `secretId` null with `place`: a key the place
- * does not hold, decided on the caller's standing there (Probing.tla, MissingByStanding); a plain value, decided as
- * any and handed back as its text, which its object's digest binds (PlainByStanding). Neither leaves an entry, nor a
- * cover. `names`: what the request named, which the statement holds its rows to, answering `moved` if they are no
- * longer those, having written nothing.
+ * A use's answer inside the vault: its outcome, its row, the view it decided on, if it got that far. A named one may
+ * also answer, having written and locked nothing: `unknown`, a token no credential has; `nowhere`, a place that is
+ * none, archived, a fork's or a personal config's, which the app answers itself, decided on the place alone; or, named
+ * or by ids, `again`, the use the vault allowed on the rows the call read, to be made by their ids, decided (D153).
+ */
+type Used =
+  | { unknown: true } | { nowhere: true } | { again: Ids; row: UseRow }
+  | { outcome: UseOutcome | { ok: true; plain: string; versionId: string }; row: UseRow | null; checked: CheckedView | null; request: UseRequest };
+
+/**
+ * One call of `use_credential`, and the decision on its row. `secretId` null with `place`: a key the place does not
+ * hold, decided on the caller's standing there (Probing.tla, MissingByStanding); a plain value, decided as any and
+ * handed back as its text, which its object's digest binds (PlainByStanding). Neither leaves an entry, nor a cover.
+ *
+ * `names`: what the request named, which the statement reads by (0045, D153); its ids, the isolate's map's, only let it
+ * make the use. A named call whose ids are not the names' answers `moved`, and one whose key would take its principal's
+ * lock with no use of it kept answers `decide`, each having written and locked nothing: the vault decides the use on
+ * the rows the names read, key and all, and refuses it there, whatever the reason, as for a key never made; only a use
+ * it allows is made, in a second call (DecideBeforeLock). A named call whose caller stands nowhere there, for what
+ * they ask, reads no key at all (`use_stands`, W268; StandingFirst): its row is a key the place does not hold, which
+ * the vault refuses on that standing.
  */
 async function useOnce(
   path: UsePath,
-  input: Pick<UseInput, 'credential' | 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & { secretId: string | null },
+  input: Pick<UseInput, 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & { credential: string | null; secretId: string | null },
   names?: Names,
-  /** Within the place in admission a call of the same request held: not refused for want of one. */
-  reserved = false,
+  decided = false,
 ): Promise<Used> {
   const { cache } = path;
   const request: UseRequest = {
-    credential: input.credential, secretId: input.secretId ?? '', place: input.place, purpose: input.purpose,
-    keepsSensitive: input.keepsSensitive === true, at: input.at,
+    credential: input.credential ?? '', secretId: input.secretId ?? '', place: input.place, purpose: input.purpose,
+    keepsSensitive: input.keepsSensitive === true, at: input.at, ...(names === undefined ? {} : { plain: true as const }),
   };
   // A deadline the database would refuse (deadline_max) is refused here at no cost; one already past, too.
   if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return { outcome: busy('late'), row: null, checked: null, request };
-  if (!reserved && cache.inFlight >= cache.limits.inFlight) return { outcome: busy('overloaded'), row: null, checked: null, request };
+  if (cache.inFlight >= cache.limits.inFlight) return { outcome: busy('overloaded'), row: null, checked: null, request };
   const purpose = purposeCode(request);
-  const key = `${input.credential}\n${input.secretId ?? ''}\n${input.place ?? ''}`;
-  const known = cache.seals.get(key);
+  const key = `${input.credential ?? ''}\n${input.secretId ?? ''}\n${input.place ?? ''}`;
+  // The seals a probe of these ids read, for the cached form: a use by ids only. A named call always probes, so that
+  // its work is the same whatever the key and whatever this isolate kept of earlier uses (D153; review r12).
+  const known = input.credential === null || names !== undefined ? undefined : cache.seals.get(key);
   // A cover is of the same request but its id and time: the same credential, key, place and purpose.
   const coverKey = `${key}\n${purpose}`;
   const held = input.secretId === null ? undefined : cache.covers.get(coverKey);
@@ -289,40 +332,67 @@ async function useOnce(
   const cover = held !== undefined && input.at < held.until && input.at >= held.at && (known?.inputs == null || BigInt(held.number) > BigInt(known.inputs)) ? held : undefined;
   const call: UseCall = {
     credential: input.credential, secretId: input.secretId, requestId: input.requestId, at: input.at, purpose, place: input.place,
-    mac: entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId ?? '', purpose, place: input.place } }),
+    // No ids, no use: a call that only reads by names writes nothing, whatever its MAC (0045, `v_right`).
+    mac: input.credential === null
+      ? Buffer.alloc(16)
+      : entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId ?? '', purpose, place: input.place } }),
     deadline: input.deadline,
     ...(cover === undefined ? {} : { cover }),
     ...(known === undefined ? {} : { known }),
     ...(names === undefined ? {} : { names }),
+    ...(decided ? { decided: true as const } : {}),
   };
   const answered = await raced(path, call);
   if ('busy' in answered) return { outcome: answered, row: null, checked: null, request };
   const row = answered;
-  if (row.state === 'moved') return { moved: true };
-  if (row.state === 'unnamed') return { unnamed: true };
   if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured') return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
-  if (row.state !== null) throw new Error(`use_credential answered ${row.state}, which never leaves it`);
+  if (names !== undefined && row.state === 'unknown') return { unknown: true };
+  if (names !== undefined && row.state === 'nowhere') return { nowhere: true };
+  if (row.state !== null && !((names !== undefined && (row.state === 'moved' || row.state === 'archived')) || (row.state === 'decide' && !decided))) {
+    throw new Error(`use_credential answered ${row.state}, which never leaves it`);
+  }
+  if (row.state !== null) {
+    // The rows the call read, by the names' ids or the use's own (D153): the use decided on them, key and all but the
+    // cap, which a use the vault allows weighs under its principal's lock. Refused, as for a key never made, whatever
+    // the reason, nothing written; a key that reads an archived place (a reference's source's) too, by name (review r4);
+    // allowed, made by those ids, in a second call. A moved call read every seal anew (0045), so the map's never judge
+    // the names' rows.
+    const ids: Ids = names === undefined
+      ? { credential: input.credential!, secretId: input.secretId, place: input.place }
+      : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null ? row.n_place : null };
+    const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
+    const view = viewOf(row, named, row.probed ? undefined : known);
+    if (view.changed) cache.seals.delete(key);
+    const checked = checkedOf(path.sealKeys, view.view, named, view.accounted);
+    const code = decidedOn(checked, named, row) ?? (names !== undefined && readsArchived(row) ? 'archived' : null);
+    if (code !== null) return { outcome: { ok: false, code, number: null }, row, checked, request: named };
+    return { again: ids, row };
+  }
   const view = viewOf(row, request, row.probed ? undefined : known);
-  if (row.probed && row.newest !== null) {
+  // An input whose row names another object than the cache's seal is of: `stale`, and the next use probes.
+  if (view.changed) cache.seals.delete(key);
+  const checked = checkedOf(path.sealKeys, view.view, request, view.accounted);
+  const code = decidedOn(checked, request, row);
+  // The seals a probe read, kept for the next use's cached form: by ids alone. A named call never runs the cached form
+  // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12).
+  if (row.probed && row.newest !== null && !view.changed && names === undefined) {
     cache.keep(cache.seals, key, {
       newest: row.newest, newestMac: row.newest_mac!, inputs: row.inputs, ids: view.ids,
       cap: { count: Number(row.cap_count), windowMs: Number(row.cap_window) }, last: lastsOf(row),
     });
   }
-  // A row that names other objects than the cache's seals are of: `stale`, and the next use probes.
-  if (view.view === null) cache.seals.delete(key);
-  const checked = view.view === null ? null : checkedOf(path.sealKeys, view.view, request, view.accounted);
-  const code = checked === null ? 'stale' : decideChecked(checked, request);
   if (row.covered !== null && code !== null) {
-    // Refused on a cover (its credential's end, say): the request is logged as an entry of its own.
+    // Refused on a cover (its credential's end, say): by ids, the request is logged as an entry of its own. By name, it
+    // is answered as it is, in its one call, as a key the place does not hold is, and the app's entry records it: a
+    // second call would tell a key held from one never made (T158; Probing.tla, CoveredRefusalAnswered).
     cache.covers.delete(coverKey);
-    return useOnce(path, input, names);
+    if (names === undefined) return useOnce(path, input);
   }
   if (code !== null) {
     cache.covers.delete(coverKey);
     return { outcome: { ok: false, code, number: row.number }, row, checked, request };
   }
-  const v = view.view!;
+  const v = view.view;
   const secret = v.secret.row!;
   const value = secret.source === null ? secret : v.source!.row!;
   // A plain value, decided: its text, which its object's digest binds; no entry, no cover (it counts toward nothing).
@@ -338,129 +408,152 @@ async function useOnce(
 }
 
 /**
- * A use as the request names it (T145, PR B; formal/Probing.tla, Credentials.tla Revoking015Caller): the ids of
- * what it names from this isolate's map, or one read of them on a miss (`use_resolve`), then one use by them, which
- * holds its rows to the names (`moved`) and answers the rows the app checks. A map out of date (`moved`, or a key the
- * place no longer holds by the id kept) is dropped and read again, once: that attempt wrote nothing and released
- * nothing. One admission for the whole call, checked before anything is read, so that a busy answer never hangs on
- * whether a key is held.
+ * `decideChecked` on what a call read. A named call that found its caller standing nowhere read no key (`n_standing`,
+ * W268): refused as for a key the place does not hold, which the vault's rule refuses too, on the caller's standing
+ * (`standingRefusal`). Where that rule finds them standing, a row changed around the log between the gate's statement
+ * and the one that read the rest, each with its own snapshot (the fence holds back changes, not such writes): `stale`,
+ * which is what happened, never an answer of its own.
+ */
+function decidedOn(checked: CheckedView, request: UseRequest, row: UseRow): UseCode | null {
+  if (request.plain === true && row.n_standing === false && standingRefusal(checked, request) === null) return 'stale';
+  return decideChecked(checked, request);
+}
+
+/** Whether a call read its key through an archived place: the place, the key's own, or a reference's source's (0045). */
+function readsArchived(row: UseRow): boolean {
+  return (['e1', 'e2', 'e3'] as const).some((slot) => row[`${slot}_archived`] === true || row[`${slot}_project_archived`] === true);
+}
+
+/** The ids and slugs a named call read, which the isolate's map keeps for the request's names. */
+function mapped(row: UseRow): Resolved | null {
+  if (row.n_credential === null || row.n_place === null || row.n_project === null || row.n_environment === null) return null;
+  return { credential: row.n_credential, environment: row.n_place, slugs: { project: row.n_project, environment: row.n_environment } };
+}
+
+/**
+ * A use as the request names it (T145, PR B; D153; formal/Probing.tla, Credentials.tla Revoking015Caller): one call,
+ * which reads what the request names by its names, whatever this isolate's map holds; the ids the map holds, if any,
+ * let it make the use in that call, as by ids. A use the vault refuses, whatever the reason, is refused in that one
+ * call, whatever the map held (Probing.tla, ResolveByName, NoIsFixed); one it allows on rows the map had no ids for
+ * is made by the ids the call read, in a second, and the map keeps them. One admission, checked before anything is
+ * read, so that a busy answer never hangs on whether a key is held. The request's route is the credential's and its
+ * account's alone (`routeOf`, Probing.tla, OneRoute): the key and the map decide the use, never how the app answers it.
  */
 export async function useNamed(path: UsePath, input: NamedUseInput): Promise<NamedUseOutcome> {
   checkInput(input);
   if ((input.key !== null && (typeof input.key !== 'string' || input.key === '')) || typeof input.tokenHash !== 'string') throw new Error('a named use names its token, by hash, and its key, if any');
+  const { accepts } = input;
+  if (typeof accepts?.signin !== 'boolean' || !Array.isArray(accepts.issuers) || accepts.issuers.some((issuer) => typeof issuer !== 'string')) {
+    throw new Error('a named use says what credentials the app accepts: whether it signs in, and its providers\' issuers');
+  }
   const { cache } = path;
   const tokenHash = Buffer.from(input.tokenHash, 'base64');
-  const answered = (outcome: UseOutcome) => ({ served: true as const, secretId: null, outcome, app: null, standing: null, place: input.place });
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return answered(busy('late'));
-  if (cache.inFlight >= cache.limits.inFlight) return answered(busy('overloaded'));
+  const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
+  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
+  if (cache.inFlight >= cache.limits.inFlight) return busyFor(busy('overloaded'));
   const at = `${input.tokenHash}\n${input.place?.project ?? ''}\n${input.place?.environment ?? ''}`;
-  for (let attempt = 0; ; attempt += 1) {
-    let found = cache.named(at);
-    let keyed = found?.environment == null || input.key === null ? undefined : cache.keyed(found.environment, input.key);
-    // A key the map holds no id for is read again: one made since is found, one never made costs the read.
-    const fresh = found === undefined || (input.key !== null && keyed === undefined);
-    if (fresh) {
-      const read = await resolved(path, tokenHash, input.place, input.key === null ? [] : [input.key], input.deadline);
-      if (read === 'late') return answered(busy('late'));
-      found = read;
-      keyed = input.key === null ? undefined : read.keys.get(input.key);
-      if (read.credential !== null && !read.shared) {
-        cache.name(at, { ...read, keys: new Map() });
-        if (read.environment !== null) for (const [name, id] of read.keys) cache.key(read.environment, name, id);
-      }
-    }
-    // An unknown token: refused as one, whatever it names (`credential`, as a use of an ended one).
-    if (found!.credential === null) return answered({ ok: false, code: 'credential', number: null });
-    // A fork, a personal config, a handle of several environments or none: the app reads those as ever.
-    if (found!.shared || found!.environment === null || found!.slugs === null) return { served: false };
-    const ids = found!;
-    // The handle's own place, which the request does not mean: the app routes it as ever.
-    const slugs = input.place ?? ids.slugs!;
-    if (input.place === null && (input.unless ?? []).some((other) => other.project === slugs.project && other.environment === slugs.environment)) return { served: false };
-    const secretId = input.key === null ? null : keyed ?? null;
-    // Held to the slugs it is at, named or the handle's as read: renamed since, `moved`, and read again.
-    const names: Names = { tokenHash, project: slugs.project, environment: slugs.environment, key: input.key };
-    const used = await useOnce(path, {
-      credential: ids.credential!, secretId, place: secretId === null ? ids.environment : null,
-      purpose: input.purpose, keepsSensitive: input.keepsSensitive, requestId: input.requestId, at: input.at, deadline: input.deadline,
-    }, names);
-    // A place it reads archived: the app answers it, as it did before any use by name.
-    if ('unnamed' in used) return { served: false };
-    // Out of date: dropped and read again, once. A key gone by the id kept may have been made again under its name.
-    const stale = 'moved' in used || (!fresh && secretId !== null && !used.outcome.ok && 'code' in used.outcome && used.outcome.code === 'missing');
-    if (stale && attempt === 0) {
-      cache.names.delete(at);
-      if (input.key !== null) cache.unkey(ids.environment!, input.key);
-      continue;
-    }
-    if ('moved' in used) return answered(busy('late'));
-    // Late: a use of a key held may have waited for its principal's lock, for the cap's row of a key it has not used in
-    // the window, which a key never made never does; whatever the key, its history is the caller's to shape. So the
-    // caller's standing at the place decides first, in a call that takes no lock and reads no key: refused there, the
-    // request is refused as for any key; otherwise it stays busy (Probing.tla, ConfirmStandingOnLate; review r2 of #412).
-    // It runs within the place the use held in admission, once the use's call has let it go, never refused for want of
-    // one: else the late use's own call, still running, would leave it none (ConfirmReserved; review r3 of #412).
-    if (secretId !== null && !used.outcome.ok && 'busy' in used.outcome && used.outcome.busy === 'late') {
-      await leftBehind.get(used.outcome);
-      const now = Date.now();
-      const stood = await useOnce(path, {
-        credential: ids.credential!, secretId: null, place: ids.environment, purpose: input.purpose, keepsSensitive: input.keepsSensitive,
-        requestId: newUseRequestId(), at: now, deadline: now + STANDING_MS,
-      }, { ...names, key: null }, true);
-      if ('outcome' in stood && stood.checked !== null && !stood.outcome.ok && 'code' in stood.outcome && stood.outcome.code !== 'missing') {
-        return {
-          served: true, secretId, outcome: stood.outcome, app: stood.row?.app == null ? null : JSON.stringify(stood.row.app),
-          standing: standingOf(stood.checked, stood.request), place: slugs,
-        };
-      }
-    }
-    return {
-      served: true,
-      secretId,
-      outcome: used.outcome,
-      app: used.row?.app == null ? null : JSON.stringify(used.row.app),
-      standing: used.checked === null ? null : standingOf(used.checked, used.request),
-      place: slugs,
-    };
+  const found = cache.named(at);
+  const keyed = found === undefined || input.key === null ? undefined : cache.keyed(found.environment, input.key);
+  // The ids the map holds, if it holds them all; else none, and the first call only reads.
+  const held: Ids | null = found === undefined || (input.key !== null && keyed === undefined) ? null
+    : { credential: found.credential, secretId: keyed ?? null, place: keyed == null ? found.environment : null };
+  const names: Names = {
+    tokenHash, project: input.place?.project ?? null, environment: input.place?.environment ?? null, key: input.key, handle: input.place === null,
+    // The places a stable URL does not mean, judged by the call against the slugs it reads, never the map's.
+    unless: input.place !== null ? [] : (input.unless ?? []).map((other) => `${other.project}/${other.environment}`),
+    accepts: { signin: accepts.signin, issuers: [...accepts.issuers] },
+  };
+  const asked = { purpose: input.purpose, keepsSensitive: input.keepsSensitive, requestId: input.requestId, at: input.at, deadline: input.deadline };
+  let used = await useOnce(path, { ...asked, ...(held ?? { credential: null, secretId: null, place: null }) }, names);
+  if ('again' in used) {
+    // Allowed on the rows its names read: the map keeps their ids, and the use is made by them, decided.
+    keep(cache, at, input.key, used.row);
+    used = await useOnce(path, { ...asked, ...used.again }, names, true);
+    // Out of date again, between its two calls: nothing decided, ask again.
+    if ('again' in used) return busyFor(busy('late'));
   }
+  if ('unknown' in used) {
+    cache.names.delete(at);
+    // An unknown token: the credential's own check answers it, whatever it names.
+    return { served: true, route: 'credential', outcome: { ok: false, code: 'credential', number: null } };
+  }
+  // A place the vault serves not by name (none, archived, a fork's, a personal config's, one the URL does not mean):
+  // decided on the place, never the key.
+  if ('nowhere' in used) return { served: false };
+  if ('busy' in used.outcome) return busyFor(used.outcome);
+  const row = used.row!;
+  const checked = used.checked!;
+  keep(cache, at, input.key, row);
+  if (routeOf(checked, input.at) === 'credential') {
+    const outcome = used.outcome.ok ? null : used.outcome;
+    // The credential's seals bear out, ended or not, before any use is allowed (`decideChecked`, the credential first).
+    if (outcome === null || !('code' in outcome)) throw new Error('a use was allowed on a credential its seals do not bear out');
+    return { served: true, route: 'credential', outcome };
+  }
+  return {
+    served: true,
+    route: 'name',
+    secretId: used.request.secretId === '' ? null : used.request.secretId,
+    outcome: used.outcome,
+    app: row.app == null ? null : JSON.stringify(row.app),
+    standing: standingOf(checked, used.request),
+    place: input.place ?? mapped(row)?.slugs ?? null,
+    at: placeOf(checked, row),
+  };
 }
 
-/** One read of the ids a request names (`use_resolve`), within its deadline, as a call admitted as a use is. */
-async function resolved(path: UsePath, tokenHash: Buffer, place: NamedUseInput['place'], keys: readonly string[], deadline: number): Promise<Resolved | 'late'> {
-  const { cache } = path;
-  cache.inFlight += 1;
-  // Counted until the read settles, not until its deadline: one left behind still holds its connection (review r1).
-  const read = (engineOf(path.db) === 'postgres' ? resolvePostgres : resolveSqlite)(path.db, { tokenHash, place, keys }).finally(() => {
-    cache.inFlight -= 1;
-  });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<'late'>((resolve) => {
-    timer = setTimeout(() => resolve('late'), Math.max(0, deadline - Date.now()));
-  });
-  try {
-    const first = await Promise.race([read, late]);
-    if (first === 'late') read.catch(() => {});
-    return first;
-  } finally {
-    clearTimeout(timer);
-  }
+/**
+ * The ids and slugs a named call read, kept in the isolate's map for the request's names and its key: never a key it
+ * did not read, its caller standing nowhere there (W268), which would map the name to none for whoever asks next.
+ */
+function keep(cache: UseCache, at: string, key: string | null, row: UseRow): void {
+  const read = mapped(row);
+  if (read === null) return;
+  cache.name(at, read);
+  if (key !== null && row.n_standing !== false) cache.key(read.environment, key, row.n_secret);
+}
+
+/** The place a named call read its names at, by the ids of its row as the call read it. */
+function placeOf(checked: CheckedView, row: UseRow): { projectId: string; environmentId: string } | null {
+  const place = row.n_place === null ? null : checked.environments.get(row.n_place)?.row ?? null;
+  return place === null ? null : { projectId: place.projectId, environmentId: place.id };
+}
+
+/** What a named request's route hangs on: its credential and its account, as the use read and checked them. */
+type CallerSeals = Pick<CheckedView, 'credential' | 'principal'>;
+
+/**
+ * How the app answers a named request (D153, review r2): `name`, on the vault's decision, every refusal of the key
+ * alike; or `credential`, by the credential's own check (401, a token of 0.10's sealed first). On the credential and
+ * its account alone, as their seals bear them out, and whether the credential has ended: never the roles, a place, the
+ * key's rows or the isolate's map, which it cannot see, so that no key, however it is held, and no state of the map,
+ * moves a request from one path to the other (formal/Probing.tla, OneRoute).
+ */
+export function routeOf(caller: CallerSeals, at: number): 'name' | 'credential' {
+  const { credential, principal } = caller;
+  if (credential.row === null || !credential.valid || !credential.current) return 'credential';
+  if (principal === null || !principal.valid || !principal.current) return 'credential';
+  return credentialEnded(credential.row, principal.row, at) ? 'credential' : 'name';
 }
 
 /**
  * What the use decided the caller holds, as `access` answers it, from the sealed rows it read (`readerOf`): their
  * standing, role, scope and live grants, and the policy as far as the environments it weighed, which is all the app
- * then checks (the place it reads). Null where the decision did not reach them.
+ * then checks (the place it reads). Its credential and account bear out, as its route says. Roles, the policy or the
+ * place where the key is held or sought not as their seals say (put back, or written around the log): the use was
+ * refused on them (`decideChecked`, the seals first), and the caller holds nothing, so that nothing the app checks
+ * after reads those rows. Never the key's own rows, which a refusal of it alone says (D153).
  */
-function standingOf(checked: CheckedView, request: UseRequest): Access | null {
-  const credential = checked.credential.row;
-  if (credential === null || checked.principal === null) return null;
-  // Only from rows the vault's seals bear out, each its object's newest: one put back or written around the log (a
-  // grant restored by a writer) is no standing, and the app asks the vault as before (review r1).
-  const inputs = [checked.credential, checked.principal, checked.roles, checked.policy, ...checked.environments.values()];
-  if (inputs.some((input) => !input.valid || !input.current)) return null;
+function standingOf(checked: CheckedView, request: UseRequest): Access {
+  const credential = checked.credential.row!;
+  const principal = checked.principal!.row;
+  const stand = checked.secret.row?.environmentId ?? request.place;
+  const place = stand === null ? undefined : checked.environments.get(stand);
+  const sealed = [checked.roles, checked.policy, ...(place === undefined ? [] : [place])].every((input) => input.valid && input.current);
   const rows = [...checked.environments.values()].flatMap((read) => (read.row === null ? [] : [read.row]));
-  const reader = readerOf(checked.principal.row, credential, checked.roles.row ?? { kind: 'roles', roles: {}, instanceRoles: {} }, rows, request.at);
-  const principal = checked.principal.row;
+  const reader = sealed
+    ? readerOf(principal, credential, checked.roles.row ?? noEdits(), rows, request.at)
+    : { status: readerOf(principal, credential, noEdits(), [], request.at).status, live: NOTHING };
   const live = reader.live;
   return {
     principal: credential.principal,
@@ -468,7 +561,7 @@ function standingOf(checked: CheckedView, request: UseRequest): Access | null {
     generation: principal?.generation ?? 0,
     role: live.role,
     scope: live.scope,
-    grants: reader.status !== 'active' || principal === null
+    grants: !sealed || reader.status !== 'active' || principal === null
       ? []
       : principal.grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > request.at).map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
     since: null,
@@ -483,9 +576,6 @@ function standingOf(checked: CheckedView, request: UseRequest): Access | null {
  * dropped. It counts against admission until it settles, holding its
  * connection until then.
  */
-/** A `late` answer's call, left behind at its deadline, settled: what a use that asks again within its place waits for. */
-const leftBehind = new WeakMap<object, Promise<void>>();
-
 async function raced(path: UsePath, call: UseCall): Promise<UseRow | Extract<UseOutcome, { busy: UseBusy }>> {
   const { cache } = path;
   cache.inFlight += 1;
@@ -502,10 +592,8 @@ async function raced(path: UsePath, call: UseCall): Promise<UseRow | Extract<Use
   try {
     const first = await Promise.race([running, deadline]);
     if (first === 'late') {
-      const late = busy('late');
-      // Its call left behind, which still holds its place in admission until it settles.
-      leftBehind.set(late, running.then(() => undefined, () => undefined));
-      return late;
+      running.catch(() => {});
+      return busy('late');
     }
     return first;
   } catch (error) {
@@ -531,21 +619,33 @@ function lastsOf(row: UseRow): Lasts {
 /**
  * What the statement read, as PR 3's `UseView` (decide.ts): each input's
  * object, made from its row's columns (objects.ts), its seal, and its
- * newest change's, probed or the cache's. Null, the use `stale`, when the
- * rows name other objects than the cache's seals are of. `accounted`: the
+ * newest change's, probed or the cache's. An input whose row names another
+ * object than the cache's seal is of (a reference's source repointed, a
+ * credential's principal, written around the log) has no newest seal the
+ * vault knows: it is not current, and decides `stale` (review r2 of D153).
+ * Each input alone: the credential's and its account's judgement never
+ * hangs on the key's rows, which a request's route needs (`routeOf`).
+ * `changed`: some input's did, and the next use probes. `accounted`: the
  * principal's newest 0.14 access entry is one the new log accounts for
  * (UsesSeeOldWrites).
  */
-export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): { view: UseView | null; ids: string; accounted: boolean } {
-  const last = known?.last ?? lastsOf(row);
+export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): { view: UseView; ids: Identities; changed: boolean; accounted: boolean } {
+  const ids: Identities = {
+    c: request.credential, m: row.c_principal, s: request.secretId, x: row.s_source,
+    e1: row.e1_id, e2: row.e2_id, e3: row.e3_id, e4: row.e4_id,
+  };
+  const moved = (Object.keys(ids) as (keyof Identities)[]).filter((input) => known !== undefined && known.ids[input] !== ids[input]);
+  const cached = known?.last ?? lastsOf(row);
+  // No seal is equal to none: an input moved is current to nothing.
+  const last = (input: keyof Identities): Buffer | null => (moved.includes(input) ? UNKNOWN : cached[input]);
   const read = <T extends Input>(object: T | null, seal: Buffer | null, newest: Buffer | null): Read<T> => ({ row: object, seal, newest });
   const credential = read(row.c_principal === null ? null : credentialObject({
     id: request.credential, principal: row.c_principal, kind: row.c_kind!, scope: row.c_scope, revoked: row.c_revoked === true,
     expiresAt: row.c_expires === null ? null : Number(row.c_expires), generation: row.c_generation!,
-  }), row.c_seal, last.c);
+  }), row.c_seal, last('c'));
   const principal = row.c_principal === null ? null : read(row.m_status === null ? null : principalObject({
     principal: row.c_principal, status: row.m_status, generation: row.m_generation!, ...memberStanding({ owner: row.m_owner === true, role: row.m_role, scope: row.m_scope }),
-  }, grantsOf(row)), row.m_seal, last.m);
+  }, grantsOf(row)), row.m_seal, last('m'));
   // A plain value's text, which its object's digest binds.
   const version = row.v_wrapped_dek === null ? null : {
     sensitive: row.v_sensitive === true, plaintext: row.v_plaintext,
@@ -554,11 +654,11 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
   const secret = read(row.s_environment === null ? null : secretObject({
     id: request.secretId, projectId: row.s_project!, environmentId: row.s_environment, source: row.s_source, reference: row.s_reference,
     version: row.s_source === null && version !== null ? { id: row.s_version!, ...version } : null,
-  }), row.s_seal, last.s);
+  }), row.s_seal, last('s'));
   const source = row.s_source === null ? null : read(row.x_environment === null ? null : secretObject({
     id: row.s_source, projectId: row.x_project!, environmentId: row.x_environment, source: row.x_source, reference: row.x_reference,
     version: row.x_source === null && version !== null ? { id: row.x_version!, ...version } : null,
-  }), row.x_seal, last.x);
+  }), row.x_seal, last('x'));
   const environments = new Map<string, Read<EnvironmentInput>>();
   for (const slot of SLOTS) {
     const id = row[`${slot}_id`];
@@ -567,24 +667,25 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
     environments.set(id, read(project === null ? null : environmentObject({
       id, projectId: project, slug: row[`${slot}_slug`]!, owner: row[`${slot}_owner`], parentId: row[`${slot}_parent`],
       protected: row[`${slot}_protected`], archived: row[`${slot}_archived`] === true, projectArchived: row[`${slot}_project_archived`] === true,
-    }), row[`${slot}_seal`], last[slot]));
+    }), row[`${slot}_seal`], last(slot)));
   }
   const view: UseView = {
     credential,
     principal,
-    roles: read(row.r_value === null ? null : configObject(row.r_value) as RolesInput, row.r_seal, last.r),
-    policy: read(row.p_value === null ? null : configObject(row.p_value) as PolicyInput, row.p_seal, last.p),
+    roles: read(row.r_value === null ? null : configObject(row.r_value) as RolesInput, row.r_seal, cached.r),
+    policy: read(row.p_value === null ? null : configObject(row.p_value) as PolicyInput, row.p_seal, cached.p),
     secret,
     source,
     environments,
     bulk: credential.row === null ? null : { inSet: row.in_set === true, others: Number(row.others ?? 0) },
   };
-  const ids = [request.credential, row.c_principal, request.secretId, row.s_source, ...SLOTS.map((slot) => row[`${slot}_id`])].join('\n');
   // UsesSeeOldWrites: 0.14's newest access entry about the principal, at or below the one its newest change accounts for.
-  const old = last.mOld;
+  const old = cached.mOld;
   const accounted = row.m_access === null || (old !== null && BigInt(row.m_access) <= BigInt(old));
-  return { view: known !== undefined && known.ids !== ids ? null : view, ids, accounted };
+  return { view, ids, changed: moved.length > 0, accounted };
 }
+
+const UNKNOWN = Buffer.alloc(0);
 
 function grantsOf(row: UseRow): InputGrant[] {
   return (row.g_role ?? []).map((role, i) => ({

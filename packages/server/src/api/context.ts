@@ -10,7 +10,7 @@ import type { AppChanges } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
-import { ApiError, forbidden, vaultRefused } from './errors.ts';
+import { ApiError, forbidden, UnloggedRefusal, vaultRefused } from './errors.ts';
 import type { Asking, Decided } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { Render } from './render.ts';
@@ -99,7 +99,7 @@ export function actor(
   };
 }
 
-type EntryFields = Omit<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp' | 'action' | 'decision'>;
+export type EntryFields = Omit<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp' | 'action' | 'decision'>;
 
 type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null; via?: McpVia | null };
 
@@ -378,10 +378,22 @@ export async function withRefusals<T>(
   try {
     return await work();
   } catch (error) {
+    // A use the vault refused before it wrote anything, whoever asked for it (a read, a fork's copy, a dry run's
+    // compare): the request's entry is the app's, where the use was and why (review r3 of D153).
+    if (error instanceof UnloggedRefusal && writes(ctx)) return refuse(ctx, new Refusal(error, unlogged(ctx, error)));
     if (!(error instanceof Refusal)) throw error;
     return refuse(ctx, error);
   }
 }
+
+/** The entry of a use the vault refused before it wrote anything: where the use was, its key and purpose, and why. */
+export function unlogged(ctx: Writer, error: UnloggedRefusal, reason = error.reason ?? error.code): AuditEntry {
+  const { metadata, ...fields } = error.fields;
+  return denied(ctx, 'secret.read', reason, { ...fields, metadata: { ...metadata } });
+}
+
+/** Whether a context can write an entry of its own: a request's, with its caller. */
+const writes = (ctx: object): ctx is Writer => 'caller' in ctx && 'requestId' in ctx && 'sourceIp' in ctx;
 
 /** `missing_secret_read`, the reason logged when `secret.read` was needed. */
 export function missing(permission: Permission): string {
@@ -494,6 +506,7 @@ export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller
  */
 function answered({ error, entry }: Refusal): ApiError | Error {
   const reason = entry.metadata?.reason;
-  if (!(error instanceof ApiError) || error.reason !== undefined || typeof reason !== 'string') return error;
+  // A key a request may not have says no reason: every one is answered alike, and the log alone says why (D153).
+  if (!(error instanceof ApiError) || error.code === 'not_available' || error.reason !== undefined || typeof reason !== 'string') return error;
   return new ApiError(error.code, error.message, reason);
 }

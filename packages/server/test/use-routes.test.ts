@@ -19,7 +19,7 @@ import { credential } from '@coffre/client/credential';
 import { github, signin } from '@coffre/core/identity';
 import { derivedSigningKey } from '@coffre/vault';
 import { replayStored, runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gt, sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
 import { checkPlugins } from '../src/plugins.ts';
@@ -246,20 +246,43 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
   const issued = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const ci = bearer(issued.token);
   assert.deepEqual((await ci.secrets.reveal('market/dev/API_KEY')).values, { API_KEY });
-  // Its grant gone: the request decides on the app's answer kept from the last one (`Accesses`), and the use, on the
-  // rows as they are, refuses. Nothing goes back.
+  const newest = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).reduce((max, row) => (row.seq > max ? row.seq : max), -1n);
+  const denied = async (since: bigint) => (await db.owner.select({ decision: auditLog.decision }).from(auditLog).where(gt(auditLog.seq, since))).some((row) => row.decision === 'deny');
+  /**
+   * A refusal, recorded once: by the vault, its use refused on the rows as they are and replayed so (`code`), when the
+   * key's row of the cap's is fresh; or, when the cap's period turned between the two requests (it is the wall clock's,
+   * a minute at most) and the use would take the principal's lock, decided first and written nowhere by the vault, by
+   * the app's own entry (T158), or for a credential ended, by none, as any 401. Which, the clock decides, never the key.
+   */
+  const recordedOnce = async (ask: () => Promise<unknown>, code: string, app: boolean) => {
+    const [since, uses, decided] = [await newest(), (await usesLogged()).length, [...(await replayStored(db.owner, [signingKey])).decided.values()]];
+    await ask();
+    const replayed = await replayStored(db.owner, [signingKey]);
+    assert.deepEqual(replayed.faults, []);
+    const added = [...replayed.decided.values()].slice(decided.length);
+    if ((await usesLogged()).length > uses) assert.deepEqual(added, [code], 'logged by the vault, and replayed so');
+    else {
+      assert.deepEqual(added, [], 'nothing in the vault\'s log');
+      assert.equal(await denied(since), app, app ? "the app's entry records it" : 'a 401, as any');
+    }
+  };
+  // Its grant gone: a key it has used is used and refused on the rows as they are. Nothing goes back, and it is
+  // answered as every refusal of a key is (D153): no such key, or no access to it.
   await root.access.set(CI, { market: null });
-  await assert.rejects(ci.secrets.reveal('market/dev/WEBHOOK'), (error: { status: number; reason?: string }) => error.status === 403);
-  const replayed = await replayStored(db.owner, [signingKey]);
-  assert.deepEqual(replayed.faults, []);
-  assert.deepEqual([...replayed.decided.values()], [null, 'no_grant'], 'the first allowed, the second refused, live as replayed');
-  // Revoked, the token reads nothing: its one key's use by name (T145) refuses it as the vault's rows have it, logged as
-  // its request, and the app's own check answers it, 401, as ever.
+  const notAvailable = (error: { status: number; code?: string }) => error.status === 404 && error.code === 'not_available';
+  await recordedOnce(() => assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), notAvailable), 'no_grant', true);
+  // One it has not used in the window would take its principal's lock: its standing decides first, refuses it there,
+  // and nothing is written, as for a key the place does not hold (T158); the app's own entry records the request.
+  const [since, uses] = [await newest(), (await usesLogged()).length];
+  await assert.rejects(ci.secrets.reveal('market/dev/WEBHOOK'), notAvailable);
+  assert.equal((await usesLogged()).length, uses, 'no entry of its own');
+  assert.ok(await denied(since), "the app's records it");
+  // Revoked, the token reads nothing: its one key's use by name (T145) refuses it as the vault's rows have it, and the
+  // app's own check answers it, 401, as ever.
   await root.tokens.revoke(CI, issued.id);
-  await assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), (error: { status: number }) => error.status === 401);
-  const revoked = await replayStored(db.owner, [signingKey]);
-  assert.deepEqual([...revoked.decided.values()], [null, 'no_grant', 'credential']);
-  assert.equal((await usesLogged()).length, 3);
+  await recordedOnce(() => assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), (error: { status: number }) => error.status === 401), 'credential', false);
+  const replayed = await replayStored(db.owner, [signingKey]);
+  assert.equal([...replayed.decided.values()][0], null, 'the first allowed, live as replayed');
 });
 
 test(`0.15: a whole environment of more keys than a request has uses in flight (${USES_AT_ONCE}) opens each, by one use each`, async () => {
@@ -292,9 +315,10 @@ test("0.15: a read through a fork vouches for no kept answer: its uses check whe
   const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
   assert.equal((await ci.secrets.reveal('market/feature/API_KEY')).values.API_KEY, API_KEY);
   // Its grant on the fork gone, its parent's kept: each use is allowed where the value is held, and the kept answer,
-  // which still holds the fork, is asked again rather than vouched for. As 0.14 refuses it, `access_changed`.
+  // which still holds the fork, is asked again rather than vouched for, and refuses it: a key's refusal, the one answer
+  // for every one (D153), the fork's read the app's own path's.
   await root.access.set(CI, { 'market/feature': null });
-  await assert.rejects(ci.secrets.reveal('market/feature/API_KEY'), (error: { status: number }) => error.status === 403);
+  await assert.rejects(ci.secrets.reveal('market/feature/API_KEY'), (error: { status: number; code?: string }) => error.status === 404 && error.code === 'not_available');
   assert.equal((await ci.secrets.reveal('market/dev/API_KEY')).values.API_KEY, API_KEY, 'its parent it still reads');
 });
 

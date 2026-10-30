@@ -620,7 +620,9 @@ class VaultService implements Vault {
     const { log015, uses: cache } = this.#prepared;
     if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
     if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
-    return useNamed({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache }, input);
+    // As `use`: an isolate's first calls wait for the cutover's seal (`#cutOverYet`), within their admission (review r10).
+    const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
+    return useNamed({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }) }, input);
   }
 
   async #now(db: Queryable): Promise<number> {

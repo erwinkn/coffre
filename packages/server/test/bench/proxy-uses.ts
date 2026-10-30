@@ -43,7 +43,7 @@ export type ProxyLoad = {
   /** The stable URL, `/use/<credential>/…`, as an app's own config names it (R14), which asks first which environment the handle was made for; else the environment's. */
   stable: boolean;
   /**
-   * 0.15's vault's map of names (T145, `UseLimits.names`), its cap: 0, every request reads its ids first (`use_resolve`),
+   * 0.15's vault's map of names (T145, `UseLimits.names`), its cap: 0, every request's use reads its names first, then is made,
    * the worst case; under the handles a thread sends, each picked at random, that share of them misses. Unset, its
    * default, and the handles in turn: every request warm.
    */

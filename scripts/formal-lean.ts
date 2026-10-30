@@ -461,7 +461,7 @@ repeat(20000, () => {
     // A key the place does not hold is mostly asked for where it was sought (T145): the caller's standing there decides.
     credential: 'c1', secretId: secret.row?.id ?? pick(KEYS),
     place: secret.row === null ? (chance(0.8) ? pick(ENVIRONMENTS) : null) : owner || chance(0.7) ? null : chance(0.3) ? secret.row.environmentId : pick(ENVIRONMENTS), purpose: pick(PURPOSES),
-    keepsSensitive: chance(0.5), at: 900 + Math.floor(random() * 300),
+    keepsSensitive: chance(0.5), at: 900 + Math.floor(random() * 300), ...(chance(0.5) ? { plain: true as const } : {}),
   };
   add(
     { op: 'decideUse', view: { ...view, environments: [...view.environments].map(([id, read]) => ({ id, read })) }, request },

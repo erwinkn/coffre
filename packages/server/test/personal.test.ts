@@ -87,7 +87,7 @@ test("nobody else reads or writes a personal config's values, an instance Owner 
   const { slug } = await adasConfig();
   for (const client of [root, maintainer]) {
     await assert.rejects(client.secrets.reveal(`market/${slug}`), { status: 403 });
-    await assert.rejects(client.secrets.reveal(`market/${slug}/DATABASE_URL`), { status: 403 });
+    await assert.rejects(client.secrets.reveal(`market/${slug}/DATABASE_URL`), { status: 404, code: 'not_available' });
     await assert.rejects(client.secrets.list(`market/${slug}`), { status: 403 });
     await assert.rejects(client.secrets.set(`market/${slug}`, { DATABASE_URL: 'x' }), { status: 403 });
   }

@@ -21,7 +21,7 @@ import { Accesses } from '../src/accesses.ts';
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -133,8 +133,9 @@ async function reveal(client: CoffreClient, path: string): Promise<string> {
   try {
     return Object.values((await client.secrets.reveal(path)).values).join();
   } catch (error) {
-    const { status, reason } = error as { status: number; reason?: string };
-    return `${status} ${reason ?? ''}`.trim();
+    const { status, code, reason } = error as { status: number; code?: string; reason?: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    return `${status} ${(code === 'not_available' ? await refusedIn(db.owner) : reason) ?? ''}`.trim();
   }
 }
 
@@ -153,12 +154,13 @@ test("0.15: a read of one key keeps and recalls nothing: the vault's one use by 
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   assert.deepEqual(calls, ['useNamed']);
-  // Revoked: refused at once as they are now, by the same one call, which logs the request (R53); nothing asked first.
+  // Revoked: refused at once as they are now, by the same one call; nothing asked first. A caller standing nowhere there
+  // has no key read, so the vault logs no use of theirs (W268): the app's entry records the request.
   await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
   calls = [];
-  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '403 missing_secret_read');
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '404 no_grant');
   assert.deepEqual(calls, ['useNamed']);
-  assert.equal((await usesLogged(db.owner)).length, 2, 'the first read (the second rode its cover) and the refusal');
+  assert.equal((await usesLogged(db.owner)).length, 1, 'the first read (the second rode its cover), and no use of the refusal');
   // Granted elsewhere: read there at once, with no answer kept to refuse it first.
   calls = [];
   assert.equal(await reveal(reader, 'market/prod/API_KEY'), 'fake-prod-key');
@@ -171,7 +173,7 @@ test('a grant revoked since: the vault refuses the kept answer, reading and logg
   await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
   const since = await newestSeq();
   calls = [];
-  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '403 missing_secret_read');
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '404 missing_secret_read');
   // The unwrap on the kept answer, refused; then the reader asked for, and refused by the app. 0.15's use is refused
   // on its merits, its refusal checked against the reader as they are (an `access` that differs), and asked again.
   assert.deepEqual(calls, LOG === '0.15' ? ['use', 'access', 'access'] : ['unwrap', 'access']);
@@ -236,7 +238,7 @@ test('a vault older than 0.14.1 checks nothing it is not told: the app asks befo
   // Its answer changed meanwhile: nothing goes back on the kept one.
   await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
   calls = [];
-  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '403 missing_secret_read');
+  assert.equal(await reveal(reader, 'market/dev/API_KEY'), '404 missing_secret_read');
   // The vault decides the unwrap on its own rules and refuses it; the answer, asked for before anything goes back, has
   // changed, so the read goes again, asking, and is refused as the reader is now.
   assert.deepEqual(calls, ['unwrap', 'access', 'access']);

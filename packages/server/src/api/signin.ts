@@ -404,6 +404,17 @@ export class SigninService {
     return unseal<PendingState>(this.#stateKey, value);
   }
 
+  /**
+   * The sign-in providers this deployment configures, each `<provider id>:<issuer hash>`, which a browser session's
+   * identity must name for `#liveCredential` to take it: what a named use holds its credential to first, in the vault's
+   * call (`NamedUseInput.accepts`; review r6 of D153).
+   */
+  get acceptedIssuers(): readonly string[] {
+    return (this.#accepted ??= this.config.providers.map((provider) => `${provider.id}:${this.#issuerHash(provider.id)!}`));
+  }
+
+  #accepted: readonly string[] | undefined;
+
   #issuerHash(providerId: string): string | null {
     const provider = this.config.providers.find((candidate) => candidate.id === providerId);
     // Fixed width keeps the identity index exact on every database engine.
@@ -750,12 +761,17 @@ export class SigninService {
      * `shows`: what the request shows of its caller, read with the credential from the vault's rows (`Shows`).
      * `standing`: the caller as the vault's named use decided them, from the sealed rows it read (`Vault.useNamed`,
      * T145): taken as the vault's answer, nothing asked or kept.
+     * `at`: the instant that use was asked at (`NamedUseInput.at`), at which the vault judged the credential's end: its
+     * expiry is judged at it here too, one clock for both (review r8 of D153; formal/Probing.tla, OneClock). A
+     * credential live when its request began is that request's, which the use's deadline bounds; its revocation and
+     * generation stay as they are now.
      */
-    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access } = { sourceIp: null },
+    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number } = { sourceIp: null },
   ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
     const now = new Date();
+    const asked = request.at === undefined ? now : new Date(request.at);
     const tokenHash = hashToken(token);
 
     let row: Awaited<ReturnType<typeof findCredential>>;
@@ -783,20 +799,20 @@ export class SigninService {
       else if (row !== null && request.standing !== undefined && !unsealed) access = request.standing;
       else if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
       // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
-      if (row !== null && access !== null && this.#unsealed(row, access, now)) {
+      if (row !== null && access !== null && this.#unsealed(row, access, asked)) {
         const binding = issuingBinding(row.createdBy);
         const issued = binding === null ? row : await findBinding(db, chainKey, row.principal, binding);
         if (issued !== null) {
           await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: binding === null ? 'token' : 'binding', id: binding ?? row.id, principal: row.principal, createdBy: issued.createdBy, scope: issued.scope }]);
         }
         row = await findCredential(db, chainKey, { tokenHash });
-        if (row !== null && this.#unsealed(row, access, now)) throw new Error('its scope could not be sealed');
+        if (row !== null && this.#unsealed(row, access, asked)) throw new Error('its scope could not be sealed');
       }
     } catch (error) {
       if (error instanceof AuthRowTampered) throw error;
       throw new CredentialUncheckable(error);
     }
-    if (row === null || access === null || !this.#liveCredential(row, access, now)) throw new Error('unknown, expired or revoked credential');
+    if (row === null || access === null || !this.#liveCredential(row, access, asked)) throw new Error('unknown, expired or revoked credential');
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {

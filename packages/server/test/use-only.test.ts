@@ -18,7 +18,7 @@ import { serveApi } from '../src/api/router.ts';
 import { parsePath } from '../src/api/paths.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { auditLog, environments, projects, secrets } from './db/tables.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const API = 'api';
@@ -93,8 +93,9 @@ async function outcome<T>(call: Promise<T>): Promise<T | string> {
   try {
     return await call;
   } catch (error) {
-    const { status, reason } = error as { status: number; reason?: string };
-    return `${status} ${reason ?? ''}`.trim();
+    const { status, code, reason } = error as { status: number; code?: string; reason?: string };
+    // A key's one refusal says no reason (D153): the app's entry of it does.
+    return `${status} ${(code === 'not_available' ? await refusedIn(db.owner) : reason) ?? ''}`.trim();
   }
 }
 
@@ -103,7 +104,7 @@ test('a workload reads plain values and the keys its binding lists; the rest it 
   const read = await api.secrets.reveal('market/prod');
   assert.deepEqual(read.values, { DATABASE_URL: 'postgres://prod', STRIPE_WEBHOOK_SECRET: 'whsec_0123', TWILIO_SID: 'AC0123' });
   assert.deepEqual([read.sensitive, read.useOnly], [[], ['STRIPE_SECRET_KEY']]);
-  assert.equal(await outcome(api.secrets.reveal('market/prod/STRIPE_SECRET_KEY')), '403 use_only');
+  assert.equal(await outcome(api.secrets.reveal('market/prod/STRIPE_SECRET_KEY')), '404 use_only');
   assert.deepEqual((await api.secrets.reveal('market/prod/STRIPE_WEBHOOK_SECRET')).values, { STRIPE_WEBHOOK_SECRET: 'whsec_0123' });
 
   // Listing nothing, it reads the plain values alone.
@@ -123,7 +124,7 @@ test('renaming a key onto a listed name leaves it unreadable: reads list IDs, no
   const api = client(await byId({ 'market/prod': ['STRIPE_WEBHOOK_SECRET'] }));
   await root.secrets.rename('market/prod/STRIPE_WEBHOOK_SECRET', 'STRIPE_WEBHOOK_OLD');
   await root.secrets.rename('market/prod/STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET');
-  assert.equal(await outcome(api.secrets.reveal('market/prod/STRIPE_WEBHOOK_SECRET')), '403 use_only');
+  assert.equal(await outcome(api.secrets.reveal('market/prod/STRIPE_WEBHOOK_SECRET')), '404 use_only');
   assert.deepEqual((await api.secrets.reveal('market/prod/STRIPE_WEBHOOK_OLD')).values, { STRIPE_WEBHOOK_OLD: 'whsec_0123' });
   assert.deepEqual((await api.secrets.reveal('market/prod')).useOnly, ['DATABASE_URL', 'STRIPE_WEBHOOK_SECRET']);
 });
@@ -133,7 +134,7 @@ test('a reference is read where its value is held: "*" where it lives reads noth
   const api = client(await byId({ 'market/dev': '*' }));
   const read = await api.secrets.reveal('market/dev');
   assert.deepEqual([read.values, read.useOnly], [{ T: 'AC0123' }, ['S']]);
-  assert.equal(await outcome(api.secrets.reveal('market/dev/S')), '403 use_only');
+  assert.equal(await outcome(api.secrets.reveal('market/dev/S')), '404 use_only');
   assert.deepEqual((await client(await byId({ 'market/dev': '*', 'market/prod': ['STRIPE_SECRET_KEY'] })).secrets.reveal('market/dev/S')).values, { S: 'sk_live_0123' });
 });
 

@@ -19,6 +19,7 @@ import { Superseded } from '../watch.ts';
  *   403 bulk_limit         the vault said no: too many secrets read in too short a time
  *   403 insufficient_scope a request through MCP whose connection lacks the scope the route needs
  *   404 not_found          no such project, environment, secret or member
+ *   404 not_available      a key a request named, by name, that it may not have: none such, or no access to it, alike (D153)
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later
@@ -41,6 +42,7 @@ export const ERROR_STATUS = {
   bulk_limit: 403,
   insufficient_scope: 403,
   not_found: 404,
+  not_available: 404,
   method_not_allowed: 405,
   conflict: 409,
   too_many_requests: 429,
@@ -76,11 +78,33 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The vault's refusal of a use by ids it decided before writing anything (`number` null: its key would have taken
+ * its principal's lock, which only a use the vault allowed takes; DecideBeforeLock, review r2 of D153). Answered as
+ * the refusal it carries; the vault logged no request, so the app does, whoever asked (`withRefusals`), with `fields`:
+ * where the use was, its key, its operation and its purpose.
+ */
+export class UnloggedRefusal extends ApiError {
+  fields: { projectId?: string; environmentId?: string; secretId?: string; operationId?: string | null; metadata?: Record<string, unknown> };
+
+  constructor(refusal: ApiError, fields: UnloggedRefusal['fields']) {
+    super(refusal.code, refusal.message, refusal.reason, refusal.retryAfter);
+    this.name = 'UnloggedRefusal';
+    this.fields = fields;
+  }
+}
+
 export const badRequest = (message: string) => new ApiError('bad_request', message);
 export const forbidden = (message = 'you do not have permission to do that') =>
   new ApiError('forbidden', message);
 export const notFound = (message = 'not found') => new ApiError('not_found', message);
 export const conflict = (message: string) => new ApiError('conflict', message);
+/**
+ * A key a request named that it may not have, whatever the reason (D153): there is none of that name, the caller may
+ * not use it, or read it, a reference it is has ended, a row of it was put back. One answer for all, so that nobody
+ * learns a key is held from being refused it; the reason is the audit log's.
+ */
+export const notAvailable = () => new ApiError('not_available', 'not available: no such key, or no access to it');
 /**
  * A route of docs/design/workload-access.md that is declared, in every map
  * that lists the API, before the change that serves it: its message names

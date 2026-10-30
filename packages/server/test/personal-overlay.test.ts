@@ -13,7 +13,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
 import { clientFor } from './api-fixture.ts';
-import { callRaw, connect, db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { callRaw, connect, db, deps, DEV, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog, environments } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
@@ -122,7 +122,9 @@ test('each key the owner sets is theirs, at the level of the key it overrides un
   });
   assert.deepEqual([...all.sensitive].sort(), ['API_KEY', 'NEW_SENSITIVE', 'SEAL']);
   for (const key of ['API_KEY', 'NEW_SENSITIVE', 'SEAL']) {
-    await assert.rejects(dev.secrets.reveal(`market/dev@me/${key}`), { status: 403, reason: 'sensitive' });
+    // A key's one refusal (D153), its reason in the app's entry.
+    await assert.rejects(dev.secrets.reveal(`market/dev@me/${key}`), { status: 404, code: 'not_available' });
+    assert.equal(await refusedFor(), 'sensitive', key);
   }
   assert.deepEqual({ ...(await dev.secrets.reveal('market/dev@me/NEW_PLAIN')).values }, { NEW_PLAIN: MINE.NEW_PLAIN });
   // Each version says how it is held, a plain one's as any plain version's.
@@ -180,7 +182,8 @@ for (const [who, email] of [['an instance Owner', ROOT], ["the project's Maintai
       ['dry run', () => client.secrets.dryRun(path, { NEW_PLAIN: MINE.NEW_PLAIN })],
       ['write', () => client.secrets.set(path, { NEW_PLAIN: { value: 'overwritten', sensitivity: 'plain' } })],
     ] as const) {
-      await assert.rejects(attempt(), { status: 403 }, what);
+      // A key's read is the one "no" (D153); what is no read of a key says the place is not theirs.
+      await assert.rejects(attempt(), { status: what === 'get' ? 404 : 403 }, what);
     }
     // A handle may name it, and its plan opens nothing.
     const handle = (await bearer(await sessionFor(email)).handles.create({ label: 'coffre run', paths: [path] })).token;

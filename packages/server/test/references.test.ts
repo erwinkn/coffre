@@ -6,7 +6,7 @@ import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { withTriggersLifted } from './db/engine.ts';
-import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, LOG_014_ONLY, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // References between environments and projects (docs/design/environments.md).
 // market/prod/DATABASE_URL is the source; billing/prod holds references to it.
@@ -63,6 +63,8 @@ beforeEach(async () => {
 });
 
 const ref = (path: string) => ({ ref: path });
+/** A key's one refusal (D153), as `refusal` gives it. */
+const NO = '404: not available: no such key, or no access to it';
 const refusal = (call: Promise<unknown>) => call.then(() => 'let through', (error: { status?: number; message?: string }) => `${error.status}: ${error.message}`);
 
 test("a reader of the holder reads the source through it, live, without a grant in the source's project", async () => {
@@ -71,7 +73,7 @@ test("a reader of the holder reads the source through it, live, without a grant 
   });
   assert.deepEqual((await bo.secrets.reveal('billing/prod')).values, { DATABASE_URL: 'postgres://v1', PORT: '8080' });
   // Bo still reads nothing in market itself.
-  await assert.rejects(bo.secrets.reveal('market/prod/DATABASE_URL'), { status: 403 });
+  await assert.rejects(bo.secrets.reveal('market/prod/DATABASE_URL'), { status: 404, code: 'not_available' });
   // A rotation in market is what billing reads next.
   await caro.secrets.set('market/prod', { DATABASE_URL: 'postgres://v2' });
   assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v2' });
@@ -107,11 +109,11 @@ test("an instance role scoped to prod reads through a reference held in prod, as
   // Bo's grant moves from billing/prod to his instance role, on billing's prod: still nothing in market.
   await root.access.set(`user:${BO}`, { 'billing/prod': null });
   await root.members.add(`user:${BO}`, { role: 'developer', scope: { projects: { only: ['billing'] }, environments: { only: ['prod'] } } });
-  await assert.rejects(bo.secrets.reveal('market/prod/DATABASE_URL'), { status: 403 });
+  await assert.rejects(bo.secrets.reveal('market/prod/DATABASE_URL'), { status: 404, code: 'not_available' });
   assert.deepEqual((await bo.secrets.reveal('billing/prod/DATABASE_URL')).values, { DATABASE_URL: 'postgres://v1' });
   // Renamed, billing/prod is no longer prod: the role on prod no longer reaches through it.
   await root.environments.update('billing/prod', { slug: 'live' });
-  await assert.rejects(bo.secrets.reveal('billing/live/DATABASE_URL'), { status: 403 });
+  await assert.rejects(bo.secrets.reveal('billing/live/DATABASE_URL'), { status: 404, code: 'not_available' });
 });
 
 test("a reference reads its source's newest version only, whatever its current_version_id says", async () => {
@@ -122,7 +124,7 @@ test("a reference reads its source's newest version only, whatever its current_v
   const [first] = await db.owner.select({ id: secretVersions.id }).from(secretVersions).where(and(eq(secretVersions.secretId, source!.id), eq(secretVersions.version, 1)));
   await db.owner.update(secrets).set({ currentVersionId: first!.id }).where(eq(secrets.id, source!.id));
   const before = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow')));
-  await assert.rejects(bo.secrets.reveal('billing/prod/DATABASE_URL'), { status: 403 });
+  await assert.rejects(bo.secrets.reveal('billing/prod/DATABASE_URL'), { status: 404, code: 'not_available' });
   const after = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow')));
   assert.equal(after.length, before.length, 'nothing is released');
 });
@@ -279,7 +281,8 @@ test("a reference held in the place being archived blocks nothing; a forged row 
 
 test('a reference held in an archived place blocks nothing; its holder restored, it shows its source archived, and reads refuse saying so (D58)', async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL'), STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
-  const archivedSource = /^409: billing\/prod\/DATABASE_URL is a reference to market\/prod\/DATABASE_URL, which is archived: market\/prod's maintainers can unarchive it, or set a value for DATABASE_URL$/;
+  // A key's read is the one "no" (D153), its reason in the app's entry; the environment's, and its list, say why.
+  const archivedSource = async () => [await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), await refusedIn(db.owner)];
 
   // Its environment archived, nobody reads through it: the source's environment archives.
   await root.environments.update('billing/prod', { archived: true });
@@ -291,7 +294,7 @@ test('a reference held in an archived place blocks nothing; its holder restored,
   // Restored, the holder reads nothing through it, and says why and how to fix it; a run or an export of the environment stops at it.
   await root.environments.update('billing/prod', { archived: false });
   assert.equal((await bo.secrets.list('billing/prod')).keys.find((key) => key.key === 'DATABASE_URL')!.reference?.state, 'source_archived');
-  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), archivedSource);
+  assert.deepEqual(await archivedSource(), [NO, 'reference_unreadable']);
   assert.match(await refusal(bo.secrets.reveal('billing/prod')), /^409: billing\/prod\/DATABASE_URL is a reference to market\/prod\/DATABASE_URL, which is archived/);
   // The source back, it reads again: archiving never ended it.
   await root.environments.update('market/prod', { archived: false });
@@ -301,14 +304,14 @@ test('a reference held in an archived place blocks nothing; its holder restored,
   await root.projects.update('billing', { archived: true });
   await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
   await root.projects.update('billing', { archived: false });
-  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), archivedSource);
+  assert.deepEqual(await archivedSource(), [NO, 'reference_unreadable']);
   await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
   await root.secrets.update('billing/prod/DATABASE_URL', { archived: true });
   await caro.secrets.update('market/prod/DATABASE_URL', { archived: true });
   // While the other key's reference, held in a live place, still blocks.
   assert.match(await refusal(caro.secrets.update('market/prod/STRIPE_KEY', { archived: true })), /^409: 1 reference reads market\/prod\/STRIPE_KEY/);
   await root.secrets.update('billing/prod/DATABASE_URL', { archived: false });
-  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), archivedSource);
+  assert.deepEqual(await archivedSource(), [NO, 'reference_unreadable']);
 });
 
 test('an archive that commits between the vault sealing a reference and its row refuses the reference: no live reference reads an archived source', async () => {
@@ -347,7 +350,7 @@ test('an archive that commits between the vault sealing a reference and its row 
     sourceProjectId: sealed.also.projectId, sourceEnvironmentId: sealed.also.environmentId, sourceSecretId: sealed.also.secretId,
     createdSeq: seal!.seq, createdBy: `user:${ADA}`,
   });
-  assert.match(await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), /^409: billing\/prod\/DATABASE_URL is a reference to market\/prod\/DATABASE_URL, which ada@acme.example broke/);
+  assert.deepEqual([await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), await refusedIn(db.owner)], [NO, 'reference_unreadable']);
 });
 
 test("the source's side sees who reads through its references, and the reads are in both projects' logs", async () => {

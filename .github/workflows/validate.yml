@@ -98,6 +98,25 @@ jobs:
         env:
           COFFRE_TEST_LOG: '0.15'
 
+  matrices:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    # The generated matrices of 0.15's use by name (T158, D153): every key a caller may not have answered alike, whatever
+    # the vault's map holds, each statement slowed. Longer than the suites' 30 minutes, so beside them.
+    name: Use matrices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+        with:
+          build: 'false'
+      - name: Use matrices, Postgres
+        run: pnpm test:matrices
+      - name: Use matrices, SQLite
+        run: pnpm test:matrices:sqlite
+
   schema:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
@@ -388,7 +407,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, action, checks, tests, tests-015, schema, formal, proofs, workers, node, consumer, compat, image]
+    needs: [changes, action, checks, tests, tests-015, matrices, schema, formal, proofs, workers, node, consumer, compat, image]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump

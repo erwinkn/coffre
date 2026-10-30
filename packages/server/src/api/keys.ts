@@ -20,7 +20,7 @@ import {
 import { AccessChanged, type Recalled } from '../accesses.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { uses015 } from './changes.ts';
-import { ApiError, UNAVAILABLE, vaultRefused } from './errors.ts';
+import { ApiError, UNAVAILABLE, UnloggedRefusal, vaultRefused } from './errors.ts';
 
 /**
  * The app's half of envelope encryption. It encrypts and decrypts values
@@ -122,7 +122,11 @@ export async function openValues(
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const { credentialRow, ...asked } = asking;
   if (credentialRow != null && (await uses015(vault))) {
-    const opened = await useValues(vault, { credential: credentialRow, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed);
+    const opened = await useValues(vault, { credential: credentialRow, purpose: asking.purpose, keepsSensitive: asking.keepsSensitive === true }, sealed).catch((error: unknown) => {
+      // The request's operation, for the app's entry of a refusal the vault logged nothing of.
+      if (error instanceof UnloggedRefusal) error.fields.operationId = asking.operationId;
+      throw error;
+    });
     // A use decides on the rows as they are, but only where its key is held: it vouches for a kept answer about the
     // caller when every value going back is a use's, each read where it is held. Not with a plain value beside, which
     // no use decided, nor one inherited in a fork, where the use checks no permission of the caller's: the app asks.
@@ -165,7 +169,10 @@ export async function openValues(
  * to; `holder`, for a reference, the key that holds it, which a use names
  * (the vault finds the source itself, as it reads it then).
  */
-export type OpenItem = { secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string; holder?: string };
+export type OpenItem = {
+  secretVersionId: string; secret: SecretRef; envelope: Envelope; plaintext?: string | null; via?: Via; through?: string;
+  holder?: string; holderAt?: { projectId: string; environmentId: string };
+};
 
 /** How many uses one request has in flight at once: a whole environment's read takes turns, and leaves the isolate's admission room for others (R44). */
 export const USES_AT_ONCE = 4;
@@ -207,7 +214,16 @@ export async function useValues(
           at,
           deadline: at + USE_DEADLINE_MS,
         });
-        if (!outcome.ok) throw refusedUse(outcome);
+        // Decided before anything was written (`number` null): the app's entry records the request (`recorded`).
+        if (!outcome.ok) {
+          throw 'code' in outcome && outcome.number === null && !ASKED_AGAIN.has(outcome.code)
+            ? new UnloggedRefusal(refusedUse(outcome), {
+              // The key the use named, where it is held: a reference's own, not its source's (review r4 of D153).
+              ...(item.holderAt ?? { projectId: item.secret.projectId, environmentId: item.secret.environmentId }), secretId: item.holder ?? item.secret.secretId,
+              metadata: { purpose: asked.purpose },
+            })
+            : refusedUse(outcome);
+        }
         // Another version than the app read: what the rest of the answer says (its version, nature, what it left out)
         // would not be of this value. Asked again, the request reads both anew.
         if (outcome.value.versionId !== item.secretVersionId) throw changed();
@@ -222,6 +238,9 @@ export async function useValues(
   return values;
 }
 
+/** Refusals that are no one's to log: a credential ended (401, its own check), a read to ask again, no cap logged yet. */
+const ASKED_AGAIN: ReadonlySet<string> = new Set(['credential', 'missing', 'no_policy']);
+
 /** The value a use opened, decrypted with its key and bound to what the vault read: a reference's source's ids. */
 function openedValue(value: UsedValue): string {
   const dek = Buffer.from(value.key, 'base64');
@@ -234,8 +253,11 @@ function openedValue(value: UsedValue): string {
   }
 }
 
-/** A use of a request's one key the vault made already, by name (`Vault.useNamed`): the key's id, and its outcome. */
-export type Decided = { secretId: string | null; outcome: Extract<NamedUseOutcome, { served: true }>['outcome'] };
+/**
+ * A use of a request's one key the vault made already, by name (`Vault.useNamed`): the key's id, its outcome, and the
+ * place it was decided at, by the ids of the vault's own rows: where a refusal of it is logged.
+ */
+export type Decided = { secretId: string | null; outcome: Extract<NamedUseOutcome, { served: true }>['outcome']; at: Extract<NamedUseOutcome, { route: 'name' }>['at'] };
 
 /**
  * The values of a read the vault decided already, by name: at most its one key, whose outcome stands for it, a refusal
@@ -249,7 +271,9 @@ function decidedValues({ secretId, outcome }: Decided, items: readonly OpenItem[
   if (items.length === 0) return { ok: true, values: [], stood: true };
   if (!outcome.ok) throw refusedUse(outcome);
   const values = items.map((item) => {
-    if ((item.holder ?? item.secret.secretId) !== secretId) throw new Error("a named use's read opens no key but the one the vault decided");
+    // Another key than the one the vault decided: renamed between the vault's read and the app's (SQLite's app reads its
+    // own rows). Asked again, the request reads both anew (Fable's review of D153).
+    if ((item.holder ?? item.secret.secretId) !== secretId) throw changed();
     if ('plain' in outcome) {
       if (outcome.versionId !== item.secretVersionId) throw changed();
       return outcome.plain;

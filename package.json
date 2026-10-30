@@ -14,6 +14,8 @@
     "test": "pnpm lint && ./scripts/test-suite.sh",
     "test:sqlite": "pnpm lint && COFFRE_TEST_ENGINE=sqlite ./scripts/test-suite.sh",
     "test:all": "pnpm test && pnpm test:sqlite",
+    "test:matrices": "./scripts/test-suite.sh --files packages/vault/test/use.matrix.ts packages/server/test/named.matrix.ts",
+    "test:matrices:sqlite": "COFFRE_TEST_ENGINE=sqlite ./scripts/test-suite.sh --files packages/vault/test/use.matrix.ts packages/server/test/named.matrix.ts",
     "test:properties": "node --conditions=coffre:source scripts/test-properties.mjs",
     "test:properties:server": "./scripts/server-properties.sh",
     "test:properties:long": "pnpm test:properties --long && pnpm test:properties:server --long",

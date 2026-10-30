@@ -243,8 +243,9 @@ test('a granted reader can read, and the read is attributed to them', async () =
 });
 
 test('denied and grantless reads are audited', async () => {
-  await assert.rejects(reader.secrets.reveal('market/prod/ANYTHING'), { status: 403 });
-  await assert.rejects(outsider.secrets.reveal('market/dev/X'), { status: 403 });
+  // A key's one refusal (D153), its reason in the app's entry.
+  await assert.rejects(reader.secrets.reveal('market/prod/ANYTHING'), { status: 404, code: 'not_available' });
+  await assert.rejects(outsider.secrets.reveal('market/dev/X'), { status: 404, code: 'not_available' });
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => row.actorId), [READER, 'outsider@acme.example']);
   assert.ok(rows.every((row) => row.decision === 'deny'));
@@ -382,7 +383,8 @@ test('ciphertext relocated between environments cannot be decrypted', async () =
   await withTriggersLifted(db.owner, 'secret_versions', (owner) =>
     owner.update(secretVersions).set(envelope).where(eq(secretVersions.id, prod.id)));
   // The vault unwraps a key only as the secret it was wrapped for: dev's key is not prod's.
-  await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 403, code: 'vault_refused', reason: 'bad_claim' });
+  // A key's one refusal (D153), the vault's reason in its own entry.
+  await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 404, code: 'not_available', reason: undefined });
 });
 
 test("a key's age is its current version's: a rename or a move leaves it, a write moves it; the list says when a value is due", async () => {

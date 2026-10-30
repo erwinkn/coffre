@@ -15,7 +15,7 @@ import { credential } from '@coffre/client/credential';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
-import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, entries, NO, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
 import { credentialProxy, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
@@ -138,11 +138,10 @@ test('an HMAC signer signs as Node does and checks its own signatures; a verifie
   assert.equal(await iframe.verify(`${payload}x`, signature), false);
   await assert.rejects(used(env, 'yousign').sign(YOUSIGN_BODY), /yousign is a verifier, which checks signatures and makes none/);
   await assert.rejects(used(env, 'dfns-key').verify('m', 'sig'), /verify names a verifier/);
-  // An environment that holds no secret for it says so, and names no value.
+  // An environment that holds no secret for it: the one "no" of a key (D153), which names nothing, its reason in the app's entry.
   const bare = await run(['market/bare']);
   const absent = (await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }) }));
-  assert.equal(absent.status, 409);
-  assert.match(((await absent.json()) as { message: string }).message, /market\/bare holds no YOUSIGN_WEBHOOK_SECRET, which yousign needs/);
+  assert.deepEqual([absent.status, await absent.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'missing' : 'unknown_secret']);
   // An empty secret, which WebCrypto takes for no key: said, never a 500.
   const empty = await run(['market/empty']);
   for (const asked of [{ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }, { sign: { credential: 'iframe-token', message: 'aGk' } }]) {

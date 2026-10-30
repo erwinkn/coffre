@@ -21,7 +21,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute, type CoffrePlugin } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { credentials as credentialRows, logFence } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -196,8 +196,9 @@ test("a plain value used after the handle's check is used on the person's access
   assert.equal((await fetched('/probe/later', fifth)).status, 200);
   between = () => root.access.set(`user:${FIFTH}`, { market: null }).then(() => undefined);
   try {
+    // A key's one "no" (D153), its reason in the app's entry.
     const answer = await fetched('/probe/later', fifth);
-    assert.equal(answer.status, 403, await answer.text());
+    assert.deepEqual([answer.status, await answer.json(), await refusedIn(db.owner)], [404, { error: 'not_available' }, LOG === '0.15' ? 'no_grant' : 'missing_secret_use']);
   } finally {
     between = async () => undefined;
   }
@@ -232,7 +233,7 @@ test("revoked since their answer was kept, someone learns nothing of a key made 
   // Busy, by ids or by name (T145): a request of one key is the vault's use by name, which answers busy before it reads
   // anything, whatever the key; the app's answer kept, refused, asks the vault again first (`Recalled.confirm`).
   deps.vault.use = async () => ({ ok: false, busy: 'overloaded', retryAfter: 1 });
-  deps.vault.useNamed = async () => ({ served: true, secretId: null, outcome: { ok: false, busy: 'overloaded', retryAfter: 1 }, app: null, standing: null, place: null });
+  deps.vault.useNamed = async () => ({ served: true, route: 'busy', outcome: { ok: false, busy: 'overloaded', retryAfter: 1 } });
   try {
     // A key made since and one that never was: answered alike, busy.
     const made = await reveal('market/dev/MADE_SINCE');

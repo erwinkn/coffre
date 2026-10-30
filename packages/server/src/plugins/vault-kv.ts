@@ -237,11 +237,15 @@ function failure(status: number, message = '', retryAfter?: string): Response {
 /**
  * The API's refusal, as Vault says it. A token coffre does not know is
  * Vault's 403, not 401; a place that does not exist is 404, which ESO
- * reads as the secret gone. Anything else keeps its status and message:
- * a 503 stays one, so that an outage is never read as a deletion.
+ * reads as the secret gone. A key's one refusal (`not_available`, D153),
+ * whether the key is missing or the caller may not have it, is 403: as
+ * the two are one answer, a 404 would have ESO delete a secret it syncs
+ * whenever its reader lost the key, a grant revoked or the key made
+ * sensitive. Anything else keeps its status and message: a 503 stays
+ * one, so that an outage is never read as a deletion.
  */
 function refused(error: CoffreError): Response {
-  if (error.status === 401 || error.status === 403) return failure(403, `permission denied: ${error.message}`);
+  if (error.status === 401 || error.status === 403 || error.code === 'not_available') return failure(403, `permission denied: ${error.message}`);
   // coffre not answering for a moment says when to ask again, as the API does.
   return failure(error.status, error.message, error.status === 503 && error.code === 'unavailable' && error.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
 }

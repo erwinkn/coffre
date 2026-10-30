@@ -125,6 +125,8 @@ structure UseReq where
   purpose : String
   keepsSensitive : Bool
   time : Int
+  /-- A named use, which hands a plain value back (T145); any other, by ids and logged, refuses one (review r1 of D153). -/
+  plain : Bool
   deriving Repr, Inhabited
 
 /-- The first of a list of refusals. -/
@@ -212,30 +214,24 @@ def capRefusal (count : Nat) (b : BulkIn) : Code :=
 /-- No edits, when the log has no roles object. -/
 def noEdits : RolesIn := ⟨[], []⟩
 
+/-- A credential that reaches nothing: revoked, ended at the request's time, or of an earlier generation than its active account's. -/
+def credentialEnded (v : UseView) (r : UseReq) (c : CredentialIn) : Bool :=
+  c.revoked || (match c.expiresAt with | some e => r.time ≥ e | none => false)
+    || (match v.principal.bind (·.row) with | some m => m.active && m.generation != c.generation | none => false)
+
 /-- What its rows say before 0.14's rules: its credential, its key, where it is read; then the key's read, as `KeyRead`. -/
 def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead :=
   match v.credential.row with
   | none => .error "credential"
   | some c =>
     -- Of an earlier generation than its account's: a removal ended it, before its sweep revokes it.
-    if c.revoked || (match c.expiresAt with | some e => r.time ≥ e | none => false)
-      || (match v.principal.bind (·.row) with | some m => m.active && m.generation != c.generation | none => false) then .error "credential"
+    if credentialEnded v r c then .error "credential"
     else match v.secret.row with
     | none =>
-      -- A key the place does not hold (T145; Probing.tla, MissingByStanding): refused as the caller stands where it
-      -- was sought, and `missing` only to one who may act there, so that nobody it refuses learns whether it is held.
-      let rows : Table EnvIn := ids.filterMap fun id => ((v.envs.get? id).bind (·.row)).map (id, ·)
-      match r.place with
-      | none => .error "missing"
-      | some p => match rows.get? p with
-        | none => .error "missing"
-        | some e =>
-          let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD noEdits) (rows.map (·.2)) r.time
-          let envRows : Table EnvRow := rows.map fun (id, e) => (id, ⟨e.project, e.slug, e.owner, e.parent, e.deleted⟩)
-          let perm : Permission := if r.purpose == "use" then .use else .read
-          match keyRefusal reader c.principal perm ⟨e.project, p⟩ ⟨e.project, p⟩ envRows none false with
-          | some code => .error code
-          | none => .error "missing"
+      -- A key the place does not hold (T145; Probing.tla, MissingByStanding): its caller's standing where it was sought
+      -- decided it first (`standingFirst`), and `missing` only to one who may act there, so that nobody it refuses
+      -- learns whether it is held.
+      .error "missing"
     | some s =>
       let value := match s.source with
         | none => some s
@@ -284,11 +280,61 @@ def capOf (v : UseView) : Code :=
   | none, _ => some "no_policy"
   | _, none => some "unread"
 
-/-- `decideChecked`: every environment it weighs read, then every seal, then its rows and 0.14's rules, then the cap. -/
+/-- The environment a personal config at `p` is of, as the view read it: its standing weighs it too (R8). -/
+def standingParents (v : UseView) (p : String) : List (String × In EnvIn) :=
+  match (v.envs.get? p).bind (·.row) with
+  | some e => if e.owner.isSome then (match e.parent with | some q => ((v.envs.get? q).map (q, ·)).toList | none => []) else []
+  | none => []
+
+/--
+`standingAt`: 0.14's rules for the request's permission at `p`, on the reader that place makes, with a personal
+config's parent, nothing of any key's.
+-/
+def standingAt (v : UseView) (r : UseReq) (c : CredentialIn) (p : String) : Code :=
+  match (v.envs.get? p).bind (·.row) with
+  | none => some "missing"
+  | some e =>
+    let rows : Table EnvIn := (p, e) :: (standingParents v p).filterMap fun (q, i) => i.row.map (q, ·)
+    let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD noEdits) (rows.map (·.2)) r.time
+    let perm : Permission := if r.purpose == "use" then .use else .read
+    keyRefusal reader c.principal perm ⟨e.project, p⟩ ⟨e.project, p⟩ (rows.map fun (id, x) => (id, ⟨x.project, x.slug, x.owner, x.parent, x.deleted⟩)) none false
+
+/-- Where the caller's standing is decided: where the key is held, or where a key the place does not hold was sought. -/
+def standOf (v : UseView) (r : UseReq) : Option String :=
+  match v.secret.row with
+  | none => r.place
+  | some s => some s.env
+
+/--
+The caller's standing, before anything else of the key's (T158, review d5 of #416): the credential first, its row's
+seal and its account's, then whether it reaches at all, which no place or key decides (review r1 of D153); then the
+seals of what the standing reads (roles, policy, the key's row, which says where it is held, the place), then 0.14's
+rules there.
+-/
+def standingFirst (v : UseView) (r : UseReq) : Code :=
+  let stand := standOf v r
+  (firstSome ([v.credential.refusal] ++ (v.principal.map (·.refusal)).toList)).orElse fun _ =>
+    match v.credential.row with
+    | none => some "credential"
+    | some c =>
+      if credentialEnded v r c then some "credential"
+      else (firstSome ([v.roles.refusal, v.policy.refusal, v.secret.refusal] ++
+          ((stand.bind (v.envs.get? ·)).map (·.refusal)).toList ++
+          (match stand with | some p => (standingParents v p).map (·.2.refusal) | none => []))).orElse fun _ =>
+        match stand with
+        | none => none
+        | some p => standingAt v r c p
+
+/--
+`decideChecked`: every environment it weighs read, then the caller's standing, then every other seal, then the key's
+rows and 0.14's rules, then the cap.
+-/
 def decideUse (v : UseView) (r : UseReq) : Code :=
   match (useEnvs v r.place).mapM (v.envs.get? ·) with
   | none => some "unread"
-  | some envs => ((firstSome (sealRefusals v envs)).orElse fun _ => rowsRefusal v r (useEnvs v r.place)).orElse fun _ => capOf v
+  | some envs =>
+    (((standingFirst v r).orElse fun _ => firstSome (sealRefusals v envs)).orElse fun _ => rowsRefusal v r (useEnvs v r.place)).orElse
+      fun _ => if plainValue v && !r.plain then some "bad_claim" else capOf v
 
 /-! ## The bulk cap's rule -/
 
@@ -355,7 +401,7 @@ theorem allowed_sealed {v : UseView} {r : UseReq} (h : decideUse v r = none) :
   split at h
   · cases h
   · rename_i envs henvs
-    exact ⟨envs, henvs, firstSome_none (orElse_none (orElse_none h).1).1⟩
+    exact ⟨envs, henvs, firstSome_none (orElse_none (orElse_none (orElse_none h).1).1).2⟩
 
 /-- In particular its credential: current, and validly sealed. -/
 theorem allowed_credential_sealed {v : UseView} {r : UseReq} (h : decideUse v r = none) :
@@ -377,7 +423,50 @@ theorem stale_credential_refused {v : UseView} {r : UseReq}
   unfold decideUse
   split
   · rename_i heq; simp [heq] at hread
-  · rcases hr with hr | hr <;> simp [sealRefusals, firstSome, hr, Option.orElse]
+  · rcases hr with hr | hr <;> simp [standingFirst, firstSome, hr, Option.orElse]
+
+/--
+**Standing before the key** (T158, review d5 of #416). A caller the standing refuses (its rows' seals, the credential,
+0.14's rules at the place) is refused so, whatever the key's own rows say: a key held, gone or never made alike.
+-/
+theorem refused_by_standing {v : UseView} {r : UseReq} {c : String}
+    (hread : ((useEnvs v r.place).mapM (v.envs.get? ·)).isSome = true) (h : standingFirst v r = some c) :
+    decideUse v r = some c := by
+  unfold decideUse
+  split
+  · rename_i heq; simp [heq] at hread
+  · simp [h, Option.orElse]
+
+/--
+**No key before standing** (W268; formal/Probing.tla, `NoKeyBeforeStanding`). The standing at a place reads nothing of
+a key's: the view with any key and source, or none, decides it alike. So the named statement's gate (`use_stands`,
+`namedStanding`), which reads no key, decides what the use would on the key's own view.
+-/
+theorem standingAt_keyless (v : UseView) (r : UseReq) (c : CredentialIn) (p : String) (s : In SecretIn) (x : Option (In SecretIn)) :
+    standingAt { v with secret := s, source := x } r c p = standingAt v r c p := rfl
+
+/--
+**A refusal on standing is the use's** (W268). Where the caller does not stand at the place the use's standing is
+decided at, by 0.14's rules there, the use is refused, whatever its seals and its key: so the gate, which refuses such a
+caller before any key is read, refuses only uses the decision refuses.
+-/
+theorem refused_without_standing {v : UseView} {r : UseReq} {c : CredentialIn} {p code : String}
+    (hread : ((useEnvs v r.place).mapM (v.envs.get? ·)).isSome = true)
+    (hc : v.credential.row = some c) (hstand : standOf v r = some p) (hgate : standingAt v r c p = some code) :
+    (decideUse v r).isSome = true := by
+  have hfirst : (standingFirst v r).isSome = true := by
+    unfold standingFirst
+    simp only [hstand, hc]
+    cases firstSome ([v.credential.refusal] ++ (v.principal.map (·.refusal)).toList) with
+    | some _ => simp [Option.orElse]
+    | none =>
+      simp only [Option.orElse]
+      split
+      · simp
+      · split <;> simp_all
+  obtain ⟨k, hk⟩ := Option.isSome_iff_exists.mp hfirst
+  rw [refused_by_standing hread hk]
+  rfl
 
 /-- **0.14's rules, unchanged.** An allowed use is one `KeyRead.decide` allows, on the reader its sealed inputs make. -/
 theorem allowed_keyread {v : UseView} {r : UseReq} (h : decideUse v r = none) :
@@ -405,7 +494,7 @@ theorem allowed_same_generation {v : UseView} {r : UseReq} (h : decideUse v r = 
   cases hb : (m.generation != c.generation)
   · simpa using hb
   · unfold keyOf at hk
-    simp [hc, hm, ha, hb] at hk
+    simp [credentialEnded, hc, hm, ha, hb] at hk
 
 /--
 **Within the cap.** An allowed use's key, of a value that is not plain, is in its principal's set, or fewer than the
@@ -417,6 +506,7 @@ theorem allowed_within_cap {v : UseView} {r : UseReq} (h : decideUse v r = none)
   split at h
   · cases h
   · have hcap := (orElse_none h).2
+    simp only [hplain, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hcap
     unfold capOf at hcap
     simp only [hplain, Bool.false_eq_true, ↓reduceIte] at hcap
     split at hcap

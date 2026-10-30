@@ -11,6 +11,9 @@ import { expect, refused } from '../report.ts';
 import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 import { query } from './storage.ts';
 
+/** A read of one key refused, whatever the reason (D153): `outcome`'s status and code. */
+const NO = '404 not_available';
+
 /** Where the fork check copies dev to; archived once checked. */
 const FORKED = `${PROJECT}/forked`;
 
@@ -194,7 +197,8 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     try {
       expect(underArchived === 'let through', `${source} could not be archived while only an archived key referred to it: ${underArchived}`);
       const restored = await outcome(reader.api.secrets.reveal(`${DEV}/${HELD}`));
-      expect(restored.startsWith('409 '), `a reference read a source archived while its holder was: ${restored}`);
+      // One key's refusal is the one "no" (D153): no reason, which the audit log keeps.
+      expect(restored === NO, `a reference read a source archived while its holder was: ${restored}`);
     } finally {
       if (underArchived === 'let through') await admin.api.secrets.update(source, { archived: false });
     }
@@ -218,7 +222,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     try {
       const forgedRead = await outcome(reader.api.secrets.reveal(`${DEV}/${FORGED}`));
       // Read from its seal, the row is no reference at all, and its key holds no value; the vault would refuse it anyway.
-      expect(['404 no_value', '404 not_found', '403 bad_claim'].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
+      expect(['404 no_value', '404 not_found', '403 bad_claim', NO].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
     } finally {
       await using(deployment.database(), async (sql) => {
         await query(sql, 'DELETE FROM secret_references WHERE secret_id = $1', [forged]);
@@ -228,7 +232,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
 
     await admin.api.references.break(`${DEV}/${HELD}`);
     const after = await outcome(reader.api.secrets.reveal(`${DEV}/${HELD}`));
-    expect(after.startsWith('409 '), `a broken reference still read: ${after}`);
+    expect(after === NO, `a broken reference still read: ${after}`);
   } finally {
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
   }

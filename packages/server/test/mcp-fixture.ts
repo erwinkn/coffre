@@ -14,7 +14,7 @@ import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
-import { contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
 
 export const ORIGIN = 'https://secrets.acme.example';
@@ -162,6 +162,12 @@ export async function entries(action: string) {
   const rows = await db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(auditLog.seq);
   return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
 }
+
+/** The proxy's one "no" for a key its request may not have (D153), whichever reason its entry gives. */
+export const NO = { error: 'credential_proxy', message: 'not available: no such key, or no access to it', reason: 'not_available' };
+
+/** The reason the app's newest refusal of a read gives (`refusedIn`). */
+export const refusedFor = () => refusedIn(db.owner);
 
 /** A raw 2026-07-28 request, with the headers the client would send, each overridable. */
 export function raw(token: string, body: Record<string, unknown>, headers: Record<string, string | null> = {}) {

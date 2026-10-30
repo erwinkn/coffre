@@ -1393,3 +1393,29 @@ Each limit is stated here once; the other documents link to it.
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
   sign-in row can undo one sign-out until the session's own expiry; a
   member's removal still ends it, through the generation.
+- **A key someone may not have is answered one way, except under a
+  credential row forged in the database.** A request that names one key it
+  may not have, whether there is none of that name or the caller may not
+  use it, gets one answer at one cost: 404 `not_available`, in as many of
+  the vault's calls and statements, and no lock waited for (D153;
+  `Probing.tla`). A credential is checked twice: the vault checks its own
+  seal over the row, and the app its MAC (`APP_KEY`, [Sign-in
+  rows](#sign-in-rows)) on the rows the vault's call answered, after it.
+  A row whose seal holds and whose MAC does not, which only a database
+  writer can make, is decided by the vault before the app refuses it. So
+  a held key its caller has not used this window takes their principal's
+  lock and is logged as used, and a key never made does not: with that
+  lock held by another request, one answers 503, the other 401. The
+  request still fails closed, 401 and no value, whatever the key; and a
+  database writer reads every key's name in the database anyway. Coffre
+  does not design around such rows (D154): checking the MAC first would
+  cost every named use a statement more. `named-reveal.test.ts` pins the
+  behaviour, so a change to it is deliberate. Everything else the app
+  checks of a credential the vault checks first, in the same call, before
+  anything that hangs on the key: what the deployment's config accepts
+  (coffre's own sign-in, its sign-in providers), carried with the call,
+  and the credential's own end, its expiry judged by both at the
+  request's one instant: a token live when its request began is honoured
+  for that request, within the use's 3 s deadline ([formal.md](formal.md),
+  "Probing.tla").
+  Any other difference by key in a refusal is a bug.

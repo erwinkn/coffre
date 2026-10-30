@@ -86,7 +86,7 @@ test('one value, by its key', async () => {
   assert.deepEqual(data.data, { STRIPE_KEY: PROD.STRIPE_KEY });
 });
 
-test("an environment the token cannot read is Vault's 403, with no value; one that does not exist is 404, which ESO reads as gone", async () => {
+test("an environment the token cannot read is Vault's 403, with no value; one that does not exist is 404, which ESO reads as gone; a key not there is 403", async () => {
   const denied = await vault('secret/data/market/staging');
   assert.equal(denied.status, 403);
   const text = await denied.text();
@@ -96,7 +96,10 @@ test("an environment the token cannot read is Vault's 403, with no value; one th
   const missing = await vault('secret/data/market/nowhere');
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { errors: [] });
-  assert.equal((await vault('secret/data/market/prod/NOPE')).status, 404);
+  // A key not there is one answer with a key refused (D153): Vault's 403, never 404, which ESO would read as gone.
+  const nope = await vault('secret/data/market/prod/NOPE');
+  assert.equal(nope.status, 403);
+  assert.deepEqual(await nope.json(), { errors: ['permission denied: not available: no such key, or no access to it'] });
 });
 
 test('the token is X-Vault-Token alone: none, a wrong one, or a browser session cookie are each refused', async () => {
@@ -127,8 +130,10 @@ test("a person's read of an environment leaves its sensitive keys out, and Vault
   const { data, warnings } = JSON.parse(text) as { data: { data: Record<string, string> }; warnings: string[] };
   assert.deepEqual(data.data, { ...STAGING, OPEN: 'open' });
   assert.deepEqual(warnings, ['left out, sensitive, which no person is handed: HIDDEN']);
-  // The key alone is refused, never 404, which ESO would read as the secret gone.
-  assert.equal((await vault('secret/data/market/staging/HIDDEN', await sessionFor(DEV))).status, 403);
+  // The key alone is refused, never 404, which ESO would read as the secret gone: the same answer as a key not there.
+  const hiddenOne = await vault('secret/data/market/staging/HIDDEN', await sessionFor(DEV));
+  assert.equal(hiddenOne.status, 403);
+  assert.deepEqual(await hiddenOne.json(), { errors: ['permission denied: not available: no such key, or no access to it'] });
   // A service account is handed it, and nothing is left out.
   await root.access.set('token:eso', { 'market/staging': 'viewer' });
   const both = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'eso', { label: 'staging', expiresInDays: 1 })).token;

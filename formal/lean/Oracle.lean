@@ -230,7 +230,7 @@ def useView (j : Json) : Parse UseView := do
     ← checked countIn (← req j "policy"), ← checked secretIn (← req j "secret"), ← opt (checked secretIn) (field j "source"), envs, bulk⟩
 
 def useReq (j : Json) : Parse UseReq := do
-  pure ⟨← optStr (field j "place"), ← str (← req j "purpose"), ← flag (field j "keepsSensitive"), ← int (← req j "at")⟩
+  pure ⟨← optStr (field j "place"), ← str (← req j "purpose"), ← flag (field j "keepsSensitive"), ← int (← req j "at"), ← flag (field j "plain")⟩
 
 def answer (j : Json) : Parse Json := do
   let op ← str (field j "op")

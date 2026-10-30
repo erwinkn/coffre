@@ -210,6 +210,44 @@
   checkpointer keeps, so the first use needs nothing made. It adds only
   partitions, which the previous release never touches, and costs a use
   nothing. SQLite does not partition.
+- **A read of one key answers every refusal alike; 0.15's use by name, at
+  a fixed cost, behind its switch.** A key a request names that it may not
+  have, whatever the reason (no standing, none to read, no such key, a
+  reference ended or whose source is gone, a sensitive value, a row put
+  back), is answered `not_available`, 404, "not available: no such key, or
+  no access to it": by its path, through MCP, and through the proxy (a
+  credential's, a signer's or a verifier's key), on either log; the audit
+  log keeps the reason. Vault's API answers it 403 `permission denied`, a
+  key not there included, never the 404 ESO reads as a secret gone: a
+  target that reads one key by its path no longer goes when the key is
+  archived (`docs/vault.md`). A whole environment's read still names what it
+  leaves out. A credential ended (401, decided before anything else, a
+  place's seal included) and a busy vault (503) are answered as before,
+  and a use the caller may make as before, `bulk_limit` included. The
+  vault's first call reads what the request names by its names, whatever
+  its per-isolate map of names holds, which only lets that call make the
+  use (migration 0045; `use_resolve` goes): a refusal is one call whatever
+  the map held, and the principal's lock is taken only for a use the vault
+  allowed, in its second call; a use by ids does the same. Whether a
+  request is answered on the vault's decision or by the app's own path is
+  decided on its credential and account alone, never on the key or the
+  isolate's map. The vault holds the credential first to what the
+  deployment's config accepts (coffre's own sign-in, the providers it
+  configures), so a browser session of a provider removed, or any coffre
+  token behind Cloudflare Access, is refused as an unknown token before
+  anything of the key. Then it decides whether the caller stands at the
+  place for what they ask, from their credential, account, grants, the
+  roles and the place, and reads the key only for one who does: a caller
+  without standing (revoked, lapsed, no grant, a Contributor asking to
+  read) is answered as for a key never made by the same statement, its
+  work inside it the same for every key, and no use of theirs is logged
+  by the vault. Before, a revoked caller
+  could tell a key that exists from one that does not by a 503 under a held
+  lock, a reference ended from a key never made by the refusal's
+  reason, and a reference from a key never made by how much of the
+  database the refusal read. `docs/design/0.15-plan.md`, "As built: T158",
+  "As built: D153" and "As built: W268"; `formal/Probing.tla`. The CLI
+  prints the one message as it is.
 - **0.15's use of one key is one call of the vault's, behind its switch.**
   A proxy `/use`, a handle's stable URL, and a reveal of one key (its path,
   or `keys` naming one, as `coffre export --keys API_KEY` sends) now hand

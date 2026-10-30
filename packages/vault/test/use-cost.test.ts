@@ -71,14 +71,18 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   const id = await w.key();
   const { pool, statements } = counting();
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
-  // One statement per use, whichever form: the first probes, the next is from the cache.
-  for (const purpose of ['run', 'reveal', 'compare'] as const) {
-    const before = statements();
-    const outcome = await vault.use!(ask(w, id, { purpose }));
-    assert.ok(outcome.ok, JSON.stringify(outcome));
-    assert.equal(statements() - before, 1, `a ${purpose} use is one statement`);
+  // One statement per use, whichever form: the first probes, the next is from the cache. The first, its key not yet in
+  // the principal's set, would take their lock: decided first, then made, a second (DecideBeforeLock; review r2 of D153).
+  try {
+    for (const purpose of ['run', 'reveal', 'compare'] as const) {
+      const before = statements();
+      const outcome = await vault.use!(ask(w, id, { purpose }));
+      assert.ok(outcome.ok, JSON.stringify(outcome));
+      assert.equal(statements() - before, purpose === 'run' ? 2 : 1, `a ${purpose} use's statements`);
+    }
+  } finally {
+    await pool.end();
   }
-  await pool.end();
 
   // Each form's buffers, as the hot login runs it again on a connection of its own, its plans made. The least of
   // several runs: every run inserts its use, and an insert now and then splits an index page or extends the heap,
@@ -96,9 +100,21 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       const at = Date.now();
       const requestId = newRequestId();
       const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
-      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14)`,
-        [w.credentialId, id, requestId, String(at), mac, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? String(15 * 60_000) : null,
-          named ? names!.token_hash : null, named ? names!.project : null, named ? 'dev' : null, named ? names!.key : null] as never[]);
+      // Named, as the app asks: its config accepting the credential (0045's `p_signin`), so that the call reads its names.
+      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14, p_signin => $15)';
+      const argsOf = (request: string, macOf: Buffer) => [w.credentialId, id, request, String(at), macOf, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null,
+        cached ? 1000 : null, cached ? String(15 * 60_000) : null, named ? names!.token_hash : null, named ? names!.project : null, named ? 'dev' : null, named ? names!.key : null,
+        named ? true : null] as never[];
+      const args = argsOf(requestId, mac);
+      if (named && i === 0) {
+        // A request of its own, beside the one measured: each use's entry is its request's.
+        const checked = newRequestId();
+        const checkedMac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+        const [row] = await client.unsafe(`SELECT ${call}::text AS use`, argsOf(checked, checkedMac)) as unknown as { use: string }[];
+        const answered = JSON.parse(row!.use) as { state: string | null; n_secret: string | null };
+        assert.ok(answered.state !== 'unknown' && answered.n_secret === id, `the names read: ${row!.use.slice(0, 200)}`);
+      }
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
       const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
       least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
     }
@@ -115,5 +131,67 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   // (at, request_id) grows a level from 10k to 1M here: its insert and a cover's probe of it, a buffer each at most.
   for (const form of ['probing', 'cached', 'named'] as const) {
     assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 10k, ${large[form]} at 1M`);
+  }
+});
+
+test("D153: a named use reads what it names by index, its buffers the same at 1k places and at 10k, its ids mapped or not", { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+  const w = await world();
+  const id = await w.key();
+  const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
+    FROM credentials c, secrets s JOIN projects p ON p.id = s.project_id WHERE c.id = ${w.credentialId} AND s.id = ${id}`);
+  /** `count` places more, each a project with its `dev` and a key of the same name: what an index tells apart, and a scan reads. */
+  let made = 0;
+  const grow = async (count: number) => {
+    await run(db.owner, sql`INSERT INTO projects (id, slug, name) SELECT gen_random_uuid(), 'grown-' || (${made} + g), 'Grown' FROM generate_series(1, ${count}) g`);
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name, protected)
+      SELECT gen_random_uuid(), p.id, 'dev', 'Development', false FROM projects p WHERE p.slug LIKE 'grown-%' AND NOT EXISTS (SELECT 1 FROM environments e WHERE e.project_id = p.id)`);
+    await run(db.owner, sql`INSERT INTO secrets (id, project_id, environment_id, key)
+      SELECT gen_random_uuid(), e.project_id, e.id, ${names!.key} FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'grown-%' AND NOT EXISTS (SELECT 1 FROM secrets s WHERE s.environment_id = e.id)`);
+    made += count;
+    await run(db.owner, sql`VACUUM ANALYZE`);
+  };
+  // As the hot login runs it, its plans generic (`force_generic_plan`): the least of several runs, as above.
+  const client = postgresClient(HOT_URL, { max: 1 });
+  const buffers = async (mapped: boolean): Promise<number> => {
+    let least = Infinity;
+    for (let i = 0; i < 6; i += 1) {
+      const at = Date.now();
+      const requestId = newRequestId();
+      const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+      const argsOf = (request: string, macOf: Buffer) =>
+        [mapped ? w.credentialId : null, mapped ? id : null, request, String(at), macOf, String(at + 3000), names!.token_hash, names!.project, 'dev', names!.key] as never[];
+      const args = argsOf(requestId, mac);
+      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $7, $8, $9, $10, p_signin => true)';
+      // What is measured reads the names: the key resolved by them, never the early answer for a credential not accepted.
+      // A request of its own, beside the one measured: each use's entry is its request's.
+      if (i === 0) {
+        const checked = newRequestId();
+        const checkedMac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+        const [row] = await client.unsafe(`SELECT ${call}::text AS use`, argsOf(checked, checkedMac)) as unknown as { use: string }[];
+        const answered = JSON.parse(row!.use) as { state: string | null; n_secret: string | null };
+        assert.ok(answered.state !== 'unknown' && answered.n_secret === id, `the names read: ${row!.use.slice(0, 200)}`);
+      }
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+    }
+    return least;
+  };
+  const at = async (places: number) => ({ places, mapped: await buffers(true), cold: await buffers(false) });
+  await grow(100);
+  const few = await at(100);
+  await grow(900);
+  const small = await at(1_000);
+  await grow(9_000);
+  const large = await at(10_000);
+  await client.end();
+  console.log(JSON.stringify({ few, small, large }));
+  // Flat: the credential by its token's hash, the place by its slugs, the key by its name there, each by a unique index;
+  // a scan of the places, or of their keys, would read a page per hundred of them. From 100 places to 1k, each index of
+  // the places' tables grows a level, a page more for each probe of them, the use's own reads of its rows included:
+  // past it, none until some hundred thousand.
+  for (const form of ['mapped', 'cold'] as const) {
+    assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 100 places, ${large[form]} at 10k`);
   }
 });
