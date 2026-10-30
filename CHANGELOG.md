@@ -11,9 +11,13 @@
     of the vault's, through a login and a Hyperdrive config of its own
     (`coffre_vault_hot`), never behind a change, a sign-in or the audit
     head. On the Workers bench (`pnpm bench:workers`, Postgres 16.14 on
-    Debian, the CPU of both Workers, warm median), a one-key reveal costs
-    12.2 ms against 0.14.5's 16.9, and the audit page 50 against 68. A read
-    of many keys is one vault call (below): BENCH_MANY.
+    Debian, warm, against the same release on 0.14's log), a one-key reveal
+    costs 12.0 ms of CPU against 18.9, an export of 30 keys 21.6 against
+    25.3, a reveal of 30 keys 21.3 against 19.0 (one vault call, below),
+    and the audit page 53.7 against 68.6; a sign-in 28.8 against 17.7. Wall
+    time, locally, is longer: 56 against 45 ms for one key, 80 to 83
+    against 47 to 48 for 30, as each vault call there opens a Postgres
+    connection of its own, which Hyperdrive keeps open between calls.
   - Every change answers once a checkpoint the vault's key signs seals it,
     within about half a second: the checkpointer, a Durable Object beside
     the vault on Workers (`CoffreCheckpointer`, which the vault starts), or
