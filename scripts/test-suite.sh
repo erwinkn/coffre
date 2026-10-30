@@ -3,7 +3,7 @@
 # file still run sequentially and retain all their resets and transaction guards.
 # COFFRE_TEST_DATABASE is the base name; a random suffix isolates each run.
 # `--files <file>...` runs those files alone, on the same footing: the use
-# matrices (`pnpm test:matrices`), which run as a CI job of their own.
+# matrices (`pnpm test:matrices`), which CI runs in shards (`scripts/matrix-shard.ts`).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

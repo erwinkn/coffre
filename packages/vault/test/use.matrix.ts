@@ -31,6 +31,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
+import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
@@ -319,14 +320,14 @@ const labelOf = (row: Row) => `${row.map} / ${row.lost} / ${row.place} / ${row.a
 /**
  * Every row, generated: each map of their asking's over every other dimension; each map set as it should never be
  * over every way of losing their standing and every place, as asked and past the floor, the window passed (a key of
- * the place named would take the principal's lock, were its use made).
+ * the place named would take the principal's lock, were its use made). CI runs them in shards, a slice each (`shardOf`).
  */
-const ROWS: Row[] = [
+const ROWS: Row[] = shardOf(import.meta.url, [
   ...ASKED.flatMap((map) => LOST.flatMap((lost) => PLACES.flatMap((place) => ADMISSIONS.flatMap((admission) =>
     WINDOWS.map((window) => ({ map, lost, place, admission, window })))))),
   ...SET.flatMap((map) => LOST.flatMap((lost) => PLACES.filter((place) => place !== 'its seal replaced').flatMap((place) => (['as asked', 'past the floor'] as const).map((admission) =>
     ({ map, lost, place, admission, window: 'passed' as const }))))),
-];
+], labelOf);
 
 test(`a caller learns nothing of a key they may not have, whatever the isolate's map holds, in any of ${ROWS.length} rows of ${KEYS.length} key states (T158, D150, D153)`, { timeout: 7_200_000 }, async () => {
   const differing: string[] = [];

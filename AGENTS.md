@@ -136,7 +136,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
+`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
@@ -213,11 +213,17 @@ unsupported diff select full validation.
   `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
   for tests and local development; deployed app databases use Postgres.
 - `pnpm test:matrices` runs the generated matrices of 0.15's use by name
-  (`packages/vault/test/use.matrix.ts`, `packages/server/test/named.matrix.ts`):
-  every key a caller may not have answered alike, whatever the vault's map
-  holds, each statement slowed. They take about half an hour, so `pnpm test`
-  leaves them out and CI runs them as a job of their own;
-  `pnpm test:matrices:sqlite` runs the vault's on SQLite. Needs Postgres.
+  (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
+  `packages/server/test/named.matrix.ts`): every key a caller may not have
+  answered alike, whatever the vault's map holds, each statement slowed. They
+  take about three quarters of an hour, so `pnpm test` leaves them out;
+  `pnpm test:matrices:sqlite` runs them on SQLite. Needs Postgres. CI runs
+  them in shards, four on Postgres and two on SQLite, each from a database of
+  its own: `COFFRE_TEST_SHARD=<k>/<n>` runs the k-th of n, case i in shard
+  i mod n + 1 (`scripts/matrix-shard.ts`), and `COFFRE_TEST_SHARD_REPORT=<dir>`
+  writes which cases each matrix ran, which `Use matrices` holds to every case
+  run exactly once (`scripts/matrix-coverage.mjs`). A new matrix passes its
+  generated cases through `shardOf`, or that check fails.
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,
   checks TLS trust and hostname verification, and runs `coffre setup` against
