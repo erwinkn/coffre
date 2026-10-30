@@ -351,8 +351,9 @@ The Action uses your job's existing Node, which must be version 20 or newer,
 and runs the CLI that the tag holds: `action/coffre.mjs`, the CLI's sources at
 that commit bundled into one file, which CI holds to them. A workflow that
 pins the Action by commit SHA therefore pins the code that runs: no registry
-answers at run time, and the job's own npm settings (`.npmrc`, a project's
-`devEngines`) play no part. It leaves your toolchain and `PATH` unchanged. It pipes the token to `coffre login --token`,
+answers at run time, the job's own npm settings (`.npmrc`, a project's
+`devEngines`) play no part, and the file loads no module but Node's own, so
+a `node_modules` above it or `NODE_PATH` cannot slip one in. It leaves your toolchain and `PATH` unchanged. It pipes the token to `coffre login --token`,
 never in a command argument, with the CLI in a home of the step's own,
 removed when the step ends: no other job on the runner sees the session. The secrets become environment variables in subsequent steps
 of the same job. Their values, and each line of multiline values, are

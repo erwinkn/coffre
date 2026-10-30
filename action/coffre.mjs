@@ -9469,6 +9469,11 @@ var require_constants = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	};
 }));
 //#endregion
+//#region \0absent:bufferutil
+var require__absent_bufferutil = /* @__PURE__ */ __commonJSMin((() => {
+	throw new Error("bufferutil is not in the Action's CLI");
+}));
+//#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/buffer-util.js
 var require_buffer_util = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	const { EMPTY_BUFFER } = require_constants();
@@ -9557,7 +9562,7 @@ var require_buffer_util = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	};
 	/* istanbul ignore else  */
 	if (!process.env.WS_NO_BUFFER_UTIL) try {
-		const bufferUtil = __require("bufferutil");
+		const bufferUtil = require__absent_bufferutil();
 		module.exports.mask = function(source, mask, output, offset, length) {
 			if (length < 48) _mask(source, mask, output, offset, length);
 			else bufferUtil.mask(source, mask, output, offset, length);
@@ -9956,6 +9961,11 @@ var require_permessage_deflate = /* @__PURE__ */ __commonJSMin(((exports, module
 	}
 }));
 //#endregion
+//#region \0absent:utf-8-validate
+var require__absent_utf_8_validate = /* @__PURE__ */ __commonJSMin((() => {
+	throw new Error("utf-8-validate is not in the Action's CLI");
+}));
+//#endregion
 //#region ../../node_modules/.pnpm/ws@8.21.3/node_modules/ws/lib/validation.js
 var require_validation = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	const { isUtf8 } = __require("buffer");
@@ -10145,7 +10155,7 @@ var require_validation = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		return buf.length < 24 ? _isValidUTF8(buf) : isUtf8(buf);
 	};
 	else if (!process.env.WS_NO_UTF_8_VALIDATE) try {
-		const isValidUTF8 = __require("utf-8-validate");
+		const isValidUTF8 = require__absent_utf_8_validate();
 		module.exports.isValidUTF8 = function(buf) {
 			return buf.length < 32 ? _isValidUTF8(buf) : isValidUTF8(buf);
 		};

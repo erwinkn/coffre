@@ -245,3 +245,27 @@ exit 0
     const as = `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose`;
     assert.deepEqual(service.calls, [`${as} missing app/ci --check`, `${as} export --format github --keys=DATABASE_URL app/ci`]);
 });
+
+test('the Action\'s CLI loads nothing from outside it: a planted bufferutil or utf-8-validate never runs', (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-action-shadow-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    // Where Node would look for them: a node_modules above the Action, and NODE_PATH.
+    mkdirSync(join(dir, 'action'));
+    cpSync(join(root, 'action/coffre.mjs'), join(dir, 'action/coffre.mjs'));
+    const marker = join(dir, 'ran');
+    for (const base of [join(dir, 'node_modules'), join(dir, 'path')]) {
+        for (const name of ['bufferutil', 'utf-8-validate']) {
+            mkdirSync(join(base, name), { recursive: true });
+            writeFileSync(join(base, name, 'index.js'), `require('node:fs').appendFileSync(${JSON.stringify(marker)}, '${name} from ${base}\\n');\n`);
+        }
+    }
+    for (const args of [['help'], ['--url', 'http://127.0.0.1:9', 'export', 'app/ci', '--format', 'shell']]) {
+        spawnSync(process.execPath, [join(dir, 'action/coffre.mjs'), ...args], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { PATH: process.env.PATH, HOME: dir, NODE_PATH: join(dir, 'path') },
+            timeout: 10_000,
+        });
+    }
+    assert.equal(existsSync(marker) ? readFileSync(marker, 'utf8') : '', '');
+});

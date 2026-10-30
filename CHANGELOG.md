@@ -28,7 +28,9 @@
   into one file from the sources at the same commit, with the job's Node:
   a workflow that pins the Action's SHA pins the code that runs, which no
   registry answers for at run time, and the job's `.npmrc` and `devEngines`
-  no longer reach it. Its inputs, checks, messages, masking and throwaway
+  no longer reach it. The file loads no module but Node's own: ws's optional
+  native addons, which it looked for in any `node_modules` above it and on
+  `NODE_PATH`, are left out, and the build fails on any other. Its inputs, checks, messages, masking and throwaway
   home are as they were; npx is no longer needed beside Node 20 or newer.
   Validate's `pnpm check:action` holds the file to the sources, which a
   change to the CLI rebuilds with `pnpm build:action`; it names no version,
