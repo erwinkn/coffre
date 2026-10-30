@@ -1,19 +1,19 @@
 import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
-import { type Access, type CredentialAcceptance, type NamedUseInput, type NamedUseOutcome, type UseBusy, type UseInput, type UseOutcome, type UsedValue } from '@coffre/core/vault';
+import { type Access, type CredentialAcceptance, type NamedUseInput, type NamedUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
 import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
-import { noEdits, objectKey, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys } from './inputs.ts';
+import { noEdits, objectKey, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
 import { entryMac } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
-import { callUse as callPostgres } from './use.postgres.ts';
-import { callUse as callSqlite } from './use.sqlite.ts';
+import { callBatch as batchPostgres, callUse as callPostgres } from './use.postgres.ts';
+import { callBatch as batchSqlite, callUse as callSqlite } from './use.sqlite.ts';
 
 /**
  * 0.15's use (docs/design/0.15-plan.md, PR 5; hot-path-one.md, "A use";
@@ -43,7 +43,7 @@ import { callUse as callSqlite } from './use.sqlite.ts';
  *   in a second call (DecideBeforeLock, DecideEachLock).
  */
 
-export type { UseInput, UseOutcome, UsedValue };
+export type { UseInput, UseManyInput, UseManyOutcome, UseOutcome, UsedValue };
 
 /** A use's request id (`newUseRequestId`, core's: the app makes them too). */
 export { newUseRequestId as newRequestId } from '@coffre/core/vault';
@@ -77,7 +77,15 @@ export type Cover = { number: string; at: number; requestId: string; until: numb
  * The settings of an isolate's uses: how many calls in flight at once, how long a cover holds, and how many requests'
  * names it maps to ids (`UseCache.names`; 0 maps none, each request then reads its ids: the bench's worst case).
  */
-export type UseLimits = { inFlight: number; coverMs: number; names: number };
+export type UseLimits = {
+  inFlight: number; coverMs: number; names: number;
+  /**
+   * The most keys a statement of a batch makes uses of (`useMany`): each statement holds the fence for its keys' uses,
+   * about 0.4 ms a key, and a change or the checkpointer's barrier waits behind it, every use queued behind that (R44).
+   * A batch of more is made in statements of this many, in turn (review r2 of #433): 100 hold the fence about 40 ms.
+   */
+  batch: number;
+};
 
 /**
  * How many uses an isolate has in flight at most, unless set: a pool of
@@ -86,7 +94,7 @@ export type UseLimits = { inFlight: number; coverMs: number; names: number };
  * for Workers; here it is the pool's.
  */
 export function useLimits(connections: number, set: Partial<UseLimits> = {}): UseLimits {
-  return { inFlight: set.inFlight ?? Math.max(1, connections), coverMs: set.coverMs ?? 60_000, names: set.names ?? 10_000 };
+  return { inFlight: set.inFlight ?? Math.max(1, connections), coverMs: set.coverMs ?? 60_000, names: set.names ?? 10_000, batch: Math.max(1, set.batch ?? 100) };
 }
 
 /** An isolate's admission count, seal cache and covers. Bounded: past `max` entries, a map starts over. */
@@ -310,6 +318,107 @@ export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
   return used.outcome;
 }
 
+/**
+ * A request's several keys, one call (T167, B2; formal/Batching.tla; migration 0048, `use_batch`): each key's use made
+ * as `use` makes it, by ids, in the request's order, in one statement (of at most `limits.batch` keys: more are made
+ * in statements of that many, in turn), and decided on what it read (`settle`), under one admission and one deadline. Then, only once every key is allowed on those rows (AllDecidedFirst), one more call
+ * for the keys that would take the principal's lock, which answered `decide` having written and locked nothing: it
+ * takes the lock exclusive before its first key (StrongestFirst), and each key is decided again on what it reads then.
+ * Values leave only once every key is allowed, all opened then (AnswerWhole); otherwise the first key in the request's
+ * order not allowed is the answer, refused or busy, and no key is opened.
+ *
+ *   a CI run's `coffre export` of 30 keys    1 call, 30 entries (2, its keys entering its cap's set)   the 30 values
+ *   the same, a reference among them ended   1 call, the other keys' entries                           that key's refusal
+ *
+ * A refusal on a cover, which a lone use by ids makes again as an entry of its own, is answered as it is (its `number`
+ * null, the app logs it): the batch is refused, and makes no other call.
+ */
+export async function useMany(path: UsePath, input: UseManyInput): Promise<UseManyOutcome> {
+  const { items, ...asked } = input;
+  if (!Array.isArray(items) || items.length === 0) throw new Error('a batch of uses names a key at least');
+  for (const item of items) {
+    checkInput({ ...asked, requestId: item.requestId });
+    checkIds({ credential: asked.credential, secretId: item.secretId, place: item.place, way: asked.way });
+  }
+  if (new Set(items.map((item) => item.requestId)).size !== items.length) throw new Error("a batch's uses each have a request id of their own");
+  const way = wayOf(asked);
+  const each: Asked[] = items.map((item) => ({ ...asked, ...way, secretId: item.secretId, place: item.place, requestId: item.requestId }));
+  const settled: (Used | Allowed | Uncovered | undefined)[] = [];
+  // The objects every key shares, their seals checked once for the batch.
+  const seals = sealedOnce();
+  let pending = each.map((_, index) => index);
+  for (let round = 1; pending.length > 0; round++) {
+    const decided = round > 1;
+    if (round > 2) throw new Error('use_batch answered `decide` to a call of keys it was decided for');
+    if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busy('late');
+    if (path.cache.inFlight >= path.cache.limits.inFlight) return busy('overloaded');
+    const made = pending.map((index) => ready(path, each[index]!, requestOf(each[index]!, undefined), undefined, decided, seals));
+    // Round 2's keys, each decided on round 1's rows, take their principal's lock: exclusive, first. Rows that name two
+    // principals for one credential were written around the log: no lock first, and Postgres ends a wait cycle (40P01).
+    const principals = new Set(decided ? pending.map((index) => (settled[index] as Extract<Used, { again: Ids }>).row.c_principal) : []);
+    const lock = principals.size === 1 ? [...principals][0] ?? null : null;
+    const answered = await raced(path, input.deadline, () => inStatements(path, made.map((one) => one.call), lock, input.deadline), async (rows) => {
+      if (rows.length !== made.length) throw new Error(`use_batch answered ${rows.length} rows for ${made.length} keys`);
+      const forged = new Map<string, Promise<boolean>>();
+      // One check a principal and entry, as every key's row reads the same (`oldWrite`), in turn on the call's connection.
+      const forgedOf = async (row: UseRow, known: CachedSeals | undefined) => {
+        const at = `${row.c_principal}\n${row.m_access}\n${(known?.last ?? lastsOf(row)).mOld}`;
+        if (!forged.has(at)) forged.set(at, forgedPast(path, row, known));
+        return forged.get(at)!;
+      };
+      const out: { row: UseRow; forged: boolean }[] = [];
+      for (const [i, row] of rows.entries()) out.push({ row, forged: await forgedOf(row, row.probed ? undefined : made[i]!.known) });
+      return out;
+    });
+    if ('busy' in answered) return answered;
+    for (const [i, index] of pending.entries()) settled[index] = settle(path, each[index]!, undefined, decided, made[i]!, answered[i]!.row, answered[i]!.forged);
+    // The first key not allowed, in the request's order, answers for the batch, and no other call is made.
+    const first = settled.findIndex((one) => one !== undefined && !('again' in one) && !('allowed' in one));
+    if (first >= 0) return refusedAt(first, settled[first]!);
+    pending = settled.flatMap((one, index) => (one !== undefined && 'again' in one ? [index] : []));
+  }
+  // Every key allowed: each opened, within the deadline.
+  const opened = await Promise.all(settled.map((one) => opening(path, one as Allowed, input.deadline)));
+  const values: Extract<UseManyOutcome, { ok: true }>['values'] = [];
+  for (const [index, one] of opened.entries()) {
+    const outcome = 'outcome' in one ? one.outcome : null;
+    if (outcome === null || !outcome.ok || !('value' in outcome)) return refusedAt(index, one);
+    values.push({ number: outcome.number, covered: outcome.covered, value: outcome.value });
+  }
+  return { ok: true, values };
+}
+
+/** A batch's answer for the key at `index` that was not allowed. */
+function refusedAt(index: number, used: Used | Allowed | Uncovered): Extract<UseManyOutcome, { ok: false }> {
+  if (!('outcome' in used)) throw new Error('a use by ids answered a named state');
+  const { outcome } = used;
+  if ('busy' in outcome) return outcome;
+  if (outcome.ok) throw new Error('a use allowed is no refusal');
+  if (!('code' in outcome)) throw new Error('a use by ids was handed a plain value');
+  return { ok: false, index, code: outcome.code, number: outcome.number };
+}
+
+/**
+ * A round's calls, `limits.batch` keys a statement, in turn, under the round's one admission and deadline: each its own
+ * transaction and fence span, a locked round's each taking the principal's lock exclusive before its first key.
+ */
+async function inStatements(path: UsePath, calls: readonly UseCall[], lock: string | null, deadline: number): Promise<UseRow[]> {
+  const rows: UseRow[] = [];
+  const size = path.cache.limits.batch;
+  for (let start = 0; start < calls.length; start += size) {
+    // Past the deadline, the round is answered `late` (`raced`): no statement more is sent, and the call lets go of its
+    // admission and connection with the one in flight (review r3 of #433). As Postgres's own past-deadline refusal.
+    if (start > 0 && Date.now() >= deadline) throw Object.assign(new Error('a batch past its deadline sends no more statements'), { code: '57014' });
+    rows.push(...await batchOf(path.db)(path.db, calls.slice(start, start + size), lock));
+  }
+  return rows;
+}
+
+/** The engine's `use_batch`. */
+function batchOf(db: Queryable): (db: Queryable, calls: readonly UseCall[], lock: string | null) => Promise<UseRow[]> {
+  return engineOf(db) === 'postgres' ? batchPostgres : batchSqlite;
+}
+
 /** A use's request as the vault makes it: by its ids, and its way in's (`wayOf`). */
 type Ids = { credential: string; secretId: string | null; place: string | null; way?: Way; principal?: string | null };
 
@@ -336,23 +445,43 @@ type Used =
  * they ask, reads no key at all (`use_stands`, W268; StandingFirst): its row is a key the place does not hold, which
  * the vault refuses on that standing.
  */
-async function useOnce(
-  path: UsePath,
-  input: Pick<UseInput, 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & {
-    credential: string | null; secretId: string | null; way?: Way; principal?: string | null;
-  },
-  names?: Names,
-  decided = false,
-): Promise<Used> {
-  const { cache } = path;
+async function useOnce(path: UsePath, input: Asked, names?: Names, decided = false): Promise<Used> {
+  const request = requestOf(input, names);
+  // A deadline the database would refuse (deadline_max) is refused here at no cost; one already past, too.
+  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return { outcome: busy('late'), row: null, checked: null, request };
+  if (path.cache.inFlight >= path.cache.limits.inFlight) return { outcome: busy('overloaded'), row: null, checked: null, request };
+  const made = ready(path, input, request, names, decided);
+  // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
+  // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
+  const answered = await raced(path, input.deadline, () => callOf(path.db)(path.db, made.call), async (row) => ({ row, forged: await forgedPast(path, row, row.probed ? undefined : made.known) }));
+  if ('busy' in answered) return { outcome: answered, row: null, checked: null, request };
+  const used = settle(path, input, names, decided, made, answered.row, answered.forged);
+  // Refused on a cover, by ids: the request is logged as an entry of its own.
+  if ('uncovered' in used) return useOnce(path, input);
+  return 'allowed' in used ? opening(path, used, input.deadline) : used;
+}
+
+/** What a use asks the vault, by ids: the request's, or a named call's ids as its isolate's map holds them (none: null). */
+type Asked = Pick<UseInput, 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & {
+  credential: string | null; secretId: string | null; way?: Way; principal?: string | null;
+};
+
+/** The request a use decides, as the log's replay reads it back. */
+function requestOf(input: Asked, names: Names | undefined): UseRequest {
   const way = input.way ?? 'credential';
-  const request: UseRequest = {
+  return {
     credential: input.credential ?? '', ...(way === 'credential' ? {} : { way }), secretId: input.secretId ?? '', place: input.place, purpose: input.purpose,
     keepsSensitive: input.keepsSensitive === true, at: input.at, ...(names === undefined ? {} : { plain: true as const }),
   };
-  // A deadline the database would refuse (deadline_max) is refused here at no cost; one already past, too.
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return { outcome: busy('late'), row: null, checked: null, request };
-  if (cache.inFlight >= cache.limits.inFlight) return { outcome: busy('overloaded'), row: null, checked: null, request };
+}
+
+/** A use's call made ready, with what deciding on its row takes: its cache's keys, and the seals the call passed. */
+type Ready = { call: UseCall; request: UseRequest; key: string; coverKey: string; known: CachedSeals | undefined; seals?: typeof sealed };
+
+/** A use's call, its cover and its cached seals as the isolate holds them (`useOnce`, before the statement). */
+function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | undefined, decided: boolean, seals?: typeof sealed): Ready {
+  const { cache } = path;
+  const way = input.way ?? 'credential';
   const purpose = purposeCode(request);
   const key = `${input.credential ?? ''}\n${input.secretId ?? ''}\n${input.place ?? ''}`;
   // The seals a probe of these ids read, for the cached form: a use by ids only. A named call always probes, so that
@@ -376,11 +505,20 @@ async function useOnce(
     ...(names === undefined ? {} : { names }),
     ...(decided ? { decided: true as const } : {}),
   };
-  // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
-  // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
-  const answered = await raced(path, call, async (row) => ({ row, forged: await forgedPast(path, row, row.probed ? undefined : known) }));
-  if ('busy' in answered) return { outcome: answered, row: null, checked: null, request };
-  const { row, forged } = answered;
+  return { call, request, key, coverKey, known, ...(seals === undefined ? {} : { seals }) };
+}
+
+/** A use by ids refused on its cover, nothing written of it: made again as an entry of its own, or answered as it is (a batch's). */
+type Uncovered = { uncovered: true; outcome: Extract<UseOutcome, { code: UseCode }> };
+
+/**
+ * The decision on a call's row (`useOnce`, after the statement): a use allowed with its key yet to open (`Allowed`), or
+ * refused on its cover by ids (`Uncovered`), or any other answer.
+ */
+function settle(path: UsePath, input: Asked, names: Names | undefined, decided: boolean, made: Ready, row: UseRow, forged: boolean): Used | Allowed | Uncovered {
+  const { cache } = path;
+  const { request, key, coverKey, known } = made;
+  const way = input.way ?? 'credential';
   if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured') return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
   if (names !== undefined && row.state === 'unknown') return { unknown: true };
   if (names !== undefined && row.state === 'nowhere') return { nowhere: true };
@@ -399,7 +537,7 @@ async function useOnce(
     const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
     const view = viewOf(row, named, row.probed ? undefined : known);
     if (view.changed) cache.seals.delete(key);
-    const checked = checkedOf(path.sealKeys, view.view, named, view.accounted || forged);
+    const checked = checkedOf(path.sealKeys, view.view, named, view.accounted || forged, made.seals);
     const code = decidedOn(checked, named, row) ?? (names !== undefined && readsArchived(row) ? 'archived' : null);
     if (code !== null) return { outcome: { ok: false, code, number: null }, row, checked, request: named };
     return { again: ids, row };
@@ -407,7 +545,7 @@ async function useOnce(
   const view = viewOf(row, request, row.probed ? undefined : known);
   // An input whose row names another object than the cache's seal is of: `stale`, and the next use probes.
   if (view.changed) cache.seals.delete(key);
-  const checked = checkedOf(path.sealKeys, view.view, request, view.accounted || forged);
+  const checked = checkedOf(path.sealKeys, view.view, request, view.accounted || forged, made.seals);
   const code = decidedOn(checked, request, row);
   // The seals a probe read, kept for the next use's cached form: by ids alone. A named call never runs the cached form
   // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12).
@@ -422,7 +560,7 @@ async function useOnce(
     // is answered as it is, in its one call, as a key the place does not hold is, and the app's entry records it: a
     // second call would tell a key held from one never made (T158; Probing.tla, CoveredRefusalAnswered).
     cache.covers.delete(coverKey);
-    if (names === undefined) return useOnce(path, input);
+    if (names === undefined) return { uncovered: true, outcome: { ok: false, code, number: null } };
   }
   if (code !== null) {
     cache.covers.delete(coverKey);
@@ -441,10 +579,18 @@ async function useOnce(
     const expires = checked.credential.row!.expiresAt ?? Infinity;
     cache.keep(cache.covers, coverKey, { number: row.number!, at: input.at, requestId: input.requestId, until: Math.min(input.at + cache.limits.coverMs, expires) });
   }
-  const opened = await open(path, v, row, input.deadline);
+  return { allowed: { view: v, number: row.covered ?? row.number!, covered: row.covered !== null }, row, checked, request };
+}
+
+/** A use allowed, its key yet to open: what `settle` answers of a sealed value, which its caller opens (`opening`). */
+type Allowed = { allowed: { view: UseView; number: string; covered: boolean }; row: UseRow; checked: CheckedView; request: UseRequest };
+
+/** A use's answer once its key is opened: the value, or `late` past its deadline, or `bad_claim` for a key not this value's. */
+async function opening(path: UsePath, { allowed: { view, number, covered }, row, checked, request }: Allowed, deadline: number): Promise<Used> {
+  const opened = await open(path, view, row, deadline);
   if (opened === 'late') return { outcome: busy('late'), row, checked, request };
-  if (opened === 'bad_claim') return { outcome: { ok: false, code: 'bad_claim', number: row.covered ?? row.number }, row, checked, request };
-  return { outcome: { ok: true, number: row.covered ?? row.number!, covered: row.covered !== null, value: opened }, row, checked, request };
+  if (opened === 'bad_claim') return { outcome: { ok: false, code: 'bad_claim', number }, row, checked, request };
+  return { outcome: { ok: true, number, covered, value: opened }, row, checked, request };
 }
 
 /**
@@ -617,27 +763,28 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
 }
 
 /**
- * The call, then `then` on its row, raced against the deadline
- * (WorkerHonoursDeadline): lost, the use is answered `late`, and the call's
- * row, if it ever comes, is dropped. Both count against admission until they
- * settle, holding the call's connection until then: what the vault reads
- * after the statement (`oldWrite`) is within the same place and deadline.
+ * The call, then `then` on its row (or a batch's rows), raced against the
+ * deadline (WorkerHonoursDeadline): lost, the use is answered `late`, and
+ * the call's row, if it ever comes, is dropped. Both count against
+ * admission until they settle, holding the call's connection until then:
+ * what the vault reads after the statement (`oldWrite`) is within the same
+ * place and deadline. A round of a batch is one call, its statements made in turn within it.
  */
-async function raced<T>(path: UsePath, call: UseCall, then: (row: UseRow) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
+async function raced<R, T>(path: UsePath, deadline: number, call: () => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const { cache } = path;
   cache.inFlight += 1;
   const running = (async () => {
     await path.ready?.();
-    return then(await (engineOf(path.db) === 'postgres' ? callPostgres : callSqlite)(path.db, call));
+    return then(await call());
   })().finally(() => {
     cache.inFlight -= 1;
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<'late'>((resolve) => {
-    timer = setTimeout(() => resolve('late'), Math.max(0, call.deadline - Date.now()));
+  const late = new Promise<'late'>((resolve) => {
+    timer = setTimeout(() => resolve('late'), Math.max(0, deadline - Date.now()));
   });
   try {
-    const first = await Promise.race([running, deadline]);
+    const first = await Promise.race([running, late]);
     if (first === 'late') {
       running.catch(() => {});
       return busy('late');
@@ -648,12 +795,20 @@ async function raced<T>(path: UsePath, call: UseCall, then: (row: UseRow) => Pro
     const code = (error as { code?: string }).code ?? (error as { cause?: { code?: string } }).cause?.code;
     // A replay of a call that wrote: its entry stands, and its value never left. Not decided again.
     if (code === '23505') return busy('replayed');
-    // Past its deadline by Postgres's clock, or a lock not had within the hot login's lock_timeout: nothing written.
-    if (code === '57014' || code === '55P03') return busy('late');
+    // Past its deadline by Postgres's clock, or a lock not had within the hot login's lock_timeout: nothing written. A
+    // batch that waited on another for the principal's lock, which Postgres ended (40P01), the same: it never does when
+    // each takes the lock exclusive first (`use_batch`, StrongestFirst), unless rows written around the log name two
+    // principals for one credential.
+    if (code === '57014' || code === '55P03' || code === '40P01') return busy('late');
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The engine's `use_credential`. */
+function callOf(db: Queryable): (db: Queryable, call: UseCall) => Promise<UseRow> {
+  return engineOf(db) === 'postgres' ? callPostgres : callSqlite;
 }
 
 /**
@@ -791,8 +946,8 @@ function grantsOf(row: UseRow): InputGrant[] {
  * row passes could still be one a late 0.14 revoke moved past. Checked with
  * the seals, before any row (StaleFirst).
  */
-function checkedOf(keys: SealKeys, view: UseView, request: UseRequest, accounted: boolean): CheckedView {
-  const checked = checkSeals(keys, view, request);
+function checkedOf(keys: SealKeys, view: UseView, request: UseRequest, accounted: boolean, seals?: typeof sealed): CheckedView {
+  const checked = checkSeals(keys, view, request, seals);
   const principal = checked.principal === null || accounted ? checked.principal : { ...checked.principal, current: false };
   return { ...checked, principal };
 }

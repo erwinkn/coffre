@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **0.15's read of several keys is one vault call and one statement, behind its switch.**
+  A reveal of an environment, `coffre export` and the Action's `keys:`
+  opened each value by a vault call of its own, about 3.5 ms of Workers
+  CPU a key: 119 ms for 30 keys, where 0.14 takes 18. The app now hands
+  the vault every key at once (`useMany`), which makes each key's use as
+  before, in the request's order, in one statement (`use_batch`, migration
+  0048; a statement for each 100 keys past that), and a second only when
+  keys enter the caller's cap's set. Each key
+  keeps its own entry and its place in the cap; the answer is all or
+  nothing, as before and as 0.14's. Thirty keys now cost about 20 ms of
+  CPU and 81 ms of wall time, where they took 119 and 415. A request of
+  one key is unchanged.
 - **`coffre setup` makes the hot path's login, and its Hyperdrive config.**
   `coffre_vault_hot`, the login 0.15's uses run as, under its own lock and
   statement timeouts, is a deployment's third runtime login. Setup makes it

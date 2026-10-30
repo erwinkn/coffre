@@ -2,10 +2,11 @@
 // inputs, each made by its `genesis` change, and the change path as the owner
 // plays it until PR 4 builds it: under the fence, each row and its change
 // entry written together.
+import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
-import type { UseInput } from '@coffre/core/vault';
+import type { UseInput, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
@@ -14,6 +15,7 @@ import { resolveVaultConfig } from '../src/config.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
+import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId } from '../src/use.ts';
 import { ENGINE, rows, run, type TestDatabase } from './database.ts';
@@ -226,3 +228,53 @@ export function ask(w: { credentialId: string }, secretId: string, extra: Partia
   return { credential: w.credentialId, secretId, place: null, purpose: 'run', requestId: newRequestId(), at, deadline: at + 3000, ...extra };
 }
 
+/**
+ * The log replayed (log-replay.ts) and each use's decision held to its live answer, read in number order: `refOf`
+ * knows an object from its genesis, and the heap need not hold the rows so (a VACUUM frees the slots of the rows a
+ * test deleted, and the next insert takes the first, ahead of rows written before it).
+ */
+export async function replayed(answered: ReadonlyMap<string, UseOutcome>): Promise<number> {
+  const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
+    sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
+    sql`SELECT number, at, credential, secret, purpose, place FROM log_uses ORDER BY number`);
+  const refs = new Map<string, Ref>();
+  const entries: Logged[] = [
+    ...changes.map((row) => {
+      const op = JSON.parse(row.payload) as Op & { old?: string };
+      const ref = refOf(op, row.object, refs);
+      return { kind: 'change' as const, number: BigInt(row.number), at: Number(row.at), ref, op: stripped(op), seal: row.seal === null ? null : Buffer.from(row.seal) };
+    }),
+    ...uses.map((row) => ({
+      kind: 'use' as const, number: BigInt(row.number),
+      request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purposeOf(Number(row.purpose))! },
+    })),
+  ].sort((a, b) => (a.number < b.number ? -1 : 1));
+  let checked = 0;
+  const result = replay([SEAL], entries, (entry, code) => {
+    const live = answered.get(entry.number.toString());
+    if (live === undefined) return;
+    // Live may refuse `stale` or `tampered` where the log allows (a row put back or edited, a late 0.14 write), never otherwise.
+    if (!live.ok && 'code' in live && (live.code === 'stale' || live.code === 'tampered')) return;
+    assert.equal(live.ok ? null : (live as { code: string }).code, code, `entry ${entry.number}: live and replay disagree`);
+    checked += 1;
+  });
+  assert.deepEqual(result.faults, []);
+  return checked;
+}
+
+function stripped(op: Op & { old?: string }): Op {
+  const { old: _, ...rest } = op;
+  return rest as Op;
+}
+
+/** The object a change is about: the kind and id its key is of, from a genesis's value or a ref seen before. */
+function refOf(op: Op, key: string, seen: Map<string, Ref>): Ref {
+  if (op.op === 'genesis') {
+    const value = op.value;
+    const ref: Ref = value.kind === 'principal' ? { kind: 'principal', id: value.principal } : value.kind === 'roles' || value.kind === 'policy' ? { kind: value.kind, id: 'instance' } : { kind: value.kind, id: value.id };
+    assert.equal(objectKey(ref), key);
+    seen.set(key, ref);
+  }
+  return seen.get(key)!;
+}

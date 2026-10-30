@@ -11,12 +11,13 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { decrypt } from '@coffre/core/envelope';
-import type { UseOutcome } from '@coffre/core/vault';
+import type { UseManyOutcome, UseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { emptyDatabase, ENGINE, HOT_URL, openTestDatabase, rows, VAULT_URL, type TestDatabase } from './database.ts';
 import { ask, emptyLog, KEK, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { newRequestId } from '../src/use.ts';
 
 const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
 
@@ -80,4 +81,20 @@ test("on Workers, `log: '0.15'` says it answers uses, and a use through the entr
     value.context, Buffer.from(value.key, 'base64'));
   assert.equal(plain.toString(), 'postgres://prod');
   assert.deepEqual(await rows<{ secret: string }>(db.owner, sql`SELECT secret::text FROM log_uses`), [{ secret: id }]);
+});
+
+test('on Workers, the vault says it batches, and a request\'s several keys are one call through the entrypoint (T167)', { skip, timeout: 120_000 }, async () => {
+  const w = await world();
+  const ids = [await w.key('one'), await w.key('two')];
+  await call('startCheckpointer');
+  // Read without the hot path, as every call but a use is: what it says of uses, it says of batches (cloudflare.ts).
+  assert.equal((await call<{ batchUses?: boolean }>('about')).batchUses, true);
+  const { secretId: _, place: __, requestId: ___, ...one } = ask(w, ids[0]!);
+  const outcome = await call<UseManyOutcome>('useMany', { ...one, items: ids.map((secretId) => ({ secretId, place: null, requestId: newRequestId() })) });
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  const opened = outcome.values.map(({ value }) => decrypt(
+    { envelopeVersion: value.envelope.version, ciphertext: Buffer.from(value.envelope.ciphertext, 'base64'), iv: Buffer.from(value.envelope.iv, 'base64'), authTag: Buffer.from(value.envelope.authTag, 'base64') },
+    value.context, Buffer.from(value.key, 'base64'),
+  ).toString());
+  assert.deepEqual(opened, ['one', 'two']);
 });

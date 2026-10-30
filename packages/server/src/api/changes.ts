@@ -38,9 +38,9 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; credentials: boolean; issues: boolean; binds: boolean }>();
+const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; batches: boolean; credentials: boolean; issues: boolean; binds: boolean }>();
 
-async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; credentials: boolean; issues: boolean; binds: boolean }> {
+async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; batches: boolean; credentials: boolean; issues: boolean; binds: boolean }> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
   const about = await vault.about();
@@ -48,6 +48,7 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; cr
   const kept = {
     log,
     uses: log && about.uses === true && vault.use !== undefined,
+    batches: log && about.uses === true && about.batchUses === true && vault.use !== undefined && vault.useMany !== undefined,
     credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
     issues: log && about.issues === true && vault.issueToken !== undefined,
     binds: log && about.binds === true && vault.changeBindings !== undefined,
@@ -83,6 +84,11 @@ export async function vaultIssuesTokens(vault: Vault): Promise<boolean> {
 /** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */
 export async function uses015(vault: Vault): Promise<boolean> {
   return (await about015(vault)).uses;
+}
+
+/** Whether the vault answers a request's several keys in one call (`useMany`, T167): one of this release does. */
+export async function usesMany(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).batches;
 }
 
 /**

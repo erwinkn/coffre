@@ -14,6 +14,7 @@ import { objectKey, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { ask, change, DAY, emptyLog, genesis, isolate, ROOT, SEAL, seal, useDatabases, world } from './use-world.ts';
+import { newRequestId } from '../src/use.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -170,6 +171,20 @@ test("a credential's id named as a connection's is none: the way in is the entry
   const id = await w.key();
   assert.equal(code(heard(await (await isolate()).use({ ...ask(w, id), credential: w.credentialId, way: 'connection' }))), 'credential');
   assert.equal(await replayAgrees(), 1);
+});
+
+test('a batch through an MCP connection: one call, an entry a key naming the connection, every value (T167)', async () => {
+  const w = await world({ caller: 'person' });
+  const ids = [await w.key('one'), await w.key('two')];
+  const k = await connection(w);
+  const { secretId: _, place: __, requestId: ___, ...one } = { ...ask(w, ids[0]!, { purpose: 'reveal' }), credential: k.id, way: 'connection' as const };
+  const outcome = await (await isolate()).vault.useMany!({ ...one, items: ids.map((secretId) => ({ secretId, place: null, requestId: newRequestId() })) });
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  for (const { number, covered, value } of outcome.values) {
+    heard({ ok: true, number, covered, value });
+    assert.deepEqual(await entryOf(number), { credential: k.id, way: 'connection' });
+  }
+  assert.equal(await replayAgrees(), 2);
 });
 
 // --- a Cloudflare binding ---------------------------------------------------------------------------

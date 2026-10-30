@@ -20,7 +20,7 @@ import {
 import { AccessChanged, type Recalled } from '../accesses.ts';
 import type { WayIn } from './context.ts';
 import type { AuditEntry } from '../db/audit.ts';
-import { uses015 } from './changes.ts';
+import { uses015, usesMany } from './changes.ts';
 import { ApiError, UNAVAILABLE, UnloggedRefusal, vaultRefused } from './errors.ts';
 
 /**
@@ -175,27 +175,31 @@ export type OpenItem = {
   holder?: string; holderAt?: { projectId: string; environmentId: string };
 };
 
-/** How many uses one request has in flight at once: a whole environment's read takes turns, and leaves the isolate's admission room for others (R44). */
+/** How many uses one request has in flight at once, with a vault that has no `useMany`: a whole environment's read takes turns, and leaves the isolate's admission room for others (R44). */
 export const USES_AT_ONCE = 4;
 
 /**
- * 0.15's read (docs/design/0.15-plan.md, PR 5b): one use per value, each
- * `use_credential` call logged as its request and decided on the rows as
- * the call reads them (R53). What goes back is the version the app read,
- * opened from the use's envelope: a use that read another answers 409, so
- * that the rest of the answer (its version, its natures) is of the same.
- * All or nothing: the first refusal refuses the request, and no value of
- * it goes back. A use the vault could not decide (late, over its isolate's
- * calls in flight) answers 503 with `Retry-After` (R44).
+ * 0.15's read (docs/design/0.15-plan.md, PR 5b; T167): each value a use,
+ * logged as its request and decided on the rows as its statement reads them
+ * (R53). Several values are one vault call, `useMany`, one statement for
+ * them all (two, when keys enter the caller's cap's set); a vault without
+ * it, mid-deploy, makes them one call a value, four at a time. What goes
+ * back is the version the app read, opened from the use's envelope: a use
+ * that read another answers 409, so that the rest of the answer (its
+ * version, its natures) is of the same. All or nothing, as 0.14's unwrap
+ * answers: the first refusal, in the request's order, refuses the request,
+ * and no value of it goes back. A use the vault could not decide (late,
+ * over its isolate's calls in flight) answers 503 with `Retry-After` (R44).
  *
- *   Ada's `coffre run` of 9 keys      9 uses, 4 at a time     9 entries, the values
- *   her grant revoked after the 4th   the 5th refused         403, nothing handed back
+ *   Ada's `coffre run` of 9 keys              1 vault call, 1 statement   9 entries, the values
+ *   the same, a reference among them ended    1 vault call                403, nothing handed back
  */
 export async function useValues(
   vault: Vault,
   asked: WayIn & { purpose: Purpose; keepsSensitive: boolean },
   items: readonly OpenItem[],
 ): Promise<string[]> {
+  if (items.length > 1 && (await usesMany(vault))) return usedTogether(vault, asked, items);
   const values: string[] = [];
   let failed: { error: unknown } | null = null;
   let next = 0;
@@ -216,20 +220,8 @@ export async function useValues(
           at,
           deadline: at + USE_DEADLINE_MS,
         });
-        // Decided before anything was written (`number` null): the app's entry records the request (`recorded`).
-        if (!outcome.ok) {
-          throw 'code' in outcome && outcome.number === null && !ASKED_AGAIN.has(outcome.code)
-            ? new UnloggedRefusal(refusedUse(outcome), {
-              // The key the use named, where it is held: a reference's own, not its source's (review r4 of D153).
-              ...(item.holderAt ?? { projectId: item.secret.projectId, environmentId: item.secret.environmentId }), secretId: item.holder ?? item.secret.secretId,
-              metadata: { purpose: asked.purpose },
-            })
-            : refusedUse(outcome);
-        }
-        // Another version than the app read: what the rest of the answer says (its version, nature, what it left out)
-        // would not be of this value. Asked again, the request reads both anew.
-        if (outcome.value.versionId !== item.secretVersionId) throw changed();
-        values[i] = openedValue(outcome.value);
+        if (!outcome.ok) throw refusedItem(outcome, item, asked.purpose);
+        values[i] = valueOf(outcome.value, item);
       } catch (error) {
         failed ??= { error };
       }
@@ -238,6 +230,42 @@ export async function useValues(
   await Promise.all(Array.from({ length: Math.min(USES_AT_ONCE, items.length) }, turn));
   if (failed !== null) throw (failed as { error: unknown }).error;
   return values;
+}
+
+/** A request's several values as one vault call (`Vault.useMany`, T167; formal/Batching.tla): every one, or the first refused. */
+async function usedTogether(vault: Vault, asked: WayIn & { purpose: Purpose; keepsSensitive: boolean }, items: readonly OpenItem[]): Promise<string[]> {
+  const at = Date.now();
+  const outcome = await vault.useMany!({
+    credential: asked.credential,
+    ...(asked.way === undefined ? {} : { way: asked.way }),
+    items: items.map((item) => ({ secretId: item.holder ?? item.secret.secretId, place: item.through ?? null, requestId: newUseRequestId() })),
+    purpose: asked.purpose,
+    ...(asked.keepsSensitive ? { keepsSensitive: true } : {}),
+    at,
+    deadline: at + USE_DEADLINE_MS,
+  });
+  if (!outcome.ok) throw 'busy' in outcome ? refusedUse(outcome) : refusedItem(outcome, items[outcome.index]!, asked.purpose);
+  return outcome.values.map(({ value }, i) => valueOf(value, items[i]!));
+}
+
+/** A use of `item` refused, as the read answers it: decided before anything was written (`number` null), the app's entry records the request (`recorded`). */
+function refusedItem(outcome: Exclude<UseOutcome, { ok: true }>, item: OpenItem, purpose: Purpose): ApiError {
+  return 'code' in outcome && outcome.number === null && !ASKED_AGAIN.has(outcome.code)
+    ? new UnloggedRefusal(refusedUse(outcome), {
+      // The key the use named, where it is held: a reference's own, not its source's (review r4 of D153).
+      ...(item.holderAt ?? { projectId: item.secret.projectId, environmentId: item.secret.environmentId }), secretId: item.holder ?? item.secret.secretId,
+      metadata: { purpose },
+    })
+    : refusedUse(outcome);
+}
+
+/**
+ * The value a use opened for `item`. Another version than the app read: what the rest of the answer says (its version,
+ * nature, what it left out) would not be of this value. Asked again, the request reads both anew.
+ */
+function valueOf(value: UsedValue, item: OpenItem): string {
+  if (value.versionId !== item.secretVersionId) throw changed();
+  return openedValue(value);
 }
 
 /** Refusals that are no one's to log: a credential ended (401, its own check), a read to ask again, no cap logged yet. */

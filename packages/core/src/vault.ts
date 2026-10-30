@@ -204,6 +204,12 @@ export interface Vault {
      */
     uses?: true;
     /**
+     * `true` when the vault also answers a request's several keys in one call (`useMany`; T167). Said here, as a
+     * Worker's stub answers any method's name: a vault older than this app, mid-deploy, says nothing, and the app makes
+     * a use a key. Absent otherwise.
+     */
+    batchUses?: true;
+    /**
      * `true` when the vault makes sign-ins through trust bindings and revokes
      * credentials itself (`signIn`, `revokeCredential`; T149): its log is
      * 0.15's. Said here, as a Worker's stub answers any method's name.
@@ -253,6 +259,14 @@ export interface Vault {
    * value, it decides on the caller's standing there, logging nothing. Absent from a vault without 0.15's uses.
    */
   useNamed?(input: NamedUseInput): Promise<NamedUseOutcome>;
+
+  /**
+   * A request's several keys as one call (T167, B2; formal/Batching.tla): each key's use made as `use` makes it, in the
+   * request's order, in one statement, and decided on what it read; a second call, only once every key is allowed, for
+   * those that take the principal's lock. All or nothing: every value, or the first key refused, or busy. Absent from a
+   * vault without 0.15's uses (`about().batchUses` says whether it has it).
+   */
+  useMany?(input: UseManyInput): Promise<UseManyOutcome>;
 
   /**
    * 0.15's log (docs/design/0.15-plan.md, "As built: PR 4b"): the changes
@@ -1358,6 +1372,24 @@ export type UseInput = {
   /** When it must have answered: at most 3 s after `at` (R53). */
   deadline: number;
 };
+
+/**
+ * A request's several keys as the app asks for them (`Vault.useMany`): what `UseInput` names but its key, once, and
+ * each key with the place it is read through and its own request id, which its entry takes.
+ */
+export type UseManyInput = Omit<UseInput, 'secretId' | 'place' | 'requestId'> & {
+  items: readonly { secretId: string; place: string | null; requestId: string }[];
+};
+
+/**
+ * A request's several keys' answer, all or nothing: every value, in the request's order, each with its entry (or the
+ * one it rode on); or the first key refused, by its index in the request, logged as its request was (`number`) or not
+ * (null: decided before anything of it was written, as a use's refusal by ids is); or busy, nothing decided.
+ */
+export type UseManyOutcome =
+  | { ok: true; values: { number: string; covered: boolean; value: UsedValue }[] }
+  | { ok: false; index: number; code: UseCode; number: string | null }
+  | { ok: false; busy: UseBusy; retryAfter: number };
 
 /** The way in a use came through that has no credentials row (`UseInput.way`): each a sealed object of the log but Access. */
 export type UseWay = 'connection' | 'binding' | 'access';
