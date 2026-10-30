@@ -210,6 +210,23 @@
   checkpointer keeps, so the first use needs nothing made. It adds only
   partitions, which the previous release never touches, and costs a use
   nothing. SQLite does not partition.
+- **0.15's uses reach every way in, behind its switch: an MCP connection,
+  a Cloudflare binding and Cloudflare Access.** Until now a request with no
+  credentials row read as 0.14's do, under 0.14's head, then checked its
+  way in again. Now each value it opens is one `use_credential` call, as a
+  credential's is, deciding on the way in itself: an MCP client's
+  connection, now a sealed object of the log whose make and every end
+  (disconnect, a replayed token, a step-up, a removal) is a change; a
+  Worker's Cloudflare binding, as its service's workload credential; and,
+  behind Access, the account alone, a person's or a service token's. The
+  entry names its way in in the purpose's spare bits, and nothing is read
+  after the use. A lone 0.14 `token.unbind` of a binding whose row stands
+  no longer refuses its Cloudflare calls: a binding ends by its change in
+  the log, as its sign-ins already read it. Migration 0046 adds
+  `mcp_connections.seal`, and the cutover seals the connections 0.14 left.
+  On Workers, `vault(env => ({ …, log: '0.15', checkpointer: env.CHECKPOINTER }))`
+  turns 0.15's log on, its changes sealed by the checkpointer's object.
+  `docs/design/0.15-plan.md`, "As built: T147, T136"; `formal/WaysIn.tla`.
 - **A read of one key answers every refusal alike; 0.15's use by name, at
   a fixed cost, behind its switch.** A key a request names that it may not
   have, whatever the reason (no standing, none to read, no such key, a

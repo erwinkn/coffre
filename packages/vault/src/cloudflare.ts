@@ -40,9 +40,9 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import type { Witness } from './checkpointer.ts';
-import { checkpointerObject } from './checkpointer-workers.ts';
+import { checkpointerObject, durableHeldOutside, durableSealThrough, type ObjectNamespace } from './checkpointer-workers.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
-import { openVault, prepareVault, type PreparedVault } from './vault.ts';
+import { openVault, prepareVault, type PreparedVault, type VaultOptions } from './vault.ts';
 
 export type { Vault, VaultConfig };
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -56,12 +56,23 @@ export * from './index.ts';
  * own whose login is `coffre_vault_hot`; and `uses`, how many uses an
  * isolate has in flight at most (by default `connections`, the share of
  * that config's pool an isolate may hold: T112 measures it).
+ *
+ * `log`, the switch itself (`VaultOptions.log`), until PR 10 flips it:
+ * `'0.15'` keeps 0.15's log, whose changes answer once the checkpointer's
+ * Durable Object, `checkpointer` (its namespace, `CoffreCheckpointer`
+ * bound beside the vault), has sealed them (R51), and whose verifier holds
+ * every walk to the pairs that object remembers.
+ *
+ *   vault((env: Env) => ({ database: postgres(env.HYPERDRIVE), hotDatabase: postgres(env.HOT_HYPERDRIVE),
+ *     log: '0.15', checkpointer: env.CHECKPOINTER, kek: …, owners: […] }))
  */
 export type WorkersVaultConfig = VaultConfig & {
   database: PostgresDatabase;
   witnesses?: readonly Witness[];
   hotDatabase?: PostgresDatabase;
   uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number };
+  log?: '0.14' | '0.15';
+  checkpointer?: ObjectNamespace;
 };
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
@@ -123,7 +134,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const prepared = await prepareVault(resolveVaultConfig(config), config.uses === undefined ? {} : { uses: config.uses });
+      const prepared = await prepareVault(resolveVaultConfig(config), { ...(config.uses === undefined ? {} : { uses: config.uses }), ...logOf(config) });
       // Calls that raced here each made one; the first kept serves them all from now on.
       entry = ready.get(env) ?? { database: config.database, ...(config.hotDatabase === undefined ? {} : { hotDatabase: config.hotDatabase }), prepared };
       ready.set(env, entry);
@@ -166,6 +177,13 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   fetch() {
     return new Response('not found', { status: 404 });
   }
+}
+
+/** The log a configuration keeps (`WorkersVaultConfig.log`): 0.15's seals and remembers through its checkpointer's object. */
+function logOf(config: WorkersVaultConfig): Pick<VaultOptions, 'log' | 'sealThrough' | 'heldOutside'> {
+  if (config.log !== '0.15') return {};
+  if (config.checkpointer === undefined) throw new Error("0.15's log answers a change once its checkpointer has sealed it: set checkpointer in vault(…), its Durable Object's namespace");
+  return { log: '0.15', sealThrough: durableSealThrough(config.checkpointer), heldOutside: durableHeldOutside(config.checkpointer) };
 }
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */

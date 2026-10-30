@@ -1,7 +1,7 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS, type BindingColumns, type CredentialColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
@@ -856,7 +856,7 @@ export async function loggedRows(db: Queryable): Promise<{
  * The kinds whose objects the change path reads: the vault's own, an
  * environment's, a key's (its reference's end), the roles' and the policy's.
  */
-export type ReadKind = Exclude<Kind, 'credential' | 'binding'>;
+export type ReadKind = Exclude<Kind, 'credential' | 'connection' | 'binding'>;
 
 /** `archived`: a key's rows read even while it is archived, as its unarchive would make them (an end's check, T134). */
 export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, { archived = false } = {}): Promise<HeldObject> {
@@ -1095,6 +1095,8 @@ const KNOWN_OPS: Record<Kind, readonly string[]> = {
   roles: ['role.define'],
   policy: ['bulk.limit'],
   credential: [],
+  // The app's changes alone make and end a connection (`app_change`): the change path seals 0.14's at the cutover.
+  connection: [],
   // The vault's own statements change a binding (`change_bindings`), never the change path.
   binding: [],
   secret: ['secret.write', 'secret.delete'],
@@ -1102,7 +1104,7 @@ const KNOWN_OPS: Record<Kind, readonly string[]> = {
 
 /** `change_input`, step for step, on SQLite. */
 async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint | null> {
-  const { logChanges, logUses, vaultMembers, environments, projects, logConfig, credentials, serviceBindings, secrets, secretReferences } = tablesOf(tx);
+  const { logChanges, logUses, vaultMembers, environments, projects, logConfig, credentials, mcpConnections, serviceBindings, secrets, secretReferences } = tablesOf(tx);
   const { ref } = call;
   const target = objectKey(ref);
   const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, call.requestId));
@@ -1136,6 +1138,9 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
     case 'credential':
       done = changedRows(await tx.update(credentials).set({ seal: call.seal }).where(and(eq(credentials.id, ref.id), from(credentials.seal))))
         || changedRows(await tx.update(serviceBindings).set({ seal: call.seal }).where(and(eq(serviceBindings.id, ref.id), from(serviceBindings.seal))));
+      break;
+    case 'connection':
+      done = changedRows(await tx.update(mcpConnections).set({ seal: call.seal }).where(and(eq(mcpConnections.id, ref.id), from(mcpConnections.seal))));
       break;
     case 'secret': {
       if (value === null) {
@@ -1216,8 +1221,12 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
 
 /** The seal on an object's row, null if it has none or no row (the credentials' table first: a binding's id never meets a token's). */
 async function heldSeal(db: Queryable, ref: Ref): Promise<Buffer | null> {
-  const { credentials, serviceBindings, secrets } = tablesOf(db);
+  const { credentials, mcpConnections, serviceBindings, secrets } = tablesOf(db);
   switch (ref.kind) {
+    case 'connection': {
+      const [row] = await db.select({ seal: mcpConnections.seal }).from(mcpConnections).where(eq(mcpConnections.id, ref.id));
+      return row?.seal ?? null;
+    }
     case 'credential': {
       const [token] = await db.select({ seal: credentials.seal }).from(credentials).where(eq(credentials.id, ref.id));
       if (token !== undefined) return token.seal ?? null;
@@ -1372,6 +1381,22 @@ export async function credentialsAt(db: Queryable, ids: readonly string[]): Prom
     // As `issuingCredential` reads one (store.ts): its end the earlier of its expiry and its hard end.
     const ends = [Number(row.expires_at), ...(row.not_after == null ? [] : [Number(row.not_after)])];
     const columns: CredentialColumns = { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: Boolean(row.revoked), expiresAt: Math.min(...ends), generation: Number(row.generation) };
+    return [row.id, { columns, seal: bytes(row.seal), logged: Boolean(row.logged) }];
+  }));
+}
+
+/** An MCP connection the app vouched for, as its row is now (`cutover_connections`, T147): its object's columns, its seal, and whether the log has a change of it. */
+export type ConnectionRead = { columns: ConnectionColumns; seal: Buffer | null; logged: boolean };
+
+export async function connectionsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, ConnectionRead>> {
+  if (ids.length === 0) return new Map();
+  type Read = { id: string; principal: string; generation: number; expires_at: string | number; revoked: boolean | number; seal: Buffer | Uint8Array | null; logged: boolean | number };
+  const rows = engineOf(db) === 'postgres'
+    ? await rowsOf<Read>(db, sql`SELECT * FROM cutover_connections(${sql.param([...ids])}::uuid[])`)
+    : await rowsOf<Read>(db, sql`SELECT k.id, k.principal, k.generation, k.expires_at, k.revoked_at IS NOT NULL AS revoked, k.seal,
+        0 AS logged FROM mcp_connections k WHERE k.id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`);
+  return new Map(rows.map((row) => {
+    const columns: ConnectionColumns = { id: row.id, principal: row.principal, generation: Number(row.generation), expiresAt: Number(row.expires_at), revoked: Boolean(row.revoked) };
     return [row.id, { columns, seal: bytes(row.seal), logged: Boolean(row.logged) }];
   }));
 }

@@ -4,7 +4,7 @@ import { useOnly } from '@coffre/core/access';
 
 import { environmentSecrets, fileSecrets, liveEnvironment, MAX_PARENTS, parentsOf, resolvePath, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { asking, audited, denied, need, Refusal, withRefusals, type ApiContext } from './context.ts';
+import { asking, audited, denied, need, Refusal, wayIn, withRefusals, type ApiContext } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
@@ -107,7 +107,7 @@ export async function forkEnvironment(
     const forking = rowWritten(protecting, id, slug);
     const copies = readable.items.filter((item) => !plan.has(item.key));
     // It keeps a sensitive value sensitive in its copy (below), and says so: the vault opens one to copy for no app that does not.
-    const opened = await openValues(forking.vault, { ...asking(forking, randomUUID()), purpose: 'copy', keepsSensitive: true, credentialRow: forking.credentialId }, copies);
+    const opened = await openValues(forking.vault, { ...asking(forking, randomUUID()), purpose: 'copy', keepsSensitive: true, way: wayIn(forking) }, copies);
     if (!opened.ok) throw vaultRefused(opened.refusal);
     // A null-prototype record: a key named __proto__ is a key like any other.
     const patch: Record<string, SecretValue> = Object.create(null);

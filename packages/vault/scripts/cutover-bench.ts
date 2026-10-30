@@ -101,7 +101,7 @@ const askedMs = ms(started);
 const [head] = await owner.unsafe<{ next_seq: string; head_hash: Buffer }[]>('SELECT next_seq, head_hash FROM audit_chain_head');
 const to = { seq: (BigInt(head!.next_seq) - 1n).toString(), hash: Buffer.from(head!.head_hash).toString('hex') };
 started = process.hrtime.bigint();
-const outcome = await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], deleted: [] });
+const outcome = await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], connections: [], deleted: [] });
 const cutMs = ms(started);
 if (!outcome.ok) throw new Error(JSON.stringify(outcome));
 const [{ sealed }] = await owner.unsafe<{ sealed: string }[]>("SELECT count(*) AS sealed FROM log_changes WHERE payload::jsonb ->> 'op' = 'genesis'");

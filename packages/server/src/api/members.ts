@@ -29,6 +29,7 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
 import {
+  priorConnections,
   revokePriorMembership,
   revokeCredentialsWhere,
   liveConnections,
@@ -47,7 +48,7 @@ import {
 import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf, projectsReached } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, retrying, revokes } from './changes.ts';
+import { AppChanges, connectionRevokes, retrying, revokes } from './changes.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
@@ -748,10 +749,14 @@ export async function putMember(
  */
 async function endPriorMembership(ctx: ApiContext, member: MemberRef, generation: number): Promise<void> {
   await retrying(async () => {
-    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))));
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => [
+      ...revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))),
+      ...connectionRevokes(await priorConnections(ctx.db, ctx.chainKey, member, generation, new Date())),
+    ]);
     await audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
       const ended = await revokePriorMembership(tx, ctx.chainKey, member, generation, ctx.caller.principal.id);
-      changes?.expectRevoked(ended);
+      changes?.expectRevoked(ended.credentials);
+      changes?.expectRevoked(ended.connections, 'connection');
     }, changes);
   });
 }
@@ -811,8 +816,12 @@ export async function removeMember(
     }
     const { generation } = result;
     return retrying(async () => {
-    // The credentials it ends, each a change of 0.15's log: as read now, and again under the head, the same.
-    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))));
+    // The credentials and connected apps it ends, each a change of 0.15's log (T147 for apps): as read now, and again
+    // under the head, the same.
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => [
+      ...revokes(await liveCredentialsWhere(ctx.db, ctx.chainKey, priorCredentials(member, generation, new Date()))),
+      ...(member.type === 'user' ? connectionRevokes((await liveConnections(ctx.db, ctx.chainKey, principal, new Date())).filter((row) => row.generation < generation)) : []),
+    ]);
     // Following through on the vault's removal, made under its head: no fence (`audited`), the ways in end whatever came since.
     return audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
       const now = new Date();
@@ -832,6 +841,7 @@ export async function removeMember(
       if (liveApps.length > 0) {
         await updateAuth(tx, ctx.chainKey, mcpConnections, { id: ids(liveApps) }, { revokedAt: now, revokedBy });
       }
+      changes?.expectRevoked(ids(liveApps), 'connection');
 
       return {
         grants: result.revoked.length,

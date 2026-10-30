@@ -349,7 +349,7 @@ async function cutOverAtOpen(vault: Vault, db: Database): Promise<void> {
   const { auditChainHead } = tablesOf(db);
   const [head] = await db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead);
   const to = { seq: (BigInt(head!.nextSeq) - 1n).toString(), hash: Buffer.from(head!.headHash).toString('hex') };
-  await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], deleted: [] });
+  await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], connections: [], deleted: [] });
 }
 
 /** A handler context for one principal, loaded the way a request loads it. */

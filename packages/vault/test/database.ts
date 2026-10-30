@@ -96,7 +96,7 @@ export async function cutOver(vault: Pick<Vault, 'cutover'>, db: Queryable): Pro
   assert.ok(asked.ok, `the cutover is refused: ${asked.ok ? '' : asked.why}`);
   const [head] = await rows<{ next_seq: string | number; head_hash: Buffer | Uint8Array }>(db, sql`SELECT next_seq, head_hash FROM audit_chain_head`);
   const to = { seq: (BigInt(head!.next_seq) - 1n).toString(), hash: Buffer.from(head!.head_hash).toString('hex') };
-  const outcome = await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], deleted: [] });
+  const outcome = await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], connections: [], deleted: [] });
   assert.ok(outcome.ok && outcome.done, `the cutover is refused: ${outcome.ok ? '' : outcome.why}`);
 }
 

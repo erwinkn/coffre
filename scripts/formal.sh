@@ -365,6 +365,16 @@ REMOVALS=(
   "LifecycleCompromised AudienceSealed SignInsOnValidTokens"
   # A binding of fetched keys, whose tokens the app verifies: the vault still takes only one it sealed.
   "LifecycleFetched BindingSealed SignInsOnValidTokens"
+  # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
+  # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
+  "WaysInRevoke WayReadInUse EndOrdersUses"
+  "WaysInRevoke RevokeTakesFence EndOrdersUses"
+  "WaysInUnbind WayReadInUse EndOrdersUses"
+  "WaysInUnbind UnbindTakesFence EndOrdersUses"
+  "WaysInRemove UseChecksGeneration AllowedAtCurrentGeneration"
+  "WaysInRemove AccountReadInUse RemovalOrdersUses"
+  "WaysInRemove RemovalTakesFence RemovalOrdersUses"
+  "WaysInForge SealChecked AllowedOnSealed"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.

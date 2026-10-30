@@ -226,6 +226,8 @@ test('an Owner is whoever the vault says, in one call', async () => {
     assert.equal(result.registered, true);
     assert.equal(result.sourceIp, '203.0.113.10');
     assert.deepEqual(result.principal, root);
+    // Access signed it in, with no row of coffre's: a use's way in is its account (T147).
+    assert.equal(result.access, true);
   }
 });
 
@@ -270,7 +272,7 @@ test('an unregistered identity is marked for the closed-door boundary', async ()
     requestId: 'unregistered-request',
     sourceIp: null,
     credentialId: null,
-    credentialExpiresAt: null, provenance: null, personalToken: null, handlePlaces: null, via: null, workload: null,
+    credentialExpiresAt: null, provenance: null, personalToken: null, handlePlaces: null, via: null, workload: null, access: true,
   });
 });
 

@@ -43,6 +43,11 @@ export type AuthenticatedIdentity = {
    * anything else.
    */
   bindingId?: string | null;
+  /**
+   * Signed in by Cloudflare Access, a browser or an Access service token,
+   * with no row of coffre's: a use's way in is its account (T147).
+   */
+  access?: true;
 };
 
 type AuthenticationRuntime = Pick<
@@ -276,6 +281,8 @@ export async function authenticateRequest(
       handlePlaces,
       via: null,
       workload: null,
+      // Access's verifier signed it in: the deployment's auth is Cloudflare Access.
+      ...(runtime.auth?.mode === 'cloudflare' ? { access: true as const } : {}),
     };
   } catch (error) {
     // Logged, so a bug of ours is not read as an outage of the vault or the database.

@@ -8,8 +8,8 @@ import { genesisCall, payloadOf, type ChangeKeys } from './changes.ts';
 import type { BulkLimit } from './config.ts';
 import { canonical, objectKey, sealOf, type Input, type Ref, type RolesInput } from './inputs.ts';
 import { CUTOVER_ACTOR, CUTOVER_OBJECT, entryMac } from './log-entry.ts';
-import { bindingObject, credentialObject, environmentObject, principalObject, secretObject } from './objects.ts';
-import type { BindingRead, ChangeCall, CredentialRead, EnvironmentRead, Member, ProjectRow, SecretRead } from './store.ts';
+import { bindingObject, connectionObject, credentialObject, environmentObject, principalObject, secretObject } from './objects.ts';
+import type { BindingRead, ChangeCall, ConnectionRead, CredentialRead, EnvironmentRead, Member, ProjectRow, SecretRead } from './store.ts';
 
 export { CUTOVER_ACTOR, CUTOVER_OBJECT };
 
@@ -40,9 +40,10 @@ export { CUTOVER_ACTOR, CUTOVER_OBJECT };
  *   unarchive has something to restore. A reference row no authentic
  *   `reference.create` made is no object; one an authentic `reference.end`
  *   ended has its row's end written first (0029);
- * - **a credential** or **a binding** the app vouched for under its key
- *   (`CutoverInput`), as it read it (VouchedHeld): its row must still be
- *   that, or the cutover asks the app again (`Moved`).
+ * - **a credential**, **a binding** or **an MCP connection** the app
+ *   vouched for under its key (`CutoverInput`), as it read it
+ *   (VouchedHeld): its row must still be that, or the cutover asks the app
+ *   again (`Moved`).
  *
  * A row 0.14 would not accept gets no genesis: its object stays unsealed,
  * every use of it `stale`, never sealed as a writer left it.
@@ -93,6 +94,7 @@ export type CutoverFacts = {
   input: CutoverInput;
   credentials: ReadonlyMap<string, CredentialRead>;
   bindings: ReadonlyMap<string, BindingRead>;
+  connections: ReadonlyMap<string, ConnectionRead>;
 };
 
 /** One object's genesis: its object, the 0.14 entry it accounts for, and, for an archived key, its delete after. */
@@ -214,6 +216,14 @@ export function planCutover(facts: CutoverFacts): CutoverPlan {
     if (read.logged || read.seal !== null || facts.logged.has(objectKey(ref))) continue;
     if (canonical(read.columns) !== canonical(vouched)) throw new Moved(`the credential ${vouched.id}'s row moved since the app vouched for it`);
     plan.genesis.push({ ref, object: credentialObject(read.columns) });
+  }
+  for (const vouched of facts.input.connections) {
+    const ref: Ref = { kind: 'connection', id: vouched.id };
+    const read = facts.connections.get(vouched.id);
+    if (read === undefined) throw new Moved(`the connection ${vouched.id} the app vouched for has no row now`);
+    if (read.logged || read.seal !== null || facts.logged.has(objectKey(ref))) continue;
+    if (canonical(read.columns) !== canonical(vouched) || read.columns.revoked) throw new Moved(`the connection ${vouched.id}'s row moved since the app vouched for it`);
+    plan.genesis.push({ ref, object: connectionObject(read.columns) });
   }
   for (const vouched of facts.input.bindings) {
     const ref: Ref = { kind: 'binding', id: vouched.id };

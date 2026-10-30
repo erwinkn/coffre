@@ -3255,6 +3255,7 @@ class VaultService implements Vault {
       input,
       credentials: await store.credentialsAt(tx, input.credentials.map((columns) => columns.id)),
       bindings: await store.bindingsAt(tx, input.bindings.map((columns) => columns.id)),
+      connections: await store.connectionsAt(tx, input.connections.map((columns) => columns.id)),
     });
     // Reported as a change refused on them would be (`#notLogged`), once: a member's by their check (`#integrity`).
     for (const { ref, fault } of plan.skipped) if (ref.kind !== 'principal') this.#report(reports, null, fault === 'tampered' ? 'mac' : 'stale', `log.${ref.kind}:${ref.id}`);

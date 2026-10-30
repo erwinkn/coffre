@@ -7,7 +7,7 @@ import { hashToken } from '@coffre/core/identity';
 import { keeps015 } from './api/changes.ts';
 import type { ResolvedConfig } from './config.ts';
 import { appVerifier, verifyAppEntries, walkChain, type AppKeys } from './db/audit.ts';
-import { appEntries, liveBindings, liveCredentials } from './db/cutover.ts';
+import { appEntries, liveBindings, liveConnections, liveCredentials } from './db/cutover.ts';
 import { logged } from './logged.ts';
 
 /**
@@ -143,7 +143,7 @@ export async function vouched(db: Queryable, keys: AppKeys, from: ChainMark, pub
   const authentic = (entry: StoredEntry) => verifyAppEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash }, verifier).ok;
   // Each entry of the app's that ends or deletes something, by its MAC: one that fails is damaged history, which refuses
   // the cutover, never taken for no end (a credential 0.14 holds revoked would be vouched for: review r4).
-  const lifecycle = await appEntries(db, ['project.delete', 'environment.delete', 'token.revoke', 'sign_out', 'account.unlink']);
+  const lifecycle = await appEntries(db, ['project.delete', 'environment.delete', 'token.revoke', 'sign_out', 'account.unlink', 'mcp.disconnect']);
   const damaged = lifecycle.find((entry) => !authentic(entry));
   if (damaged !== undefined) return `0.14's ${damaged.action} at entry ${damaged.seq} does not carry the app's MAC: its history is damaged`;
   const deleted: CutoverInput['deleted'] = [];
@@ -158,10 +158,13 @@ export async function vouched(db: Queryable, keys: AppKeys, from: ChainMark, pub
     .map((entry) => ({ action: entry.action, ...(JSON.parse(entry.metadata) as { targetCredentialId?: unknown; identityId?: unknown }) }));
   const revoked = new Set(ended.filter((entry) => entry.action !== 'account.unlink').map((entry) => entry.targetCredentialId));
   const unlinked = new Set(ended.filter((entry) => entry.action === 'account.unlink').map((entry) => entry.identityId));
+  // A connection disconnected (by its person, an admin, a step-up or a token replayed), by its authentic entry.
+  const disconnected = new Set(lifecycle.filter((entry) => entry.action === 'mcp.disconnect').map((entry) => (JSON.parse(entry.metadata) as { connectionId?: unknown }).connectionId));
   return {
     checked: { from, to: { seq: walked.at.seq.toString(), hash: walked.at.hash.toString('hex') } },
     credentials: (await liveCredentials(db, keys.chainKey, issuers)).filter(({ columns, identityId }) => !revoked.has(columns.id) && (identityId === null || !unlinked.has(identityId))).map(({ columns }) => columns),
     bindings: await liveBindings(db, keys.chainKey, publicUrl),
+    connections: (await liveConnections(db, keys.chainKey)).filter(({ id }) => !disconnected.has(id)),
     deleted,
   };
 }

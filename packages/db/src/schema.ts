@@ -747,8 +747,12 @@ export const mcpConnections = pgTable(
     lastUsedIp: text('last_used_ip'),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokedBy: text('revoked_by'),
+    // 0.15's seal (T147): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16 bytes, the same
+    // seal its newest change in `log_changes` records. Null until the row is sealed.
+    seal: bytea(),
   },
   (table) => [
+    check('mcp_connections_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('mcp_connections_principal_check', sql`${table.principal} LIKE 'user:%'`),
     check('mcp_connections_registration_check', sql`${table.registration} IN ('cimd', 'dcr')`),
     check('mcp_connections_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),

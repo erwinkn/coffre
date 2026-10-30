@@ -7,7 +7,7 @@ import { EVERYWHERE, ROLES } from '@coffre/core/access';
 import { bulkStep, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from '../src/bulk.ts';
 import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
 import { limitOp, applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
-import { purposeCode, purposeOf, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
+import { purposeCode, purposeOf, WAYS, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
 import { readerOf, type UseCode } from '../src/decide.ts';
 import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World, WRAPPED } from './world.ts';
 
@@ -348,14 +348,20 @@ test('the bulk rows are outside the seals: erased, they let a request the replay
   assert.notDeepEqual(result.bulk.get(ADA), w.bulk.get(ADA));
 });
 
-test('purpose and keepsSensitive are one smallint in the use row: the purpose code, plus 256 for a copy kept sensitive', () => {
+test('purpose, keepsSensitive and the way in are one smallint in the use row: the purpose code, plus 256 for a copy kept sensitive, plus 512 for each way in (T147)', () => {
   assert.deepEqual([...PURPOSES], ['reveal', 'run', 'compare', 'copy', 'use', 'expose']);
+  assert.deepEqual([...WAYS], ['credential', 'connection', 'binding', 'access']);
   for (const purpose of PURPOSES) {
-    for (const keepsSensitive of [false, true]) assert.deepEqual(purposeOf(purposeCode({ purpose, keepsSensitive })), { purpose, keepsSensitive });
+    for (const keepsSensitive of [false, true]) {
+      assert.deepEqual(purposeOf(purposeCode({ purpose, keepsSensitive })), { purpose, keepsSensitive });
+      for (const way of WAYS.slice(1)) assert.deepEqual(purposeOf(purposeCode({ purpose, keepsSensitive, way })), { purpose, keepsSensitive, way });
+    }
   }
   assert.equal(purposeCode({ purpose: 'copy', keepsSensitive: true }), 259);
+  assert.equal(purposeCode({ purpose: 'reveal', keepsSensitive: false, way: 'access' }), 1536);
   assert.equal(purposeOf(6), null);
-  assert.equal(purposeOf(512), null);
+  assert.equal(purposeOf(512 + 6), null);
+  assert.equal(purposeOf(2048), null);
   assert.equal(purposeOf(-1), null);
 });
 
