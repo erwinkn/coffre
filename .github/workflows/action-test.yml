@@ -136,42 +136,6 @@ jobs:
           token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/ci action-test/deploy
           keys: UNNAMED_SECRET NOWHERE_*
-      # TIMING (W266, removed before merge)
-      - name: 'Timing, export only: v0.14.4 (npx)'
-        uses: erwinkn/coffre/action@9c3e83ec4e6de3d6102e3715e74fd8c0800297bf
-        with:
-          url: ${{ env.ACTION_TEST_URL }}
-          token: ${{ env.ACTION_TEST_TOKEN }}
-          environment: action-test/ci
-          keys: ACTION_TEST_*
-      - name: 'Timing, require-complete and two environments: v0.14.4 (npx)'
-        uses: erwinkn/coffre/action@9c3e83ec4e6de3d6102e3715e74fd8c0800297bf
-        with:
-          url: ${{ env.ACTION_TEST_URL }}
-          token: ${{ env.ACTION_TEST_TOKEN }}
-          environment: action-test/ci action-test/deploy
-          keys: |
-            ACTION_TEST_*
-            GITHUB_TOKEN
-          require-complete: true
-      # TIMING (W266, removed before merge)
-      - name: 'Timing, export only: this revision'
-        uses: ./action
-        with:
-          url: ${{ env.ACTION_TEST_URL }}
-          token: ${{ env.ACTION_TEST_TOKEN }}
-          environment: action-test/ci
-          keys: ACTION_TEST_*
-      - name: 'Timing, require-complete and two environments: this revision'
-        uses: ./action
-        with:
-          url: ${{ env.ACTION_TEST_URL }}
-          token: ${{ env.ACTION_TEST_TOKEN }}
-          environment: action-test/ci action-test/deploy
-          keys: |
-            ACTION_TEST_*
-            GITHUB_TOKEN
-          require-complete: true
       - name: Load secrets through the Action
         uses: ./action
         with:

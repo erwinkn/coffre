@@ -19,9 +19,12 @@
   protection is a lock, and only while it is on.
 - **The GitHub Action runs its own CLI, without npx.** Each `coffre` the
   step ran started through `npx -y @coffre/cli@<version>`, about 0.6 s with
-  npm's cache warm and more with it cold, before its first request; a step
+  npm's cache warm and 1-2 s with it cold, before its first request; a step
   with `require-complete` runs one per environment, and one more for a
-  token's login. The Action now runs `action/coffre.mjs`, the CLI bundled
+  token's login. On GitHub's runners, against a local instance, a token's
+  read of one environment took 2.0-4.6 s and now takes 0.25-0.38 s; with
+  `require-complete` and two environments, 2.7-4.0 s and now 0.41-0.72 s.
+  Against a real instance the rest of the step, its requests, stays. The Action now runs `action/coffre.mjs`, the CLI bundled
   into one file from the sources at the same commit, with the job's Node:
   a workflow that pins the Action's SHA pins the code that runs, which no
   registry answers for at run time, and the job's `.npmrc` and `devEngines`

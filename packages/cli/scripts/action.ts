@@ -1,8 +1,9 @@
 // The GitHub Action's CLI: this CLI, in one file of its own, committed as
 // action/coffre.mjs, which the Action runs with the job's Node. What a
 // workflow pins by SHA is then the code that runs, with no registry in
-// between. It is read as written, unminified, from the packages' sources
-// (`coffre:source`), so that a change shows in its diff as in theirs.
+// between. It is unminified, so that a change shows in its diff as in the
+// sources', and built from what the npm CLI is: the packages' dist/, which
+// `pnpm build` writes first.
 //
 //   node scripts/action.ts           writes it
 //   node scripts/action.ts --check   fails unless it is what this checkout builds
@@ -54,7 +55,7 @@ try {
   if (!check) {
     writeFileSync(target, built);
   } else if (readFileSync(target, 'utf8') !== built) {
-    process.stderr.write('action/coffre.mjs is not what this checkout builds: run `pnpm build:action` and commit it\n');
+    process.stderr.write('action/coffre.mjs is not what this checkout builds: run `pnpm build`, then `pnpm build:action`, and commit it\n');
     process.exitCode = 1;
   }
 } finally {
