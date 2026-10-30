@@ -240,6 +240,7 @@ async function cell(row: Row, key: Key) {
         // Standing, a refused key's request again from an isolate with no history (no map, seals or covers), on the same
         // world: what its call reads must not hang on what the measured isolate's history held.
         cold: null as HotCall | null, coldBuffers: null as number | null, coldKeyBlocks: null as number | null, coldBlocks: null as Weighed['blocks'] | null,
+        coldAnswer: null as { code: string; route: string } | null,
       };
       await measured.end();
       // Its twin, on the same world, from an isolate with no history (no map, seals or covers): standing, the same
@@ -250,7 +251,8 @@ async function cell(row: Row, key: Key) {
         const fresh = await slowed(db, { connections: 1 });
         const now = Date.now();
         const times = row.admission === 'past its deadline' ? { at: now - 4000, deadline: now - 1000 } : { at: now, deadline: now + 3000 };
-        await fresh.vault.useNamed!(row.lost === 'they stand' ? ask(purpose, times) : w.ask(`${name}_NEVER`, { purpose, ...times }));
+        const twin = await fresh.vault.useNamed!(row.lost === 'they stand' ? ask(purpose, times) : w.ask(`${name}_NEVER`, { purpose, ...times }));
+        result.coldAnswer = { code: codeOf(twin), route: routeOf(twin) };
         result.cold = fresh.statements() > 0 ? fresh.last() : null;
         await fresh.end();
       }
@@ -304,6 +306,14 @@ async function each<T, R>(items: readonly T[], work: (item: T) => Promise<R>): P
  */
 const BUFFER_SLACK = 6;
 
+/**
+ * Standing only, how many more blocks of the key's own relations a refusal may fetch than the same request from an
+ * isolate with no history (D155): the versions a key's history left dead, which a call that reads the key may find
+ * pruned or not yet (CI read 17 beside 15 for a key deleted, once in four runs of the same code). They show only a
+ * caller who may know of the key (R6). Without standing no key is read, and the blocks are held exactly alike.
+ */
+const KEY_BLOCK_SLACK = 3;
+
 const labelOf = (row: Row) => `${row.map} / ${row.lost} / ${row.place} / ${row.admission} / window ${row.window}`;
 
 /**
@@ -324,6 +334,8 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   let widest = 0;
   /** Standing, the widest gap between a refusal's buffers and the same request's from an isolate with no history. */
   let widestHistory = 0;
+  /** Standing, the widest gap between the blocks of the key's relations a refusal fetched and its twin's. */
+  let widestKeyBlocks = 0;
   /**
    * Each cell's buffers, and its cold twin's, weighed in turn once a batch's cells have all answered, in one session:
    * weighed while the others still ran, a cell read what their writes left half done (W268: a row of no key read spread
@@ -398,16 +410,21 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
     } else {
       // Standing, a key's refusal may cost what its shape does, a key they may know of (R6); never what the isolate's
       // history holds: each as many buffers as the same request from an isolate with none, on the same world, weighed
-      // beside it. A use the map's ids made logs its request (R53), which one from no map does not: those apart.
+      // beside it, answering as it does. A use the map's ids made logs its request (R53), which one from no map does not:
+      // those apart.
       for (const r of results) {
+        if (r.coldAnswer !== null && (told(r.code) !== told(r.coldAnswer.code) || r.route !== r.coldAnswer.route)) {
+          differing.push(`${label}: ${r.key} ${r.code} by ${r.route}, beside ${r.coldAnswer.code} by ${r.coldAnswer.route} from an isolate with no history`);
+        }
         if (r.buffers === null || r.coldBuffers === null || r.entries !== 0) continue;
         widestHistory = Math.max(widestHistory, Math.abs(r.buffers - r.coldBuffers));
         if (Math.abs(r.buffers - r.coldBuffers) > BUFFER_SLACK) differing.push(`${label}: ${r.key}, buffers ${r.buffers} beside ${r.coldBuffers} from an isolate with no history`);
         // A warm call riding a cover reads the cover's entry (R53), which a call from no history has none of: `log_uses`
-        // apart for it, every other relation of the key's held alike (review r6 of W268).
+        // apart for it, every other relation of the key's held alike (review r6 of W268), within `KEY_BLOCK_SLACK`.
         const covered = r.sent?.args[8] != null;
-        const [warmKey, coldKey] = covered ? [keyBlocksOf(r.blocks ?? {}, ['log_uses']), keyBlocksOf(r.coldBlocks ?? {}, ['log_uses'])] : [r.keyBlocks, r.coldKeyBlocks];
-        if (warmKey !== coldKey) differing.push(`${label}: ${r.key}, blocks of the key's tables ${warmKey} beside ${coldKey} from an isolate with no history${covered ? ', a cover\'s entry apart' : ''}`);
+        const [warmKey, coldKey] = covered ? [keyBlocksOf(r.blocks ?? {}, ['log_uses']), keyBlocksOf(r.coldBlocks ?? {}, ['log_uses'])] : [r.keyBlocks!, r.coldKeyBlocks!];
+        widestKeyBlocks = Math.max(widestKeyBlocks, Math.abs(warmKey - coldKey));
+        if (Math.abs(warmKey - coldKey) > KEY_BLOCK_SLACK) differing.push(`${label}: ${r.key}, blocks of the key's tables ${warmKey} beside ${coldKey} from an isolate with no history${covered ? ', a cover\'s entry apart' : ''}`);
       }
     }
     // Refused, or busy only as admission makes every request, never for a lock: no row is `ok`.
@@ -462,6 +479,6 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       for (const { row, results } of measured) judge(row, results);
     }
   }
-  console.log(`the widest spread of buffers within a row's refusals, beyond their world's key never made, no standing: ${widest}; standing, a refusal's beside an isolate with no history: ${widestHistory}`);
+  console.log(`the widest spread of buffers within a row's refusals, beyond their world's key never made, no standing: ${widest}; standing, a refusal's beside an isolate with no history: ${widestHistory}, of the key's blocks ${widestKeyBlocks}`);
   assert.deepEqual(differing, []);
 });
