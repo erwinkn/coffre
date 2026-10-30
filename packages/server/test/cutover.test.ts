@@ -8,15 +8,18 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
 import { deriveLogKey } from '@coffre/core/audit';
-import { defineSignin, github, google, hashToken } from '@coffre/core/identity';
+import { defineSignin, github, google, hashToken, signin } from '@coffre/core/identity';
 import { newUseRequestId, type NamedUseOutcome, type UseOutcome } from '@coffre/core/vault';
 import { appendEntries } from '@coffre/db/log';
 import { asc, eq, like, sql, type SQL } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { runScheduled } from '../src/app.ts';
+import { resolveConfig } from '../src/config.ts';
 import { CUTTING_OVER_NOW, cutoverReady, type CutoverKnown } from '../src/cutover.ts';
 import { finishRotation, rotateStep } from '../src/key-rotation.ts';
 import { resolvePath } from '../src/db/queries.ts';
+import { createRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, identities, logChanges, logFence, projects, secrets, vaultGrants, vaultMembers } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
@@ -530,4 +533,16 @@ test("an access entry forged in the vault's name holds no use: its check writes 
   // The next decision about the account, the head free, reports it.
   await now.vault.access(CI);
   assert.equal(await reports(), 1);
+});
+
+test("the scheduled job, run before any request, as a Node server runs it at its start, cuts over first, then checkpoints", async () => {
+  await old.root.projects.create('market');
+  const now = deploy();
+  const config = resolveConfig({ publicUrl: PUBLIC_URL, vault: now.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: now.deps.chainKey.toString('base64') });
+  const runtime = createRuntime(config, now.deps.db, now.vault, { json: async () => assert.fail('the job fetches nothing') });
+  await runScheduled(runtime);
+  assert.equal(runtime.cutover?.done, true);
+  assert.ok((await db.owner.select({ number: logChanges.number }).from(logChanges)).length > 0, "0.15's log holds the cutover");
+  // And it runs as it did, once cut over.
+  await runScheduled(runtime);
 });

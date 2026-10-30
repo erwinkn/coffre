@@ -27,13 +27,21 @@ export async function postgres(url: string): Promise<Sql> {
   };
 }
 
-/** A SQLite file, perhaps open in another process: it waits out their locks. */
+/**
+ * A SQLite file, perhaps open in another process: it waits out their locks.
+ * An integer past 2^53, as 0.15's log numbers are, reads as a bigint; any other, as a number.
+ */
 export function sqlite(file: string): Sql {
   const db = new DatabaseSync(file, { timeout: 5000 });
+  const exact = (value: unknown) => (typeof value === 'bigint' && value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value);
   return {
     engine: 'sqlite',
-    query: async <Row>(statement: string, params: unknown[] = []) =>
-      db.prepare(statement).all(...(params as never[])) as Row[],
+    query: async <Row>(statement: string, params: unknown[] = []) => {
+      const prepared = db.prepare(statement);
+      prepared.setReadBigInts(true);
+      const rows = prepared.all(...(params as never[])) as Record<string, unknown>[];
+      return rows.map((row) => Object.fromEntries(Object.entries(row).map(([name, value]) => [name, exact(value)]))) as Row[];
+    },
     exec: async (statements) => db.exec(statements),
     close: async () => db.close(),
   };

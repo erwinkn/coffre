@@ -297,6 +297,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         DATABASE_URL: `file:${database}`,
         // SQLite has no logins: the hot path's database is the same file.
         HOT_DATABASE_URL: `file:${database}`,
+        // Kept across a restart, as a deployment keeps it: the checkpointer goes on from the pair it signed.
+        CHECKPOINTER_MEMORY: join(scratch, 'checkpointer-memory'),
         VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
         VAULT_KEY: KEYS.VAULT_KEY,
         ...OWNER_VARS,

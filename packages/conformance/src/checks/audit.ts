@@ -1,7 +1,7 @@
 // What is written down: every value opened, by the vault that opened it;
 // every version stored, naming the vault's wrap of its key; no value without
 // its entry; and a log changed behind coffre's back is caught.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
 
@@ -165,28 +165,35 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
 }
 
 /**
- * No value leaves without its entry: with the audit log refusing writes (a
- * trigger, as a full disk or a lost connection would), the vault cannot log
- * the read, so a reveal fails and carries nothing.
+ * No value leaves without its entry: with 0.15's log refusing uses (a
+ * trigger, as a full disk or a lost connection would), the vault's use,
+ * which writes its row in the statement that decides it, fails, so a
+ * reveal fails and carries nothing. Of a key no one has read yet: a key's
+ * use within a minute of the last is that one's, its isolate's cover, and
+ * writes nothing again.
  */
 export async function noAuditNoValue(deployment: Deployment, { admin }: People, canaries: Canaries): Promise<string> {
   let status = 0;
+  const key = `UNLOGGED_${randomBytes(4).toString('hex').toUpperCase()}`;
+  const value = `coffre-canary-${randomBytes(10).toString('hex')}`;
+  await admin.api.secrets.set(DEV, { [key]: value });
   await using(deployment.database(), (sql) => logRefuses(sql, async () => {
     const before = deployment.output().split(LOG_REFUSAL).length;
-    const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
+    const response = await admin.browser.send('POST', '/api/reveals', { path: `${DEV}/${key}` });
     const text = await response.text();
     status = response.status;
     const body = JSON.parse(text) as { error: string; message: string; reason?: string };
     expect(status === 500 && body.error === 'internal_error' && body.reason === undefined,
       'the unlogged reveal did not fail as internal_error', { status, body });
     expect(body.message === 'something went wrong; see the server log', 'the audit failure exposed another reason', body);
-    expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
+    expect(![value, ...Object.values(canaries)].some((canary) => text.includes(canary)), 'a reveal that could not be logged carried a value', text);
     // A lost vault gives the same public error; the trigger must be its cause.
     await until('the injected audit refusal in the processes\' output', async () => deployment.output().split(LOG_REFUSAL).length > before, 5);
-  }, 'secret.read'));
-  const after = await admin.api.secrets.reveal(DEV);
-  expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`], 'reveals did not come back once the log took writes again');
-  return `a reveal the audit log would not take: ${status} internal_error, its injected cause in the log, and no value`;
+  }, undefined, 'log_uses'));
+  const after = await admin.api.secrets.reveal(`${DEV}/${key}`);
+  expect(after.values[key] === value, 'reveals did not come back once the log took writes again');
+  expect((await admin.api.secrets.reveal(DEV)).values.API_KEY === canaries[`${DEV}/API_KEY`], 'reveals did not come back once the log took writes again');
+  return `a reveal the log would not take: ${status} internal_error, its injected cause in the log, and no value`;
 }
 
 /** A publicly chained entry still needs the vault's MAC. */

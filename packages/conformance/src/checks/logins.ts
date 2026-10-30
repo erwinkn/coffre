@@ -8,9 +8,11 @@ import { expect, Skip } from '../report.ts';
 import { quoted, tables } from './storage.ts';
 
 const ZEROS = "decode(repeat('00', 32), 'hex')";
+// Marked as a writer under 0.15's log marks it (`log015`), so that the cutover's refusal of 0.14's writes, which comes
+// first, leaves it to the privilege checks.
 const appendAs = (author: string) => `INSERT INTO audit_log
-  (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-  VALUES (9000000000, '${author}', '${author}:0', 0, 'system:conformance', 'probe', 'allow', ${ZEROS}, ${ZEROS}, ${ZEROS})`;
+  (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, log015)
+  VALUES (9000000000, '${author}', '${author}:0', 0, 'system:conformance', 'probe', 'allow', ${ZEROS}, ${ZEROS}, ${ZEROS}, true)`;
 const IMMUTABLE = [
   "UPDATE audit_log SET action = 'rewritten' WHERE author = 'app'",
   "UPDATE audit_log SET action = 'rewritten' WHERE author = 'vault'",
