@@ -10,7 +10,12 @@
   - A use (`/use`, a reveal, an export, a CI run's read) is one statement
     of the vault's, through a login and a Hyperdrive config of its own
     (`coffre_vault_hot`), never behind a change, a sign-in or the audit
-    head. On the Workers bench, BENCH_NUMBERS.
+    head. On the Workers bench (`pnpm bench:workers`, Postgres 16.14 on
+    Debian, the CPU of both Workers, warm median), a one-key reveal costs
+    12.2 ms against 0.14.5's 16.9, and the audit page 50 against 68. A read
+    of many keys is one use each, so a reveal or an export of 30 keys costs
+    118 to 122 ms against 18 to 21: whole-environment reads cost several
+    times 0.14's CPU until a request's uses go to the vault together.
   - Every change answers once a checkpoint the vault's key signs seals it,
     within about half a second: the checkpointer, a Durable Object beside
     the vault on Workers (`CoffreCheckpointer`, which the vault starts), or

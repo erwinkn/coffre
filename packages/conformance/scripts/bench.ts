@@ -130,11 +130,19 @@ function cpu(of: Map<string, number[]>): Record<string, number> {
   return Object.fromEntries([...of].map(([name, pids]) => [name, pids.reduce((sum, pid) => sum + total(pid), 0)]));
 }
 
-/** The CPU `request` costs, by group, counted until the processes are quiet: 150ms without a tenth of a millisecond more. */
+/** A sample's wall time, from asking to the answer, beside its groups' CPU. */
+const WALL = 'wall';
+
+/**
+ * The CPU `request` costs, by group, counted until the processes are quiet: 150ms without a tenth of a millisecond
+ * more; and its wall time (`WALL`), from asking to the answer, as its client waits.
+ */
 async function measure(deployment: Deployment, request: () => Promise<unknown>): Promise<Record<string, number>> {
   const of = processes(deployment.serving());
   const before = cpu(of);
+  const asked = performance.now();
   await request();
+  const wall = performance.now() - asked;
   let last = cpu(of);
   for (let quiet = 0; quiet < 3; ) {
     await sleep(50);
@@ -143,7 +151,7 @@ async function measure(deployment: Deployment, request: () => Promise<unknown>):
     quiet = moved < 0.1 ? quiet + 1 : 0;
     last = now;
   }
-  return Object.fromEntries(Object.keys(last).map((name) => [name, last[name] - before[name]]));
+  return { ...Object.fromEntries(Object.keys(last).map((name) => [name, last[name] - before[name]])), [WALL]: wall };
 }
 
 // --- what is asked -------------------------------------------------------------
@@ -274,5 +282,11 @@ function report(asked: Path[], cold: Map<string, Record<string, number>[]>, warm
   const unit = groups.length === 1 ? 'ms CPU' : `ms CPU (${groups.join(' + ')})`;
   console.log(`\n| path | cold, median | warm, median | warm, max |\n|---|---|---|---|`);
   for (const path of asked) console.log(`| ${path.name} | ${cell(cold.get(path.name), median)} | ${cell(warm.get(path.name), median)} | ${cell(warm.get(path.name), max)} |`);
+  // The wall time a client waits, warm, locally: the processes on this machine and Postgres a hop away, so it says
+  // how a change moves, not what a deployment's users wait.
+  const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.ceil(q * xs.length) - 1)] ?? NaN;
+  const walls = (name: string) => (warm.get(name) ?? []).map((sample) => sample[WALL]!);
+  console.log(`\n| path | wall, warm p50 | wall, warm p99 |\n|---|---|---|`);
+  for (const path of asked) console.log(`| ${path.name} | ${quantile(walls(path.name), 0.5).toFixed(1)} | ${quantile(walls(path.name), 0.99).toFixed(1)} |`);
   console.log(`\n${unit}; cold: the first request after a restart, ${count('cold')} times; warm: ${count('warm')} times after one more.`);
 }
