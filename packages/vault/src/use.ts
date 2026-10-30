@@ -7,7 +7,7 @@ import { engineOf } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
-import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
+import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
 import { noEdits, objectKey, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys } from './inputs.ts';
 import { entryMac } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
@@ -588,9 +588,13 @@ export function routeOf(caller: CallerSeals, at: number): 'name' | 'credential' 
 function standingOf(checked: CheckedView, request: UseRequest): Access {
   const credential = checked.credential.row!;
   const principal = checked.principal!.row;
-  const stand = checked.secret.row?.environmentId ?? request.place;
-  const place = stand === null ? undefined : checked.environments.get(stand);
-  const sealed = [checked.roles, checked.policy, ...(place === undefined ? [] : [place])].every((input) => input.valid && input.current);
+  // Every place the use weighed (where its key is sought or held, read through, its value's, a personal config's parent):
+  // one a writer changed refused the use, and tells the app nothing either (T159, Fable on #431).
+  const weighed = useEnvironments(checked, request).flatMap((id) => {
+    const read = checked.environments.get(id);
+    return read === undefined ? [] : [read];
+  });
+  const sealed = [checked.roles, checked.policy, ...weighed].every((input) => input.valid && input.current);
   // Only the rows their seals bear out: another a writer changed protects or names nothing the app is told (T159).
   const rows = [...checked.environments.values()].flatMap((read) => (read.row === null || !read.valid || !read.current ? [] : [read.row]));
   const reader = sealed

@@ -346,7 +346,7 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
  */
 export function goneEnvironment(id: string, newest: Buffer | null): EnvironmentRow {
   const columns = { id, projectId: '', slug: '', owner: null, parentId: null, protected: null, archived: false, projectArchived: false };
-  return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest: newest ?? Buffer.alloc(0) } };
+  return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest } };
 }
 
 /**

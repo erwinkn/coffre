@@ -155,6 +155,11 @@ for (const [how, { tamper, projectOf }] of Object.entries(TAMPERS)) {
     const { policy } = await w.vault.access(ADA);
     assert.ok(policy!.protected.includes(w.dev));
     assert.deepEqual(policy!.protectedIn[w.project], [{ environmentId: w.dev, slug: null }]);
+    // An issue elsewhere goes on: weighed with no slug there, that place is left out of what `issue_token` holds.
+    assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
+    assert.ok((await w.vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: w.project, environmentId: w.prod, role: 'viewer', expiresAt: null }] })).ok);
+    const issued = await w.vault.issueToken!(await issueOn(w.vault, issue(ROOT, [issuedGrant({ projectId: w.project, environmentId: w.prod, role: 'viewer' })])));
+    assert.ok(issued.ok, JSON.stringify(issued));
   });
 
   test(`an issue whose scope names a place ${how} around the log is refused, nothing written`, async () => {
