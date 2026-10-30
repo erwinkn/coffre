@@ -95,7 +95,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek: randomBytes(32) }, {}, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : {}) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek: randomBytes(32) }, {}, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' }) });
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,

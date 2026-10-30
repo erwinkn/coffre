@@ -15,13 +15,17 @@ import { fileURLToPath } from 'node:url';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 
-import { clientFor, usesLogged } from './api-fixture.ts';
+import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 import { appClient, tunnelListener } from './tunnel-listener.ts';
 
-const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database, over Hyperdrive' : false;
+const skip = TEST_ENGINE !== 'postgres'
+  ? 'the tunnel reaches a Postgres database, over Hyperdrive'
+  : LOG === '0.14'
+    ? "the Worker's vault keeps 0.15's log, and the suite's instance, on 0.14's, is not cut over: its door would hold the tunnel"
+    : false;
 const NAME = 'coffre-tunnel-coffre-workers-test';
 
 let dir: string;

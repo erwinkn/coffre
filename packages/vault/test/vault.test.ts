@@ -492,7 +492,7 @@ test('aliased restore targets keep each source version in its own entry', async 
   const target = { ...first, version: 3 };
   // Workers RPC can preserve aliases; use the implementation without the local JSON transport.
   // The suite's log, as the world's vault keeps it: under 0.15's, cut over, a vault of 0.14's writes nothing (PR 9b).
-  const vault = openVault(db.vault, await prepareVault(config, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : {}));
+  const vault = openVault(db.vault, await prepareVault(config, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' }));
   const result = await vault.rewrap({ principal: ROOT, caller: 'person', items: sources.map((source, i) => ({
     secret: target, ...source, from: i + 1, wrapped: wrappedKeys[i],
   })) });
