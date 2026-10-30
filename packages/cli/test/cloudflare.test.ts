@@ -16,7 +16,7 @@ import { appManifest, appName, appSettings, convert, createGitHubApp, logoPath, 
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
-import { addressOf, addressProblem, adminsProblem, domainOf, isOurs, nameFrom, nameProblem, ourConfig, ownersVar, recordsOf } from '../src/workers.ts';
+import { addressOf, addressProblem, adminsProblem, domainOf, isOurs, nameFrom, nameProblem, newPasswords, ourConfig, ownersVar, recordsOf } from '../src/workers.ts';
 import { cancelTerminals, fakeCloudflare, fakeGitHub, fakeOpener, fakeTerminal, fakeWrangler, manifestForm, settle, submitManifest } from './fakes.ts';
 
 // Whatever a failed test leaves waiting, a prompt, a wrangler, a listener, goes: this file's process always ends.
@@ -194,6 +194,30 @@ test("a Hyperdrive config is this deployment's by the id it records, or by name 
   assert.equal(ourConfig([live], 'coffre', 'hd-live', administrator), live, 'recorded here: ours, wherever it points');
   assert.equal(ourConfig([live, leftover], 'coffre-try', null, administrator), leftover, "made by a run that stopped before recording it");
   assert.equal(ourConfig([config('hd-x', 'coffre', 'db.acme.test', 'other')], 'coffre', null, administrator), undefined, 'same host, another database');
+  // Another server on the same host: the app's config of a deployment named coffre-vault-hot, never this one's hot path's.
+  const elsewhere = { ...config('hd-other', 'coffre-vault-hot', 'db.acme.test', 'coffre'), origin: { host: 'db.acme.test', port: 6432, database: 'coffre', user: 'coffre_runtime' } };
+  assert.equal(ourConfig([elsewhere], 'coffre-vault-hot', null, administrator), undefined, 'same host and database name, another port');
+});
+
+test("a hot path's login setup unlocks gets a new password whatever its config holds, so another deployment sharing it stops the run first", () => {
+  const dir = scratch();
+  try {
+    cpSync(templateDir('workers'), dir, { recursive: true, filter: (path) => !path.includes('node_modules') });
+    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 1, 'id'], value: 'hd-hot' }]);
+    const workers = { app: readWorker(dir, 'app/wrangler.jsonc'), vault: readWorker(dir, 'vault/wrangler.jsonc') };
+    const administrator = new URL('postgresql://owner:pw@db.acme.test:5432/coffre');
+    const origin = (database: string) => ({ host: 'db.acme.test', port: 5432, database, user: 'coffre_vault_hot' });
+    const ours = { id: 'hd-hot', name: 'coffre-vault-hot', origin: origin('coffre') };
+    const theirs = { id: 'hd-theirs', name: 'theirs-vault-hot', origin: origin('theirs') };
+    const login = (unlocks: boolean) => ({ login: 'coffre_vault_hot', exists: true, unlocks });
+    const database = (unlocks: boolean) => ({ administrator, used: true, logins: { app: { ...login(false), login: 'coffre_runtime' }, vault: { ...login(false), login: 'coffre_vault_runtime' }, hot: login(unlocks) } });
+    // Its config recorded and pointing at its login: kept, and the other deployment's left logging in.
+    assert.equal(newPasswords([ours, theirs], workers, database(false), false).hot, false);
+    assert.throws(() => newPasswords([ours, theirs], workers, database(true), false), /coffre_vault_hot is also the login of the Hyperdrive config theirs-vault-hot, another deployment's/);
+    assert.equal(newPasswords([ours], workers, database(true), false).hot, true, 'unlocked: Hyperdrive gets its new password');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a deployment's name: from its address, as a Worker's name can be", () => {

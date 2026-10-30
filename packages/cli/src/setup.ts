@@ -461,7 +461,11 @@ async function holdsData(client: PostgresClient): Promise<boolean> {
 /** The database as Cloudflare's checks take it (`Database`). */
 function asRead(administrator: URL, used: boolean, existing: ReadonlyMap<string, boolean>): Database {
   const user = decodeURIComponent(administrator.username);
-  const login = (component: Runtime) => ({ login: loginFor(ROLES[component], user), exists: existing.has(ROLES[component]) });
+  const login = (component: Runtime) => ({
+    login: loginFor(ROLES[component], user),
+    exists: existing.has(ROLES[component]),
+    unlocks: UNASKED.has(component) && existing.get(ROLES[component]) === false,
+  });
   return { administrator, used, logins: { app: login('app'), vault: login('vault'), hot: login('hot') } };
 }
 

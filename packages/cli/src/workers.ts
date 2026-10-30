@@ -130,14 +130,20 @@ export function sameDatabase(origin: HyperdriveConfig['origin'], administrator: 
   return origin.host === administrator.hostname && origin.database === decodeURIComponent(administrator.pathname.slice(1));
 }
 
+/** Whether a Hyperdrive config points at this run's database server: the same host, the same port. */
+function sameServer(origin: HyperdriveConfig['origin'], administrator: URL): boolean {
+  return origin.host === administrator.hostname && (origin.port ?? 5432) === Number(administrator.port || 5432);
+}
+
 /**
  * A Hyperdrive config of this deployment's: the one this directory records;
- * else one under its name that points at this run's database, made by a
- * run that stopped before recording it. One under the name that points
- * elsewhere is another deployment's.
+ * else one under its name that points at this run's database, on this
+ * server, its port included, made by a run that stopped before recording
+ * it. One under the name that points elsewhere is another deployment's:
+ * `coffre-vault-hot` may be the app's config of one named so.
  */
 export function ourConfig(configs: readonly HyperdriveConfig[], name: string, recorded: string | null, administrator: URL): HyperdriveConfig | undefined {
-  return configs.find(({ id }) => id === recorded) ?? configs.find((config) => config.name === name && sameDatabase(config.origin, administrator));
+  return configs.find(({ id }) => id === recorded) ?? configs.find((config) => config.name === name && sameServer(config.origin, administrator) && sameDatabase(config.origin, administrator));
 }
 
 /**
@@ -170,10 +176,11 @@ export function ownersVar(vars: Record<string, string | undefined>): OwnersVar {
 
 /**
  * The database, as setup read it: its administrator, whether it holds
- * data, and each config's runtime login, by what it logs in as, and
- * whether it exists.
+ * data, and each config's runtime login, by what it logs in as, whether it
+ * exists, and whether setup gives it a password whatever Cloudflare holds:
+ * the hot path's, when it cannot log in (setup.ts, `provision`).
  */
-export type Database = { administrator: URL; used: boolean; logins: Record<Config, { login: string; exists: boolean }> };
+export type Database = { administrator: URL; used: boolean; logins: Record<Config, { login: string; exists: boolean; unlocks: boolean }> };
 
 /** What setup found on Cloudflare, before it changes anything. */
 type Found = {
@@ -211,21 +218,17 @@ async function othersUnder(
   return others;
 }
 
-/** Whether a Hyperdrive config points at this run's database server: the same host, the same port. */
-function sameServer(origin: HyperdriveConfig['origin'], administrator: URL): boolean {
-  return origin.host === administrator.hostname && (origin.port ?? 5432) === Number(administrator.port || 5432);
-}
-
 /**
  * Which logins get a new password: Hyperdrive must have it, and the
  * database keeps only its verifier. So each whose config is missing, or
- * logs in elsewhere, or both, when asked. Setup stops before a login that
+ * logs in elsewhere, or both, when asked, and the hot path's when it cannot
+ * log in, which setup unlocks unasked. Setup stops before a login that
  * exists gets one, when it is also the login of another deployment's
  * Hyperdrive config, on the same server: a login is the server's, not a
  * database's, and that deployment would be cut off. On PlanetScale, a
  * login names its branch, and never is.
  */
-function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Config, boolean> {
+export function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Config, boolean> {
   const { administrator } = database;
   const records = recordsOf(workers);
   const ourOwn = (config: Config) => ourConfig(configs, configName(config, namesOf(workers)), records.hyperdrive[config], administrator);
@@ -233,9 +236,9 @@ function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Comp
   const resets = {} as Record<Config, boolean>;
   // All checked before any changes.
   for (const config of CONFIGS) {
-    const { login, exists } = database.logins[config];
+    const { login, exists, unlocks } = database.logins[config];
     const origin = ourOwn(config)?.origin;
-    resets[config] = all || origin === undefined || !sameServer(origin, administrator) || !sameDatabase(origin, administrator) || origin.user !== login;
+    resets[config] = all || unlocks || origin === undefined || !sameServer(origin, administrator) || !sameDatabase(origin, administrator) || origin.user !== login;
     if (!resets[config] || !exists) continue;
     const other = configs.find((each) => !ours.has(each) && sameServer(each.origin, administrator) && each.origin.user === login);
     if (other === undefined) continue;
