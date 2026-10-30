@@ -42,12 +42,21 @@ export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): 
  * timeouts and generic plans. A role dropped and made again, as `coffre
  * setup` makes a missing one, has none of them, and 0022 never runs
  * twice. Only what differs, and refused as 0022 refuses it, saying what to
- * run, to a login that may not change the role or grant the group.
+ * run, to a login that may not change the role or grant the group. A
+ * setting of the role's for this database alone would outrank the
+ * server-wide one at login, so it is refused, as 0022 refuses it.
  */
 export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
   await client.unsafe(`DO $$ DECLARE
     held text[];
   BEGIN
+    IF EXISTS (
+      SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
+       WHERE s.setrole = 'coffre_vault_hot'::regrole AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+         AND split_part(setting, '=', 1) IN ('lock_timeout', 'statement_timeout', 'plan_cache_mode')
+    ) THEN
+      RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
+    END IF;
     SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
     IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
     IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;

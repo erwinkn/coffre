@@ -635,6 +635,18 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   for (const each of [again.app.DATABASE_URL!, again.vault.DATABASE_URL!, again.vault.HOT_DATABASE_URL!]) assert.ok(await connects(each));
   assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
 
+  // Remade with a setting for this database alone, which would outrank the hot path's at login: refused, as 0022 refuses it, saying what to run.
+  await asSuperuser('setup_hot', async (client) => {
+    await client.unsafe('DROP ROLE coffre_vault_hot');
+    await client.unsafe('CREATE ROLE coffre_vault_hot NOLOGIN');
+    await client.unsafe('GRANT coffre_vault_hot TO setup_owner WITH ADMIN TRUE');
+    await client.unsafe('ALTER ROLE coffre_vault_hot IN DATABASE setup_hot SET statement_timeout = 0');
+  });
+  const outranked = setup(['--json'], { stdin: `${url}\n` });
+  assert.equal(outranked.status, 1);
+  assert.match(outranked.stderr, /✗ Checking the database is up to date\n\s+the database is at the migrated schema, but reasserting its privileges failed: coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path's: run ALTER ROLE coffre_vault_hot IN DATABASE setup_hot RESET ALL/);
+  assert.equal(outranked.stdout, '', 'no URL shown for a login without its bounds');
+
   // One another role made, unable to log in: on Postgres 16, the owner may not change it without its ADMIN. Said so, before the app's and the vault's change.
   await asSuperuser('setup_hot', async (client) => {
     await client.unsafe('DROP ROLE coffre_vault_hot');
