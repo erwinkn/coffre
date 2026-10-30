@@ -125,7 +125,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
     const source = await w.key(`source of ${name}`, false, at);
     const holder = randomUUID();
     const row = randomUUID();
-    const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }]));
+    const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true));
     await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: name });
     await db.owner.insert(tablesOf(db.owner).secretReferences).values({
       id: row, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: at, sourceSecretId: source,

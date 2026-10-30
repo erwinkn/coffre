@@ -58,9 +58,10 @@ async function grow(total: number): Promise<void> {
     SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total)}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)}
       FROM generate_series(1, ${changes}) g`);
   await run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) SELECT 'token:other-' || (g % 1000), gen_random_uuid(), ${now} FROM generate_series(1, ${others}) g`);
-  await run(db.owner, sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
+  // Written past the cutover, as 0.15's vault writes them (`log015`).
+  await run(db.owner, sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash, log015)
     SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', ${now}, 'system:x', CASE WHEN g % 10 = 0 THEN 'access.grant' ELSE 'secret.read' END, 'allow',
-           'token:other-' || (g % 1000), '{}', ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}
+           'token:other-' || (g % 1000), '{}', ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, true
       FROM generate_series(1, ${others}) g`);
   // As autovacuum leaves a table that stopped growing: index-only probes read no heap.
   await run(db.owner, sql`VACUUM ANALYZE`);

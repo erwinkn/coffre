@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { parseScopes } from '@coffre/core/mcp';
+import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { mcpApprovals } from '@coffre/db/schema';
 
@@ -119,7 +120,7 @@ export function outcomeOf(row: ApprovalRow, now: Date): Outcome | null {
   return unanswered(row, now) ? UNKNOWN_OUTCOME : null;
 }
 
-type ApprovalDeps = { db: Database; chainKey: Buffer; publicUrl: string; transport: WorkloadTransport };
+type ApprovalDeps = { db: Database; chainKey: Buffer; vault: Vault; publicUrl: string; transport: WorkloadTransport };
 
 export class McpApprovals {
   readonly #deps: ApprovalDeps;

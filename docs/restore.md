@@ -318,6 +318,43 @@ Verification proves the restored history is the one coffre wrote, up to the
 backup's moment. It cannot show what was written after it: a complete older
 backup verifies as well as a recent one ([Limits](architecture.md#limits)).
 
+## On 0.15's log
+
+An instance on 0.15's log (`log: '0.15'`, behind its switch until it is the
+default) keeps two logs in the same database: 0.14's chain, which the steps
+above check, and 0.15's, its changes and uses sealed into checkpoints that
+its checkpointer signs. A backup holds both. Its checkpointer keeps one
+thing outside the database: its memory of the newest pair it signed (a
+file beside the vault on Node, its Durable Object's storage on Workers).
+
+The restore takes one step more. The checkpointer's memory is newer than
+the backup: it remembers pairs signed after it. It refuses the restored log
+("the database lost entries the signer sealed"), exactly as it refuses a
+database a writer rolled back, and seals nothing until its memory is reset.
+That refusal is the point, so it is reset by hand, once, for a restore you
+meant:
+
+- **Node:** stop the vault, move its memory file aside (`<memory>` and
+  `<memory>.alarms`), and start it again;
+- **Workers:** clear the checkpointer's Durable Object storage, then start
+  it.
+
+A checkpointer with no memory takes the database's newest pair as its
+start, and says so in an alarm ("the audit signer remembers no pair"). Then,
+besides the checks above, `coffre verify instance` checks 0.15's trees:
+the newest pair signed by the vault's key and every entry above it by its
+MAC.
+
+The wrong vault key fails here too: its checkpointer refuses the log's
+checkpoints ("not a pair signed by this log"), and every use of a value is
+refused.
+
+`packages/server/test/restore-015.test.ts` drills it on Postgres, with
+PostgreSQL 16's `pg_dump` and `pg_restore`: a cut-over instance backed up,
+written to after, restored, refused by the old memory, taken by a new one,
+its trees verified, a token's use serving the value it served at the
+backup, a change sealed on top; and the wrong vault key refused.
+
 ## If the vault key is wrong
 
 The vault's configuration names the vault key `kek`, and the keys it

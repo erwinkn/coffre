@@ -339,6 +339,25 @@ test("a revoke is one change of the log, from the row's seal, the app's MAC writ
   assert.deepEqual(await w.vault.revokeCredential!(input), { ok: false, refused: 'moved' });
 });
 
+test("a revoke takes 0.14's head first, which 0.14's use of the credential holds from its check to its commit: it writes no 0.14 entry, so no use of 0.14's goes on past it (EntryLessHead, PR 9b)", postgresOnly("0.14's head is a row lock of Postgres"), async () => {
+  const w = await world();
+  const made = await signedIn(w);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // 0.14's use, on an isolate still serving: the credential checked under the head (credentialStill), not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    let revoked = false;
+    const revoking_ = w.vault.revokeCredential!(revoking(made)).then((outcome) => ((revoked = true), outcome));
+    await sleep(200);
+    assert.equal(revoked, false, "the revoke waits for 0.14's head");
+    await holder.unsafe('COMMIT');
+    assert.ok((await revoking_).ok);
+  } finally {
+    await holder.end();
+  }
+});
+
 test('a revoke goes ahead only from the row as the app read it and signed it: another MAC, or another seal, is moved', async () => {
   const w = await world();
   const made = await signedIn(w);

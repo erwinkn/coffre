@@ -866,14 +866,15 @@ test("a break by a Developer in a protected environment after a writer marked it
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'role', role: 'developer', definition: null } })).ok);
 });
 
-test("with 0.14's log, a reference's end is 0.14's entry alone: no row's end, no change (T125)", async () => {
+test("with 0.14's log, a reference's end is 0.14's entry alone, which the cut-over log refuses whole: no row's end, no change (T125, PR 9b)", async () => {
   const w = await world();
   const source = await w.key();
   const vault = await deciding();
   const { holder, via } = await reference(w, vault, source);
   const { vault: old } = await isolate({ log: '0.14' });
   const before = await rows(db.owner, sql`SELECT number FROM log_changes`);
-  assert.ok((await old.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] })).ok);
+  await assert.rejects(old.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] }),
+    (error: Error & { cause?: Error }) => /is cut over from 0\.14/.test(`${error.message} ${error.cause?.message ?? ''}`));
   assert.deepEqual(await endedAt(holder), [null]);
   assert.equal((await rows(db.owner, sql`SELECT number FROM log_changes`)).length, before.length);
 });

@@ -11,14 +11,16 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
+import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
+import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, type Resolved } from '../src/use.ts';
-import { ENGINE, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { holding as holdingIn, namedWorld, principalLock, slowed as slowedVault } from './named-world.ts';
-import { change, emptyLog, isolate, seal, useDatabases, world } from './use-world.ts';
+import { change, emptyLog, isolate, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -494,12 +496,10 @@ test("no use is kept for a later one to take the principal's lock on: each that 
     await passed();
     assert.deepEqual(await cost(a), ['ok', 2]);
     // A 0.14 write of the principal's access, mid-upgrade, which is no change of the log's: decided, and the rows it read
-    // refuse it (UsesSeeOldWrites), before any lock, the principal's lock held all the while.
-    // Written at the 0.14 log's head, which it moves on, as 0.14's code writes one: the log stays whole for what follows.
-    await run(db.owner, sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
-      SELECT h.next_seq, 'vault', 'vault:x', ${Date.now()}, 'system:x', 'access.grant', 'allow', ${w.principal}, '{}', h.head_hash, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}
-        FROM audit_chain_head h WHERE h.only_row`);
-    await run(db.owner, sql`UPDATE audit_chain_head SET next_seq = next_seq + 1, head_hash = ${Buffer.alloc(32)} WHERE only_row`);
+    // refuse it (UsesSeeOldWrites), before any lock, the principal's lock held all the while. Under the vault's key, as
+    // 0.14's code writes one at its head, past the cutover's refusal, whose trigger the database's owner dropped (PR 9b).
+    // Its MAC is checked after the statement, on the vault's own login here, which these hot statements do not count.
+    await withLogUnlocked(db.owner, (tx) => appendEntries(tx as never, vaultLogKey(SIGNING_KEY), [{ actor: 'system:vault', action: 'access.grant', decision: 'allow', subjectPrincipal: w.principal, metadata: '{}' }]));
     await passed();
     assert.deepEqual(await holding(principalLock(w.principal), () => cost(a)), ['stale', 1]);
   } finally {

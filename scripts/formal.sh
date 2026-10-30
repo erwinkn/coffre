@@ -292,18 +292,19 @@ REMOVALS=(
   "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence+RowFirst NewLogFollowsOld"
   "Migration015 Marker OneCutover"
   "Migration015 DualFence NothingAllowedAfterAnswer"
-  "Migration015 OldWritesFence NothingAllowedAfterAnswer"
+  # A late 0.14 write across a 0.15 use: the trigger's fence makes it wait, its refusal (PR 9b) keeps it out.
+  "Migration015 OldWritesFence+OldWritesRefused NothingAllowedAfterAnswer"
   "Migration015 ChangeHeadFirst NoWaitCycle"
   "Migration015 RowFirst NoWaitCycle"
   # An object of the app's rows, changed in the app's own transaction (plan PR 4b): head, row, fence.
   "Migration015App AppHeadFirst NoWaitCycle"
   "Migration015App DualFence NothingAllowedAfterAnswer"
-  "Migration015App OldWritesFence NothingAllowedAfterAnswer"
+  "Migration015App OldWritesFence+OldWritesRefused NothingAllowedAfterAnswer"
   # Sign-ins and the barrier: the issue lock in the order row, head, issue lock, fence (T123).
   "Migration015Issue IssueBeforeFence NoWaitCycle"
   "Migration015Issue BarrierIssueFirst NoWaitCycle"
   "Migration015Issue ExchangeOnlyIssues ExchangeChangesNoInput"
-  "Migration015Issue ExchangeOnlyIssues NothingAllowedAfterAnswer"
+  "Migration015Issue ExchangeOnlyIssues+OldWritesRefused NothingAllowedAfterAnswer"
   # A policy change takes the issue lock before the fence (T149, review r3): the barrier holds it while it waits for the fence.
   "Migration015Policy PolicyIssueFirst NoWaitCycle"
   # The cutover's own 0.14 entry is fenced by the trigger: the issue lock before the fence, as everywhere (T132).
@@ -314,14 +315,16 @@ REMOVALS=(
   # An app's row (a credential, a binding: T160) is checked by the app, under its key, and held to that by the vault.
   "Migration015AppTamper VerifyRows AllowedOnlyWhenGranted"
   "Migration015AppTamper VouchedHeld AllowedOnlyWhenGranted"
-  "Migration015 Adopt EveryOldWriteAdopted"
-  "Migration015 AdoptRepeats EveryOldWriteAdopted"
+  # 0.14's code writes nothing after the cutover (PR 9b): its append is refused once the cutover is there.
+  "Migration015 OldWritesRefused OldWritesBeforeAnchor"
+  "Migration015App OldWritesRefused OldWritesBeforeAnchor"
   "Migration015Tamper VerifyChain AnchorHolds"
   "Migration015Tamper VerifyRows AllowedOnlyWhenGranted"
-  "Migration015Tamper AdoptVerifies NewLogFollowsOld"
-  "Migration015Tamper AdoptSealsEntry AllowedOnlyWhenGranted"
-  "Migration015Tamper UsesSeeOldWrites AllowedOnlyWhenGranted"
-  "Migration015Drops AdoptAfterSeal NewChangesStand"
+  # A row put back over a late write: the refusal keeps the write from landing, the probe reads past the row. The
+  # refusal is a trigger the database's owner can drop; the probe needs the key.
+  "Migration015Tamper UsesSeeOldWrites+OldWritesRefused AllowedOnlyWhenGranted"
+  # A 0.15 change that writes no 0.14 entry (T149's revoke, an unbind) takes 0.14's head all the same (PR 9b).
+  "Migration015EntryLess EntryLessHead NothingAllowedAfterAnswer"
   # The marker PR 5 did not take (the plan's PR 5): it holds only while the writer leaves it alone.
   "Migration015Marker OldWriteMarksRow AllowedOnlyWhenGranted"
   # … and a writer who clears it (MaxClears=1) breaks it with every protection on: why PR 5 keeps the probe.

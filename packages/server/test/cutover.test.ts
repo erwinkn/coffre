@@ -7,17 +7,19 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
-import { defineSignin, github, google } from '@coffre/core/identity';
-import type { UseOutcome } from '@coffre/core/vault';
-import { asc, eq, like, sql } from 'drizzle-orm';
+import { deriveLogKey } from '@coffre/core/audit';
+import { defineSignin, github, google, hashToken } from '@coffre/core/identity';
+import { newUseRequestId, type NamedUseOutcome, type UseOutcome } from '@coffre/core/vault';
+import { appendEntries } from '@coffre/db/log';
+import { asc, eq, like, sql, type SQL } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { CUTTING_OVER_NOW, cutoverReady, type CutoverKnown } from '../src/cutover.ts';
 import { finishRotation, rotateStep } from '../src/key-rotation.ts';
 import { resolvePath } from '../src/db/queries.ts';
-import { auditLog, credentials, environments, identities, logChanges, logFence, projects, secrets } from './db/tables.ts';
+import { auditLog, credentials, environments, identities, logChanges, logFence, projects, secrets, vaultGrants, vaultMembers } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
-import { TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
+import { postgresOnly, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
@@ -54,9 +56,9 @@ beforeEach(async () => {
 });
 
 /** The deploy: a vault of 0.15's log on the same keys, not cut over, and the app over it, whose door cuts it over. */
-function deploy(signin = SIGNIN) {
+function deploy(signin = SIGNIN, config: { bulkLimit?: { count: number; windowMinutes: number } } = {}) {
   const hotDatabase = TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
-  const vault = testVault([ROOT], { hotDatabase }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, cutover: 'app' });
+  const vault = testVault([ROOT], { hotDatabase, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, cutover: 'app' });
   // The same app, its key the same: a deploy changes neither.
   const deps = testDeps(db.runtime, [ROOT], { vault, chainKey: old.deps.chainKey });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
@@ -246,7 +248,7 @@ test("an APP_KEY rotated at the deploy that turns 0.15's log on: the rotation si
   let state = await rotateStep(db.runtime, keys, { vault: now.vault });
   while (state.kind === 'rotating') state = await rotateStep(db.runtime, keys, { vault: now.vault });
   assert.equal(state.kind, 'sealing');
-  assert.equal((await finishRotation(db.runtime, keys)).kind, 'settled');
+  assert.equal((await finishRotation(db.runtime, keys, { vault: now.vault })).kind, 'settled');
   assert.deepEqual(await db.owner.select().from(logChanges), [], 'nothing of 0.15\'s before the cutover');
   assert.equal(await cutoverReady({ ...now.runtime, ...keys }), null);
   // Signed out by the rotation: its session is no credential 0.14 takes, and none is sealed.
@@ -391,4 +393,141 @@ test("a deployment with no cutover due answers its first requests at once, toget
   // Its runtime made again, the log cut over: two first requests at once, neither held.
   const runtime = { ...now.runtime, cutover: { done: false } as CutoverKnown };
   assert.deepEqual(await Promise.all([cutoverReady(runtime), cutoverReady(runtime)]), [null, null]);
+});
+
+/**
+ * `work` with the refusal of 0.14's writes dropped, as the database's owner may drop it (migration 0047's trigger):
+ * off, then on again, however `work` ends. SQLite has no switch: the trigger is dropped and made again.
+ */
+async function refusalDropped<T>(work: () => Promise<T>): Promise<T> {
+  if (TEST_ENGINE === 'postgres') {
+    await db.owner.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
+    try {
+      return await work();
+    } finally {
+      await db.owner.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
+    }
+  }
+  const sqlite = db.owner as unknown as { all<Row>(query: SQL): Promise<Row[]>; run(query: SQL): Promise<unknown> };
+  const [trigger] = await sqlite.all<{ sql: string }>(sql`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'audit_log_refuse_old'`);
+  await sqlite.run(sql`DROP TRIGGER audit_log_refuse_old`);
+  try {
+    return await work();
+  } finally {
+    await sqlite.run(sql.raw(trigger!.sql));
+  }
+}
+
+/** A member's row and grants as they stand: what a writer copies, to put back later. */
+async function memberRows(principal: string) {
+  return {
+    member: (await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, principal)))[0]!,
+    grants: await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, principal)),
+  };
+}
+
+async function putBack({ member, grants }: Awaited<ReturnType<typeof memberRows>>): Promise<void> {
+  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, member.principal));
+  if (grants.length > 0) await db.owner.insert(vaultGrants).values(grants);
+  await db.owner.update(vaultMembers).set(member).where(eq(vaultMembers.principal, member.principal));
+}
+
+test("0.14's writes refused once the cutover is there: an old isolate's write fails whole, its app's or its vault's, its reads and uses go on; 0.15's own write lands (OldWritesRefused, PR 9b)", async () => {
+  await old.root.projects.create('market');
+  await old.root.environments.create('market/dev');
+  await old.root.secrets.set('market/dev', { A: 'one' });
+  await old.root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await old.root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const now = deploy();
+  assert.equal(await now.cutover(), null);
+  const a = await keyIn(await environmentOf('market', 'dev'), 'A');
+  const entries = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).length;
+  const logged = await entries();
+  const before = await memberRows(CI);
+
+  // The old isolate's app writes a value, its vault changes an access, it issues a token: each refused whole, nothing left.
+  await assert.rejects(old.root.secrets.set('market/dev', { A: 'two' }), (error: { status?: number }) => error.status === 500);
+  await assert.rejects(old.root.access.set(CI, { 'market/dev': 'developer' }), (error: { status?: number }) => error.status === 500);
+  await assert.rejects(old.root.tokens.issue(CI, { label: 'late', expiresInDays: 30 }), (error: { status?: number }) => error.status === 500);
+  assert.equal(await entries(), logged);
+  assert.deepEqual(await memberRows(CI), before);
+  assert.deepEqual((await db.owner.select({ label: credentials.label }).from(credentials).where(eq(credentials.label, 'late'))), []);
+  // Its reads go on, logged as 0.14 logs them; and the token it issued before serves through 0.15's use.
+  assert.deepEqual((await old.root.secrets.reveal('market/dev', ['A'])).values, { A: 'one' });
+  assert.equal(codeOf(await use(now.vault, token.id, a)), 'ok');
+
+  // 0.15's app and vault write as before: their entries say they are 0.15's.
+  await now.root.secrets.set('market/dev', { A: 'two' });
+  await now.root.access.set(CI, { 'market/dev': 'developer' });
+  assert.equal(codeOf(await use(now.vault, token.id, a)), 'ok');
+  const marked = await db.owner.select({ action: auditLog.action, log015: auditLog.log015 }).from(auditLog).where(sql`${auditLog.seq} >= ${logged}`);
+  assert.ok(marked.some((entry) => entry.action === 'secret.write') && marked.some((entry) => entry.action === 'access.grant'), JSON.stringify(marked));
+  assert.ok(marked.filter((entry) => !['secret.read', 'credential.use'].includes(entry.action)).every((entry) => entry.log015 === true), JSON.stringify(marked));
+});
+
+test("a use's probe of 0.14's log reads past an access entry forged in the vault's name, reported; a late write the dropped trigger let land is refused, its row put back too (UsesSeeOldWrites, OldWritesRefused; PR 9b)", async () => {
+  await old.root.projects.create('market');
+  await old.root.environments.create('market/dev');
+  await old.root.secrets.set('market/dev', { A: 'one' });
+  await old.root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await old.root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const now = deploy();
+  assert.equal(await now.cutover(), null);
+  const a = await keyIn(await environmentOf('market', 'dev'), 'A');
+  assert.equal(codeOf(await use(now.vault, token.id, a)), 'ok');
+
+  // A writer without the vault's key appends an access entry in its name about the token's account: the probe finds it
+  // newer than the account's newest change accounts for, and its MAC tells it apart. The use is decided as before.
+  await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', randomBytes(32)), [{ actor: 'system:vault', action: 'access.grant', decision: 'allow', subjectPrincipal: CI, metadata: '{}' }], undefined, undefined, [], true));
+  assert.equal(codeOf(await use(now.vault, token.id, a)), 'ok');
+  // The use writes nothing of it; the next decision about the account reports it.
+  const reports = async () => (await db.owner.select({ code: auditLog.code }).from(auditLog).where(sql`${auditLog.action} = 'vault.tampered' AND ${auditLog.subjectPrincipal} = ${CI}`)).map((report) => report.code);
+  assert.deepEqual(await reports(), []);
+  await now.vault.access(CI);
+  assert.deepEqual(await reports(), ['forged_entry']);
+
+  // The refusal dropped by the database's owner: the old isolate's vault widens the account's access, and lands.
+  const before = await memberRows(CI);
+  await refusalDropped(() => old.root.access.set(CI, { 'market/dev': 'developer' }));
+  // Its row no longer its seal's: refused.
+  assert.equal(codeOf(await use(now.vault, token.id, a)), 'tampered');
+  // A writer puts the account's row and grants back as 0.14's cutover sealed them: their seal holds again, and the probe,
+  // which reads 0.14's newest authentic access entry, still refuses it.
+  await putBack(before);
+  assert.equal(codeOf(await use(now.vault, token.id, a)), 'stale');
+});
+
+test("an access entry forged in the vault's name holds no use: its check writes nothing, so a use answers while an old isolate holds 0.14's head and the vault has settling left to do (a bulk cap changed at the deploy), and the next decision reports it (reviews r3, r4 of PR 9b)", postgresOnly("0.14's head is a row lock of Postgres"), async () => {
+  await old.root.projects.create('market');
+  await old.root.environments.create('market/dev');
+  await old.root.secrets.set('market/dev', { A: 'one' });
+  await old.root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await old.root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  // The deploy changes the bulk cap: the vault's settling logs it, under 0.14's head, before its first decision.
+  const now = deploy(SIGNIN, { bulkLimit: { count: 7, windowMinutes: 15 } });
+  assert.equal(await now.cutover(), null);
+  await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', randomBytes(32)), [{ actor: 'system:vault', action: 'access.grant', decision: 'allow', subjectPrincipal: CI, metadata: '{}' }], undefined, undefined, [], true));
+  const named = (deadline = 3000): Promise<NamedUseOutcome> => {
+    const at = Date.now();
+    return now.vault.useNamed!({ tokenHash: hashToken(token.token).toString('base64'), place: { project: 'market', environment: 'dev' }, key: 'A', accepts: { signin: true, issuers: [] }, purpose: 'use', requestId: newUseRequestId(), at, deadline: at + deadline });
+  };
+  const reports = async () => (await db.owner.select({ code: auditLog.code }).from(auditLog).where(sql`${auditLog.action} = 'vault.tampered' AND ${auditLog.subjectPrincipal} = ${CI}`)).length;
+  // 0.14's head held, as an old isolate's write holds it, around a named use: answered, and served, well within its deadline.
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const holding = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE`);
+    await released;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const started = Date.now();
+  const held = await named(400).finally(() => release());
+  const took = Date.now() - started;
+  await holding;
+  assert.ok(took < 400, `answered after ${took} ms`);
+  assert.ok(held.served && held.outcome.ok, JSON.stringify(held));
+  assert.equal(await reports(), 0);
+  // The next decision about the account, the head free, reports it.
+  await now.vault.access(CI);
+  assert.equal(await reports(), 1);
 });

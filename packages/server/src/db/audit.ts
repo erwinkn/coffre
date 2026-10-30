@@ -44,6 +44,12 @@ export async function appendAudit(
   entries: readonly AuditEntry[],
   /** 0.15's changes of the write, made in the append's own statement (`appendEntries`): their numbers come back as `changes`. */
   changes: readonly PreparedChange[] = [],
+  /**
+   * Whether the app writes under 0.15's log (its vault keeps it: `keeps015`):
+   * its entries say so, as the log requires of every write once it is cut
+   * over from 0.14 (`appendEntries`).
+   */
+  log015 = false,
 ): Promise<Appended & { changes: (bigint | null)[] }> {
   return appendEntries(
     tx,
@@ -65,6 +71,7 @@ export async function appendAudit(
     undefined,
     undefined,
     changes,
+    log015,
   );
 }
 

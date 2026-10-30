@@ -24,10 +24,26 @@ const url = (login: string, database: string) => `postgresql://${login}@127.0.0.
 const owner = (database: string) => url('coffre_owner:local-dev-only', database);
 const backupLogin = (database: string) => url('coffre_backup_login:local-backup-only', database);
 
+/** The server's major version, as PostgreSQL's tools must have it: a newer `pg_restore` sends settings an older server lacks. */
+async function serverMajor(url: string): Promise<string> {
+  const client = postgresClient(url);
+  try {
+    const [row] = await client.unsafe<{ server_version_num: string }[]>('SHOW server_version_num');
+    return String(Math.floor(Number(row!.server_version_num) / 10_000));
+  } finally {
+    await client.end();
+  }
+}
+
 // PostgreSQL's own tools, which the commands run: of the server's major version, as a deployment's pipeline has them.
 const tools = spawnSync('pg_restore', ['--version'], { encoding: 'utf8' });
+const toolsMajor = /(\d+)\.\d+/.exec(tools.stdout ?? '')?.[1] ?? null;
+const sqlite = process.env.COFFRE_TEST_ENGINE === 'sqlite';
+const major = sqlite || tools.status !== 0 ? null : await serverMajor(owner('postgres'));
 const postgres = {
-  skip: process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: coffre backup runs pg_dump' : tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH' : false,
+  skip: sqlite ? 'Postgres only: coffre backup runs pg_dump'
+    : tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH'
+    : toolsMajor !== major ? `needs PostgreSQL ${major} pg_dump and pg_restore on PATH, the server's major version, not ${toolsMajor}` : false,
 };
 
 // --- without a database --------------------------------------------------------------

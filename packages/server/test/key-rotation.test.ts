@@ -242,7 +242,7 @@ test('starts that race each other rotate once, each step going on from the one b
   const starts = Array.from({ length: 6 }, () => startUnder(B, [A]));
   await Promise.all(starts.map(async (start) => {
     for (let state = await keyState(deps.db, start); state.kind === 'rotating' || state.kind === 'sealing';) {
-      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, { rows: 2, vault: deps.vault }) : await finishRotation(deps.db, start);
+      state = state.kind === 'rotating' ? await rotateStep(deps.db, start, { rows: 2, vault: deps.vault }) : await finishRotation(deps.db, start, { vault: deps.vault });
     }
   }));
   const entries = await appEntries();
@@ -525,8 +525,9 @@ test('a beat of an instance still under the old key, during the rotation, leaves
 });
 
 test('a step entry that does not say where the rotation goes on is refused, and readiness says the key is refused', async () => {
-  // Written under B, with B's MAC, but saying nothing of where the next step goes on.
-  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'coffre-key-rotation', action: 'key.reseal', decision: 'allow', subject: appLogKey(A).keyId, metadata: { from: appLogKey(A).keyId } }]));
+  // Written under B, with B's MAC, but saying nothing of where the next step goes on: as this release's app writes it,
+  // under 0.15's log too, where its entry says so.
+  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'coffre-key-rotation', action: 'key.reseal', decision: 'allow', subject: appLogKey(A).keyId, metadata: { from: appLogKey(A).keyId } }], [], LOG === '0.15'));
   const next = startUnder(B, [A]);
   const state = await keyState(deps.db, next);
   assert.equal(state.kind, 'refused');

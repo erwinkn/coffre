@@ -397,6 +397,10 @@ export const auditLog = pgTable(
     prevHash: bytea('prev_hash').notNull(),
     mac: bytea().notNull(),
     hash: bytea().notNull(),
+    // Set on every entry a writer under 0.15's log appends, and covered by no MAC: once the cutover is there, an
+    // allowed write without it is 0.14's code, which migration 0047's trigger refuses (docs/design/0.15-plan.md,
+    // "As built: PR 9b"). Gone with 0.14's appends in 0.16.
+    log015: boolean('log015'),
   },
   (table) => [
     check('audit_log_author_check', sql`${table.author} IN ('app', 'vault')`),

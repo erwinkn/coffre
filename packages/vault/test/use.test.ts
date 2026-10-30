@@ -8,10 +8,12 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import type { UseOutcome } from '@coffre/core/vault';
-import { tablesOf, type Queryable } from '@coffre/db';
+import { tablesOf, type Database, type Queryable } from '@coffre/db';
+import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 import { postgresSession } from '@coffre/db/connect';
@@ -23,15 +25,17 @@ import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { authentic } from '../src/log-entry.ts';
 import { purposeCode, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
-import { newRequestId } from '../src/use.ts';
+import { newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, FENCE, isolate, MAC, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
+/** The hot path's login, as an isolate's uses run on it. */
+let hot: Database;
 before(async () => {
   db = await openTestDatabase();
-  await useDatabases(db);
+  hot = await useDatabases(db);
 });
 after(() => db.close());
 beforeEach(emptyLog);
@@ -613,13 +617,50 @@ test('UsesSeeOldWrites: a 0.14 access entry about the principal that the new log
   const id = await w.key();
   const { use } = await isolate();
   assert.ok(heard(await use(ask(w, id))).ok);
-  // A late 0.14 grant (an old isolate's), its entry in 0.14's log: until the new log adopts it, the principal is stale.
-  const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: w.principal, metadata: '{}' }]));
+  // A late 0.14 grant (an old isolate's), its entry in 0.14's log, landed past the cutover's refusal, whose trigger the
+  // database's owner dropped (PR 9b): until a change of the new log accounts for it, the principal is stale.
+  const appended = await withLogUnlocked(db.owner, (tx) => appendEntries(tx as never, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: w.principal, metadata: '{}' }]));
   assert.equal(code(heard(await use(ask(w, id, { purpose: 'reveal' })))), 'stale');
-  // An adoption (PR 9) accounts for it: the principal's newest change names the entry.
+  // A change that names it accounts for it: the principal's newest change names the entry, as a 0.15 decision's mirror.
   await change({ kind: 'principal', id: w.principal }, { op: 'genesis', value: w.objects.principal }, w.objects.principal, seal('vault_members', 'principal', w.principal), appended.seqStart);
   assert.ok(heard(await use(ask(w, id, { purpose: 'compare' }))).ok);
   await replayAgrees();
+});
+
+test("the probe's MAC check reads no further than the entry the use's statement found: an access entry committed after it is none the use decided on (review r1 of PR 9b)", async () => {
+  const w = await world();
+  const key = vaultLogKey(SIGNING_KEY);
+  const grant = { actor: ROOT, action: 'access.grant', decision: 'allow' as const, subjectPrincipal: w.principal, metadata: '{}' };
+  // What the use's statement found, then an access change of the vault's committed before its check reads.
+  const found = await db.vault.transaction((tx) => appendEntries(tx, key, [grant], undefined, undefined, [], true));
+  const since = await db.vault.transaction((tx) => appendEntries(tx, key, [grant], undefined, undefined, [], true));
+  const check = { authentic: (entry: StoredEntry) => verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [key] }).ok, forged: () => {} };
+  const newest = (through?: bigint) => newestAccess(db.vault, w.principal, check, through).then((entry) => (typeof entry === 'string' ? entry : entry.seq));
+  assert.equal(await newest(), since.seqStart);
+  assert.equal(await newest(found.seqStart), found.seqStart);
+});
+
+test("the probe's MAC check runs within the use's admission and deadline: held up, it keeps the isolate's place, and past the deadline the use is late (review r2 of PR 9b)", async () => {
+  const w = await world();
+  const id = await w.key();
+  // An access entry about the principal that the new log does not account for, which the probe finds; its MAC is checked
+  // after the statement (`oldWrite`), held up here until let go.
+  await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: w.principal, metadata: '{}' }], undefined, undefined, [], true));
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const path: UsePath = {
+    db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 })),
+    oldWrite: async () => {
+      await held;
+      return false;
+    },
+  };
+  const at = Date.now();
+  const first = use(path, ask(w, id, { at, deadline: at + 600 }));
+  await sleep(200);
+  assert.deepEqual(await use(path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 }, 'the first, its check held up, keeps its place');
+  assert.deepEqual(await first, { ok: false, busy: 'late', retryAfter: 1 });
+  release();
 });
 
 test('admission: past its calls in flight, an isolate refuses at once, holding no connection', async () => {
@@ -683,7 +724,8 @@ test('a reference reads its source\'s value, decided at its holder: the whole sh
   await grant(w, prod);
   const holder = randomUUID();
   const row = randomUUID();
-  const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }]));
+  // As 0.15's vault writes it, past the cutover: its entry says so (`log015`).
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true));
   await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId: prod, key: `HELD_${holder.slice(0, 4)}` });
   await db.owner.insert(tablesOf(db.owner).secretReferences).values({
     id: row, projectId: w.project, environmentId: prod, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,

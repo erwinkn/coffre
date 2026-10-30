@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { isCredentialScope } from '@coffre/core/access';
 import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
 import type { CutoverInput, PolicyEdits } from '@coffre/core/vault';
 import type { GrantRow } from '@coffre/db/grants';
@@ -237,6 +238,11 @@ export function planCutover(facts: CutoverFacts): CutoverPlan {
       plan.skipped.push({ ref, why: 'it names an instance, which no binding of 0.14 does', fault: 'tampered' });
       continue;
     }
+    // A scope 0.14 never writes (`seal_binding` holds the row's to its object's, as JSON: one that is no scope would not be).
+    if (!scopeReads(read.columns.scope)) {
+      plan.skipped.push({ ref, why: 'its scope is none 0.14 writes', fault: 'tampered' });
+      continue;
+    }
     if (canonical(read.columns) !== canonical(columns) || read.columns.revoked) throw new Moved(`the binding ${vouched.id}'s row moved since the app vouched for it`);
     plan.bindings.push({ ref, object: bindingObject({ ...read.columns, origin: vouched.origin }) });
   }
@@ -251,6 +257,16 @@ export function genesisCalls(keys: ChangeKeys, genesis: readonly Genesis[], at: 
     const row = { at, requestId: randomUUID(), object: objectKey(ref), actor: CUTOVER_ACTOR, payload: payloadOf(ref, { op: 'secret.delete' }), seal: null };
     return [made, { ref, ...row, value: null, sealFrom: sealOf(keys.seals[0]!, ref, object), mac: entryMac(keys.mac, { tree: 'changes', row }) }];
   });
+}
+
+/** Whether a binding's stored scope is one: none, or JSON a credential's scope is. */
+function scopeReads(stored: string | null): boolean {
+  if (stored === null) return true;
+  try {
+    return isCredentialScope(JSON.parse(stored));
+  } catch {
+    return false;
+  }
 }
 
 function baseSlug(slug: string): string {

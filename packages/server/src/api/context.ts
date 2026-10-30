@@ -6,7 +6,7 @@ import { lockLogHead } from '@coffre/db/log';
 
 import { appendAudit, type AuditEntry } from '../db/audit.ts';
 import type { ReadAhead } from '../db/read-ahead.ts';
-import type { AppChanges } from './changes.ts';
+import { keeps015, type AppChanges } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
@@ -203,10 +203,12 @@ export class Refusal extends Error {
  * only; answered once sealed (R51).
  */
 export async function audited<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'policySeq' | 'policy' | 'recalled'> },
+  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'vault'> & { caller?: Pick<Caller, 'policySeq' | 'policy' | 'recalled'> },
   work: (tx: Transaction, log: AuditEntry[]) => Promise<T>,
   changes: AppChanges | null = null,
 ): Promise<T> {
+  // Under 0.15's log, its entries say so: once cut over, the log refuses a write's entry that does not (migration 0047).
+  const log015 = await keeps015(ctx.vault);
   try {
     const result = await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
@@ -215,10 +217,10 @@ export async function audited<T>(
       if (ctx.caller !== undefined) await policyStill({ caller: ctx.caller }, tx);
       const result = await work(tx, log);
       if (changes === null) {
-        if (log.length > 0) await appendAudit(tx, ctx.chainKey, log);
+        if (log.length > 0) await appendAudit(tx, ctx.chainKey, log, [], log015);
       } else if (log.length > 0) {
         // The changes in the append's own statement: one round trip less under the head (T123).
-        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls)).changes);
+        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, log015)).changes);
       } else {
         await changes.commit(tx);
       }
@@ -292,7 +294,7 @@ export const POLICY_CHANGED = 'policy_changed';
  *   her MCP client's reveal               use_credential              disconnected meanwhile: refused in the use
  */
 export async function recorded<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
+  ctx: Pick<ApiContext, 'db' | 'chainKey' | 'vault' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
   work: (log: AuditEntry[], fence: () => void, at: (where: EntryFields) => void, stood: () => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {

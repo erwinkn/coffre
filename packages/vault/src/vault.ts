@@ -160,7 +160,7 @@ import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type GrantRow, type Member } from './store.ts';
-import { use, UseCache, useLimits, useNamed, type UseLimits } from './use.ts';
+import { use, UseCache, useLimits, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
 
@@ -606,23 +606,48 @@ class VaultService implements Vault {
 
   /** 0.15's use (use.ts), on the hot path's login. */
   async use(input: UseInput): Promise<UseOutcome> {
+    return use(this.#usePath(), input);
+  }
+
+  /** 0.15's use as the request names it (use.ts, `useNamed`), on the hot path's login. */
+  async useNamed(input: NamedUseInput): Promise<NamedUseOutcome> {
+    return useNamed(this.#usePath(), input);
+  }
+
+  /** What 0.15's uses run on, either way they are asked (use.ts, `UsePath`). */
+  #usePath(): UsePath {
     // Behind the switch: a vault keeping 0.14's log alone has no 0.15 objects to decide on.
     const { log015, uses: cache } = this.#prepared;
     if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
     if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
     // An isolate's first uses read the cutover's marker (`#cutOverYet`) within their admission, as any call holds a connection.
     const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
-    return use({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }) }, input);
+    return {
+      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
+      oldWrite: (principal, old, through) => this.#oldWrite(principal, old, through),
+    };
   }
 
-  /** 0.15's use as the request names it (use.ts, `useNamed`), on the hot path's login. */
-  async useNamed(input: NamedUseInput): Promise<NamedUseOutcome> {
-    const { log015, uses: cache } = this.#prepared;
-    if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
-    if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
-    // As `use`: an isolate's first calls wait for the cutover's seal (`#cutOverYet`), within their admission (review r10).
-    const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
-    return useNamed({ db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }) }, input);
+  /**
+   * Whether 0.14's newest access entry about `principal` that carries the
+   * vault's MAC, at or below `through`, is past `old`, what the principal's
+   * newest change accounts for (Migration015.tla's UsesSeeOldWrites, of the
+   * newest authentic write): asked by a use whose probe found `through` in
+   * the vault's name past it, which, but for a write the cutover refused to
+   * let land, is one forged there. Read from `through` down, never above: the
+   * use's statement committed before this reads, and a change's entry since
+   * is none it decided on (review r1). Each forged one is passed over; past
+   * `LOOK_BACK` of them, the use is refused as if it were not. It writes
+   * nothing: no report, which would wait for 0.14's head, or for the
+   * vault's settling, past the use's deadline (reviews r3, r4). The next
+   * decision about the principal reports what is forged (`#integrity`).
+   */
+  async #oldWrite(principal: string, old: bigint | null, through: bigint): Promise<boolean> {
+    // On Workers the use's vault is opened over its one hot connection (cloudflare.ts, `openVault(hot, prepared, hot)`):
+    // this reads on it, never a second connection in the call.
+    const newest = await newestAccess(this.#db, principal, { authentic: (entry) => this.#authentic(entry), forged: () => {} }, through);
+    if (newest === 'unreached') return true;
+    return typeof newest !== 'string' && (old === null || newest.seq > old);
   }
 
   async #now(db: Queryable): Promise<number> {
@@ -1116,7 +1141,8 @@ class VaultService implements Vault {
    * is to a key it does not hold: a vault given a newer KEK has replaced
    * this one, which writes nothing more. Checked under the head's lock, so
    * that an instance still running with the replaced KEK, as during a
-   * deploy, cannot write after the rotation.
+   * deploy, cannot write after the rotation. Under 0.15's log, its entries
+   * say so (`log015`): once cut over, the log refuses a write without it.
    */
   async #append(
     tx: Transaction,
@@ -1134,7 +1160,7 @@ class VaultService implements Vault {
         throw new Error(prepared.superseded);
       }
       for (const check of underLock) await check(locked);
-    }, head === undefined ? undefined : { head, last: head.last, at: held!.at });
+    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], prepared.log015 !== null);
     // The head still held, as this append left it, for the next append of the same transaction: a remote key's intent,
     // then the decision's reports.
     if (head !== undefined) {

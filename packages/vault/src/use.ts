@@ -247,6 +247,17 @@ export type UsePath = {
   cache: UseCache;
   /** What a call waits for first, within its admission (`inFlight`): an isolate's first, the log's cutover (vault.ts, `#cutOverYet`). */
   ready?: () => Promise<void>;
+  /**
+   * Whether `principal`'s newest 0.14 access entry that carries the vault's
+   * MAC, at or below `through`, is past `old`, the newest its newest change
+   * accounts for (null: none): asked only when the statement's probe, which
+   * reads any entry in the vault's name, found one past it, `through`
+   * (UsesSeeOldWrites). An entry forged there is passed over (vault.ts,
+   * `#oldWrite`), which writes nothing. Never past `through`: the use's
+   * statement committed before this reads, and an entry since is no input it
+   * decided on. Absent, the probe's answer stands.
+   */
+  oldWrite?: (principal: string, old: bigint | null, through: bigint) => Promise<boolean>;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -365,9 +376,11 @@ async function useOnce(
     ...(names === undefined ? {} : { names }),
     ...(decided ? { decided: true as const } : {}),
   };
-  const answered = await raced(path, call);
+  // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
+  // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
+  const answered = await raced(path, call, async (row) => ({ row, forged: await forgedPast(path, row, row.probed ? undefined : known) }));
   if ('busy' in answered) return { outcome: answered, row: null, checked: null, request };
-  const row = answered;
+  const { row, forged } = answered;
   if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured') return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
   if (names !== undefined && row.state === 'unknown') return { unknown: true };
   if (names !== undefined && row.state === 'nowhere') return { nowhere: true };
@@ -386,7 +399,7 @@ async function useOnce(
     const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
     const view = viewOf(row, named, row.probed ? undefined : known);
     if (view.changed) cache.seals.delete(key);
-    const checked = checkedOf(path.sealKeys, view.view, named, view.accounted);
+    const checked = checkedOf(path.sealKeys, view.view, named, view.accounted || forged);
     const code = decidedOn(checked, named, row) ?? (names !== undefined && readsArchived(row) ? 'archived' : null);
     if (code !== null) return { outcome: { ok: false, code, number: null }, row, checked, request: named };
     return { again: ids, row };
@@ -394,7 +407,7 @@ async function useOnce(
   const view = viewOf(row, request, row.probed ? undefined : known);
   // An input whose row names another object than the cache's seal is of: `stale`, and the next use probes.
   if (view.changed) cache.seals.delete(key);
-  const checked = checkedOf(path.sealKeys, view.view, request, view.accounted);
+  const checked = checkedOf(path.sealKeys, view.view, request, view.accounted || forged);
   const code = decidedOn(checked, request, row);
   // The seals a probe read, kept for the next use's cached form: by ids alone. A named call never runs the cached form
   // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12).
@@ -419,7 +432,11 @@ async function useOnce(
   const secret = v.secret.row!;
   const value = secret.source === null ? secret : v.source!.row!;
   // A plain value, decided: its text, which its object's digest binds; no entry, no cover (it counts toward nothing).
-  if (value.key === null) return { outcome: { ok: true, plain: row.v_plaintext!, versionId: value.version }, row, checked, request };
+  // Past its deadline, it never leaves, as a value whose key opened late (`open`).
+  if (value.key === null) {
+    if (Date.now() >= input.deadline) return { outcome: busy('late'), row, checked, request };
+    return { outcome: { ok: true, plain: row.v_plaintext!, versionId: value.version }, row, checked, request };
+  }
   if (row.covered === null) {
     const expires = checked.credential.row!.expiresAt ?? Infinity;
     cache.keep(cache.covers, coverKey, { number: row.number!, at: input.at, requestId: input.requestId, until: Math.min(input.at + cache.limits.coverMs, expires) });
@@ -594,17 +611,18 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
 }
 
 /**
- * The call, raced against the deadline (WorkerHonoursDeadline): lost, the
- * use is answered `late`, and the call's row, if it ever comes, is
- * dropped. It counts against admission until it settles, holding its
- * connection until then.
+ * The call, then `then` on its row, raced against the deadline
+ * (WorkerHonoursDeadline): lost, the use is answered `late`, and the call's
+ * row, if it ever comes, is dropped. Both count against admission until they
+ * settle, holding the call's connection until then: what the vault reads
+ * after the statement (`oldWrite`) is within the same place and deadline.
  */
-async function raced(path: UsePath, call: UseCall): Promise<UseRow | Extract<UseOutcome, { busy: UseBusy }>> {
+async function raced<T>(path: UsePath, call: UseCall, then: (row: UseRow) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const { cache } = path;
   cache.inFlight += 1;
   const running = (async () => {
     await path.ready?.();
-    return (engineOf(path.db) === 'postgres' ? callPostgres : callSqlite)(path.db, call);
+    return then(await (engineOf(path.db) === 'postgres' ? callPostgres : callSqlite)(path.db, call));
   })().finally(() => {
     cache.inFlight -= 1;
   });
@@ -630,6 +648,21 @@ async function raced(path: UsePath, call: UseCall): Promise<UseRow | Extract<Use
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Whether the access entry the statement's probe found past what the
+ * principal's newest change accounts for (`viewOf`'s `accounted` false) is
+ * one forged in the vault's name, as is every one past it up to the probe's:
+ * then it is passed over, as Migration015.tla's UsesSeeOldWrites reads only
+ * authentic writes, and the use is decided as its replay decides it.
+ */
+async function forgedPast(path: UsePath, row: UseRow, known?: CachedSeals): Promise<boolean> {
+  // A row that answers a state (`moved`, `unknown`, `unconfigured`) may name none of these: nothing to check.
+  if (path.oldWrite === undefined || row.m_access == null || row.c_principal == null) return false;
+  const old = (known?.last ?? lastsOf(row)).mOld ?? null;
+  if (old !== null && BigInt(row.m_access) <= BigInt(old)) return false;
+  return !(await path.oldWrite(row.c_principal, old === null ? null : BigInt(old), BigInt(row.m_access)));
 }
 
 function lastsOf(row: UseRow): Lasts {
