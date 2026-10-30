@@ -134,8 +134,15 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
   const query = (engine === 'postgres' ? postgres : sqlite)(asked);
   const [row] = await rowsOf<{ snapshot: string | Raw }>(db, query);
   const raw: Raw = typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
-  // SQLite has no `log_object`: the environments' newest changes in a statement of their own, by the keys the vault computes.
-  const newest = asked.seals === true && engine !== 'postgres' ? await store.newestSeals(db, raw.environments.map(({ id }) => ({ kind: 'environment', id }))) : null;
+  // SQLite has no `log_object`: the environments' newest changes in a statement of their own, by the keys the vault
+  // computes, the places asked with no row among them (`gone`, which Postgres's statement answers itself).
+  const rowless = asked.seals === true && engine !== 'postgres' ? (raw.placeIds ?? []).filter((id) => !raw.environments.some((row) => row.id === id)) : [];
+  const newest = asked.seals === true && engine !== 'postgres'
+    ? await store.newestSeals(db, [...raw.environments.map(({ id }) => id), ...rowless].map((id) => ({ kind: 'environment' as const, id })))
+    : null;
+  const gone = newest === null
+    ? (raw.gone ?? []).map(({ id, newest: last }) => [id, hex(last)] as const)
+    : rowless.flatMap((id) => (newest.has(objectKey({ kind: 'environment', id })) ? [[id, newest.get(objectKey({ kind: 'environment', id })) ?? null] as const] : []));
   return {
     at: Number(raw.at),
     members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
@@ -143,7 +150,7 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
     newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
     newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
     newestSettings: asked.settings !== true ? undefined : raw.settings == null ? null : entryOf(raw.settings),
-    environments: new Map(raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
+    environments: new Map<string, EnvironmentRow>([...gone.map(([id, last]) => [id, store.goneEnvironment(id, last)] as const), ...raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
       projectId, slug, owner, parentId,
       deleted: Boolean(deleted),
       archived: Boolean(archived),
@@ -154,7 +161,7 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
           newest === null ? hex(sealed.newest) : newest.get(objectKey({ kind: 'environment', id })) ?? null,
         ),
       } : {}),
-    }])),
+    }] as const)]),
     ended: new Set(raw.ended.map((seq) => BigInt(seq))),
     released: Number(raw.released ?? 0),
     head: raw.head === null ? null : {
@@ -195,6 +202,10 @@ type Raw = {
     /** With `asked.seals`: the object's own columns, the row's seal and, on Postgres, its newest change's, as hex. */
     protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: string | null;
   }[];
+  /** With `asked.seals`, on Postgres: the places asked that the log holds a change of and no row answers to. */
+  gone?: { id: string; newest: string | null }[];
+  /** With `asked.seals`, on SQLite: every place id asked, row or none. */
+  placeIds?: string[];
   ended: Int[];
   released: Int | null;
 };

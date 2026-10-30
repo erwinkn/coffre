@@ -318,7 +318,11 @@ export async function environmentsById(
     .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
   // SQLite has no `log_object`: the newest changes in a statement of their own, by the keys the vault computes.
   const newest = seals && !postgres ? await newestSeals(db, rows.map((row) => ({ kind: 'environment', id: row.id }))) : null;
-  return new Map(rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
+  // An id asked with no row, which the log holds a change of: deleted outright around it (review r5). A statement more,
+  // only when a row is missing.
+  const rowless = seals && ids !== 'all' ? [...new Set(ids)].filter((id) => !rows.some((row) => row.id === id)) : [];
+  const gone = await loggedEnvironments(db, rowless);
+  return new Map<string, EnvironmentRow>([...[...gone].map(([id, last]) => [id, goneEnvironment(id, last)] as const), ...rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
     ...environment,
     ...(seals ? {
       sealed: environmentSeal(
@@ -327,7 +331,32 @@ export async function environmentsById(
         newest === null ? last ?? null : newest.get(objectKey({ kind: 'environment', id })) ?? null,
       ),
     } : {}),
-  }]));
+  }] as const)]);
+}
+
+/**
+ * A place the log holds a change of, which no row answers to (deleted outright around the log, or its project's): read
+ * as a row whose seal is none, which no check passes (`#placeFault`), so that every decision on it fails closed as on
+ * any other row the log does not hold, a protection on it kept (review r5). Its other columns name nothing.
+ */
+export function goneEnvironment(id: string, newest: Buffer | null): EnvironmentRow {
+  const columns = { id, projectId: '', slug: '', owner: null, parentId: null, protected: null, archived: false, projectArchived: false };
+  return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest: newest ?? Buffer.alloc(0) } };
+}
+
+/**
+ * Of these environment ids, those the log holds a change of: by its newest seal, null for one that left none. One probe
+ * of each object's changes.
+ */
+async function loggedEnvironments(db: Queryable, ids: readonly string[]): Promise<Map<string, Buffer | null>> {
+  if (ids.length === 0) return new Map();
+  if (engineOf(db) !== 'postgres') {
+    const found = await newestSeals(db, ids.map((id) => ({ kind: 'environment', id })));
+    return new Map(ids.flatMap((id) => (found.has(objectKey({ kind: 'environment', id })) ? [[id, found.get(objectKey({ kind: 'environment', id })) ?? null] as const] : [])));
+  }
+  const rows = await rowsOf<{ id: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT g.id::text AS id, l.seal FROM unnest(${sql.param([...ids])}::uuid[]) AS g (id)
+    CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', g.id::text) ORDER BY l.number DESC LIMIT 1) l`);
+  return new Map(rows.map((row) => [row.id, bytes(row.seal)]));
 }
 
 /** The columns `environmentsById` reads with `seals`, as the drivers answer them. */

@@ -355,3 +355,28 @@ test('a reference is decided on its holder\'s project as the row the decision ch
     await holder.end();
   }
 });
+
+test('a protected place whose row a writer deleted outright stays protected: the log holds it, so it is no fork never written (review r5)', async () => {
+  const w = await world();
+  let offset = 0;
+  const vault = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, clockOffset: () => offset });
+  const [a, b] = [await newEnvironment(db.owner, w.project), await newEnvironment(db.owner, w.project)];
+  assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [a, b], protected: true } })).ok);
+  // Maya, a Developer of the whole instance, reads no protected place; CI views the project, by Root's grant.
+  assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: MAYA, role: 'developer' })).ok);
+  assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
+  assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
+  assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: 'token:ci2' })).ok);
+  // Past the ten minutes a fork's id protects before its row is written.
+  offset = 11 * 60_000;
+  const give = () => vault.setAccess({ actor: MAYA, caller: 'person', principal: 'token:ci2', changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] });
+  const issueProject = async () => vault.issueToken!(await issueOn(vault, issue(MAYA, [issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' })])));
+  assert.equal((await give()).ok, false, 'a project-wide grant reaches the protected places, which she does not read');
+  assert.equal((await issueProject()).ok, false);
+  await run(db.owner, sql`DELETE FROM environments WHERE id IN (${a}, ${b})`);
+  const { policy } = await vault.access(MAYA);
+  assert.deepEqual([...policy!.protectedIn[w.project]!].sort((x, y) => (x.environmentId < y.environmentId ? -1 : 1)),
+    [{ environmentId: a, slug: null }, { environmentId: b, slug: null }].sort((x, y) => (x.environmentId < y.environmentId ? -1 : 1)));
+  assert.equal((await give()).ok, false);
+  assert.equal((await issueProject()).ok, false);
+});

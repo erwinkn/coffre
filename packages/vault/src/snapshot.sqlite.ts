@@ -92,7 +92,20 @@ export function snapshotQuery(asked: Asked): SQL {
             -- Of a forged entry's, an element that is no object names nothing: json_extract would fail on a string.
             WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'
           )
-      )),
+      )),${seals
+        ? sql`
+      -- Every place id asked, row or none: snapshot finds those the log holds a change of and no row answers to (review r5).
+      'placeIds', json((
+        SELECT json_group_array(id) FROM (
+          SELECT value AS id FROM json_each(${environments})
+          UNION SELECT parent_id FROM environments WHERE id IN (SELECT value FROM json_each(${environments})) AND owner IS NOT NULL
+          UNION SELECT environment_id FROM vault_grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL
+          UNION SELECT json_extract(place.value, '$.environmentId')
+            FROM policy, json_each(policy.metadata, '$.policy.protected') AS place
+            WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'
+        ) WHERE id IS NOT NULL
+      )),`
+        : sql``}
       'ended', json((
         SELECT json_group_array(related_seq) FROM audit_log
         WHERE author = 'vault' AND action = 'reference.end' AND decision = 'allow' AND related_seq IN (SELECT value FROM json_each(${references}))
