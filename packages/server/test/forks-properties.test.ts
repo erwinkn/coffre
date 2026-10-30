@@ -56,7 +56,7 @@ before(async () => {
   await resetDatabase(database.owner);
   // 0.14's log, whatever the suite's: the places are written as rows around the vault, which 0.15's decides nothing on
   // (T159), and what is held here is the app's resolution of them, not the vault's log.
-  vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 31) }, {}, {});
+  vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 31) }, {}, { log: '0.14' });
 });
 after(async () => { await database.close(); });
 

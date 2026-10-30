@@ -35,15 +35,18 @@ async function auditFixture(t: test.TestContext, status: number, error: string, 
   const dir = mkdtempSync(join(tmpdir(), 'coffre-refusal-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, 'app.db');
-  await using(sqlite(file), (sql) => sql.exec('CREATE TABLE audit_log (action TEXT)'));
+  // 0.15's uses, which a reveal writes to in the statement that decides it.
+  await using(sqlite(file), (sql) => sql.exec('CREATE TABLE log_uses (number INTEGER)'));
   let output = '';
+  // The values the check writes, as the instance would keep them.
+  const written: Record<string, string> = {};
   const deployment = { database: async () => sqlite(file), output: () => output } as Deployment;
   const admin = {
     browser: { send: async () => {
       if (!down) {
         await using(sqlite(file), async (sql) => {
           try {
-            await sql.exec("INSERT INTO audit_log VALUES ('secret.read')");
+            await sql.exec('INSERT INTO log_uses VALUES (1)');
           } catch (cause) {
             output += String(cause);
           }
@@ -51,7 +54,12 @@ async function auditFixture(t: test.TestContext, status: number, error: string, 
       }
       return Response.json({ error, message: 'something went wrong; see the server log' }, { status });
     } },
-    api: { secrets: { reveal: async () => ({ values: { API_KEY: 'canary' } }) } },
+    api: {
+      secrets: {
+        set: async (_path: string, values: Record<string, string>) => void Object.assign(written, values),
+        reveal: async (path: string) => ({ values: path === DEV ? { API_KEY: 'canary' } : written }),
+      },
+    },
   };
   return { deployment, people: { admin } as unknown as People, canaries: { [`${DEV}/API_KEY`]: 'canary' } };
 }
