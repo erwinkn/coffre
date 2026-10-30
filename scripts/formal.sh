@@ -102,6 +102,15 @@ REMOVALS=(
   # D150 (fallback D), W268: her standing decided from rows no key decides, before any of the key's is read.
   "Probing StandingFirst NoKeyBeforeStanding"
   "ProbingFloor StandingFirst NoKeyBeforeStanding"
+  # B2 (Batching.tla, T167): a request's several keys, one vault call and one statement, two rounds as a use by ids.
+  "Batching StrongestFirst NoWaitCycle"
+  "Batching CountsOwnBatch CapHolds"
+  "Batching DecideBeforeLock NoLockForRefused"
+  "BatchingRefused DecideBeforeLock NoLockForRefused"
+  "BatchingRefused DecideBeforeLock RefusedEntersNothing"
+  "BatchingRefused AllDecidedFirst NoLockForRefused"
+  "BatchingRefused AllDecidedFirst RefusedEntersNothing"
+  "BatchingRefused AnswerWhole AllOrNothing"
   # A use by name holds its rows to the names (Naming.tla; review r2 of #412): an id kept is used only while it is still named so.
   "Naming HeldToNames UsedAsNamed"
   "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"

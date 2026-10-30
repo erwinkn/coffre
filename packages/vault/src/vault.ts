@@ -125,6 +125,8 @@ import {
   type Unwrapped,
   type UseInput,
   type NamedUseInput,
+  type UseManyInput,
+  type UseManyOutcome,
   type NamedUseOutcome,
   type UseOutcome,
   type UseRecord,
@@ -160,7 +162,7 @@ import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member } from './store.ts';
-import { use, UseCache, useLimits, useNamed, type UseLimits, type UsePath } from './use.ts';
+import { use, UseCache, useLimits, useMany, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 
 
@@ -636,7 +638,12 @@ class VaultService implements Vault {
     return useNamed(this.#usePath(), input);
   }
 
-  /** What 0.15's uses run on, either way they are asked (use.ts, `UsePath`). */
+  /** A request's several keys as one call (use.ts, `useMany`; T167), on the hot path's login. */
+  async useMany(input: UseManyInput): Promise<UseManyOutcome> {
+    return useMany(this.#usePath(), input);
+  }
+
+  /** What 0.15's uses run on, every way they are asked (use.ts, `UsePath`). */
   #usePath(): UsePath {
     // Behind the switch: a vault keeping 0.14's log alone has no 0.15 objects to decide on.
     const { log015, uses: cache } = this.#prepared;
@@ -3311,7 +3318,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; credentials?: true; issues?: true }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; batchUses?: true; credentials?: true; issues?: true }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3324,7 +3331,9 @@ class VaultService implements Vault {
       // With it, the vault makes sign-ins through bindings and revokes credentials itself (credentials.ts).
       ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, credentials: true as const, issues: true as const, binds: true as const }),
       // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
-      ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const }),
+      // A request's several keys in one call too (`useMany`, T167), said so that an app newer than its vault asks for it
+      // only of a vault that has it.
+      ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const, batchUses: true as const }),
     };
   }
 

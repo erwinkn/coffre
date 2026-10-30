@@ -25,6 +25,7 @@ export const METHODS = [
   'verifyLog',
   'use',
   'useNamed',
+  'useMany',
   'prepare',
   'waitSealed',
   'signIn',

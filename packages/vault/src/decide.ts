@@ -285,10 +285,14 @@ type In<T extends Input, checked extends boolean> = checked extends true ? Check
  * A row with none (none read) is valid, and current while its object has
  * no newest seal either: never made, or gone.
  */
-export function checkSeals(keys: SealKeys, view: UseView, request: Pick<UseRequest, 'credential' | 'secretId' | 'way'>): CheckedView {
+export function checkSeals(
+  keys: SealKeys, view: UseView, request: Pick<UseRequest, 'credential' | 'secretId' | 'way'>,
+  /** How a seal is checked: `sealed`, or a batch's `sealedOnce`, which checks an object its keys share once. */
+  seals: typeof sealed = sealed,
+): CheckedView {
   const check = <T extends Input>(read: Read<T>, ref: Ref): Checked<T> => ({
     row: read.row,
-    valid: read.row === null ? read.seal === null : sealed(keys, ref, read.row, read.seal),
+    valid: read.row === null ? read.seal === null : seals(keys, ref, read.row, read.seal),
     current: read.row === null ? read.newest === null : read.seal !== null && read.newest !== null && read.seal.equals(read.newest),
   });
   const credential = wayChecked(check, view, request);

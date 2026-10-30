@@ -242,6 +242,24 @@ export function sealed(keys: SealKeys, ref: Ref, input: Input, seal: Buffer | nu
 }
 
 /**
+ * `sealed`, each answer kept for the calls of one batch of uses (T167), where every key's rows build the shared
+ * objects (the way in, the account, the roles, the policy, the places) alike; a key's own, its secret's, as `sealed`: by the object's kind and id, the seal,
+ * and the object's JSON as it was built. Equal JSON is an equal object, so an equal canonical encoding and seal: the
+ * answer is the one `sealed` gives, at the cost of one `JSON.stringify` where it was the encoding and an HMAC.
+ */
+export function sealedOnce(): typeof sealed {
+  const kept = new Map<string, boolean>();
+  return (keys, ref, input, seal) => {
+    // A key's own object (its secret, a reference's source) is no other key's: checked as it is, its JSON not built.
+    if (seal === null || ref.kind === 'secret') return sealed(keys, ref, input, seal);
+    const at = `${ref.kind}\0${ref.id}\0${seal.toString('hex')}\0${JSON.stringify(input)}`;
+    let answer = kept.get(at);
+    if (answer === undefined) kept.set(at, (answer = sealed(keys, ref, input, seal)));
+    return answer;
+  };
+}
+
+/**
  * An object as its seal covers it: a principal's grants as a set, in one
  * order whatever order the rows come back in. Everything else is kept as
  * written: a credential's scope is a list it was issued with.

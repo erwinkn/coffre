@@ -644,6 +644,35 @@ The tests hold the code to it: `packages/vault/test/use-named.test.ts`, a
 key renamed, a token's hash moved, a key deleted and made again under its
 name.
 
+### Batching.tla
+
+A request's several keys are one vault call, `useMany`, and one statement,
+`use_batch` (migration 0048; T167, B2), where each key had a call of its
+own. The statement makes each key's use as `use_credential` makes one, by
+ids, in the request's order, in one transaction: HotPathOne.tla holds each
+of those uses, and this model what a batch adds, as several share one
+transaction, one principal's lock and one cap. A batch is two rounds, as a
+lone use by ids is (T158, D153): a first call that uses every key whose
+row of the cap's is fresh and answers `decide` for the others, locking and
+writing nothing; then, once the vault has allowed every key on those rows,
+a second call for the keys left, under the principal's lock. Values leave
+only when every key is allowed, all or nothing, as 0.14's unwrap and 0.15's
+use a key both answer a request of several keys.
+
+| Protection, in the code | Turned off, TLC finds |
+|---|---|
+| The second call takes the principal's lock exclusive, after the fence and before its first key (`use_batch`, `p_lock`; `useMany`) | two batches of one principal's, each moving a key on under the lock shared, then each waiting for it exclusive to enter another (`NoWaitCycle`, `Batching`): Postgres ends one after `deadlock_timeout`, a second, and it answers `late` |
+| Each key's use counts the cap's set as its own statements read it, the batch's earlier keys included (`use_credential` called a key at a time inside `use_batch`, each statement its own snapshot) | a batch of two entering beside a set of one, at a cap of two, each counted against the set as the batch began: three in the set (`CapHolds`, `Batching`) |
+| The first call takes no principal's lock: a key that would take it answers `decide` (`p_decided`, T158) | a caller revoked, or a batch with a key the rules refuse, waits for the lock (`NoLockForRefused`, `Batching`, `BatchingRefused`) and enters keys in the set (`RefusedEntersNothing`, `BatchingRefused`) |
+| The second call is made only once the vault allowed every key of the batch on the first call's rows (`useMany`, AllDecidedFirst) | the same, for a batch whose one key the rules refuse (`NoLockForRefused`, `RefusedEntersNothing`, `BatchingRefused`) |
+| Values leave only when every key of the batch is allowed (`useMany`; the app's `useValues`) | a batch hands back its allowed key beside one refused (`AllOrNothing`, `BatchingRefused`) |
+
+The tests hold the code to it: `packages/vault/test/use-many.test.ts`, on
+both engines, each case put back without its protection to check it
+fails: two batches through the principal's lock held elsewhere (without
+the exclusive lock first, Postgres's 40P01 after a second), a batch over
+the cap, a batch refused on its first call's rows, a key the rules refuse.
+
 ### Their invariants
 
 | Invariant | What must hold in every state |
@@ -658,6 +687,10 @@ name.
 | `NoReadOnStaleAnswer` | No `secret.read` is logged on an answer of the vault's kept from an earlier request that is no longer its answer |
 | `SameAnswer` | Every answer to someone with no access is the same whether a key they ask for was made since or never made |
 | `UsedAsNamed` | Every use the log records is of the key the request named, as the use read it |
+| `NoWaitCycle` (Batching) | No two batches of one principal's each wait for the principal's lock the other holds |
+| `NoLockForRefused` | A batch holds, or waits for, the principal's lock only in its second call, once every one of its keys was allowed on its first call's rows |
+| `RefusedEntersNothing` | A batch refused on its first call's rows enters no key in the cap's set |
+| `AllOrNothing` | A batch hands back every one of its values, each allowed, or none |
 | `SensitiveOnlyFromOwners` | A scope reads a project's sensitive values only if whoever issued it is an Owner of the project when it commits |
 | `SealedOnce` | The older release's token is sealed once, however many first uses race |
 | `CapHolds` | At most the limit's keys decided for the principal in any window |
@@ -679,6 +712,8 @@ name.
 | `ProbingProvider` | `Probing` with her browser session's sign-in provider removed from the deployment's config and nothing else of the deployment's changing, three requests: every `no` alike (review r6 of D153) | 62 thousand |
 | `ProbingAccess` | `Probing` with the deployment moving its sign-in to Cloudflare Access, three requests: the same (review r7 of D153) | 84 thousand |
 | `Naming` | One request's key name mapped to its id once, while the key is renamed and another named so (T145, PR B) | 31 |
+| `Batching` | Two requests of one principal's, each two keys of three as one batch, at most two keys in the cap's set, every start of their rows, while the caller's standing is revoked or restored once and time ages a row once (T167, B2) | 76 thousand |
+| `BatchingRefused` | The same, the second request naming a key the rules refuse whatever the standing | 26 thousand |
 | `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 
@@ -707,6 +742,19 @@ name.
 - **Bulk.tla:**
   - The intent a key service's read logs first, which counts the same way
     and releases nothing.
+- **Batching.tla:**
+  - Each key's use's own steps (its snapshot, its entry's number under the
+    fence, covers, the seal cache, the deadline), HotPathOne.tla's: a key's
+    use is one step here.
+  - Lone uses beside the batches: one never holds the principal's lock and
+    waits for another lock after it, so it closes no wait cycle.
+  - A round of more than `uses.batch` keys (100), made in statements of that
+    many in turn: each is a round of the model's, its own transaction, and a
+    locked one takes the principal's lock exclusive first; between two, the
+    batch holds no lock.
+  - The window's time, as a row's three states (none, old, fresh), and the
+    rows' writes as visible at once: only a holder of the lock exclusive
+    enters a key, and a move keeps a key in the set.
   - The database clock moving backwards, or the window's test offset.
 
 ### What they do not prove

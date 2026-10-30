@@ -23,6 +23,18 @@ export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
   return (db as Database).transaction((tx) => useOnce(tx, call));
 }
 
+/**
+ * `use_batch` (0048) on SQLite: each key's use as `callUse` makes it, in order, in one transaction. Its one writer at a
+ * time makes the principal's lock, the batch's `lock`, implicit too.
+ */
+export async function callBatch(db: Queryable, calls: readonly UseCall[], _lock: string | null): Promise<UseRow[]> {
+  return (db as Database).transaction(async (tx) => {
+    const rows: UseRow[] = [];
+    for (const call of calls) rows.push(await useOnce(tx, call));
+    return rows;
+  });
+}
+
 /** A change's number as text: SQLite's integers are 64 bits, a JavaScript number's exact ones 53. */
 type Changed = { number: string; mac: Buffer; seal: Buffer | null; payload: string };
 

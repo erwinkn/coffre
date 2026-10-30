@@ -30,6 +30,7 @@ import type { ChangeBindingsInput, CutoverInput,
   ChangePolicyInput,
   UnwrapInput,
   NamedUseInput,
+  UseManyInput,
   UseInput,
   Vault,
   VerifyLogInput,
@@ -55,7 +56,8 @@ export * from './index.ts';
  * its switch (docs/design/0.15-plan.md, PR 5), a Hyperdrive config of its
  * own whose login is `coffre_vault_hot`; and `uses`, how many uses an
  * isolate has in flight at most (by default `connections`, the share of
- * that config's pool an isolate may hold: T112 measures it).
+ * that config's pool an isolate may hold: T112 measures it), and `uses.batch`, the most keys a statement
+ * of a request's several makes uses of (100: `UseLimits.batch`).
  *
  * `log`, the switch itself (`VaultOptions.log`), until PR 10 flips it:
  * `'0.15'` keeps 0.15's log, whose changes answer once the checkpointer's
@@ -70,7 +72,7 @@ export type WorkersVaultConfig = VaultConfig & {
   database: PostgresDatabase;
   witnesses?: readonly Witness[];
   hotDatabase?: PostgresDatabase;
-  uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number };
+  uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number; batch?: number };
   log?: '0.14' | '0.15';
   checkpointer?: ObjectNamespace;
 };
@@ -110,6 +112,19 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     try {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).use!(input);
+    } finally {
+      this.ctx.waitUntil(pool.end());
+    }
+  }
+
+  /** A request's several keys (T167): the same one connection, for its one statement, or two. */
+  async useMany(input: UseManyInput) {
+    const { prepared, hotDatabase } = await this.#ready();
+    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
+    const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
+    try {
+      const hot = createDatabase(pool);
+      return await openVault(hot, prepared, hot).useMany!(input);
     } finally {
       this.ctx.waitUntil(pool.end());
     }
@@ -160,7 +175,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async about() {
     const { hotDatabase } = await this.#ready();
     const about = await this.#call((vault) => vault.about());
-    return about.log === '0.15' && hotDatabase !== undefined ? { ...about, uses: true as const } : about;
+    return about.log === '0.15' && hotDatabase !== undefined ? { ...about, uses: true as const, batchUses: true as const } : about;
   }
   async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
   async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
