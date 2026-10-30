@@ -31,7 +31,7 @@ snapshots:
   third-party@0.1.13: {}
 `;
 
-function fixture(t, action = true, beforeCommit = () => {}) {
+function fixture(t, beforeCommit = () => {}) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-version-only-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const git = (...args) => execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Version gate test', '-c', 'user.email=gate@example.test', ...args], { cwd: dir, encoding: 'utf8' }).trim();
@@ -47,7 +47,8 @@ function fixture(t, action = true, beforeCommit = () => {}) {
     write('examples/node/package.json', json({ name: 'coffre-node', version: '0.0.0', dependencies: { '@coffre/core': '0.1.13', 'third-party': '0.1.13' }, devDependencies: { '@coffre/cli': '0.1.13' } }));
     write('pnpm-lock.yaml', lock);
     write('packages/core/src/untouched.ts', 'export const answer = 42;\n');
-    if (action) write('action/action.yml', 'runs:\n  using: composite\n  steps:\n    - run: npx -y @coffre/cli@0.1.13 export --format github "$INPUT_ENVIRONMENT"\n');
+    write('action/action.yml', 'runs:\n  using: composite\n  steps:\n    - run: node "$GITHUB_ACTION_PATH/coffre.mjs" export --format github "$INPUT_ENVIRONMENT"\n');
+    write('action/coffre.mjs', 'process.stdout.write("the CLI, which names no version\\n");\n');
     beforeCommit({ write, edit });
     const base = commit();
     for (const path of ['packages/cli/package.json', 'packages/core/package.json']) {
@@ -59,15 +60,11 @@ function fixture(t, action = true, beforeCommit = () => {}) {
         return json(pkg);
     });
     edit('pnpm-lock.yaml', (text) => text.replace(/('@coffre\/(?:cli|core)':\n        specifier: )0\.1\.13/g, '$10.1.14'));
-    if (action) edit('action/action.yml', (text) => text.replace('@coffre/cli@0.1.13', '@coffre/cli@0.1.14'));
     return { dir, base, edit, write, commit, check: () => versionOnly(base, commit(), dir) };
 }
 
-test('a synchronized bump qualifies, including the exact Action pin or a legacy release without it', (t) => {
-    for (const action of [true, false]) {
-        const f = fixture(t, action);
-        assert.deepEqual(f.check(), { versionOnly: true, version: '0.1.14', reason: 'Only synchronized release versions changed' });
-    }
+test('a synchronized bump qualifies, the Action left as it is', (t) => {
+    assert.deepEqual(fixture(t).check(), { versionOnly: true, version: '0.1.14', reason: 'Only synchronized release versions changed' });
 });
 
 test('one extra code line selects every normal check', (t) => {
@@ -112,15 +109,16 @@ test('lockfile context matters: other specifiers, links, settings and integrity 
     }
 });
 
-test('Action changes beyond the literal pin, including a missing bump, require all checks', (t) => {
-    for (const change of [
-        (text) => text.replace('--format github', '--format shell'),
-        (text) => text.replace('0.1.14', '0.1.13'),
-        (text) => `${text}    - run: echo another command\n`,
+test('any change to the Action or its CLI requires all checks, a version in it included', (t) => {
+    for (const [path, change] of [
+        ['action/action.yml', (text) => text.replace('--format github', '--format shell')],
+        ['action/action.yml', (text) => `${text}    - run: npx -y @coffre/cli@0.1.14\n`],
+        ['action/coffre.mjs', (text) => text.replace('no version', 'version 0.1.14')],
+        ['action/coffre.mjs', (text) => `${text}process.exit(0);\n`],
     ]) {
         const f = fixture(t);
-        f.edit('action/action.yml', change);
-        assert.equal(f.check().versionOnly, false);
+        f.edit(path, change);
+        assert.equal(f.check().versionOnly, false, change.toString());
     }
 });
 
@@ -128,8 +126,8 @@ const notes = '# Release notes\n\n## Unreleased\n\n**A change.** Its note.\n\n##
 const withNotes = ({ write }) => write('CHANGELOG.md', notes);
 
 test('the release notes may stay as they are, or have Unreleased headed with the new version', (t) => {
-    assert.equal(fixture(t, true, withNotes).check().versionOnly, true);
-    const f = fixture(t, true, withNotes);
+    assert.equal(fixture(t, withNotes).check().versionOnly, true);
+    const f = fixture(t, withNotes);
     f.edit('CHANGELOG.md', (text) => text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (2026-10-07)\n'));
     assert.deepEqual(f.check(), { versionOnly: true, version: '0.1.14', reason: 'Only synchronized release versions changed' });
 });
@@ -146,12 +144,12 @@ test('any other edit of the release notes requires all checks', (t) => {
         (text) => `${text.replace('## Unreleased\n', '## Unreleased\n\n## 0.1.14 (2026-10-07)\n')}\n**Another.**\n`,
         (text) => text.replace('Its note.', 'Its note, reworded.'),
     ]) {
-        const f = fixture(t, true, withNotes);
+        const f = fixture(t, withNotes);
         f.edit('CHANGELOG.md', change);
         assert.equal(f.check().versionOnly, false, change.toString());
     }
     // Without an Unreleased heading, the notes have nothing a bump changes.
-    const f = fixture(t, true, ({ write }) => write('CHANGELOG.md', notes.replace('## Unreleased\n\n', '')));
+    const f = fixture(t, ({ write }) => write('CHANGELOG.md', notes.replace('## Unreleased\n\n', '')));
     f.edit('CHANGELOG.md', (text) => text.replace('# Release notes\n', '# Release notes\n\n## Unreleased\n\n## 0.1.14 (2026-10-07)\n'));
     assert.equal(f.check().versionOnly, false);
 });
@@ -181,13 +179,12 @@ test('invalid or non-string versions never qualify, even when all fields agree',
             return json(pkg);
         });
         f.edit('pnpm-lock.yaml', (text) => text.replaceAll('specifier: 0.1.14', `specifier: ${String(version)}`));
-        f.edit('action/action.yml', (text) => text.replace('@coffre/cli@0.1.14', `@coffre/cli@${String(version)}`));
         assert.equal(f.check().versionOnly, false);
     }
 });
 
 test('invalid UTF-8 cannot hide a non-version byte change behind replacement characters', (t) => {
-    const f = fixture(t, true, ({ write }) => write('pnpm-lock.yaml', Buffer.concat([Buffer.from(lock + '# '), Buffer.from([0xfe])])));
+    const f = fixture(t, ({ write }) => write('pnpm-lock.yaml', Buffer.concat([Buffer.from(lock + '# '), Buffer.from([0xfe])])));
     // The fixture's bump reads UTF-8 and rewrites it, changing the invalid
     // byte to U+FFFD. A permissive decoder would miss that unrelated edit.
     assert.equal(f.check().versionOnly, false);

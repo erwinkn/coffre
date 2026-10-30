@@ -5,7 +5,6 @@ import { appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { actionPin, bumpAction } from './action-pin.mjs';
 import { headChangelog, releaseDate } from './changelog.mjs';
 import { bumpLockfile } from './lockfile.mjs';
 
@@ -60,11 +59,6 @@ export function versionOnly(base, head = 'HEAD', cwd = process.cwd()) {
             expected.set(path, canonical(pkg));
         }
         expected.set('pnpm-lock.yaml', bumpLockfile(read(base, 'pnpm-lock.yaml'), pins, before, after));
-        if (paths.includes('action/action.yml')) {
-            const action = read(base, 'action/action.yml');
-            if (actionPin(action) !== before) return full('Action pin disagrees');
-            expected.set('action/action.yml', bumpAction(action, after));
-        }
         // The release notes may keep their Unreleased heading, or have it
         // headed with the new version, on whichever day the bump ran.
         if (paths.includes('CHANGELOG.md')) {

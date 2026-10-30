@@ -29,6 +29,9 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 pnpm build
+# The tag's Action runs action/coffre.mjs: not what its sources build, it
+# would not be the release npm gets.
+pnpm check:action
 for name in core db client ui server vault conformance cli; do
     package="@coffre/$name"
     if npm view "$package@$version" version >/dev/null 2>&1; then

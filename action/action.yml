@@ -42,8 +42,8 @@ runs:
         INPUT_KEYS: ${{ inputs.keys }}
         INPUT_REQUIRE_COMPLETE: ${{ inputs.require-complete }}
       run: |
-        if ! command -v node >/dev/null || ! command -v npx >/dev/null; then
-          echo '::error::coffre requires Node.js 20 or newer and npx. Set up your job toolchain before this Action.' >&2
+        if ! command -v node >/dev/null; then
+          echo '::error::coffre requires Node.js 20 or newer. Set up your job toolchain before this Action.' >&2
           exit 1
         fi
         if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
@@ -70,10 +70,12 @@ runs:
         fi
         # The CLI's home is the step's own, and goes with it: on a runner
         # whose user several runners share, no other job sees the session.
-        # npx keeps its cache where it was.
         home="$(mktemp -d)"
         trap 'rm -rf "$home"' EXIT
-        coffre() { npm_config_cache="${npm_config_cache:-$HOME/.npm}" HOME="$home" npx -y @coffre/cli@0.14.5 "$@"; }
+        # The CLI at this commit, one file built from its sources
+        # (`pnpm build:action`, which CI holds it to): what a workflow pins
+        # is what runs, with no registry in between.
+        coffre() { HOME="$home" node "$GITHUB_ACTION_PATH/coffre.mjs" "$@"; }
         # One environment or several, a word each.
         read -r -d '' -a environments <<< "$INPUT_ENVIRONMENT" || true
         if [ -n "$INPUT_SERVICE" ]; then

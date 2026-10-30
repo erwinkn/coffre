@@ -348,8 +348,12 @@ opened. To hand every key of an environment to one process, and to no
 other step, run it with `coffre run market/prod -- ./deploy`.
 
 The Action uses your job's existing Node, which must be version 20 or newer,
-and runs `@coffre/cli` at the same exact version as the tag. It leaves your
-toolchain and `PATH` unchanged. It pipes the token to `coffre login --token`,
+and runs the CLI that the tag holds: `action/coffre.mjs`, the CLI's sources at
+that commit bundled into one file, which CI holds to them. A workflow that
+pins the Action by commit SHA therefore pins the code that runs: no registry
+answers at run time, the job's own npm settings (`.npmrc`, a project's
+`devEngines`) play no part, and the file loads no module but Node's own, so
+a `node_modules` above it or `NODE_PATH` cannot slip one in. It leaves your toolchain and `PATH` unchanged. It pipes the token to `coffre login --token`,
 never in a command argument, with the CLI in a home of the step's own,
 removed when the step ends: no other job on the runner sees the session. The secrets become environment variables in subsequent steps
 of the same job. Their values, and each line of multiline values, are
@@ -408,8 +412,12 @@ coffre: GET /api/secrets/deploy/prod: 200 in 310 ms
 coffre: POST /api/reveals: 200 in 480 ms
 ```
 
-Each `coffre` the step runs starts through `npx` first, which these lines
-do not count: the timestamps GitHub puts on each line of the log show it.
+What these lines do not count, the CLI starting and the time between
+requests, the timestamps GitHub puts on each line of the log show: about
+0.1 s for each `coffre` the step runs. Most of a step's time is the
+instance's: each request takes as many round trips to its database as it
+asks, so an instance whose Workers run far from it (a runner in the US, a
+database in Europe) pays an ocean for each. A sign-in costs most.
 
 When the instance answers 503 for a moment's trouble (it could not reach
 its database or its vault, count exchanges, fetch the issuer's keys, or is

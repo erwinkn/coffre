@@ -24,6 +24,8 @@
   },
   "scripts": {
     "build": "tsdown && node scripts/copy-templates.ts && node scripts/copy-migrations.ts",
+    "build:action": "node scripts/action.ts",
+    "check:action": "node scripts/action.ts --check",
     "typecheck": "tsc --noEmit",
     "test": "node --conditions=coffre:source --test 'test/*.test.ts'"
   },

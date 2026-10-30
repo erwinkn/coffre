@@ -10,10 +10,10 @@ import { versionOnly } from './version-only.mjs';
 const root = resolve(import.meta.dirname, '..');
 
 function checkout(t) {
-    const dir = mkdtempSync(join(tmpdir(), 'coffre-action-pin-'));
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-action-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', '.npmrc', 'dev/package.json', 'action/action.yml', 'CHANGELOG.md',
-        'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/action-pin.mjs', 'scripts/changelog.mjs', 'scripts/lockfile.mjs',
+    const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', '.npmrc', 'dev/package.json', 'action/action.yml', 'action/coffre.mjs', 'CHANGELOG.md',
+        'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/changelog.mjs', 'scripts/lockfile.mjs',
         'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
     for (const base of ['packages', 'examples']) {
         for (const name of readdirSync(join(root, base))) files.push(`${base}/${name}/package.json`);
@@ -36,23 +36,26 @@ function run(dir, script, ...args) {
     return spawnSync(process.execPath, ['--import', OFFLINE, join(dir, 'scripts', script), ...args], { cwd: dir, encoding: 'utf8', timeout: 10_000 });
 }
 
-test('bump moves the Action with the packages and examples; check:pins rejects drift and ranges', (t) => {
+test('bump moves the packages and examples and leaves the Action, which names no version; check:pins rejects drift and ranges', (t) => {
     const dir = checkout(t);
     const bumped = run(dir, 'bump.mjs', '9.8.7-test.1');
     assert.equal(bumped.status, 0, bumped.stderr);
-    assert.match(readFileSync(join(dir, 'action/action.yml'), 'utf8'), /npx -y @coffre\/cli@9\.8\.7-test\.1 "\$@"/);
+    for (const file of ['action/action.yml', 'action/coffre.mjs']) {
+        assert.equal(readFileSync(join(dir, file), 'utf8'), readFileSync(join(root, file), 'utf8'));
+    }
     const today = new Date().toISOString().slice(0, 10);
     assert.equal(
         readFileSync(join(dir, 'CHANGELOG.md'), 'utf8'),
         readFileSync(join(root, 'CHANGELOG.md'), 'utf8').replace('\n## Unreleased\n', `\n## Unreleased\n\n## 9.8.7-test.1 (${today})\n`),
     );
     assert.equal(run(dir, 'check-pins.mjs').status, 0);
+    const path = join(dir, 'examples/node/package.json');
+    const bumpedPins = readFileSync(path, 'utf8');
     for (const pin of ['9.8.6', '^9.8.7-test.1']) {
-        const path = join(dir, 'action/action.yml');
-        writeFileSync(path, readFileSync(join(root, 'action/action.yml'), 'utf8').replace(/@coffre\/cli@[^\s]+/, `@coffre/cli@${pin}`));
+        writeFileSync(path, bumpedPins.replace('"@coffre/cli": "9.8.7-test.1"', `"@coffre/cli": "${pin}"`));
         const checked = run(dir, 'check-pins.mjs');
         assert.equal(checked.status, 1);
-        assert.match(checked.stderr, /action\/action.yml/);
+        assert.match(checked.stderr, /examples\/node\/package.json/);
     }
 });
 
@@ -92,47 +95,46 @@ test('bump leaves release notes without an Unreleased heading, or none, as they 
     assert.equal(existsSync(path), false);
 });
 
-test('a malformed or missing Action fails before bump edits any manifests', (t) => {
-    const dir = checkout(t);
-    const path = join(dir, 'action/action.yml');
-    const before = readFileSync(join(dir, 'packages/cli/package.json'), 'utf8');
-    writeFileSync(path, 'runs: {}\n');
-    assert.notEqual(run(dir, 'bump.mjs', '9.8.7').status, 0);
-    assert.equal(readFileSync(join(dir, 'packages/cli/package.json'), 'utf8'), before);
-    rmSync(path);
-    assert.equal(run(dir, 'check-pins.mjs').status, 1);
-});
+// The Action's shell, as GitHub runs it, with a fake `node` first on its
+// PATH: `node -e` (the version check) exits with `version`, and the CLI, the
+// Action's own coffre.mjs, runs `cli`, a bash script given its arguments.
+const ACTION_PATH = '/actions/coffre/action';
 
-test('the Action refuses an unsupported Node before npx runs, with a clear minimum', (t) => {
-    const dir = checkout(t);
+function action(dir, cli, version = 0) {
     const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho npx-must-not-run\nexit 0\n', { mode: 0o755 });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'node'), `#!/bin/bash
+[ "$1" = -e ] && exit ${version}
+[ "$1" = "$GITHUB_ACTION_PATH/coffre.mjs" ] || { echo "node ran $1, not the Action's CLI" >&2; exit 9; }
+shift
+${cli}`, { mode: 0o755 });
     const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
-    const block = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1];
-    const shell = block.replace(/^        /gm, '');
-    const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin }, timeout: 10_000 });
+    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
+    // The shell's own tools, beside the fake: cat, for the fake CLI.
+    return { text, shell, bin, env: { PATH: `${bin}:/usr/bin:/bin`, GITHUB_ACTION_PATH: ACTION_PATH } };
+}
+
+test('the Action refuses a missing or unsupported Node before the CLI runs, with a clear minimum', (t) => {
+    const dir = checkout(t);
+    const { shell, bin } = action(dir, 'echo cli-must-not-run', 1);
+    const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin, GITHUB_ACTION_PATH: ACTION_PATH }, timeout: 10_000 });
     assert.equal(ran.status, 1);
-    assert.match(ran.stderr, /requires Node.js 20 or newer/);
-    assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
+    assert.match(ran.stderr, /^::error::coffre requires Node.js 20 or newer\. Set up your job toolchain before this Action\.\n$/);
+    assert.doesNotMatch(ran.stdout, /cli-must-not-run/);
+    const none = join(dir, 'none');
+    mkdirSync(none);
+    const missing = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: none }, timeout: 10_000 });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /^::error::coffre requires Node.js 20 or newer\. Set up your job toolchain before this Action\.\n$/);
 });
 
 test('the Action takes one of a token or a service, and a service only with the job\'s ID token; the token goes on stdin', (t) => {
     const dir = checkout(t);
-    const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     // It says where its home is, and leaves a mark there, which must go with the step.
-    writeFileSync(join(bin, 'npx'), `#!/bin/sh\necho "$HOME" >> '${join(dir, 'homes')}'\ntouch "$HOME/session"\necho "npx ran with: $*"\necho "stdin: $(cat)"\nexit 0\n`, { mode: 0o755 });
-    // The shell's own tools, beside the fakes: cat, for the fake npx.
-    const path = `${bin}:/usr/bin:/bin`;
-    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
-    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
+    const { shell, env: runner } = action(dir, `echo "$HOME" >> '${join(dir, 'homes')}'\ntouch "$HOME/session"\necho "coffre ran with: $*"\necho "stdin: $(cat)"\n`);
     // As GitHub passes them, a default included.
     const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci', INPUT_KEYS: 'DATABASE_URL STRIPE_*', INPUT_REQUIRE_COMPLETE: 'false' };
-    const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
-    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: path, ...inputs, ...env }, timeout: 10_000 });
+    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { ...runner, ...inputs, ...env }, timeout: 10_000 });
     for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
         const ran = run(env);
         assert.equal(ran.status, 1);
@@ -143,25 +145,25 @@ test('the Action takes one of a token or a service, and a service only with the 
     assert.match(noIdToken.stderr, /permissions: id-token: write/);
     const service = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token' });
     assert.equal(service.status, 0, service.stderr);
-    assert.equal(service.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`);
+    assert.equal(service.stdout, `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`);
     const token = run({ INPUT_TOKEN: 'coffre_svc_x' });
     assert.equal(token.status, 0, token.stderr);
     // The token piped to login, never an argument; the export as that session; and the session forgotten after.
     assert.equal(
         token.stdout,
-        `npx ran with: ${cli} --verbose login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
-            `npx ran with: ${cli} --url https://coffre.example.com --verbose export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`,
+        `coffre ran with: --verbose login https://coffre.example.com --token\nstdin: coffre_svc_x\n` +
+            `coffre ran with: --url https://coffre.example.com --verbose export --format github --keys=DATABASE_URL STRIPE_* app/ci\nstdin: \n`,
     );
     assert.ok(!token.stderr.includes('coffre_svc_x'));
     // Several environments, by spaces or lines as a YAML block gives them: a word each, read together.
     const several = run({ INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'deploy/prod  auth/prod\nwww/prod\n' });
     assert.equal(several.status, 0, several.stderr);
-    assert.equal(several.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* deploy/prod auth/prod www/prod\nstdin: \n`);
+    assert.equal(several.stdout, `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* deploy/prod auth/prod www/prod\nstdin: \n`);
     // The keys, by spaces or lines too, go to the CLI as one argument, unexpanded: STRIPE_* is no file glob.
     writeFileSync(join(dir, 'STRIPE_KEY'), '');
-    const lines = spawnSync('/bin/bash', ['-e', '-c', shell], { cwd: dir, encoding: 'utf8', env: { PATH: path, ...inputs, INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_KEYS: 'STRIPE_*\n--format\n' }, timeout: 10_000 });
+    const lines = spawnSync('/bin/bash', ['-e', '-c', shell], { cwd: dir, encoding: 'utf8', env: { ...runner, ...inputs, INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_KEYS: 'STRIPE_*\n--format\n' }, timeout: 10_000 });
     assert.equal(lines.status, 0, lines.stderr);
-    assert.equal(lines.stdout, `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=STRIPE_*\n--format\n app/ci\nstdin: \n`);
+    assert.equal(lines.stdout, `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=STRIPE_*\n--format\n app/ci\nstdin: \n`);
     // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
     const homes = readFileSync(join(dir, 'homes'), 'utf8').trim().split('\n');
     assert.equal(new Set(homes).size, 4, 'one home per step, shared by its commands');
@@ -173,19 +175,14 @@ test('the Action takes one of a token or a service, and a service only with the 
 
 test('the Action needs the workflow to name the keys it exports, and stops before anything is read without them', (t) => {
     const dir = checkout(t);
-    const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'npx'), '#!/bin/sh\necho npx-must-not-run\nexit 0\n', { mode: 0o755 });
-    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
-    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
+    const { text, shell, env: runner } = action(dir, 'echo cli-must-not-run');
     // Left out, GitHub passes it empty; a YAML block of blank lines is as empty.
     for (const keys of [undefined, '', ' \n\n']) {
-        const env = { PATH: `${bin}:/usr/bin:/bin`, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' };
+        const env = { ...runner, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' };
         const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: keys === undefined ? env : { ...env, INPUT_KEYS: keys }, timeout: 10_000 });
         assert.equal(ran.status, 1);
         assert.match(ran.stderr, /^::error::coffre needs `keys:`, the keys to export to the later steps, by name or prefix: `keys: DATABASE_URL STRIPE_\*`\. To hand every key to one process instead, run it with `coffre run <environment> -- <cmd>`\.\n$/);
-        assert.doesNotMatch(ran.stdout, /npx-must-not-run/);
+        assert.doesNotMatch(ran.stdout, /cli-must-not-run/);
     }
     const declared = text.match(/\n  keys:\n((?:    [^\n]*\n)+)/)[1];
     assert.match(declared, /required: true/);
@@ -193,12 +190,8 @@ test('the Action needs the workflow to name the keys it exports, and stops befor
 
 test('require-complete checks each environment before anything is read, and stops the step with an annotation for each that lacks keys', (t) => {
     const dir = checkout(t);
-    const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    writeFileSync(join(bin, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     // A fake CLI: `missing <env> --check` lacks keys in */prod, 50% off included, fails to check down/*, and passes elsewhere.
-    writeFileSync(join(bin, 'npx'), `#!/bin/bash
-echo "npx ran with: $*" >> '${join(dir, 'calls')}'
+    const { shell, env: runner } = action(dir, `echo "coffre ran with: $*" >> '${join(dir, 'calls')}'
 cat > /dev/null
 for arg in "$@"; do
   case "$arg" in
@@ -208,21 +201,18 @@ for arg in "$@"; do
 done
 [ "\${*: -1}" != --check ] || echo "\${@: -2:1} has every key of its sibling environments"
 exit 0
-`, { mode: 0o755 });
-    const text = readFileSync(join(dir, 'action/action.yml'), 'utf8');
-    const shell = text.match(/      run: \|\n((?:        [^\n]*\n?)+)/)[1].replace(/^        /gm, '');
-    const cli = `-y @coffre/cli@${text.match(/@coffre\/cli@(\S+)/)[1]}`;
+`);
     const run = (env) => {
         rmSync(join(dir, 'calls'), { force: true });
         const ran = spawnSync('/bin/bash', ['-e', '-o', 'pipefail', '-c', shell], {
             encoding: 'utf8',
-            env: { PATH: `${bin}:/usr/bin:/bin`, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_KEYS: 'DATABASE_URL', ...env },
+            env: { ...runner, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_KEYS: 'DATABASE_URL', ...env },
             timeout: 10_000,
         });
         return { ...ran, calls: existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n') : [] };
     };
-    const signIn = `npx ran with: ${cli} --verbose login https://coffre.example.com --token`;
-    const login = `npx ran with: ${cli} --url https://coffre.example.com --verbose`;
+    const signIn = `coffre ran with: --verbose login https://coffre.example.com --token`;
+    const login = `coffre ran with: --url https://coffre.example.com --verbose`;
 
     const refused = run({ INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'yes' });
     assert.equal(refused.status, 1);
@@ -252,6 +242,34 @@ exit 0
     assert.deepEqual(complete.calls, [signIn, `${login} missing app/ci --check`, `${login} missing app/staging --check`, `${login} export --format github --keys=DATABASE_URL app/ci app/staging`]);
     const service = run({ INPUT_TOKEN: '', INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' });
     assert.equal(service.status, 0, service.stderr);
-    const as = `npx ran with: ${cli} --url https://coffre.example.com --service token:api-deploy --verbose`;
+    const as = `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose`;
     assert.deepEqual(service.calls, [`${as} missing app/ci --check`, `${as} export --format github --keys=DATABASE_URL app/ci`]);
+});
+
+test('the Action\'s CLI loads nothing from outside it: a planted bufferutil or utf-8-validate never runs', (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-action-shadow-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    // Where Node would look for them: a node_modules above the Action, and NODE_PATH.
+    mkdirSync(join(dir, 'action'));
+    cpSync(join(root, 'action/coffre.mjs'), join(dir, 'action/coffre.mjs'));
+    const marker = join(dir, 'ran');
+    for (const base of [join(dir, 'node_modules'), join(dir, 'path')]) {
+        for (const name of ['bufferutil', 'utf-8-validate']) {
+            mkdirSync(join(base, name), { recursive: true });
+            writeFileSync(join(base, name, 'index.js'), `require('node:fs').appendFileSync(${JSON.stringify(marker)}, '${name} from ${base}\\n');\n`);
+        }
+    }
+    const cli = (...args) => spawnSync(process.execPath, [join(dir, 'action/coffre.mjs'), ...args], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH, HOME: dir, NODE_PATH: join(dir, 'path') },
+        timeout: 10_000,
+    });
+    // It ran, so that nothing planted ran means nothing was loaded, not that it never started.
+    const help = cli('help');
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /^coffre /);
+    const read = cli('--url', 'http://127.0.0.1:9', 'export', 'app/ci', '--format', 'shell');
+    assert.match(read.stderr, /^coffre: /);
+    assert.equal(existsSync(marker) ? readFileSync(marker, 'utf8') : '', '');
 });
