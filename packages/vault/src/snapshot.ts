@@ -6,6 +6,7 @@ import type { GrantRow } from '@coffre/db/grants';
 
 import { snapshotQuery as postgres } from './snapshot.postgres.ts';
 import { snapshotQuery as sqlite } from './snapshot.sqlite.ts';
+import { objectKey } from './inputs.ts';
 import * as store from './store.ts';
 import type { EnvironmentRow, Member } from './store.ts';
 
@@ -43,7 +44,9 @@ export type Snapshot = {
   newestSettings: StoredEntry | null | undefined;
   /**
    * The asked environments, the environments each personal config among
-   * them is a config of, and those the newest `policy.change` names, by id.
+   * them is a config of, and those the newest `policy.change` names, by id;
+   * with `asked.seals`, those the asked principals' grants are on too, each
+   * with what 0.15's log holds it to (`EnvironmentRow.sealed`).
    */
   environments: Map<string, EnvironmentRow>;
   /** Of the asked `reference.create` entries, those a `reference.end` of the vault's names, allowed. */
@@ -77,6 +80,12 @@ export type Asked = {
   /** The newest `settings.change` too (`newestSettings`). */
   settings?: boolean;
   environments?: readonly string[];
+  /**
+   * Each environment read with what 0.15's log holds it to, and the asked
+   * principals' grants' too, whose projects their grants are read with
+   * (T159): asked once 0.15's log is cut over, before which no row is sealed.
+   */
+  seals?: boolean;
   references?: readonly bigint[];
   /**
    * One principal's releases within the last `windowMs` of the clock, moved
@@ -121,9 +130,12 @@ export function current(head: LockedHead): boolean {
 }
 
 async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
-  const query = (engineOf(db) === 'postgres' ? postgres : sqlite)(asked);
+  const engine = engineOf(db);
+  const query = (engine === 'postgres' ? postgres : sqlite)(asked);
   const [row] = await rowsOf<{ snapshot: string | Raw }>(db, query);
   const raw: Raw = typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
+  // SQLite has no `log_object`: the environments' newest changes in a statement of their own, by the keys the vault computes.
+  const newest = asked.seals === true && engine !== 'postgres' ? await store.newestSeals(db, raw.environments.map(({ id }) => ({ kind: 'environment', id }))) : null;
   return {
     at: Number(raw.at),
     members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
@@ -131,10 +143,17 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
     newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
     newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
     newestSettings: asked.settings !== true ? undefined : raw.settings == null ? null : entryOf(raw.settings),
-    environments: new Map(raw.environments.map(({ id, ...environment }) => [id, {
-      ...environment,
-      deleted: Boolean(environment.deleted),
-      archived: Boolean(environment.archived),
+    environments: new Map(raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
+      projectId, slug, owner, parentId,
+      deleted: Boolean(deleted),
+      archived: Boolean(archived),
+      ...(asked.seals === true ? {
+        sealed: store.environmentSeal(
+          { id, projectId, slug, owner, parentId, protected: sealed.protected == null ? null : Boolean(sealed.protected), archived: Boolean(sealed.ownArchived), projectArchived: Boolean(sealed.projectArchived) },
+          hex(sealed.seal),
+          newest === null ? hex(sealed.newest) : newest.get(objectKey({ kind: 'environment', id })) ?? null,
+        ),
+      } : {}),
     }])),
     ended: new Set(raw.ended.map((seq) => BigInt(seq))),
     released: Number(raw.released ?? 0),
@@ -171,10 +190,18 @@ type Raw = {
   access: RawEntry[];
   policy: RawEntry | null;
   settings?: RawEntry | null;
-  environments: { id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number }[];
+  environments: {
+    id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number;
+    /** With `asked.seals`: the object's own columns, the row's seal and, on Postgres, its newest change's, as hex. */
+    protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: string | null;
+  }[];
   ended: Int[];
   released: Int | null;
 };
+
+function hex(value: string | null | undefined): Buffer | null {
+  return value == null ? null : Buffer.from(value, 'hex');
+}
 
 /** An entry as the chain's codec reads it, from what `entryJson` wrote. */
 export function entryOf(raw: RawEntry): StoredEntry {

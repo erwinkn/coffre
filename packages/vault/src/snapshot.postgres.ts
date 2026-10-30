@@ -22,6 +22,7 @@ export function snapshotQuery(asked: Asked): SQL {
   const actions = sql`${sql.param([...ACCESS_ACTIONS])}::text[]`;
   const tomb = `%${TOMBSTONE}%`;
   const released = asked.released;
+  const seals = asked.seals === true;
   // The head only if nobody holds it: a statement never waits for it, so all it reads is as of when it took it (`snapshot`).
   const head = asked.head === true
     ? sql`, head AS (SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED)`
@@ -67,12 +68,23 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT coalesce(json_agg(json_build_object(
           'id', env.id, 'projectId', env.project_id, 'slug', env.slug, 'owner', env.owner, 'parentId', env.parent_id,
           'deleted', env.slug LIKE ${tomb} OR project.slug LIKE ${tomb},
-          'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL)), '[]')
+          'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL${seals
+            ? sql`,
+          -- What 0.15's log holds the row to (T159): its object's own columns, its seal, and its newest change's, one probe
+          -- of its object's changes, newest first (log_changes_object_idx, which holds the seal).
+          'protected', env.protected, 'ownArchived', env.archived_at IS NOT NULL, 'projectArchived', project.archived_at IS NOT NULL,
+          'seal', encode(env.seal, 'hex'),
+          'newest', (SELECT encode(l.seal, 'hex') FROM log_changes l WHERE l.object = log_object('environment', env.id::text) ORDER BY l.number DESC LIMIT 1)`
+            : sql``})), '[]')
         FROM environments env JOIN projects project ON project.id = env.project_id
         -- One list of ids, each found by the primary key.
         WHERE env.id = ANY(ARRAY(
           SELECT unnest(${environments})
-          UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL
+          UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL${seals
+            ? sql`
+          -- The places the asked principals' grants are on, whose projects their grants are read with.
+          UNION SELECT environment_id FROM vault_grants WHERE principal = ANY(${principals}) AND environment_id IS NOT NULL`
+            : sql``}
           -- What the newest policy protects, by the ids its JSON names; one that is no UUID names nothing.
           UNION SELECT (place #>> '{}')::uuid FROM policy, jsonb_path_query(policy.metadata::jsonb, '$.policy.protected[*].environmentId') AS place
           WHERE (place #>> '{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'

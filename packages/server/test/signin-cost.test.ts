@@ -250,9 +250,10 @@ test("a service token's issue: the app's reads and the vault's two answers, as b
   assert.equal(ran.app.length, 5);
   assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
   // `access` for the issuer and for the account (the app's checks), a snapshot each; then the issue: one snapshot (the
-  // members, their grants, the policy, the setting), the places the account's grants name, and its one write.
+  // members, their grants, the policy, the setting, and the places their grants are on, each with what 0.15's log holds
+  // it to: T159), and its one write.
   assert.equal(ran.vaultCalls, 3);
-  assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'select "environments"."id", ', '/* writes */ SELECT issue_to']);
+  assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', '/* writes */ SELECT issue_to']);
 });
 
 test("an issue's write reads as many rows and pages however long the logs and the account's history grow (R48)", POSTGRES, async () => {

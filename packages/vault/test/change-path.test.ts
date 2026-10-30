@@ -51,11 +51,15 @@ function keysOf(config: ResolvedVaultConfig): ChangeKeys {
   return { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
 }
 
-/** A vault keeping 0.15's log, whatever the suite's setting, its changes sealed at once unless `options` says how. */
-async function world(options: VaultOptions = {}, config = configure()) {
+/**
+ * A vault keeping 0.15's log, whatever the suite's setting, its changes sealed at once unless `options` says how; its
+ * places made as the app makes them, or, `sealed: false`, as 0.14's log alone holds them, for a test that seals them
+ * itself, standing in for the cutover (`genesis`).
+ */
+async function world(options: VaultOptions = {}, config = configure(), { sealed: seal = true }: { sealed?: boolean } = {}) {
   const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, ...options });
   assert.equal((await vault.access(ROOT)).role, 'owner');
-  const where = await places(db.owner);
+  const where = await places(db.owner, { sealed: seal });
   return { vault, config, keys: keysOf(config), ...where };
 }
 
@@ -210,7 +214,7 @@ test('change_input refuses a row that is not its object\'s newest change\'s, und
 });
 
 test('change_input: a retry finds its entry, another payload under its request is refused, and of two changes from one seal the second does nothing (fence-one)', async () => {
-  const w = await world();
+  const w = await world({}, configure(), { sealed: false });
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const from = (await store.readObject(db.owner, { kind: 'environment', id: w.prod })).seal;
   const ref = { kind: 'environment' as const, id: w.prod };
@@ -244,7 +248,7 @@ test('change_input refuses an op it does not take, and a payload that names anot
 });
 
 test('a change to a row a writer edited, its seal kept, is refused as tampered before anything is written', async () => {
-  const w = await world();
+  const w = await world({}, configure(), { sealed: false });
   await genesis(w.keys, { kind: 'environment', id: w.dev }, environment(w.project, w.dev, 'dev'));
   // Mallory points dev at another parent; the seal stays.
   const { environments } = tablesOf(db.owner);
@@ -327,7 +331,7 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
 });
 
 test('protecting an environment the cutover sealed is a change of its object; one before the cutover is 0.14\'s alone', async () => {
-  const w = await world();
+  const w = await world({}, configure(), { sealed: false });
   const { environments } = tablesOf(db.owner);
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const protect = (ids: string[], on: boolean) => w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: ids, protected: on } });
@@ -348,7 +352,7 @@ test('protecting an environment the cutover sealed is a change of its object; on
 });
 
 test('protecting two sealed environments in one call is two changes, each from its own seal; a deleted one changes nothing in 0.15\'s log', async () => {
-  const w = await world();
+  const w = await world({}, configure(), { sealed: false });
   const { environments } = tablesOf(db.owner);
   const gone = randomUUID();
   await db.owner.insert(environments).values({ id: gone, projectId: w.project, slug: 'old~1', name: 'Old' });
@@ -453,7 +457,7 @@ test('a change answers only once its entry is sealed (R51, CommitBeforeAnswer)',
 });
 
 test('a change waits for every use in flight, and every use asked meanwhile waits for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
-  const w = await world();
+  const w = await world({}, configure(), { sealed: false });
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const from = (await store.readObject(db.owner, { kind: 'environment', id: w.prod })).seal;
   const protect = made(w.keys, { kind: 'environment', id: w.prod }, { op: 'environment.protect', protected: true }, { ...environment(w.project, w.prod, 'prod'), protected: true }, from);

@@ -44,7 +44,9 @@ import {
   newEnvironment,
   newProject,
   openTestDatabase,
+  changePlace,
   places,
+  sealPlaces,
   storedVersions,
   postgresOnly,
   rows,
@@ -1459,6 +1461,7 @@ async function laterProject(): Promise<{ project: string; dev: SecretRef; prod: 
     { id: devId, projectId: project, slug: 'dev', name: 'Development' },
     { id: prodId, projectId: project, slug: 'prod', name: 'Production' },
   ]);
+  await sealPlaces(db.owner, [{ id: devId, projectId: project, slug: 'dev' }, { id: prodId, projectId: project, slug: 'prod' }]);
   const secretIn = async (environmentId: string): Promise<SecretRef> => {
     const id = randomUUID();
     await db.owner.insert(secrets).values({ id, projectId: project, environmentId, key: `KEY_${id.slice(0, 8)}` });
@@ -1668,7 +1671,6 @@ test('a service account whose row was deleted is refused, under forged entries a
 
 test('an instance role reaches every project in its scope, the ones made later too, and grants add to it', async () => {
   const w = await world();
-  const { environments } = tablesOf(db.owner);
   assert.deepEqual(await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY }), {
     ok: true, created: true, role: 'developer', scope: DEV_ONLY, generation: 0,
   });
@@ -1687,9 +1689,9 @@ test('an instance role reaches every project in its scope, the ones made later t
   assert.equal(!misclaimed.ok && misclaimed.refusal.code, 'no_grant');
 
   // The slug is read at each decision: a rename moves the environment in or out.
-  await db.owner.update(environments).set({ slug: 'development' }).where(eq(environments.id, later.devId));
+  await changePlace(db.owner, later.devId, { slug: 'development' });
   assert.deepEqual(await readWrite(w, ADA, later.dev), ['no_grant', 'no_grant']);
-  await db.owner.update(environments).set({ slug: 'dev' }).where(eq(environments.id, later.prodId));
+  await changePlace(db.owner, later.prodId, { slug: 'dev' });
   assert.deepEqual(await readWrite(w, ADA, later.prod), ['ok', 'ok']);
 
   // What they hold says so, and the log replays it.

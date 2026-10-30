@@ -36,6 +36,11 @@ the app updates outside any change (a credential's `last_used_at` and
 the overlap never stales a credential. The change path and the use path
 build each object from its fields alone.
 
+Not only a use: every decision of the vault's checks each environment row
+it reads against its seal and its newest change's, `access`, issues and
+grants included, and fails closed on one that does not hold (T159;
+[0.15-plan.md](0.15-plan.md), "As built: T159").
+
 Every change to the policy carries the **whole policy as its `value`**
 (`genesis` or `bulk.limit`): schema 0022's `use_credential` reads the cap
 from the newest one at `value.bulk.count` and `value.bulk.windowMs`.

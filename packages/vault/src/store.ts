@@ -1,14 +1,14 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns, withinBytes } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
-import { objectKey, type Input, type Kind, type Ref } from './inputs.ts';
+import { objectKey, type EnvironmentInput, type Input, type Kind, type Ref } from './inputs.ts';
 import { CUTOVER_OBJECT } from './log-entry.ts';
 import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
@@ -258,12 +258,6 @@ function at(db: Queryable, place: Place) {
   );
 }
 
-/**
- * Each of these environments that exists, by id, with its project, its
- * slug, what grants on one slug in every project match, and whether it was
- * deleted, alone or with its project: then no key under it opens, or is
- * wrapped, whatever grant would cover it.
- */
 /** An environment as a decision reads it. */
 export type EnvironmentRow = {
   projectId: string;
@@ -272,30 +266,90 @@ export type EnvironmentRow = {
   parentId: string | null;
   deleted: boolean;
   archived: boolean;
+  /** Read when asked (`seals`): what 0.15's log holds the row to. */
+  sealed?: EnvironmentSeal;
 };
 
+/**
+ * What 0.15's log holds an environment's row to (T159): the row's object
+ * (`environmentObject`), its seal, and its object's newest change's seal,
+ * null for none. The vault checks them before it decides on the row.
+ */
+export type EnvironmentSeal = { object: EnvironmentInput; seal: Buffer | null; newest: Buffer | null };
+
+/**
+ * Each of these environments that exists, by id, with its project, its
+ * slug, what grants on one slug in every project match, and whether it was
+ * deleted, alone or with its project: then no key under it opens, or is
+ * wrapped, whatever grant would cover it. With `seals`, what 0.15's log
+ * holds each to as well, in the same statement on Postgres.
+ */
 export async function environmentsById(
   db: Queryable,
   ids: readonly string[],
+  { seals = false }: { seals?: boolean } = {},
 ): Promise<Map<string, EnvironmentRow>> {
   if (ids.length === 0) return new Map();
   const { environments, projects } = tablesOf(db);
-  const rows = await db
-    .select({
-      id: environments.id,
-      projectId: environments.projectId,
-      slug: environments.slug,
-      // A personal config's owner, and the environment it is a config of, whose read it takes.
-      owner: environments.owner,
-      parentId: environments.parentId,
-      deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
-      // Only what names a fork asks it: nothing is decided on it.
-      archived: truth(or(isNotNull(environments.archivedAt), isNotNull(projects.archivedAt))!),
-    })
+  const postgres = engineOf(db) === 'postgres';
+  const columns = {
+    id: environments.id,
+    projectId: environments.projectId,
+    slug: environments.slug,
+    // A personal config's owner, and the environment it is a config of, whose read it takes.
+    owner: environments.owner,
+    parentId: environments.parentId,
+    deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
+    // Only what names a fork asks it: nothing is decided on it.
+    archived: truth(or(isNotNull(environments.archivedAt), isNotNull(projects.archivedAt))!),
+  };
+  const sealColumns = {
+    protected: environments.protected,
+    ownArchived: truth(isNotNull(environments.archivedAt)),
+    projectArchived: truth(isNotNull(projects.archivedAt)),
+    seal: environments.seal,
+    // One probe of its object's changes, newest first (`log_changes_object_idx`, which holds the seal).
+    ...(postgres ? { newest: sql<Buffer | Uint8Array | null>`(SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', ${environments.id}::text) ORDER BY l.number DESC LIMIT 1)` } : {}),
+  };
+  const rows = (await db
+    .select(seals ? { ...columns, ...sealColumns } : columns)
     .from(environments)
     .innerJoin(projects, eq(projects.id, environments.projectId))
-    .where(inArray(environments.id, [...new Set(ids)]));
-  return new Map(rows.map(({ id, ...environment }) => [id, environment]));
+    .where(inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
+  // SQLite has no `log_object`: the newest changes in a statement of their own, by the keys the vault computes.
+  const newest = seals && !postgres ? await newestSeals(db, rows.map((row) => ({ kind: 'environment', id: row.id }))) : null;
+  return new Map(rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
+    ...environment,
+    ...(seals ? {
+      sealed: environmentSeal(
+        { id, projectId: environment.projectId, slug: environment.slug, owner: environment.owner, parentId: environment.parentId, protected: guarded == null ? null : Boolean(guarded), archived: Boolean(ownArchived), projectArchived: Boolean(projectArchived) },
+        seal ?? null,
+        newest === null ? last ?? null : newest.get(objectKey({ kind: 'environment', id })) ?? null,
+      ),
+    } : {}),
+  }]));
+}
+
+/** The columns `environmentsById` reads with `seals`, as the drivers answer them. */
+type SealedColumns = { protected: boolean | number | null; ownArchived: boolean | number; projectArchived: boolean | number; seal: Buffer | Uint8Array | null; newest: Buffer | Uint8Array | null };
+
+/** An environment's row as 0.15's log holds it to (`EnvironmentSeal`), from its columns and the two seals as read. */
+export function environmentSeal(columns: EnvironmentColumns, seal: Buffer | Uint8Array | null, newest: Buffer | Uint8Array | null): EnvironmentSeal {
+  return { object: environmentObject(columns), seal: bytes(seal), newest: bytes(newest) };
+}
+
+/**
+ * The seal each object's newest change left, by its key in the log
+ * (`objectKey`), null for one that left none; an object with no change is
+ * not in the map. One probe of each object's changes, newest first.
+ */
+export async function newestSeals(db: Queryable, refs: readonly Ref[]): Promise<Map<string, Buffer | null>> {
+  if (refs.length === 0) return new Map();
+  const keys = sql.join([...new Set(refs.map((ref) => objectKey(ref)))].map((key) => sql`${key}`), sql`, `);
+  const rows = await rowsOf<{ object: string; seal: Buffer | Uint8Array | null }>(
+    db, sql`SELECT c.object, c.seal FROM log_changes c WHERE c.object IN (${keys}) AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = c.object)`,
+  );
+  return new Map(rows.map((row) => [row.object, bytes(row.seal)]));
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
@@ -339,25 +393,20 @@ export async function places(
   db: Queryable,
   projectIds: readonly string[],
   environmentIds: readonly string[],
-): Promise<{ projects: Set<string>; environments: Map<string, { projectId: string; slug: string }>; deleted: Set<string> }> {
-  const { projects, environments } = tablesOf(db);
+  { seals = false }: { seals?: boolean } = {},
+): Promise<{ projects: Set<string>; environments: Map<string, EnvironmentRow>; deleted: Set<string> }> {
+  const { projects } = tablesOf(db);
   const [foundProjects, foundEnvironments] = await Promise.all([
     projectIds.length === 0
       ? []
       : db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).where(inArray(projects.id, [...projectIds])),
-    environmentIds.length === 0
-      ? []
-      : db
-          .select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!) })
-          .from(environments)
-          .innerJoin(projects, eq(projects.id, environments.projectId))
-          .where(inArray(environments.id, [...environmentIds])),
+    environmentsById(db, environmentIds, { seals }),
   ]);
   return {
     projects: new Set(foundProjects.map((row) => row.id)),
-    environments: new Map(foundEnvironments.map((row) => [row.id, { projectId: row.projectId, slug: row.slug }])),
+    environments: foundEnvironments,
     // The projects and environments among them that were deleted, alone or with their project.
-    deleted: new Set([...foundProjects, ...foundEnvironments].filter((row) => row.deleted).map((row) => row.id)),
+    deleted: new Set([...foundProjects.filter((row) => row.deleted).map((row) => row.id), ...[...foundEnvironments].filter(([, row]) => row.deleted).map(([id]) => id)]),
   };
 }
 

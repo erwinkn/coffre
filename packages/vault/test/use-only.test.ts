@@ -9,7 +9,7 @@ import { tablesOf } from '@coffre/db';
 import { and, eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { emptyDatabase, openLocalVault, openTestDatabase, places, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { emptyDatabase, openLocalVault, openTestDatabase, places, sealPlaces, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 // A workload is handed back only what its credential lists, by key ID,
 // where each value is held (docs/design/workload-access.md, section 6.1):
@@ -140,6 +140,7 @@ test("a fork's inherited key is read at its parent: a list at the fork reads not
   const { environments } = tablesOf(db.owner);
   const fork = randomUUID();
   await db.owner.insert(environments).values({ id: fork, projectId: w.market.project, slug: 'pr-7', name: 'pr-7', parentId: w.market.prod });
+  await sealPlaces(db.owner, [{ id: fork, projectId: w.market.project, slug: 'pr-7', parentId: w.market.prod }]);
   const granted = await w.vault.setAccess({ actor: ROOT, principal: API, changes: [{ projectId: w.market.project, environmentId: fork, role: 'viewer', expiresAt: null }] });
   assert.ok(granted.ok, JSON.stringify(granted));
   const atFork = [...w.scope(), { ...issuedGrant({ projectId: w.market.project, environmentId: fork, role: 'viewer' }), reads: '*' as const }];

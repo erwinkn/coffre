@@ -130,7 +130,7 @@ export const CLOSED_POLICY: Policy = {
 };
 
 /** An environment a policy names, as the policy reads it. */
-export type PolicyEnvironment = { slug: string; deleted: boolean };
+export type PolicyEnvironment = { slug: string | null; deleted: boolean };
 
 /**
  * The policy the newest `policy.change` says, from its metadata, as of

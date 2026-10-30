@@ -553,9 +553,10 @@ function keep(cache: UseCache, at: string, key: string | null, row: UseRow): voi
   if (key !== null && row.n_standing !== false) cache.key(read.environment, key, row.n_secret);
 }
 
-/** The place a named call read its names at, by the ids of its row as the call read it. */
+/** The place a named call read its names at, by the ids of its row as the call read it: none for a row its seals do not bear out (T159). */
 function placeOf(checked: CheckedView, row: UseRow): { projectId: string; environmentId: string } | null {
-  const place = row.n_place === null ? null : checked.environments.get(row.n_place)?.row ?? null;
+  const read = row.n_place === null ? undefined : checked.environments.get(row.n_place);
+  const place = read !== undefined && read.valid && read.current ? read.row : null;
   return place === null ? null : { projectId: place.projectId, environmentId: place.id };
 }
 
@@ -590,7 +591,8 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
   const stand = checked.secret.row?.environmentId ?? request.place;
   const place = stand === null ? undefined : checked.environments.get(stand);
   const sealed = [checked.roles, checked.policy, ...(place === undefined ? [] : [place])].every((input) => input.valid && input.current);
-  const rows = [...checked.environments.values()].flatMap((read) => (read.row === null ? [] : [read.row]));
+  // Only the rows their seals bear out: another a writer changed protects or names nothing the app is told (T159).
+  const rows = [...checked.environments.values()].flatMap((read) => (read.row === null || !read.valid || !read.current ? [] : [read.row]));
   const reader = sealed
     ? readerOf(principal, credential, checked.roles.row ?? noEdits(), rows, request.at)
     : { status: readerOf(principal, credential, noEdits(), [], request.at).status, live: NOTHING };
