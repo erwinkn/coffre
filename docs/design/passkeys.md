@@ -128,7 +128,7 @@ passkeys: {
   policy: 'required',
   // The WebAuthn relying party: publicUrl's host unless set, or a parent of it (section 7.1).
   rpId: 'acme.example',
-  // Reading a protected environment's values takes a fresh check too (section 4.3).
+  // Phase 3 (section 4.3): reading a protected environment's values takes a fresh check too.
   protectedReveals: true,
 },
 ```
@@ -176,6 +176,7 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
      next: string;                  // where to land, a path of at most 512 characters, or '/projects'
      challenge: string;             // 32 random bytes, base64url
      issuedAt: number;              // ms; also the replay guard (section 7.3)
+     userHandle: string | null;     // enroll: the user.id handed to create(), base64url, which the POST stores
    };
    ```
 
@@ -199,7 +200,14 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
 
 The cookie carries what GitHub vouched for and nothing coffre decided.
 Someone who passed GitHub but not the passkey leaves no row behind, and an
-unauthenticated visitor makes coffre write nothing, as today.
+unauthenticated visitor makes coffre write nothing, as today. Precisely:
+nothing a visitor sends is written. A cold deployment's first request of
+any kind, a visitor's included, still runs what every request's door runs
+before any route (`cutoverReady`, which may settle the vault through
+`vault.about()`): the cutover, the vault's own settling, and the admission
+of the Owners the config names. That writes only what the deployment's
+code and data already decide, the same whoever asks, and is outside this
+design.
 
 **The callback writes nothing, the vault included.** Today a first sign-in
 can admit a member: `#principalForEmails` asks `vault.access`, which makes
@@ -230,7 +238,9 @@ says "Add a passkey to finish signing in". Its button calls
   rp: { id: 'secrets.acme.example', name: 'Acme secrets' },  // the sign-in page's title
   user: { id: handle, name: 'bob@acme.example', displayName: 'Bob' },
   challenge,
-  pubKeyCredParams: [{ type: 'public-key', alg: -8 }, { alg: -7 }, { alg: -257 }], // Ed25519, ES256, RS256
+  pubKeyCredParams: [ // Ed25519, ES256, RS256
+    { type: 'public-key', alg: -8 }, { type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 },
+  ],
   authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
   attestation: 'none',
   excludeCredentials: [],          // the person's live passkeys, when adding a second one
@@ -251,7 +261,10 @@ the door meant for the first.
 
 `user.id` is 16 random bytes, made at a person's first passkey and kept on
 each of their passkey rows (`passkeys.user_handle`), copied from the
-others when they add one. WebAuthn asks that it reveal nothing about the
+others when they add one. The registration response does not echo it, so
+the sealed state that goes with `create()` carries it (`userHandle` of the
+`enroll` cookie, or of the add's sealed state), and the `POST` stores that
+exact value. WebAuthn asks that it reveal nothing about the
 person, and a hash of the email, even keyed, can be tested against
 guesses by anyone who learns the key; random bytes cannot, and survive an
 `APP_KEY` rotation. It stays the same across a person's passkeys, so a
@@ -1207,9 +1220,12 @@ running `passkeys: 'required'`:
 20. Two fresh checks on one session: one new session, one `401`.
 21. A session made at a fresh check expires when the one before it would
     have.
-22. Under `required`, on an empty database and on a cold vault, the Owner
-    the config names signs in, adds a passkey and lands; a provider sign-in
-    that stops at the passkey admits no one and writes nothing.
+22. Under `required`, on an empty database and on a cold vault, through the
+    deployment's real HTTP entry, the Owner the config names signs in, adds
+    a passkey and lands; a provider sign-in that stops at the passkey leaves
+    no session, identity, passkey or member of its own making (what the
+    door's settling writes on a cold start, the same for any first request,
+    is not counted).
 23. A device code approved without a passkey redeems nothing once its
     person adds a first passkey, whatever happens to that passkey after.
 24. `?dryRun=1` on a route that takes none, from a session not confirmed in
@@ -1217,7 +1233,7 @@ running `passkeys: 'required'`:
     nothing.
 25. An MCP consent whose session a removal ended meanwhile connects
     nothing.
-26. Under `protectedReveals`, a stale session's one-key reveal in a
+26. Phase 3, with `protectedReveals`: a stale session's one-key reveal in a
     protected environment answers as for a key it cannot see, whether the
     key exists or not, and the log holds no use of it; the same for a
     several-key reveal (`POST /api/reveals` with `keys`) and an
@@ -1246,7 +1262,7 @@ running `passkeys: 'required'`:
    the link checks, MCP approvals that stay pending.
 5. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
-6. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
+6. **Conformance** checks of section 13 but check 26, which is phase 3's, and docs: `docs/deployment-auth.md`
    (the policy, `rpId`, recovery and its log review) and
    `docs/offboarding.md`.
 
