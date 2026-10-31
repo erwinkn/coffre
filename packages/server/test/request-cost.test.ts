@@ -1474,10 +1474,10 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   };
   const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_reads, log_read_places`);
   try {
-    // Today's: 20,000 reads of the project's keys by another member, Ada's 200 among them through the day, the quiet
+    // Today's: 20,000 reads of the project's keys by another member, Ada's 2,000 among them through the day, the quiet
     // keys read once each, 18 hours ago, 100 reads in the fork, 50 through market/busy's reference into market/dev.
     await plant(20_000, OTHER, keys, e!, 12 * 3_600_000, 2_000);
-    await plant(200, ADA, keys, e!, 10 * 3_600_000, 150_000);
+    await plant(2_000, ADA, keys, e!, 10 * 3_600_000, 15_000);
     await plant(5, OTHER, quietKeys, quiet!, 18 * 3_600_000, 1);
     await plant(100, OTHER, keys, e!, 9 * 3_600_000, 100_000, { fork: fork! });
     await plant(50, OTHER, [holder!], busy!, 8 * 3_600_000, 200_000, { source: { environment: dev!, key: devKey! } });

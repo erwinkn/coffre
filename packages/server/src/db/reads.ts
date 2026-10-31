@@ -219,7 +219,9 @@ type Row = {
 /** The reads `found` names, newest first, each with the names of what it names: lookups by primary key, a probe each. */
 function listed(engine: dialect.Engine, found: SQL): SQL {
   const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
-  const join = (alias: string, select: SQL) => (engine === 'postgres' ? sql`LEFT JOIN LATERAL (${select}) ${sql.raw(alias)} ON TRUE` : sql`LEFT JOIN (${select}) ${sql.raw(alias)}`);
+  // Each a probe of its row's key, `LIMIT 1` so that Postgres keeps it one: pulled up into a join, the planner may read a
+  // table whole once its estimates grow (review r3: secrets read whole, 911 pages a page, then 2,139).
+  const join = (alias: string, select: SQL) => (engine === 'postgres' ? sql`LEFT JOIN LATERAL (${select} LIMIT 1) ${sql.raw(alias)} ON TRUE` : sql`LEFT JOIN (${select}) ${sql.raw(alias)}`);
   if (engine === 'postgres') {
     return sql`
       SELECT c.number, c.at, ${text('c.credential')} AS credential, c.purpose, c.principal, ${text('c.secret')} AS secret, ${text('c.environment')} AS environment,
