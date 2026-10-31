@@ -24,7 +24,7 @@ import { READS_BEHIND_MS, readsListed } from '../src/api/audit.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
+import { logReadDays, logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 
@@ -306,6 +306,19 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
     `read ${moved} is listed otherwise than the log sealed it`,
     `read ${copied} is listed twice`,
   ]) assert.ok(named.includes(problem), `${problem}, among ${JSON.stringify(named)}`);
+});
+
+test("a member's day of reads deleted takes them off her report, and the whole log's check names each (review r6)", { skip: LOG !== '0.15' }, async () => {
+  await ada.secrets.reveal('market/dev/API_KEY');
+  await settle();
+  const [listed] = await db.owner.select({ number: logReads.number }).from(logReads);
+  assert.deepEqual((await root.members.get(ADA)).exposed.map((secret) => secret.key), ['API_KEY']);
+  await db.owner.delete(logReadDays).where(eq(logReadDays.principal, ADA));
+  // Her report reads her days alone (as her page does on Postgres, whose days are partitions).
+  assert.deepEqual((await root.members.get(ADA)).exposed, []);
+  const verdict = await root.audit.verifyReads();
+  assert.ok(verdict.kept);
+  assert.deepEqual([verdict.ok, verdict.problems], [false, [`read ${listed!.number} is off its member's pages: their day of it is not listed`]]);
 });
 
 test("a use renumbered after its seal stops the projection, which lists nothing it would derive from it, and the whole log's check says why (WindowChecked)", { skip: LOG !== '0.15' }, async () => {

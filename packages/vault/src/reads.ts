@@ -77,8 +77,11 @@ export type ReadsStore = Pick<LogReader, 'tiles'> & {
   makeReadsDays(days: readonly string[]): Promise<void>;
   /** The reads, each once by its number, and the cursor on to `cursor`, never back: one write. */
   writeReads(reads: readonly ReadRow[], cursor: ReadsCursor): Promise<void>;
-  /** What the listing holds of a stretch (`checkReads`): its reads numbered in `(after, upto]` at times in `[from, to]`. */
-  listing(stretch: { after: bigint; upto: bigint; from: number; to: number }): Promise<ReadRow[]>;
+  /**
+   * What the listing holds of a stretch (`checkReads`): its reads numbered in `(after, upto]` at times in `[from, to]`,
+   * each with whether its member's day of it is in `log_read_days` (`dayed`), which their pages read.
+   */
+  listing(stretch: { after: bigint; upto: bigint; from: number; to: number }): Promise<(ReadRow & { dayed: boolean })[]>;
 };
 
 /** How many entries one step of the projector reads: a tick's worth at R44's 1,000 uses a second, and more. */
@@ -293,7 +296,7 @@ async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly Log
   let [from, to] = [range.floor, range.signedAt];
   for (const read of reads) [from, to] = [Math.min(from, read.at), Math.max(to, read.at)];
   const listing = await store.listing({ after: range.after, upto: range.upto, from, to });
-  const listed = new Map<bigint, ReadRow>();
+  const listed = new Map<bigint, ReadRow & { dayed: boolean }>();
   for (const read of listing) {
     if (listed.has(read.number)) problems.push(`read ${read.number} is listed twice`);
     listed.set(read.number, read);
@@ -303,6 +306,8 @@ async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly Log
     listed.delete(read.number);
     if (row === undefined) problems.push(`read ${read.number} is sealed but not listed`);
     else if (!readHolds(mac, row) || !row.mac.equals(read.mac)) problems.push(`read ${read.number} is listed otherwise than the log sealed it`);
+    // Its member's day of it gone, their page and offboarding report would leave it out unseen (review r6).
+    else if (!row.dayed) problems.push(`read ${read.number} is off its member's pages: their day of it is not listed`);
   }
   for (const number of listed.keys()) problems.push(`read ${number} is listed, but the log seals no such use`);
   return problems;

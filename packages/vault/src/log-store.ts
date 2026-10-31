@@ -615,13 +615,16 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       const found = await rowsOf<{
         number: string | number; at: string | number; credential: string; purpose: string | number; principal: string; secret: string; environment: string; project: string;
         place: string | null; source: string | null; source_environment: string | null; source_project: string | null; version: string | null; mac: Uint8Array;
-      }>(db, sql`SELECT number, at, ${text('credential')} AS credential, purpose, principal, ${text('secret')} AS secret, ${text('environment')} AS environment, ${text('project')} AS project,
-          ${text('place')} AS place, ${text('source')} AS source, ${text('source_environment')} AS source_environment, ${text('source_project')} AS source_project, ${text('version')} AS version, mac
-        FROM log_reads WHERE at >= ${big(from)} AND at <= ${big(to)} AND number > ${big(after)} AND number <= ${big(upto)}`);
-      return found.map((row): ReadRow => ({
+        dayed: boolean | number;
+      }>(db, sql`SELECT r.number, r.at, ${text('r.credential')} AS credential, r.purpose, r.principal, ${text('r.secret')} AS secret, ${text('r.environment')} AS environment,
+          ${text('r.project')} AS project, ${text('r.place')} AS place, ${text('r.source')} AS source, ${text('r.source_environment')} AS source_environment,
+          ${text('r.source_project')} AS source_project, ${text('r.version')} AS version, r.mac,
+          EXISTS (SELECT 1 FROM log_read_days d WHERE d.principal = r.principal AND d.day = CAST(r.at / 86400000 AS integer)) AS dayed
+        FROM log_reads r WHERE r.at >= ${big(from)} AND r.at <= ${big(to)} AND r.number > ${big(after)} AND r.number <= ${big(upto)}`);
+      return found.map((row): ReadRow & { dayed: boolean } => ({
         number: BigInt(row.number), at: Number(row.at), credential: row.credential, purpose: Number(row.purpose), principal: row.principal, secret: row.secret,
         environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
-        sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac),
+        sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac), dayed: row.dayed === true || row.dayed === 1,
       }));
     },
     async makeDays(days) {
