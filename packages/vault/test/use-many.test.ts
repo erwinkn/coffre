@@ -312,10 +312,11 @@ test('a batch answered `late` by its timer while the clock is still short of its
     t.mock.timers.reset();
     assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
     go();
-    await sleep(200);
+    // Settled once the statement in flight has answered: its place given back, and whatever it would send after, sent.
+    for (const until = Date.now() + 2_000; isolate.cache.inFlight > 0 && Date.now() < until;) await sleep(10);
+    assert.equal(isolate.cache.inFlight, 0);
     assert.ok(Date.now() < at + 3_000);
     assert.equal(isolate.statements() - before, 1, 'the statement in flight, and none after it');
-    assert.equal(isolate.cache.inFlight, 0);
   } finally {
     await isolate.close();
   }
