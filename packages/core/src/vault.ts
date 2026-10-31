@@ -210,6 +210,11 @@ export interface Vault {
      */
     batchUses?: true;
     /**
+     * `true` when the vault says whether its checkpointer seals (`sealing`; T169), which `/readyz` asks. Said here,
+     * as a Worker's stub answers any method's name: of a vault older than this app, mid-deploy, readiness asks nothing.
+     */
+    sealing?: true;
+    /**
      * `true` when the vault makes sign-ins through trust bindings and revokes
      * credentials itself (`signIn`, `revokeCredential`; T149): its log is
      * 0.15's. Said here, as a Worker's stub answers any method's name.
@@ -352,6 +357,34 @@ export interface Vault {
    * 0.14's log alone, `kept` false; a vault older than 0.15 has none.
    */
   verifyTrees?(): Promise<TreeVerification>;
+  /**
+   * With 0.15's log, whether its checkpointer seals (T169): open, its last
+   * tick ended well, and within the last few seconds. What `/readyz` asks,
+   * since a change answers only once sealed (R51). Bounded: a checkpointer
+   * that does not answer is said not to seal, at once.
+   */
+  sealing?(): Promise<Sealing>;
+}
+
+/** Whether 0.15's checkpointer seals, and if not, why (`Vault.sealing`). */
+export type Sealing = { ok: true } | { ok: false; reason: string };
+
+/**
+ * What the error of a change says when the change committed but its seal
+ * did not come in time (T169): the checkpointer stalled, or cannot be
+ * reached. Its words are the contract, since only an error's message
+ * crosses Workers' RPC: the app answers 503 with Retry-After
+ * (`isUnsealed`), and the change is in force.
+ */
+export const UNSEALED = 'was committed, but not sealed in time';
+
+/** Whether `error`, or one of its causes, is a change's seal that did not come in time (`UNSEALED`). */
+export function isUnsealed(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { message } = cause as { message?: unknown };
+    if (typeof message === 'string' && message.includes(UNSEALED)) return true;
+  }
+  return false;
 }
 
 /**

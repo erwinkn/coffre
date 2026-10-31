@@ -245,15 +245,19 @@ function postgresStore(db: Database, range: number): LogStore {
     async close(after, from) {
       // The barrier, and the newest pair with it: only the checkpointer writes that row, so a snapshot from before the
       // barrier's lock holds it. The window comes in the next statement, a snapshot after the lock.
-      const [barrier] = await rowsOf<{ upto: string | null; at_floor: string | null; floor_found: string | null; newest: RawPair | null }>(db, sql`
-        SELECT b.upto::text, b.at_floor::text, b.floor_found::text, (SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1) AS newest
+      // The ceiling is the clock less the deadline once close_one has run, as close_one raises the floor to it: no
+      // barrier before this one can have left the floor above it (T169, a late one included).
+      const [barrier] = await rowsOf<{ upto: string | null; at_floor: string | null; floor_found: string | null; ceiling: string; newest: RawPair | null }>(db, sql`
+        SELECT b.upto::text, b.at_floor::text, b.floor_found::text,
+               ((extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max())::text AS ceiling,
+               (SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1) AS newest
           FROM close_one() b`);
       const upto = BigInt(barrier?.upto ?? '0');
       return {
         upto,
         newest: toPair(barrier?.newest),
         entries: (await rows(after, upto, sql`${from}::bigint`)).map(fromRow),
-        floor: { found: barrier?.floor_found == null ? null : Number(barrier.floor_found), set: Number(barrier?.at_floor ?? 0) },
+        floor: { found: barrier?.floor_found == null ? null : Number(barrier.floor_found), set: Number(barrier?.at_floor ?? 0), ceiling: Number(barrier?.ceiling) },
       };
     },
     async newest() {
@@ -390,10 +394,10 @@ function sqliteStore(db: Database): LogStore {
       const barrier = await db.transaction(async (tx) => {
         const [fence] = await rowsOf<{ at_floor: number }>(tx, sql`SELECT at_floor FROM log_fence WHERE only_row`);
         await rowsOf(tx, sql`UPDATE log_fence SET at_floor = max(at_floor, ${NOW} - 3000) WHERE only_row`);
-        const [now] = await rowsOf<{ at_floor: number; upto: number | null }>(tx, sql`
-          SELECT (SELECT at_floor FROM log_fence WHERE only_row) AS at_floor,
+        const [now] = await rowsOf<{ at_floor: number; ceiling: number; upto: number | null }>(tx, sql`
+          SELECT (SELECT at_floor FROM log_fence WHERE only_row) AS at_floor, ${NOW} - 3000 AS ceiling,
                  max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS upto`);
-        return { found: fence?.at_floor ?? null, set: Number(now!.at_floor), upto: BigInt(now!.upto ?? 0) };
+        return { found: fence?.at_floor ?? null, set: Number(now!.at_floor), ceiling: Number(now!.ceiling), upto: BigInt(now!.upto ?? 0) };
       });
       const read = await one<{ newest: RawPair | null; entries: RawEntry[] }>(db, sql`SELECT json_object(
           'newest', json((SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)),
@@ -402,7 +406,7 @@ function sqliteStore(db: Database): LogStore {
         upto: barrier.upto,
         newest: toPair(read.newest),
         entries: read.entries.map(toEntry),
-        floor: { found: barrier.found === null ? null : Number(barrier.found), set: barrier.set },
+        floor: { found: barrier.found === null ? null : Number(barrier.found), set: barrier.set, ceiling: barrier.ceiling },
       };
     },
     async newest() {

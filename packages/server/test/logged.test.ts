@@ -5,10 +5,11 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { UNSEALED } from '@coffre/core/vault';
 import { isUnavailable } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
-import { ApiError, toErrorBody } from '../src/api/errors.ts';
+import { ApiError, toErrorBody, UNSEALED_MESSAGE } from '../src/api/errors.ts';
 import { errorResponse } from '../src/http.ts';
 import { openTestDatabase } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
@@ -80,3 +81,13 @@ test('a moment\'s 503 says when to ask again, 5 seconds, and nothing else does',
   assert.equal(errorResponse(new ApiError('forbidden', 'no')).headers.get('retry-after'), null);
 });
 
+
+test('T169: a change committed and not sealed in time is a 503 that says so, with Retry-After, whether the error is the vault\'s own or only its words, as Workers\' RPC carries it', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const rpc = new Error(`the checkpointer failed: change 41 ${UNSEALED}: a tick ran past 10000 ms; try again shortly`);
+  for (const error of [rpc, new Error('Failed query: select 1', { cause: rpc })]) {
+    assert.deepEqual(toErrorBody(error), { status: 503, body: { error: 'unavailable', message: UNSEALED_MESSAGE } });
+    const response = errorResponse(error);
+    assert.deepEqual([response.status, response.headers.get('retry-after')], [503, '5']);
+  }
+});

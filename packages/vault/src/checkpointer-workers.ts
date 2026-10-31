@@ -6,6 +6,9 @@
 // remembered (RememberFirst). It holds one connection to the database
 // through the vault's Hyperdrive for as long as it lives: its ticks run one
 // at a time, and a Durable Object may keep a connection across requests.
+// Nothing it awaits is unbounded (T169): a tick past its bound stalls the
+// checkpointer, its connection is cut, and the next alarm opens another; a
+// change waits at most `SEAL_WAIT_MS` for its seal, then answers 503.
 //
 // The deployment binds it and exports it (`export const CoffreCheckpointer =
 // checkpointer()`, beside `vault(…)`); the vault starts it, from each
@@ -15,7 +18,26 @@ import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle'
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
-import { heldIn, type Alarm, type Checkpointer, type InclusionProof, type Memory, type SealThrough, type Sealed, type Tick, type Witness } from './checkpointer.ts';
+import type { Sealing } from '@coffre/core/vault';
+
+import {
+  Fence,
+  heldIn,
+  SEAL_WAIT_MS,
+  sealingOf,
+  TICK_BOUND_MS,
+  Unsealed,
+  WITNESS_DEADLINE_MS,
+  within,
+  type Alarm,
+  type Checkpointer,
+  type InclusionProof,
+  type Memory,
+  type SealThrough,
+  type Sealed,
+  type Tick,
+  type Witness,
+} from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { logStore } from './log-store.ts';
 import { dayOf } from './retention.ts';
@@ -50,6 +72,8 @@ export type CheckpointerSettings = {
   closeIdleMs?: number;
   /** Full days of uses kept before today's; null keeps every day (retention.ts). */
   retainDays?: number | null;
+  /** `TICK_BOUND_MS`, which also bounds an open and the next days made without one: for the tests. */
+  tickBoundMs?: number;
 };
 
 /**
@@ -71,6 +95,17 @@ export function durableMemory(storage: ObjectState['storage']): Memory {
 
 /** How long alarms are kept. */
 const ALARMS_KEPT_MS = 30 * 86_400_000;
+/**
+ * How long the object waits on an open, which reads the newest pair and the trees' edges, and on the next days of
+ * uses made without it (T169): as long as a tick.
+ */
+const OPEN_BOUND_MS = TICK_BOUND_MS;
+/** How long it waits on the log's upkeep after a tick: retention drops a day's partition and its tiles, hourly. */
+const UPKEEP_BOUND_MS = 60_000;
+/** How long the vault waits on the object for anything but a seal: a start, its status, the pair it remembers. */
+const ASK_BOUND_MS = 2000;
+/** How long the vault waits on the object for a seal: its own bound, and the witnesses', and a second more. */
+const SEAL_ASK_BOUND_MS = SEAL_WAIT_MS + WITNESS_DEADLINE_MS + 1000;
 /** An alarm's key: its time, then random bytes, so that two at one millisecond never share one, evicted or not. */
 const alarmKey = (at: number, suffix = '') => `alarm:${String(at).padStart(16, '0')}:${suffix}`;
 
@@ -106,19 +141,29 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
       return this.#state.blockConcurrencyWhile(async () => {
         if (this.#checkpointer !== null) return this.#checkpointer;
         let pool: HyperdrivePool | null = null;
+        // Bounded (T169): an open that stalls is fenced and its connection cut, so that the gate lets go well before the
+        // platform's 30 s would reset the object.
+        const fence = new Fence();
         try {
           const s = await settings(this.#env);
-          pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
+          const opening = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
+          pool = opening;
           const store = logStore(createDatabase(pool));
-          const checkpointer = await openLogCheckpointer({
+          const checkpointer = await within(openLogCheckpointer({
             store,
             seed: s.seed,
             memory: durableMemory(this.#state.storage),
             witnesses: s.witnesses,
             record: (alarm) => this.#record(alarm),
+            fence,
+            ...(s.tickBoundMs === undefined ? {} : { tickBoundMs: s.tickBoundMs }),
+          }), s.tickBoundMs ?? OPEN_BOUND_MS, 'the open', () => {
+            void fence.close('its open stalled');
+            opening.destroy();
           });
           this.#checkpointer = checkpointer;
-          this.#upkeep = upkeep(checkpointer, store, {
+          // Behind the checkpointer's fence, as everything it does: nothing of it runs once another opens.
+          this.#upkeep = upkeep(checkpointer, fence.store(store), {
             keepDays: s.retainDays ?? null,
             seed: s.seed,
             alert: (message) => {
@@ -127,7 +172,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             },
           });
         } catch (error) {
-          await pool?.end().catch(() => {});
+          await fence.close('its open failed');
+          pool?.destroy();
           await this.#failure(`the checkpointer cannot open: ${reasonOf(error)}`);
           return null;
         }
@@ -147,8 +193,10 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     }
 
     /**
-     * Nothing else delivered meanwhile, and the old checkpointer closed, its tick in flight ended, before the next
-     * request may open another: a change still waiting on the old one can tick it no more, so two never sign at once.
+     * Nothing else delivered meanwhile, and the old checkpointer closed, fenced, its tick in flight ended or stalled,
+     * before the next request may open another: a change still waiting on the old one can tick it no more, so two
+     * never sign at once. Its connection is cut first, so that what it still awaits fails now rather than whenever the
+     * database answers (T169); a statement it had sent may still land, which the fence's rules allow.
      */
     async #reset(): Promise<void> {
       await this.#state.blockConcurrencyWhile(async () => {
@@ -156,8 +204,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         this.#checkpointer = null;
         this.#pool = null;
         this.#upkeep = null;
+        pool?.destroy();
         await old?.close();
-        await pool?.end().catch(() => {});
       });
     }
 
@@ -182,8 +230,9 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
       let pool: HyperdrivePool | null = null;
       try {
         const s = await settings(this.#env);
-        pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: 1000 });
-        await logStore(createDatabase(pool)).makeDays(daysAround(now));
+        const making = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: 1000 });
+        pool = making;
+        await within(logStore(createDatabase(making)).makeDays(daysAround(now)), s.tickBoundMs ?? OPEN_BOUND_MS, 'making them', () => making.destroy());
         this.#daysFor = today;
         this.#daysFailed = null;
       } catch (error) {
@@ -194,7 +243,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         }
         this.#daysFailed = message;
       } finally {
-        await pool?.end().catch(() => {});
+        pool?.destroy();
       }
     }
 
@@ -203,11 +252,14 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         const checkpointer = await this.#open();
         if (checkpointer === null) return await this.#makeDays();
         const t0 = performance.now();
+        // Bounded by the checkpointer itself (TICK_BOUND_MS): one that stalled throws, and is replaced below.
         const t = await checkpointer.tick();
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
-        await this.#upkeep?.();
+        // On the same connection, cut past its bound: the checkpointer goes with it.
+        const pool = this.#pool;
+        if (this.#upkeep !== null) await within(this.#upkeep(), UPKEEP_BOUND_MS, "the log's upkeep", () => pool?.destroy());
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
         await this.#failure(`a checkpoint failed: ${reasonOf(error)}`);
@@ -228,15 +280,25 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           return Response.json({ ok: true });
         }
         if (call.op === 'seal') {
+          // A 503 is a seal that did not come in time (T169): the change is in force, and asked again, sealed.
           const checkpointer = await this.#open();
-          if (checkpointer === null) return Response.json({ error: this.#failed }, { status: 503 });
-          return Response.json(sealedToJson(await checkpointer.sealThrough(BigInt(call.number), call.deadline)));
+          if (checkpointer === null) return Response.json({ error: new Unsealed(BigInt(call.number), this.#failed ?? 'the checkpointer cannot open').message }, { status: 503 });
+          try {
+            return Response.json(sealedToJson(await checkpointer.sealThrough(BigInt(call.number), call.deadline)));
+          } catch (error) {
+            if (error instanceof Unsealed) return Response.json({ error: error.message }, { status: 503 });
+            throw error;
+          }
         }
         if (call.op === 'status') {
-          // The object's own view: after an eviction, nothing until its next tick opens it again (`open: false`).
+          // The object's own view: after an eviction, nothing until its next tick opens it again (`open: false`); the
+          // failure that stands, if any, which readiness reads with the last tick's time (`sealingOf`).
           const head = this.#checkpointer?.pair.pair;
           return Response.json({
             open: this.#checkpointer !== null,
+            failed: this.#failed,
+            // By the object's clock, as its ticks' times are.
+            sealing: sealingOf({ open: this.#checkpointer !== null, failed: this.#failed, last: this.#ticks.at(-1) ?? null }),
             upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
             ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
           });
@@ -266,19 +328,40 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
   };
 }
 
-/** Asks the checkpointer's object, as `durableSealThrough(env.CHECKPOINTER)` and `startCheckpointer(env.CHECKPOINTER)` do. */
-async function ask<T>(namespace: ObjectNamespace, name: string, call: object): Promise<T> {
+/**
+ * Asks the checkpointer's object, as `durableSealThrough(env.CHECKPOINTER)` and `startCheckpointer(env.CHECKPOINTER)`
+ * do, for at most `ms` (T169): an object that does not answer, its gate held or its isolate wedged, fails the ask
+ * rather than the call that asked.
+ */
+async function ask<T>(namespace: ObjectNamespace, name: string, call: object, ms = ASK_BOUND_MS): Promise<T> {
   if (typeof namespace?.idFromName !== 'function') throw new Error('there is no CHECKPOINTER binding: bind the CoffreCheckpointer Durable Object to the vault');
-  const response = await namespace.get(namespace.idFromName(name)).fetch(new Request('https://checkpointer/', { method: 'POST', body: JSON.stringify(call) }));
-  const body = (await response.json()) as T & { error?: string };
+  const asked = (async () => {
+    const response = await namespace.get(namespace.idFromName(name)).fetch(new Request('https://checkpointer/', { method: 'POST', body: JSON.stringify(call) }));
+    return { response, body: (await response.json()) as T & { error?: string } };
+  })();
+  const { response, body } = await within(asked, ms, "the checkpointer's object");
   // Its status kept: a 503 is an object that refused to open, its alarm set (`start`).
   if (!response.ok) throw Object.assign(new Error(`the checkpointer failed: ${body.error ?? response.status}`), { status: response.status });
   return body;
 }
 
-/** The change path's seam on Workers (plan PR 4): seal through the checkpointer's object. */
+/**
+ * The change path's seam on Workers (plan PR 4): seal through the checkpointer's object. Its 503, or no answer in
+ * time, is `Unsealed` (T169): the change is committed and in force, and the app says 503, try again.
+ */
 export function durableSealThrough(namespace: ObjectNamespace, name = 'checkpointer'): SealThrough {
-  return async (number, deadline) => sealedFromJson(await ask<SealedJson>(namespace, name, { op: 'seal', number: String(number), deadline }));
+  return async (number, deadline) => {
+    let sealed: SealedJson;
+    try {
+      sealed = await ask<SealedJson>(namespace, name, { op: 'seal', number: String(number), deadline }, SEAL_ASK_BOUND_MS);
+    } catch (error) {
+      // The object's 503 says so in core's words; an object that did not answer, or not in time, is the same. Its 500 is
+      // a seal refused (an entry that fails its MAC, a database at another pair): an alarm, kept by the object.
+      if ((error as { status?: number }).status === undefined) throw new Unsealed(number, `the checkpointer's object did not answer: ${(error as Error).message}`, error);
+      throw error;
+    }
+    return sealedFromJson(sealed);
+  };
 }
 
 /** Starts the object's ticks, once; again is harmless. Throws when it cannot open, its alarm set all the same. */
@@ -287,8 +370,19 @@ export async function startCheckpointer(namespace: ObjectNamespace, name = 'chec
 }
 
 /** The object's head and its last ticks, each with its barrier, write and wall time. */
-export function checkpointerStatus(namespace: ObjectNamespace, name = 'checkpointer'): Promise<{ open: boolean; upto: string | null; sizes: Record<'changes' | 'uses', number> | null; ticks: (Omit<Tick, 'upto'> & { upto: string; wallMs: number; at: number })[] }> {
+export function checkpointerStatus(namespace: ObjectNamespace, name = 'checkpointer'): Promise<{ open: boolean; failed: string | null; sealing: Sealing; upto: string | null; sizes: Record<'changes' | 'uses', number> | null; ticks: (Omit<Tick, 'upto'> & { upto: string; wallMs: number; at: number })[] }> {
   return ask(namespace, name, { op: 'status' });
+}
+
+/** Whether the object seals (`Vault.sealing`, T169): its own view, or, if it does not answer within 2 s, that it does not. */
+export function durableSealing(namespace: ObjectNamespace, name = 'checkpointer'): () => Promise<Sealing> {
+  return async () => {
+    try {
+      return (await checkpointerStatus(namespace, name)).sealing;
+    } catch (error) {
+      return { ok: false, reason: `the checkpointer's object did not answer: ${(error as Error).message}` };
+    }
+  };
 }
 
 /**

@@ -468,6 +468,54 @@ tree's origin is that plus `/changes` or `/uses`. A new signing key starts
 a new log; how a rotation carries the trees across is the cutover's
 (PR 9).
 
+**Nothing it awaits is unbounded** (T169). On W278's Cloudflare bench, one
+tick waited 25 minutes on a connection that never answered, until a
+redeploy reset the object. Every seal waited behind it, sign-in and
+readiness with them, and each new vault isolate's first uses waited on the
+cutover's seal. Now:
+- **A tick runs at most `TICK_BOUND_MS`** (10 s). Past it the checkpointer
+  *stalls*: it is closed for good behind its `Fence`, which refuses every
+  call it makes to its store and every write to its memory from then on.
+  Its host opens another: on Workers the next alarm, its connection cut
+  first (`HyperdrivePool.destroy`); on Node a tick later. What the stalled
+  one had sent may still land. A memory write the host waits for. A
+  database write is refused where a row holds its place, and a barrier
+  raises the floor no higher than the next one does (below). Seal.tla's
+  `Fenced` (`SealStall`) shows the fence necessary: without it, the stalled
+  tick writes a pair the new signer does not hold, an alarm with no
+  attacker.
+- **A change waits at most `SEAL_WAIT_MS`** (5 s) for its ticks and its
+  proof, then the witnesses' 2 s. Past it, or once the checkpointer stalled
+  or its database does not answer, it is `Unsealed`: committed and in
+  force, and its message carries core's `UNSEALED`, which is all Workers'
+  RPC carries. The app answers 503 with Retry-After, and the next tick
+  seals it. On Workers the vault asks the object for at most 8 s, and 2 s
+  for anything else.
+- **The open, the next days of uses, and the upkeep after a tick** are
+  bounded too: 10 s, 10 s and 60 s.
+- **A use waits on no checkpointer.** An isolate's uses start the object
+  behind them (`#behind` in `cloudflare.ts`), and its first ones take the
+  cutover as sealed once a pair the vault's key signed covers its number,
+  as the newest checkpoint row shows: no seal asked, unless the cutover is
+  that new.
+- **Readiness asks `sealing()`**: open, its last tick ended well within
+  `SEALING_STALE_MS` (5 s), no failure standing (`sealingOf`). On Workers
+  the object answers from its own state and clock, in at most 2 s, or the
+  answer is no; `/readyz` gives the vault 3 s. Red within seconds of a
+  stall, green again once a tick seals.
+- **A late barrier is no alarm.** A barrier sent by a checkpointer given
+  up on may run in the database after the next one has opened and ticked,
+  raising the floor past where that one's last barrier left it. The next
+  barrier takes a floor above its last one when it is no higher than its
+  own clock less the use deadline (`floor.ceiling`, read after
+  `close_one`): exactly what a late barrier leaves, and what this barrier
+  raises it to anyway. Higher, a writer raised it, and the tick refuses.
+  HotPathOne's `BarrierAcceptsLate` (`HotPathOneStallLive`) shows the rule
+  necessary for checkpoints to go on. It leaves open what it always left
+  open: a writer who lowers the floor and puts it back before the next
+  barrier reads it lets uses in unsealed, and a late barrier can put it
+  back too (`HotPathOneStall`, EXPECTED).
+
 **On Node** (`packages/vault/src/checkpointer-node.ts`):
 - `runCheckpointer({ database, seed, memory, witnesses })` ticks every
   500 ms, a tick after the last ends. A tick that throws is an alarm, kept
@@ -500,7 +548,7 @@ configured by the same `vault(env => …)`.
 - **It ticks on its alarm** every 500 ms, holding one Hyperdrive connection
   that closes when idle. A failed tick drops the connection and the
   checkpointer, and the next alarm opens both again under `open()`'s rules.
-  The old checkpointer is closed first, its tick in flight ended, with
+  The old checkpointer is closed first, fenced, its connection cut, with
   nothing else delivered meanwhile. A change still waiting on it can tick
   it no more, so two never sign at once (review r3).
 - **A refused open and a tick that throws are alarms**, kept once while
@@ -569,6 +617,8 @@ the code holds it and the tests that break it.
 |---|---|---|
 | NumberUnderLock, CloseLocks | `CheckpointStore.close`: the barrier (`close_one`) | 6b, over migration 0022 |
 | BarrierChecksFloor (`HotPathOne.tla`) | `tick`: the floor `close_one` found must be exactly where this process's last barrier left it (after a restart, no lower than the newest pair's), else every tick refuses until reopened; each pair signs its floor, and windows are read from the newest pair's | "BarrierChecksFloor: …", "review r9–r10, BarrierChecksFloor: …" |
+| BarrierAcceptsLate (`HotPathOne.tla`, T169) | `tick`: a floor above the last barrier's no higher than `floor.ceiling` is a late barrier's | "T169: a tick whose barrier never answers…"; stall.test.ts |
+| Fenced (T169) | `Fence`: every store call and memory write of a checkpointer closed or stalled refused; `close` waits for its memory writes in flight | "T169: …", stall.test.ts, log-hosts.test.ts and workers-stall.test.ts |
 | RememberFirst | `tick`: `memory.remember` before `store.write` | (e) |
 | SignerMemory | `open()`: memory equal, a prefix in both trees, or re-derived; else refused | (b), (c), (g), (j), "a memory restored…" |
 | RowChecked, PairChecked | `tick`: the newest pair, each tree's own newest note, byte for byte | (m), "PairChecked: …", "review r1: a row replaced…" |

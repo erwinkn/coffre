@@ -53,7 +53,8 @@ const UNSENT = new Set(['GROUP_UNTYPED', 'MAX_PARAMETERS_EXCEEDED', 'UNDEFINED_V
  * still go in the order they are asked.
  *
  * Closed by `end`, once what was asked has answered; asked again after, as
- * a call's background work may, it opens a connection again.
+ * a call's background work may, it opens a connection again. Cut by
+ * `destroy`, at once and for good.
  */
 export class HyperdrivePool implements Client {
   readonly #connectionString: string;
@@ -71,6 +72,8 @@ export class HyperdrivePool implements Client {
   readonly #groupReads: boolean;
   /** The reads that will take the next group's turn, while it has not started: what a read asked now joins. */
   #gathering: Gathered[] | null = null;
+  /** Set by `destroy`: every turn after it fails. */
+  #destroyed = false;
 
   /**
    * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
@@ -172,6 +175,20 @@ export class HyperdrivePool implements Client {
     await client?.end().catch(() => {});
   }
 
+  /**
+   * The connection cut now, what it was asked failing at once, and every
+   * turn after refused: for what a host stopped waiting on, a connection
+   * gone dead or a connect that never answers (T169), so that whatever
+   * still awaits it fails rather than waits for good. Its statement may
+   * still run in the database.
+   */
+  destroy(): void {
+    this.#destroyed = true;
+    const client = this.#client;
+    this.#client = null;
+    void client?.end({ timeout: 0 }).catch(() => {});
+  }
+
   /** `go` once every turn asked before it is done. Anything but a group's closes the group gathering: it goes after. */
   #turn<T>(go: () => PromiseLike<T>): Promise<T> {
     this.#gathering = null;
@@ -192,6 +209,7 @@ export class HyperdrivePool implements Client {
 
   /** The call's client, made the first time. postgres.js opens its connection again when one is lost. */
   #connected(): PostgresClient {
+    if (this.#destroyed) throw new Error('this connection was cut: its call stopped waiting on it');
     this.#client ??= textTypes(postgresClient(this.#connectionString, {
       max: 1,
       idle_timeout: this.#closeIdleMs === undefined ? undefined : this.#closeIdleMs / 1000,
