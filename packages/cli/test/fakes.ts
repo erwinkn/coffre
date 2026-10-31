@@ -436,6 +436,9 @@ if (args[0] === 'auth' && apiToken !== null) {
   const name = config.name;
   if (existsSync(STATE + '/fail-' + name)) { console.error('✘ [ERROR] A request to the Cloudflare API failed.'); process.exit(1); }
   if (REAL !== null) {
+    // The stub exports each Durable Object class the config binds, as the Worker's own code does, or wrangler refuses it.
+    const classes = [...new Set((config.durable_objects?.bindings ?? []).map(({ class_name }) => class_name))];
+    writeFileSync(STATE + '/stub.js', 'export default { fetch: () => new Response("ok") };\\n' + classes.map((name) => 'export class ' + name + ' {}\\n').join(''));
     // Its stdin a pipe, as setup gives it: see deploymentWrangler.
     const dry = spawnSync('/bin/sh', ['-c', 'cat | "$0" "$@"', process.execPath, REAL, 'deploy', STATE + '/stub.js', '--assets', STATE + '/assets', '--dry-run', ...args.slice(1)], {
       input: stdin,

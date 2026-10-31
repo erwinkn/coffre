@@ -93,7 +93,9 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
   };
   try {
     const db = await open(config.database);
-    const hot = config.hotDatabase === undefined ? undefined : await open(config.hotDatabase);
+    // The same URL is the same connection: on SQLite, where it is the same file, two would wait on each other's
+    // writes, a use's and the checkpointer's, past the busy timeout.
+    const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
     // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
     const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
     const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };

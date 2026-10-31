@@ -57,7 +57,7 @@
   - **A restore resets the checkpointer's memory**, once, by hand
     (`docs/restore.md`, "On 0.15's log").
   - **Do not rotate the vault's signing key on 0.15, nor a local vault
-    key,** until T168 lands. 0.15's checkpoints, and the MACs of its log's
+    key,** until 0.15.1. 0.15's checkpoints, and the MACs of its log's
     entries, are under the vault's first signing key alone: after a rotation
     that changes it, the checkpointer refuses the log, and every change
     fails at its seal (uses go on). A local vault key derives the signing
