@@ -638,13 +638,14 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  // Its report reads what they read under 0.15's log, their uses (T166), beside its first reads: a statement, no trip.
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does (T166), beside
+  // its first reads: two statements, no trip.
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 18, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
   "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 2, vaultCalls: 3 } },
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 4, vaultCalls: 5 } },
-  // Its report reads their uses too (T166), beside its first reads.
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  // Its report reads their reads too, and how far they are listed (T166), beside its first reads.
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 21, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
   "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 3, vaultCalls: 4 } },
   "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
@@ -1393,7 +1394,9 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   const [busyFork] = await ids(sql`environments WHERE slug = 'busy-eu' AND project_id = ${market}`);
   const [holder] = await ids(sql`secrets WHERE key = 'DEV_API_KEY'`);
   const [devKey] = await ids(sql`secrets WHERE key = 'API_KEY' AND environment_id = ${dev}`);
-  const [prodKey] = await ids(sql`secrets WHERE environment_id = ${prod} LIMIT 1`);
+  // A key of the test's own there, whatever the tests before it left (review r4).
+  await root.secrets.set('market/prod', { READS_COST_KEY: 'prod-value' });
+  const [prodKey] = await ids(sql`secrets WHERE environment_id = ${prod} AND key = 'READS_COST_KEY'`);
   const now = Date.now();
   const day = (at: number) => new Date(at).toISOString().slice(0, 10);
   await db.owner.execute(sql`SELECT make_reads_day(${day(now - 86_400_000)}::date), make_reads_day(${day(now)}::date)`);

@@ -494,6 +494,11 @@ export type Api = {
         principalId: string;
         toRotate: number;
       }[];
+      reads?: {
+        through: string | null;
+        behind: boolean;
+        forged?: true;
+      };
     };
   };
   "GET /members/:member": {
@@ -534,6 +539,11 @@ export type Api = {
         at: string;
       }[];
       rotated: number;
+      reads?: {
+        through: string | null;
+        behind: boolean;
+        forged?: true;
+      };
       issuedTokens: {
         id: string;
         service: string;
@@ -679,6 +689,11 @@ export type Api = {
           at: string;
         }[];
         rotated: number;
+        reads?: {
+          through: string | null;
+          behind: boolean;
+          forged?: true;
+        };
         issuedTokens: {
           id: string;
           service: string;
@@ -2266,6 +2281,11 @@ export type OffboardingReport = {
     at: string;
   }[];
   rotated: number;
+  reads?: {
+    through: string | null;
+    behind: boolean;
+    forged?: true;
+  };
   issuedTokens: {
     id: string;
     service: string;

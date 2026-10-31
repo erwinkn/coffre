@@ -70,6 +70,19 @@ const COVERED_MS = 90_000;
 const LISTED_WITHIN_MS = 20_000;
 
 /**
+ * Whether `probe` holds within `LISTED_WITHIN_MS`, asked every quarter of a
+ * second: what a check of 0.15's reads waits for, as a read is listed once
+ * the log has sealed it and the vault's projector has gone that far (T166).
+ */
+export async function listed(probe: () => Promise<boolean>): Promise<boolean> {
+  for (const deadline = Date.now() + LISTED_WITHIN_MS; ;) {
+    if (await probe()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/**
  * Every value read, with 0.15's log, where a read is a use of each key,
  * which names no operation (R53, T166): the reader's newest read of each,
  * for the purpose, made by this read or by one within the minute before it
@@ -80,24 +93,23 @@ const LISTED_WITHIN_MS = 20_000;
 async function usesAudited(
   deployment: Deployment, { admin, reader }: Pick<People, 'admin' | 'reader'>, keys: string[], purpose: 'reveal' | 'run', asked: number,
 ): Promise<string> {
-  const { keys: listed } = await admin.api.secrets.list(DEV);
+  const { keys: held } = await admin.api.secrets.list(DEV);
+  // Of the key at dev itself: not a read of another place's key of that name, as through dev's reference into prod.
   const readOf = (entries: AuditEntryView[], key: string) => entries.find((found) => found.log === '0.15' && found.action === 'secret.read' && found.actorId === reader.email && found.key === key
-    && found.metadata.purpose === purpose && Date.parse(found.occurredAt) >= asked - COVERED_MS);
+    && `${found.project}/${found.environment}` === DEV && found.metadata.via === undefined && found.metadata.purpose === purpose && Date.parse(found.occurredAt) >= asked - COVERED_MS);
   let entries = await everyAuditEntry(admin.api);
-  for (const deadline = Date.now() + LISTED_WITHIN_MS; keys.some((key) => readOf(entries, key) === undefined) && Date.now() < deadline;) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    entries = await everyAuditEntry(admin.api);
-  }
+  await listed(async () => keys.every((key) => readOf(entries, key) !== undefined) || ((entries = await everyAuditEntry(admin.api)), false));
   const read = keys.map((key) => {
     const entry = readOf(entries, key);
     expect(entry !== undefined, `the read of ${key} is not listed in 0.15's log within ${LISTED_WITHIN_MS / 1000} s`, entries.slice(0, 5));
     expect(entry.author === 'vault' && entry.decision === 'allow' && entry.forged !== true, `the read of ${key} is not the vault's allowed read`, entry);
-    expect(entry.version === listed.find((found) => found.key === key)?.version, `the entry for ${key} names another version`, entry);
+    expect(entry.version === held.find((found) => found.key === key)?.version, `the entry for ${key} names another version`, entry);
     return entry;
   });
   for (const entry of read) {
-    const own = await admin.api.audit.list({ path: `${DEV}/${String(entry.key)}`, limit: 200, sealed: '1' });
-    expect(own.entries.some((found) => found.log === '0.15' && found.seq === entry.seq), `the read is not in ${String(entry.key)}'s log`, own.entries.slice(0, 5));
+    // Its whole log: the read may ride on a cover from the minute before, past a page of the key's newer reads.
+    const own = await everyAuditEntry(admin.api, `${DEV}/${String(entry.key)}`);
+    expect(own.some((found) => found.log === '0.15' && found.seq === entry.seq), `the read is not in ${String(entry.key)}'s log`, { read: entry, newest: own.slice(0, 5) });
   }
   await using(deployment.database(), async (sql) => {
     for (const entry of read) {
@@ -356,10 +368,10 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
 }
 
 /** The whole log, detail included, newest first: 0.14's entries, and the sign-ins 0.15's records. */
-export async function everyAuditEntry(api: CoffreClient): Promise<AuditEntryView[]> {
+export async function everyAuditEntry(api: CoffreClient, path?: string): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: string | undefined; ; ) {
-    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1' });
+    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1', ...(path === undefined ? {} : { path }) });
     all.push(...entries);
     if (next === null) return all;
     before = next;

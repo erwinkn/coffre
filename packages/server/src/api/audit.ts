@@ -368,7 +368,8 @@ export async function listAudit(
   const change = reach !== null && (page.reached || page.change === null) ? reach : page.change;
   const next = page.oldStop === null && change === null ? null : `${page.oldStop ?? '-'}:${change === null ? '-' : pointText(change)}`;
   const entries = withOrigins(page.entries, origins);
-  const listed = standing === null ? {} : { reads: readsListed(standing, vouches.cursorForged) };
+  const shown = standing === null ? null : readsListed(standing, vouches.cursorForged);
+  const listed = shown === null ? {} : { reads: shown };
   if (!counted) return { entries, more: next !== null, next, ...listed };
   // The page's stretch of each log, from where it stopped there to where it started; to the first entry when nothing
   // older is left; nothing when the page before was the last of it. 0.14's stops at its oldest entry shown, or where
@@ -552,7 +553,11 @@ async function vouched(
 export type ReadsListed = {
   /** Every read the log sealed up to this time is listed; null before any. */
   through: string | null;
-  /** Whether sealed reads newer than that wait to be listed: more than `READS_BEHIND_MS` behind the newest pair. */
+  /**
+   * Whether sealed reads newer than that wait to be listed: the newest pair's
+   * not all listed, it signed more than `READS_BEHIND_MS` after the listing's
+   * or that long ago. Strict (a report's): any of its reads not listed.
+   */
   behind: boolean;
   /** The vault does not vouch for where the reads' listing stands: its cursor was moved around the projector. */
   forged?: true;
@@ -561,9 +566,17 @@ export type ReadsListed = {
 /** How far behind the newest pair the reads' listing is said to be behind: a few ticks, so that the one a seal takes says nothing. */
 export const READS_BEHIND_MS = 5_000;
 
-function readsListed(standing: Awaited<ReturnType<typeof readsStanding>>, forged: boolean): ReadsListed {
-  const behind = standing.sealed !== null && standing.through < standing.sealed && standing.sealedAt !== null && standing.sealedAt - standing.at > READS_BEHIND_MS;
-  return { through: standing.at === 0 ? null : new Date(standing.at).toISOString(), behind: behind || forged, ...(forged ? { forged: true as const } : {}) };
+/**
+ * How far the reads are listed, as a page or a report says it: null where
+ * the log has no signed pair, which 0.14's alone has not. A projector
+ * stopped after the newest pair shows too, by the clock (review r4): no
+ * later pair need come to show it.
+ */
+export function readsListed(standing: Awaited<ReturnType<typeof readsStanding>>, forged: boolean, options: { strict?: boolean } = {}): ReadsListed | null {
+  if (standing.sealed === null || standing.sealedAt === null) return null;
+  const waiting = standing.through < standing.sealed;
+  const late = options.strict === true || standing.sealedAt - standing.at > READS_BEHIND_MS || Date.now() - standing.sealedAt > READS_BEHIND_MS;
+  return { through: standing.at === 0 ? null : new Date(standing.at).toISOString(), behind: (waiting && late) || forged, ...(forged ? { forged: true as const } : {}) };
 }
 
 /**

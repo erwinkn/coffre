@@ -132,6 +132,17 @@ test("a read through a Cloudflare binding is its service's, as the binding's obj
   assert.deepEqual((await rows<{ principal: string }>(db.owner, sql`SELECT principal FROM log_reads`)).map((row) => row.principal), [w.principal]);
 });
 
+test("a read of a day with no reads' partition yet makes it: a log older than the days made ahead does not stop the projector (review r4)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: partitions' }, async () => {
+  const tick = await signer();
+  await reads(2);
+  await tick();
+  const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+  for (const table of ['log_reads', 'log_read_places']) await run(db.owner, sql.raw(`DROP TABLE ${table}_${day}`));
+  await projectReads(logStore(db.vault), await keys());
+  assert.equal(await count('log_reads'), 2);
+  assert.deepEqual(await checked(), []);
+});
+
 test('an unsigned cursor is the start only: anywhere else, or at another time, it is not the vault\'s', async () => {
   const { mac } = await keys();
   assert.equal(cursorHolds(mac, { through: 0n, pair: 0n, at: 0, mac: null }), true);

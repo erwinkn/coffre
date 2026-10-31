@@ -40,6 +40,8 @@ import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPay
  * drops nothing a retention change it holds does not cut.
  */
 export type RetentionStore = {
+  /** How far the reads' projector has gone (reads.ts, T166): no day nor tile it has yet to read is dropped. */
+  readsCursor(): Promise<{ through: bigint }>;
   /** The UTC days of uses the database holds, oldest first: YYYY-MM-DD. */
   days(): Promise<string[]>;
   /** Makes each day's partition of uses (`make_day`), once a store. */
@@ -111,7 +113,9 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
   }
   // The tiles below the newest cut, once its sealing is two freshness bounds past it, as a day goes (FreshBeforeDrop).
   const newest = await sealedCut(cp, store);
-  if (newest !== null && cp.pair.pair.at >= newest.at + 2 * cp.freshMs) {
+  const projecting = newest === null ? null : await behindReads(store, newest.upto);
+  if (projecting !== null) run.waiting ??= { day: null, lock: false, reason: `the tiles below ${newest!.upto}: ${projecting}` };
+  else if (newest !== null && cp.pair.pair.at >= newest.at + 2 * cp.freshMs) {
     const tiles = await waitingOnLock(() => store.dropTiles(newest.uses.size));
     if (typeof tiles === 'number') run.tiles = tiles;
     else run.waiting ??= { day: null, lock: true, reason: `the tiles below ${newest.upto}: ${tiles.reason}` };
@@ -170,13 +174,23 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   // 3. Freshness, against the signer's own pair, never a row.
   const bound = Math.max(cut.at, end) + 2 * cp.freshMs;
   if (freshAt < bound) return { lock: false, reason: `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet` };
-  // 4. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above). A reader
+  // 4. Not before the reads' projector has read every use at or below the cut (T166): those it has yet to list would
+  // otherwise never be, and the range it walks needs the tiles too.
+  const projecting = await behindReads(store, cut.upto);
+  if (projecting !== null) return { lock: false, reason: projecting };
+  // 5. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above). A reader
   // holding log_uses longer than `drop_day`'s lock_timeout (a backup, say) makes it give up: the next run tries again.
   let state = await waitingOnLock(() => store.dropDay(day));
   if (state === 'dropped') state = await waitingOnLock(() => store.dropDay(day));
   if (typeof state === 'object') return state;
   if (state === 'dropped') throw new Error(`retention of ${day}: its uses were not dropped`);
   return { change, detached: state === 'detached' };
+}
+
+/** Why a cut waits on the reads' projector (T166), or null once it has gone past it. */
+async function behindReads(store: RetentionStore, upto: bigint): Promise<string | null> {
+  const { through } = await store.readsCursor();
+  return through >= upto ? null : `the reads' projection (through ${through}) has not reached the cut (${upto}) yet`;
 }
 
 /** What `work` answers, or, when the database gave up waiting for a lock (55P03, lock_timeout), why: no alarm. */

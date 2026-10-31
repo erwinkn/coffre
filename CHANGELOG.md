@@ -238,7 +238,7 @@
   `GET /api/audit?sealed=1`, the offboarding report and `coffre verify
   instance` list each where 0.14's entry stood. Each is vouched for by the
   vault (`Vault.vouch`) and marked forged when it fails. When the
-  projection is behind, the pages say how far reads are listed (`reads`).
+  projection is behind, the pages and the offboarding report say how far reads are listed (`reads`); retention drops no day the projector has yet to read.
   `coffre verify log`, the audit page's whole-log check and conformance
   hold the listing to the sealed uses (`GET /api/audit/reads`), a
   checkpoint's range a request. A run of several keys is an entry a key,

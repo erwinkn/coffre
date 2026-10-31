@@ -28,7 +28,8 @@ import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
-import { readsBy } from '../db/reads.ts';
+import { readsBy, readsStanding } from '../db/reads.ts';
+import { readsListed, type ReadsListed } from './audit.ts';
 import {
   priorConnections,
   revokePriorMembership,
@@ -154,6 +155,12 @@ export type OffboardingReport = {
   exposed: ExposedSecret[];
   /** Secrets they saw that have had a new version since. */
   rotated: number;
+  /**
+   * With 0.15's log, how far their reads are listed (T166): `exposed` names
+   * what they read through then, and says, `behind`, when reads sealed
+   * since wait to be listed, which it may yet name (review r4).
+   */
+  reads?: ReadsListed;
   /** Service tokens they issued that still work. */
   issuedTokens: IssuedToken[];
   /** A person's connected MCP apps, which removing them disconnects. */
@@ -330,7 +337,7 @@ function byPlace(a: PlacedGrant, b: PlacedGrant): number {
 export async function listMembers(
   ctx: ApiContext,
   query: { path?: Path },
-): Promise<{ members: Member[]; removed: RemovedMember[] }> {
+): Promise<{ members: Member[]; removed: RemovedMember[]; reads?: ReadsListed }> {
   const { caller } = ctx;
   const administrator = administers(caller.role);
   const [all, known, setting, owners] = await Promise.all([
@@ -399,7 +406,10 @@ export async function listMembers(
   // Everyone removed, so their reports stay reachable: removal ends access,
   // not the work of rotating what they saw.
   const removed = all.filter((listed) => listed.status === 'removed').map((listed) => listed.member);
-  const exposed = exposure(removed, removed.length === 0 ? [] : await ctx.db.transaction((tx) => memberActivity(tx, removed.map((m) => m.id)), SNAPSHOT));
+  // And how far their reads are listed under 0.15's log, which their counts are as of (T166).
+  const [activity, standing] = removed.length === 0 ? [[], null] : await ctx.db.transaction((tx) => Promise.all([memberActivity(tx, removed.map((m) => m.id)), readsStanding(tx)]), SNAPSHOT);
+  const exposed = exposure(removed, activity);
+  const reads = standing === null ? null : readsListed(standing, false, { strict: true });
   return {
     members,
     removed: removed.map((member) => ({
@@ -407,6 +417,7 @@ export async function listMembers(
       principalId: member.id,
       toRotate: exposed.get(formatMember(member))!.exposed.length,
     })),
+    ...(reads === null ? {} : { reads }),
   };
 }
 
@@ -498,10 +509,13 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
   // Everyone, not just them: the service tokens they issued belong to others. Beside it, every place (which whoever
   // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
-  // And their reads under 0.15's log, as the vault's projection lists them (T166), which the report weighs below.
-  const [everyone, known, owners, references, used] = await Promise.all([
+  // And their reads under 0.15's log, as the vault's projection lists them (T166), which the report weighs below, and how
+  // far it lists them.
+  const [everyone, known, owners, references, used, standing] = await Promise.all([
     directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsBy(ctx.db, [formatMember(member)]),
+    readsStanding(ctx.db),
   ]);
+  const reads = readsListed(standing, false, { strict: true });
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
@@ -539,6 +553,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     },
     exposed,
     rotated,
+    ...(reads === null ? {} : { reads }),
     issuedTokens: issued.map((token) => ({
       id: token.id,
       service: token.service,

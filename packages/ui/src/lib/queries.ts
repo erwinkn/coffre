@@ -101,7 +101,7 @@ function grantRows(members: Member[]): GrantRow[] {
 
 function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
-    const { members, removed } = await client.members.list();
+    const { members, removed, reads } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
       ({ principalType, principalId, instanceRole, scope, tampered, managed, declared, grants }) => ({
         principalType,
@@ -114,7 +114,8 @@ function listDirectory(client: CoffreClient) {
         grants: grants.map(({ project, environment }) => ({ project, environment })),
       }),
     );
-    return { principals, removed };
+    // How far reads are listed, under 0.15's log, which the counts of what the removed saw are as of (T166).
+    return { principals, removed, ...(reads === undefined ? {} : { reads }) };
   });
 }
 

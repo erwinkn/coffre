@@ -87,9 +87,16 @@ beforeEach(async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function open() {
+/**
+ * A store whose reads' projection is past every cut, as these tests have no projector: retention waits on it otherwise
+ * (T166). The T166 test below opens the store as it is (`projected` false).
+ */
+const projected = (store: LogStore): LogStore => ({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: null }) });
+
+async function open(options: { projected?: boolean } = {}) {
   const alerts: string[] = [];
-  const store = logStore(db.vault, { tileRange: RANGE });
+  const raw = logStore(db.vault, { tileRange: RANGE });
+  const store = options.projected === false ? raw : projected(raw);
   const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   return { cp, store, alerts };
 }
@@ -196,12 +203,12 @@ test('a day dropped below its sealed retention change, across midnight: straggle
 });
 
 test("the reads' projection goes on across retention's cuts, and the whole log's check of it starts at the cut: nothing found, and no use dropped looked for (T166, review r3)", async () => {
-  const { cp, store } = await open();
+  const { cp, store } = await open({ projected: false });
   // The reads' days beside the uses', as the store's upkeep makes them.
   if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
   const keys = { verifiers, mac: macKey };
-  const projected = async () => {
+  const projectedAll = async () => {
     for (let run = 0; run < 100; run += 1) {
       const { through, sealed } = await projectReads(store, keys, { steps: 100 });
       if (through >= sealed) return;
@@ -217,19 +224,24 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
     }
     return problems;
   };
-  await projected();
+  // D10 due, but none of its reads listed yet: retention waits on the projector, which no day it has yet to read leaves
+  // (review r4: a projector stopped through retention once skipped D9's stragglers below the cut, unsaid).
+  await later(cp);
+  const waiting = await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual(waiting.dropped, []);
+  assert.match(waiting.waiting?.reason ?? '', /the reads' projection \(through 0\) has not reached the cut/);
+  await projectedAll();
   assert.deepEqual(await checked(), []);
   // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.
-  await later(cp);
   await retain(cp, store, { keepDays: 9, macKey, now });
   await retain(cp, store, { keepDays: 9, macKey, now });
-  await projected();
+  await projectedAll();
   assert.deepEqual(await checked(), []);
   await retain(cp, store, { keepDays: 1, macKey, now });
   await retain(cp, store, { keepDays: 1, macKey, now });
   for (let i = 0; i < 30; i += 1) await log.use();
   assert.ok((await cp.tick()).signed);
-  await projected();
+  await projectedAll();
   assert.deepEqual(await checked(), []);
 });
 
@@ -363,7 +375,7 @@ function pastFloors(store: LogStore, floors: number[]): LogStore {
 
 test('review r2: two days due at once, each cut its own: a catch-up drops both, though the tiles below the newer cut went first', async () => {
   const alerts: string[] = [];
-  const store = pastFloors(logStore(db.vault, { tileRange: RANGE }), [MIDNIGHT - 3_600_000, MIDNIGHT + 10_000, MIDNIGHT + DAY_MS - 3_600_000]);
+  const store = pastFloors(projected(logStore(db.vault, { tileRange: RANGE })), [MIDNIGHT - 3_600_000, MIDNIGHT + 10_000, MIDNIGHT + DAY_MS - 3_600_000]);
   const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   // D10 sealed below a floor before its end; D9 in two pairs, the first of them past D10's end; then today, past D9's.
   for (let i = 0; i < 300; i += 1) await log.use(MIDNIGHT - 3_000_000 + i * 1000);

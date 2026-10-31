@@ -1904,6 +1904,10 @@ async function offboard(args: string[]): Promise<void> {
       `  ${names[index]!.padEnd(width)}  v${String(entry.version).padEnd(4)} ${entry.how} ${entry.at.slice(0, 10)}\n`,
     );
   });
+  // 0.15's reads are named once listed: reads sealed since may add to these. An instance before 0.15 says nothing.
+  if (report.reads?.behind === true) {
+    process.stdout.write(`  reads are listed through ${report.reads.through ?? 'none yet'}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
+  }
 
   if (report.apps.length > 0) {
     process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);

@@ -72,6 +72,8 @@ export type ReadsStore = Pick<LogReader, 'tiles'> & {
    * numbered below `below`; null for none.
    */
   objects(asked: readonly { object: string; below: bigint; first: boolean }[]): Promise<Sealed[]>;
+  /** The reads' days these are (`make_reads_day` on Postgres), once a store: a log older than the days made ahead holds uses of others. */
+  makeReadsDays(days: readonly string[]): Promise<void>;
   /** The reads and their places, each read once by its number, and the cursor on to `cursor`, never back: one write. */
   writeReads(reads: readonly ReadRow[], places: readonly ReadPlace[], cursor: ReadsCursor): Promise<void>;
   /**
@@ -194,13 +196,8 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
   const newest = await store.newest();
   const head = newest === null ? null : await openPair(newest.notes, keys.verifiers);
   if (head === null) return { through: cursor.through, sealed: cursor.through, projected: 0 };
-  // Behind retention's cut, the uses below it are gone: on from the cut. Asked only with something to project.
-  const cut = cursor.through < head.upto ? await sealedCut(store, head) : null;
-  if (cut !== null && cursor.pair < cut.upto) {
-    const moved = { through: cut.upto, pair: cut.upto, at: cut.at };
-    cursor = { ...moved, mac: cursorMac(keys.mac, moved) };
-    await store.writeReads([], [], cursor);
-  }
+  // Retention drops no day, nor tile, the projector has yet to read (retention.ts): below its cut it goes on as anywhere,
+  // and a range gone all the same stops it, never skipped (review r4).
   let projected = 0;
   // The range the cursor stands in, read once a run however many chunks it takes.
   let range: { at: bigint; pair: Pair; uses: LogEntry[] } | null = null;
@@ -218,6 +215,8 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
     // Its time, once a range is whole: the pair's, as signed, which every read of it is at or below.
     const moved = chunk.length === left.length ? { through: pair.upto, pair: pair.upto, at: pair.at } : { through: chunk.at(-1)!.number, pair: cursor.pair, at: cursor.at };
     cursor = { ...moved, mac: cursorMac(keys.mac, moved) };
+    // Each read's day there to hold it: uses of a log older than the days made ahead (review r4).
+    await store.makeReadsDays([...new Set(reads.map((read) => new Date(read.at).toISOString().slice(0, 10)))]);
     await store.writeReads(reads, places, cursor);
     projected += reads.length;
   }

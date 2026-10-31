@@ -10,6 +10,7 @@ import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
 import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 import { query } from './storage.ts';
+import { listed } from './audit.ts';
 
 /** A read of one key refused, whatever the reason (D153): `outcome`'s status and code. */
 const NO = '404 not_available';
@@ -177,7 +178,8 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
     const logged = async (path: string) => (await admin.api.audit.list({ path, limit: 200, sealed: '1' })).entries
       .filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email && entry.metadata.via !== undefined).length;
-    expect(await logged(PROD) >= 1 && await logged(DEV) >= 1, "the read through the reference is not in both the source's log and the holder's");
+    // Listed once sealed and projected, a tick or two on (T166).
+    expect(await listed(async () => await logged(PROD) >= 1 && await logged(DEV) >= 1), "the read through the reference is not in both the source's log and the holder's");
 
     // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
     // project could be, since the reference is held there too, and archiving it stops no one else's read.

@@ -20,6 +20,7 @@ import { derivedSigningKey } from '@coffre/vault';
 import { runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
 import { and, desc, eq } from 'drizzle-orm';
 
+import { READS_BEHIND_MS, readsListed } from '../src/api/audit.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -299,10 +300,29 @@ test("a read waits to be listed until the projector writes it, and the page says
   const waiting = await root.audit.list({ sealed: '1', limit: 50 });
   assert.equal(waiting.entries.filter((entry) => entry.action === 'secret.read').length, 0);
   assert.equal(waiting.reads?.through, null);
+  // Her report names nothing to rotate yet, and says it is behind, at once: an offboarding never reads it as all there is
+  // (review r4); the removed members' counts the same.
+  const report = await root.members.get(ADA);
+  assert.deepEqual([report.exposed.length, report.reads?.behind], [0, true]);
   await signer!.projected();
   const listed = await root.audit.list({ sealed: '1', limit: 50 });
   assert.equal(listed.entries.filter((entry) => entry.action === 'secret.read').length, 1);
   assert.deepEqual([typeof listed.reads?.through, listed.reads?.behind, listed.reads?.forged], ['string', false, undefined]);
+  const after = await root.members.get(ADA);
+  assert.deepEqual([after.exposed.map((secret) => secret.key), after.reads?.behind], [['API_KEY'], false]);
+});
+
+test("a listing stopped behind its newest pair says so once that pair is a few seconds old, with no pair after it (review r4)", () => {
+  const standing = (through: bigint, sealedAt: number, at: number) => ({ through, pair: through, at, mac: null, sealed: 10n, sealedAt });
+  const now = Date.now();
+  // The newest pair signed a second after the listing's, and nothing signed since: behind once it is old, not before.
+  assert.equal(readsListed(standing(8n, now - 1000, now - 2000), false)?.behind, false);
+  assert.equal(readsListed(standing(8n, now - READS_BEHIND_MS - 1000, now - READS_BEHIND_MS - 2000), false)?.behind, true);
+  // All listed: never behind; strict, as a report is: behind as soon as one waits.
+  assert.equal(readsListed(standing(10n, now - 60_000, now - 60_000), false)?.behind, false);
+  assert.equal(readsListed(standing(8n, now - 100, now - 200), false, { strict: true })?.behind, true);
+  // No pair at all: 0.14's log alone, no listing to speak of.
+  assert.equal(readsListed({ ...standing(0n, 0, 0), sealed: null, sealedAt: null }, false), null);
 });
 
 test('the offboarding report names what someone read under either log, current until a new version is written', async () => {
