@@ -41,9 +41,11 @@ const IPv6Reg = new RegExp(
  * With TLS to follow, it reads one chunk alone, the server's answer to the
  * SSLRequest, so that the reader is free for `startTls`.
  */
-class WorkerdSocket extends EventEmitter {
+export class WorkerdSocket extends EventEmitter {
   readyState = 'open';
   raw: RawSocket | null = null;
+  /** Destroyed before `connect` made its socket: closed as soon as it has. */
+  destroyed = false;
   writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
@@ -52,6 +54,7 @@ class WorkerdSocket extends EventEmitter {
       this.readyState = 'opening';
       const { connect } = (await import('cloudflare:sockets' as string)) as { connect: Connect };
       const raw = (this.raw = connect(host + ':' + port, tls ? { secureTransport: 'starttls' } : {}));
+      if (this.destroyed) return void raw.close().catch(() => {});
       raw.closed.then(
         () => {
           if (this.readyState !== 'upgrade') return this.close();
@@ -102,8 +105,16 @@ class WorkerdSocket extends EventEmitter {
     return data ? this.write(data, () => void this.raw!.close()) : this.raw!.close();
   }
 
+  /**
+   * Closed at once, as Node's `destroy`: the raw socket's `close()`, which closes both streams whatever is still being
+   * written. Upstream ended it, which waits for a write stuck under backpressure (review r2 of #438).
+   */
   destroy(): void {
-    this.end();
+    if (this.raw === null) {
+      this.destroyed = true;
+      return this.close();
+    }
+    void this.raw.close().catch(() => {});
   }
 
   async read(): Promise<void> {

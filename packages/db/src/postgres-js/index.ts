@@ -427,7 +427,7 @@ export default function postgres(given: Options): Sql {
   }
 
   async function destroy(resolve: () => void): Promise<void> {
-    await Promise.all(connections.map((c) => c.terminate()));
+    await Promise.all(connections.map((c) => c.terminate(true)));
     while (queries.length) queries.shift()!.reject(Errors.connection('CONNECTION_DESTROYED', options));
     resolve();
   }
