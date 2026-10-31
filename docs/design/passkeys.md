@@ -177,6 +177,7 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
      challenge: string;             // 32 random bytes, base64url
      issuedAt: number;              // ms; also the replay guard (section 7.3)
      userHandle: string | null;     // enroll: the user.id handed to create(), base64url, which the POST stores
+     passkeysEver: number | null;   // enroll: how many passkey rows the person had, removed ones included (section 3.2)
    };
    ```
 
@@ -265,6 +266,17 @@ person has no live passkey, and refuses otherwise ("You already have a
 passkey: sign in with it"). So a second use of the same sealed state, or two
 tabs racing, adds one passkey at most, and nobody adds a second key through
 the door meant for the first.
+
+**And it is good for one enrollment, ever.** "No live passkey" alone would
+let a state be used again after a reset: an attacker who saved Bob's
+`enroll` cookie registers a key, an Owner resets it, and within the
+cookie's five minutes the attacker uses the cookie again with a new key,
+without passing GitHub again. So the state seals `passkeysEver`, the number
+of passkey rows the person had at the callback, removed ones included, and
+the transaction, under the person's factor lock (section 6.1), refuses it
+unless the count is still that. Rows are never deleted, so every enrollment
+moves the count for good, and no reset moves it back. The add's sealed
+state from Account carries the same count.
 
 `user.id` is 16 random bytes, made at a person's first passkey and kept on
 each of their passkey rows (`passkeys.user_handle`), copied from the
@@ -609,19 +621,25 @@ they are then (open question 4).
 ```ts
 // packages/server/src/api/fresh-routes.ts, typed over the route table as PERSONAL_TOKEN_ROUTES is.
 type Fresh = 'always' | 'holder' | 'ceremony' | 'never';
-export const FRESH_ROUTES: { [K in RouteKey]: Fresh | ((input: RouteInput<K>, ctx: ApiContext) => Fresh) } = {
+// What a route's handler gets, typed per route: its path parameters, its parsed body and its parsed query.
+type Asked<K extends RouteKey> = { params: RouteParams<K>; input: RouteBody<K>; query: RouteQuery<K> };
+export const FRESH_ROUTES: { [K in RouteKey]: Fresh | ((asked: Asked<K>, ctx: ApiContext) => Fresh) } = {
   'PATCH /access/:member': 'always',
-  'PATCH /projects/:project/:environment': (input) => (input.protected === false ? 'always' : 'never'),
-  'POST /members/:member/tokens': (input, ctx) => …, // service: always; personal from a browser: holder; else never
-  'POST /device-logins/:code': (input) => (input.approve ? 'ceremony' : 'never'),
+  'PATCH /projects/:project/:environment': ({ input }) => (input.protected === false ? 'always' : 'never'),
+  'POST /members/:member/tokens': ({ params, query }, ctx) => …, // dryRun: never; a service: always; personal from a browser: holder; else never
+  'DELETE /projects/:project': ({ query }) => (query.dryRun === undefined ? 'always' : 'never'),
+  'POST /device-logins/:code': ({ input }) => (input.approve ? 'ceremony' : 'never'),
   'POST /reveals': 'never',                         // protectedReveals is the vault's to decide (section 4.3)
   'GET /me': 'never',
   // … every route
 };
 ```
 
-The router checks it after the body parses and before the handler runs,
-from the request's credential, which it read already. A **ceremony** route
+The router checks it after the body and query parse and before the
+handler runs, with what the handler gets (`params`, `input`, `query`) and
+the request's credential, which it read already. MCP approvals ask the same
+function about the change they would make, with the change's own
+`params`, `input` and `query`. A **ceremony** route
 checks its assertion in its own handler, inside the transaction that makes
 its change. A refusal is `403 fresh_check_required`, with `{ add: true }`
 when the caller has no passkey yet, and is not logged: it is a prompt, not
@@ -1252,6 +1270,8 @@ running `passkeys: 'required'`:
 28. A pending sign-in or enrollment whose provider's issuer the deployment
     replaced, under the same provider ID, before the passkey answered,
     completes nothing.
+29. An `enroll` state used once, its passkey then reset by an Owner, used
+    again within its five minutes, enrolls nothing.
 
 ## 14. Build plan (phase 2, after 0.15)
 
