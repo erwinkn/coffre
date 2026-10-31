@@ -1,6 +1,6 @@
 import { leafData, openPair, proveConsistency, TREES, verifyConsistency, type Cut, type LogEntry, type StoredPair } from '@coffre/core/merkle';
 
-import type { Checkpointer, CheckpointStore } from './checkpointer.ts';
+import { FenceClosed, type Checkpointer, type CheckpointStore } from './checkpointer.ts';
 import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload } from './log-entry.ts';
 import { cursorHolds, type ReadsCursor } from './reads.ts';
 
@@ -146,7 +146,11 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   if (sealed === null || sealed.upto < cut.upto) {
     for (const tree of TREES) {
       if (cut[tree].size === head[tree].size && cut.upto === head.upto) continue;
-      const proof = cut[tree].size > head[tree].size ? null : await proveConsistency(store, tree, cut[tree].size, head[tree].size).catch(() => null);
+      // A fence closed under it (T169) is no answer of the database's: it goes through, and no alarm says the cut is off.
+      const proof = cut[tree].size > head[tree].size ? null : await proveConsistency(store, tree, cut[tree].size, head[tree].size).catch((error: unknown) => {
+        if (error instanceof FenceClosed) throw error;
+        return null;
+      });
       if (proof === null || !verifyConsistency(cut[tree].size, head[tree].size, cut[tree].root, head[tree].root, proof)) {
         throw new Error(`retention of ${day}: the cut's ${tree} head (up to ${cut.upto}) is not on the signer's history`);
       }

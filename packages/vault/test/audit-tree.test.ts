@@ -977,26 +977,26 @@ test('T169, review r1: a fence closed refuses every call after it and every answ
 
 test('T169, review by Fable: a tick is bounded by the work its window asks, so a long drain goes on where a short window that took as long stalls', async () => {
   const { k, store, memory, alerts } = await setup();
-  const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 100 });
+  const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 250, windowMax: 2000 });
   const cp = await open();
   await traffic(store, cp, 1);
-  // A window read that sorts what is left, 3 µs a number: 300 ms for a backlog of 100,000, past the bound alone, and
-  // inside it with the window's own allowance (WINDOW_ENTRY_MS); each part sealed is WINDOW_MAX of it.
+  // A window read that sorts what is left, 6 µs a number: 300 ms for a backlog of 50,000, past the bound alone, and
+  // inside it with the window's own allowance (WINDOW_ENTRY_MS), the rest of the bound left for the part's own work.
   let fixed: number | null = null;
   const close = store.close.bind(store);
   store.close = async (after, from, limit, barrier) => {
     const read = await close(after, from, limit, barrier);
-    await new Promise((resolve) => setTimeout(resolve, fixed ?? Number(read.upto - after) * 0.003));
+    await new Promise((resolve) => setTimeout(resolve, fixed ?? Number(read.upto - after) * 0.006));
     return read;
   };
-  for (let i = 0; i < 100_000; i += 1) store.append('uses', `drain-${i}`);
-  assert.ok(100_000 * 0.003 > 100 && 0.003 < WINDOW_ENTRY_MS);
+  for (let i = 0; i < 50_000; i += 1) store.append('uses', `drain-${i}`);
+  assert.ok(50_000 * 0.006 > 250 && 0.006 < WINDOW_ENTRY_MS);
   const t = await cp.tick();
   assert.ok(t.signed && t.more, t.failures.join('; '));
   while ((await cp.tick()).more);
-  assert.equal(cp.pair.pair.uses.size, 100_000 + 20);
-  // One entry whose read takes as long: no window asks for that, and the tick stalls.
-  fixed = 300;
+  assert.equal(cp.pair.pair.uses.size, 50_000 + 20);
+  // One entry whose read takes twice as long: no window asks for that, and the tick stalls.
+  fixed = 600;
   store.append('uses', 'one');
   await assert.rejects(cp.tick(), Stalled);
 });

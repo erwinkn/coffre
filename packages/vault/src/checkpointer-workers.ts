@@ -138,7 +138,10 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     /** Whether the upkeep after a tick that held runs now (`alarm`), which readiness counts as the tick's time. */
     #upkeeping = false;
 
-    /** The last tick as readiness reads it: during the upkeep after it, as if it had just ended. */
+    /**
+     * The last tick as readiness reads it: during the upkeep after it, as if it had just ended. What stood since, a seal's
+     * tick that stalled or was refused meanwhile, readiness reads from the checkpointer itself (`standing`).
+     */
     #lastSeen(): { at: number; failures: readonly string[] } | null {
       const last = this.#ticks.at(-1) ?? null;
       return last === null || !this.#upkeeping ? last : { at: Date.now(), failures: last.failures };
@@ -374,7 +377,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             open: this.#checkpointer !== null,
             failed: this.#failed,
             // By the object's clock, as its ticks' times are.
-            sealing: sealingOf({ open: this.#checkpointer !== null, failed: this.#failed, last: this.#lastSeen() }),
+            sealing: sealingOf({ open: this.#checkpointer !== null, failed: this.#failed ?? this.#checkpointer?.standing ?? null, last: this.#lastSeen() }),
             upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
             ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
           });

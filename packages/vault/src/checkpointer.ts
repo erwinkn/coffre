@@ -512,6 +512,14 @@ export class Checkpointer {
     this.floor = head.pair.floor;
   }
 
+  /**
+   * What stands against it sealing, whichever tick met it, an alarm's or a change's: why it stalled, or the refusal of
+   * its last tick; null when its last tick held. Readiness reads it beside its host's own view (T169, review r5).
+   */
+  get standing(): string | null {
+    return this.stalled ?? (this.closed ? 'this checkpointer was closed' : this.refused);
+  }
+
   /** The newest pair the signer signed and the database holds. */
   get pair(): { pair: Pair; notes: PairNotes } {
     return this.head;

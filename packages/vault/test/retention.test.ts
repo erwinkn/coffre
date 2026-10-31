@@ -14,7 +14,7 @@ import { leafHash, openPair, pairSigners, pairVerifiers, verifyInclusion, verify
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { Checkpointer } from '../src/checkpointer.ts';
+import { Checkpointer, FenceClosed } from '../src/checkpointer.ts';
 import { logObject } from '../src/inputs.ts';
 import { DAYS_AHEAD, upkeep } from '../src/log-checkpointer.ts';
 import { authentic, logMacKey, RETENTION_OBJECT, retentionCut } from '../src/log-entry.ts';
@@ -594,4 +594,15 @@ test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s c
   await vault.end();
   console.log(JSON.stringify({ small, large }));
   for (const name of Object.keys(statements)) assert.ok(large[name]! - small[name]! <= 2, `${name}: ${small[name]} buffers at 10k, ${large[name]} at 1M`);
+});
+
+test('T169, review r5: a fence closed under retention\'s consistency proof goes through as such, never read as a cut off the signer\'s history', async () => {
+  const { cp, store } = await open();
+  await midnight(cp);
+  const fenced = Object.assign(Object.create(store) as LogStore, {
+    tiles: async () => {
+      throw new FenceClosed('this checkpointer was closed (stalled): another holds its memory');
+    },
+  });
+  await assert.rejects(retain(cp, fenced, { keepDays: 9, macKey, now }), (error: Error) => error instanceof FenceClosed);
 });

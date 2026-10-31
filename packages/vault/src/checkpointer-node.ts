@@ -95,6 +95,8 @@ export async function runCheckpointer(options: {
   tickBoundMs?: number;
   /** The memory over its file, `fileMemory` unless a test holds its writes. */
   memoryOf?: (path: string) => Memory;
+  /** `UPKEEP_BOUND_MS`, for the tests. */
+  upkeepBoundMs?: number;
 }): Promise<RunningCheckpointer> {
   const alarmsPath = `${options.memory}.alarms`;
   let appending: Promise<void> = Promise.resolve();
@@ -159,12 +161,29 @@ export async function runCheckpointer(options: {
   // The upkeep, bounded, beside the ticks: one past its bound goes on behind them, and none starts beside it. Its
   // store is behind the checkpointer's fence, and its connection the runner's own session's, where it has one.
   let upkeeping: Promise<void> | null = null;
+  // Told once to its keeper, a stall's or an upkeep's past its bound.
+  let retired = false;
+  const retire = (why: string) => {
+    if (retired) return;
+    retired = true;
+    options.stalled?.(why);
+  };
   const upkeepOnce = async () => {
     if (upkeeping !== null) return;
     const run = (upkeeping = keep().finally(() => {
       if (upkeeping === run) upkeeping = null;
     }));
-    await within(run, UPKEEP_BOUND_MS, "the log's upkeep").catch((error: Error) => console.warn(`coffre audit: ${error.message}`));
+    // Past its bound, the runner is retired as a stall is (review r5): its keeper cuts the session the upkeep waits on
+    // and opens another, whose upkeep starts afresh. Kept, it would let no upkeep run again, and the days run out.
+    await within(run, options.upkeepBoundMs ?? UPKEEP_BOUND_MS, "the log's upkeep").catch(async (error: Error) => {
+      const message = `a checkpoint failed: ${error.message}`;
+      console.warn(`coffre audit: ${message}`);
+      failed = message;
+      stalled = true;
+      clearTimeout(timer);
+      await record({ at: Date.now(), message });
+      void ticking.finally(() => retire(message));
+    });
   };
   // The upkeep after a tick that held; after one refused, only the next days (retention would fail on it, alarmed again).
   // A window sealed only in part (T169, WINDOW_MAX): the next tick at once, the upkeep once it has caught up.
@@ -190,7 +209,7 @@ export async function runCheckpointer(options: {
       if (error instanceof Stalled) stalled = true;
       await within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses').catch(() => {});
     }).finally(() => {
-      if (stalled) options.stalled?.(failed!);
+      if (stalled) retire(failed ?? "the log's upkeep did not end in time");
       else if (!stopped) timer = setTimeout(loop, more ? 0 : interval);
     });
   };
@@ -212,7 +231,7 @@ export async function runCheckpointer(options: {
       }
       throw new Error("the reads' projection did not catch up with the newest pair");
     },
-    sealing: () => sealingOf({ open: !stalled && !stopped, failed, last }),
+    sealing: () => sealingOf({ open: !stalled && !stopped, failed: failed ?? checkpointer.standing, last }),
     async alarms(since = 0) {
       await appending;
       return (await readAlarms(alarmsPath)).filter((a) => a.at >= since);

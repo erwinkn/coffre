@@ -395,3 +395,26 @@ test('T169, Workers: the object\'s connection stops answering under a tick: its 
     await proxy.close();
   }
 });
+
+test('T169, review r5, Workers: a seal\'s tick that stalls between alarms turns readiness red at once, whatever the last alarm\'s tick said', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive', timeout: 60_000 }, async () => {
+  const proxy = await stallProxy(VAULT_URL);
+  const state = objectState();
+  const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: proxy.url }, seed, closeIdleMs: 60_000, tickBoundMs: 300 }));
+  const object = new Checkpointer_(state, {});
+  const namespace = namespaceOf(object);
+  try {
+    await startCheckpointer(namespace);
+    await log.use();
+    await object.alarm();
+    assert.deepEqual(await durableSealing(namespace)(), { ok: true });
+    // No alarm meanwhile: a change's seal ticks the checkpointer itself, on a connection that stops answering.
+    proxy.hold();
+    const change = await log.change();
+    await assert.rejects(durableSealThrough(namespace)(change), (error: Error) => isUnsealed(error));
+    const sealing = await durableSealing(namespace)();
+    assert.ok(!sealing.ok && /stalled/.test(sealing.reason), JSON.stringify(sealing));
+  } finally {
+    proxy.release();
+    await proxy.close();
+  }
+});

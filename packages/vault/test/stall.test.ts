@@ -53,23 +53,36 @@ const until = async (done: () => boolean | Promise<boolean>, ms: number, what: s
  * The vault's database as the checkpointer gets it, whose statements can be held before they are sent: a connection
  * that stops answering, a connect that hangs. The vault's own calls and its uses go on the database itself.
  */
-function stallable(database: Database) {
+function stallable(database: Database, which: (text: string) => boolean = () => true) {
   let held: Promise<void> | null = null;
   let release = () => {};
+  let answered = 0;
   const asks = new Set(['execute', 'all', 'run', 'get', 'values', 'transaction']);
+  const textOf = (query: unknown) => {
+    try {
+      return (database as unknown as { dialect: { sqlToQuery(q: unknown): { sql: string } } }).dialect.sqlToQuery(query).sql;
+    } catch {
+      return '';
+    }
+  };
   const db = new Proxy(database, {
     get(target, key) {
       const value = Reflect.get(target, key) as unknown;
       if (typeof value !== 'function') return value;
       if (!asks.has(key as string)) return (value as (...a: unknown[]) => unknown).bind(target);
       return async (...args: unknown[]) => {
-        if (held !== null) await held;
-        return (value as (...a: unknown[]) => unknown).apply(target, args);
+        const mine = typeof args[0] !== 'function' && which(textOf(args[0]));
+        if (held !== null && mine) await held;
+        const answer = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        if (mine) answered += 1;
+        return answer;
       };
     },
   });
   return {
     db,
+    /** How many of the statements it holds have answered. */
+    answered: () => answered,
     hold: () => void (held = new Promise<void>((resolve) => (release = resolve))),
     release: () => {
       held = null;
@@ -275,5 +288,21 @@ test('T169, review r3, Node: a tick that stalls in its memory write: the keeper\
   } finally {
     release();
     await (stopping ?? kept.stop());
+  }
+});
+
+test('T169, review r5, Node: an upkeep past its bound retires its runner, as a stall does: another opens, and its upkeep runs again once answered', { timeout: 60_000 }, async () => {
+  // Only the upkeep's pruning of the bulk cap's rows goes unanswered; the ticks are answered as ever.
+  const stall = stallable(db.vault, (text) => /prune_bulk|DELETE FROM log_bulk/i.test(text));
+  stall.hold();
+  const kept = await keepCheckpointer({ database: stall.db, seed: SIGNING_KEY, memory: join(dir, `memory-${ENGINE}-6`), intervalMs: 20, retryMs: 50, tickBoundMs: 300, upkeepBoundMs: 300 });
+  try {
+    await until(async () => (await kept.alarms()).some((a) => /the log's upkeep did not end within 300 ms/.test(a.message)), 10_000, 'the upkeep given up on');
+    stall.release();
+    await until(() => kept.sealing().ok, 10_000, 'sealing again');
+    await until(() => stall.answered() > 0, 10_000, 'an upkeep that ran again');
+  } finally {
+    stall.release();
+    await kept.stop();
   }
 });
