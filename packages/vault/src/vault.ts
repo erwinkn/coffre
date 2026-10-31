@@ -3956,26 +3956,24 @@ class VaultService implements Vault {
 
   /**
    * A stretch of the reads' check (reads.ts, `checkReads`): from `start`, or
-   * a stretch's `next` (`<pair>:<through>`), in a snapshot of its own. Flat:
-   * a checkpoint's range or `CHECKED_AT_ONCE` entries of it, whatever the
-   * log's length.
+   * a stretch's `next` (a pair's number), in a snapshot of its own. Flat:
+   * a checkpoint's range, whatever the log's length.
    */
   async verifyReads(input: { from: string }): Promise<ReadsVerification> {
     await this.#settled();
     if (this.#prepared.log015 === null) return { kept: false };
     const from = (input as { from?: unknown } | undefined)?.from;
-    const at = typeof from === 'string' ? /^(?:start|([0-9]{1,19}):([0-9]{1,19}))$/.exec(from) : null;
+    const at = typeof from === 'string' ? /^(?:start|([0-9]{1,19}))$/.exec(from) : null;
     if (at === null) throw new Error('verifyReads starts at start, or at a stretch\'s next');
-    const stretch = at[1] === undefined ? { pair: 0n, through: 0n } : { pair: BigInt(at[1]), through: BigInt(at[2]!) };
     const keys = await this.#verifierKeys();
-    const checked = await this.#db.transaction((tx) => checkReads(logStore(tx as unknown as Database), keys, stretch), SNAPSHOT);
+    const checked = await this.#db.transaction((tx) => checkReads(logStore(tx as unknown as Database), keys, at[1] === undefined ? 0n : BigInt(at[1])), SNAPSHOT);
     return {
       kept: true,
       ok: checked.problems.length === 0,
       problems: checked.problems,
       through: String(checked.through),
       listed: String(checked.listed),
-      next: checked.next === null ? null : `${checked.next.pair}:${checked.next.through}`,
+      next: checked.next === null ? null : String(checked.next),
     };
   }
 

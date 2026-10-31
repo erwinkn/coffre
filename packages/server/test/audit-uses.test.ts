@@ -23,7 +23,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { logReadPartners, logReadPlaces, logReads, logReadsCursor, secrets } from './db/tables.ts';
+import { logReadPartners, logReadPlaces, logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 
@@ -266,6 +266,21 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
     `read ${moved} is listed otherwise at a place it was read`,
     `read ${copied} is listed twice`,
   ]) assert.ok(named.includes(problem), `${problem}, among ${JSON.stringify(named)}`);
+});
+
+test("a use renumbered after its seal stops the projection, which lists nothing it would derive from it, and the whole log's check says why (WindowChecked)", { skip: LOG !== '0.15' }, async () => {
+  await ada.secrets.reveal('market/dev/API_KEY');
+  await ada.secrets.reveal('market/dev/OTHER');
+  await signer!.checkpointer.tick();
+  // Whoever owns the database swaps the two sealed uses' numbers, which neither use's MAC covers.
+  const [first, second] = (await db.owner.select({ number: logUses.number }).from(logUses).orderBy(logUses.number)).map((row) => row.number) as [bigint, bigint];
+  for (const [from, to] of [[first, -1n], [second, first], [-1n, second]] as const) await db.owner.update(logUses).set({ number: to }).where(eq(logUses.number, from));
+  await assert.rejects(signer!.projected(), /did not catch up/);
+  assert.match((await signer!.alarms()).map((alarm) => alarm.message).join('\n'), /does not hold to the pair that sealed it/);
+  const { entries } = await root.audit.list({ sealed: '1', limit: 50 });
+  assert.equal(entries.filter((entry) => entry.action === 'secret.read').length, 0);
+  const verdict = await root.audit.verifyReads();
+  assert.ok(verdict.kept && !verdict.ok && /does not hold to the pair that sealed it/.test(verdict.problems.join()), JSON.stringify(verdict));
 });
 
 test("a read waits to be listed until the projector writes it, and the page says how far it lists", { skip: LOG !== '0.15' }, async () => {

@@ -757,7 +757,7 @@ export const routes = {
   ...route('GET /audit/trees', { run: (ctx) => verifyAuditTrees(ctx) }),
   // The reads' listing held to 0.15's log, a stretch a request, from `start`, then each `next` (`coffre verify log`).
   ...route('GET /audit/reads', {
-    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,19}:[0-9]{1,19}$/)]) }),
+    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,19}$/)]) }),
     run: (ctx, { input }) => verifyAuditReads(ctx, input),
   }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.

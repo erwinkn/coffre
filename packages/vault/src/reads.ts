@@ -1,10 +1,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { openPair, type LogEntry, type PairVerifiers } from '@coffre/core/merkle';
+import { openPair, verifyLog, type LogEntry, type LogReader, type Pair, type PairVerifiers, type StoredPair } from '@coffre/core/merkle';
 import { USE_WAYS } from '@coffre/core/vault';
 
 import { logObject } from './inputs.ts';
-import { authentic } from './log-entry.ts';
 
 // The audit pages' reads (T166; docs/design/0.15-plan.md, "As built: T166";
 // formal/Reads.tla). A use is the slim row of R53: its way in, its key, the
@@ -56,7 +55,7 @@ export type ReadsCursor = { through: bigint; pair: bigint; at: number; mac: Buff
 export type Sealed = { payload: string; actor: string } | null;
 
 /** What the projector needs of the database (log-store.ts, on both engines). */
-export type ReadsStore = {
+export type ReadsStore = Pick<LogReader, 'tiles'> & {
   readsCursor(): Promise<ReadsCursor>;
   pair(upto: bigint): Promise<{ upto: bigint; notes: { changes: string; uses: string } } | null>;
   pairs(after: bigint, limit: number): Promise<{ upto: bigint; notes: { changes: string; uses: string } }[]>;
@@ -111,17 +110,52 @@ export function readHolds(key: Buffer, row: ReadRow): boolean {
 export type Projected = { through: bigint; sealed: bigint; projected: number };
 
 /**
- * Project the sealed uses above the cursor, a checkpoint's range at a time
- * and `PROJECTED_AT_ONCE` entries at most a step, up to `steps` steps: each
- * from the newest pair whose signatures hold, never past it
- * (ProjectSealedOnly), its uses read from the floor the pair below them
- * signed (a floor a writer raised would hide them), each use's MAC held
- * (a use edited since its seal is left out, which the explicit check of
- * the whole log names), then derived (`derive`) and written, rows before
- * the cursor (CursorAfterRows), each once (IdempotentByNumber).
+ * A range of the log, from the pair at `start` (null: the genesis) to
+ * `next`, read whole and held to the trees (WindowChecked): its entries,
+ * from the floor `start` signed, must give `next`'s signed heads from
+ * `start`'s, both trees, so that a use or change deleted, edited,
+ * renumbered or slipped in since its seal fails the range, never a read
+ * derived from it. A tick seals its whole window, so a range is what one
+ * tick sealed: a few hundred entries, more after an outage, which the
+ * checkpointer read whole too. Throws on a range that does not hold.
+ */
+async function sealedRange(store: ReadsStore, verifiers: PairVerifiers, start: StoredPair | null, next: StoredPair): Promise<LogEntry[]> {
+  const walked: LogEntry[] = [];
+  // The log as far as `next`, and no further: the walk takes `next` for the newest pair.
+  const reader: LogReader = {
+    pairs: async (after, limit) => (after >= next.upto ? [] : (await store.pairs(after, limit)).filter((row) => row.upto <= next.upto)),
+    pair: async (upto) => (upto > next.upto ? null : store.pair(upto)),
+    entries: async (after, upto, options) => (after >= next.upto ? [] : store.entries(after, upto < next.upto ? upto : next.upto, options)),
+    tiles: (tree, keys) => store.tiles(tree, keys),
+  };
+  const verdict = await verifyLog(reader, { verifiers, ...(start === null ? {} : { from: start.notes }), check: (entry) => (walked.push(entry), null) });
+  if (!verdict.ok || verdict.headPair?.upto !== next.upto) {
+    throw new Error(`the log up to ${next.upto} does not hold to the pair that sealed it: ${verdict.problems[0] ?? 'the walk stopped short'}`);
+  }
+  return walked;
+}
+
+/** The range the pair at `at` starts: its row (none for the genesis at 0), the next pair's, and that one opened. */
+async function rangeAt(store: ReadsStore, verifiers: PairVerifiers, at: bigint): Promise<{ start: StoredPair | null; next: StoredPair; pair: Pair }> {
+  const start = await store.pair(at);
+  if (start === null && at !== 0n) throw new Error(`no pair at ${at}, where the reads' projection stands: checkpoints were deleted`);
+  const [next] = await store.pairs(at, 1);
+  const pair = next === undefined ? null : await openPair(next.notes, verifiers);
+  if (next === undefined || pair === null) throw new Error(`the pair after ${at} is not one the vault signed`);
+  return { start, next, pair };
+}
+
+/**
+ * Project the sealed uses above the cursor, a checkpoint's range at a time,
+ * up to `steps` ranges: each up to the newest pair whose signatures hold,
+ * never past it (ProjectSealedOnly), read whole and held to the trees
+ * (`sealedRange`, WindowChecked), then derived (`derive`) and written
+ * `PROJECTED_AT_ONCE` uses at a time, the rows before the cursor
+ * (CursorAfterRows), each once (IdempotentByNumber). A range that does not
+ * hold stops the projection, an alarm, and the pages say how far they
+ * list: nothing it would derive is listed (fail closed).
  */
 export async function projectReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, options: { steps?: number } = {}): Promise<Projected> {
-  const holds = authentic(keys.mac);
   let cursor = await store.readsCursor();
   if (!cursorHolds(keys.mac, cursor)) throw new Error(`the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`);
   const newest = await store.newest();
@@ -129,74 +163,75 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
   if (head === null) return { through: cursor.through, sealed: cursor.through, projected: 0 };
   let projected = 0;
   for (let step = 0; step < (options.steps ?? 4) && cursor.through < head.upto; step += 1) {
-    // The range: from the pair the cursor stands in, to the next one above it, both signed.
-    // Before the first pair the log signed, its genesis, from the first entry.
-    const startRow = await store.pair(cursor.pair);
-    const start = startRow === null ? (cursor.pair === 0n ? { floor: 0 } : null) : await openPair(startRow.notes, keys.verifiers);
-    if (start === null) throw new Error(`the pair at ${cursor.pair}, where the reads' projection stands, is not one the vault signed`);
-    const [nextRow] = await store.pairs(cursor.pair, 1);
-    const next = nextRow === undefined ? null : await openPair(nextRow.notes, keys.verifiers);
-    if (next === null || next.upto > head.upto) throw new Error(`the pair after ${cursor.pair} is not one the vault signed`);
-    const entries = await store.entries(cursor.through, next.upto, { floor: start.floor, limit: PROJECTED_AT_ONCE });
-    const done = entries.length < PROJECTED_AT_ONCE;
-    const uses = entries.filter((entry) => entry.tree === 'uses' && holds(entry));
-    const { reads, places } = await derive(store, keys.mac, uses);
-    // Its time, once a range is whole: the pair's, as signed, which every read of it is at or below.
-    const moved = done ? { through: next.upto, pair: next.upto, at: next.at } : { through: entries.at(-1)!.number, pair: cursor.pair, at: cursor.at };
-    cursor = { ...moved, mac: cursorMac(keys.mac, moved) };
-    await store.writeReads(reads, places, cursor);
-    projected += reads.length;
+    const { start, next, pair } = await rangeAt(store, keys.verifiers, cursor.pair);
+    if (pair.upto > head.upto) throw new Error(`the pair after ${cursor.pair} is past the newest`);
+    const entries = await sealedRange(store, keys.verifiers, start, next);
+    // Where a run before this one stopped inside the range, on from there.
+    const left = entries.filter((entry) => entry.tree === 'uses' && entry.number > cursor.through);
+    for (let i = 0; i === 0 || i < left.length; i += PROJECTED_AT_ONCE) {
+      const chunk = left.slice(i, i + PROJECTED_AT_ONCE);
+      const { reads, places } = await derive(store, keys.mac, chunk);
+      // Its time, once a range is whole: the pair's, as signed, which every read of it is at or below.
+      const moved = i + PROJECTED_AT_ONCE >= left.length ? { through: pair.upto, pair: pair.upto, at: pair.at } : { through: chunk.at(-1)!.number, pair: cursor.pair, at: cursor.at };
+      cursor = { ...moved, mac: cursorMac(keys.mac, moved) };
+      await store.writeReads(reads, places, cursor);
+      projected += reads.length;
+    }
   }
   return { through: cursor.through, sealed: head.upto, projected };
 }
 
-/** The most entries a stretch of the reads' check reads: a projector's step. */
-export const CHECKED_AT_ONCE = PROJECTED_AT_ONCE;
-
 /** The most problems a stretch names; more are counted. */
 const PROBLEMS_NAMED = 20;
 
-/** Where a stretch of the reads' check starts: in the range of the pair at `pair`, after the entry `through`. */
-export type ReadsStretch = { pair: bigint; through: bigint };
-
 /**
- * The reads' listing held to the sealed log, a stretch at a time (T166,
- * steer 3): the explicit check of the whole log, `coffre verify log`,
- * never a page's. Each stretch is a checkpoint's range or
- * `CHECKED_AT_ONCE` entries of it, up to where the projector has listed:
- * its uses whose MAC holds derived again, as the projector derives them,
+ * The reads' listing held to the sealed log, a checkpoint's range at a
+ * time, from the pair at `from` (T166, steer 3): the explicit check of
+ * the whole log, `coffre verify log`, never a page's. Each range the
+ * projector has listed whole is read whole and held to the trees
+ * (`sealedRange`), its uses derived again as the projector derives them,
  * and each read and each of its places held to the listing. A read
  * deleted from it, edited, renumbered or listed twice, a place row deleted
- * or changed, a pair of places dropped, each is named; and a use whose MAC
- * does not hold, which the projector leaves out. A read planted under a
- * number, or at a time, no use of the range may have, it reads no further
- * for: every page shows that one forged, by its MAC. Flat: a stretch reads
- * as much however long the log.
+ * or changed, a pair of places dropped, each is named; and a range above
+ * the listing that does not hold, which stops the projector. A read planted
+ * under a number, or at a time, no use of the range may have, it reads no
+ * further for: every page shows that one forged, by its MAC. Flat: a
+ * stretch reads one range however long the log.
  */
-export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, from: ReadsStretch): Promise<{ problems: string[]; through: bigint; listed: bigint; next: ReadsStretch | null }> {
+export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, from: bigint): Promise<{ problems: string[]; through: bigint; listed: bigint; next: bigint | null }> {
   const cursor = await store.readsCursor();
-  const stop = (problem: string) => ({ problems: [problem], through: from.through, listed: cursor.through, next: null });
+  const stop = (problem: string) => ({ problems: [problem], through: from, listed: cursor.through, next: null });
   if (!cursorHolds(keys.mac, cursor)) return stop(`the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`);
-  if (from.through >= cursor.through) return { problems: [], through: from.through, listed: cursor.through, next: null };
-  const startRow = await store.pair(from.pair);
-  const start = startRow === null ? (from.pair === 0n ? { floor: 0 } : null) : await openPair(startRow.notes, keys.verifiers);
-  if (start === null) return stop(`the pair at ${from.pair} is not one the vault signed`);
-  const [nextRow] = await store.pairs(from.pair, 1);
-  const next = nextRow === undefined ? null : await openPair(nextRow.notes, keys.verifiers);
-  if (next === null) return stop(`the pair after ${from.pair}, below the reads' cursor, is not one the vault signed`);
-  const upto = next.upto < cursor.through ? next.upto : cursor.through;
-  const entries = await store.entries(from.through, upto, { floor: start.floor, limit: CHECKED_AT_ONCE });
-  const reached = entries.length < CHECKED_AT_ONCE ? upto : entries.at(-1)!.number;
-  const holds = authentic(keys.mac);
+  if (from >= cursor.pair) {
+    // Past what the projector has listed whole: the range it stands in, if the log sealed one, must hold, or the
+    // projection is stopped on it, and the pages list nothing past it.
+    const [ahead] = await store.pairs(cursor.pair, 1);
+    if (ahead !== undefined) {
+      try {
+        const { start, next } = await rangeAt(store, keys.verifiers, cursor.pair);
+        await sealedRange(store, keys.verifiers, start, next);
+      } catch (error) {
+        return stop(`the projection is stopped at ${cursor.through}: ${(error as Error).message}`);
+      }
+    }
+    return { problems: [], through: from, listed: cursor.through, next: null };
+  }
+  let range;
+  try {
+    range = await rangeAt(store, keys.verifiers, from);
+    range = { ...range, entries: await sealedRange(store, keys.verifiers, range.start, range.next) };
+  } catch (error) {
+    return stop((error as Error).message);
+  }
+  const { pair, entries, start } = range;
   const problems: string[] = [];
-  const uses = entries.filter((entry) => entry.tree === 'uses');
-  for (const use of uses) if (!holds(use)) problems.push(`use ${use.number}: its MAC does not hold, so no page lists it`);
-  const { reads, places } = await derive(store, keys.mac, uses.filter(holds));
+  const { reads, places } = await derive(store, keys.mac, entries.filter((entry) => entry.tree === 'uses'));
   if (reads.length > 0) {
     // Every time a use of the range may be at: none is below the floor the pair under it signed, nor, but for a clock
     // apart, past the time the pair over it was signed at.
+    const floor = start === null ? 0 : ((await openPair(start.notes, keys.verifiers))?.floor ?? 0);
     const ats = reads.map((read) => read.at);
-    const listing = await store.listing({ after: from.through, upto: reached, from: Math.min(start.floor, ...ats), to: Math.max(next.at, ...ats) }, places);
+    const listing = await store.listing({ after: from, upto: pair.upto, from: Math.min(floor, ...ats), to: Math.max(pair.at, ...ats) }, places);
     const listed = new Map<bigint, ReadRow>();
     for (const read of listing.reads) {
       if (listed.has(read.number)) problems.push(`read ${read.number} is listed twice`);
@@ -217,8 +252,8 @@ export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerif
     });
   }
   const named = problems.length <= PROBLEMS_NAMED ? problems : [...problems.slice(0, PROBLEMS_NAMED), `and ${problems.length - PROBLEMS_NAMED} more`];
-  const onward = reached >= cursor.through ? null : { pair: reached === next.upto ? next.upto : from.pair, through: reached };
-  return { problems: named, through: reached, listed: cursor.through, next: onward };
+  // On to the next range, the last one past the listing's included.
+  return { problems: named, through: pair.upto, listed: cursor.through, next: pair.upto };
 }
 
 /** A use's columns as the uses tree holds them: [at, request, credential, secret, purpose, place, mac]. */
