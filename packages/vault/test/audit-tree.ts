@@ -68,7 +68,8 @@ export class MemoryStore implements CheckpointStore {
     // Changes by number; uses by `at` from the floor the signer holds, as 6b's store reads them through their index.
     const all = this.between(after, upto).filter((e) => e.tree === 'changes' || e.at >= from);
     // The first `limit` by number (T169), and the lowest `at` of the uses left above them.
-    const entries = limit === undefined || all.length <= limit ? all : all.slice(0, limit);
+    // As the stores cap it: an entry past the cut that holds the last one's number is kept, for the tick to refuse.
+    const entries = limit === undefined || all.length <= limit ? all : all[limit]!.number === all[limit - 1]!.number ? all.slice(0, limit + 1) : all.slice(0, limit);
     const left = all.slice(entries.length).filter((e) => e.tree === 'uses').map((e) => e.at);
     const more = entries === all ? null : { above: left.length === 0 ? null : left.reduce((a, b) => Math.min(a, b)) };
     return { upto, newest: await this.newest(), entries, floor: { found, set: this.floor, ceiling }, more };

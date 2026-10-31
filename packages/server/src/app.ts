@@ -385,11 +385,11 @@ const SEALING_ASKED_MS = 3000;
 async function unsealing(runtime: CoffreRuntime): Promise<string | null> {
   const { vault } = runtime;
   if (vault.sealing === undefined) return null;
-  const sealing = vault.sealing.bind(vault);
   let timer: ReturnType<typeof setTimeout> | undefined;
   // The vault's word on what it has, its `about`, inside the same bound (review r1): a vault that does not answer is red.
+  // Called on the vault itself, never a method of it taken apart: a Worker's stub answers `bind` as a call of its own.
   const said = await Promise.race([
-    (async () => ((await vaultSaysSealing(vault)) ? await sealing() : ({ ok: true } as const)))()
+    (async () => ((await vaultSaysSealing(vault)) ? await vault.sealing!() : ({ ok: true } as const)))()
       .catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : String(error) })),
     new Promise<{ ok: false; reason: string }>((resolve) => {
       timer = setTimeout(() => resolve({ ok: false, reason: `the vault did not say within ${SEALING_ASKED_MS} ms` }), SEALING_ASKED_MS);

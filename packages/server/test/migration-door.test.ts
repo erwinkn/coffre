@@ -213,7 +213,13 @@ test("T169: under 0.15's log, readiness is red while the vault's checkpointer do
   await resetDatabase(db.owner);
   const why = 'a tick ran past 10000 ms: the database stalled under it';
   let sealing: Sealing | null = { ok: false, reason: why };
-  const vault = { ...deps.vault, sealing: () => (sealing === null ? new Promise<Sealing>(() => {}) : Promise.resolve(sealing)) };
+  // As a Worker's stub answers it: a method taken apart (`bind`) is a call of its own, which the vault does not have.
+  const sealingCall = Object.assign(() => (sealing === null ? new Promise<Sealing>(() => {}) : Promise.resolve(sealing)), {
+    bind: () => {
+      throw new Error('The RPC receiver does not implement the method "bind".');
+    },
+  });
+  const vault = { ...deps.vault, sealing: sealingCall };
   const runtime = { ...freshRuntime(), vault, schema: { migrated: true }, appKey: { settled: true } };
   const said = mock.method(console, 'error', () => {});
   try {

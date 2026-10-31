@@ -323,3 +323,19 @@ test("T169: Postgres's clock stepping back under a capped window (a later use st
   assert.ok(proof === null || proof instanceof Error, 'no proof of a use past its pair\'s ceiling');
   assert.ok(await cp.prove(low), 'the low use is proved where its pair says');
 });
+
+for (const [what, first] of [['two uses', () => use()], ['a change and a use', () => change()]] as const) {
+  test(`T169, review r2: ${what} a writer gave one number, across a part's cut, are refused and alarmed, never sealed through`, async () => {
+    const { cp, alerts } = await open(variableMemory(), 1);
+    const a = await first();
+    const b = await use();
+    await use();
+    // The second takes the first's number: the part of one entry would end at it, its twin past the cut.
+    await run(db.owner, sql`UPDATE log_uses SET number = ${a} WHERE number = ${b}`);
+    const t = await cp.tick();
+    assert.equal(t.signed, false);
+    assert.match(t.failures.join('\n'), new RegExp(`${a}: outside the window .*two entries with one number`));
+    assert.ok(alerts.some((m) => /two entries with one number/.test(m)), 'alarmed');
+    assert.equal(cp.pair.pair.upto, 0n, 'nothing sealed through it');
+  });
+}

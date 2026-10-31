@@ -174,6 +174,16 @@ const dayStart = (day: string) => Date.parse(`${day}T00:00:00Z`);
 const DAY_MS = 86_400_000;
 const indexOf = (level: number, leaf: number) => leaf / 2 ** (8 * (level + 1));
 
+/**
+ * A window's first `limit` entries by number, of the `limit + 1` read (T169): the one past them kept too when it holds
+ * the last one's number (review r2), so that the tick's check sees two entries with one number and refuses, rather
+ * than seal through a number whose second entry a writer put past the cut.
+ */
+function capped<E extends { number: bigint }>(read: E[], limit: number | undefined): E[] {
+  if (limit === undefined || read.length <= limit) return read;
+  return read[limit]!.number === read[limit - 1]!.number ? read : read.slice(0, limit);
+}
+
 /** One row, one JSON column `v`, as both dialects answer the reads below. */
 async function one<T>(db: Database, query: SQL): Promise<T> {
   const [row] = await rowsOf<{ v: unknown }>(db, query);
@@ -285,7 +295,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
       // The window by number, its first `limit` (T169): every use of the window read, sorted by number, which costs the
       // window's size; past the limit, the lowest `at` of the uses left above it, which the index finds past those read.
       const read = (await rows(after, upto, sql`${from}::bigint`, undefined, limit === undefined ? undefined : limit + 1, true)).map(fromRow);
-      const entries = limit === undefined || read.length <= limit ? read : read.slice(0, limit);
+      const entries = capped(read, limit);
       const more = entries === read ? null : { above: await lowestAbove(entries.at(-1)!.number, upto, from) };
       return {
         upto,
@@ -438,7 +448,7 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
           'newest', json((SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)),
           'entries', json(${window(after, barrier.upto, sql`${from}`, undefined, limit === undefined ? undefined : limit + 1, true)})) AS v`);
       const all = read.entries.map(toEntry);
-      const entries = limit === undefined || all.length <= limit ? all : all.slice(0, limit);
+      const entries = capped(all, limit);
       let more: { above: number | null } | null = null;
       if (entries !== all) {
         const at = await one<number | null>(db, sql`SELECT min(u.at) AS v FROM log_uses u WHERE u.at >= ${from} AND u.number > ${entries.at(-1)!.number} AND u.number <= ${barrier.upto}`);
