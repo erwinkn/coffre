@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 
-import type { Client, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
+import type { Client, InStatement, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
 import { createDatabase, type Database } from './database.ts';
 import type { Engine } from './dialect.ts';
 import { asPostgresDatabase } from './portable.ts';
@@ -60,6 +60,16 @@ export function engineOfUrl(url: string): Engine {
  * connections reach it. Each begins IMMEDIATE (libsql's default), taking the
  * write lock with its first statement, which is what makes a read inside it
  * as good as a locked one (see forUpdate).
+ *
+ * A lone statement that writes waits its turn too. It cannot wait for the
+ * lock itself: libsql's busy wait blocks the thread, so the transaction
+ * holding the lock, in this process, cannot go on to commit, and the write
+ * fails after `timeout`. A connection whose write failed that way still
+ * reads the file as it was then, until its statement is collected:
+ *
+ *   six MCP calls at once     the first's approval, in a transaction    BEGIN IMMEDIATE, then awaits
+ *   another's last_used_at    a lone UPDATE, outside the queue          the thread blocked 5 s, SQLITE_BUSY
+ *   it reads the approval     on that connection                        no row
  */
 class WriteQueue {
   #tail: Promise<void> = Promise.resolve();
@@ -88,7 +98,17 @@ function oneTransactionAtATime(client: Client, queue: WriteQueue): Client {
   return new Proxy(client, {
     get(target, key) {
       if (key === 'execute') {
-        return async (...args: Parameters<Client['execute']>) => numbers(await target.execute(...args));
+        return async (...args: Parameters<Client['execute']>) => {
+          // Parameters<> sees execute's last overload only, (sql, args); Drizzle calls the other, ({ sql, args }).
+          const [statement] = args as unknown as [InStatement];
+          if (!writes(typeof statement === 'string' ? statement : statement.sql)) return numbers(await target.execute(...args));
+          const release = await queue.acquire();
+          try {
+            return numbers(await target.execute(...args));
+          } finally {
+            release();
+          }
+        };
       }
       if (key === 'transaction') {
         return async (mode?: TransactionMode) => {
@@ -152,6 +172,39 @@ function settling(tx: LibsqlTransaction, release: () => void): LibsqlTransaction
   };
   return tx;
 }
+
+/**
+ * Whether a lone statement may write: all but a query (SELECT or VALUES, or
+ * a WITH whose statement is one) and EXPLAIN, read from its words outside
+ * parentheses, strings, quoted names and comments.
+ *
+ *   select … from "mcp_approvals" where …                 reads
+ *   WITH policy AS (SELECT …) SELECT json_object(…)       reads
+ *   WITH old AS (SELECT …) DELETE FROM …                  writes
+ *   update "mcp_connections" set …                        writes
+ */
+export function writes(statement: string): boolean {
+  let depth = 0;
+  let first: string | null = null;
+  for (const [token] of statement.matchAll(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:[^']|'')*'?|"(?:[^"]|"")*"?|`[^`]*`?|\[[^\]]*\]?|[()]|[A-Za-z_][\w$]*/g)) {
+    if (token === '(') depth += 1;
+    else if (token === ')') depth -= 1;
+    else if (depth === 0 && /^[A-Za-z_]/.test(token)) {
+      const word = token.toLowerCase();
+      if (first === null) {
+        first = word;
+        if (word !== 'with') return !QUERIES.has(word);
+      } else if (STATEMENTS.has(word)) {
+        return !QUERIES.has(word);
+      }
+    }
+  }
+  return true;
+}
+
+const QUERIES = new Set(['select', 'values', 'explain']);
+/** The words a WITH's own statement starts with. */
+const STATEMENTS = new Set(['select', 'values', 'insert', 'update', 'delete', 'replace']);
 
 /** Keep large counters exact; Drizzle's booleans and dates still need safe numbers. */
 function numbers(result: ResultSet): ResultSet {

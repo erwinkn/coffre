@@ -1241,7 +1241,9 @@ What differs stays in the schemas and `packages/db/src/dialect.ts`:
   on Postgres. SQLite has one writer, but its driver does not queue for us,
   so `connect.ts` queues transactions once per database file however many
   clients open it. Each takes the write lock with its first statement;
-  a row lock there is a no-op.
+  a row lock there is a no-op. A lone statement that writes queues too:
+  libsql's busy wait blocks the thread, so one waiting on a transaction
+  of the same process would hold that transaction from its commit.
 - **Shared constraints.** Active identities use a unique index on a generated
   column that holds the subject only while the identity is not revoked.
   Emails are stored lowercase. Checks stay in both databases, with expressions
