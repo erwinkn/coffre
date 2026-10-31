@@ -93,6 +93,8 @@ export async function runCheckpointer(options: {
   stalled?: (why: string) => void;
   /** `TICK_BOUND_MS`, which bounds the open and the next days too: for the tests. */
   tickBoundMs?: number;
+  /** The memory over its file, `fileMemory` unless a test holds its writes. */
+  memoryOf?: (path: string) => Memory;
 }): Promise<RunningCheckpointer> {
   const alarmsPath = `${options.memory}.alarms`;
   let appending: Promise<void> = Promise.resolve();
@@ -105,7 +107,7 @@ export async function runCheckpointer(options: {
   const checkpointer = await within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses').then(() => within(openLogCheckpointer({
     store,
     seed: options.seed,
-    memory: fileMemory(options.memory),
+    memory: (options.memoryOf ?? fileMemory)(options.memory),
     witnesses: options.witnesses,
     record: (alarm) => record(alarm),
     fence,
@@ -262,6 +264,9 @@ export async function keepCheckpointer(options: Parameters<typeof runCheckpointe
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const alarmsPath = `${options.memory}.alarms`;
+  // The runners that stalled, stopping: their memory writes in flight land before `stop` returns, so that nothing opened
+  // after it over the same file has a newer pair overwritten (review r3).
+  let retiring: Promise<void> = Promise.resolve();
   const tryOpen = async (): Promise<void> => {
     try {
       const opened: RunningCheckpointer = await runCheckpointer({
@@ -270,7 +275,9 @@ export async function keepCheckpointer(options: Parameters<typeof runCheckpointe
         stalled: (why) => {
           if (running === opened) running = null;
           failed = why;
-          void opened.stop().finally(() => {
+          const retired = opened.stop().catch(() => {});
+          retiring = Promise.all([retiring, retired]).then(() => {});
+          void retired.finally(() => {
             if (!stopped) timer = setTimeout(() => void (trying = tryOpen()), TICK_MS);
           });
         },
@@ -303,6 +310,7 @@ export async function keepCheckpointer(options: Parameters<typeof runCheckpointe
       clearTimeout(timer);
       await trying;
       await running?.stop();
+      await retiring;
     },
   };
 }

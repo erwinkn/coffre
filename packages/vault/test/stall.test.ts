@@ -5,7 +5,7 @@
 // once the database answers, it seals again by itself, the change too.
 // (On Workers: log-hosts.test.ts and workers-log.test.ts.)
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, beforeEach, test } from 'node:test';
@@ -17,7 +17,7 @@ import { sql } from 'drizzle-orm';
 import { openDatabase } from '@coffre/db/connect';
 
 import { SEAL_WAIT_MS } from '../src/checkpointer.ts';
-import { keepCheckpointer, type KeptCheckpointer } from '../src/checkpointer-node.ts';
+import { fileMemory, keepCheckpointer, type KeptCheckpointer } from '../src/checkpointer-node.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { stallProxy } from './stall-proxy.ts';
@@ -230,5 +230,49 @@ test('T169, review r1, Node, Postgres: stall after stall, each on a connection o
     proxy.release();
     await kept.stop();
     await proxy.close();
+  }
+});
+
+test('T169, review r3, Node: a tick that stalls in its memory write: the keeper\'s stop returns only once that write has landed, so nothing opened after it over the same file has its pair overwritten', { timeout: 60_000 }, async () => {
+  const w = await world();
+  const path = join(dir, `memory-${ENGINE}-5`);
+  let hold: Promise<void> | null = null;
+  let release = () => {};
+  let landed = 0;
+  const memoryOf = (file: string) => {
+    const memory = fileMemory(file);
+    return {
+      last: () => memory.last(),
+      remember: async (record: string) => {
+        if (hold !== null) await hold;
+        await memory.remember(record);
+        landed += 1;
+      },
+    };
+  };
+  const kept = await keepCheckpointer({ database: db.vault, seed: SIGNING_KEY, memory: path, intervalMs: 20, retryMs: 50, tickBoundMs: 200, memoryOf });
+  let stopping: Promise<unknown> | null = null;
+  try {
+    await until(() => kept.sealing().ok, 5000, 'sealing at first');
+    // Its memory's writes held, then a change for the next tick to sign and remember: the tick stalls in its write.
+    hold = new Promise<void>((resolve) => (release = resolve));
+    await commitChange(w);
+    await until(() => !kept.sealing().ok, 3000, 'stalled in its memory write');
+    // Retired by its keeper, its stop waiting on the write: no runner is the keeper's now.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    let stopped = false;
+    stopping = kept.stop().then(() => (stopped = true));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(stopped, false, 'stop waits for the memory write in flight');
+    const before = landed;
+    release();
+    await stopping;
+    assert.ok(landed > before, 'the write landed before stop returned');
+    const record = readFileSync(path, 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(readFileSync(path, 'utf8'), record, 'nothing lands after stop');
+  } finally {
+    release();
+    await (stopping ?? kept.stop());
   }
 });
