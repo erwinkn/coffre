@@ -54,14 +54,14 @@ export class WorkerdSocket extends EventEmitter {
       this.readyState = 'opening';
       const { connect } = (await import('cloudflare:sockets' as string)) as { connect: Connect };
       const raw = (this.raw = connect(host + ':' + port, tls ? { secureTransport: 'starttls' } : {}));
-      if (this.destroyed) return void raw.close().catch(() => {});
+      if (this.destroyed) return this.abort();
       raw.closed.then(
         () => {
           if (this.readyState !== 'upgrade') return this.close();
           this.readyState = 'open';
           this.emit('secureConnect');
         },
-        (error: unknown) => this.emit('error', error),
+        (error: unknown) => this.error(error),
       );
       this.writer = raw.writable.getWriter();
       this.reader = raw.readable.getReader();
@@ -84,8 +84,8 @@ export class WorkerdSocket extends EventEmitter {
     // Upstream's option, which workerd reads as `expectedServerHostname`: the name is not checked here.
     const raw = (this.raw = this.raw!.startTls({ servername }));
     raw.closed.then(
-      () => this.emit('close'),
-      (error: unknown) => this.emit('error', error),
+      () => this.close(),
+      (error: unknown) => this.error(error),
     );
     this.writer = raw.writable.getWriter();
     this.reader = raw.readable.getReader();
@@ -106,15 +106,26 @@ export class WorkerdSocket extends EventEmitter {
   }
 
   /**
-   * Closed at once, as Node's `destroy`: the raw socket's `close()`, which closes both streams whatever is still being
-   * written. Upstream ended it, which waits for a write stuck under backpressure (review r2 of #438).
+   * Closed at once, as Node's `destroy`, whatever it is still writing or opening: its writes aborted and its reads
+   * cancelled, so that nothing buffered is sent, then the raw socket closed, which on its own waits until the socket
+   * has opened and every write has gone (workerd's `Socket::close`). Upstream ended it, which waits for a write stuck
+   * under backpressure too (reviews r2 and r3 of #438). Its TCP connection workerd closes with the request, whose I/O
+   * it is: locally, not before (packages/vault/test/workers-socket.test.ts). Before `connect` has made the raw socket,
+   * it is made only to be closed. Says `close` once, a task later, as Node's does.
    */
   destroy(): void {
-    if (this.raw === null) {
-      this.destroyed = true;
-      return this.close();
-    }
-    void this.raw.close().catch(() => {});
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (this.raw !== null) this.abort();
+    setTimeout(() => this.close(), 0);
+  }
+
+  /** The raw socket's streams torn down, then the socket closed (`destroy`). */
+  abort(): void {
+    const raw = this.raw!;
+    void (this.writer ?? raw.writable).abort().catch(() => {});
+    void (this.reader ?? raw.readable).cancel().catch(() => {});
+    void raw.close().catch(() => {});
   }
 
   async read(): Promise<void> {
@@ -140,9 +151,11 @@ export class WorkerdSocket extends EventEmitter {
     this.emit('close');
   }
 
+  /** Said once: past `close` (a `destroy`'s, whose aborted streams fail what was under way), nothing more. */
   error(error: unknown): void {
+    if (this.readyState === 'closed' || this.destroyed) return;
     this.emit('error', error);
-    this.emit('close');
+    this.close();
   }
 }
 
