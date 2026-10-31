@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { chainUnknown, queries, shownChain, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
+import { chainUnknown, queries, shownChain, wholeTrees, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -56,7 +56,8 @@ export function AuditPage() {
     try {
       // 0.15's log, where the instance keeps it, checked again as on a visit, from its newest checkpoint, beside the walk
       // (R42). Nothing walks it whole on a request: its cost is the database's to shape.
-      const trees = Promise.allSettled([client.audit.verifyTrees()]);
+      // And the reads the pages list, held to the uses the log sealed (T166): the whole log's check alone reads them.
+      const trees = Promise.allSettled([wholeTrees(client)]);
       const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
       verdict = withTrees(chain, true, (await trees)[0]);
     } catch (error) {

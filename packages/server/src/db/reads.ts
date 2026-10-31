@@ -109,7 +109,23 @@ export async function readsPage(db: Queryable, filter: ReadFilter): Promise<{ ro
   if (streams.length === 0) return { rows: [], more: false };
   const found = sql`SELECT DISTINCT f.at, f.number FROM (${sql.join(streams.map((each) => sql`SELECT * FROM (${each}) s`), sql` UNION ALL `)}) f ORDER BY f.at DESC, f.number DESC LIMIT ${take}`;
   const rows = await dialect.rowsOf<Row>(db, listed(engine, found));
-  return { rows: rows.slice(0, filter.limit).map(read), more: rows.length > filter.limit };
+  // Each read where its own columns, which its MAC covers, place it: the place rows only find it (fail closed).
+  return { rows: rows.slice(0, filter.limit).map(read).filter((row) => places.every((list) => within(row, list))), more: rows.length > filter.limit };
+}
+
+/**
+ * Whether a read is at one of `list`'s places and at none it leaves out, by
+ * its own columns: its key's environment and project, the fork it was read
+ * in, its source's environment and project; for a list of keys, the key it
+ * names or its source.
+ */
+function within(row: ListedRead, list: ReadPlaces): boolean {
+  const at: [string, string][] = [[row.environment, row.project]];
+  if (row.place !== null) at.push([row.place, row.project]);
+  if (row.sourceEnvironment !== null) at.push([row.sourceEnvironment, row.sourceProject ?? row.project]);
+  if (at.some(([environment]) => list.except.includes(environment))) return false;
+  if (list.secretIds.length > 0) return list.secretIds.includes(row.secret) || (row.source !== null && list.secretIds.includes(row.source));
+  return at.some(([environment, project]) => list.environmentIds.includes(environment) || list.projectIds.includes(project));
 }
 
 /** One index's stream of `(at, number)`, newest first, below `point`, at most `take`: on Postgres its function, on SQLite its read. */

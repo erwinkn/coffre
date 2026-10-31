@@ -8,6 +8,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import type { Through, UseInput, UseOutcome, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
+import { openDatabase } from '@coffre/db/connect';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, runCheckpointer, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
@@ -332,6 +333,7 @@ export function testVault(
     changeBindings: call('changeBindings'),
     cutover: call('cutover'),
     verifyTrees: call('verifyTrees'),
+    verifyReads: call('verifyReads'),
     vouch: call('vouch'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),
@@ -347,12 +349,15 @@ export function testVault(
     async listReads() {
       if (log.log !== '0.15') return;
       const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
-      const signer = await runCheckpointer({ database: await openVaultDatabase(), seed: config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64'), memory: join(memory, 'memory'), intervalMs: 3_600_000 });
+      // On a connection of its own, closed after: on SQLite, a connection the vault reads on meanwhile is another.
+      const own = TEST_ENGINE === 'postgres' ? null : await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
+      const signer = await runCheckpointer({ database: own?.db ?? await openVaultDatabase(), seed: config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64'), memory: join(memory, 'memory'), intervalMs: 3_600_000 });
       try {
         await signer.checkpointer.tick();
         await signer.projected();
       } finally {
         await signer.stop();
+        await own?.close();
         rmSync(memory, { recursive: true, force: true });
       }
     },

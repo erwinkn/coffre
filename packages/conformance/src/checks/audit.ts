@@ -24,11 +24,11 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
   expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
   const expected = purpose === 'reveal' ? { API_KEY: canaries[`${DEV}/API_KEY`] } : valuesIn(canaries, DEV);
   expect(JSON.stringify(Object.entries(values).sort()) === JSON.stringify(Object.entries(expected).sort()), 'the read returned different values', values);
+  // With 0.15's log, each value read is its use, listed once the log has sealed it and the vault's projector has gone
+  // that far (T166).
+  if ((await admin.api.audit.verifyTrees()).kept) return usesAudited(deployment, { admin, reader }, Object.keys(expected), purpose, asked);
   const entries = await everyAuditEntry(admin.api);
   const bundle = entries.filter((entry) => entry.operationId === operationId);
-  if (bundle.length === 0 && entries.some((entry) => entry.log === '0.15' && entry.action === 'secret.read')) {
-    return usesAudited(deployment, { admin, reader }, Object.keys(expected), purpose, asked, entries);
-  }
   expect(bundle.length === 1, 'the read of one place is not logged as one entry', bundle);
   const [entry] = bundle as [AuditEntryView];
   const read = entry.secrets ?? [{ key: entry.key, version: entry.version }];
@@ -66,20 +66,31 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
  */
 const COVERED_MS = 90_000;
 
+/** How long a read may wait to be listed: the checkpointer's tick seals it, then the projector's lists it, each a tick or so. */
+const LISTED_WITHIN_MS = 20_000;
+
 /**
  * Every value read, with 0.15's log, where a read is a use of each key,
  * which names no operation (R53, T166): the reader's newest read of each,
  * for the purpose, made by this read or by one within the minute before it
- * that this rode on, the vault's and vouched for, of the version the key
- * holds, in the key's own log, and the row the vault wrote.
+ * that this rode on, listed within `LISTED_WITHIN_MS`, the vault's and
+ * vouched for, of the version the key holds, in the key's own log, and the
+ * use the vault wrote, as its projector listed it.
  */
 async function usesAudited(
-  deployment: Deployment, { admin, reader }: Pick<People, 'admin' | 'reader'>, keys: string[], purpose: 'reveal' | 'run', asked: number, entries: AuditEntryView[],
+  deployment: Deployment, { admin, reader }: Pick<People, 'admin' | 'reader'>, keys: string[], purpose: 'reveal' | 'run', asked: number,
 ): Promise<string> {
   const { keys: listed } = await admin.api.secrets.list(DEV);
+  const readOf = (entries: AuditEntryView[], key: string) => entries.find((found) => found.log === '0.15' && found.action === 'secret.read' && found.actorId === reader.email && found.key === key
+    && found.metadata.purpose === purpose && Date.parse(found.occurredAt) >= asked - COVERED_MS);
+  let entries = await everyAuditEntry(admin.api);
+  for (const deadline = Date.now() + LISTED_WITHIN_MS; keys.some((key) => readOf(entries, key) === undefined) && Date.now() < deadline;) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    entries = await everyAuditEntry(admin.api);
+  }
   const read = keys.map((key) => {
-    const entry = entries.find((found) => found.log === '0.15' && found.action === 'secret.read' && found.actorId === reader.email && found.key === key && found.metadata.purpose === purpose);
-    expect(entry !== undefined && Date.parse(entry.occurredAt) >= asked - COVERED_MS, `the read of ${key} is not in 0.15's log`, entry ?? entries.slice(0, 5));
+    const entry = readOf(entries, key);
+    expect(entry !== undefined, `the read of ${key} is not listed in 0.15's log within ${LISTED_WITHIN_MS / 1000} s`, entries.slice(0, 5));
     expect(entry.author === 'vault' && entry.decision === 'allow' && entry.forged !== true, `the read of ${key} is not the vault's allowed read`, entry);
     expect(entry.version === listed.find((found) => found.key === key)?.version, `the entry for ${key} names another version`, entry);
     return entry;
@@ -92,6 +103,8 @@ async function usesAudited(
     for (const entry of read) {
       const rows = await query<{ secret: string }>(sql, 'SELECT secret FROM log_uses WHERE number = $1', [entry.seq]);
       expect(rows.length === 1 && String(rows[0]!.secret) === entry.metadata.secretId, 'the read is not the use the vault wrote', { entry, rows });
+      const projected = await query<{ secret: string; principal: string }>(sql, 'SELECT secret, principal FROM log_reads WHERE number = $1', [entry.seq]);
+      expect(projected.length === 1 && String(projected[0]!.secret) === entry.metadata.secretId && projected[0]!.principal === `user:${reader.email}`, "the read is not the use as the vault's projector listed it", { entry, projected });
     }
   });
   return `${read.length} values read by the vault for ${purpose}, each its use in 0.15's log`;
@@ -125,6 +138,9 @@ export async function verification(deployment: Deployment, { admin }: People): P
   // Not checked to its head, as 0.14's checkpoints catching up above: a checkpointer behind, no break of the log, and
   // no pass either (review r4 of W240).
   expect(!trees.kept || !trees.capped, "0.15's log is not checked to its head: more entries wait above its newest checkpoint than a check reads, the checkpointer behind", trees);
+  // And the reads the pages list, held to the uses it sealed, from the first, as `coffre verify log` holds them (T166).
+  const reads = await admin.api.audit.verifyReads();
+  expect(!reads.kept || reads.ok, "the reads listed are not the uses 0.15's log sealed", reads);
   const page = await admin.browser.fetch('/audit');
   const html = await page.text();
   expect(page.status === 200 && html.includes('chain-seal') && !html.includes('Verifying'), 'the audit page was not sent with its verification result', { status: page.status });

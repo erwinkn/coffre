@@ -1751,6 +1751,21 @@ export type Api = {
       capped: boolean;
     };
   };
+  "GET /audit/reads": {
+    input: {
+      from: string;
+    };
+    output: {
+      kept: false;
+    } | {
+      kept: true;
+      ok: boolean;
+      problems: string[];
+      through: string;
+      listed: string;
+      next: string | null;
+    };
+  };
 };
 
 export type AccessValue = string | null | {

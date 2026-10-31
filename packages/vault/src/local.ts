@@ -34,6 +34,7 @@ export const METHODS = [
   'changeBindings',
   'cutover',
   'verifyTrees',
+  'verifyReads',
   'vouch',
 ] as const satisfies readonly (keyof Vault)[];
 

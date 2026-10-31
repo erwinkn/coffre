@@ -11,19 +11,19 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type AuditEntryView, type CoffreClient } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
 import { tablesOf } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { logReads, logReadsCursor, secrets } from './db/tables.ts';
+import { logReadPartners, logReadPlaces, logReads, logReadsCursor, secrets } from './db/tables.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 
@@ -221,6 +221,51 @@ test('a read the vault does not vouch for is shown forged: edited, renumbered, o
   await db.owner.update(logReadsCursor).set({ through: 1_000_000n });
   const { reads } = await root.audit.list({ sealed: '1', limit: 10 });
   assert.deepEqual([reads?.forged, reads?.behind], [true, true]);
+});
+
+test("the whole log's check holds the reads listed to the uses sealed: one deleted, edited, planted or missing at a place, each named", { skip: LOG !== '0.15' }, async () => {
+  await root.secrets.set('market/prod', { SOURCE: 'prod-source' });
+  await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/SOURCE' }, THIRD: 'third', FOURTH: 'fourth' });
+  // Five reads, each sealed by a pair of its own, so that the check goes a stretch for each.
+  for (const key of ['API_KEY', 'OTHER', 'HELD', 'THIRD', 'FOURTH']) {
+    await ada.secrets.reveal(`market/dev/${key}`);
+    await settle();
+  }
+  const sealed = await root.audit.verifyReads();
+  assert.ok(sealed.kept && sealed.ok, JSON.stringify(sealed));
+  const numbers = (await db.owner.select({ number: logReads.number }).from(logReads).orderBy(logReads.number)).map((row) => row.number);
+  assert.equal(numbers.length, 5);
+  const [deleted, edited, held, moved, copied] = numbers as [bigint, bigint, bigint, bigint, bigint];
+  // Whoever owns the database deletes a read; edits another; deletes the pair of places the reference's read is at;
+  // says a fourth was Bob's at its place; and lists the last twice, a moment apart. A read planted at a time no use of
+  // the log's sealed near, or under a number none did, every page shows forged, by its MAC (above).
+  await db.owner.delete(logReadPlaces).where(eq(logReadPlaces.number, deleted));
+  await db.owner.delete(logReads).where(eq(logReads.number, deleted));
+  await db.owner.update(logReads).set({ credential: randomUUID() }).where(eq(logReads.number, edited));
+  await db.owner.update(logReadPlaces).set({ principal: BOB }).where(eq(logReadPlaces.number, moved));
+  const [pair] = await db.owner.select().from(logReadPlaces).where(eq(logReadPlaces.number, held)).limit(1);
+  await db.owner.delete(logReadPartners).where(and(eq(logReadPartners.environment, pair!.environment), eq(logReadPartners.partner, pair!.partner)));
+  const [copy] = await db.owner.select().from(logReads).where(eq(logReads.number, copied));
+  await db.owner.insert(logReads).values({ ...copy!, at: copy!.at + 1 });
+  const verdict = await root.audit.verifyReads();
+  assert.ok(verdict.kept && !verdict.ok);
+  // The client stops at the first stretch that fails, the deleted read's; the vault's stretches go on past each.
+  assert.deepEqual(verdict.problems, [`read ${deleted} is sealed but not listed`, `read ${deleted} is not listed at a place it was read`]);
+  const named: string[] = [];
+  for (let from = 'start'; ;) {
+    const stretch = await deps.vault.verifyReads!({ from });
+    assert.ok(stretch.kept);
+    named.push(...stretch.problems);
+    if (stretch.next === null) break;
+    from = stretch.next;
+  }
+  for (const problem of [
+    `read ${deleted} is sealed but not listed`,
+    `read ${edited} is listed otherwise than the log sealed it`,
+    `read ${held}'s places are not listed together, so no page there lists it`,
+    `read ${moved} is listed otherwise at a place it was read`,
+    `read ${copied} is listed twice`,
+  ]) assert.ok(named.includes(problem), `${problem}, among ${JSON.stringify(named)}`);
 });
 
 test("a read waits to be listed until the projector writes it, and the page says how far it lists", { skip: LOG !== '0.15' }, async () => {

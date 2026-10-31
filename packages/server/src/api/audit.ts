@@ -1,5 +1,5 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
-import { describeAccessFault, useOfCode, type LogVerification, type TreeVerification } from '@coffre/core/vault';
+import { describeAccessFault, useOfCode, type LogVerification, type ReadsVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry } from '@coffre/db/log';
 
@@ -1001,6 +1001,20 @@ export async function verifyAuditTrees(ctx: ApiContext): Promise<TreeVerificatio
   }
   if (ctx.vault.verifyTrees === undefined) return { kept: false };
   return ctx.vault.verifyTrees();
+}
+
+/**
+ * A stretch of the reads' check (the vault's `verifyReads`, T166): the
+ * reads the audit pages list held to the uses 0.15's log sealed, each
+ * stretch a checkpoint's range at most, for whoever reads the whole log, as
+ * `verifyAudit`. With 0.14's log alone, `kept` false.
+ */
+export async function verifyAuditReads(ctx: ApiContext, input: { from: string }): Promise<ReadsVerification> {
+  if (!readsWholeLog(ctx.caller)) {
+    throw forbidden('only those who read the whole log may verify it: an auditor, admin or owner of the whole instance');
+  }
+  if (ctx.vault.verifyReads === undefined) return { kept: false };
+  return ctx.vault.verifyReads({ from: input.from });
 }
 
 /**

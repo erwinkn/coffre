@@ -2067,12 +2067,33 @@ async function verifyLog(): Promise<void> {
       process.exit(3);
     }
     process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
+    await verifyReads(shown);
     return;
   }
   const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;
   const through = result.through === null ? 'nothing verified' : `verified through entry ${result.through}`;
   process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
   process.exit(2);
+}
+
+/**
+ * The reads the audit pages list held to the uses 0.15's log sealed, from
+ * the first to as far as the vault's projector has listed (T166), a stretch
+ * a request: a read deleted from the listing, edited or planted, or one
+ * missing at a place it was read, which no page's check sees. Nothing for
+ * an instance that keeps 0.14's log alone.
+ */
+async function verifyReads(shown: boolean): Promise<void> {
+  const result = await client().audit.verifyReads((stretch) => {
+    if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rreads verified through entry ${stretch.through}…`);
+  });
+  if (shown) process.stderr.write('\r\x1b[K');
+  if (!result.kept) return;
+  if (!result.ok) {
+    process.stderr.write(`reads BROKEN, found by the vault's check (verified through entry ${result.through}):\n${result.problems.map((problem) => `  ${problem}\n`).join('')}`);
+    process.exit(2);
+  }
+  process.stdout.write(`reads OK: every read sealed through entry ${result.listed} listed as the log sealed it\n`);
 }
 
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */

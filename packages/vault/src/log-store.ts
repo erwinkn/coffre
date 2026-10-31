@@ -65,6 +65,7 @@ export function logStore(db: Database, options: Options = {}): LogStore {
     readsCursor: reads.readsCursor,
     objects: reads.objects,
     writeReads: reads.writeReads,
+    listing: reads.listing,
     // The reads' days with the uses' (T166): made beside them, and gone once they are.
     async makeDays(days) {
       await base.makeDays(days);
@@ -531,10 +532,11 @@ function sqliteStore(db: Database): CheckpointStore & RetentionStore {
  * cursor on after them, never past the newest pair; SQLite, one writer and
  * no partitions, writes them in a transaction, and drops a day's by `at`.
  */
-function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 'writeReads'> & { makeDays(days: readonly string[]): Promise<void>; dropDay(day: string): Promise<void> } {
+function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 'writeReads' | 'listing'> & { makeDays(days: readonly string[]): Promise<void>; dropDay(day: string): Promise<void> } {
   const postgres = engineOf(db) === 'postgres';
   const made = new Set<string>();
   const id = (value: string | null) => (value === null ? sql`NULL` : postgres ? sql`CAST(${value} AS uuid)` : sql`${value}`);
+  const text = (column: string) => sql.raw(postgres ? `CAST(${column} AS text)` : column);
   return {
     async readsCursor() {
       const [row] = await rowsOf<{ through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null }>(db, sql`SELECT through, pair, at, mac FROM log_reads_cursor WHERE only_row`);
@@ -586,6 +588,46 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         }
         await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
       });
+    },
+    async listing({ after, upto, from, to }, places) {
+      const big = (value: bigint | number) => (postgres ? sql`CAST(${String(value)} AS bigint)` : sql`${value}`);
+      const found = await rowsOf<{
+        number: string | number; at: string | number; credential: string; purpose: string | number; principal: string; secret: string; environment: string; project: string;
+        place: string | null; source: string | null; source_environment: string | null; source_project: string | null; version: string | null; mac: Uint8Array;
+      }>(db, sql`SELECT number, at, ${text('credential')} AS credential, purpose, principal, ${text('secret')} AS secret, ${text('environment')} AS environment, ${text('project')} AS project,
+          ${text('place')} AS place, ${text('source')} AS source, ${text('source_environment')} AS source_environment, ${text('source_project')} AS source_project, ${text('version')} AS version, mac
+        FROM log_reads WHERE at >= ${big(from)} AND at <= ${big(to)} AND number > ${big(after)} AND number <= ${big(upto)}`);
+      const reads = found.map((row): ReadRow => ({
+        number: BigInt(row.number), at: Number(row.at), credential: row.credential, purpose: Number(row.purpose), principal: row.principal, secret: row.secret,
+        environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
+        sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac),
+      }));
+      // Each place by its own index's columns, a probe each, a few hundred to a statement.
+      const listedAt = new Map<string, Pick<ReadPlace, 'principal' | 'secret' | 'partners'>>();
+      const paired = new Set<string>();
+      const at = (place: Pick<ReadPlace, 'environment' | 'partner'> & Partial<Pick<ReadPlace, 'at' | 'number'>>) => `${place.environment}:${place.partner}:${place.at ?? ''}:${place.number ?? ''}`;
+      for (let i = 0; i < places.length; i += 500) {
+        const chunk = places.slice(i, i + 500);
+        const rows = await rowsOf<{ environment: string; partner: string; at: string | number; number: string | number; principal: string; secret: string; partners: string }>(db, sql`
+          SELECT ${text('environment')} AS environment, ${text('partner')} AS partner, at, number, principal, ${text('secret')} AS secret, ${sql.raw(postgres ? 'CAST(to_json(partners) AS text)' : 'partners')} AS partners
+            FROM log_read_places WHERE (environment, partner, at, number) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${id(p.partner)}, ${big(p.at)}, ${big(p.number)})`), sql`, `)})`);
+        for (const row of rows) {
+          listedAt.set(at({ ...row, at: Number(row.at), number: BigInt(row.number) }), { principal: row.principal, secret: row.secret, partners: JSON.parse(row.partners) as string[] });
+        }
+      }
+      const pairs = [...new Map(places.map((p) => [at({ environment: p.environment, partner: p.partner }), p])).values()];
+      for (let i = 0; i < pairs.length; i += 500) {
+        const chunk = pairs.slice(i, i + 500);
+        const rows = await rowsOf<{ environment: string; partner: string }>(db, sql`
+          SELECT ${text('environment')} AS environment, ${text('partner')} AS partner FROM log_read_partners
+            WHERE (environment, partner) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${id(p.partner)})`), sql`, `)})`);
+        for (const row of rows) paired.add(at(row));
+      }
+      return {
+        reads,
+        places: places.map((place) => listedAt.get(at(place)) ?? null),
+        pairs: places.map((place) => paired.has(at({ environment: place.environment, partner: place.partner }))),
+      };
     },
     async makeDays(days) {
       if (!postgres) return;

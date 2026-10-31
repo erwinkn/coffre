@@ -353,6 +353,14 @@ export interface Vault {
    */
   verifyTrees?(): Promise<TreeVerification>;
   /**
+   * The reads' listing held to 0.15's log, a stretch a call (T166): from
+   * `start`, then each `next`, the uses the log sealed derived again and
+   * held to the reads the pages list, each read and each place it was read
+   * at. For whoever checks the whole log (`coffre verify log`), never a
+   * page. `kept` false with 0.14's log alone.
+   */
+  verifyReads?(input: { from: string }): Promise<ReadsVerification>;
+  /**
    * Which of these entries of 0.15's log, as a page of the audit log read
    * them, the vault does not vouch for: its MAC, under any of the vault's
    * signing keys, as its seals are checked, does not hold over the columns
@@ -386,6 +394,20 @@ export type VouchedEntry =
  * one held outside; an entry whose MAC fails, or under another's request.
  * Numbers are decimal text: the log's are 64-bit.
  */
+export type ReadsVerification =
+  | { kept: false }
+  | {
+      kept: true;
+      /** Nothing wrong found in the stretch. */
+      ok: boolean;
+      problems: string[];
+      /** The entry the stretch checked through, and how far the projector has listed. */
+      through: string;
+      listed: string;
+      /** Where the next stretch starts; null at the projector's cursor, or on a problem that stops the check. */
+      next: string | null;
+    };
+
 export type TreeVerification =
   | { kept: false }
   | {

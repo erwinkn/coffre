@@ -401,6 +401,17 @@ export function withTrees(chain: Awaited<ReturnType<CoffreClient['audit']['verif
 export type TreesResult = Awaited<ReturnType<CoffreClient['audit']['verifyTrees']>>;
 
 /**
+ * 0.15's log checked whole, as a walk from the first entry has it: its trees
+ * from the newest checkpoint, and the reads the pages list held to the uses
+ * it sealed (`audit.verifyReads`, T166), whose problems are the log's.
+ */
+export async function wholeTrees(client: CoffreClient): Promise<TreesResult> {
+  const [trees, reads] = await Promise.all([client.audit.verifyTrees(), client.audit.verifyReads()]);
+  if (!trees.kept || !reads.kept || reads.ok) return trees;
+  return { ...trees, ok: false, problems: [...trees.problems, ...reads.problems.map((problem) => `the reads' listing: ${problem}`)] };
+}
+
+/**
  * A verdict as the page shows it: `whole` when it comes from the walk
  * from the first entry, which someone asked for, not from the newest
  * checkpoint's. Where the instance keeps 0.15's log too, its check

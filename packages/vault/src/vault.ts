@@ -133,6 +133,7 @@ import {
   type Wrapped,
   type Vault,
   type Via,
+  type ReadsVerification,
   type TreeVerification,
   type VerifyLogInput,
   type VouchedEntry,
@@ -157,7 +158,8 @@ import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, logMacKey, useEntry as usedEntry } from './log-entry.ts';
-import { cursorHolds, readHolds, type ReadRow } from './reads.ts';
+import { logStore } from './log-store.ts';
+import { checkReads, cursorHolds, readHolds, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -3949,6 +3951,31 @@ class VaultService implements Vault {
         const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
         return logged !== null && macs.some((key) => authentic(key)(logged)) ? [] : [named];
       }),
+    };
+  }
+
+  /**
+   * A stretch of the reads' check (reads.ts, `checkReads`): from `start`, or
+   * a stretch's `next` (`<pair>:<through>`), in a snapshot of its own. Flat:
+   * a checkpoint's range or `CHECKED_AT_ONCE` entries of it, whatever the
+   * log's length.
+   */
+  async verifyReads(input: { from: string }): Promise<ReadsVerification> {
+    await this.#settled();
+    if (this.#prepared.log015 === null) return { kept: false };
+    const from = (input as { from?: unknown } | undefined)?.from;
+    const at = typeof from === 'string' ? /^(?:start|([0-9]{1,19}):([0-9]{1,19}))$/.exec(from) : null;
+    if (at === null) throw new Error('verifyReads starts at start, or at a stretch\'s next');
+    const stretch = at[1] === undefined ? { pair: 0n, through: 0n } : { pair: BigInt(at[1]), through: BigInt(at[2]!) };
+    const keys = await this.#verifierKeys();
+    const checked = await this.#db.transaction((tx) => checkReads(logStore(tx as unknown as Database), keys, stretch), SNAPSHOT);
+    return {
+      kept: true,
+      ok: checked.problems.length === 0,
+      problems: checked.problems,
+      through: String(checked.through),
+      listed: String(checked.listed),
+      next: checked.next === null ? null : `${checked.next.pair}:${checked.next.through}`,
     };
   }
 
