@@ -2228,8 +2228,8 @@ function failure(status: number, message: string, reason?: string, retryAfter?: 
     status,
     headers: {
       'content-type': 'application/json', 'cache-control': 'no-store', 'coffre-proxy': 'refused',
-      // coffre could not answer for a moment (`errorResponse`): the app's client hears when to ask again.
-      ...(status === 503 && reason === 'unavailable' ? { 'retry-after': retryAfter ?? UNAVAILABLE_RETRY_AFTER } : {}),
+      // coffre could not answer for a moment (`errorResponse`), or said when to ask again (a busy use): the app's client hears when.
+      ...(status === 503 && (reason === 'unavailable' || retryAfter !== undefined) ? { 'retry-after': retryAfter ?? UNAVAILABLE_RETRY_AFTER } : {}),
     },
   });
 }

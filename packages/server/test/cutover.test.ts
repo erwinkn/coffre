@@ -63,7 +63,7 @@ function deploy(signin = SIGNIN, config: { bulkLimit?: { count: number; windowMi
   const deps = testDeps(db.runtime, [ROOT], { vault, chainKey: old.deps.chainKey });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
   const runtime = { db: deps.db, vault, chainKey: deps.chainKey, previousChainKeys: [], publicUrl: PUBLIC_URL, auth: { mode: 'signin' as const, signin }, cutover: { done: false } as CutoverKnown };
-  return { vault, deps, root: clientFor(deps, ROOT), cutover: () => cutoverReady(runtime), runtime };
+  return { vault, deps, root: clientFor(deps, ROOT), cutover: async () => (await cutoverReady(runtime))?.why ?? null, runtime };
 }
 
 let request = 0n;
@@ -316,7 +316,8 @@ test("the door tries a due cutover once at a time, and holds a failure as a refu
   assert.deepEqual(await Promise.all([now.cutover(), now.cutover()]), [failed, CUTTING_OVER_NOW]);
   assert.equal(tries, 1);
   const before = asked;
-  assert.equal(await now.cutover(), failed);
+  // Held as failed, which the door says apart from a refusal (T170).
+  assert.deepEqual(await cutoverReady(now.runtime), { why: failed, failed: true });
   assert.equal(asked, before);
   failing = false;
   now.runtime.cutover.held!.until = 0;

@@ -14,9 +14,10 @@ export function jsonResponse(
 /** Anything thrown, as the API's one error shape: `{ error, message }`; a moment's 503 says when to ask again. */
 export function errorResponse(error: unknown, headers: HeadersInit = {}): Response {
   const { status, body } = toErrorBody(error);
-  const momentary = status === 503 && body.error === 'unavailable' && body.reason === undefined && !new Headers(headers).has('retry-after');
-  const later = error instanceof ApiError && error.retryAfter !== undefined ? error.retryAfter : UNAVAILABLE_RETRY_AFTER;
-  return jsonResponse(body, status, momentary ? { ...Object.fromEntries(new Headers(headers)), 'retry-after': later } : headers);
+  // A moment's 503: what coffre could not reach (no reason), or one that says itself when to ask again (a busy use, the vault's).
+  const own = error instanceof ApiError ? error.retryAfter : undefined;
+  const later = status !== 503 || body.error !== 'unavailable' || new Headers(headers).has('retry-after') ? undefined : own ?? (body.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
+  return jsonResponse(body, status, later === undefined ? headers : { ...Object.fromEntries(new Headers(headers)), 'retry-after': later });
 }
 
 export function methodNotAllowed(allowed: readonly string[]): Response {

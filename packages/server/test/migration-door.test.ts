@@ -194,6 +194,20 @@ test("a cutover held refused answers readiness 503 and says why in the server's 
   }
 });
 
+test("the door says what holds it: a cutover held moves the log; a question that did not answer, as an instance made on 0.15 asking of its own cutover's seal, says only that (T170)", async () => {
+  await resetDatabase(db.owner);
+  const held = (failed: boolean) => ({ ...freshRuntime(), schema: { migrated: true }, appKey: { settled: true }, cutover: { done: false, held: { why: 'the cutover failed: timed out', until: Date.now() + 60_000, ...(failed ? { failed: true as const } : {}) } } });
+  const said = mock.method(console, 'error', () => {});
+  try {
+    const refused = await ask(held(false), '/api/me');
+    assert.deepEqual([refused.status, JSON.parse(refused.body).message], [503, "coffre is moving its audit log to 0.15's, and serves once it has: the server's log says what holds it back"]);
+    const failed = await ask(held(true), '/api/me');
+    assert.deepEqual([failed.status, JSON.parse(failed.body)], [503, { error: 'unavailable', message: "coffre could not check that its audit log is cut over to 0.15's, and serves once it can: the server's log says why" }]);
+  } finally {
+    said.mock.restore();
+  }
+});
+
 test('without an audit watch, the scheduled run asks the vault to checkpoint and writes no beat, and readiness is the database migrated', async () => {
   await resetDatabase(db.owner);
   const runtime = { ...freshRuntime(), schema: { migrated: true }, appKey: { settled: true } };
