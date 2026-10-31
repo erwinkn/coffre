@@ -311,8 +311,9 @@ const SCREENS = [
           ${row('Monitor', 'Firefox on macOS', 'via GitHub · <span class="mono">81.65.12.4</span>', '<span class="tag tag-green pk-chip">YubiKey 5C · 3 min left</span>', '2s ago', 'in 10h', true)}
           ${row('Smartphone', 'Safari on iOS', 'via GitHub · <span class="mono">81.65.12.9</span>', 'iCloud Keychain', '1h ago', 'in 6h')}
           ${row('Terminal', 'coffre CLI on ada-mbp', 'approved in Firefox on macOS', 'YubiKey 5C', '12 min ago', 'in 29d')}
+          ${row('Monitor', 'Chrome on Linux', 'via GitHub · <span class="mono">81.65.12.4</span>', '<span class="tag tag-amber">No passkey</span>', '3d ago', 'in 9h')}
           </tbody></table></div></section>
-          <p class="hint section-foot">Each touch of a passkey gives this browser a new session and ends the one before. Removing a passkey signs you out of everything else.</p>`);
+          <p class="hint section-foot">A session no passkey confirmed was signed in before this instance required passkeys; it asks for a touch at its next page. Each touch gives this browser a new session and ends the one before.</p>`);
     },
     states: ['list'],
   },
