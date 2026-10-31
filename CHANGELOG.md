@@ -10,7 +10,7 @@
   its deadline at the latest, and its place lapses 2 s after that (the hot
   login's `statement_timeout`), settled or not. On Node, where a call
   always settles, it keeps its place until it does. A call starts no
-  statement past its deadline. A use
+  statement past its deadline, or once it has answered `late`. A use
   that is not decided (`overloaded`, `late`, and the rest) now answers 503
   with reason `busy` and a message that says which. It used to answer
   "coffre cannot reach what it depends on". It keeps the vault's

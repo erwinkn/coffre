@@ -815,7 +815,9 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
  * after the statement (`oldWrite`) is within the same place and deadline.
  * Past the deadline, or the race lost, the call starts nothing more, neither the statement
  * after `ready` (nor a batch's next, `sends`) nor, the race lost, the reads after it: its
- * answer has gone. A round of a batch is one call, its statements made in turn within it.
+ * answer has gone. One it had started may still reach Postgres (on Node, its bytes leave on
+ * the next turn of the loop), which refuses it past the deadline, and its row is dropped.
+ * A round of a batch is one call, its statements made in turn within it.
  */
 async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => void) => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const release = path.cache.admit(deadline);

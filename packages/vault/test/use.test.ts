@@ -703,6 +703,28 @@ test('a call answered `late` by its timer while the clock is still short of its 
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
 
+test('a call whose timer has not fired by its deadline, as under a blocked loop, sends nothing past it either (T170)', async (t) => {
+  const w = await world();
+  const id = await w.key();
+  const { path, asked, waiting, lift } = heldBack(false);
+  // The race's timer held back, never ticked: the clock alone passes the deadline, and the call has not lost its race.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const at = Date.now();
+  const answer = use(path, ask(w, id, { at, deadline: at + 100 }));
+  await waiting;
+  t.mock.timers.reset();
+  await sleep(at + 150 - Date.now());
+  lift();
+  assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(asked(), 0, 'no statement past the deadline');
+  assert.equal(path.cache.inFlight, 0);
+});
+
+test("a place lapses no sooner than Postgres has ended what its call sent: the hot login's statement_timeout (T170)", postgresOnly('the hot login'), async () => {
+  const [setting] = await rows<{ statement_timeout: string }>(hot, sql`SHOW statement_timeout`);
+  assert.equal(setting?.statement_timeout, `${HELD_PAST_DEADLINE_MS / 1000}s`);
+});
+
 test('admission: past its calls in flight, an isolate refuses at once, holding no connection', async () => {
   const w = await world();
   const id = await w.key();
