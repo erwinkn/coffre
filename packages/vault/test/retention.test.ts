@@ -363,6 +363,34 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   assert.deepEqual((await retain(cp, store, { keepDays: 1, macKey, now })).detached, [D9]);
 });
 
+test("a reader holding a day's reads past drop_reads_day's lock timeout makes the run wait; the next drops them before the uses' partition, so the day is never forgotten with its reads listed (T166, review r10)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+  const { cp, store } = await open({ projected: false });
+  await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
+  await midnight(cp);
+  await later(cp);
+  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, { verifiers, mac: macKey }, { steps: 100 }));
+  const d10 = (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_reads WHERE at >= ${Date.parse(`${D10}T00:00:00Z`)} AND at < ${MIDNIGHT}`))[0]!.n;
+  assert.equal(d10, 600);
+  // A reader of D10's reads, a backup say, past the reads' drop's lock timeout: the uses' day detached, its reads kept.
+  const reader = postgresSession(VAULT_URL);
+  await reader.unsafe('BEGIN');
+  await reader.unsafe(`SELECT count(*) FROM log_reads WHERE at < ${MIDNIGHT}`);
+  try {
+    const held = await retain(cp, store, { keepDays: 9, macKey, now });
+    assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
+    assert.equal(await exists(`log_reads_${D10.replaceAll('-', '')}`), true);
+  } finally {
+    await reader.unsafe('ROLLBACK');
+    await reader.end();
+  }
+  // Found again by its uses' partition, still there detached: its reads go, then the uses'.
+  assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual([await exists(`log_reads_${D10.replaceAll('-', '')}`), await exists(`log_uses_${D10.replaceAll('-', '')}`)], [false, false]);
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${Date.parse(`${D10}T00:00:00Z`) / DAY_MS}`))[0]!.n, 0);
+});
+
 /**
  * The store with the first barriers' floors given, as days past would have left them: the signer signs them as it
  * signs any floor, and reads each window from them. After the last, the database's own floor again.

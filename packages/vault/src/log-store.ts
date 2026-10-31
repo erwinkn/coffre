@@ -67,14 +67,18 @@ export function logStore(db: Database, options: Options = {}): LogStore {
     writeReads: reads.writeReads,
     listing: reads.listing,
     makeReadsDays: (days) => reads.makeDays(days),
-    // The reads' days with the uses' (T166): made beside them, and gone once they are.
+    // The reads' days with the uses' (T166): made beside them, and gone before the uses' last step, so that a day is
+    // found (`days()` reads the uses') until both are: a reads' drop that gave up, past its lock timeout, is tried again
+    // by the next run, never forgotten with its reads listed (review r10). On Postgres the reads' day goes once the uses'
+    // is detached (`drop_reads_day` keeps it while the log holds it); on SQLite, before the uses' rows.
     async makeDays(days) {
       await base.makeDays(days);
       await reads.makeDays(days);
     },
     async dropDay(day) {
+      await reads.dropDay(day);
       const state = await base.dropDay(day);
-      if (state !== 'detached') await reads.dropDay(day);
+      if (state === 'detached') await reads.dropDay(day);
       return state;
     },
   };
@@ -637,8 +641,8 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
     },
     async dropDay(day) {
       if (postgres) {
-        await rowsOf(db, sql`SELECT drop_reads_day(${day}::date)`);
-        made.delete(day);
+        const [row] = await rowsOf<{ state: string }>(db, sql`SELECT drop_reads_day(${day}::date) AS state`);
+        if (row?.state !== 'kept') made.delete(day);
         return;
       }
       const from = Date.parse(`${day}T00:00:00Z`);

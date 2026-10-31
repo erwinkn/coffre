@@ -73,15 +73,18 @@ BEGIN
     RETURN to_char(p_day, 'YYYYMMDD');
 END
 $$;--> statement-breakpoint
--- A day of reads dropped, once its uses are gone (retention dropped their day): what is projected of them goes with them.
+-- A day of reads dropped, once its uses are gone from the log (retention detached their day): what is projected of them
+-- goes with them, before the uses' partition is dropped, so that the day is still found (by its uses' table) until both
+-- are gone, and a drop that gave up is tried again (review r10). While the uses' day is the log's, nothing: 'kept'.
 CREATE FUNCTION drop_reads_day(p_day date) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '100ms' AS $$
 DECLARE
     parent text;
     name text;
 BEGIN
-    IF to_regclass('public.' || quote_ident('log_uses_' || to_char(p_day, 'YYYYMMDD'))) IS NOT NULL THEN
-        RAISE EXCEPTION 'the uses of % are kept', p_day USING ERRCODE = 'invalid_parameter_value';
+    IF EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = to_regclass('public.log_uses')
+                  AND i.inhrelid = to_regclass('public.' || quote_ident('log_uses_' || to_char(p_day, 'YYYYMMDD')))) THEN
+        RETURN 'kept';
     END IF;
     FOREACH parent IN ARRAY ARRAY['log_reads'] LOOP
         name := parent || '_' || to_char(p_day, 'YYYYMMDD');
