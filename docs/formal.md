@@ -1833,6 +1833,8 @@ k2; c1 moves to account B; c1 reads through r again; c2 reads k1. Each
 use's projection differs from every other's. The scenarios:
 - `Reads`: one projector, one crash, two attacker steps;
 - `ReadsRace`: two projectors, no attacker;
+- `ReadsRetain`: as `ReadsRace`, with retention dropping the uses and rows
+  at or below a cut the cursor has passed;
 - `ReadsProbe`: as `Reads`, with a use's MAC that covers only its own columns;
 - `ReadsSeal`: only the signer is fair;
 - `ReadsLive`: the signer and the projector are both fair, with one crash.
@@ -1850,6 +1852,7 @@ use's projection differs from every other's. The scenarios:
 | the cursor carries the vault's MAC, which the projector and the page check (CursorMac) | `LagShown`: a writer sets the cursor ahead, and the page claims reads it never had |
 | the full verify flags a sealed use with no row, not just a row with no use (CountChecked) | `DeletionDetected` |
 | the projector runs apart from the signer's tick (ProjectorApart) | `SealNeverWaitsOnProjection`, `ChangeAnswered`: a stopped projector stops sealing, and the next change never answers |
+| a chunk's rows written only while the cursor stands where the chunk started (FromChecked) | `RetiredStayGone`: p2 reads use 1's chunk, p1 projects it and moves the cursor, retention drops use 1 and its row, and p2 writes the row back below the cut (review r11 of #434: 600 retired reads came back) |
 
 `EXPECTED`, with every protection on:
 - `Reads ListedComplete`: the page does not see a row deleted below its
@@ -1876,9 +1879,10 @@ use's projection differs from every other's. The scenarios:
 
 **Not modelled:** forged use or change rows, which the signer's MAC check
 refuses (Seal.tla's `MacChecked`); the use's own decision, which is
-HotPathOne's; retention of `log_reads` with its day (a unique key on a
-partitioned table must include the partition column: the day, which is a
-function of the use); and who sees which rows (`formal/lean`'s access model).
+HotPathOne's; retention's day as such (a cut, below which uses and rows
+go, stands for it; the order in which a day's two partitions go, the
+reads' first, is `retention.test.ts`'s); and who sees which rows
+(`formal/lean`'s access model).
 
 **As built** (`packages/vault/src/reads.ts`; `docs/design/0.15-plan.md`,
 "As built: T166"):
@@ -1896,7 +1900,8 @@ function of the use); and who sees which rows (`formal/lean`'s access model).
 - CountChecked is `checkReads`, behind `GET /api/audit/reads` (`coffre
   verify log`). CursorMac is `cursorMac`, ReplaceOnConflict and
   IdempotentByNumber `project_reads`' upsert, CursorAfterRows its single
-  transaction. ProjectorApart is the `reads` object on Workers and an
+  transaction, FromChecked its `p_from` (SQLite's write the same, in its
+  transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
 
 ## TLC

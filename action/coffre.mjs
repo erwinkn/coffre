@@ -15961,7 +15961,7 @@ async function tokenReveal(api, canary, token) {
 	const read = entries.filter((entry) => entry.operationId === operationId);
 	if (read.length === 0 && (reads !== void 0 || first.readsOmitted !== void 0)) {
 		expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
-		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.project === canary.project && entry.environment === canary.environment && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.project === canary.project && entry.environment === canary.environment && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && entry.version === version && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
 		const recent = async () => {
 			const all = [];
 			for (let before;;) {

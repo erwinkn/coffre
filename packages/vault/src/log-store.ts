@@ -66,7 +66,6 @@ export function logStore(db: Database, options: Options = {}): LogStore {
     objects: reads.objects,
     writeReads: reads.writeReads,
     listing: reads.listing,
-    makeReadsDays: (days) => reads.makeDays(days),
     // The reads' days with the uses' (T166): made beside them, and gone before the uses' last step, so that a day is
     // found (`days()` reads the uses') until both are: a reads' drop that gave up, past its lock timeout, is tried again
     // by the next run, never forgotten with its reads listed (review r10). On Postgres the reads' day goes once the uses'
@@ -582,22 +581,26 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       }
       return found;
     },
-    async writeReads(reads, cursor) {
+    async writeReads(reads, from, cursor) {
       if (postgres) {
         const json = (rows: readonly object[]) => JSON.stringify(rows, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : Buffer.isBuffer(value) ? value.toString('hex') : value));
         const wire = reads.map((row) => ({ ...row, mac: row.mac.toString('hex') }));
-        await rowsOf(db, sql`SELECT project_reads(${json(wire)}::jsonb, ${String(cursor.through)}::bigint, ${String(cursor.pair)}::bigint, ${cursor.at}::bigint, ${cursor.mac}::bytea)`);
-        return;
+        const [row] = await rowsOf<{ wrote: boolean }>(db, sql`SELECT project_reads(${json(wire)}::jsonb, ${String(from)}::bigint, ${String(cursor.through)}::bigint,
+          ${String(cursor.pair)}::bigint, ${cursor.at}::bigint, ${cursor.mac}::bytea) AS wrote`);
+        return row!.wrote === true;
       }
       // A few statements however many reads, rows by the hundred: the transaction holds the file's one writer as briefly as
       // it can, so that neither the vault's own transactions, queued behind it, nor the app's, waiting on its lock, are kept.
       // A read was a statement (review r5's CI: a run of a thousand held the writer for seconds).
       const values = <T>(rows: readonly T[], size: number) => Array.from({ length: Math.ceil(rows.length / size) }, (_, i) => rows.slice(i * size, (i + 1) * size));
-      await db.transaction(async (raw) => {
+      return db.transaction(async (raw) => {
         const tx = raw as unknown as Database;
         const [cut] = await rowsOf<{ sealed: string | number | null }>(tx, sql`SELECT max(upto) AS sealed FROM log_checkpoints`);
         if (cut?.sealed == null || cursor.through > BigInt(cut.sealed)) throw new Error(`reads through ${cursor.through} are past the newest pair`);
-        if ((await rowsOf(tx, sql`SELECT 1 FROM log_reads_cursor WHERE only_row`)).length === 0) throw new CursorGone();
+        const [stands] = await rowsOf<{ through: string | number }>(tx, sql`SELECT through FROM log_reads_cursor WHERE only_row`);
+        if (stands === undefined) throw new CursorGone();
+        // Overtaken (FromChecked): nothing written.
+        if (BigInt(stands.through) !== from) return false;
         // The projector's row over any other at its number (ReplaceOnConflict).
         for (const rows of values(reads, SQLITE_ROWS)) {
           await rowsOf(tx, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
@@ -612,6 +615,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
           await rowsOf(tx, sql`INSERT INTO log_read_days (principal, day) VALUES ${sql.join(rows.map(([principal, day]) => sql`(${principal}, ${Number(day)})`), sql`, `)} ON CONFLICT DO NOTHING`);
         }
         await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
+        return true;
       });
     },
     async listing({ after, upto, from, to }) {

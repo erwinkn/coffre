@@ -49,7 +49,7 @@ export async function tokenChecks(
 // --- with a token ---------------------------------------------------------------
 
 /** The token's service, and its credential, as `GET /me` names it (null from a server before 0.15). */
-type Token = { member: string; credentialId: string | null };
+export type Token = { member: string; credentialId: string | null };
 
 /** The token is a service's, and reads the canary's environment. */
 async function whoIsToken(origin: string, api: CoffreClient, canary: Canary): Promise<{ detail: string; value: Token }> {
@@ -86,7 +86,7 @@ const LISTED_WITHIN_MS = 20_000;
  * (a cover is of the same credential, purpose and key), once listed, which
  * may take a few seconds (`LISTED_WITHIN_MS`).
  */
-async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Promise<string> {
+export async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Promise<string> {
   const path = `${canary.project}/${canary.environment}`;
   const asked = Date.now();
   const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
@@ -109,9 +109,11 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
   // the token's own page lists its own, whatever it audits.
   if (read.length === 0 && (reads !== undefined || first.readsOmitted !== undefined)) {
     expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
+    // Of the version revealed: an earlier version's read of the minute before stops no wait for this one (review r11).
     const ownOf = (listed: typeof entries) => listed.filter((entry) => entry.log === '0.15' && entry.action === 'secret.read' && entry.key === canary.key
       && entry.project === canary.project && entry.environment === canary.environment
-      && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === 'reveal' && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+      && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === 'reveal' && entry.version === version
+      && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
     // Page back as far as the cover's minute: newer entries of the token's may fill the first page (review r6).
     const recent = async () => {
       const all: typeof entries = [];

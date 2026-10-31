@@ -94,6 +94,40 @@ test("two projectors at once write each read once, and the whole log's check fin
   assert.deepEqual(await checked(), []);
 });
 
+test("a projector another overtook writes nothing: never the reads retention has since dropped with their day, nor their day again (FromChecked, review r11)", async () => {
+  const tick = await signer();
+  await reads(4);
+  await tick();
+  let wrote: boolean | null = null;
+  const real = logStore(db.vault);
+  // A derives its chunk and stops before its write; meanwhile B lists every read, and retention drops their day.
+  const paused = Object.assign(Object.create(real) as typeof real, {
+    writeReads: async (...args: Parameters<typeof real.writeReads>) => {
+      await projectReads(logStore(ENGINE === 'postgres' ? db.owner : db.vault), await keys());
+      assert.equal(await count('log_reads'), 4);
+      const days = await rows<{ at: string | number }>(db.owner, sql`SELECT DISTINCT at FROM log_reads`);
+      const named = [...new Set(days.map((row) => new Date(Number(row.at)).toISOString().slice(0, 10).replaceAll('-', '')))];
+      if (ENGINE === 'postgres') for (const day of named) await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
+      else await run(db.owner, sql`DELETE FROM log_reads`);
+      await run(db.owner, sql`DELETE FROM log_read_days`);
+      wrote = await real.writeReads(...args);
+      return wrote;
+    },
+  });
+  try {
+    await projectReads(paused, await keys());
+    assert.equal(wrote, false);
+    assert.equal(await count('log_reads'), 0);
+    assert.equal(await count('log_read_days'), 0);
+    if (ENGINE === 'postgres') {
+      const today = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+      assert.equal((await rows<{ found: boolean }>(db.owner, sql`SELECT to_regclass(${`public.log_reads_${today}`}) IS NOT NULL AS found`))[0]!.found, false, 'made again');
+    }
+  } finally {
+    if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day((now() AT TIME ZONE 'UTC')::date + d) FROM generate_series(-1, 3) AS d`);
+  }
+});
+
 test("the whole log's check holds the range the projector stopped in, as far as it went: a read deleted there is named", async () => {
   const tick = await signer();
   await reads(3);

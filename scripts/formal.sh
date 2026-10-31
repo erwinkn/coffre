@@ -400,6 +400,7 @@ REMOVALS=(
   "Reads CursorMac LagShown"
   "Reads CountChecked DeletionDetected"
   "ReadsRace IdempotentByNumber NoDuplicate"
+  "ReadsRetain FromChecked RetiredStayGone"
   "ReadsProbe DeriveFromSealed ProjectionMatchesReplayOrFlagged"
   "ReadsSeal ProjectorApart SealNeverWaitsOnProjection"
   "ReadsSeal ProjectorApart ChangeAnswered"

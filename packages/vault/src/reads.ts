@@ -73,10 +73,13 @@ export type ReadsStore = Pick<LogReader, 'tiles'> & {
    * numbered below `below`; null for none.
    */
   objects(asked: readonly { object: string; below: bigint; first: boolean }[]): Promise<Sealed[]>;
-  /** The reads' days these are (`make_reads_day` on Postgres), once a store: a log older than the days made ahead holds uses of others. */
-  makeReadsDays(days: readonly string[]): Promise<void>;
-  /** The reads, each once by its number, and the cursor on to `cursor`, never back: one write. */
-  writeReads(reads: readonly ReadRow[], cursor: ReadsCursor): Promise<void>;
+  /**
+   * The reads, each once by its number, their days made (`make_reads_day` on Postgres: a log older than the days made
+   * ahead holds uses of others), and the cursor on to `cursor`, never back: one write, and only while the cursor still
+   * stands at `from`, where the chunk started (FromChecked): whether it wrote. A projector another overtook writes
+   * nothing, so never the reads of a day retention has since dropped (review r11).
+   */
+  writeReads(reads: readonly ReadRow[], from: bigint, cursor: ReadsCursor): Promise<boolean>;
   /**
    * What the listing holds of a stretch (`checkReads`): its reads numbered in `(after, upto]` at times in `[from, to]`,
    * each with whether its member's day of it is in `log_read_days` (`dayed`), which their pages read.
@@ -213,10 +216,10 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
     const reads = await derive(store, keys.mac, chunk);
     // Its time, once a range is whole: the pair's, as signed, which every read of it is at or below.
     const moved = chunk.length === left.length ? { through: pair.upto, pair: pair.upto, at: pair.at } : { through: chunk.at(-1)!.number, pair: cursor.pair, at: cursor.at };
+    const from = cursor.through;
     cursor = { ...moved, mac: cursorMac(keys.mac, moved) };
-    // Each read's day there to hold it: uses of a log older than the days made ahead (review r4).
-    await store.makeReadsDays([...new Set(reads.map((read) => new Date(read.at).toISOString().slice(0, 10)))]);
-    await store.writeReads(reads, cursor);
+    // Overtaken: the run ends, and the next starts from where the other left the cursor.
+    if (!(await store.writeReads(reads, from, cursor))) return { through: from, sealed: head.upto, projected };
     projected += reads.length;
   }
   return { through: cursor.through, sealed: head.upto, projected };

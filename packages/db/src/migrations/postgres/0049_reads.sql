@@ -100,10 +100,12 @@ BEGIN
 END
 $$;--> statement-breakpoint
 -- The projector's write: reads, each once (by its time and number), the projector's row put back over any other at its number (a row planted ahead would otherwise make it skip one: formal/Reads.tla, ReplaceOnConflict; two projectors write the same bytes), each member's days of them (`log_read_days`), and the cursor moved on to `p_through`, never back, with the signed pair at or below it whose floor the next read takes (`p_pair`) and its MAC (CursorMac), in one call, after the rows (IdempotentByNumber, CursorAfterRows). One projector's call at a time, the lock taken before any statement reads. None past the newest signed pair's number (ProjectSealedOnly): the projector holds the pair's signatures itself before it asks.
-CREATE FUNCTION project_reads(p_reads jsonb, p_through bigint, p_pair bigint, p_at bigint, p_mac bytea) RETURNS bigint
+-- Only from where the chunk started (`p_from`, FromChecked): a projector another overtook, whose reads retention may since have dropped with their day, writes nothing, nor makes their day again: whether it wrote (review r11: 600 retired reads came back). The days its reads need, made here, once it may write.
+CREATE FUNCTION project_reads(p_reads jsonb, p_from bigint, p_through bigint, p_pair bigint, p_at bigint, p_mac bytea) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
 DECLARE
     sealed bigint;
+    stands bigint;
 BEGIN
     PERFORM pg_advisory_xact_lock(1668244070, 166);
     sealed := (SELECT max(k.upto) FROM public.log_checkpoints k);
@@ -111,12 +113,19 @@ BEGIN
         RAISE EXCEPTION 'reads through % are past the newest pair, %', p_through, sealed USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- The cursor is the migration's one row: gone, nothing is projected, and the pages say so (review r6).
-    IF NOT EXISTS (SELECT 1 FROM public.log_reads_cursor c WHERE c.only_row) THEN
+    stands := (SELECT c.through FROM public.log_reads_cursor c WHERE c.only_row);
+    IF stands IS NULL THEN
         RAISE EXCEPTION 'the reads cursor is gone' USING ERRCODE = 'data_corrupted';
+    END IF;
+    IF stands <> p_from THEN
+        RETURN false;
     END IF;
     IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_reads) r WHERE (r ->> 'number')::bigint > p_through) THEN
         RAISE EXCEPTION 'a read past % is no read it projects', p_through USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    -- Each read's day there to hold it: uses of a log older than the days made ahead (review r4).
+    PERFORM public.make_reads_day(d) FROM (SELECT DISTINCT date '1970-01-01' + ((x ->> 'at')::bigint / 86400000)::integer AS d FROM jsonb_array_elements(p_reads) x) days
+      WHERE to_regclass('public.' || quote_ident('log_reads_' || to_char(d, 'YYYYMMDD'))) IS NULL;
     INSERT INTO public.log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
     SELECT (x ->> 'number')::bigint, (x ->> 'at')::bigint, (x ->> 'credential')::uuid, (x ->> 'purpose')::smallint, x ->> 'principal', (x ->> 'secret')::uuid,
            (x ->> 'environment')::uuid, (x ->> 'project')::uuid, (x ->> 'place')::uuid, (x ->> 'source')::uuid, (x ->> 'sourceEnvironment')::uuid,
@@ -129,7 +138,7 @@ BEGIN
     SELECT DISTINCT x ->> 'principal', ((x ->> 'at')::bigint / 86400000)::integer FROM jsonb_array_elements(p_reads) x
     ON CONFLICT DO NOTHING;
     UPDATE public.log_reads_cursor SET through = p_through, pair = p_pair, at = p_at, mac = p_mac WHERE only_row AND through < p_through;
-    RETURN (SELECT c.through FROM public.log_reads_cursor c WHERE c.only_row);
+    RETURN true;
 END
 $$;--> statement-breakpoint
 -- A member's reads, newest first, below a point, at most `p_take`: their days that hold any, newest first, each day's index read in order until the page is full. However many days the log holds, a page reads its member's days and no other (review r6); weighing the empty days made ahead, the planner would otherwise read a busy member's day whole and sort it (measured, T166).
@@ -151,9 +160,9 @@ BEGIN
     END LOOP;
 END
 $$;--> statement-breakpoint
-REVOKE ALL ON FUNCTION make_reads_day(date), drop_reads_day(date), project_reads(jsonb, bigint, bigint, bigint, bytea),
+REVOKE ALL ON FUNCTION make_reads_day(date), drop_reads_day(date), project_reads(jsonb, bigint, bigint, bigint, bigint, bytea),
     log_reads_by(text, bigint, bigint, integer) FROM PUBLIC;--> statement-breakpoint
-GRANT EXECUTE ON FUNCTION make_reads_day(date), drop_reads_day(date), project_reads(jsonb, bigint, bigint, bigint, bytea) TO coffre_vault;--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION make_reads_day(date), drop_reads_day(date), project_reads(jsonb, bigint, bigint, bigint, bigint, bytea) TO coffre_vault;--> statement-breakpoint
 GRANT EXECUTE ON FUNCTION log_reads_by(text, bigint, bigint, integer) TO coffre_app;--> statement-breakpoint
 GRANT SELECT ON log_reads, log_read_days, log_reads_cursor TO coffre_vault, coffre_app, coffre_backup;--> statement-breakpoint
 -- The pairs' places and times, for the pages to say how far behind the projection is: public, as the notes are.
