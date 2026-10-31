@@ -170,7 +170,7 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
      purpose: 'signin' | 'enroll';
      // What GitHub vouched for: the account, and for a first sign-in the one verified email that
      // matched an invitation. Never the whole list: the cookie stays under 1 KB sealed.
-     account: { provider: string; subject: string; email: string | null; name: string | null }; // name cut to 100 characters
+     account: { provider: string; issuerHash: string; subject: string; email: string | null; name: string | null }; // name cut to 100 characters
      principal: string;             // 'user:admin@acme.example'
      generation: number;
      next: string;                  // where to land, a path of at most 512 characters, or '/projects'
@@ -191,7 +191,14 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
    same origin as every other. coffre opens the cookie, reads the passkey
    the assertion names (its key and counter), checks the assertion (section
    7), and runs today's `completeSignin` from the cookie's `account`, which
-   re-reads and re-checks everything it decides on. Inside its transaction,
+   re-reads and re-checks everything it decides on. The account's
+   `issuerHash` is the issuer that verified it, sealed at the callback:
+   `completeSignin` would otherwise take the issuer from the configuration
+   as it is now, so a deployment that replaced the issuer behind the same
+   provider ID within those five minutes would have one issuer's proof
+   bound as the other's. A sealed hash that no longer matches the
+   configured provider's refuses the sign-in (`state_mismatch`), and the
+   person starts again. Inside its transaction,
    before the session is written, it moves the passkey's counter and replay
    mark (section 7.3), conditional on the passkey still being live and
    still Ada's, at the generation `completeSignin` resolved. The session
@@ -1242,6 +1249,9 @@ running `passkeys: 'required'`:
     after releases nothing, on each path.
 27. The configured Owner of check 22 signs in again with the passkey added
     there.
+28. A pending sign-in or enrollment whose provider's issuer the deployment
+    replaced, under the same provider ID, before the passkey answered,
+    completes nothing.
 
 ## 14. Build plan (phase 2, after 0.15)
 
