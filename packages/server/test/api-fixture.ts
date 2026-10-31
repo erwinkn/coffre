@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
@@ -7,7 +10,7 @@ import type { Through, UseInput, UseOutcome, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
-import { localVault, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
+import { localVault, runCheckpointer, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
@@ -46,6 +49,13 @@ export type TestVault = SpeakingVault<Vault> & {
   /** Move the vault's clock, for expiry and the bulk limit. */
   advance(ms: number): void;
   reset(): Promise<void>;
+  /**
+   * 0.15's reads as the audit pages list them, once the log is sealed and the
+   * vault's projector has gone that far (T166): a checkpointer of its own,
+   * under the vault's signing key, ticks once, then the projector runs to its
+   * newest pair. Nothing under 0.14's log.
+   */
+  listReads(): Promise<void>;
 };
 
 /** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
@@ -333,6 +343,18 @@ export function testVault(
     async reset() {
       current = null;
       offset = 0;
+    },
+    async listReads() {
+      if (log.log !== '0.15') return;
+      const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
+      const signer = await runCheckpointer({ database: await openVaultDatabase(), seed: config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64'), memory: join(memory, 'memory'), intervalMs: 3_600_000 });
+      try {
+        await signer.checkpointer.tick();
+        await signer.projected();
+      } finally {
+        await signer.stop();
+        rmSync(memory, { recursive: true, force: true });
+      }
     },
   } as TestVault;
   vaults.add(vault);

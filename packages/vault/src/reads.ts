@@ -251,17 +251,20 @@ async function derive(store: ReadsStore, mac: Buffer, entries: readonly LogEntry
 export const NOWHERE = '00000000-0000-0000-0000-000000000000';
 
 /**
- * The projector as a host runs it, beside its checkpointer (checkpointer-node.ts, checkpointer-workers.ts): `kick` after
- * each tick starts a run unless one is going, and returns at once, so that no tick, seal, change or use ever waits on
- * it (formal/Reads.tla, SealNeverWaitsOnProjection). Each run opens the store it reads and writes, a connection of its
- * own on Workers, so that its statements never queue behind the tick's; goes some steps; and lets go. A failure is an
- * alarm, said once while it stands; the pages show the lag meanwhile.
+ * The projector as a host runs it, apart from its checkpointer: on Node,
+ * `kick` after each tick starts a run unless one is going, and returns at
+ * once (checkpointer-node.ts); on Workers, an object of its own runs it on
+ * its own alarm (checkpointer-workers.ts). Either way no tick, seal, change
+ * or use ever waits on it (formal/Reads.tla, SealNeverWaitsOnProjection).
+ * Each run opens the store it reads and writes, goes some steps, and lets
+ * go. A failure is an alarm, said once while it stands; the pages show the
+ * lag meanwhile.
  */
 export class Projector {
   readonly #open: () => Promise<{ store: ReadsStore; close(): Promise<void> }>;
   readonly #keys: { verifiers: PairVerifiers; mac: Buffer };
   readonly #alert: (message: string) => void;
-  #running: Promise<void> | null = null;
+  #running: Promise<boolean> | null = null;
   #failed: string | null = null;
   #stopped = false;
 
@@ -273,10 +276,15 @@ export class Projector {
 
   /** Start a run unless one is going or the projector is stopped; never waits on it. */
   kick(): void {
-    if (this.#running !== null || this.#stopped) return;
-    this.#running = this.#run().finally(() => {
+    void this.run();
+  }
+
+  /** A run, or the one going: whether it left sealed uses to project. Never throws. */
+  run(): Promise<boolean> {
+    if (this.#stopped) return Promise.resolve(false);
+    return (this.#running ??= this.#run().finally(() => {
       this.#running = null;
-    });
+    }));
   }
 
   /** The run going, if any, ended: for a host that stops, and for tests. */
@@ -290,16 +298,18 @@ export class Projector {
     await this.#running;
   }
 
-  async #run(): Promise<void> {
+  async #run(): Promise<boolean> {
     let opened: { store: ReadsStore; close(): Promise<void> } | null = null;
     try {
       opened = await this.#open();
-      await projectReads(opened.store, this.#keys);
+      const { through, sealed } = await projectReads(opened.store, this.#keys);
       this.#failed = null;
+      return through < sealed;
     } catch (error) {
       const message = `the reads' projection failed: ${error instanceof Error ? error.message : String(error)}`;
       if (message !== this.#failed) this.#alert(message);
       this.#failed = message;
+      return false;
     } finally {
       await opened?.close().catch(() => {});
     }

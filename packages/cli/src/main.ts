@@ -1993,6 +1993,11 @@ async function audit(args: string[]): Promise<void> {
     const forged = entry.forged === true ? '  FORGED: the vault does not vouch for it' : '';
     process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}${forged}\n`);
   }
+  // 0.15's reads are listed once the vault's projector has caught up with the log, apart from sealing: say when it lags.
+  // An instance before 0.15 sends no `reads`.
+  const reads = result.reads;
+  if (reads?.forged === true) process.stderr.write('Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n');
+  else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? 'none yet'}; newer reads are not listed yet.\n`);
 }
 
 /**

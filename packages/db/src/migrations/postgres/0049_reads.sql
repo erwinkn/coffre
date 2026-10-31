@@ -59,7 +59,7 @@ CREATE INDEX "log_read_places_member_key_idx" ON "log_read_places" USING btree (
 INSERT INTO "log_reads_cursor" ("only_row", "through", "pair", "at") VALUES (true, 0, 0, 0);--> statement-breakpoint
 -- A day of reads and of their places, made as make_day makes one of uses, and beside it.
 CREATE FUNCTION make_reads_day(p_day date) RETURNS text
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
 DECLARE
     lo bigint := (p_day - date '1970-01-01')::bigint * 86400000;
     parent text;
@@ -91,7 +91,7 @@ END
 $$;--> statement-breakpoint
 -- A day of reads dropped, once its uses are gone (retention dropped their day): what is projected of them goes with them.
 CREATE FUNCTION drop_reads_day(p_day date) RETURNS text
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '100ms' AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off SET lock_timeout = '100ms' AS $$
 DECLARE
     parent text;
     name text;
@@ -113,7 +113,7 @@ END
 $$;--> statement-breakpoint
 -- The projector's write: reads and their places, each read once (by its time and number), the projector's row put back over any other at its number (a row planted ahead would otherwise make it skip one: formal/Reads.tla, ReplaceOnConflict; two projectors write the same bytes), and the cursor moved on to `p_through`, never back, with the signed pair at or below it whose floor the next read takes (`p_pair`) and its MAC (CursorMac), in one call, after the rows (IdempotentByNumber, CursorAfterRows). None past the newest signed pair's number (ProjectSealedOnly): the projector holds the pair's signatures itself before it asks.
 CREATE FUNCTION project_reads(p_reads jsonb, p_places jsonb, p_through bigint, p_pair bigint, p_at bigint, p_mac bytea) RETURNS bigint
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
 DECLARE
     sealed bigint := (SELECT max(k.upto) FROM public.log_checkpoints k);
 BEGIN
@@ -150,7 +150,7 @@ $$;--> statement-breakpoint
 -- A page's reads of one place (by the place each is at besides), one member's, one member's at a place, one key's at a place: each its index read newest first, below a point, at most `p_take`. Functions, so that each reads its index in order and stops: weighing the empty days made ahead, the planner would otherwise read a busy place's day whole and sort it (measured, T166). Of a use at three places, the one row kept is the one whose places besides are none of `p_except`.
 CREATE FUNCTION log_reads_in(p_environment uuid, p_partner uuid, p_at bigint, p_number bigint, p_take integer, p_except uuid[])
     RETURNS TABLE (at bigint, number bigint)
-    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET enable_sort = off SET enable_bitmapscan = off AS $$
+    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET jit = off SET enable_sort = off SET enable_bitmapscan = off AS $$
     SELECT p.at, p.number FROM public.log_read_places p
      WHERE p.environment = p_environment AND p.partner = p_partner AND (p.at, p.number) < (p_at, p_number)
        AND (cardinality(p.partners) <= 1 OR NOT (p.partners && p_except))
@@ -158,7 +158,7 @@ CREATE FUNCTION log_reads_in(p_environment uuid, p_partner uuid, p_at bigint, p_
 $$;--> statement-breakpoint
 CREATE FUNCTION log_reads_by_in(p_principal text, p_environment uuid, p_partner uuid, p_at bigint, p_number bigint, p_take integer, p_except uuid[])
     RETURNS TABLE (at bigint, number bigint)
-    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET enable_sort = off SET enable_bitmapscan = off AS $$
+    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET jit = off SET enable_sort = off SET enable_bitmapscan = off AS $$
     SELECT p.at, p.number FROM public.log_read_places p
      WHERE p.principal = p_principal AND p.environment = p_environment AND p.partner = p_partner AND (p.at, p.number) < (p_at, p_number)
        AND (cardinality(p.partners) <= 1 OR NOT (p.partners && p_except))
@@ -166,7 +166,7 @@ CREATE FUNCTION log_reads_by_in(p_principal text, p_environment uuid, p_partner 
 $$;--> statement-breakpoint
 CREATE FUNCTION log_reads_of(p_secret uuid, p_environment uuid, p_partner uuid, p_at bigint, p_number bigint, p_take integer, p_except uuid[])
     RETURNS TABLE (at bigint, number bigint)
-    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET enable_sort = off SET enable_bitmapscan = off AS $$
+    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET jit = off SET enable_sort = off SET enable_bitmapscan = off AS $$
     SELECT p.at, p.number FROM public.log_read_places p
      WHERE p.secret = p_secret AND p.environment = p_environment AND p.partner = p_partner AND (p.at, p.number) < (p_at, p_number)
        AND (cardinality(p.partners) <= 1 OR NOT (p.partners && p_except))
@@ -174,7 +174,7 @@ CREATE FUNCTION log_reads_of(p_secret uuid, p_environment uuid, p_partner uuid, 
 $$;--> statement-breakpoint
 CREATE FUNCTION log_reads_by_of(p_principal text, p_secret uuid, p_environment uuid, p_partner uuid, p_at bigint, p_number bigint, p_take integer, p_except uuid[])
     RETURNS TABLE (at bigint, number bigint)
-    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET enable_sort = off SET enable_bitmapscan = off AS $$
+    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET jit = off SET enable_sort = off SET enable_bitmapscan = off AS $$
     SELECT p.at, p.number FROM public.log_read_places p
      WHERE p.principal = p_principal AND p.secret = p_secret AND p.environment = p_environment AND p.partner = p_partner AND (p.at, p.number) < (p_at, p_number)
        AND (cardinality(p.partners) <= 1 OR NOT (p.partners && p_except))
@@ -182,7 +182,7 @@ CREATE FUNCTION log_reads_by_of(p_principal text, p_secret uuid, p_environment u
 $$;--> statement-breakpoint
 CREATE FUNCTION log_reads_by(p_principal text, p_at bigint, p_number bigint, p_take integer)
     RETURNS TABLE (at bigint, number bigint)
-    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET enable_sort = off SET enable_bitmapscan = off AS $$
+    LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp SET jit = off SET enable_sort = off SET enable_bitmapscan = off AS $$
     SELECT r.at, r.number FROM public.log_reads r
      WHERE r.principal = p_principal AND (r.at, r.number) < (p_at, p_number)
      ORDER BY r.at DESC, r.number DESC LIMIT p_take

@@ -1009,6 +1009,7 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
 
   // Whoever owns the database deletes the credential's row: the log still leads from the read to its run.
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
+  await deps.vault.listReads();
   const { entries } = await root.audit.list({ detail: '1', sealed: '1' });
   // Its sign-in, 0.14's `token.exchange` entry or, with 0.15's log, its change (D147), which the page lists in that
   // entry's place (T156); and every read it shows, the refused one included, with the run.

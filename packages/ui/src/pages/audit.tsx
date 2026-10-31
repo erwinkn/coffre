@@ -15,6 +15,7 @@ import {
 } from '../lib/audit-sentences';
 import { absolute, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
 import { memberName, Sentence } from '../components/audit-sentence';
+import { ReadsLag } from '../components/actions-log';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
@@ -158,6 +159,8 @@ export function AuditPage() {
           </Link>
         )}
       </div>
+
+      <ReadsLag reads={result.reads} />
 
       <section className="card card-wide" aria-label="Audit entries">
         {shown.length === 0 ? (

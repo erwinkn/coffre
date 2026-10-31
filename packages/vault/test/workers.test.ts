@@ -232,6 +232,10 @@ test('each call opens one connection at most: on Cloudflare, a call that opened 
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
+    // Each object's connection its own, opened before the calls counted: the checkpointer's at its start, the reads'
+    // projector's at its first alarm.
+    for (const deadline = Date.now() + 10_000; database.opened < 2 && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(database.opened, 2, "the checkpointer's connection and the projector's");
     // A fresh isolate's first calls settle its keys and make root the bootstrap Owner: the most queries a call makes.
     const calls: [string, ...unknown[]][] = [
       ['access', ROOT],

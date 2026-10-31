@@ -11,6 +11,13 @@
 // checkpointer()`, beside `vault(…)`); the vault starts it, from each
 // isolate's first call (cloudflare.ts). Asked with `fetch`, as the anchor
 // and the gates are.
+//
+// The reads' projector (reads.ts, T166) is another object of the same class,
+// named `reads` (`startProjector`), which its storage says it is: its own
+// alarm, its own invocation and its own connection, so that no invocation
+// ever holds two connections (a Worker that opened several at once was
+// cancelled as hung, AGENTS.md), and a projection behind, or failing, delays
+// no tick, no seal, no change and no use (formal/Reads.tla).
 import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
@@ -85,11 +92,9 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #pool: HyperdrivePool | null = null;
     /** The log's upkeep after each tick (log-checkpointer.ts), with the checkpointer it was opened with. */
     #upkeep: (() => Promise<void>) | null = null;
-    /**
-     * The reads' projection (reads.ts, T166), kicked after each tick and never awaited: each run opens a Hyperdrive
-     * connection of its own, so that none of its statements queues behind the tick's, and a projection behind lags
-     * the audit pages, never a seal.
-     */
+    /** Whether this object is the reads' projector, as its storage says (`startProjector`); asked once. */
+    #projects: boolean | null = null;
+    /** The projector, on a connection of its own for as long as the object lives, as the checkpointer's. */
     #projector: Projector | null = null;
     /** The day the next days of uses were last made for without the checkpointer (`#makeDays`), when it last tried, and its failure. */
     #daysFor: string | null = null;
@@ -126,14 +131,6 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             record: (alarm) => this.#record(alarm),
           });
           this.#checkpointer = checkpointer;
-          const closeIdleMs = s.closeIdleMs ?? 10_000;
-          this.#projector = new Projector(async () => {
-            const own = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs });
-            return { store: logStore(createDatabase(own)), close: () => own.end() };
-          }, await verifierKeys([s.seed]), (message) => {
-            console.warn(`coffre audit: ${message}`);
-            void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
-          });
           this.#upkeep = upkeep(checkpointer, store, {
             keepDays: s.retainDays ?? null,
             seed: s.seed,
@@ -168,13 +165,10 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
      */
     async #reset(): Promise<void> {
       await this.#state.blockConcurrencyWhile(async () => {
-        const [old, pool, projector] = [this.#checkpointer, this.#pool, this.#projector];
+        const [old, pool] = [this.#checkpointer, this.#pool];
         this.#checkpointer = null;
         this.#pool = null;
         this.#upkeep = null;
-        this.#projector = null;
-        // Not waited for: its own connection, and a run going on beside the next checkpointer writes each read once.
-        void projector?.stop();
         await old?.close();
         await pool?.end().catch(() => {});
       });
@@ -217,7 +211,38 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
       }
     }
 
+    /**
+     * The projector's run: some steps of `projectReads`, then the next alarm, a tick later, or at once while a run
+     * leaves sealed uses to project. A failure is an alarm, said once while it stands (`Projector`), and the next
+     * tick tries again, on the same connection, which postgres.js opens again when it is lost.
+     */
+    async #project(): Promise<void> {
+      let more = false;
+      try {
+        if (this.#projector === null) {
+          const s = await settings(this.#env);
+          const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
+          const store = logStore(createDatabase(pool));
+          this.#projector = new Projector(async () => ({ store, close: async () => {} }), await verifierKeys([s.seed]), (message) => {
+            console.warn(`coffre audit: ${message}`);
+            void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
+          });
+        }
+        more = await this.#projector.run();
+      } catch (error) {
+        this.#projector = null;
+        await this.#failure(`the reads' projection cannot open: ${reasonOf(error)}`);
+      } finally {
+        await this.#state.storage.setAlarm(Date.now() + (more ? 0 : TICK_MS));
+      }
+    }
+
+    async #isProjector(): Promise<boolean> {
+      return (this.#projects ??= (await this.#state.storage.get<string>('role')) === 'reads');
+    }
+
     async alarm(): Promise<void> {
+      if (await this.#isProjector()) return this.#project();
       try {
         const checkpointer = await this.#open();
         if (checkpointer === null) return await this.#makeDays();
@@ -226,7 +251,6 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
-        this.#projector?.kick();
         await this.#upkeep?.();
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
@@ -240,7 +264,17 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
 
     async fetch(request: Request): Promise<Response> {
       try {
-        const call = (await request.json()) as { op: 'start' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' } | { op: 'remembered' };
+        const call = (await request.json()) as { op: 'start' } | { op: 'project' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' } | { op: 'remembered' };
+        if (call.op === 'project') {
+          // The reads' projector from now on, its role kept for when it wakes evicted, and its alarm set.
+          if (!(await this.#isProjector())) {
+            await this.#state.storage.put('role', 'reads');
+            this.#projects = true;
+          }
+          if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
+          return Response.json({ ok: true });
+        }
+        if (await this.#isProjector() && call.op !== 'alarms') return new Response('the reads\' projector seals nothing', { status: 400 });
         if (call.op === 'start') {
           // The alarm first, whether it opens or not: refused, each tick tries again and makes the next days of uses meanwhile.
           if ((await this.#state.storage.getAlarm()) === null) await this.#state.storage.setAlarm(Date.now() + TICK_MS);
@@ -304,6 +338,14 @@ export function durableSealThrough(namespace: ObjectNamespace, name = 'checkpoin
 /** Starts the object's ticks, once; again is harmless. Throws when it cannot open, its alarm set all the same. */
 export async function startCheckpointer(namespace: ObjectNamespace, name = 'checkpointer'): Promise<void> {
   await ask(namespace, name, { op: 'start' });
+}
+
+/**
+ * Starts the reads' projector (reads.ts, T166): the object of the same class named `name`, which projects from then
+ * on, on its own alarm. Again is harmless.
+ */
+export async function startProjector(namespace: ObjectNamespace, name = 'reads'): Promise<void> {
+  await ask(namespace, name, { op: 'project' });
 }
 
 /** The object's head and its last ticks, each with its barrier, write and wall time. */

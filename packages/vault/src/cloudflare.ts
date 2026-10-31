@@ -46,7 +46,7 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import type { Witness } from './checkpointer.ts';
-import { checkpointerObject, durableHeldOutside, durableSealThrough, startCheckpointer, type ObjectNamespace } from './checkpointer-workers.ts';
+import { checkpointerObject, durableHeldOutside, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -236,6 +236,9 @@ function checked(config: WorkersVaultConfig): { hotDatabase: PostgresDatabase; c
  * needs no checkpointer, and a change fails on its seal.
  */
 async function start(entry: Ready): Promise<void> {
+  // The reads' projector beside it (T166), an object of its own, which opens nothing to start: one that fails to is
+  // started by the next isolate's first call, and the audit pages say how far behind their reads are meanwhile.
+  const projecting = startProjector(entry.checkpointer).catch((error: Error) => console.warn(`coffre vault: the reads' projector did not start: ${error.message}`));
   try {
     await startCheckpointer(entry.checkpointer);
     entry.started = true;
@@ -244,6 +247,7 @@ async function start(entry: Ready): Promise<void> {
     else entry.failed = Date.now();
     console.warn(`coffre vault: ${(error as Error).message}`);
   }
+  await projecting;
 }
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */
@@ -265,5 +269,5 @@ export function checkpointer() {
   });
 }
 
-export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer, type ObjectNamespace } from './checkpointer-workers.ts';
+export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
 export { durableWitness, r2Archive, witnessObject as witness, type WitnessSettings } from './witness-workers.ts';
