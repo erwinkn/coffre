@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
+import { isUnsealed } from '@coffre/core/vault';
 
-import { Checkpointer, FRESH_MS, heldIn, localWitness, Refused, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, type Witness } from '../src/checkpointer.ts';
 import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
 
@@ -372,12 +373,13 @@ test('PR 8 review r4: a change whose proof the database answers wrongly for is r
   };
   await assert.rejects(cp.sealThrough(number), /cannot be proved in the signed changes tree: use 9 is in none/);
   assert.ok(alerts.some((a) => /cannot be proved in the signed changes tree/.test(a)));
-  // A failure of the database's to answer at all (a connection dropped) is no refusal: it goes through, no alarm.
+  // A failure of the database's to answer at all (a connection dropped) is no refusal: the change, committed, is not
+  // sealed in time (T169), the app's 503, and no alarm.
   const before = alerts.length;
   store.locate = async () => {
     throw new Error('Connection terminated unexpectedly');
   };
-  await assert.rejects(cp.sealThrough(number), /^Error: Connection terminated unexpectedly$/);
+  await assert.rejects(cp.sealThrough(number), (error: Error) => error instanceof Unsealed && isUnsealed(error) && /Connection terminated unexpectedly/.test(error.message));
   assert.equal(alerts.length, before);
 });
 
@@ -877,4 +879,68 @@ test('PR 8 reviews r1, r4 (W240): above the newest pair a walk reads at most `ab
   const behind = await verify(store, k, { anchors: [signed], above: 3 });
   assert.ok(behind.behind && !behind.ok, behind.problems.join('\n'));
   assert.deepEqual([read, behind.unsealed], [0, 0]);
+});
+
+test('T169: a tick whose barrier never answers stalls within its bound; a change answers unsealed, the stalled tick lands nothing once the database answers, and another checkpointer seals on, its late barrier no alarm', async () => {
+  const { k, store, memory, alerts } = await setup();
+  const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 100, sealWaitMs: 300 });
+  const cp = await open();
+  await traffic(store, cp, 2);
+  // The next barrier does not answer until let go: a connection gone dead, a lock never let go.
+  let release!: () => void;
+  let gate: Promise<void> | null = new Promise<void>((resolve) => (release = resolve));
+  const close = store.close.bind(store);
+  store.close = async (after, from) => {
+    const held = gate;
+    gate = null;
+    if (held !== null) await held;
+    return close(after, from);
+  };
+  const change = store.append('changes', 'revoke');
+  let t0 = performance.now();
+  await assert.rejects(cp.tick(), Stalled);
+  assert.ok(performance.now() - t0 < 1000, `stalled after ${performance.now() - t0} ms`);
+  // Stalled, it seals nothing more: the change, committed, answers unsealed, at once.
+  t0 = performance.now();
+  await assert.rejects(cp.sealThrough(change), (error: Error) => error instanceof Unsealed && isUnsealed(error));
+  assert.ok(performance.now() - t0 < 100);
+  // Another opens over the same memory while the stalled tick still waits, and seals the change.
+  const next = await open();
+  assert.equal((await next.sealThrough(change)).proof.number, change);
+  const [record, writes] = [memory.record, store.writes];
+  // The database answers: the stalled tick reads its window and raises the floor (a late barrier), and is refused at
+  // its fence before it remembers or writes anything.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(memory.record, record, 'its memory is the new checkpointer\'s');
+  assert.equal(store.writes, writes, 'nothing written');
+  // The floor it raised is no higher than the next barrier's own: no alarm, and the next tick seals.
+  store.append('uses', 'after');
+  const t = await next.tick();
+  assert.ok(t.signed, t.failures.join('; '));
+  assert.deepEqual(alerts.filter((a) => /floor/.test(a)), []);
+  const v = await verify(store, k, { anchors: [decodePair(memory.record!)!] });
+  assert.ok(v.ok, v.problems.join('\n'));
+});
+
+test('T169: a seal waits at most its bound on ticks that do not end, and a tick queued behind a stalled one answers as soon as it stalls', async () => {
+  const { k, store, memory, alerts } = await setup();
+  const cp = await Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 400, sealWaitMs: 150 });
+  await traffic(store, cp, 1);
+  store.close = () => new Promise(() => {});
+  const change = store.append('changes', 'revoke');
+  const ticking = cp.tick();
+  const queued = cp.tick();
+  let t0 = performance.now();
+  await assert.rejects(cp.sealThrough(change), (error: Error) => error instanceof Unsealed && /did not end within/.test(error.message));
+  assert.ok(performance.now() - t0 < 300, `the seal answered after ${performance.now() - t0} ms`);
+  t0 = performance.now();
+  await assert.rejects(ticking, Stalled);
+  await assert.rejects(queued, Stalled);
+  assert.ok(performance.now() - t0 < 600);
+  // Closed by its host: at once, the stalled tick's work fenced.
+  t0 = performance.now();
+  await cp.close();
+  assert.ok(performance.now() - t0 < 100);
 });

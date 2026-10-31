@@ -401,7 +401,7 @@ function pastFloors(store: LogStore, floors: number[]): LogStore {
     close: async (after: bigint, from: number) => {
       const real = await store.close(after, from);
       const set = floors.shift();
-      const floor = set !== undefined ? { found: last ?? real.floor.found, set } : { found: last ?? real.floor.found, set: real.floor.set };
+      const floor = { found: last ?? real.floor.found, set: set ?? real.floor.set, ceiling: real.floor.ceiling };
       last = set ?? null;
       return { ...real, floor };
     },

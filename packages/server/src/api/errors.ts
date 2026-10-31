@@ -1,3 +1,4 @@
+import { isUnsealed } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { gaveUp, isUnavailable } from '@coffre/db/dialect';
@@ -144,6 +145,12 @@ export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; tr
  */
 export const UNAVAILABLE_RETRY_AFTER = '5';
 
+/**
+ * What a change is told when it committed but its seal did not come in time
+ * (T169; R51): it is in force, and nothing says so yet but the log.
+ */
+export const UNSEALED_MESSAGE = 'coffre made this change, but could not seal it in its audit log in time; it will once it can. Check before you make it again';
+
 /** The status and body for anything a handler throws. */
 export function toErrorBody(error: unknown): { status: number; body: ErrorBody } {
   if (error instanceof ApiError) {
@@ -162,6 +169,11 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       status: 400,
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
+  }
+  // A change committed whose seal did not come in time (T169): the vault's checkpointer stalled or did not answer.
+  if (isUnsealed(error)) {
+    console.error('a change was not sealed in time', logged(error));
+    return { status: 503, body: { error: 'unavailable', message: UNSEALED_MESSAGE } };
   }
   // The database not answering, the vault's behind its call, or a key service's: the request was fine, and may be
   // asked again; a write whose connection dropped may have committed, which a look at it says. A statement that gave

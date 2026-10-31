@@ -206,6 +206,12 @@
 (*                         nothing (a floor a writer lowered would let a   *)
 (*                         use in below it, which the next checkpoint's    *)
 (*                         `at` scan misses);                              *)
+(*   BarrierAcceptsLate    ... or above it, but no higher than this        *)
+(*                         barrier's own clock less D: what a barrier of a *)
+(*                         signer given up on (T169) leaves when it lands  *)
+(*                         late, which the next barrier raises past anyway *)
+(*                         (LateBarrier); without, one such barrier stops  *)
+(*                         every checkpoint after it (CheckpointsGoOn);    *)
 (*   WorkerHonoursDeadline the Worker answers 503 at the deadline, and a   *)
 (*                         value whose call returns later never leaves;    *)
 (*   PrincipalLocks        a key that enters the cap's set takes the       *)
@@ -290,6 +296,7 @@ CONSTANTS
     MaxRestores,     \* restores from a backup in a behaviour
     Holds,           \* Hyperdrive may hold a call and never run it
     FloorTampers,    \* the writer's tampering (MaxTampers) may lower the floor of `at` instead of a row
+    LateBarriers,    \* a barrier of a checkpointer given up on may land late, any number of times (T169)
     Failures,        \* a call may fail before its commit, or its Worker die after it
     Keys,            \* the keys one principal asks for; {}: no bulk cap
     MaxTime,         \* Postgres's clock runs 0..MaxTime
@@ -301,7 +308,7 @@ CONSTANTS
     UseLocks, StatementSnapshot, UseNumberUnderLock, ChangeLocks, ChangeNumberUnderLock,
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
-    ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
+    ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, BarrierAcceptsLate, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
     PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, Slack, DeadlineSlack,
     AheadSlack, CapFromPolicy, CapSealed,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
@@ -951,7 +958,8 @@ CheckpointClose ==
     /\ Cardinality(signed) < MaxCheckpoints
     /\ bar + 1 >= Len(BarrierLocks)
     /\ Len(BarrierLocks) > 0 => LockOpen(BarrierLocks[Len(BarrierLocks)])
-    /\ BarrierChecksFloor => floor = lastFloor
+    /\ BarrierChecksFloor => \/ floor = lastFloor
+                             \/ BarrierAcceptsLate /\ lastFloor < floor /\ floor <= pnow - D
     /\ floor' = Max(floor, pnow - D)
     /\ cp' = [open |-> TRUE, from |-> lastUpto, upto |-> nextSeq - 1, readFloor |-> lastFloor, floor |-> Max(floor, pnow - D)]
     /\ holder' = IF holder = "barrier" THEN None ELSE holder
@@ -959,6 +967,16 @@ CheckpointClose ==
     /\ bar' = 0
     /\ UNCHANGED <<log, nextSeq, shared, plock, u, c, answered, released, lastUpto, lastFloor, signed, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, ishared>>
+
+\* A barrier of a checkpointer given up on (T169): its statement was in flight when the host stopped waiting for it, and
+\* runs when its locks are free, as late as it likes, raising the floor as any barrier does. Nothing reads its window
+\* or signs it. As many times as it likes: the floor only follows the clock.
+LateBarrier ==
+    /\ LateBarriers
+    /\ LockFree /\ iholder = None /\ ishared = {}
+    /\ floor' = Max(floor, pnow - D)
+    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Later, outside any lock: it reads the window (the changes by number, the uses through the `at`
 \* index from the previous barrier's floor) and signs their numbers.
@@ -1063,7 +1081,7 @@ Next ==
     \/ \E x \in Uses : UseStart(x) \/ UseHold(x) \/ UseResume(x) \/ UseStep(x) \/ UseFail(x) \/ UseCrash(x)
     \/ \E h \in Changers : ChangeStep(h) \/ ChangeAbort(h)
     \/ \E i \in Issuers : IssueStep(i) \/ IssueFail(i)
-    \/ BarrierLock \/ CheckpointClose \/ CheckpointSign
+    \/ BarrierLock \/ CheckpointClose \/ CheckpointSign \/ LateBarrier
     \/ Flush \/ Crash \/ Tamper \/ TamperFloor \/ Restore
 
 Spec == Init /\ [][Next]_vars
@@ -1194,5 +1212,11 @@ UseAnswered ==
 \* Every change that starts is answered.
 ChangeAnswered ==
     \A h \in Changers : \A n \in 0..(MaxChanges - 1) : (c[h].pc = "started" /\ c[h].n = n) ~> c[h].n > n
+
+MaxSeq == Cardinality(Uses) + Cardinality(Changers) * MaxChanges + Cardinality(Issuers)
+
+\* Every number handed out is closed by a checkpoint, while the scenario has checkpoints left to sign.
+CheckpointsGoOn ==
+    \A n \in 1..MaxSeq : nextSeq > n ~> (lastUpto >= n \/ Cardinality(signed) >= MaxCheckpoints)
 
 =============================================================================

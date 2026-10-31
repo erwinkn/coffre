@@ -2,9 +2,10 @@ import { appendFile, open, readFile, rename, stat, writeFile } from 'node:fs/pro
 import { dirname } from 'node:path';
 
 import type { PairNotes } from '@coffre/core/merkle';
+import type { Sealing } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
-import { heldIn, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
+import { Fence, heldIn, sealingOf, Stalled, TICK_BOUND_MS, Unsealed, within, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { Projector } from './reads.ts';
 import { verifierKeys } from './verifier.ts';
@@ -14,7 +15,9 @@ import { logStore } from './log-store.ts';
  * The 0.15 checkpointer on Node (docs/design/audit-tree.md): one process
  * seals the log every 500 ms, its memory a file beside the vault, synced
  * before the database has the pair it holds (RememberFirst). The vault's
- * process runs it (`keepCheckpointer`, node.ts).
+ * process runs it (`keepCheckpointer`, node.ts). Nothing it awaits is
+ * unbounded (T169): a tick past its bound stalls the checkpointer, and the
+ * vault's process opens another.
  */
 
 /** The signer's memory in a file: written whole, synced, renamed over the last, and the directory synced, so a power loss keeps it. */
@@ -53,8 +56,14 @@ export type RunningCheckpointer = {
   heldOutside(): Promise<PairNotes[]>;
   /** The reads' projection run until it stands at the newest pair (T166): for tests and tools, never on a request's path. */
   projected(): Promise<void>;
+  /** Whether it seals (`Vault.sealing`): ticking, its last tick ended well, lately. */
+  sealing(): Sealing;
   stop(): Promise<void>;
 };
+
+/** How long the runner waits on an open, the next days of uses, or the log's upkeep after a tick (T169). */
+const OPEN_BOUND_MS = TICK_BOUND_MS;
+const UPKEEP_BOUND_MS = 60_000;
 
 /**
  * Opens the checkpointer over `database` (the vault's login) and ticks it
@@ -73,19 +82,27 @@ export async function runCheckpointer(options: {
   tileRange?: number;
   /** Full days of uses kept before today's; null keeps every day (retention.ts). */
   retainDays?: number | null;
+  /** Told once its checkpointer stalls (T169), which ticks no more: `keepCheckpointer` opens another. */
+  stalled?: (why: string) => void;
+  /** `TICK_BOUND_MS`, for the tests. */
+  tickBoundMs?: number;
 }): Promise<RunningCheckpointer> {
   const alarmsPath = `${options.memory}.alarms`;
   let appending: Promise<void> = Promise.resolve();
   const store = logStore(options.database, { tileRange: options.tileRange });
-  // The next days of uses first: a use needs its day's partition even if the checkpointer then refuses to open.
-  await store.makeDays(daysAround(Date.now()));
-  const checkpointer = await openLogCheckpointer({
+  // The next days of uses first: a use needs its day's partition even if the checkpointer then refuses to open. Each
+  // bounded (T169); an open past its bound fenced, so that it does nothing more once another opens.
+  await within(store.makeDays(daysAround(Date.now())), OPEN_BOUND_MS, 'making the next days of uses');
+  const fence = new Fence();
+  const checkpointer = await within(openLogCheckpointer({
     store,
     seed: options.seed,
     memory: fileMemory(options.memory),
     witnesses: options.witnesses,
     record: (alarm) => record(alarm),
-  });
+    fence,
+    ...(options.tickBoundMs === undefined ? {} : { tickBoundMs: options.tickBoundMs }),
+  }), OPEN_BOUND_MS, 'the open', () => void fence.close('its open stalled'));
   /** In order, one after the other; a file grown past a megabyte keeps its last 30 days. */
   function record(alarm: Alarm): Promise<void> {
     appending = appending.then(async () => {
@@ -98,7 +115,8 @@ export async function runCheckpointer(options: {
     }).catch((error: Error) => console.warn(`coffre audit: an alarm could not be kept: ${error.message}`));
     return appending;
   }
-  const keep = upkeep(checkpointer, store, {
+  // Behind the checkpointer's fence: an upkeep still running once it stalled does nothing beside the next one's.
+  const keep = upkeep(checkpointer, fence.store(store), {
     keepDays: options.retainDays ?? null,
     seed: options.seed,
     alert: (message) => {
@@ -119,18 +137,39 @@ export async function runCheckpointer(options: {
   let ticking: Promise<unknown> = Promise.resolve();
   // A tick that throws (a failed write may be a tamper signal: a tile changed under the signer) is an alarm, kept once.
   let failed: string | null = null;
+  // The last tick that ended, for readiness; and whether the checkpointer stalled, which ends the loop.
+  let last: { at: number; failures: string[] } | null = null;
+  let stalled = false;
+  // The upkeep, bounded: one past its bound goes on behind the next ticks, and none starts beside it. Its connection
+  // is the vault's pool's, which the runner does not cut.
+  let upkeeping: Promise<void> | null = null;
+  const upkeepOnce = async () => {
+    if (upkeeping !== null) return;
+    const run = (upkeeping = keep().finally(() => {
+      if (upkeeping === run) upkeeping = null;
+    }));
+    await within(run, UPKEEP_BOUND_MS, "the log's upkeep").catch((error: Error) => console.warn(`coffre audit: ${error.message}`));
+  };
   // The upkeep after a tick that held; after one refused, only the next days (retention would fail on it, alarmed again).
   const loop = () => {
-    ticking = checkpointer.tick().then(() => ((failed = null), projector.kick(), keep()), async (error: Error) => {
+    ticking = checkpointer.tick().then((t) => {
+      failed = null;
+      last = { at: Date.now(), failures: t.failures };
+      projector.kick();
+      return upkeepOnce();
+    }, async (error: Error) => {
       const message = `a checkpoint failed: ${reasonOf(error)}`;
       if (message !== failed) {
         failed = message;
         console.warn(`coffre audit: ${message}`);
         await record({ at: Date.now(), message });
       }
-      await store.makeDays(daysAround(Date.now())).catch(() => {});
+      // A checkpointer that stalled (T169) ticks no more: its keeper opens another.
+      if (error instanceof Stalled) stalled = true;
+      await within(store.makeDays(daysAround(Date.now())), OPEN_BOUND_MS, 'making the next days of uses').catch(() => {});
     }).finally(() => {
-      if (!stopped) timer = setTimeout(loop, interval);
+      if (stalled) options.stalled?.(failed!);
+      else if (!stopped) timer = setTimeout(loop, interval);
     });
   };
   loop();
@@ -151,6 +190,7 @@ export async function runCheckpointer(options: {
       }
       throw new Error("the reads' projection did not catch up with the newest pair");
     },
+    sealing: () => sealingOf({ open: !stalled && !stopped, failed, last }),
     async alarms(since = 0) {
       await appending;
       return (await readAlarms(alarmsPath)).filter((a) => a.at >= since);
@@ -184,7 +224,7 @@ async function readAlarms(path: string): Promise<Alarm[]> {
 /** How long after a refused open the vault's checkpointer tries again (`keepCheckpointer`). */
 const OPEN_AGAIN_MS = 10_000;
 
-export type KeptCheckpointer = Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside' | 'alarms' | 'stop'>;
+export type KeptCheckpointer = Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside' | 'alarms' | 'sealing' | 'stop'>;
 
 /**
  * The checkpointer as the vault's process keeps it: `runCheckpointer`, tried
@@ -192,7 +232,8 @@ export type KeptCheckpointer = Pick<RunningCheckpointer, 'sealThrough' | 'heldOu
  * restore, docs/restore.md; the database out of reach), each try making the
  * next days of uses first, so that uses go on; its failure an alarm, kept
  * once while it stands. Meanwhile a change's seal fails with why, as on
- * Workers, and the pair held outside is read from the file as ever.
+ * Workers, and the pair held outside is read from the file as ever. One
+ * that stalls (T169) is stopped, fenced, and another opened a tick later.
  */
 export async function keepCheckpointer(options: Parameters<typeof runCheckpointer>[0] & { retryMs?: number }): Promise<KeptCheckpointer> {
   let running: RunningCheckpointer | null = null;
@@ -202,7 +243,18 @@ export async function keepCheckpointer(options: Parameters<typeof runCheckpointe
   const alarmsPath = `${options.memory}.alarms`;
   const tryOpen = async (): Promise<void> => {
     try {
-      running = await runCheckpointer(options);
+      const opened: RunningCheckpointer = await runCheckpointer({
+        ...options,
+        // Its stop waits for the memory writes it sent (its fence); then another opens, as after a refused open.
+        stalled: (why) => {
+          if (running === opened) running = null;
+          failed = why;
+          void opened.stop().finally(() => {
+            if (!stopped) timer = setTimeout(() => void (trying = tryOpen()), TICK_MS);
+          });
+        },
+      });
+      running = opened;
       failed = null;
     } catch (error) {
       const message = `the checkpointer cannot open: ${reasonOf(error)}`;
@@ -217,7 +269,8 @@ export async function keepCheckpointer(options: Parameters<typeof runCheckpointe
   let trying = tryOpen();
   await trying;
   return {
-    sealThrough: (number, deadline) => (running === null ? Promise.reject(new Error(failed ?? 'the checkpointer is not open')) : running.sealThrough(number, deadline)),
+    sealThrough: (number, deadline) => (running === null ? Promise.reject(new Unsealed(number, failed ?? 'the checkpointer is not open')) : running.sealThrough(number, deadline)),
+    sealing: () => (running === null ? { ok: false, reason: failed ?? 'the checkpointer is not open' } : running.sealing()),
     async heldOutside() {
       return heldIn(await fileMemory(options.memory).last());
     },

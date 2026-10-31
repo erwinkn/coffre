@@ -46,7 +46,7 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import type { Witness } from './checkpointer.ts';
-import { checkpointerObject, durableHeldOutside, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
+import { checkpointerObject, durableHeldOutside, durableSealing, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -90,10 +90,11 @@ const ready = new WeakMap<object, Ready>();
 
 /**
  * One `env`'s vault, ready: its databases, its prepared state, and whether
- * a call of this isolate started the checkpointer, or when a start last
- * failed: settled values, never the start under way.
+ * a call of this isolate started the checkpointer, when a start last
+ * failed, and when a use last started one behind it: settled values, never
+ * the start under way.
  */
-type Ready = { database: PostgresDatabase; hotDatabase: PostgresDatabase; checkpointer: ObjectNamespace; prepared: PreparedVault; started: boolean; failed: number };
+type Ready = { database: PostgresDatabase; hotDatabase: PostgresDatabase; checkpointer: ObjectNamespace; prepared: PreparedVault; started: boolean; failed: number; kicked: number };
 
 /** How long after a start that failed, the checkpointer's object out of reach, the next call tries again. */
 const START_AGAIN_MS = 10_000;
@@ -121,7 +122,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
    * lapses soon after (use.ts, `HELD_PAST_DEADLINE_MS`; T170).
    */
   async use(input: UseInput) {
-    const { prepared, hotDatabase } = await this.#ready();
+    const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
       const hot = createDatabase(pool);
@@ -133,7 +134,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
 
   /** A request's several keys (T167): the same one connection, for its one statement, or two. */
   async useMany(input: UseManyInput) {
-    const { prepared, hotDatabase } = await this.#ready();
+    const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
@@ -146,7 +147,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
 
   /** 0.15's use as the request names it: the same one connection, for its read of ids on a miss and its one use. */
   async useNamed(input: NamedUseInput) {
-    const { prepared, hotDatabase } = await this.#ready();
+    const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
       const hot = createDatabase(pool);
@@ -156,7 +157,26 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     }
   }
 
+  /** The vault ready, its checkpointer started from this call first, for at most 2 s (`start`). */
   async #ready(): Promise<Ready> {
+    const entry = await this.#prepared();
+    if (!entry.started && Date.now() - entry.failed >= START_AGAIN_MS) await start(entry);
+    return entry;
+  }
+
+  /**
+   * A use waits on no start (T169, R58): it needs no checkpointer, the days of uses the migrations made and the object
+   * makes ahead of time aside. Its isolate's start goes on behind it, once each START_AGAIN_MS until one answers.
+   */
+  #behind(entry: Ready): Ready {
+    if (!entry.started && Date.now() - entry.kicked >= START_AGAIN_MS) {
+      entry.kicked = Date.now();
+      this.ctx.waitUntil(start(entry));
+    }
+    return entry;
+  }
+
+  async #prepared(): Promise<Ready> {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
@@ -171,10 +191,9 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
         callsEndWithRequest: true,
       });
       // Calls that raced here each made one; the first kept serves them all from now on.
-      entry = ready.get(env) ?? { database: config.database, hotDatabase, checkpointer: namespace, prepared, started: false, failed: -Infinity };
+      entry = ready.get(env) ?? { database: config.database, hotDatabase, checkpointer: namespace, prepared, started: false, failed: -Infinity, kicked: -Infinity };
       ready.set(env, entry);
     }
-    if (!entry.started && Date.now() - entry.failed >= START_AGAIN_MS) await start(entry);
     return entry;
   }
 
@@ -209,6 +228,11 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
   async verifyReads(input: { from: string }) { return this.#call((vault) => vault.verifyReads(input)); }
   async vouch(input: VouchInput) { return this.#call((vault) => vault.vouch(input)); }
+  /** Whether the checkpointer seals (T169), asked of its object for at most 2 s; no database, and no start awaited. */
+  async sealing() {
+    const { checkpointer: namespace } = this.#behind(await this.#prepared());
+    return durableSealing(namespace)();
+  }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {
@@ -243,8 +267,9 @@ function checked(config: WorkersVaultConfig): { hotDatabase: PostgresDatabase; c
  * which a call may not await on Workers (AGENTS.md).
  * An object that refuses to open (a log it cannot take: docs/restore.md) is
  * started all the same, its alarm set, and says why in its alarms; one out
- * of reach is tried again by a call 10 s later. Neither stops this call: a use
- * needs no checkpointer, and a change fails on its seal.
+ * of reach, or that does not answer within 2 s (T169), is tried again by a
+ * call 10 s later. Neither stops this call: a use needs no checkpointer (and
+ * waits on no start: `#behind`), and a change fails on its seal.
  */
 async function start(entry: Ready): Promise<void> {
   // The reads' projector beside it (T166), an object of its own, which opens nothing to start: one that fails to is
@@ -280,5 +305,5 @@ export function checkpointer() {
   });
 }
 
-export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
+export { checkpointerAlarms, checkpointerStatus, durableHeldOutside, durableSealing, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
 export { durableWitness, r2Archive, witnessObject as witness, type WitnessSettings } from './witness-workers.ts';
