@@ -1377,6 +1377,8 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   await root.secrets.set('uses/e', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`KEY_${i}`, `value-${i}`])));
   await root.secrets.set('uses/quiet', Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`QUIET_${i}`, `value-${i}`])));
   await root.environments.create('uses/e-eu', { name: 'e-eu', from: 'e', inherit: true });
+  // And a fork of market/busy, which reads its reference into market/dev in the fork: at three places.
+  await root.environments.create('market/busy-eu', { name: 'busy-eu', from: 'busy', inherit: true });
   const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
   const [project] = await ids(sql`projects WHERE slug = 'uses'`);
   const [e] = await ids(sql`environments WHERE slug = 'e' AND project_id = ${project}`);
@@ -1388,6 +1390,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   const [dev] = await ids(sql`environments WHERE slug = 'dev' AND project_id = ${market}`);
   const [prod] = await ids(sql`environments WHERE slug = 'prod' AND project_id = ${market}`);
   const [busy] = await ids(sql`environments WHERE slug = 'busy' AND project_id = ${market}`);
+  const [busyFork] = await ids(sql`environments WHERE slug = 'busy-eu' AND project_id = ${market}`);
   const [holder] = await ids(sql`secrets WHERE key = 'DEV_API_KEY'`);
   const [devKey] = await ids(sql`secrets WHERE key = 'API_KEY' AND environment_id = ${dev}`);
   const [prodKey] = await ids(sql`secrets WHERE environment_id = ${prod} LIMIT 1`);
@@ -1398,8 +1401,8 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   let next = 5_000_000;
   /**
    * `count` reads numbered on from the last, asked from `from` ms ago, one every `every` ms, by `principal`, of one of
-   * `secretIds` in turn, filed at `environment`; read in a fork, or through a reference into `source`'s key: each with
-   * its places as the projector writes them, a row at each place naming the other.
+   * `secretIds` in turn, filed at `environment`; read in a fork, through a reference into `source`'s key, or both: each
+   * with its places as the projector writes them, a row at each place naming all the others.
    */
   const plant = async (count: number, principal: string, secretIds: readonly string[], environment: string, from: number, every: number,
     options: { fork?: string; source?: { environment: string; key: string } } = {}) => {
@@ -1411,16 +1414,16 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
              ${environment}::uuid, ${[e, quiet, fork].includes(environment) ? project : market}::uuid, ${options.fork ?? null}::uuid, ${options.source?.key ?? null}::uuid, ${options.source?.environment ?? null}::uuid,
              ${options.source === undefined ? null : market}::uuid, NULL, decode(repeat('00', 16), 'hex')
         FROM generate_series(1, ${count}) g`);
-    const other = options.fork ?? options.source?.environment ?? null;
-    const places: [string, string, SQL][] = other === null
-      ? [[environment, environment, sql`secret`]]
-      : [[environment, other, sql`secret`], [other, environment, options.source === undefined ? sql`secret` : sql`source`]];
-    for (const [at, partner, secret] of places) {
+    const filed: [string, SQL][] = [[environment, sql`secret`]];
+    if (options.fork !== undefined) filed.push([options.fork, sql`secret`]);
+    if (options.source !== undefined) filed.push([options.source.environment, sql`source`]);
+    for (const [at, secret] of filed) {
+      const partners = array(filed.map(([other]) => other).filter((other) => other !== at).sort());
       await db.owner.execute(sql`
-        INSERT INTO log_read_places (environment, partner, at, number, principal, secret, partners)
-        SELECT ${at}::uuid, ${partner}::uuid, at, number, principal, ${secret}, ${other === null ? sql`'{}'::uuid[]` : sql`ARRAY[${partner}::uuid]`}
+        INSERT INTO log_read_places (environment, partners, at, number, principal, secret)
+        SELECT ${at}::uuid, ${partners}, at, number, principal, ${secret}
           FROM log_reads WHERE number > ${first} AND number <= ${first + count}`);
-      await db.owner.execute(sql`INSERT INTO log_read_partners (environment, partner) VALUES (${at}::uuid, ${partner}::uuid) ON CONFLICT DO NOTHING`);
+      await db.owner.execute(sql`INSERT INTO log_read_partners (environment, partners) VALUES (${at}::uuid, ${partners}) ON CONFLICT DO NOTHING`);
     }
   };
   const place = (places: Partial<ReadPlaces>): ReadPlaces => ({ projectIds: [], environmentIds: [], secretIds: [], except: [], ...places });
@@ -1442,6 +1445,8 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     "a scoped reader's whole log, a protected environment left out": { places: [scoped], limit: 100 },
     "a scoped reader's page of a person, a protected environment left out": { actors: [ADA], places: [scoped], limit: 100 },
     "a scoped reader's page of market/busy": { places: [place({ environmentIds: [busy!] }), scoped], limit: 100 },
+    // Of its fork, where every read is also at market/dev, through the reference: none read, however many (review r3).
+    "a scoped reader's page of market/busy's fork": { places: [place({ environmentIds: [busyFork!] }), scoped], limit: 100 },
   };
   const reads: Record<string, () => Promise<unknown>> = {
     ...Object.fromEntries(Object.entries(filters).map(([name, filter]) => [name, () => readsPage(counted, filter)])),
@@ -1476,6 +1481,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(5, OTHER, quietKeys, quiet!, 18 * 3_600_000, 1);
     await plant(100, OTHER, keys, e!, 9 * 3_600_000, 100_000, { fork: fork! });
     await plant(50, OTHER, [holder!], busy!, 8 * 3_600_000, 200_000, { source: { environment: dev!, key: devKey! } });
+    await plant(100, OTHER, [holder!], busy!, 8 * 3_600_000, 100_000, { fork: busyFork!, source: { environment: dev!, key: devKey! } });
     await settle();
     const small = await pages();
     // market/dev's page lists the reads through market/busy's reference into it, while no newer read of its own hides them.
@@ -1489,6 +1495,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(10_000, OTHER, keys, e!, 5 * 3_600_000, 300, { fork: fork! });
     await plant(100_000, OTHER, [devKey!], dev!, 5 * 3_600_000, 150);
     await plant(20_000, OTHER, [holder!], busy!, 5 * 3_600_000, 700, { source: { environment: dev!, key: devKey! } });
+    await plant(50_000, OTHER, [holder!], busy!, 5 * 3_600_000, 300, { fork: busyFork!, source: { environment: dev!, key: devKey! } });
     await plant(10_000, ADA, keys, e!, 20 * 3_600_000, 500);
     await plant(100_000, ADA, [prodKey!], prod!, 4 * 3_600_000, 100);
     await settle();
@@ -1505,7 +1512,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     for (const name of Object.keys(filters)) {
       const rows = await page(name);
       if (name === "a quiet environment's reads") assert.equal(rows.length, 5);
-      else if (name === "a scoped reader's page of market/busy") assert.equal(rows.length, 0, name);
+      else if (name.startsWith("a scoped reader's page of market/busy")) assert.equal(rows.length, 0, name);
       else assert.equal(rows.length, 100, name);
     }
     assert.ok((await page("a person's reads")).every((read) => read.principal === ADA));

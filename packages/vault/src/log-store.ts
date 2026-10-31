@@ -6,7 +6,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
-import type { ReadPlace, ReadRow, ReadsCursor, ReadsStore, Sealed } from './reads.ts';
+import type { ReadPlace, ReadRow, ReadsCursor, ReadsStore } from './reads.ts';
 import type { RetentionStore } from './retention.ts';
 
 /**
@@ -532,6 +532,9 @@ function sqliteStore(db: Database): CheckpointStore & RetentionStore {
  * cursor on after them, never past the newest pair; SQLite, one writer and
  * no partitions, writes them in a transaction, and drops a day's by `at`.
  */
+/** How many objects one statement of `objects` asks for. */
+const OBJECTS_AT_ONCE = 200;
+
 function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 'writeReads' | 'listing'> & { makeDays(days: readonly string[]): Promise<void>; dropDay(day: string): Promise<void> } {
   const postgres = engineOf(db) === 'postgres';
   const made = new Set<string>();
@@ -543,22 +546,31 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       return row === undefined ? { through: 0n, pair: 0n, at: 0, mac: null } : { through: BigInt(row.through), pair: BigInt(row.pair), at: Number(row.at), mac: row.mac === null ? null : Buffer.from(row.mac) };
     },
     async objects(asked) {
-      if (asked.length === 0) return [];
-      // Each asked's place and whether it wants the first change are the code's own whole numbers, written as such.
-      const rows = sql.join(asked.map(({ object, below, first }, i) => (i === 0
-        ? sql`SELECT ${sql.raw(String(i))} AS i, ${id(object)} AS object, CAST(${String(below)} AS ${sql.raw(postgres ? 'bigint' : 'INTEGER')}) AS below, ${sql.raw(first ? '1' : '0')} AS first`
-        : sql`SELECT ${sql.raw(String(i))}, ${id(object)}, CAST(${String(below)} AS ${sql.raw(postgres ? 'bigint' : 'INTEGER')}), ${sql.raw(first ? '1' : '0')}`)), sql` UNION ALL `);
-      // One probe of `log_changes_object_idx` each: the object's first change, or its newest below the number.
-      const found = await rowsOf<{ i: number | string; payload: string | null; actor: string | null }>(db, sql`
-        SELECT a.i, c.payload, c.actor FROM (${rows}) a
-          LEFT JOIN log_changes c ON c.number = CASE WHEN a.first = 1
-            THEN (SELECT min(b.number) FROM log_changes b WHERE b.object = a.object)
-            ELSE (SELECT max(b.number) FROM log_changes b WHERE b.object = a.object AND b.number < a.below) END`);
-      const byIndex = new Map(found.map((row) => [Number(row.i), row]));
-      return asked.map((_, i): Sealed => {
-        const row = byIndex.get(i);
-        return row?.payload == null ? null : { payload: row.payload, actor: row.actor ?? '' };
-      });
+      const found: (LogEntry | null)[] = [];
+      // A few hundred a statement: SQLite takes 500 terms of a compound SELECT at most.
+      for (let at = 0; at < asked.length; at += OBJECTS_AT_ONCE) {
+        const batch = asked.slice(at, at + OBJECTS_AT_ONCE);
+        // Each asked's place and whether it wants the first change are the code's own whole numbers, written as such.
+        const rows = sql.join(batch.map(({ object, below, first }, i) => (i === 0
+          ? sql`SELECT ${sql.raw(String(i))} AS i, ${id(object)} AS object, CAST(${String(below)} AS ${sql.raw(postgres ? 'bigint' : 'INTEGER')}) AS below, ${sql.raw(first ? '1' : '0')} AS first`
+          : sql`SELECT ${sql.raw(String(i))}, ${id(object)}, CAST(${String(below)} AS ${sql.raw(postgres ? 'bigint' : 'INTEGER')}), ${sql.raw(first ? '1' : '0')}`)), sql` UNION ALL `);
+        // One probe of `log_changes_object_idx` each: the object's first change, or its newest below the number; whole,
+        // for its MAC.
+        const read = await rowsOf<{ i: number | string; n: string | number; at: string | number; request_id: string; object: string; actor: string; payload: string; seal: Uint8Array | null; mac: Uint8Array }>(db, sql`
+          SELECT a.i, c.number AS n, ${text('c.at')} AS at, ${text('c.request_id')} AS request_id, ${text('c.object')} AS object, c.actor, c.payload, c.seal, c.mac FROM (${rows}) a
+            JOIN log_changes c ON c.number = CASE WHEN a.first = 1
+              THEN (SELECT min(b.number) FROM log_changes b WHERE b.object = a.object)
+              ELSE (SELECT max(b.number) FROM log_changes b WHERE b.object = a.object AND b.number < a.below) END`);
+        const byIndex = new Map(read.map((r) => [Number(r.i), r]));
+        for (let i = 0; i < batch.length; i += 1) {
+          const r = byIndex.get(i);
+          found.push(r === undefined ? null : changeEntry({
+            number: BigInt(r.n), at: Number(r.at), requestId: r.request_id, object: r.object, actor: r.actor, payload: r.payload,
+            seal: r.seal === null ? null : Buffer.from(r.seal), mac: Buffer.from(r.mac),
+          }));
+        }
+      }
+      return found;
     },
     async writeReads(reads, places, cursor) {
       if (postgres) {
@@ -571,7 +583,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         const tx = raw as unknown as Database;
         const [cut] = await rowsOf<{ sealed: string | number | null }>(tx, sql`SELECT max(upto) AS sealed FROM log_checkpoints`);
         if (cut?.sealed == null || cursor.through > BigInt(cut.sealed)) throw new Error(`reads through ${cursor.through} are past the newest pair`);
-        // The projector's row over any other at its number, its places with it (ReplaceOnConflict).
+        // The projector's row over any other at its number (ReplaceOnConflict), each place once.
         for (const row of reads) {
           await rowsOf(tx, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
             VALUES (${row.number}, ${row.at}, ${row.credential}, ${row.purpose}, ${row.principal}, ${row.secret}, ${row.environment}, ${row.project}, ${row.place}, ${row.source},
@@ -579,12 +591,13 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
             ON CONFLICT (at, number) DO UPDATE SET credential = excluded.credential, purpose = excluded.purpose, principal = excluded.principal, secret = excluded.secret,
               environment = excluded.environment, project = excluded.project, place = excluded.place, source = excluded.source, source_environment = excluded.source_environment,
               source_project = excluded.source_project, version = excluded.version, mac = excluded.mac`);
-          await rowsOf(tx, sql`DELETE FROM log_read_places WHERE at = ${row.at} AND number = ${row.number}`);
         }
         for (const place of places) {
-          await rowsOf(tx, sql`INSERT INTO log_read_places (environment, partner, at, number, principal, secret, partners)
-            VALUES (${place.environment}, ${place.partner}, ${place.at}, ${place.number}, ${place.principal}, ${place.secret}, ${JSON.stringify(place.partners)})`);
-          await rowsOf(tx, sql`INSERT INTO log_read_partners (environment, partner) VALUES (${place.environment}, ${place.partner}) ON CONFLICT DO NOTHING`);
+          const partners = JSON.stringify(place.partners);
+          await rowsOf(tx, sql`INSERT INTO log_read_places (environment, partners, at, number, principal, secret)
+            VALUES (${place.environment}, ${partners}, ${place.at}, ${place.number}, ${place.principal}, ${place.secret})
+            ON CONFLICT (environment, partners, at, number, secret) DO UPDATE SET principal = excluded.principal`);
+          await rowsOf(tx, sql`INSERT INTO log_read_partners (environment, partners) VALUES (${place.environment}, ${partners}) ON CONFLICT DO NOTHING`);
         }
         await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
       });
@@ -602,31 +615,33 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
         sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac),
       }));
-      // Each place by its own index's columns, a probe each, a few hundred to a statement.
-      const listedAt = new Map<string, Pick<ReadPlace, 'principal' | 'secret' | 'partners'>>();
+      // Each place by its unique index, a probe each, a few hundred to a statement; each set of places by its key.
+      const set = (partners: readonly string[]) => (postgres
+        ? sql`CAST(${`{${partners.join(',')}}`} AS uuid[])`
+        : sql`${JSON.stringify(partners)}`);
+      const key = (p: { environment: string; partners: readonly string[]; at?: number; number?: bigint; secret?: string }) => `${p.environment}:${p.partners.join(',')}:${p.at ?? ''}:${p.number ?? ''}:${p.secret ?? ''}`;
+      const listedAt = new Map<string, string>();
       const paired = new Set<string>();
-      const at = (place: Pick<ReadPlace, 'environment' | 'partner'> & Partial<Pick<ReadPlace, 'at' | 'number'>>) => `${place.environment}:${place.partner}:${place.at ?? ''}:${place.number ?? ''}`;
+      const partnersOf = (value: string | string[]) => (Array.isArray(value) ? value : (JSON.parse(value) as string[]));
       for (let i = 0; i < places.length; i += 500) {
         const chunk = places.slice(i, i + 500);
-        const rows = await rowsOf<{ environment: string; partner: string; at: string | number; number: string | number; principal: string; secret: string; partners: string }>(db, sql`
-          SELECT ${text('environment')} AS environment, ${text('partner')} AS partner, at, number, principal, ${text('secret')} AS secret, ${sql.raw(postgres ? 'CAST(to_json(partners) AS text)' : 'partners')} AS partners
-            FROM log_read_places WHERE (environment, partner, at, number) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${id(p.partner)}, ${big(p.at)}, ${big(p.number)})`), sql`, `)})`);
-        for (const row of rows) {
-          listedAt.set(at({ ...row, at: Number(row.at), number: BigInt(row.number) }), { principal: row.principal, secret: row.secret, partners: JSON.parse(row.partners) as string[] });
-        }
+        const rows = await rowsOf<{ environment: string; partners: string | string[]; at: string | number; number: string | number; principal: string; secret: string }>(db, sql`
+          SELECT ${text('environment')} AS environment, ${sql.raw(postgres ? 'CAST(to_json(partners) AS text)' : 'partners')} AS partners, at, number, principal, ${text('secret')} AS secret
+            FROM log_read_places WHERE (environment, partners, at, number, secret) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${set(p.partners)}, ${big(p.at)}, ${big(p.number)}, ${id(p.secret)})`), sql`, `)})`);
+        for (const row of rows) listedAt.set(key({ ...row, partners: partnersOf(row.partners), at: Number(row.at), number: BigInt(row.number) }), row.principal);
       }
-      const pairs = [...new Map(places.map((p) => [at({ environment: p.environment, partner: p.partner }), p])).values()];
-      for (let i = 0; i < pairs.length; i += 500) {
-        const chunk = pairs.slice(i, i + 500);
-        const rows = await rowsOf<{ environment: string; partner: string }>(db, sql`
-          SELECT ${text('environment')} AS environment, ${text('partner')} AS partner FROM log_read_partners
-            WHERE (environment, partner) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${id(p.partner)})`), sql`, `)})`);
-        for (const row of rows) paired.add(at(row));
+      const sets = [...new Map(places.map((p) => [key({ environment: p.environment, partners: p.partners }), p])).values()];
+      for (let i = 0; i < sets.length; i += 500) {
+        const chunk = sets.slice(i, i + 500);
+        const rows = await rowsOf<{ environment: string; partners: string | string[] }>(db, sql`
+          SELECT ${text('environment')} AS environment, ${sql.raw(postgres ? 'CAST(to_json(partners) AS text)' : 'partners')} AS partners FROM log_read_partners
+            WHERE (environment, partners) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${set(p.partners)})`), sql`, `)})`);
+        for (const row of rows) paired.add(key({ environment: row.environment, partners: partnersOf(row.partners) }));
       }
       return {
         reads,
-        places: places.map((place) => listedAt.get(at(place)) ?? null),
-        pairs: places.map((place) => paired.has(at({ environment: place.environment, partner: place.partner }))),
+        places: places.map((place) => listedAt.get(key(place)) ?? null),
+        pairs: places.map((place) => paired.has(key({ environment: place.environment, partners: place.partners }))),
       };
     },
     async makeDays(days) {

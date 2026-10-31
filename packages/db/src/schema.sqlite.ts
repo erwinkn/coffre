@@ -987,26 +987,25 @@ export const logReadPlaces = sqliteTable(
   'log_read_places',
   {
     environment: text().notNull(),
-    partner: text().notNull(),
+    partners: ids('partners').notNull(),
     at: integer({ mode: 'number' }).notNull(),
     number: int64('number').notNull(),
     principal: text().notNull(),
     secret: text().notNull(),
-    partners: ids('partners').notNull(),
   },
   (table) => [
-    index('log_read_places_place_idx').on(table.environment, table.partner, table.at, table.number),
-    index('log_read_places_member_idx').on(table.principal, table.environment, table.partner, table.at, table.number),
-    index('log_read_places_key_idx').on(table.secret, table.environment, table.partner, table.at, table.number),
-    index('log_read_places_member_key_idx').on(table.principal, table.secret, table.environment, table.partner, table.at, table.number),
+    uniqueIndex('log_read_places_place_idx').on(table.environment, table.partners, table.at, table.number, table.secret),
+    index('log_read_places_member_idx').on(table.principal, table.environment, table.partners, table.at, table.number),
+    index('log_read_places_key_idx').on(table.secret, table.environment, table.partners, table.at, table.number),
+    index('log_read_places_member_key_idx').on(table.principal, table.secret, table.environment, table.partners, table.at, table.number),
   ],
 );
 
-/** Each place reads were at, and the place each was at besides (schema.ts). */
+/** Each place reads were at, with the places each was at besides (schema.ts); `partners`, JSON. */
 export const logReadPartners = sqliteTable(
   'log_read_partners',
-  { environment: text().notNull(), partner: text().notNull() },
-  (table) => [primaryKey({ name: 'log_read_partners_pkey', columns: [table.environment, table.partner] })],
+  { environment: text().notNull(), partners: ids('partners').notNull() },
+  (table) => [primaryKey({ name: 'log_read_partners_pkey', columns: [table.environment, table.partners] })],
 );
 
 /** How far the projector has gone (schema.ts). */

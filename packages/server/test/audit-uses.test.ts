@@ -186,6 +186,15 @@ test('a read through a reference is in its source\'s log and its holder\'s, of t
   assert.deepEqual((await every(root, { path: 'market/prod' })).filter((entry) => entry.key === 'OTHER' && entry.action === 'secret.read'), []);
 });
 
+test('a read through a reference within one environment is in the logs of both its keys there, once each (review r3)', async () => {
+  await root.secrets.set('market/dev', { HELD: { ref: 'market/dev/API_KEY' } });
+  assert.equal((await ada.secrets.reveal('market/dev/HELD')).values.HELD, 'dev-key');
+  for (const path of [undefined, 'market/dev', 'market/dev/HELD', 'market/dev/API_KEY']) {
+    const shown = (await every(root, path === undefined ? {} : { path })).filter((entry) => entry.action === 'secret.read' && entry.metadata.via !== undefined);
+    assert.equal(shown.length, 1, path);
+  }
+});
+
 test('pages tile the reads with every other entry: each once, newest first, whatever the page size', async () => {
   for (let i = 0; i < 4; i++) {
     await ada.secrets.reveal('market/dev/API_KEY');
@@ -236,7 +245,7 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
   const numbers = (await db.owner.select({ number: logReads.number }).from(logReads).orderBy(logReads.number)).map((row) => row.number);
   assert.equal(numbers.length, 5);
   const [deleted, edited, held, moved, copied] = numbers as [bigint, bigint, bigint, bigint, bigint];
-  // Whoever owns the database deletes a read; edits another; deletes the pair of places the reference's read is at;
+  // Whoever owns the database deletes a read; edits another; deletes the set of places the reference's read is at;
   // says a fourth was Bob's at its place; and lists the last twice, a moment apart. A read planted at a time no use of
   // the log's sealed near, or under a number none did, every page shows forged, by its MAC (above).
   await db.owner.delete(logReadPlaces).where(eq(logReadPlaces.number, deleted));
@@ -244,7 +253,7 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
   await db.owner.update(logReads).set({ credential: randomUUID() }).where(eq(logReads.number, edited));
   await db.owner.update(logReadPlaces).set({ principal: BOB }).where(eq(logReadPlaces.number, moved));
   const [pair] = await db.owner.select().from(logReadPlaces).where(eq(logReadPlaces.number, held)).limit(1);
-  await db.owner.delete(logReadPartners).where(and(eq(logReadPartners.environment, pair!.environment), eq(logReadPartners.partner, pair!.partner)));
+  await db.owner.delete(logReadPartners).where(and(eq(logReadPartners.environment, pair!.environment), eq(logReadPartners.partners, pair!.partners)));
   const [copy] = await db.owner.select().from(logReads).where(eq(logReads.number, copied));
   await db.owner.insert(logReads).values({ ...copy!, at: copy!.at + 1 });
   const verdict = await root.audit.verifyReads();

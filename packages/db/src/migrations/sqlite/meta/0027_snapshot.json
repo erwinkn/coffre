@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "718cbe95-99d0-428e-92e7-1dd45b525f9d",
+  "id": "7946e73a-270d-4329-8898-e65267423792",
   "prevId": "654b1165-9b5f-4fbe-b1e2-47bf02425767",
   "tables": {
     "audit_chain_head": {
@@ -1853,8 +1853,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "partner": {
-          "name": "partner",
+        "partners": {
+          "name": "partners",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -1867,7 +1867,7 @@
         "log_read_partners_pkey": {
           "columns": [
             "environment",
-            "partner"
+            "partners"
           ],
           "name": "log_read_partners_pkey"
         }
@@ -1885,8 +1885,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "partner": {
-          "name": "partner",
+        "partners": {
+          "name": "partners",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -1919,13 +1919,6 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
-        },
-        "partners": {
-          "name": "partners",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
         }
       },
       "indexes": {
@@ -1933,18 +1926,19 @@
           "name": "log_read_places_place_idx",
           "columns": [
             "environment",
-            "partner",
+            "partners",
             "at",
-            "number"
+            "number",
+            "secret"
           ],
-          "isUnique": false
+          "isUnique": true
         },
         "log_read_places_member_idx": {
           "name": "log_read_places_member_idx",
           "columns": [
             "principal",
             "environment",
-            "partner",
+            "partners",
             "at",
             "number"
           ],
@@ -1955,7 +1949,7 @@
           "columns": [
             "secret",
             "environment",
-            "partner",
+            "partners",
             "at",
             "number"
           ],
@@ -1967,7 +1961,7 @@
             "principal",
             "secret",
             "environment",
-            "partner",
+            "partners",
             "at",
             "number"
           ],

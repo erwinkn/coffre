@@ -1,5 +1,5 @@
 {
-  "id": "a79c31cb-f78f-44a7-ab76-e1a11bf28b67",
+  "id": "28f55489-aec1-4144-b334-f9eb77e40ffb",
   "prevId": "cd759e62-bb1e-45f0-be77-0ff113ce74d7",
   "version": "7",
   "dialect": "postgresql",
@@ -2204,9 +2204,9 @@
           "primaryKey": false,
           "notNull": true
         },
-        "partner": {
-          "name": "partner",
-          "type": "uuid",
+        "partners": {
+          "name": "partners",
+          "type": "uuid[]",
           "primaryKey": false,
           "notNull": true
         }
@@ -2218,7 +2218,7 @@
           "name": "log_read_partners_pkey",
           "columns": [
             "environment",
-            "partner"
+            "partners"
           ]
         }
       },
@@ -2237,9 +2237,9 @@
           "primaryKey": false,
           "notNull": true
         },
-        "partner": {
-          "name": "partner",
-          "type": "uuid",
+        "partners": {
+          "name": "partners",
+          "type": "uuid[]",
           "primaryKey": false,
           "notNull": true
         },
@@ -2266,12 +2266,6 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
-        },
-        "partners": {
-          "name": "partners",
-          "type": "uuid[]",
-          "primaryKey": false,
-          "notNull": true
         }
       },
       "indexes": {
@@ -2285,7 +2279,7 @@
               "nulls": "last"
             },
             {
-              "expression": "partner",
+              "expression": "partners",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2301,9 +2295,15 @@
               "isExpression": false,
               "asc": true,
               "nulls": "last"
+            },
+            {
+              "expression": "secret",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
             }
           ],
-          "isUnique": false,
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -2324,7 +2324,7 @@
               "nulls": "last"
             },
             {
-              "expression": "partner",
+              "expression": "partners",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2363,7 +2363,7 @@
               "nulls": "last"
             },
             {
-              "expression": "partner",
+              "expression": "partners",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2408,7 +2408,7 @@
               "nulls": "last"
             },
             {
-              "expression": "partner",
+              "expression": "partners",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

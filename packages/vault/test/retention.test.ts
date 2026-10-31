@@ -19,6 +19,7 @@ import { logObject } from '../src/inputs.ts';
 import { DAYS_AHEAD, upkeep } from '../src/log-checkpointer.ts';
 import { authentic, logMacKey, RETENTION_OBJECT, retentionCut } from '../src/log-entry.ts';
 import { logStore, type LogStore } from '../src/log-store.ts';
+import { checkReads, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
@@ -192,6 +193,44 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.ok((await cp.tick()).signed);
   assert.ok((await verify(store)).ok);
   assert.deepEqual(alerts, []);
+});
+
+test("the reads' projection goes on across retention's cuts, and the whole log's check of it starts at the cut: nothing found, and no use dropped looked for (T166, review r3)", async () => {
+  const { cp, store } = await open();
+  // The reads' days beside the uses', as the store's upkeep makes them.
+  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
+  await midnight(cp);
+  const keys = { verifiers, mac: macKey };
+  const projected = async () => {
+    for (let run = 0; run < 100; run += 1) {
+      const { through, sealed } = await projectReads(store, keys, { steps: 100 });
+      if (through >= sealed) return;
+    }
+    assert.fail("the projection did not catch up");
+  };
+  const checked = async () => {
+    const problems: string[] = [];
+    for (let from: bigint | null = 0n; from !== null;) {
+      const stretch = await checkReads(store, keys, from);
+      problems.push(...stretch.problems);
+      from = stretch.next;
+    }
+    return problems;
+  };
+  await projected();
+  assert.deepEqual(await checked(), []);
+  // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.
+  await later(cp);
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  await projected();
+  assert.deepEqual(await checked(), []);
+  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, macKey, now });
+  for (let i = 0; i < 30; i += 1) await log.use();
+  assert.ok((await cp.tick()).signed);
+  await projected();
+  assert.deepEqual(await checked(), []);
 });
 
 test('a dropped use put back is never sealed again', async () => {
