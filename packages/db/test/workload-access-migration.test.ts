@@ -79,9 +79,7 @@ test(`${TAG} keeps every credential and index on SQLite, and takes a workload's 
     for (const row of rows) for (const name of added) assert.equal(row[name], null, `${row.id as string}.${name}`);
 
     const indexes = await all(after.db, "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'credentials' ORDER BY name");
-    // This migration's, and the audit pages' walk of a member's credentials (0027_use_audit_index), which the tree after it adds.
-    const later = ['credentials_enrollment_roots_idx', 'credentials_expiry_idx'];
-    assert.deepEqual(indexes.filter((index) => !later.includes(index.name as string)), indexesBefore);
+    assert.deepEqual(indexes.filter((index) => index.name !== 'credentials_enrollment_roots_idx'), indexesBefore);
     assert.ok(indexes.some((index) => index.name === 'credentials_enrollment_roots_idx'));
     assert.deepEqual(await all(after.db, 'PRAGMA foreign_key_check'), []);
     assert.deepEqual(await all(after.db, 'PRAGMA integrity_check'), [{ integrity_check: 'ok' }]);

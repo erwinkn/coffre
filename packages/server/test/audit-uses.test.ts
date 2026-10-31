@@ -1,22 +1,31 @@
 // Reads on every audit list (T166). With 0.15's log a read writes no 0.14
-// `secret.read` entry: its use is the record (R53), and the audit lists show
+// `secret.read` entry: its use is the record (R53), which the vault's
+// projector lists once a pair seals it (`log_reads`), and the audit lists show
 // each where that entry stood, with who read what, which version, for what
 // and through what, at the places and by the members the list asks for, every
-// one vouched for by the vault. Under 0.14's log the same lists show its own
-// entries: each test holds both.
+// one vouched for by the vault. Here a checkpointer seals and the projector
+// lists at `settle()`. Under 0.14's log the same lists show its own entries:
+// each test holds both.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 import { createClient, type AuditEntryView, type CoffreClient } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
-import { logObject } from '@coffre/db/log';
-import { and, desc, eq } from 'drizzle-orm';
+import { tablesOf } from '@coffre/db';
+import { derivedSigningKey } from '@coffre/vault';
+import { runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
+import { desc, eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { credentials, logChanges, logUses, secretReferences, secrets, secretVersions } from './db/tables.ts';
-import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { logReads, logReadsCursor, secrets } from './db/tables.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { openVaultDatabase } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -32,17 +41,41 @@ let root: CoffreClient;
 let ada: CoffreClient;
 let adaToken: { id: string; label: string };
 
+const scratch = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
+/** Under 0.15's log, the checkpointer that seals every change, and whose projector lists the reads. */
+let signer: RunningCheckpointer | null = null;
+
 before(async () => {
   db = await openTestDatabase();
 });
 
 after(async () => {
+  await signer?.stop();
   await db.close();
+  rmSync(scratch, { recursive: true, force: true });
 });
 
+/** What a page lists of 0.15's reads once the log seals them and the projector has gone that far: a tick, then the projector. */
+async function settle(): Promise<void> {
+  if (signer === null) return;
+  await signer.checkpointer.tick();
+  await signer.projected();
+}
+
 beforeEach(async () => {
+  await signer?.stop();
+  signer = null;
   await resetDatabase(db.owner);
-  deps = testDeps(db.runtime, [ROOT]);
+  if (LOG === '0.15') {
+    const { logUses, logBulk, logCheckpoints, logTiles } = tablesOf(db.owner);
+    for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
+    const kek = randomBytes(32);
+    signer = await runCheckpointer({ database: await openVaultDatabase(), seed: derivedSigningKey(kek), memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });
+    const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
+    deps = testDeps(db.runtime, [ROOT], { vault });
+  } else {
+    deps = testDeps(db.runtime, [ROOT]);
+  }
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
   runtime = {
@@ -69,6 +102,7 @@ function bearer(token: string): CoffreClient {
 
 /** Every entry a list shows, page after page of `limit`, as a client of this release pages it, by `next`. */
 async function every(client: CoffreClient, query: { actor?: string; path?: string; detail?: string; decision?: string } = {}, limit = 500): Promise<AuditEntryView[]> {
+  await settle();
   const all: AuditEntryView[] = [];
   for (let before: string | undefined; ;) {
     const { entries, next } = await client.audit.list({ ...query, sealed: '1', limit, ...(before === undefined ? {} : { before }) } as Parameters<CoffreClient['audit']['list']>[0]);
@@ -172,21 +206,39 @@ test('pages tile the reads with every other entry: each once, newest first, what
   }
 });
 
-test('a use the vault does not vouch for is shown as forged: a row edited, or written, around coffre', { skip: LOG !== '0.15' }, async () => {
+test('a read the vault does not vouch for is shown forged: edited, renumbered, or written around coffre; a cursor moved on, said', { skip: LOG !== '0.15' }, async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   await ada.secrets.reveal('market/dev/OTHER');
   const before = (await every(root)).filter((entry) => entry.action === 'secret.read');
-  assert.deepEqual(before.map((entry) => entry.forged), [undefined, undefined]);
-  // Whoever owns the database says the read was of another key, and writes one nobody made.
-  const [first] = before.slice(-1) as [AuditEntryView];
-  const other = before[0]!.metadata.secretId as string;
-  await db.owner.update(logUses).set({ secret: other }).where(eq(logUses.number, BigInt(first.seq)));
+  assert.deepEqual(before.map((entry) => [entry.key, entry.forged]), [['OTHER', undefined], ['API_KEY', undefined]]);
+  // Whoever owns the database says the first read was of another key, and moves the second to another number.
+  const [second, first] = before as [AuditEntryView, AuditEntryView];
+  await db.owner.update(logReads).set({ secret: second.metadata.secretId as string }).where(eq(logReads.number, BigInt(first.seq)));
+  await db.owner.update(logReads).set({ number: BigInt(second.seq) + 1000n }).where(eq(logReads.number, BigInt(second.seq)));
   const after = (await every(root)).filter((entry) => entry.action === 'secret.read');
-  assert.deepEqual(after.map((entry) => [entry.key, entry.forged]), [['OTHER', undefined], ['OTHER', true]]);
+  assert.deepEqual(after.map((entry) => [entry.key, entry.forged]), [['OTHER', true], ['OTHER', true]]);
+  // And moves the cursor on: the page says it cannot vouch for how far reads are listed.
+  await db.owner.update(logReadsCursor).set({ through: 1_000_000n });
+  const { reads } = await root.audit.list({ sealed: '1', limit: 10 });
+  assert.deepEqual([reads?.forged, reads?.behind], [true, true]);
+});
+
+test("a read waits to be listed until the projector writes it, and the page says how far it lists", { skip: LOG !== '0.15' }, async () => {
+  await ada.secrets.reveal('market/dev/API_KEY');
+  // Sealed, not yet projected: not listed, and the page lists reads through nothing yet.
+  await signer!.checkpointer.tick();
+  const waiting = await root.audit.list({ sealed: '1', limit: 50 });
+  assert.equal(waiting.entries.filter((entry) => entry.action === 'secret.read').length, 0);
+  assert.equal(waiting.reads?.through, null);
+  await signer!.projected();
+  const listed = await root.audit.list({ sealed: '1', limit: 50 });
+  assert.equal(listed.entries.filter((entry) => entry.action === 'secret.read').length, 1);
+  assert.deepEqual([typeof listed.reads?.through, listed.reads?.behind, listed.reads?.forged], ['string', false, undefined]);
 });
 
 test('the offboarding report names what someone read under either log, current until a new version is written', async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
+  await settle();
   const report = await root.members.get(ADA);
   assert.deepEqual(report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`), ['market/dev/API_KEY']);
   await root.secrets.set('market/dev', { API_KEY: 'rotated' });
@@ -194,53 +246,34 @@ test('the offboarding report names what someone read under either log, current u
   assert.deepEqual([rotated.exposed.length, rotated.rotated], [0, 1]);
 });
 
-test("a reference's reads are its source's only while it read that source, by member too (review r1)", { skip: LOG !== '0.15' }, async () => {
+test("a reference's read is its source's then: an auditor of a source it no longer reads sees none of its later reads, by member too", async () => {
   await root.environments.create('market/stage', { name: 'stage' });
   await root.secrets.set('market/prod', { SOURCE: 'prod-source' });
   await root.secrets.set('market/stage', { OTHER_SOURCE: 'stage-source' });
   await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/SOURCE' } });
-  // Bob audits prod alone; the holder then reads stage's key instead.
+  // Bob audits prod alone. A read through the reference to prod; the holder repointed to stage; a read now.
   await root.members.add(BOB, { role: 'member' });
   await root.access.set(BOB, { 'market/prod': 'auditor' });
   const bob = clientFor(deps, 'bob@acme.example');
+  const reader = bearer((await root.tokens.issue(`user:${ROOT}`, { label: 'reader', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
+  assert.equal((await reader.secrets.reveal('market/dev/HELD')).values.HELD, 'prod-source');
   await root.secrets.set('market/dev', { HELD: { ref: 'market/stage/OTHER_SOURCE' } });
-  // The reference to prod lived two hours ago, ending twenty minutes ago; a read through it then, and one now through
-  // the reference to stage, each a use of the holder's.
-  await db.owner.update(secretReferences).set({ createdAt: new Date(Date.now() - 2 * 3_600_000), endedAt: new Date(Date.now() - 20 * 60_000) })
-    .where(eq(secretReferences.sourceSecretId, (await db.owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, 'SOURCE')))[0]!.id));
-  assert.equal((await ada.secrets.reveal('market/dev/HELD')).values.HELD, 'stage-source');
-  // Ada's token, as old as the reads planted through it.
-  await db.owner.update(credentials).set({ createdAt: new Date(Date.now() - 3 * 3_600_000) }).where(eq(credentials.id, adaToken.id));
-  const [now] = await db.owner.select().from(logUses).orderBy(desc(logUses.number)).limit(1);
-  await db.owner.insert(logUses).values({ ...now!, number: now!.number + 1000n, at: Date.now() - 30 * 60_000, requestId: now!.requestId + 1n });
-  for (const query of [{}, { actor: ADA }]) {
+  assert.equal((await reader.secrets.reveal('market/dev/HELD')).values.HELD, 'stage-source');
+  for (const query of [{}, { actor: `user:${ROOT}` }, { path: 'market/prod' }, { path: 'market/prod/SOURCE' }]) {
     const shown = (await every(bob, query)).filter((entry) => entry.action === 'secret.read');
-    assert.deepEqual(shown.map((entry) => entry.seq), [Number(now!.number) + 1000], JSON.stringify(query));
+    assert.deepEqual(shown.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`), ['market/prod/SOURCE'], JSON.stringify(query));
   }
+  // The whole log's reader sees both, each at its source then.
+  assert.deepEqual((await every(root, { path: 'market/dev/HELD' })).filter((entry) => entry.action === 'secret.read').map((entry) => entry.key), ['OTHER_SOURCE', 'SOURCE']);
 });
 
-test("a use whose version was read from a change the vault does not vouch for is shown forged (review r1)", { skip: LOG !== '0.15' }, async () => {
-  await root.secrets.set('market/dev', { API_KEY: 'dev-key-2' });
-  await ada.secrets.reveal('market/dev/API_KEY');
-  const [read] = (await every(root, { actor: ADA })).filter((entry) => entry.action === 'secret.read');
-  assert.deepEqual([read!.version, read!.forged], [2, undefined]);
-  // Whoever owns the database points the key's newest change at its first version.
-  const versions = await db.owner.select({ id: secretVersions.id, version: secretVersions.version }).from(secretVersions)
-    .where(eq(secretVersions.secretId, read!.metadata.secretId as string));
-  const [first, second] = [versions.find((v) => v.version === 1)!, versions.find((v) => v.version === 2)!];
-  const object = logObject('secret', read!.metadata.secretId as string);
-  const [change] = await db.owner.select().from(logChanges).where(eq(logChanges.object, object)).orderBy(desc(logChanges.number)).limit(1);
-  await db.owner.update(logChanges).set({ payload: change!.payload.replace(second!.id, first!.id) }).where(eq(logChanges.number, change!.number));
-  const [after] = (await every(root, { actor: ADA })).filter((entry) => entry.action === 'secret.read');
-  assert.deepEqual([after!.version, after!.forged], [1, true]);
-});
-
-test('the offboarding report names every source a reference read while they read through it (review r1)', { skip: LOG !== '0.15' }, async () => {
+test('the offboarding report names every source a reference read while they read through it', async () => {
   await root.secrets.set('market/dev', { A: 'a', B: 'b', C: 'c' });
   for (const source of ['A', 'B', 'C']) {
     await root.secrets.set('market/dev', { HELD: { ref: `market/dev/${source}` } });
     assert.equal((await ada.secrets.reveal('market/dev/HELD')).values.HELD, source.toLowerCase());
   }
+  await settle();
   const report = await root.members.get(ADA);
   assert.deepEqual(report.exposed.map((entry) => entry.key).sort(), ['A', 'B', 'C']);
 });

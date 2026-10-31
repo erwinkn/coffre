@@ -17,6 +17,8 @@ import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import { heldIn, type Alarm, type Checkpointer, type InclusionProof, type Memory, type SealThrough, type Sealed, type Tick, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
+import { Projector } from './reads.ts';
+import { verifierKeys } from './verifier.ts';
 import { logStore } from './log-store.ts';
 import { dayOf } from './retention.ts';
 
@@ -83,6 +85,12 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #pool: HyperdrivePool | null = null;
     /** The log's upkeep after each tick (log-checkpointer.ts), with the checkpointer it was opened with. */
     #upkeep: (() => Promise<void>) | null = null;
+    /**
+     * The reads' projection (reads.ts, T166), kicked after each tick and never awaited: each run opens a Hyperdrive
+     * connection of its own, so that none of its statements queues behind the tick's, and a projection behind lags
+     * the audit pages, never a seal.
+     */
+    #projector: Projector | null = null;
     /** The day the next days of uses were last made for without the checkpointer (`#makeDays`), when it last tried, and its failure. */
     #daysFor: string | null = null;
     #daysTried = -Infinity;
@@ -118,6 +126,14 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             record: (alarm) => this.#record(alarm),
           });
           this.#checkpointer = checkpointer;
+          const closeIdleMs = s.closeIdleMs ?? 10_000;
+          this.#projector = new Projector(async () => {
+            const own = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs });
+            return { store: logStore(createDatabase(own)), close: () => own.end() };
+          }, await verifierKeys([s.seed]), (message) => {
+            console.warn(`coffre audit: ${message}`);
+            void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
+          });
           this.#upkeep = upkeep(checkpointer, store, {
             keepDays: s.retainDays ?? null,
             seed: s.seed,
@@ -152,10 +168,13 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
      */
     async #reset(): Promise<void> {
       await this.#state.blockConcurrencyWhile(async () => {
-        const [old, pool] = [this.#checkpointer, this.#pool];
+        const [old, pool, projector] = [this.#checkpointer, this.#pool, this.#projector];
         this.#checkpointer = null;
         this.#pool = null;
         this.#upkeep = null;
+        this.#projector = null;
+        // Not waited for: its own connection, and a run going on beside the next checkpointer writes each read once.
+        void projector?.stop();
         await old?.close();
         await pool?.end().catch(() => {});
       });
@@ -207,6 +226,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
+        this.#projector?.kick();
         await this.#upkeep?.();
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.

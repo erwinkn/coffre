@@ -14,7 +14,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { answerQuery, settingsQuery } from './answers.ts';
-import { statesDuring, usesBy } from './uses.ts';
+import { readsBy } from './reads.ts';
 import { authMac, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
@@ -1159,15 +1159,13 @@ export async function members(
  * caller runs them in one snapshot (`SNAPSHOT`): a restore committed between
  * two would show its version without the one it restored.
  *
- * With 0.15's log a read is a use (T166), which names no version: for each
- * key they used, every version its object held between their first use of
- * it and their last (`statesDuring`), which they may have read, listed as
- * reads of theirs. A read through a reference counts at each source it
- * had then, as 0.14's entry named it. A caller that read their uses
- * already, beside its other reads (`usesBy`), passes them: one round trip
+ * With 0.15's log a read is a use (T166), whose version the vault's
+ * projection of it says (`readsBy`): each version of each key they read,
+ * through a reference its source's, as 0.14's entry named it. A caller that
+ * read them already, beside its other reads, passes them: one round trip
  * fewer.
  */
-export async function memberActivity(db: Queryable, actorIds: string[], usedAlready?: Awaited<ReturnType<typeof usesBy>>) {
+export async function memberActivity(db: Queryable, actorIds: string[], readAlready?: Awaited<ReturnType<typeof readsBy>>) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
   const allowed = eq(auditLog.decision, 'allow');
   const entries = (where: SQL | undefined) => db
@@ -1194,7 +1192,7 @@ export async function memberActivity(db: Queryable, actorIds: string[], usedAlre
   const members = actorIds.flatMap((id) => [`user:${id}`, `token:${id}`]);
   const [logged, used] = await Promise.all([
     entries(and(allowed, or(and(inArray(auditLog.actor, members), inArray(auditLog.action, ['secret.read', 'secret.write'])), eq(auditLog.action, 'secret.restore')))),
-    usedAlready ?? usesBy(db, members),
+    readAlready ?? readsBy(db, members),
   ]);
   const restores = logged.filter((row) => row.action === 'secret.restore');
   const seen = logged.filter((row) => row.action !== 'secret.restore');
@@ -1225,13 +1223,11 @@ export async function memberActivity(db: Queryable, actorIds: string[], usedAlre
   return [...rows, ...usedRows, ...restores].map(shown);
 }
 
-/** Their reads under 0.15's log (`usesBy`), as `memberActivity` lists reads (above): each a version they read, or may have. */
-async function readsOf(db: Queryable, used: Awaited<ReturnType<typeof usesBy>>) {
-  if (used.length === 0) return [];
-  const states = await statesDuring(db, used);
-  const seen = used.flatMap((use, i) => states[i]!.map((one) => ({ actor: use.actor, at: use.at, ...one })));
-  const now = await secretPlaces(db, seen.map((one) => one.secretId));
-  return seen.flatMap(({ actor, at, secretId, version }) => {
+/** Their reads under 0.15's log (`readsBy`), as `memberActivity` lists reads (above): each version they read. */
+async function readsOf(db: Queryable, seen: Awaited<ReturnType<typeof readsBy>>) {
+  if (seen.length === 0) return [];
+  const now = await secretPlaces(db, seen.map((one) => one.secret));
+  return seen.map(({ secret, ...one }) => ({ ...one, secretId: secret })).flatMap(({ actor, at, secretId, version }) => {
     const found = now.get(secretId);
     if (found === undefined) return [];
     return [{

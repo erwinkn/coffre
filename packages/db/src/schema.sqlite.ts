@@ -39,6 +39,12 @@ const int64 = customType<{ data: bigint; driverData: number | bigint }>({
 });
 
 const time = (name: string) => integer(name, { mode: 'timestamp_ms' });
+/** A list of ids, as Postgres's `uuid[]` reads, kept as JSON. */
+const ids = customType<{ data: string[]; driverData: string }>({
+  dataType: () => 'text',
+  toDriver: (value) => JSON.stringify(value),
+  fromDriver: (value) => JSON.parse(value) as string[],
+});
 const now = sql`(CAST(unixepoch('subsec') * 1000 AS INTEGER))`;
 const createdAt = () => time('created_at').notNull().default(now);
 const flag = (name: string) => integer(name, { mode: 'boolean' });
@@ -828,8 +834,6 @@ export const credentials = sqliteTable(
       foreignColumns: [identities.id, identities.principal, identities.generation],
     }).onDelete('restrict'),
     index('credentials_principal_idx').on(table.principal, table.generation),
-    // A member's credentials by their end, newest first, with when each was made: what a page of their uses walks (T166).
-    index('credentials_expiry_idx').on(table.principal, table.expiresAt, table.id, table.createdAt),
     // A member's credentials still live, however many have expired: a CI run
     // leaves one behind each time it signs in.
     index('credentials_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
@@ -949,10 +953,75 @@ export const logUses = sqliteTable(
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
-    // The audit pages' (schema.ts).
-    index('log_uses_credential_idx').on(table.credential, table.at, table.number),
-    index('log_uses_secret_idx').on(table.secret, table.at, table.number),
-    index('log_uses_place_idx').on(table.place, table.at, table.number).where(sql`${table.place} IS NOT NULL`),
+  ],
+);
+
+/** 0.15's reads as the audit pages list them (schema.ts). */
+export const logReads = sqliteTable(
+  'log_reads',
+  {
+    number: int64('number').notNull(),
+    at: integer({ mode: 'number' }).notNull(),
+    credential: text().notNull(),
+    purpose: integer().notNull(),
+    principal: text().notNull(),
+    secret: text().notNull(),
+    environment: text().notNull(),
+    project: text().notNull(),
+    place: text(),
+    source: text(),
+    sourceEnvironment: text('source_environment'),
+    sourceProject: text('source_project'),
+    version: text(),
+    mac: bytes('mac').notNull(),
+  },
+  (table) => [
+    check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
+    uniqueIndex('log_reads_number_idx').on(table.at, table.number),
+    index('log_reads_principal_idx').on(table.principal, table.at, table.number),
+  ],
+);
+
+/** A read at each place it is at (schema.ts); `partners`, JSON. */
+export const logReadPlaces = sqliteTable(
+  'log_read_places',
+  {
+    environment: text().notNull(),
+    partner: text().notNull(),
+    at: integer({ mode: 'number' }).notNull(),
+    number: int64('number').notNull(),
+    principal: text().notNull(),
+    secret: text().notNull(),
+    partners: ids('partners').notNull(),
+  },
+  (table) => [
+    index('log_read_places_place_idx').on(table.environment, table.partner, table.at, table.number),
+    index('log_read_places_member_idx').on(table.principal, table.environment, table.partner, table.at, table.number),
+    index('log_read_places_key_idx').on(table.secret, table.environment, table.partner, table.at, table.number),
+    index('log_read_places_member_key_idx').on(table.principal, table.secret, table.environment, table.partner, table.at, table.number),
+  ],
+);
+
+/** Each place reads were at, and the place each was at besides (schema.ts). */
+export const logReadPartners = sqliteTable(
+  'log_read_partners',
+  { environment: text().notNull(), partner: text().notNull() },
+  (table) => [primaryKey({ name: 'log_read_partners_pkey', columns: [table.environment, table.partner] })],
+);
+
+/** How far the projector has gone (schema.ts). */
+export const logReadsCursor = sqliteTable(
+  'log_reads_cursor',
+  {
+    onlyRow: flag('only_row').primaryKey().default(true),
+    through: int64('through').notNull(),
+    pair: int64('pair').notNull(),
+    at: integer({ mode: 'number' }).notNull(),
+    mac: bytes('mac'),
+  },
+  (table) => [
+    check('log_reads_cursor_only_row_check', sql`${table.onlyRow}`),
+    check('log_reads_cursor_mac_check', sql`${table.mac} IS NULL OR octet_length(${table.mac}) = 16`),
   ],
 );
 

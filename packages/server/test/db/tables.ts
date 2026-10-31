@@ -40,4 +40,8 @@ export const {
   logBulk,
   logCheckpoints,
   logTiles,
+  logReads,
+  logReadPlaces,
+  logReadPartners,
+  logReadsCursor,
 } = schema;

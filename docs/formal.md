@@ -39,13 +39,15 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - Four more hold the workload-access design before it is built
   ([below](#workload-access)): `formal/Workload.tla` and the three
   `formal/Workload*.tla` beside it.
-- Three hold 0.15's rewrite of the vault and the audit log, the spec its
+- Four hold 0.15's rewrite of the vault and the audit log, the spec its
   code follows ([below](#015-the-hot-path-sealing-and-the-cutover)):
   - [`formal/HotPathOne.tla`](../formal/HotPathOne.tla): uses, changes,
     sealed inputs, covers, the deadline and the bulk cap;
   - [`formal/Seal.tla`](../formal/Seal.tla): sealing into two Merkle trees;
   - [`formal/Migration015.tla`](../formal/Migration015.tla): the cutover
     from 0.14.
+  - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
+    that the audit pages read ([below](#readstla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -1801,6 +1803,82 @@ access token's MAC, the connection's scopes, a binding's freezes); and the
 cutover, which seals the connections 0.14 left as it seals credentials and
 bindings, an app object it vouched for (`Migration015.tla`'s AppObject and
 VouchedHeld).
+
+### Reads.tla
+
+T166's projection of the uses for the audit pages, written before the code
+(R45). A use's row is slim: number, credential, key, MAC, where the MAC
+covers every column but the number. A projector writes one row of
+`log_reads` for each sealed use: the account, the key's place, the source
+if the key was a reference then, the version read, and a MAC under the
+vault's key that covers the number too. It records how far it got in a
+cursor. The audit pages read only these rows, and say "reads sealed
+through <cursor>" while the cursor is below the signed pair.
+
+**The parties.**
+- **Writers** number each change or use from the one sequence and commit
+  it. One is in flight at a time.
+- **The signer** (Seal.tla, abstracted) moves `sealed` up to the barrier,
+  below which everything has committed.
+- **The projector** reads the cursor, takes the next chunk of at most two
+  numbers, derives each use's row, inserts the rows and moves the cursor.
+  It can crash between any two steps, and two instances can race.
+- **An attacker** with write access to the database and no key can delete
+  or swap uses, delete changes, edit live rows (a credential's account, a
+  key's place, the reference's source), delete, copy or make up projection
+  rows, and set the cursor.
+
+MCReads.tla's log: c1 reads through a reference r to k1; r is repointed to
+k2; c1 moves to account B; c1 reads through r again; c2 reads k1. Each
+use's projection differs from every other's. The scenarios:
+- `Reads`: one projector, one crash, two attacker steps;
+- `ReadsRace`: two projectors, no attacker;
+- `ReadsProbe`: as `Reads`, with a use's MAC that covers only its own columns;
+- `ReadsSeal`: only the signer is fair;
+- `ReadsLive`: the signer and the projector are both fair, with one crash.
+
+| protection | turned off, TLC finds |
+|---|---|
+| derive from the sealed changes below the use, never the live rows (DeriveFromSealed) | `ProjectionMatchesReplay` (with InputsInUseMac also off): use 1 projected after the repoint shows k2; `EveryUseProjected` (with InputsInUseMac on): the check refuses the live rows, and the projector stops |
+| the use's MAC covers what it decided on, and the projector holds its derivation to it (InputsInUseMac) | `ProjectionMatchesReplay`: the writer deletes c1's move, a sealed change; the probe finds the state before it, and use 4 is vouched for as account A |
+| only numbers at or below `sealed` (ProjectSealedOnly) | `LagShown`, `EveryUseProjected`: the cursor passes use 1 while it is numbered and not yet committed, and use 1 is never projected |
+| the window's use rows held whole to the sealed uses of that range (WindowChecked) | `ProjectionMatchesReplay`: uses 1 and 5 swapped once use 1 is sealed; c2's read is vouched for at number 1 |
+| the projection row's MAC covers its number (NumberInMac) | `ProjectionMatchesReplay`: use 1's row copied to number 2 is listed |
+| rows unique on the number, the cursor moved by compare-and-set (IdempotentByNumber) | `NoDuplicate`: two projectors each insert use 1's row |
+| an upsert by number, never insert-if-absent (ReplaceOnConflict) | `LagShown`: a row made up at number 1 before the insert; the insert skips 1, and the cursor passes it |
+| the cursor moved only after the chunk's rows commit (CursorAfterRows) | `LagShown`, `EveryUseProjected`: a crash between the two leaves the cursor past a row never written |
+| the cursor carries the vault's MAC, which the projector and the page check (CursorMac) | `LagShown`: a writer sets the cursor ahead, and the page claims reads it never had |
+| the full verify flags a sealed use with no row, not just a row with no use (CountChecked) | `DeletionDetected` |
+| the projector runs apart from the signer's tick (ProjectorApart) | `SealNeverWaitsOnProjection`, `ChangeAnswered`: a stopped projector stops sealing, and the next change never answers |
+
+`EXPECTED`, with every protection on:
+- `Reads ListedComplete`: the page does not see a row deleted below its
+  cursor. The full verify does (`DeletionDetected`).
+- `ReadsProbe ProjectionMatchesReplay`: when the use's MAC covers only its
+  own columns, a probe of `log_changes` by object finds a sealed change but
+  cannot prove it is the newest one below the use. A writer who deletes the
+  newest makes the page vouch for the state before it. Only Seal's verifier
+  sees that (`ProjectionMatchesReplayOrFlagged` holds).
+
+**What TLC found against the brief.**
+- **"From sealed state" needs more than a sealed change.** The tree proves
+  a change is in it, not that no later change to the same object lies
+  between it and the use. The use's MAC must cover its inputs' seals
+  (InputsInUseMac), or the projection inherits Seal's detect-only window.
+- **Insert-if-absent leaves a silent gap.** A row made up ahead of the
+  projector is kept, and its maker deletes it once the cursor has passed.
+  An upsert works because the derived row is deterministic: two projectors
+  write the same bytes.
+- **The cursor needs its own MAC.** The brief lets the attacker edit it,
+  and nothing else ties it to the rows.
+- **A window above the seal is not empty, only in flight.** The projector
+  must stop at the signer's barrier, not at the newest number it can see.
+
+**Not modelled:** forged use or change rows, which the signer's MAC check
+refuses (Seal.tla's `MacChecked`); the use's own decision, which is
+HotPathOne's; retention of `log_reads` with its day (a unique key on a
+partitioned table must include the partition column: the day, which is a
+function of the use); and who sees which rows (`formal/lean`'s access model).
 
 ## TLC
 

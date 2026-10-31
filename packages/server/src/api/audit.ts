@@ -1,5 +1,5 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
-import { describeAccessFault, type LogVerification, type TreeVerification } from '@coffre/core/vault';
+import { describeAccessFault, useOfCode, type LogVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry } from '@coffre/db/log';
 
@@ -26,7 +26,7 @@ import {
   type RecordedChange,
   type Signed,
 } from '../db/queries.ts';
-import { accountsBehindAccess, useDetails, useParts, usesPage, type ListedUse, type UseDetail, type UsePlaces } from '../db/uses.ts';
+import { readsPage, readsStanding, type ListedRead, type ReadPlaces } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import { traceFields, type ApiContext } from './context.ts';
@@ -270,7 +270,7 @@ export type AuditQuery = {
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[] }> {
+): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; reads?: ReadsListed }> {
   const filter: AuditFilter = {
     decision: query.decision,
     excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
@@ -329,60 +329,47 @@ export async function listAudit(
   // counts, and one that does not ask reads nothing for them, and always fills with what it shows.
   const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
 
-  // The reads 0.15's log records, each a use (T166): anyone's, at the places the caller reads and the path names, but
-  // never a refusal (one the vault refuses before it writes a use is the app's entry), nor below its log's end.
+  // The reads 0.15's log records, each a use, as the vault's projector lists them (T166): anyone's, at the places the
+  // caller reads and the path names, but never a refusal (one the vault refuses before it writes a use is the app's
+  // entry), nor below its log's end; and how far they are listed.
   const used = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
-  const held = usePlaces(filter);
 
   // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
   const counting = recorded && counted;
-  const [old, sealed, uses, reach] = await Promise.all([
+  const [old, sealed, reads, standing, reach] = await Promise.all([
     before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
     recorded ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit }) : { rows: [], more: false },
-    used ? usesPage(ctx.db, { actors: filter.actors, places: held, before: start, limit: query.limit }) : { rows: [], more: false, floor: null },
+    used ? readsPage(ctx.db, { actors: filter.actors, places: readPlaces(filter), before: start, limit: query.limit }) : { rows: [], more: false },
+    used ? readsStanding(ctx.db) : null,
     counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
   const oldRead = old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` }));
   const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row), below: { at: row.at, number: row.number } }));
-  // Beside each other, for every row read: what each use read, and whose it was behind Access; whether the vault vouches
-  // for each entry of 0.15's log; and how the entries' credentials came to be.
-  // Then whether the vault vouches for each entry of 0.15's log, and each change a use's details were read from.
-  const behindAccess = uses.rows.filter((use) => use.principal === null && useParts(use.purpose).way === 'access').map((use) => use.credential);
-  const [details, accounts, origins] = await Promise.all([
-    useDetails(ctx.db, uses.rows),
-    accountsBehindAccess(ctx.db, behindAccess),
-    originsOf(ctx.db, credentialsNamed([...oldRead, ...changesRead].map((read) => read.entry), uses.rows)),
+  const readsRead = reads.rows.map((row) => ({ at: row.at, entry: readView(row), below: { at: row.at, number: row.number } }));
+  // Beside each other: whether the vault vouches for each entry of 0.15's log the page read, and for how far the reads
+  // are listed; and how the entries' credentials came to be.
+  const [vouches, origins] = await Promise.all([
+    vouched(ctx, sealed.rows, reads.rows, standing),
+    originsOf(ctx.db, credentialsNamed([...oldRead, ...changesRead, ...readsRead].map((read) => read.entry))),
   ]);
-  const backing = [...details.values()].flatMap((detail) => detail.backing);
-  const forged = await vouched(ctx, [...sealed.rows, ...new Map(backing.map((change) => [change.number, change])).values()], uses.rows);
-  // Whose: the way in's row says; behind Access, the person whose object it names; failing those, as the credential's
-  // sign-in or issue named its account.
-  const account = (use: ListedUse) => use.principal ?? accounts.get(use.credential) ?? (useParts(use.purpose).way === 'credential' ? origins.get(use.credential)?.principal : null) ?? null;
-  const usesRead = uses.rows.map((use) => ({ at: use.at, entry: useView(use, details.get(use.number), account(use)), below: { at: use.at, number: use.number } }));
-  for (const read of [...changesRead, ...usesRead]) {
-    if (read.entry !== null && forged.has(read.below.number)) read.entry.forged = true;
+  for (const read of [...changesRead, ...readsRead]) {
+    if (read.entry !== null && vouches.forged.has(read.below.number)) read.entry.forged = true;
   }
-  // A use whose version or source was read from a change the vault does not vouch for says what a writer chose.
-  for (const read of usesRead) {
-    if (details.get(read.below.number)?.backing.some((change) => forged.has(change.number))) read.entry.forged = true;
-  }
-  // How far the page may go: no older than the last of 0.15's records it counts, nor than where a member's uses at some
-  // places stopped being read (`usesPage`'s floor), whichever is higher.
-  const floor = [reach, uses.floor].reduce<ChangePoint | null>((high, point) => (point === null ? high : high === null || compare(point, high) > 0 ? point : high), null);
   const page = merged(
     { read: oldRead, more: old.more },
-    sealedStream({ read: changesRead, more: sealed.more }, { read: usesRead, more: uses.more }),
+    sealedStream({ read: changesRead, more: sealed.more }, { read: readsRead, more: reads.more }),
     query.limit,
     // Those of its own time, so it goes on in that log while 0.14's does; and no more than `HIDDEN_COUNTED` of them, so
     // it shows nothing older than the last of those, and stops there (reviews r2, r3).
     counting,
-    floor,
+    reach,
   );
-  // Where it stopped at that floor, or took everything older than it, the pages after go on (and count) from there.
-  const change = floor !== null && (page.reached || page.change === null) ? floor : page.change;
+  // Where it stopped at that last one, or took everything older than it, the pages after count the rest.
+  const change = reach !== null && (page.reached || page.change === null) ? reach : page.change;
   const next = page.oldStop === null && change === null ? null : `${page.oldStop ?? '-'}:${change === null ? '-' : pointText(change)}`;
   const entries = withOrigins(page.entries, origins);
-  if (!counted) return { entries, more: next !== null, next };
+  const listed = standing === null ? {} : { reads: readsListed(standing, vouches.cursorForged) };
+  if (!counted) return { entries, more: next !== null, next, ...listed };
   // The page's stretch of each log, from where it stopped there to where it started; to the first entry when nothing
   // older is left; nothing when the page before was the last of it. 0.14's stops at its oldest entry shown, or where
   // the page before stopped when it shows none; 0.15's at the time the page ended, or at its oldest sign-in when it
@@ -398,6 +385,7 @@ export async function listAudit(
     entries,
     more: next !== null,
     next,
+    ...listed,
     hidden: [...hidden].map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0)),
   };
 }
@@ -494,7 +482,7 @@ function merged(
 
 /**
  * 0.15's two streams as one, newest first by `(at, number)`, each read up
- * to its page: its changes (`sealedPage`) and its uses (`usesPage`), which
+ * to its page: its changes (`sealedPage`) and its reads (`readsPage`), which
  * share the log's numbers. None past what either has unread, which could be
  * newer; `more` while either has any left.
  */
@@ -510,11 +498,11 @@ function sealedStream(changes: { read: Read<ChangePoint>[]; more: boolean }, use
 }
 
 /**
- * The places a page's uses are held to (`usesPage`): those its caller reads,
- * as `within` lists them, and its path's, by its narrowest part.
+ * The places a page's reads are held to (`readsPage`): those its caller
+ * reads, as `within` lists them, and its path's, by its narrowest part.
  */
-function usePlaces(filter: AuditFilter): UsePlaces[] {
-  const places: UsePlaces[] = [];
+function readPlaces(filter: AuditFilter): ReadPlaces[] {
+  const places: ReadPlaces[] = [];
   const { within } = filter;
   if (within !== undefined) places.push({ projectIds: within.projectIds, environmentIds: within.environmentIds, secretIds: [], except: within.except ?? [] });
   const none = { projectIds: [], environmentIds: [], secretIds: [], except: [] };
@@ -526,13 +514,16 @@ function usePlaces(filter: AuditFilter): UsePlaces[] {
 
 /**
  * The entries of 0.15's log a page read that the vault does not vouch for
- * (`Vault.vouch`), by number: every change and use, as read, each with the
- * columns its MAC covers, and the changes the uses' details came from. One call for the page, none for a page without
- * them. A vault that cannot vouch (older than this app) fails the page:
- * nothing of 0.15's is listed unchecked.
+ * (`Vault.vouch`), by number: every change and read, as read, each with the
+ * columns its MAC covers (a read's, its number too); and whether it vouches
+ * for the reads' cursor, which says how far they are listed. One call for
+ * the page, none for a page without them. A vault that cannot vouch (older
+ * than this app) fails the page: nothing of 0.15's is listed unchecked.
  */
-async function vouched(ctx: ApiContext, changes: readonly RecordedChange[], uses: readonly ListedUse[]): Promise<Set<bigint>> {
-  if (changes.length === 0 && uses.length === 0) return new Set();
+async function vouched(
+  ctx: ApiContext, changes: readonly RecordedChange[], reads: readonly ListedRead[], standing: Awaited<ReturnType<typeof readsStanding>> | null,
+): Promise<{ forged: Set<bigint>; cursorForged: boolean }> {
+  if (changes.length === 0 && reads.length === 0 && standing === null) return { forged: new Set(), cursorForged: false };
   if (ctx.vault.vouch === undefined) throw new ApiError('unavailable', "the vault cannot vouch for 0.15's log: it is older than this app, so deploy it first", 'vault_outdated');
   const hex = (bytes: Buffer | null) => (bytes === null ? null : bytes.toString('hex'));
   const { forged } = await ctx.vault.vouch({
@@ -540,60 +531,84 @@ async function vouched(ctx: ApiContext, changes: readonly RecordedChange[], uses
       ...changes.map((row) => ({
         tree: 'changes' as const, number: String(row.number), at: row.at, requestId: row.requestId, object: row.object, actor: row.actor, payload: row.payload, seal: hex(row.seal), mac: hex(row.mac)!,
       })),
-      ...uses.map((row) => ({
-        tree: 'uses' as const, number: String(row.number), at: row.at, requestId: row.requestId, credential: row.credential, secret: row.secret, purpose: row.purpose, place: row.place, mac: hex(row.mac)!,
+      ...reads.map((row) => ({
+        tree: 'reads' as const, number: String(row.number), at: row.at, credential: row.credential, purpose: row.purpose, principal: row.principal, secret: row.secret,
+        environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.sourceEnvironment, sourceProject: row.sourceProject,
+        version: row.version, mac: hex(row.mac)!,
       })),
+      ...(standing === null ? [] : [{ tree: 'cursor' as const, number: 'cursor' as const, through: String(standing.through), pair: String(standing.pair), at: standing.at, mac: hex(standing.mac) }]),
     ],
   });
-  return new Set(forged.flatMap((number) => (/^[0-9]{1,19}$/.test(number) ? [BigInt(number)] : [])));
+  const cursorForged = forged.includes('cursor');
+  return { forged: new Set(forged.flatMap((number) => (/^[0-9]{1,19}$/.test(number) ? [BigInt(number)] : []))), cursorForged };
 }
 
 /**
- * A use of 0.15's log (R53, T166), shown as 0.14's `secret.read` showed a
- * read of one key: by the vault, which logged it, numbered by its use, by
- * the account its way in acts as (`account`), for its purpose. Filed as
- * 0.14 filed a read: through a reference, at its source, the reference and
- * its holder beside it (`via`, `also`); otherwise at its key, the fork it
- * was read in beside it (`through`, `also`). The version is the one its
- * key's object, or its source's, held when the use was numbered
- * (`useDetails`), which every use reads under. What the slim row leaves
- * out stays out: the app's request and operation, and the proxy's
- * upstream. A use is the request (R53): one the vault refused after it was
- * written, the bulk cap's say, shows as this read too, the log's record
- * of what was asked, never less than happened.
+ * How far a page's reads are listed (`reads`): the reads 0.15's log seals are
+ * listed once the vault's projector has written them, which runs apart from
+ * sealing (T166). A page says how far, so that a projector behind, or
+ * stopped, shows rather than leaves reads missing unsaid.
+ */
+export type ReadsListed = {
+  /** Every read the log sealed up to this time is listed; null before any. */
+  through: string | null;
+  /** Whether sealed reads newer than that wait to be listed: more than `READS_BEHIND_MS` behind the newest pair. */
+  behind: boolean;
+  /** The vault does not vouch for where the reads' listing stands: its cursor was moved around the projector. */
+  forged?: true;
+};
+
+/** How far behind the newest pair the reads' listing is said to be behind: a few ticks, so that the one a seal takes says nothing. */
+export const READS_BEHIND_MS = 5_000;
+
+function readsListed(standing: Awaited<ReturnType<typeof readsStanding>>, forged: boolean): ReadsListed {
+  const behind = standing.sealed !== null && standing.through < standing.sealed && standing.sealedAt !== null && standing.sealedAt - standing.at > READS_BEHIND_MS;
+  return { through: standing.at === 0 ? null : new Date(standing.at).toISOString(), behind: behind || forged, ...(forged ? { forged: true as const } : {}) };
+}
+
+/**
+ * A read of 0.15's log (R53, T166), as the vault's projector wrote it,
+ * shown as 0.14's `secret.read` showed a read of one key: by the vault,
+ * which logged it, numbered by its use, by the account its way in acts as,
+ * for its purpose, of the version it read. Filed as 0.14 filed a read:
+ * through a reference, at its source, the reference's holder beside it
+ * (`via`, `also`); otherwise at its key, the fork it was read in beside it
+ * (`through`, `also`). Each from the sealed objects at the use's number.
+ * What the slim row leaves out stays out: the app's request and operation,
+ * and the proxy's upstream. A use is the request (R53): one the vault
+ * refused after it was written, the bulk cap's say, shows as this read too,
+ * the log's record of what was asked, never less than happened.
  *
  *   Ada's `coffre run` of market/dev        a `secret.read` for each key, `run`
  *   the proxy's use of STRIPE_KEY          a `secret.read` of it, `use`, via its credential
  */
-function useView(use: ListedUse, detail: UseDetail | undefined, account: string | null): AuditEntryView {
-  const { purpose, keepsSensitive, way } = useParts(use.purpose);
-  const { home } = use;
-  const source = detail?.source ?? null;
-  const reference = detail?.reference ?? null;
-  const filed = source ?? (home === null ? null : { ...home, secretId: use.secret });
-  const holder = home === null ? null : `${home.project}/${home.environment}/${home.key}`;
+function readView(row: ListedRead): AuditEntryView {
+  const code = useOfCode(row.purpose);
+  const way = code?.way ?? 'credential';
+  const through = row.source !== null;
+  const holder = row.key === null || row.projectSlug === null || row.environmentSlug === null ? null : `${row.projectSlug}/${row.environmentSlug}/${row.key}`;
   const via = {
-    ...(source === null ? {} : { reference: reference?.id ?? null, seq: reference?.createdSeq ?? null, path: holder, createdBy: reference?.createdBy ?? null, createdAt: reference?.createdAt ?? null }),
-    ...(way === 'connection' ? { connectionId: use.credential, ...(use.client === null ? {} : { clientId: use.client.id, clientName: use.client.name }) } : {}),
+    ...(through ? { path: holder } : {}),
+    ...(way === 'connection' ? { connectionId: row.credential, ...(row.client === null ? {} : { clientId: row.client.id, clientName: row.client.name }) } : {}),
   };
-  const also = source !== null
-    ? { projectId: home?.projectId ?? null, environmentId: home?.environmentId ?? null, secretId: use.secret }
-    : use.place !== null ? { projectId: home?.projectId ?? null, environmentId: use.place } : null;
+  const also = through
+    ? { projectId: row.project, environmentId: row.environment, secretId: row.secret }
+    : row.place !== null ? { projectId: row.project, environmentId: row.place } : null;
   return {
-    seq: Number(use.number),
+    seq: Number(row.number),
     log: '0.15',
     author: 'vault',
-    occurredAt: new Date(use.at).toISOString(),
-    ...(account === null ? { actorType: 'system' as const, actorId: 'unknown' } : actorParts(account)),
+    occurredAt: new Date(row.at).toISOString(),
+    ...actorParts(row.principal),
     action: 'secret.read',
     decision: 'allow',
     reason: null,
     detail: false,
     subject: null,
-    project: filed?.project ?? null,
-    environment: filed?.environment ?? null,
-    key: filed?.key ?? null,
-    version: detail?.version ?? null,
+    project: through ? row.sourceProjectSlug : row.projectSlug,
+    environment: through ? row.sourceEnvironmentSlug : row.environmentSlug,
+    key: through ? row.sourceKey : row.key,
+    version: row.versionNumber,
     secrets: null,
     operationId: null,
     relatedSeq: null,
@@ -601,16 +616,14 @@ function useView(use: ListedUse, detail: UseDetail | undefined, account: string 
     run: null,
     token: null,
     metadata: {
-      purpose: purpose ?? `unknown (${use.purpose})`,
-      ...(keepsSensitive ? { keepsSensitive: true } : {}),
-      secretId: filed?.secretId ?? use.secret,
-      ...(detail?.version == null ? {} : { version: detail.version }),
+      purpose: code?.purpose ?? `unknown (${row.purpose})`,
+      ...(code?.keepsSensitive ? { keepsSensitive: true } : {}),
+      secretId: through ? row.source : row.secret,
+      ...(row.versionNumber === null ? {} : { version: row.versionNumber }),
       ...(Object.keys(via).length === 0 ? {} : { via }),
-      ...(use.place === null ? {} : { through: { environmentId: use.place, ...(use.fork === null ? {} : { slug: use.fork.slug }) } }),
+      ...(row.place === null ? {} : { through: { environmentId: row.place, ...(row.forkSlug === null ? {} : { slug: row.forkSlug }) } }),
       ...(also === null ? {} : { also }),
-      ...(way === 'credential' ? { credentialId: use.credential } : way === 'binding' ? { bindingId: use.credential } : way === 'access' ? { access: true } : {}),
-      // The use's own id, which names no request of the app's.
-      use: use.requestId,
+      ...(way === 'credential' ? { credentialId: row.credential } : way === 'binding' ? { bindingId: row.credential } : way === 'access' ? { access: true } : {}),
     },
   };
 }
@@ -619,17 +632,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * The credentials entries were written on, which a page asks how they came
- * to be (`originsOf`, one read for the page): each entry's that names one,
- * and each use's through a credential.
+ * to be (`originsOf`, one read for the page): each entry's that names one, a
+ * read's through a credential included.
  */
-function credentialsNamed(entries: readonly (AuditEntryView | null)[], uses: readonly ListedUse[]): string[] {
-  return [...new Set([
-    ...entries.flatMap((entry) => {
-      const id = entry?.metadata.credentialId;
-      return entry !== null && entry.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
-    }),
-    ...uses.flatMap((use) => (useParts(use.purpose).way === 'credential' ? [use.credential] : [])),
-  ])];
+function credentialsNamed(entries: readonly (AuditEntryView | null)[]): string[] {
+  return [...new Set(entries.flatMap((entry) => {
+    const id = entry?.metadata.credentialId;
+    return entry !== null && entry.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
+  }))];
 }
 
 /**

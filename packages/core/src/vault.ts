@@ -371,7 +371,14 @@ export type VouchInput = { entries: VouchedEntry[] };
 
 export type VouchedEntry =
   | { tree: 'changes'; number: string; at: number; requestId: string; object: string; actor: string; payload: string; seal: string | null; mac: string }
-  | { tree: 'uses'; number: string; at: number; requestId: string; credential: string; secret: string; purpose: number; place: string | null; mac: string };
+  | { tree: 'uses'; number: string; at: number; requestId: string; credential: string; secret: string; purpose: number; place: string | null; mac: string }
+  /** A read as the projector wrote it (`log_reads`, T166): its MAC covers its number too. */
+  | {
+    tree: 'reads'; number: string; at: number; credential: string; purpose: number; principal: string; secret: string; environment: string; project: string;
+    place: string | null; source: string | null; sourceEnvironment: string | null; sourceProject: string | null; version: string | null; mac: string;
+  }
+  /** The projection's cursor (`log_reads_cursor`, T166), named `cursor` in the answer: whether the pages may say reads are whole up to it. */
+  | { tree: 'cursor'; number: 'cursor'; through: string; pair: string; at: number; mac: string | null };
 
 /**
  * 0.15's log as its check found it. `problems` names what does not hold,

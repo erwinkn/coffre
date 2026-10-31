@@ -1175,6 +1175,11 @@ export type Api = {
         action: string;
         count: number;
       }[];
+      reads?: {
+        through: string | null;
+        behind: boolean;
+        forged?: true;
+      };
     };
   };
   "GET /audit/verification": {

@@ -6,6 +6,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
+import type { ReadPlace, ReadRow, ReadsCursor, ReadsStore, Sealed } from './reads.ts';
 import type { RetentionStore } from './retention.ts';
 
 /**
@@ -51,13 +52,30 @@ type Options = {
 };
 
 /** The checkpointer's database, with retention's part. */
-export type LogStore = CheckpointStore & RetentionStore;
+export type LogStore = CheckpointStore & RetentionStore & ReadsStore;
 
 export function logStore(db: Database, options: Options = {}): LogStore {
   const range = options.tileRange ?? TILE_RANGE;
   // A range holds whole leaf tiles: 256 leaves each.
   if (!Number.isSafeInteger(range) || range <= 0 || range % 256 !== 0) throw new Error(`tileRange must be a positive multiple of 256, not ${range}`);
-  return engineOf(db) === 'postgres' ? postgresStore(db, range) : sqliteStore(db);
+  const base = engineOf(db) === 'postgres' ? postgresStore(db, range) : sqliteStore(db);
+  const reads = readsStore(db);
+  return {
+    ...base,
+    readsCursor: reads.readsCursor,
+    objects: reads.objects,
+    writeReads: reads.writeReads,
+    // The reads' days with the uses' (T166): made beside them, and gone once they are.
+    async makeDays(days) {
+      await base.makeDays(days);
+      await reads.makeDays(days);
+    },
+    async dropDay(day) {
+      const state = await base.dropDay(day);
+      if (state !== 'detached') await reads.dropDay(day);
+      return state;
+    },
+  };
 }
 
 /** The pair's fields as `write_checkpoint` takes them, from its notes (the checkpointer signed them; nothing is checked here). */
@@ -219,7 +237,7 @@ export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling:
       ORDER BY n${limitOf(limit)}`;
 }
 
-function postgresStore(db: Database, range: number): LogStore {
+function postgresStore(db: Database, range: number): CheckpointStore & RetentionStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
   const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
@@ -363,7 +381,7 @@ function postgresStore(db: Database, range: number): LogStore {
   };
 }
 
-function sqliteStore(db: Database): LogStore {
+function sqliteStore(db: Database): CheckpointStore & RetentionStore {
   const CHANGE = sql.raw(`json_object('tree', 'changes', 'number', CAST(c.number AS TEXT), 'at', CAST(c.at AS TEXT), 'requestId', c.request_id,
     'object', c.object, 'actor', c.actor, 'payload', c.payload, 'seal', CASE WHEN c.seal IS NULL THEN NULL ELSE hex(c.seal) END, 'mac', hex(c.mac))`);
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
@@ -505,3 +523,89 @@ function sqliteStore(db: Database): LogStore {
     },
   };
 }
+
+/**
+ * The projection of reads (reads.ts, T166), on either engine: its cursor,
+ * the objects a projection reads, its write, and its days. On Postgres the
+ * write is `project_reads`, which takes the rows, each once, and moves the
+ * cursor on after them, never past the newest pair; SQLite, one writer and
+ * no partitions, writes them in a transaction, and drops a day's by `at`.
+ */
+function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 'writeReads'> & { makeDays(days: readonly string[]): Promise<void>; dropDay(day: string): Promise<void> } {
+  const postgres = engineOf(db) === 'postgres';
+  const made = new Set<string>();
+  const id = (value: string | null) => (value === null ? sql`NULL` : postgres ? sql`CAST(${value} AS uuid)` : sql`${value}`);
+  return {
+    async readsCursor() {
+      const [row] = await rowsOf<{ through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null }>(db, sql`SELECT through, pair, at, mac FROM log_reads_cursor WHERE only_row`);
+      return row === undefined ? { through: 0n, pair: 0n, at: 0, mac: null } : { through: BigInt(row.through), pair: BigInt(row.pair), at: Number(row.at), mac: row.mac === null ? null : Buffer.from(row.mac) };
+    },
+    async objects(asked) {
+      if (asked.length === 0) return [];
+      // Each asked's place and whether it wants the first change are the code's own whole numbers, written as such.
+      const rows = sql.join(asked.map(({ object, below, first }, i) => (i === 0
+        ? sql`SELECT ${sql.raw(String(i))} AS i, ${id(object)} AS object, CAST(${String(below)} AS ${sql.raw(postgres ? 'bigint' : 'INTEGER')}) AS below, ${sql.raw(first ? '1' : '0')} AS first`
+        : sql`SELECT ${sql.raw(String(i))}, ${id(object)}, CAST(${String(below)} AS ${sql.raw(postgres ? 'bigint' : 'INTEGER')}), ${sql.raw(first ? '1' : '0')}`)), sql` UNION ALL `);
+      // One probe of `log_changes_object_idx` each: the object's first change, or its newest below the number.
+      const found = await rowsOf<{ i: number | string; payload: string | null; actor: string | null }>(db, sql`
+        SELECT a.i, c.payload, c.actor FROM (${rows}) a
+          LEFT JOIN log_changes c ON c.number = CASE WHEN a.first = 1
+            THEN (SELECT min(b.number) FROM log_changes b WHERE b.object = a.object)
+            ELSE (SELECT max(b.number) FROM log_changes b WHERE b.object = a.object AND b.number < a.below) END`);
+      const byIndex = new Map(found.map((row) => [Number(row.i), row]));
+      return asked.map((_, i): Sealed => {
+        const row = byIndex.get(i);
+        return row?.payload == null ? null : { payload: row.payload, actor: row.actor ?? '' };
+      });
+    },
+    async writeReads(reads, places, cursor) {
+      if (postgres) {
+        const json = (rows: readonly object[]) => JSON.stringify(rows, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : Buffer.isBuffer(value) ? value.toString('hex') : value));
+        const wire = reads.map((row) => ({ ...row, mac: row.mac.toString('hex') }));
+        await rowsOf(db, sql`SELECT project_reads(${json(wire)}::jsonb, ${json(places)}::jsonb, ${String(cursor.through)}::bigint, ${String(cursor.pair)}::bigint, ${cursor.at}::bigint, ${cursor.mac}::bytea)`);
+        return;
+      }
+      await db.transaction(async (raw) => {
+        const tx = raw as unknown as Database;
+        const [cut] = await rowsOf<{ sealed: string | number | null }>(tx, sql`SELECT max(upto) AS sealed FROM log_checkpoints`);
+        if (cut?.sealed == null || cursor.through > BigInt(cut.sealed)) throw new Error(`reads through ${cursor.through} are past the newest pair`);
+        // The projector's row over any other at its number, its places with it (ReplaceOnConflict).
+        for (const row of reads) {
+          await rowsOf(tx, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
+            VALUES (${row.number}, ${row.at}, ${row.credential}, ${row.purpose}, ${row.principal}, ${row.secret}, ${row.environment}, ${row.project}, ${row.place}, ${row.source},
+              ${row.sourceEnvironment}, ${row.sourceProject}, ${row.version}, ${row.mac})
+            ON CONFLICT (at, number) DO UPDATE SET credential = excluded.credential, purpose = excluded.purpose, principal = excluded.principal, secret = excluded.secret,
+              environment = excluded.environment, project = excluded.project, place = excluded.place, source = excluded.source, source_environment = excluded.source_environment,
+              source_project = excluded.source_project, version = excluded.version, mac = excluded.mac`);
+          await rowsOf(tx, sql`DELETE FROM log_read_places WHERE at = ${row.at} AND number = ${row.number}`);
+        }
+        for (const place of places) {
+          await rowsOf(tx, sql`INSERT INTO log_read_places (environment, partner, at, number, principal, secret, partners)
+            VALUES (${place.environment}, ${place.partner}, ${place.at}, ${place.number}, ${place.principal}, ${place.secret}, ${JSON.stringify(place.partners)})`);
+          await rowsOf(tx, sql`INSERT INTO log_read_partners (environment, partner) VALUES (${place.environment}, ${place.partner}) ON CONFLICT DO NOTHING`);
+        }
+        await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
+      });
+    },
+    async makeDays(days) {
+      if (!postgres) return;
+      for (const day of days) {
+        if (made.has(day)) continue;
+        await rowsOf(db, sql`SELECT make_reads_day(${day}::date)`);
+        made.add(day);
+      }
+    },
+    async dropDay(day) {
+      if (postgres) {
+        await rowsOf(db, sql`SELECT drop_reads_day(${day}::date)`);
+        made.delete(day);
+        return;
+      }
+      const from = Date.parse(`${day}T00:00:00Z`);
+      await rowsOf(db, sql`DELETE FROM log_reads WHERE at >= ${from} AND at < ${from + 86_400_000}`);
+      await rowsOf(db, sql`DELETE FROM log_read_places WHERE at >= ${from} AND at < ${from + 86_400_000}`);
+    },
+  };
+}
+
+export type { ReadPlace, ReadRow, ReadsCursor };

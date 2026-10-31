@@ -28,7 +28,7 @@ import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
-import { usesBy } from '../db/uses.ts';
+import { readsBy } from '../db/reads.ts';
 import {
   priorConnections,
   revokePriorMembership,
@@ -498,9 +498,9 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
   // Everyone, not just them: the service tokens they issued belong to others. Beside it, every place (which whoever
   // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
-  // And their reads under 0.15's log, each a use (T166), which the report weighs with their entries below.
+  // And their reads under 0.15's log, as the vault's projection lists them (T166), which the report weighs below.
   const [everyone, known, owners, references, used] = await Promise.all([
-    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), usesBy(ctx.db, [formatMember(member)]),
+    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsBy(ctx.db, [formatMember(member)]),
   ]);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');

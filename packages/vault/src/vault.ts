@@ -157,6 +157,7 @@ import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, logMacKey, useEntry as usedEntry } from './log-entry.ts';
+import { cursorHolds, readHolds, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -271,8 +272,8 @@ export type PreparedVault = {
   converted: boolean;
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
-  /** What `vouch` checks an entry's MAC with: one check under each signing key, made once a call first needs them. */
-  vouchKeys?: ((entry: LogEntry) => boolean)[];
+  /** The log's MAC key under each signing key, which `vouch` checks an entry with: made once a call first needs them. */
+  vouchKeys?: Buffer[];
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -3931,11 +3932,22 @@ class VaultService implements Vault {
   async vouch(input: VouchInput): Promise<{ forged: string[] }> {
     const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
     if (!Array.isArray(entries) || entries.length > VOUCHED_AT_ONCE) throw new Error(`vouch takes up to ${VOUCHED_AT_ONCE} entries`);
-    const checks = (this.#prepared.vouchKeys ??= this.#config.signingKeys.map((seed) => authentic(logMacKey(seed))));
+    const macs = (this.#prepared.vouchKeys ??= this.#config.signingKeys.map((seed) => logMacKey(seed)));
     return {
       forged: entries.flatMap((entry: VouchedEntry) => {
-        const read = vouchedEntry(entry);
-        return read !== null && checks.some((check) => check(read)) ? [] : [typeof entry?.number === 'string' ? entry.number : '?'];
+        const named = typeof entry?.number === 'string' ? entry.number : '?';
+        if (entry?.tree === 'cursor') {
+          const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
+          const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
+          const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
+          return cursor !== null && macs.some((key) => cursorHolds(key, cursor)) ? [] : [named];
+        }
+        if (entry?.tree === 'reads') {
+          const read = vouchedRead(entry);
+          return read !== null && macs.some((key) => readHolds(key, read)) ? [] : [named];
+        }
+        const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
+        return logged !== null && macs.some((key) => authentic(key)(logged)) ? [] : [named];
       }),
     };
   }
@@ -4633,7 +4645,7 @@ function base64(bytes: Uint8Array): string {
 }
 
 /** An entry as `vouch` was given it, as the trees take it; null for one of no shape a row has. */
-function vouchedEntry(entry: VouchedEntry): LogEntry | null {
+function vouchedEntry(entry: Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>): LogEntry | null {
   const hex = (value: unknown) => (typeof value === 'string' && /^(?:[0-9a-f]{2})*$/.test(value) ? Buffer.from(value, 'hex') : null);
   const text = (value: unknown) => typeof value === 'string';
   if (typeof entry !== 'object' || entry === null || !text(entry.number) || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !text(entry.requestId)) return null;
@@ -4648,4 +4660,15 @@ function vouchedEntry(entry: VouchedEntry): LogEntry | null {
   if (entry.tree !== 'uses' || !/^[0-9]{1,19}$/.test(entry.requestId) || !text(entry.credential) || !text(entry.secret) || !Number.isSafeInteger(entry.purpose)
     || (entry.place !== null && !text(entry.place))) return null;
   return usedEntry({ number, at: entry.at, requestId: BigInt(entry.requestId), credential: entry.credential, secret: entry.secret, purpose: entry.purpose, place: entry.place, mac });
+}
+
+/** A read as `vouch` was given it (`log_reads`, T166); null for one of no shape the projector writes. */
+function vouchedRead(entry: Extract<VouchedEntry, { tree: 'reads' }>): ReadRow | null {
+  const id = (value: unknown) => typeof value === 'string' && value.length > 0;
+  const maybe = (value: unknown): value is string | null => value === null || id(value);
+  const mac = typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : null;
+  if (mac === null || typeof entry.number !== 'string' || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !Number.isSafeInteger(entry.purpose)
+    || !id(entry.credential) || !id(entry.principal) || !id(entry.secret) || !id(entry.environment) || !id(entry.project)
+    || !maybe(entry.place) || !maybe(entry.source) || !maybe(entry.sourceEnvironment) || !maybe(entry.sourceProject) || !maybe(entry.version)) return null;
+  return { ...entry, number: BigInt(entry.number), mac };
 }

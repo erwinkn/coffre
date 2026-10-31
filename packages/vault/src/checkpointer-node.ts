@@ -6,6 +6,8 @@ import type { Database } from '@coffre/db';
 
 import { heldIn, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
+import { Projector } from './reads.ts';
+import { verifierKeys } from './verifier.ts';
 import { logStore } from './log-store.ts';
 
 /**
@@ -49,6 +51,8 @@ export type RunningCheckpointer = {
   alarms(since?: number): Promise<Alarm[]>;
   /** The pair the signer remembers, from its file: what the vault's verifier holds its walks to (`VaultOptions.heldOutside`). */
   heldOutside(): Promise<PairNotes[]>;
+  /** The reads' projection run until it stands at the newest pair (T166): for tests and tools, never on a request's path. */
+  projected(): Promise<void>;
   stop(): Promise<void>;
 };
 
@@ -102,6 +106,13 @@ export async function runCheckpointer(options: {
       void record({ at: Date.now(), message });
     },
   });
+  // The reads' projection (T166), kicked after each tick and never waited on: a projection behind lags the audit pages,
+  // never a seal (reads.ts).
+  const keys = await verifierKeys([options.seed]);
+  const projector = new Projector(async () => ({ store, close: async () => {} }), keys, (message) => {
+    console.warn(`coffre audit: ${message}`);
+    void record({ at: Date.now(), message });
+  });
   const interval = options.intervalMs ?? TICK_MS;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -110,7 +121,7 @@ export async function runCheckpointer(options: {
   let failed: string | null = null;
   // The upkeep after a tick that held; after one refused, only the next days (retention would fail on it, alarmed again).
   const loop = () => {
-    ticking = checkpointer.tick().then(() => ((failed = null), keep()), async (error: Error) => {
+    ticking = checkpointer.tick().then(() => ((failed = null), projector.kick(), keep()), async (error: Error) => {
       const message = `a checkpoint failed: ${reasonOf(error)}`;
       if (message !== failed) {
         failed = message;
@@ -129,6 +140,17 @@ export async function runCheckpointer(options: {
     async heldOutside() {
       return heldIn(await fileMemory(options.memory).last());
     },
+    async projected() {
+      // A run goes a few steps: as many runs as the ranges above the cursor take, and no more than a hundred.
+      for (let run = 0; run < 100; run += 1) {
+        await projector.settled();
+        projector.kick();
+        await projector.settled();
+        const [cursor, newest] = await Promise.all([store.readsCursor(), store.newest()]);
+        if (newest === null || cursor.through >= newest.upto) return;
+      }
+      throw new Error("the reads' projection did not catch up with the newest pair");
+    },
     async alarms(since = 0) {
       await appending;
       return (await readAlarms(alarmsPath)).filter((a) => a.at >= since);
@@ -137,6 +159,7 @@ export async function runCheckpointer(options: {
       stopped = true;
       clearTimeout(timer);
       await ticking;
+      await projector.stop();
       // Closed, so that a handle kept after stop() never ticks beside a runner started over the same memory.
       await checkpointer.close();
     },

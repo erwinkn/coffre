@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2ad5c6e7-8fa1-4a1a-9707-f0d5f3c3e4ca",
+  "id": "718cbe95-99d0-428e-92e7-1dd45b525f9d",
   "prevId": "654b1165-9b5f-4fbe-b1e2-47bf02425767",
   "tables": {
     "audit_chain_head": {
@@ -718,16 +718,6 @@
           "columns": [
             "principal",
             "generation"
-          ],
-          "isUnique": false
-        },
-        "credentials_expiry_idx": {
-          "name": "credentials_expiry_idx",
-          "columns": [
-            "principal",
-            "expires_at",
-            "id",
-            "created_at"
           ],
           "isUnique": false
         },
@@ -1853,6 +1843,328 @@
         }
       }
     },
+    "log_read_partners": {
+      "name": "log_read_partners",
+      "columns": {
+        "environment": {
+          "name": "environment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "partner": {
+          "name": "partner",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "log_read_partners_pkey": {
+          "columns": [
+            "environment",
+            "partner"
+          ],
+          "name": "log_read_partners_pkey"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "log_read_places": {
+      "name": "log_read_places",
+      "columns": {
+        "environment": {
+          "name": "environment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "partner": {
+          "name": "partner",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "at": {
+          "name": "at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "number": {
+          "name": "number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "secret": {
+          "name": "secret",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "partners": {
+          "name": "partners",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "log_read_places_place_idx": {
+          "name": "log_read_places_place_idx",
+          "columns": [
+            "environment",
+            "partner",
+            "at",
+            "number"
+          ],
+          "isUnique": false
+        },
+        "log_read_places_member_idx": {
+          "name": "log_read_places_member_idx",
+          "columns": [
+            "principal",
+            "environment",
+            "partner",
+            "at",
+            "number"
+          ],
+          "isUnique": false
+        },
+        "log_read_places_key_idx": {
+          "name": "log_read_places_key_idx",
+          "columns": [
+            "secret",
+            "environment",
+            "partner",
+            "at",
+            "number"
+          ],
+          "isUnique": false
+        },
+        "log_read_places_member_key_idx": {
+          "name": "log_read_places_member_key_idx",
+          "columns": [
+            "principal",
+            "secret",
+            "environment",
+            "partner",
+            "at",
+            "number"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "log_reads": {
+      "name": "log_reads",
+      "columns": {
+        "number": {
+          "name": "number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "at": {
+          "name": "at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "credential": {
+          "name": "credential",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "secret": {
+          "name": "secret",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "environment": {
+          "name": "environment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project": {
+          "name": "project",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "place": {
+          "name": "place",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_environment": {
+          "name": "source_environment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source_project": {
+          "name": "source_project",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "log_reads_number_idx": {
+          "name": "log_reads_number_idx",
+          "columns": [
+            "at",
+            "number"
+          ],
+          "isUnique": true
+        },
+        "log_reads_principal_idx": {
+          "name": "log_reads_principal_idx",
+          "columns": [
+            "principal",
+            "at",
+            "number"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "log_reads_mac_check": {
+          "name": "log_reads_mac_check",
+          "value": "octet_length(\"log_reads\".\"mac\") = 16"
+        }
+      }
+    },
+    "log_reads_cursor": {
+      "name": "log_reads_cursor",
+      "columns": {
+        "only_row": {
+          "name": "only_row",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "through": {
+          "name": "through",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "pair": {
+          "name": "pair",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "at": {
+          "name": "at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "blob",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "log_reads_cursor_only_row_check": {
+          "name": "log_reads_cursor_only_row_check",
+          "value": "\"log_reads_cursor\".\"only_row\""
+        },
+        "log_reads_cursor_mac_check": {
+          "name": "log_reads_cursor_mac_check",
+          "value": "\"log_reads_cursor\".\"mac\" IS NULL OR octet_length(\"log_reads_cursor\".\"mac\") = 16"
+        }
+      }
+    },
     "log_tiles": {
       "name": "log_tiles",
       "columns": {
@@ -1985,34 +2297,6 @@
             "request_id"
           ],
           "isUnique": true
-        },
-        "log_uses_credential_idx": {
-          "name": "log_uses_credential_idx",
-          "columns": [
-            "credential",
-            "at",
-            "number"
-          ],
-          "isUnique": false
-        },
-        "log_uses_secret_idx": {
-          "name": "log_uses_secret_idx",
-          "columns": [
-            "secret",
-            "at",
-            "number"
-          ],
-          "isUnique": false
-        },
-        "log_uses_place_idx": {
-          "name": "log_uses_place_idx",
-          "columns": [
-            "place",
-            "at",
-            "number"
-          ],
-          "isUnique": false,
-          "where": "\"log_uses\".\"place\" IS NOT NULL"
         }
       },
       "foreignKeys": {},

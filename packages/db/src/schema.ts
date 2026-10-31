@@ -925,8 +925,6 @@ export const credentials = pgTable(
       foreignColumns: [identities.id, identities.principal, identities.generation],
     }).onDelete('restrict'),
     index('credentials_principal_idx').on(table.principal, table.generation),
-    // A member's credentials by their end, newest first, with when each was made: what a page of their uses walks (T166).
-    index('credentials_expiry_idx').on(table.principal, table.expiresAt, table.id, table.createdAt),
     // A member's credentials still live, however many have expired: a CI run
     // leaves one behind each time it signs in.
     index('credentials_live_idx').on(table.principal, table.expiresAt).where(sql`${table.revokedAt} IS NULL`),
@@ -1071,12 +1069,9 @@ export const logChanges = pgTable(
  * A use, the slim row (R53): no principal (the credential's), no
  * environment (the secret's, or `place`), no kind (the table says it).
  * Partitioned by the day of `at` (`make_day`), which retention drops whole;
- * fixed-width columns first, and eight of them, so the row pads to nothing. The replay's
- * index: a retried call repeats its `at` and request id, both under its
- * MAC, and lands in the same day. And the audit pages', which list each use
- * where 0.14's `secret.read` stood (T166): its way in's, its key's and its
- * fork's, each newest first by when it was asked, then its number, as the
- * pages order 0.15's log, so that a page reads as many as it shows.
+ * fixed-width columns first, and eight of them, so the row pads to nothing. One index, the
+ * replay's: a retried call repeats its `at` and request id, both under its
+ * MAC, and lands in the same day.
  */
 export const logUses = pgTable(
   'log_uses',
@@ -1097,12 +1092,92 @@ export const logUses = pgTable(
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
-    // A member's uses, by each way in (a credential, a connection, a binding, or a person's object behind Access).
-    index('log_uses_credential_idx').on(table.credential, table.at, table.number),
-    // A key's uses: a place's, the keys it holds and those references of it hold.
-    index('log_uses_secret_idx').on(table.secret, table.at, table.number),
-    // A fork's: its inherited values' uses, read there. Few uses have a place, and only those are indexed.
-    index('log_uses_place_idx').on(table.place, table.at, table.number).where(sql`${table.place} IS NOT NULL`),
+  ],
+);
+
+/**
+ * 0.15's reads as the audit pages list them (T166; formal/Reads.tla): a
+ * projection of each use a signed pair seals, written by the vault's
+ * projector apart from the checkpointer, from the sealed objects at the
+ * use's number: its account, its key's place, the fork it was read in,
+ * through a reference the source and its place, the version read; under the
+ * vault's MAC over all of it, the number included. Partitioned by the day of
+ * `at`, as the uses are (`make_reads_day`), and dropped with them.
+ */
+export const logReads = pgTable(
+  'log_reads',
+  {
+    number: bigint({ mode: 'bigint' }).notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    credential: uuid().notNull(),
+    purpose: smallint().notNull(),
+    principal: text().notNull(),
+    secret: uuid().notNull(),
+    environment: uuid().notNull(),
+    project: uuid().notNull(),
+    place: uuid(),
+    source: uuid(),
+    sourceEnvironment: uuid('source_environment'),
+    sourceProject: uuid('source_project'),
+    version: uuid(),
+    mac: bytea().notNull(),
+  },
+  (table) => [
+    check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
+    uniqueIndex('log_reads_number_idx').on(table.at, table.number),
+    index('log_reads_principal_idx').on(table.principal, table.at, table.number),
+  ],
+);
+
+/**
+ * A read at each place it is at (`log_reads`): its key's environment, the
+ * fork it was read in, a reference's source's; with the place it is at
+ * besides (`partner`, its own for a read at one place) and all of them
+ * (`partners`), so that a page reads the places it shows and leaves out,
+ * by index, a read at a place its reader may not see.
+ */
+export const logReadPlaces = pgTable(
+  'log_read_places',
+  {
+    environment: uuid().notNull(),
+    partner: uuid().notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    number: bigint({ mode: 'bigint' }).notNull(),
+    principal: text().notNull(),
+    secret: uuid().notNull(),
+    partners: uuid().array().notNull(),
+  },
+  (table) => [
+    index('log_read_places_place_idx').on(table.environment, table.partner, table.at, table.number),
+    index('log_read_places_member_idx').on(table.principal, table.environment, table.partner, table.at, table.number),
+    index('log_read_places_key_idx').on(table.secret, table.environment, table.partner, table.at, table.number),
+    index('log_read_places_member_key_idx').on(table.principal, table.secret, table.environment, table.partner, table.at, table.number),
+  ],
+);
+
+/** Each place reads were at, and the place each was at besides: what a page of a place reads by. */
+export const logReadPartners = pgTable(
+  'log_read_partners',
+  { environment: uuid().notNull(), partner: uuid().notNull() },
+  (table) => [primaryKey({ name: 'log_read_partners_pkey', columns: [table.environment, table.partner] })],
+);
+
+/** How far the projector has gone: the number every use at or below it is projected, and when. */
+export const logReadsCursor = pgTable(
+  'log_reads_cursor',
+  {
+    onlyRow: boolean('only_row').primaryKey().default(true),
+    through: bigint({ mode: 'bigint' }).notNull(),
+    // The signed pair at or below `through`, whose floor of `at` the next read of uses takes.
+    pair: bigint({ mode: 'bigint' }).notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    // The vault's MAC over the three (formal/Reads.tla, CursorMac): a cursor moved ahead would have the pages list reads as
+    // whole that were never projected. Null at the start, before any read is projected.
+    mac: bytea(),
+  },
+  (table) => [
+    check('log_reads_cursor_only_row_check', sql`${table.onlyRow}`),
+    check('log_reads_cursor_mac_check', sql`${table.mac} IS NULL OR octet_length(${table.mac}) = 16`),
   ],
 );
 

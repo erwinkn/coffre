@@ -481,6 +481,10 @@ export async function resetDatabase(owner: Database): Promise<void> {
     logConfig,
     logUses,
     logBulk,
+    logReads,
+    logReadPlaces,
+    logReadPartners,
+    logReadsCursor,
   } = tablesOf(owner);
   await owner.delete(mcpApprovals);
   await owner.delete(mcpConnections);
@@ -501,6 +505,11 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // Its uses and their cap's rows: a test's reads count from none.
   await owner.delete(logUses);
   await owner.delete(logBulk);
+  // And their projection (T166), from the start again.
+  await owner.delete(logReads);
+  await owner.delete(logReadPlaces);
+  await owner.delete(logReadPartners);
+  await owner.update(logReadsCursor).set({ through: 0n, pair: 0n, at: 0, mac: null });
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);
