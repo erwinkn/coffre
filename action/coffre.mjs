@@ -15962,10 +15962,21 @@ async function tokenReveal(api, canary, token) {
 	if (read.length === 0 && (reads !== void 0 || first.readsOmitted !== void 0)) {
 		expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
 		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.project === canary.project && entry.environment === canary.environment && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
-		({entries, reads} = await list({}));
+		const recent = async () => {
+			const all = [];
+			for (let before;;) {
+				const page = await list(before === void 0 ? {} : { before });
+				all.push(...page.entries);
+				reads = page.reads;
+				const oldest = page.entries.at(-1);
+				if (page.next === null || oldest === void 0 || Date.parse(oldest.occurredAt) < asked - COVERED_MS) return all;
+				before = page.next;
+			}
+		};
+		entries = await recent();
 		for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
 			await new Promise((resolve) => setTimeout(resolve, 250));
-			({entries, reads} = await list({}));
+			entries = await recent();
 		}
 		const [used] = ownOf(entries);
 		expect(used !== void 0, `the reveal is logged 0 times, not once: no read of ${canary.key} by the token's credential since the minute before it, listed within ${LISTED_WITHIN_MS / 1e3} s (reads listed through ${reads?.through ?? "none"})`, entries.slice(0, 3));

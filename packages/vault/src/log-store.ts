@@ -6,7 +6,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
-import type { ReadRow, ReadsCursor, ReadsStore } from './reads.ts';
+import { CursorGone, type ReadRow, type ReadsCursor, type ReadsStore } from './reads.ts';
 import type { RetentionStore } from './retention.ts';
 
 /**
@@ -547,7 +547,9 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
   return {
     async readsCursor() {
       const [row] = await rowsOf<{ through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null }>(db, sql`SELECT through, pair, at, mac FROM log_reads_cursor WHERE only_row`);
-      return row === undefined ? { through: 0n, pair: 0n, at: 0, mac: null } : { through: BigInt(row.through), pair: BigInt(row.pair), at: Number(row.at), mac: row.mac === null ? null : Buffer.from(row.mac) };
+      // The migration's one row: gone, nothing is projected and no check passes (review r6), never a fresh start.
+      if (row === undefined) throw new CursorGone();
+      return { through: BigInt(row.through), pair: BigInt(row.pair), at: Number(row.at), mac: row.mac === null ? null : Buffer.from(row.mac) };
     },
     async objects(asked) {
       const found: (LogEntry | null)[] = [];
@@ -591,6 +593,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         const tx = raw as unknown as Database;
         const [cut] = await rowsOf<{ sealed: string | number | null }>(tx, sql`SELECT max(upto) AS sealed FROM log_checkpoints`);
         if (cut?.sealed == null || cursor.through > BigInt(cut.sealed)) throw new Error(`reads through ${cursor.through} are past the newest pair`);
+        if ((await rowsOf(tx, sql`SELECT 1 FROM log_reads_cursor WHERE only_row`)).length === 0) throw new CursorGone();
         // The projector's row over any other at its number (ReplaceOnConflict).
         for (const rows of values(reads, SQLITE_ROWS)) {
           await rowsOf(tx, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
@@ -599,6 +602,10 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
             ON CONFLICT (at, number) DO UPDATE SET credential = excluded.credential, purpose = excluded.purpose, principal = excluded.principal, secret = excluded.secret,
               environment = excluded.environment, project = excluded.project, place = excluded.place, source = excluded.source, source_environment = excluded.source_environment,
               source_project = excluded.source_project, version = excluded.version, mac = excluded.mac`);
+        }
+        const days = [...new Set(reads.map((row) => `${row.principal}\0${Math.floor(row.at / 86_400_000)}`))].map((key) => key.split('\0') as [string, string]);
+        for (const rows of values(days, SQLITE_ROWS)) {
+          await rowsOf(tx, sql`INSERT INTO log_read_days (principal, day) VALUES ${sql.join(rows.map(([principal, day]) => sql`(${principal}, ${Number(day)})`), sql`, `)} ON CONFLICT DO NOTHING`);
         }
         await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
       });
@@ -633,6 +640,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       }
       const from = Date.parse(`${day}T00:00:00Z`);
       await rowsOf(db, sql`DELETE FROM log_reads WHERE at >= ${from} AND at < ${from + 86_400_000}`);
+      await rowsOf(db, sql`DELETE FROM log_read_days WHERE day = ${from / 86_400_000}`);
     },
   };
 }

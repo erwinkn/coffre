@@ -1,4 +1,10 @@
 -- The audit pages' reads, a sealed projection of 0.15's uses (T166; postgres 0049_reads). SQLite has one writer and no partitions: the projector writes these directly.
+CREATE TABLE `log_read_days` (
+	`principal` text NOT NULL,
+	`day` integer NOT NULL,
+	PRIMARY KEY(`principal`, `day`)
+);
+--> statement-breakpoint
 CREATE TABLE `log_reads` (
 	`number` integer NOT NULL,
 	`at` integer NOT NULL,

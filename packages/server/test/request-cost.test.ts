@@ -1370,6 +1370,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   const counted = createDatabase(app.client);
   const ADA = 'user:ada@acme.example';
   const OTHER = 'user:other@acme.example';
+  const AHEAD = 100;
   const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
   // Ada's reads are of market's keys, of their current versions, as the offboarding report weighs them; everyone else's
   // are of keys anywhere, in forks and through references whose source moves on (review r5): none is on her pages.
@@ -1396,12 +1397,16 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     const pick = (n: number | undefined) => (n === undefined ? sql`NULL::uuid` : sql`md5(${String(first)} || '-' || (g % ${n}))::uuid`);
     await db.owner.execute(sql`
       INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
-      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * ${every}, gen_random_uuid(), 1, ${principal},
+      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * CAST(${every} AS bigint), gen_random_uuid(), 1, ${principal},
              ${options.own === true ? sql`(${array(keys.map((key) => key.id))})[1 + g % ${keys.length}]` : sql`gen_random_uuid()`},
              ${options.own === true ? sql`${dev}::uuid` : sql`gen_random_uuid()`}, ${market}::uuid, ${pick(options.forks)},
              ${pick(options.sources)}, ${options.sources === undefined ? sql`NULL::uuid` : sql`gen_random_uuid()`}, ${options.sources === undefined ? sql`NULL::uuid` : sql`${market}::uuid`},
              ${options.own === true ? sql`(${array(keys.map((key) => key.version))})[1 + g % ${keys.length}]` : sql`NULL::uuid`}, decode(repeat('00', 16), 'hex')
         FROM generate_series(1, ${count}) g`);
+    // And the days each member's reads are on, as the projector writes them beside the reads.
+    await db.owner.execute(sql`
+      INSERT INTO log_read_days (principal, day) SELECT DISTINCT principal, CAST(at / 86400000 AS integer) FROM log_reads
+       WHERE number > ${first} AND number <= ${first + count} ON CONFLICT DO NOTHING`);
   };
   const reads: Record<string, () => Promise<unknown>> = {
     'every read': () => readsPage(counted, { limit: 100 }),
@@ -1457,6 +1462,10 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(300_000, OTHER, 6 * 3_600_000, 50);
     await plant(50_000, OTHER, 5 * 3_600_000, 200, { forks: 5_000 });
     await plant(50_000, OTHER, 5 * 3_600_000, 200, { sources: 20_000 });
+    // And a hundred days of others' reads after all of Ada's, each of its own partition (review r6: her page read a
+    // probe of each).
+    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
+    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000);
     await settle();
     flat(small, await pages(), Object.keys(reads));
     // And Ada's own, older than her page: her pages read as many, her report all of hers, as 0.14's did.
@@ -1472,5 +1481,10 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     assert.deepEqual(new Set(report.reads.map((read) => read.secret)), new Set(keys.map((key) => key.id)));
   } finally {
     await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 5000000`);
+    await db.owner.execute(sql`DELETE FROM log_read_days`);
+    // The days made ahead, but those the migration made the uses of, which retention drops in their turn.
+    await db.owner.execute(sql`
+      SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d
+       WHERE to_regclass('public.log_uses_' || to_char(CAST(${day(now)} AS date) + d, 'YYYYMMDD')) IS NULL`);
   }
 });

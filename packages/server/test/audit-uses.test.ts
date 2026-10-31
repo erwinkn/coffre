@@ -175,6 +175,8 @@ test("under 0.15's log, a reader of some places sees no one's reads but their ow
   const bobs = bearer((await bob.tokens.issue(BOB, { label: 'bob', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
   await bobs.secrets.reveal('market/prod/OTHER');
   assert.deepEqual(reads(await every(bob, { actor: BOB })), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`], 'his own reads');
+  // However he names himself, and only his (review r6): `bob@acme.example` asks for `token:bob@acme.example` too.
+  assert.deepEqual(reads(await every(bob, { actor: 'bob@acme.example' })), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`], 'named bare');
   for (const query of [{}, { actor: ADA }, { path: 'market' }, { path: 'market/dev/API_KEY' }]) {
     assert.deepEqual(reads(await every(bob, query)), [], JSON.stringify(query));
     const page = await bob.audit.list({ ...query, sealed: '1', limit: 10 });
@@ -254,6 +256,15 @@ test('a read the vault does not vouch for is shown forged: edited, renumbered, o
   await db.owner.update(logReadsCursor).set({ through: 1_000_000n });
   const { reads } = await root.audit.list({ sealed: '1', limit: 10 });
   assert.deepEqual([reads?.forged, reads?.behind], [true, true]);
+  // Or deletes it: no page, report or check takes that for a projection yet to start (review r6).
+  await db.owner.delete(logReadsCursor);
+  const gone = await root.audit.list({ sealed: '1', limit: 10 });
+  assert.deepEqual([gone.reads?.forged, gone.reads?.behind], [true, true]);
+  const report = await root.members.get(ADA);
+  assert.deepEqual([report.reads?.forged, report.reads?.behind], [true, true]);
+  const verdict = await root.audit.verifyReads();
+  assert.ok(verdict.kept);
+  assert.deepEqual([verdict.ok, verdict.problems], [false, ["the reads' cursor is gone: a database writer deleted it"]]);
 });
 
 test("the whole log's check holds the reads listed to the uses sealed: one deleted, edited, given to another member or listed twice, each named", { skip: LOG !== '0.15' }, async () => {
@@ -332,7 +343,7 @@ test("a read waits to be listed until the projector writes it, and the page says
 });
 
 test("a listing stopped behind its newest pair says so once that pair is a few seconds old, with no pair after it (review r4)", () => {
-  const standing = (through: bigint, sealedAt: number, at: number) => ({ through, pair: through, at, mac: null, sealed: 10n, sealedAt });
+  const standing = (through: bigint, sealedAt: number, at: number) => ({ through, pair: through, at, mac: null, sealed: 10n, sealedAt, missing: false });
   const now = Date.now();
   // The newest pair signed a second after the listing's, and nothing signed since: behind once it is old, not before.
   assert.equal(readsListed(standing(8n, now - 1000, now - 2000), false)?.behind, false);
@@ -342,6 +353,8 @@ test("a listing stopped behind its newest pair says so once that pair is a few s
   assert.equal(readsListed(standing(8n, now - 100, now - 200), false, { strict: true })?.behind, true);
   // No pair at all: 0.14's log alone, no listing to speak of.
   assert.equal(readsListed({ ...standing(0n, 0, 0), sealed: null, sealedAt: null }, false), null);
+  // The cursor's row gone: forged, behind, whatever it would have said (review r6).
+  assert.deepEqual(readsListed({ ...standing(10n, now, now), missing: true }, false), { through: new Date(now).toISOString(), behind: true, forged: true });
 });
 
 test('the offboarding report names what someone read under either log, current until a new version is written', async () => {

@@ -26,7 +26,7 @@ import {
   type RecordedChange,
   type Signed,
 } from '../db/queries.ts';
-import { readsPage, readsStanding, type ListedRead } from '../db/reads.ts';
+import { readsPageStanding, type ListedRead, type ReadsStanding } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import { traceFields, type ApiContext } from './context.ts';
@@ -335,19 +335,25 @@ export async function listAudit(
   // Not at a place: in 0.15 no page of a project, environment or key lists them (D160), and a reader of some places
   // sees no one's but their own. Never a refusal (one the vault refuses before it writes a use is the app's entry), nor
   // below its log's end.
-  const own = filter.actors !== undefined && filter.actors.length === 1 && filter.actors[0] === formatMember(caller.principal);
+  // Their own however they name themselves (`ada@acme.example` asks for `user:ada@acme.example` among others), and then
+  // only their own (review r6).
+  const self = formatMember(caller.principal);
+  const own = filter.actors?.includes(self) === true;
   const asked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
   const used = asked && query.path === undefined && (filter.within === undefined || own);
+  const readers = filter.within === undefined ? filter.actors : [self];
 
   // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
   const counting = recorded && counted;
-  const [old, sealed, reads, standing, reach] = await Promise.all([
+  // The page's reads and how far they are listed in one statement, so as of one moment (review r6).
+  const [old, sealed, listedReads, reach] = await Promise.all([
     before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
     recorded ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit }) : { rows: [], more: false },
-    used ? readsPage(ctx.db, { actors: filter.actors, before: start, limit: query.limit }) : { rows: [], more: false },
-    used ? readsStanding(ctx.db) : null,
+    used ? readsPageStanding(ctx.db, { actors: readers, before: start, limit: query.limit }) : null,
     counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
+  const reads = listedReads ?? { rows: [], more: false };
+  const standing = listedReads?.standing ?? null;
   const oldRead = old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` }));
   const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row), below: { at: row.at, number: row.number } }));
   const readsRead = reads.rows.map((row) => ({ at: row.at, entry: readView(row), below: { at: row.at, number: row.number } }));
@@ -515,7 +521,7 @@ function sealedStream(changes: { read: Read<ChangePoint>[]; more: boolean }, use
  * than this app) fails the page: nothing of 0.15's is listed unchecked.
  */
 async function vouched(
-  ctx: ApiContext, changes: readonly RecordedChange[], reads: readonly ListedRead[], standing: Awaited<ReturnType<typeof readsStanding>> | null,
+  ctx: ApiContext, changes: readonly RecordedChange[], reads: readonly ListedRead[], standing: ReadsStanding | null,
 ): Promise<{ forged: Set<bigint>; cursorForged: boolean }> {
   if (changes.length === 0 && reads.length === 0 && standing === null) return { forged: new Set(), cursorForged: false };
   if (ctx.vault.vouch === undefined) throw new ApiError('unavailable', "the vault cannot vouch for 0.15's log: it is older than this app, so deploy it first", 'vault_outdated');
@@ -574,8 +580,10 @@ export const READS_BEHIND_MS = 5_000;
  * stopped after the newest pair shows too, by the clock (review r4): no
  * later pair need come to show it.
  */
-export function readsListed(standing: Awaited<ReturnType<typeof readsStanding>>, forged: boolean, options: { strict?: boolean } = {}): ReadsListed | null {
+export function readsListed(standing: ReadsStanding, unvouched: boolean, options: { strict?: boolean } = {}): ReadsListed | null {
   if (standing.sealed === null || standing.sealedAt === null) return null;
+  // A cursor gone is one the vault vouches for no more than one moved: only a database writer deletes it (review r6).
+  const forged = unvouched || standing.missing;
   const waiting = standing.through < standing.sealed;
   const late = options.strict === true || standing.sealedAt - standing.at > READS_BEHIND_MS || Date.now() - standing.sealedAt > READS_BEHIND_MS;
   return { through: standing.at === 0 ? null : new Date(standing.at).toISOString(), behind: (waiting && late) || forged, ...(forged ? { forged: true as const } : {}) };

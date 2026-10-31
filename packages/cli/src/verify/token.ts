@@ -92,7 +92,7 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
   const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
   expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
   const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
-  const list = async (query: { path?: string }) => {
+  const list = async (query: { path?: string; before?: string }) => {
     try {
       return await api.audit.list({ ...query, actor: token.member, limit: 50, sealed: '1' });
     } catch (error) {
@@ -112,10 +112,22 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
     const ownOf = (listed: typeof entries) => listed.filter((entry) => entry.log === '0.15' && entry.action === 'secret.read' && entry.key === canary.key
       && entry.project === canary.project && entry.environment === canary.environment
       && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === 'reveal' && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
-    ({ entries, reads } = await list({}));
+    // Page back as far as the cover's minute: newer entries of the token's may fill the first page (review r6).
+    const recent = async () => {
+      const all: typeof entries = [];
+      for (let before: string | undefined; ;) {
+        const page = await list(before === undefined ? {} : { before });
+        all.push(...page.entries);
+        reads = page.reads;
+        const oldest = page.entries.at(-1);
+        if (page.next === null || oldest === undefined || Date.parse(oldest.occurredAt) < asked - COVERED_MS) return all;
+        before = page.next;
+      }
+    };
+    entries = await recent();
     for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
       await new Promise((resolve) => setTimeout(resolve, 250));
-      ({ entries, reads } = await list({}));
+      entries = await recent();
     }
     const own = ownOf(entries);
     const [used] = own;

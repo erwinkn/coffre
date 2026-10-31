@@ -730,15 +730,21 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         return [
           { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
           { label: 'Ends', value: `${report.live.grants} grants, ${report.live.sessions} sessions, ${report.live.tokens} tokens, ${report.live.identities} linked accounts` },
-          { label: 'To rotate after', value: `${report.exposed.length} secrets they read or wrote` },
+          { label: 'To rotate after', value: `${report.exposed.length} secrets they read or wrote${report.reads?.behind === true ? `, as their reads are listed through ${report.reads.through ?? 'none yet'}: newer ones may add to it` : ''}` },
         ];
       },
       apply: async (api, { member }) => {
         const removed = await api.members.remove(apiMember(member));
         const toRotate = (removed.report?.exposed ?? []).map((entry) => `${entry.project}/${entry.environment}/${entry.key}`);
+        // 0.15's reads are named once listed: while reads sealed since wait, the list is as of then, and says so (review r6).
+        const reads = removed.report?.reads;
+        const behind = reads?.behind === true;
+        const what = toRotate.length === 0
+          ? (behind ? 'Nothing they read is listed to rotate yet' : 'Nothing they read needs rotating.')
+          : `Rotate what they read or wrote: ${toRotate.join(', ')}${behind ? '' : '.'}`;
         return {
-          result: { member: shownMember(apiMember(member)), revoked: removed.revoked, toRotate },
-          text: `${shownMember(apiMember(member))} is offboarded. ${toRotate.length === 0 ? 'Nothing they read needs rotating.' : `Rotate what they read or wrote: ${toRotate.join(', ')}.`}`,
+          result: { member: shownMember(apiMember(member)), revoked: removed.revoked, toRotate, ...(reads === undefined ? {} : { reads }) },
+          text: `${shownMember(apiMember(member))} is offboarded. ${what}${behind ? `, as their reads are listed through ${reads?.through ?? 'none yet'}: newer ones may add to it; read their report again in a few seconds.` : ''}`,
         };
       },
     },

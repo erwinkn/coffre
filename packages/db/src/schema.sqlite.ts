@@ -976,6 +976,13 @@ export const logReads = sqliteTable(
   ],
 );
 
+/** The days each member's reads are in (`log_reads`), so that a page of theirs reads those days alone: the projector writes them with the reads. */
+export const logReadDays = sqliteTable(
+  'log_read_days',
+  { principal: text().notNull(), day: integer({ mode: 'number' }).notNull() },
+  (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
+);
+
 /** How far the projector has gone (schema.ts). */
 export const logReadsCursor = sqliteTable(
   'log_reads_cursor',

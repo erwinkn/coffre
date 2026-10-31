@@ -49,6 +49,13 @@ export type ReadRow = {
  */
 export type ReadsCursor = { through: bigint; pair: bigint; at: number; mac: Buffer | null };
 
+/** The cursor's row gone: the migration made it, so only a database writer deletes it (review r6), and nothing it says holds. */
+export class CursorGone extends Error {
+  constructor() {
+    super("the reads' cursor is gone: a database writer deleted it");
+  }
+}
+
 /** A way in's or key's object as the log holds it, for a projection: a change of it, whole, for its MAC; null for none. */
 export type Sealed = LogEntry | null;
 
@@ -230,7 +237,13 @@ const PROBLEMS_NAMED = 20;
  * starts at the cut. Flat: a stretch reads one range however long the log.
  */
 export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, from: bigint): Promise<{ problems: string[]; through: bigint; listed: bigint; next: bigint | null }> {
-  const cursor = await store.readsCursor();
+  let cursor: ReadsCursor;
+  try {
+    cursor = await store.readsCursor();
+  } catch (error) {
+    if (!(error instanceof CursorGone)) throw error;
+    return { problems: [error.message], through: from, listed: 0n, next: null };
+  }
   const stop = (problem: string) => ({ problems: [problem], through: from, listed: cursor.through, next: null });
   if (!cursorHolds(keys.mac, cursor)) return stop(`the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`);
   // From the retention cut, when it is past `from`.

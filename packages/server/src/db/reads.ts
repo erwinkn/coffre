@@ -72,17 +72,23 @@ const bigint = (value: number | bigint) => sql`CAST(${String(value)} AS bigint)`
 export async function readsPage(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean }> {
   const engine = dialect.engineOf(db);
   const take = filter.limit + 1;
+  const found = pageSql(engine, filter, take);
+  if (found === null) return { rows: [], more: false };
+  const rows = await dialect.rowsOf<Row>(db, listed(engine, found));
+  return { rows: rows.slice(0, filter.limit).map(read), more: rows.length > filter.limit };
+}
+
+/** The `(at, number)` of the page's reads, newest first, `take` at most; null for a filter of no member. */
+function pageSql(engine: dialect.Engine, filter: ReadFilter, take: number): SQL | null {
   const actors = filter.actors?.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
-  if (actors?.length === 0) return { rows: [], more: false };
+  if (actors?.length === 0) return null;
   const [at, number] = [bigint(filter.before?.at ?? MAX), bigint(filter.before?.number ?? MAX)];
   const streams = actors === undefined
     ? [sql`SELECT r.at, r.number FROM log_reads r WHERE (r.at, r.number) < (${at}, ${number}) ORDER BY r.at DESC, r.number DESC LIMIT ${take}`]
     : actors.map((actor) => (engine === 'postgres'
       ? sql`SELECT * FROM log_reads_by(${actor}, ${at}, ${number}, ${take})`
       : sql`SELECT at, number FROM log_reads WHERE principal = ${actor} AND (at, number) < (${at}, ${number}) ORDER BY at DESC, number DESC LIMIT ${take}`));
-  const found = sql`SELECT DISTINCT f.at, f.number FROM (${sql.join(streams.map((each) => sql`SELECT * FROM (${each}) s`), sql` UNION ALL `)}) f ORDER BY f.at DESC, f.number DESC LIMIT ${take}`;
-  const rows = await dialect.rowsOf<Row>(db, listed(engine, found));
-  return { rows: rows.slice(0, filter.limit).map(read), more: rows.length > filter.limit };
+  return sql`SELECT DISTINCT f.at, f.number FROM (${sql.join(streams.map((each) => sql`SELECT * FROM (${each}) s`), sql` UNION ALL `)}) f ORDER BY f.at DESC, f.number DESC LIMIT ${take}`;
 }
 
 type Row = {
@@ -146,34 +152,84 @@ function read(row: Row): ListedRead {
  * signed time they are listed through, `pair` and `mac` the cursor's own;
  * `sealed`, the newest pair's number, and `sealedAt`, its time. One statement.
  */
-export async function readsStanding(db: Queryable): Promise<{ through: bigint; pair: bigint; at: number; mac: Buffer | null; sealed: bigint | null; sealedAt: number | null }> {
-  const [row] = await dialect.rowsOf<{ through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null; sealed: string | number | null; sealed_at: string | number | null }>(db, sql`
-    SELECT c.through, c.pair, c.at, c.mac, k.upto AS sealed, k.at AS sealed_at FROM log_reads_cursor c
-      LEFT JOIN (SELECT upto, at FROM log_checkpoints ORDER BY upto DESC LIMIT 1) k ON TRUE WHERE c.only_row`);
-  if (row === undefined) return { through: 0n, pair: 0n, at: 0, mac: null, sealed: null, sealedAt: null };
+/** How far the reads are listed, as a page or a report reads it: the cursor, and the newest signed pair; `missing`, no cursor. */
+export type ReadsStanding = { through: bigint; pair: bigint; at: number; mac: Buffer | null; sealed: bigint | null; sealedAt: number | null; missing: boolean };
+
+/**
+ * The standing's columns, one row whatever the cursor: its migration's one
+ * row gone (only a database writer leaves it so) reads as `missing`, which
+ * the pages show unvouched, never as a fresh start (review r6). Joined into
+ * a page's or a report's statement, the two are one snapshot.
+ */
+function standingSql(): SQL {
+  return sql`SELECT c.through AS s_through, c.pair AS s_pair, c.at AS s_at, c.mac AS s_mac, k.upto AS s_sealed, k.at AS s_sealed_at, c.only_row AS s_row
+    FROM (SELECT 1 AS one) o LEFT JOIN log_reads_cursor c ON c.only_row
+    LEFT JOIN (SELECT upto, at FROM log_checkpoints ORDER BY upto DESC LIMIT 1) k ON TRUE`;
+}
+
+type StandingRow = {
+  s_through: string | number | null; s_pair: string | number | null; s_at: string | number | null; s_mac: Uint8Array | null;
+  s_sealed: string | number | null; s_sealed_at: string | number | null; s_row: unknown;
+};
+
+function standingOf(row: StandingRow | undefined): ReadsStanding {
+  const sealed = row?.s_sealed == null ? null : BigInt(row.s_sealed);
+  const sealedAt = row?.s_sealed_at == null ? null : Number(row.s_sealed_at);
+  if (row === undefined || row.s_row === null || row.s_through === null) return { through: 0n, pair: 0n, at: 0, mac: null, sealed, sealedAt, missing: true };
   return {
-    through: BigInt(row.through), pair: BigInt(row.pair), at: Number(row.at), mac: row.mac === null ? null : Buffer.from(row.mac),
-    sealed: row.sealed === null ? null : BigInt(row.sealed), sealedAt: row.sealed_at === null ? null : Number(row.sealed_at),
+    through: BigInt(row.s_through), pair: BigInt(row.s_pair!), at: Number(row.s_at), mac: row.s_mac === null ? null : Buffer.from(row.s_mac), sealed, sealedAt, missing: false,
   };
+}
+
+export async function readsStanding(db: Queryable): Promise<ReadsStanding> {
+  const [row] = await dialect.rowsOf<StandingRow>(db, standingSql());
+  return standingOf(row);
+}
+
+/**
+ * A page of reads (`readsPage`) and how far they are listed, in one
+ * statement, so in one snapshot: read apart, a projector's write between the
+ * two would have the cursor vouch for reads the page did not list (review
+ * r6).
+ */
+export async function readsPageStanding(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean; standing: ReadsStanding }> {
+  const engine = dialect.engineOf(db);
+  const take = filter.limit + 1;
+  const found = pageSql(engine, filter, take);
+  const rows = await dialect.rowsOf<Row & StandingRow>(db, found === null
+    ? standingSql()
+    : sql`SELECT st.*, p.* FROM (${standingSql()}) st LEFT JOIN (${listed(engine, found)}) p ON TRUE ORDER BY p.at DESC, p.number DESC`);
+  const listedRows = rows.filter((row) => row.number !== null && row.number !== undefined);
+  return { rows: listedRows.slice(0, filter.limit).map(read), more: listedRows.length > filter.limit, standing: standingOf(rows[0]) };
 }
 
 /**
  * What these members read under 0.15's log, by key and version: each key
  * they read, or through a reference each source, every version they read of
- * it, and when last. What an offboarding report weighs (`memberActivity`).
- * Like 0.14's report, it reads every read of theirs.
+ * it, and when last, from their days that hold any (`log_read_days`): never
+ * a probe of each day the log holds. What an offboarding report weighs
+ * (`memberActivity`). Like 0.14's report, it reads every read of theirs.
  */
-export async function readsBy(db: Queryable, actors: readonly string[]): Promise<{ actor: string; secret: string; version: number; at: number }[]> {
-  const members = actors.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
-  if (members.length === 0) return [];
+function readsBySql(db: Queryable, members: readonly string[]): SQL {
   const engine = dialect.engineOf(db);
   const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
-  const rows = await dialect.rowsOf<{ actor: string; secret: string; version: number | string; at: string | number }>(db, sql`
-    SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS at
-      FROM log_reads r JOIN secret_versions v ON v.id = r.version
-     WHERE r.principal IN (${sql.join(members.map((member) => sql`${member}`), sql`, `)})
-     GROUP BY r.principal, coalesce(r.source, r.secret), v.version`);
-  return rows.map((row) => ({ actor: row.actor, secret: row.secret, version: Number(row.version), at: Number(row.at) }));
+  return sql`
+    SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
+      FROM log_read_days d
+      JOIN log_reads r ON r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000
+      JOIN secret_versions v ON v.id = r.version
+     WHERE d.principal IN (${sql.join(members.map((member) => sql`${member}`), sql`, `)})
+     GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
+}
+
+const membersOf = (actors: readonly string[]) => actors.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
+type ByRow = { actor: string | null; secret: string | null; version: number | string | null; read_at: string | number | null };
+const byRows = (rows: readonly ByRow[]) => rows.filter((row) => row.actor !== null).map((row) => ({ actor: row.actor!, secret: row.secret!, version: Number(row.version), at: Number(row.read_at) }));
+
+export async function readsBy(db: Queryable, actors: readonly string[]): Promise<{ actor: string; secret: string; version: number; at: number }[]> {
+  const members = membersOf(actors);
+  if (members.length === 0) return [];
+  return byRows(await dialect.rowsOf<ByRow>(db, readsBySql(db, members)));
 }
 
 /**
@@ -182,32 +238,10 @@ export async function readsBy(db: Queryable, actors: readonly string[]): Promise
  * Read apart, a projector's write between the two would have the report
  * name none and say none wait (review r5).
  */
-export async function readsByStanding(db: Queryable, actors: readonly string[]): Promise<{ reads: Awaited<ReturnType<typeof readsBy>>; standing: Awaited<ReturnType<typeof readsStanding>> }> {
-  const members = actors.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
-  const engine = dialect.engineOf(db);
-  const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
-  const reads = members.length === 0 ? sql`SELECT NULL AS actor, NULL AS secret, NULL AS version, NULL AS read_at WHERE FALSE` : sql`
-    SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
-      FROM log_reads r JOIN secret_versions v ON v.id = r.version
-     WHERE r.principal IN (${sql.join(members.map((member) => sql`${member}`), sql`, `)})
-     GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
-  const rows = await dialect.rowsOf<{
-    through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null; sealed: string | number | null; sealed_at: string | number | null;
-    actor: string | null; secret: string | null; version: number | string | null; read_at: string | number | null;
-  }>(db, sql`
-    SELECT s.through, s.pair, s.at, s.mac, s.sealed, s.sealed_at, g.actor, g.secret, g.version, g.read_at FROM (
-      SELECT c.through, c.pair, c.at, c.mac, k.upto AS sealed, k.at AS sealed_at FROM log_reads_cursor c
-        LEFT JOIN (SELECT upto, at FROM log_checkpoints ORDER BY upto DESC LIMIT 1) k ON TRUE WHERE c.only_row
-    ) s LEFT JOIN (${reads}) g ON TRUE`);
-  const [first] = rows;
-  const standing = first === undefined
-    ? { through: 0n, pair: 0n, at: 0, mac: null, sealed: null, sealedAt: null }
-    : {
-        through: BigInt(first.through), pair: BigInt(first.pair), at: Number(first.at), mac: first.mac === null ? null : Buffer.from(first.mac),
-        sealed: first.sealed === null ? null : BigInt(first.sealed), sealedAt: first.sealed_at === null ? null : Number(first.sealed_at),
-      };
-  return {
-    reads: rows.filter((row) => row.actor !== null).map((row) => ({ actor: row.actor!, secret: row.secret!, version: Number(row.version), at: Number(row.read_at) })),
-    standing,
-  };
+export async function readsByStanding(db: Queryable, actors: readonly string[]): Promise<{ reads: Awaited<ReturnType<typeof readsBy>>; standing: ReadsStanding }> {
+  const members = membersOf(actors);
+  const rows = await dialect.rowsOf<StandingRow & ByRow>(db, members.length === 0
+    ? standingSql()
+    : sql`SELECT st.*, g.* FROM (${standingSql()}) st LEFT JOIN (${readsBySql(db, members)}) g ON TRUE`);
+  return { reads: byRows(rows.map((row) => ({ actor: row.actor ?? null, secret: row.secret ?? null, version: row.version ?? null, read_at: row.read_at ?? null }))), standing: standingOf(rows[0]) };
 }

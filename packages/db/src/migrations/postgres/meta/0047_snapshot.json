@@ -1,5 +1,5 @@
 {
-  "id": "9a3d2c49-2f7c-4a84-b138-d78579abaf97",
+  "id": "afcf086c-d7b8-4145-a339-3a8555577833",
   "prevId": "cd759e62-bb1e-45f0-be77-0ff113ce74d7",
   "version": "7",
   "dialect": "postgresql",
@@ -2192,6 +2192,39 @@
           "value": "\"log_fence\".\"only_row\""
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.log_read_days": {
+      "name": "log_read_days",
+      "schema": "",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "day": {
+          "name": "day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "log_read_days_pkey": {
+          "name": "log_read_days_pkey",
+          "columns": [
+            "principal",
+            "day"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.log_reads": {

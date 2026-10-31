@@ -509,6 +509,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
     logUses,
     logBulk,
     logReads,
+    logReadDays,
     logReadsCursor,
   } = tablesOf(owner);
   await owner.delete(mcpApprovals);
@@ -532,7 +533,10 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(logBulk);
   // And their projection (T166), from the start again.
   await owner.delete(logReads);
-  await owner.update(logReadsCursor).set({ through: 0n, pair: 0n, at: 0, mac: null });
+  await owner.delete(logReadDays);
+  // Its one row put back if a test deleted it (review r6).
+  const start = { through: 0n, pair: 0n, at: 0, mac: null };
+  await owner.insert(logReadsCursor).values({ onlyRow: true, ...start }).onConflictDoUpdate({ target: logReadsCursor.onlyRow, set: start });
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);

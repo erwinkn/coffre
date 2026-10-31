@@ -315,7 +315,8 @@ async function endLeftOpen(owner: Database): Promise<void> {
 /** The reads' projection of 0.15's log (T166), gone with the log, its cursor back at the start: another log's, under another key, otherwise. */
 export async function emptyReads(owner: Database): Promise<void> {
   await run(owner, sql`DELETE FROM log_reads`);
-  await run(owner, sql`UPDATE log_reads_cursor SET through = 0, pair = 0, at = 0, mac = NULL`);
+  await run(owner, sql`DELETE FROM log_read_days`);
+  await run(owner, sql`INSERT INTO log_reads_cursor (only_row, through, pair, at, mac) VALUES (true, 0, 0, 0, NULL) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, mac = NULL`);
 }
 
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */

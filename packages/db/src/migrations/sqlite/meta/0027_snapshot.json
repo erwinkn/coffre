@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ac9de351-064a-492b-8dc7-b21dd128fb26",
+  "id": "1078e2f4-973a-44be-965c-69fac266c259",
   "prevId": "654b1165-9b5f-4fbe-b1e2-47bf02425767",
   "tables": {
     "audit_chain_head": {
@@ -1842,6 +1842,38 @@
           "value": "\"log_fence\".\"only_row\""
         }
       }
+    },
+    "log_read_days": {
+      "name": "log_read_days",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "day": {
+          "name": "day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "log_read_days_pkey": {
+          "columns": [
+            "principal",
+            "day"
+          ],
+          "name": "log_read_days_pkey"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "log_reads": {
       "name": "log_reads",

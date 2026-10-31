@@ -1129,6 +1129,13 @@ export const logReads = pgTable(
   ],
 );
 
+/** The days each member's reads are in (`log_reads`), so that a page of theirs reads those days alone: the projector writes them with the reads. */
+export const logReadDays = pgTable(
+  'log_read_days',
+  { principal: text().notNull(), day: integer().notNull() },
+  (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
+);
+
 /** How far the projector has gone: the number every use at or below it is projected, and when. */
 export const logReadsCursor = pgTable(
   'log_reads_cursor',
