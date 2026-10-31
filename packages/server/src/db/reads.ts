@@ -213,12 +213,21 @@ export async function readsPageStanding(db: Queryable, filter: ReadFilter): Prom
 function readsBySql(db: Queryable, members: readonly string[]): SQL {
   const engine = dialect.engineOf(db);
   const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
+  const named = sql.join(members.map((member) => sql`${member}`), sql`, `);
+  // On Postgres each of the member's days reads its own partition, a day at a time: `OFFSET 0` keeps the lateral a loop
+  // over the days, whose bounds prune the partitions as it runs; flattened into a join, the planner may read every
+  // day's partition first (review r8: 80 buffers, then 322 with 100 newer days of others' reads). SQLite has no
+  // partitions to read.
+  const reads = engine === 'postgres'
+    ? sql`log_read_days d CROSS JOIN LATERAL (
+        SELECT r.principal, r.source, r.secret, r.version, r.at FROM log_reads r
+         WHERE r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 OFFSET 0) r`
+    : sql`log_read_days d JOIN log_reads r ON r.principal = d.principal AND r.at >= d.day * 86400000 AND r.at < (d.day + 1) * 86400000`;
   return sql`
     SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
-      FROM log_read_days d
-      JOIN log_reads r ON r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000
+      FROM ${reads}
       JOIN secret_versions v ON v.id = r.version
-     WHERE d.principal IN (${sql.join(members.map((member) => sql`${member}`), sql`, `)})
+     WHERE d.principal IN (${named})
      GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
 }
 

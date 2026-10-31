@@ -1447,7 +1447,12 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
       }
     }
   };
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
+  // Every table's statistics fresh before each measure, so that none flips a plan between two (autovacuum's analyze of
+  // audit_log, landing mid-test on CI's slower runner, tipped the directory's walk of it from 159 pages to 380).
+  const settle = async () => {
+    await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
+    await db.owner.execute(sql`ANALYZE`);
+  };
   try {
     // Today's: 20,000 reads by another member, a tenth in forks and a twentieth through references; and Ada's 2,000 of
     // her keys through the day.
@@ -1457,15 +1462,17 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(2_000, ADA, 10 * 3_600_000, 15_000, { own: true });
     await settle();
     const small = await pages();
-    // Twenty times the others' since, all newer than what the pages show: reads anywhere, in 5,000 forks, and through
-    // references repointed to 20,000 sources between them.
+    // A hundred days of others' reads after all of Ada's, each of its own partition, alone first (reviews r6, r8: her
+    // page read a probe of each, then her report each whole, whichever plan the others' other reads tipped it to).
+    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
+    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000);
+    await settle();
+    flat(small, await pages(), Object.keys(reads));
+    // Then twenty times the others' since, all newer than what the pages show: reads anywhere, in 5,000 forks, and
+    // through references repointed to 20,000 sources between them.
     await plant(300_000, OTHER, 6 * 3_600_000, 50);
     await plant(50_000, OTHER, 5 * 3_600_000, 200, { forks: 5_000 });
     await plant(50_000, OTHER, 5 * 3_600_000, 200, { sources: 20_000 });
-    // And a hundred days of others' reads after all of Ada's, each of its own partition (review r6: her page read a
-    // probe of each).
-    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
-    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000);
     await settle();
     flat(small, await pages(), Object.keys(reads));
     // And Ada's own, older than her page: her pages read as many, her report all of hers, as 0.14's did.
