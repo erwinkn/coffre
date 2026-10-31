@@ -213,6 +213,8 @@ REMOVALS=(
   "HotPathOneRestore ChangeChecksSeal ReplaySound"
   # A writer who lowers the floor of `at`: without the barrier's check, a use lands where no checkpoint reads.
   "HotPathOneFloor BarrierChecksFloor CheckpointsHold"
+  # A barrier of a checkpointer given up on lands late (T169): the next one accepts the floor it raised, or none signs again.
+  "HotPathOneStallLive BarrierAcceptsLate CheckpointsGoOn"
   "HotPathOneRestoreCovers CoverExists RepeatsAreTheirCover"
   "HotPathOneRestoreCovers CoverExists DurableBeforeRelease"
   "HotPathOneClock FloorChecked CheckpointsHold"
@@ -296,6 +298,8 @@ REMOVALS=(
   "SealRetentionCrash FreshBeforeDrop DroppedNeverResealed"
   "SealRetentionCrash CutUsesOnly ChangesUntouched"
   "SealRetentionCrash CutUsesOnly NoFalseAlarm"
+  # A tick given up on (T169): another signer opens while its database write may still land; fenced, it starts nothing more.
+  "SealStall Fenced NoFalseAlarm"
   # 0.15's cutover from 0.14 (Migration015.tla; docs/design/0.15-plan.md, PR 9).
   "Migration015 CutoverHeadLock+CutoverFence+RowFirst OneCutover"
   "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence+RowFirst NewLogFollowsOld"
@@ -404,6 +408,10 @@ EXPECTED=(
   # The vault asks no issuer for keys: a binding of keys its issuer publishes takes the app's word for its
   # tokens, so a compromised app signs a run in through it with a token nobody signed (Lifecycle.tla's Fetched).
   "LifecycleFetched EverySignInOnValidToken"
+  # The floor is an unsigned row: a writer who lowers it and puts it back before the next barrier reads it lets uses in
+  # unsealed, which BarrierChecksFloor cannot see; a late barrier of a checkpointer given up on (T169) can put it back
+  # as well (HotPathOne.tla).
+  "HotPathOneStall CheckpointsHold"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
@@ -423,9 +431,9 @@ shard_of() {
     Overtaking|Walking|Sharing|Rows|Mixed) echo large ;;
     HotPathOneBulkSkew|HotPathOneBulkSlack) echo hotpath-skew ;;
     HotPathOneBulk) echo hotpath-bulk ;;
-    HotPathOneLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
+    HotPathOneLive|HotPathOneStallLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
-    SealPlugin|SealCore) echo seal-plugin ;;
+    SealPlugin|SealCore|SealStall) echo seal-plugin ;;
     SealRetention*) echo seal-retention ;;
     Seal|Migration015*) echo seal ;;
     *) echo rest ;;

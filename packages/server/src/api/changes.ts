@@ -38,9 +38,9 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; batches: boolean; credentials: boolean; issues: boolean; binds: boolean }>();
+const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; batches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean }>();
 
-async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; batches: boolean; credentials: boolean; issues: boolean; binds: boolean }> {
+async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; batches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean }> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
   const about = await vault.about();
@@ -49,6 +49,7 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; ba
     log,
     uses: log && about.uses === true && vault.use !== undefined,
     batches: log && about.uses === true && about.batchUses === true && vault.use !== undefined && vault.useMany !== undefined,
+    sealing: log && about.sealing === true && vault.sealing !== undefined,
     credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
     issues: log && about.issues === true && vault.issueToken !== undefined,
     binds: log && about.binds === true && vault.changeBindings !== undefined,
@@ -60,6 +61,11 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; ba
 /** Whether the vault keeps 0.15's log: the app's writes are its changes. */
 export async function keeps015(vault: Vault): Promise<boolean> {
   return (await about015(vault)).log;
+}
+
+/** Whether the vault says whether its checkpointer seals (`sealing`; T169): what `/readyz` asks under 0.15's log. */
+export async function vaultSaysSealing(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).sealing;
 }
 
 /** A vault that makes sign-ins through trust bindings and revokes credentials itself (`vaultMakesCredentials`). */

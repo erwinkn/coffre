@@ -101,7 +101,7 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
     if (own) {
       const kept = (checkpointer = await keepCheckpointer({ database: db, seed: resolved.signingKeys[0]!, memory: config.checkpointer!.memory }));
-      options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside };
+      options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing };
     }
     return await openLocalVault(db, resolved, { ...options, uses }, close, hot);
   } catch (error) {

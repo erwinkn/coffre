@@ -2,6 +2,7 @@ import test, { mock, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { github, signin, type Principal } from '@coffre/core/identity';
+import type { Sealing } from '@coffre/core/vault';
 import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
 import { asc, sql, type SQL } from 'drizzle-orm';
 
@@ -189,6 +190,31 @@ test("a cutover held refused answers readiness 503 and says why in the server's 
     const ready = await ask(runtime, '/readyz');
     assert.deepEqual([ready.status, JSON.parse(ready.body)], [503, { ok: false, cutover: false }]);
     assert.ok(said.mock.calls.some(({ arguments: [first] }) => (first as { reason?: string }).reason === why));
+  } finally {
+    said.mock.restore();
+  }
+});
+
+test("T169: under 0.15's log, readiness is red while the vault's checkpointer does not seal, or does not say within its bound, and green again once it seals", async () => {
+  await resetDatabase(db.owner);
+  const why = 'a tick ran past 10000 ms: the database stalled under it';
+  let sealing: Sealing | null = { ok: false, reason: why };
+  const vault = { ...deps.vault, sealing: () => (sealing === null ? new Promise<Sealing>(() => {}) : Promise.resolve(sealing)) };
+  const runtime = { ...freshRuntime(), vault, schema: { migrated: true }, appKey: { settled: true } };
+  const said = mock.method(console, 'error', () => {});
+  try {
+    let ready = await ask(runtime, '/readyz');
+    assert.deepEqual([ready.status, JSON.parse(ready.body)], [503, { ok: false, sealing: false }]);
+    assert.ok(said.mock.calls.some(({ arguments: args }) => (args as unknown[]).includes(why)), 'why, in the server log');
+    // A vault that does not answer: red within its bound, never a hang.
+    sealing = null;
+    const t0 = Date.now();
+    ready = await ask(runtime, '/readyz');
+    assert.deepEqual([ready.status, JSON.parse(ready.body)], [503, { ok: false, sealing: false }]);
+    assert.ok(Date.now() - t0 < 4000, `readiness answered after ${Date.now() - t0} ms`);
+    sealing = { ok: true };
+    ready = await ask(runtime, '/readyz');
+    assert.deepEqual([ready.status, (JSON.parse(ready.body) as { ok: boolean }).ok], [200, true]);
   } finally {
     said.mock.restore();
   }

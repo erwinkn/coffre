@@ -43,7 +43,7 @@ import {
   readScope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import type { PairNotes } from '@coffre/core/merkle';
+import { openPair, type PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -116,6 +116,7 @@ import {
   type SetAccessInput,
   type SetSettingsInput,
   type Settings,
+  type Sealing,
   type SignInInput,
   type SignInOutcome,
   type SignInRefusal,
@@ -154,6 +155,7 @@ import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { logMacKey } from './log-entry.ts';
+import { logStore } from './log-store.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -202,6 +204,12 @@ export type VaultOptions = {
    */
   heldOutside?: () => Promise<readonly PairNotes[]>;
   /**
+   * Under 0.15's log, whether the checkpointer seals (T169), bounded: what
+   * `sealing()` answers, and `/readyz` asks. The Node runner's `sealing`;
+   * on Workers the entrypoint asks the object itself. Without, it seals.
+   */
+  sealing?: () => Promise<Sealing> | Sealing;
+  /**
    * 0.15's uses, per isolate (use.ts): how many calls in flight at once, by
    * default the hot path's pool, `connections`, and how long a cover holds.
    */
@@ -227,13 +235,13 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
    * Null under 0.14's alone.
    */
-  log015: (ChangeKeys & { sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]> }) | null;
+  log015: (ChangeKeys & { sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing }) | null;
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
   /** Whether 0.15's log is cut over from 0.14, as this process found it (`cutover`): until then, nothing of 0.15's runs. */
@@ -277,7 +285,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
-    log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside) : null,
+    log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing) : null,
     limited: false,
     cutover: false,
     marked: false,
@@ -294,10 +302,15 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
 }
 
 /** 0.15's change keys from the vault's signing keys, the first sealing and MACing, each checking a seal. */
-function log015(seeds: readonly Uint8Array[], sealThrough: SealThrough | undefined, heldOutside: (() => Promise<readonly PairNotes[]>) | undefined): NonNullable<PreparedVault['log015']> {
+function log015(
+  seeds: readonly Uint8Array[],
+  sealThrough: SealThrough | undefined,
+  heldOutside: (() => Promise<readonly PairNotes[]>) | undefined,
+  sealing: (() => Promise<Sealing> | Sealing) = () => ({ ok: true }),
+): NonNullable<PreparedVault['log015']> {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
   if (heldOutside === undefined) throw new Error("0.15's log is verified against the pairs held where no database writer reaches: give the vault the checkpointer's heldOutside");
-  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough, heldOutside };
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough, heldOutside, sealing };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -3321,7 +3334,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; batchUses?: true; credentials?: true; issues?: true }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; batchUses?: true; sealing?: true; credentials?: true; issues?: true }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3332,7 +3345,7 @@ class VaultService implements Vault {
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
       // With it, the vault makes sign-ins through bindings and revokes credentials itself (credentials.ts).
-      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, credentials: true as const, issues: true as const, binds: true as const }),
+      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, sealing: true as const, credentials: true as const, issues: true as const, binds: true as const }),
       // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
       // A request's several keys in one call too (`useMany`, T167), said so that an app newer than its vault asks for it
       // only of a vault that has it.
@@ -3548,13 +3561,25 @@ class VaultService implements Vault {
    * Whether the log is cut over, its change sealed: the marker read with no
    * lock, then, found, its seal waited for (R51), as the vault that wrote it
    * waits before it answers. Committed and not sealed yet, as when that vault
-   * waits or failed before its seal, it serves nothing until it is.
+   * waits or failed before its seal, it serves nothing until it is. Sealed
+   * long ago, as it is but in a deployment's first moments, a pair this
+   * vault's key signed past it says so (T169): an isolate's first calls, its
+   * uses among them, ask no checkpointer, which may be the one thing that
+   * does not answer.
    */
   async #cutoverSealed(): Promise<boolean> {
     const number = await store.cutoverNumber(this.#db);
     if (number === null) return false;
-    await this.#log015().sealThrough(number);
+    if (!(await this.#signedPast(number))) await this.#log015().sealThrough(number);
     return true;
+  }
+
+  /** Whether the database's newest checkpoint is a pair this vault's key signed, at or past `number`. */
+  async #signedPast(number: bigint): Promise<boolean> {
+    const newest = await logStore(this.#db).newest();
+    if (newest === null || newest.upto < number) return false;
+    const pair = await openPair(newest.notes, (await this.#verifierKeys()).verifiers);
+    return pair !== null && pair.upto === newest.upto;
   }
 
   /**
@@ -3898,6 +3923,17 @@ class VaultService implements Vault {
    * behind (`Verdict.behind`): it is checked again 50 ms later, then a
    * tick later (reviews r4, r5). A rollback is still behind then.
    */
+  /** Whether 0.15's checkpointer seals (T169): what `/readyz` asks. Under 0.14's log alone, nothing waits on one. */
+  async sealing(): Promise<Sealing> {
+    const log015 = this.#prepared.log015;
+    if (log015 === null) return { ok: true };
+    try {
+      return await log015.sealing();
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message };
+    }
+  }
+
   async verifyTrees(): Promise<TreeVerification> {
     await this.#settled();
     if (this.#prepared.log015 === null) return { kept: false };
