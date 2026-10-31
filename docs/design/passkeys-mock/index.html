@@ -281,7 +281,7 @@ const SCREENS = [
       const remove = s !== 'remove' ? '' : dialog(`
         <h2 class="dialog-title">Remove <span class="mono">YubiKey 5C</span>?</h2>
         <p class="dialog-body">It will no longer sign you in or confirm changes. Removing it signs you out everywhere else: 3 other sessions and 1 personal token end, and this browser gets a new session. You keep iCloud Keychain.</p>
-        <div class="dialog-actions"><button type="button" class="btn" data-to="list">Cancel</button><button type="button" class="btn btn-danger">${icon('Fingerprint', 14)}Confirm with a passkey and remove</button></div>`);
+        <div class="dialog-actions"><button type="button" class="btn" data-to="list">Cancel</button><button type="button" class="btn btn-danger">${icon('Fingerprint', 14)}Touch iCloud Keychain and remove</button></div>`);
       return shell('', pageHead('Account', { actions: `<button class="btn" type="submit">${icon('LogOut', 14)}Sign out</button>` })
         + tabs('Account sections', ACCOUNT_TABS, 'Passkeys')
         + `<section class="card" aria-labelledby="pk"><div class="card-head"><div>
@@ -313,7 +313,7 @@ const SCREENS = [
           ${row('Terminal', 'coffre CLI on ada-mbp', 'approved in Firefox on macOS', 'YubiKey 5C', '12 min ago', 'in 29d')}
           ${row('Monitor', 'Chrome on Linux', 'via GitHub · <span class="mono">81.65.12.4</span>', '<span class="tag tag-amber">No passkey</span>', '3d ago', 'in 9h')}
           </tbody></table></div></section>
-          <p class="hint section-foot">A session no passkey confirmed was signed in before you added one; it asks for a touch at its next page. Each touch here gives this browser a new session and ends the one before.</p>`);
+          <p class="hint section-foot">A session no passkey confirmed was signed in before this instance required passkeys; it asks for a touch at its next page. Each touch gives this browser a new session and ends the one before.</p>`);
     },
     states: ['list'],
   },

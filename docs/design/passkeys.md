@@ -249,10 +249,14 @@ passkey: sign in with it"). So a second use of the same sealed state, or two
 tabs racing, adds one passkey at most, and nobody adds a second key through
 the door meant for the first.
 
-`user.id` is no secret and no email: 16 bytes of HKDF over the member and
-generation, derived each time and never stored. It stays the same across a
-person's passkeys, so a keychain that already holds one for Bob replaces it
-instead of keeping two.
+`user.id` is no secret and no email: 16 bytes of HKDF over the principal,
+`user:bob@acme.example`, derived each time and never stored. It needs no
+generation, so it is the same before a configured Owner is admitted and
+after, and the `userHandle` an assertion returns checks against it (7.2). It
+stays the same across a person's passkeys, so a keychain that already holds
+one for Bob replaces it instead of keeping two; a person removed and added
+back gets the same handle, and their old passkeys, of the earlier
+generation, are refused anyway.
 
 ### 3.3 `optional`: the prompt
 
@@ -379,12 +383,16 @@ Rename and Remove.
   name comes from the authenticator's AAGUID where it names one ("iCloud
   Keychain", "1Password", "YubiKey 5 Series"), else "Passkey 3".
 - **Rename**: no check. A name grants nothing and sits outside every MAC.
-- **Remove**: a session confirmed in the last five minutes. It signs the
-  person out everywhere else: every other session, terminal, personal
-  token, handle and MCP client ends, and this browser gets a new session
-  (section 6.1). The dialog says how many: "Removing YubiKey 5C signs you
-  out of 3 other sessions and ends 1 personal token." Under `required`, the
-  last passkey cannot be removed: add another first.
+- **Remove**: a touch of a passkey the person keeps, in the remove dialog
+  itself, so the new session this browser gets names a passkey that is
+  still live and was just touched. It signs the person out everywhere else:
+  every other session, terminal, personal token, handle and MCP client
+  ends (section 6.1). The dialog says how many: "Removing YubiKey 5C signs
+  you out of 3 other sessions and ends 1 personal token." Under `required`,
+  the last passkey cannot be removed: add another first. Under `optional`,
+  removing the last one takes a touch of that one, and the new session
+  names no passkey and is not fresh: the person is back to signing in with
+  the provider alone.
 - **At most 10** per person: a list a person can still read.
 
 ### 3.7 Recovery
@@ -486,7 +494,7 @@ access today, needs a fresh session like any other.
 | `POST /api/members/user:<self>/tokens` from a browser session | holder | a personal token outlives a 12-hour browser session; from a CLI session, never |
 | `GET /auth/signin/:provider?link=1`, and its callback | holder | another provider account that signs in as you (section 4.5) |
 | `POST /api/members/user:<self>/passkeys`, a second one onward | holder | a new factor |
-| `DELETE /api/members/user:<self>/passkeys/:id` | holder | removing a factor |
+| `DELETE /api/members/user:<self>/passkeys/:id` | ceremony | removing a factor: a touch of a passkey kept, or of the last one (section 3.6) |
 
 ### 4.3 Reads, and `protectedReveals`
 
@@ -498,6 +506,21 @@ covers five minutes of reads, never a prompt per secret.
 A personal token or an MCP connection cannot touch a passkey, so under
 `protectedReveals` they read no protected environment's values; their
 `/use` is untouched. Open question 4.
+
+Whether an environment is protected is the place's to say, and a one-key
+reveal goes to the vault by name before the app reads the place (section
+6.4). So the app cannot answer this one before the vault call without
+reading what the named path forbids it to read first. The vault decides it
+instead: the named call carries whether the person's session is fresh
+(`accepts.fresh`, beside what `accepts` carries today), and the vault's
+statement refuses a protected environment to a caller who is not, at the
+point where it refuses a caller without standing, with the same answer. An
+environment protected while the call runs is the vault's own read, under
+its own lock. `Probing.tla`'s `AcceptedFirst` and `NoKeyBeforeStanding`
+take the new input, and the use matrices a case per answer. The ordinary
+path (an environment's reveal) checks it in the router, as any **always**
+route. `protectedReveals` ships in a PR of its own, after the rest (section
+14).
 
 ### 4.4 Who is never asked, and who cannot be
 
@@ -683,9 +706,20 @@ inside its transaction, and on SQLite the database's one writer. Every
 transaction that issues a credential of a person's (a browser session, a
 CLI session at its poll, a personal token, a handle, an MCP connection) or
 decides a device login takes it, and so does every change to the person's
-passkeys. Under it, the issue re-reads the person's live passkeys and
-refuses a credential that no passkey confirms when the person has one
-(unless the policy is `off`), or one that names a passkey no longer live.
+passkeys. Under it, every issue re-checks what it is issued from and what
+it names:
+
+- **its source is still live**: the session or token the request came in
+  on (a personal token's, a handle's, an MCP consent's, a fresh check's, a
+  removal's), the pending sign-in's member and generation, or the device
+  approval a poll redeems. A change that ended the source before the lock
+  was taken leaves the issue nothing to issue from;
+- **its passkey**: a credential no passkey confirms is refused when the
+  person has a live passkey (unless the policy is `off`), and one that
+  names a passkey no longer live is refused.
+
+Today, MCP consent (`McpService.decide`) re-checks only membership, and a
+handle's issue only the person; both gain the source check.
 
 **Changes end credentials by revoking them**, in the same transaction:
 
@@ -1065,8 +1099,12 @@ New actions, in the shared log as `account.link` and `device.approve` are:
 
 Changed:
 
-- `sign_in` entries name the passkey that confirmed them, and a denied
-  `sign_in` gains the reasons above as `passkey_<reason>`.
+- `sign_in` entries name the passkey that confirmed them. A passkey that
+  fails at sign-in writes no entry: whoever answered passed the provider
+  but not the factor, and section 3.1 promises such a visitor writes
+  nothing. The reason goes to the process log (`console.warn`, with the
+  principal and the reason above), as a provider's failures do today.
+  `passkey.check` denials are entries: they come from a session.
 - `device.approve` names the passkey that approved.
 - Every **always** act names, in its own entry, the passkey and time that
   confirmed the session (`confirmedBy`, `confirmedAt`).
@@ -1134,6 +1172,13 @@ running `passkeys: 'required'`:
 24. `?dryRun=1` on a route that takes none, from a session not confirmed in
     the last five minutes, is `403 fresh_check_required` and changes
     nothing.
+25. An MCP consent whose session a removal ended meanwhile connects
+    nothing.
+26. Under `protectedReveals`, a stale session's one-key reveal in a
+    protected environment answers as for a key it cannot see, whether the
+    key exists or not, and the log holds no use of it.
+27. The configured Owner of check 22 signs in again with the passkey added
+    there.
 
 ## 14. Build plan (phase 2, after 0.15)
 
@@ -1153,8 +1198,11 @@ running `passkeys: 'required'`:
    dialog, the device ceremony, the CLI's step-up through the device flow,
    the link checks, MCP approvals that stay pending.
 5. **Management**: Account → Passkeys, the Owner reset, the prompt under
-   `optional`, `protectedReveals`.
-6. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
+   `optional`.
+6. **`protectedReveals`**: `accepts.fresh` in the vault's named statement,
+   `Probing.tla` and the use matrices, the router's check on the ordinary
+   path.
+7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
    (the policy, `rpId`, recovery and its log review) and
    `docs/offboarding.md`.
 
