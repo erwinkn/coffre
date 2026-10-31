@@ -249,14 +249,16 @@ passkey: sign in with it"). So a second use of the same sealed state, or two
 tabs racing, adds one passkey at most, and nobody adds a second key through
 the door meant for the first.
 
-`user.id` is no secret and no email: 16 bytes of HKDF over the principal,
-`user:bob@acme.example`, derived each time and never stored. It needs no
-generation, so it is the same before a configured Owner is admitted and
-after, and the `userHandle` an assertion returns checks against it (7.2). It
-stays the same across a person's passkeys, so a keychain that already holds
-one for Bob replaces it instead of keeping two; a person removed and added
-back gets the same handle, and their old passkeys, of the earlier
-generation, are refused anyway.
+`user.id` is 16 random bytes, made at a person's first passkey and kept on
+each of their passkey rows (`passkeys.user_handle`), copied from the
+others when they add one. WebAuthn asks that it reveal nothing about the
+person, and a hash of the email, even keyed, can be tested against
+guesses by anyone who learns the key; random bytes cannot, and survive an
+`APP_KEY` rotation. It stays the same across a person's passkeys, so a
+keychain that already holds one for Bob replaces it instead of keeping two,
+and the `userHandle` an assertion returns is checked against the row of the
+passkey it names (7.2). A configured Owner not yet admitted gets one at
+registration, as anyone does; nothing about it depends on the generation.
 
 ### 3.3 `optional`: the prompt
 
@@ -500,27 +502,44 @@ access today, needs a fresh session like any other.
 
 `POST /api/reveals` and every other read stay **never**, by default. With
 `protectedReveals: true`, a reveal that opens a value of a protected
-environment is **always** for a person's browser or CLI session: one touch
-covers five minutes of reads, never a prompt per secret.
+environment needs a fresh session, for a person's browser or CLI session:
+one touch covers five minutes of reads, never a prompt per secret. The
+vault checks it, not the router (below).
 
 A personal token or an MCP connection cannot touch a passkey, so under
 `protectedReveals` they read no protected environment's values; their
 `/use` is untouched. Open question 4.
 
-Whether an environment is protected is the place's to say, and a one-key
-reveal goes to the vault by name before the app reads the place (section
-6.4). So the app cannot answer this one before the vault call without
-reading what the named path forbids it to read first. The vault decides it
-instead: the named call carries whether the person's session is fresh
-(`accepts.fresh`, beside what `accepts` carries today), and the vault's
-statement refuses a protected environment to a caller who is not, at the
-point where it refuses a caller without standing, with the same answer. An
-environment protected while the call runs is the vault's own read, under
-its own lock. `Probing.tla`'s `AcceptedFirst` and `NoKeyBeforeStanding`
-take the new input, and the use matrices a case per answer. The ordinary
-path (an environment's reveal) checks it in the router, as any **always**
-route. `protectedReveals` ships in a PR of its own, after the rest (section
-14).
+**The vault decides it, on every reveal path.** Whether an environment is
+protected is the vault's to say: it reads the place under its own lock, and
+the policy can change while a read runs (another Owner protects `prod` while
+a stale session's `coffre export` is opening it). A check in the router, or
+in the app before the vault's call, decides on a protection the vault may
+no longer hold by the time it releases the values. So the router does not
+check reveals at all. Every call that releases values (the named use of one
+key, and the unwrap of an environment's read) carries whether the caller's
+session is fresh, `fresh: boolean`, beside what the call carries today (for
+the named call, in `accepts`), true for anything but a person's credential.
+The vault refuses a protected environment to a caller who is not fresh
+where it refuses a caller without standing, under the same fence that
+holds the policy for that decision, and so with the same answer as any
+refusal there: the named path's one `404 not_available`, the unwrap's
+`vault_refused`. A protection that lands while the read runs is the
+vault's own read, fenced like any other change of the policy.
+`Probing.tla`'s `AcceptedFirst` and `NoKeyBeforeStanding` take the new
+input, the use matrices gain its cases, and the unwrap's policy fence holds
+on all-encrypted reads too.
+
+**Asking before reading.** A refusal that looks like any other cannot ask
+for a touch, so the clients ask first, from what is no secret: `GET
+/api/me` lists the environments the caller reaches, each with whether it is
+protected, and says `confirmedUntil`. Before a read of a protected
+environment from a session that is not fresh, the page opens the confirm
+dialog, and the CLI starts its step-up (section 3.5), then reads. A
+protection that lands in between gets the plain refusal; the client reads
+`/api/me` again, sees it, confirms and retries once.
+
+`protectedReveals` ships in a PR of its own, after the rest (section 14).
 
 ### 4.4 Who is never asked, and who cannot be
 
@@ -553,7 +572,7 @@ export const FRESH_ROUTES: { [K in RouteKey]: Fresh | ((input: RouteInput<K>, ct
   'PATCH /projects/:project/:environment': (input) => (input.protected === false ? 'always' : 'never'),
   'POST /members/:member/tokens': (input, ctx) => …, // service: always; personal from a browser: holder; else never
   'POST /device-logins/:code': (input) => (input.approve ? 'ceremony' : 'never'),
-  'POST /reveals': (input, ctx) => …,               // protectedReveals and a protected place: always
+  'POST /reveals': 'never',                         // protectedReveals is the vault's to decide (section 4.3)
   'GET /me': 'never',
   // … every route
 };
@@ -592,6 +611,8 @@ export const passkeys = pgTable('passkeys', {
   // Whose: the member and the generation it was added in, as identities are bound.
   principal: text().notNull(),
   generation: integer().notNull(),
+  // The WebAuthn user handle: 16 random bytes, the same on every passkey of the person's (section 3.2).
+  userHandle: bytea('user_handle').notNull(),
   // The authenticator's credential ID, raw (WebAuthn caps it at 1023 bytes), unique across the instance.
   credentialId: bytea('credential_id').notNull(),
   // The COSE_Key as registered, and its COSE algorithm: -8 Ed25519, -7 ES256, -257 RS256.
@@ -895,8 +916,8 @@ For an assertion:
 3. The credential ID is a live passkey of this principal and generation,
    read now: another member's passkey, or one removed since the options
    were sent, is unknown here.
-4. `userHandle`, when the authenticator returns one, equals this person's
-   derived `user.id`.
+4. `userHandle`, when the authenticator returns one, equals the passkey
+   row's `user_handle`.
 5. `clientDataJSON.type` is `webauthn.get`; `challenge` equals the
    state's; origin and `crossOrigin` as in 7.1.
 6. `authenticatorData` is at least 37 bytes; `rpIdHash` is SHA-256 of the
@@ -1176,7 +1197,9 @@ running `passkeys: 'required'`:
     nothing.
 26. Under `protectedReveals`, a stale session's one-key reveal in a
     protected environment answers as for a key it cannot see, whether the
-    key exists or not, and the log holds no use of it.
+    key exists or not, and the log holds no use of it; an environment's
+    reveal that starts before the environment is protected and releases
+    after releases nothing.
 27. The configured Owner of check 22 signs in again with the passkey added
     there.
 
@@ -1199,9 +1222,9 @@ running `passkeys: 'required'`:
    the link checks, MCP approvals that stay pending.
 5. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
-6. **`protectedReveals`**: `accepts.fresh` in the vault's named statement,
-   `Probing.tla` and the use matrices, the router's check on the ordinary
-   path.
+6. **`protectedReveals`**: `fresh` in the vault's named use and unwrap,
+   decided under the policy fence, `Probing.tla` and the use matrices, the
+   clients asking first from `GET /api/me`.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
    (the policy, `rpId`, recovery and its log review) and
    `docs/offboarding.md`.
