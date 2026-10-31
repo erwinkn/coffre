@@ -64,7 +64,7 @@ replaced, cannot come back as `kek`: the vault refuses to write under it.
 under the vault's first signing key alone, so a rotation that changes the
 signing key leaves the checkpointer refusing the log and every change failing
 at its seal; uses go on. A local vault key derives the signing key, so do not
-rotate it, nor the signing key, on 0.15 until a release says it can (T168).
+rotate it, nor the signing key, on 0.15 until 0.15.1 (T168).
 With AWS KMS and a `signingKey` of its own, the KEK alone may rotate, as above.
 
 The app key, `APP_KEY`, rotates the same way: the new one becomes
