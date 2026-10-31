@@ -140,9 +140,15 @@ export class WorkerdSocket extends EventEmitter {
     }
   }
 
+  /** The server's answer to the SSLRequest; failed, or the socket closed or destroyed first, said as any read's end. */
   async readFirst(): Promise<void> {
-    const { value } = await this.reader!.read();
-    this.emit('data', Buffer.from(value!));
+    try {
+      const { done, value } = await this.reader!.read();
+      if (done) return this.close();
+      this.emit('data', Buffer.from(value));
+    } catch (error) {
+      this.error(error);
+    }
   }
 
   close(): void {
