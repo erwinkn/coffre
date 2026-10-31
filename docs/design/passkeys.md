@@ -112,8 +112,10 @@ stolen one ends (rule 1): the thief cannot ride Ada's touch.
   attacker would share Bob's access; here they hold it alone until an
   Owner resets. It is loud (a `passkey.add`, Bob locked out), and
   `docs/deployment-auth.md` says what to do: confirm with Bob out of band,
-  reset, read the log since the `passkey.add`. Owners are spared it: they
-  add one at sign-in (section 2).
+  reset, read the log since the `passkey.add`. Owners add one at their next
+  sign-in (section 2), which brings their protection forward but does not
+  remove the risk: whoever passes an Owner's provider first after the
+  upgrade adds that passkey.
 - **Device-code phishing.** The touch binds approval to a code, not to a
   terminal: a code phished from Ada, approved in Ada's browser, yields the
   attacker a 30-day CLI session, as today. The page shows where the
@@ -643,7 +645,13 @@ they are then (open question 4).
   `#decide` commits the approval before it makes the change and records
   `failed` if the change throws, so the ceremony and the change's own
   `FRESH_ROUTES` answer are checked before the approval is decided; a
-  refusal leaves it pending. Open question 9.
+  refusal leaves it pending. The touch replaces the approving browser's
+  session, as every touch does (rule 1), so the change then runs as the new
+  session: `#decide` rebuilds its context from the credential the ceremony
+  issued (fresh, naming the passkey touched), with the same connection
+  (`via`), scopes and provenance, for the router's check and for the
+  change's own calls. A change that issues a service token would otherwise
+  name the session the touch just ended and fail. Open question 9.
 - **Handles and `/use`**: never.
 
 ### 4.5 In code, and the routes outside the table
@@ -904,7 +912,17 @@ handle commits from a source it is about to revoke, and miss the handle
 factor lock before it checks `via`, and copies `via`'s `passkey_id` onto
 what it issues, handles, personal tokens and service tokens alike. Its
 statement and its model change with it (R45), the model holding that
-interleaving. A handle is then either ended by a change or made after it,
+interleaving.
+
+The previous release's vault issues too (`vaultIssuesTokens`), without the
+lock or `passkey_id`, and Workers Builds may deploy the app first. So the
+new contract is a capability of its own, which the vault says it has
+(`issuesWithPasskeys`, beside `issues`): while passkeys are not `off`, the
+app hands an issue to the vault only when it says so, and otherwise takes
+the app's own audited path, which already exists as the fallback, under
+the factor lock, writing `passkey_id` itself. Conformance runs the new app
+against the previous release's vault and issues a handle, a personal token
+and a service token. A handle is then either ended by a change or made after it,
 from a credential the change left alive.
 
 What escapes: a handle made while the policy was `off` lives out its
@@ -1340,6 +1358,11 @@ running `passkeys: 'required'`:
     nothing; the same write keeping the nature goes.
 33. A deployment whose `publicUrl` is an IP address, with passkeys not
     `off`, does not start.
+34. An MCP-approved service token issues, with its approval's touch, and
+    the browser session the touch replaced is `401` after.
+35. With the previous release's vault, a handle, a personal token and a
+    service token issue through the app's path and carry their
+    `passkey_id`.
 
 ## 14. Build plan (phase 2, after 0.15)
 
