@@ -516,10 +516,16 @@ the policy can change while a read runs (another Owner protects `prod` while
 a stale session's `coffre export` is opening it). A check in the router, or
 in the app before the vault's call, decides on a protection the vault may
 no longer hold by the time it releases the values. So the router does not
-check reveals at all. Every call that releases values (the named use of one
-key, and the unwrap of an environment's read) carries whether the caller's
-session is fresh, `fresh: boolean`, beside what the call carries today (for
-the named call, in `accepts`), true for anything but a person's credential.
+check reveals at all. **Every vault call that releases a value carries
+whether the caller's session is fresh**, `fresh: boolean`, beside what the
+call carries today, whichever route or path reaches it. Today those calls
+are `useNamed` (one key, by name; `fresh` goes in its `accepts`), `use` and
+`useMany` (0.15's reads, which `openValues` sends through `useValues`), and
+`unwrap` (0.14's); a new one joins the list in the `Vault` interface's own
+type, which makes `fresh` a required field of every call that returns a
+value. `fresh` is true for anything but a person's credential (browser,
+CLI, personal token, MCP connection): a service's read and a handle's `/use`
+never wait on a touch.
 The vault refuses a protected environment to a caller who is not fresh
 where it refuses a caller without standing, under the same fence that
 holds the policy for that decision, and so with the same answer as any
@@ -528,7 +534,7 @@ refusal there: the named path's one `404 not_available`, the unwrap's
 vault's own read, fenced like any other change of the policy.
 `Probing.tla`'s `AcceptedFirst` and `NoKeyBeforeStanding` take the new
 input, the use matrices gain its cases, and the unwrap's policy fence holds
-on all-encrypted reads too.
+on all-encrypted reads too, on each of those calls.
 
 **Asking before reading.** A refusal that looks like any other cannot ask
 for a touch, so the clients ask first, from what is no secret: `GET
@@ -1197,9 +1203,11 @@ running `passkeys: 'required'`:
     nothing.
 26. Under `protectedReveals`, a stale session's one-key reveal in a
     protected environment answers as for a key it cannot see, whether the
-    key exists or not, and the log holds no use of it; an environment's
-    reveal that starts before the environment is protected and releases
-    after releases nothing.
+    key exists or not, and the log holds no use of it; the same for a
+    several-key reveal (`POST /api/reveals` with `keys`) and an
+    environment's, by a stale session, a personal token or an MCP client;
+    a reveal that starts before the environment is protected and releases
+    after releases nothing, on each path.
 27. The configured Owner of check 22 signs in again with the passkey added
     there.
 
@@ -1222,7 +1230,8 @@ running `passkeys: 'required'`:
    the link checks, MCP approvals that stay pending.
 5. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
-6. **`protectedReveals`**: `fresh` in the vault's named use and unwrap,
+6. **`protectedReveals`**: `fresh`, required on every value-releasing call
+   of the `Vault` interface (`useNamed`, `use`, `useMany`, `unwrap`),
    decided under the policy fence, `Probing.tla` and the use matrices, the
    clients asking first from `GET /api/me`.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
