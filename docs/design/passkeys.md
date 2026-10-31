@@ -40,9 +40,11 @@ Three rules carry it:
    sign-in, at a fresh check, at a step-up, approving a terminal) issues a new session to the
    browser that touched, and ends the one it came in on. A copy of the old
    cookie, wherever it went, stops working.
-2. **Every credential a person holds names the passkey that confirmed it,
-   and every request checks that the passkey is still live.** Removing or
-   resetting a passkey ends what it confirmed, at the next request.
+2. **Changes to a person's passkeys end credentials by revoking them,
+   under one per-person lock that every issue takes too** (section 6). A
+   first passkey ends what no passkey confirmed; removing or resetting one
+   signs the person out everywhere else. Nothing is inferred from
+   timestamps, so nothing revoked comes back.
 3. **The app enforces it; the vault does not** (section 8). The vault could
    verify passkey signatures itself later, for Owner-level acts.
 
@@ -203,12 +205,15 @@ unauthenticated visitor makes coffre write nothing, as today.
 can admit a member: `#principalForEmails` asks `vault.access`, which makes
 an Owner the deployment names (`owners`, R3) a member when they are none
 yet, on an empty instance too. Under passkeys the callback only reads: it
-matches the email against the members' rows and the deployment's `owners`
-(`vault.about()`, which writes nothing). An Owner named in config with no
+matches the email against the members' rows and the deployment's `owners`.
+Not through `vault.about()`, which settles a cold vault first and can
+write (keys, members, the configured Owners, the bulk policy): through a
+new read-only `vault.configuredOwners()`, which answers from the vault's
+configuration alone. An Owner named in config with no
 member row yet gets an `enroll` cookie with `generation: null`; the `POST`
 admits them through `vault.access`, as today, once the attestation has
 verified, then enrolls at the generation that answered. Conformance runs
-`required` on an empty database (section 13).
+`required` on an empty database and on a cold vault (section 13).
 
 The page also says what to do without the passkey: "Lost your passkeys? An
 Owner can reset them" (section 3.7). There is no fallback that skips it.
@@ -328,9 +333,9 @@ nothing; one touch approves one code.
 
 The poll that redeems the code issues the CLI session with that
 `passkey_id`, and the approval's `decided_at` as its `confirmed_at`. Its
-transaction checks that the passkey is still live and still the person's,
-at the generation it issues in, so a passkey removed between approval and
-poll redeems nothing. A terminal starts with a five-minute window too.
+transaction takes the person's lock (section 6) and checks under it that
+the approval still stands and its passkey is still live, so a passkey
+removed, or a first one added, between approval and poll redeems nothing. A terminal starts with a five-minute window too.
 
 **A fresh check.** Ada runs, an hour later:
 
@@ -374,22 +379,23 @@ Rename and Remove.
   name comes from the authenticator's AAGUID where it names one ("iCloud
   Keychain", "1Password", "YubiKey 5 Series"), else "Passkey 3".
 - **Rename**: no check. A name grants nothing and sits outside every MAC.
-- **Remove**: a session confirmed in the last five minutes. Everything the
-  passkey confirmed ends: the sessions, the personal tokens and handles made
-  from them, the MCP clients connected through them. The dialog says how many:
-  "Removing YubiKey 5C ends 2 sessions and 1 personal token it confirmed."
-  Under `required`, the last passkey cannot be removed: add another first.
+- **Remove**: a session confirmed in the last five minutes. It signs the
+  person out everywhere else: every other session, terminal, personal
+  token, handle and MCP client ends, and this browser gets a new session
+  (section 6.1). The dialog says how many: "Removing YubiKey 5C signs you
+  out of 3 other sessions and ends 1 personal token." Under `required`, the
+  last passkey cannot be removed: add another first.
 - **At most 10** per person: a list a person can still read.
 
 ### 3.7 Recovery
 
 **One of two lost.** Ada signs in with iCloud Keychain and removes the
-YubiKey. What it confirmed ends with it.
+YubiKey. Every other session of Ada's ends with it.
 
 **All lost.** Bob asks an Owner. Ada opens Users → Bob → ⋯ → Reset
 passkeys..., and the dialog says what happens: "Removes Bob's 2 passkeys.
-Their 3 sessions, 1 personal token and 1 connected app, which those
-passkeys confirmed, end with them." Ada touches a passkey to confirm. Bob's
+Everything Bob is signed in with ends: 3 sessions, 1 personal token, 2
+handles and 1 connected app." Ada touches a passkey to confirm. Bob's
 next sign-in under `required` asks for a new one, as a first sign-in does;
 under `optional`, GitHub alone signs Bob in again. Either way the page says
 "Ada reset your passkeys on 31 Oct".
@@ -414,8 +420,9 @@ so the window should be minutes. A narrower lever is open question 3.
 
 What `off` leaves behind when it ends: sessions, terminals, personal
 tokens and MCP clients made while it lasted name no passkey, so for anyone
-who has a passkey they stop at their next request once the policy is back
-(section 6). What `off` cannot undo by itself is what such a session did:
+who has a passkey they are refused at their next request once the policy is
+back, and revoked by that person's next removal or reset (section 6);
+handles made meanwhile live out their lifetime unless revoked. What `off` cannot undo by itself is what such a session did:
 service tokens issued, bindings made, access changed. The recovery steps in
 `docs/deployment-auth.md` end with reading the log for the `off` window.
 
@@ -462,7 +469,13 @@ Four answers per route:
 | `POST /api/audit/loss` | accepting lost log entries for good |
 | `DELETE /api/members/:member/passkeys` | resetting someone's passkeys |
 
-`?dryRun=1` of any of these needs nothing: it changes nothing.
+`?dryRun=1` needs no check only on the routes that take it, those whose
+`query` is `dryRunFlag` or extends it (issuing tokens, bindings and their
+keys, erasing for good, role edits, secret writes), and only when the
+parsed query says so: the route's `FRESH_ROUTES` entry is a function of its
+input and query. A route that takes no `dryRun` is checked whatever its
+query string says; `PATCH /api/access/:member?dryRun=1`, which changes
+access today, needs a fresh session like any other.
 
 ### 4.2 holder and ceremony
 
@@ -584,8 +597,8 @@ export const passkeys = pgTable('passkeys', {
   check('passkeys_credential_id_check', sql`octet_length(${table.credentialId}) BETWEEN 16 AND 1023`),
   check('passkeys_principal_check', sql`${table.principal} LIKE 'user:%'`),
   foreignKey({ name: 'passkeys_principal_fkey', columns: [table.principal], foreignColumns: [vaultMembers.principal] }).onDelete('restrict'),
-  // A person's passkeys, removed ones too: the per-request check (section 6), the sign-in's read and the Passkeys tab.
-  index('passkeys_principal_idx').on(table.principal, table.generation, table.removedAt),
+  // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
+  index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
 ]);
 ```
 
@@ -657,71 +670,106 @@ keeps working while the migration runs ahead of the deploy.
 
 ## 6. The session model
 
-Every credential of a person's that the API or MCP takes (a browser or CLI
-session, a personal token, an MCP connection) passes one check at every
-request, in the statement that already reads it, with a join on the
-passkey it names and a `NOT EXISTS` on the person's passkeys, both on
-indexes:
+### 6.1 One lock, and revocation, not derived history
 
-| Policy | The credential names a passkey | It names none |
+Three review rounds found holes wherever the design inferred, from
+timestamps or from what a passkey had confirmed, whether a credential
+should still work. So it no longer infers. It writes the answer down, under
+one lock:
+
+**The person's factor lock.** A transaction-scoped lock per person:
+`pg_advisory_xact_lock` on a hash of the principal, which any login can take
+inside its transaction, and on SQLite the database's one writer. Every
+transaction that issues a credential of a person's (a browser session, a
+CLI session at its poll, a personal token, a handle, an MCP connection) or
+decides a device login takes it, and so does every change to the person's
+passkeys. Under it, the issue re-reads the person's live passkeys and
+refuses a credential that no passkey confirms when the person has one
+(unless the policy is `off`), or one that names a passkey no longer live.
+
+**Changes end credentials by revoking them**, in the same transaction:
+
+| Change | Ends |
+|---|---|
+| A first passkey added (a person with none live) | every credential of the person's that names no passkey, and every pending device approval that names none |
+| A passkey removed by its person | every credential and pending device approval of the person's, but the new session issued to the browser that removed it (rule 1): "Removing a passkey signs you out everywhere else" |
+| An Owner's reset | every credential and pending device approval of the person's |
+
+Removing a passkey ends everything, not only what that passkey confirmed:
+any session could have been confirmed by any of the person's passkeys at
+some point, and "everywhere else" is a rule a person can predict.
+
+That leaves no way back for a credential no passkey stands behind. Bob's
+terminal from before the first passkey was revoked when Bob added it, and
+stays revoked when an Owner later resets Bob's passkeys. A device code Bob
+approved without a passkey is denied when Bob adds one, so its poll redeems
+nothing. A session made while the policy was `off` is refused while its
+person has a live passkey (below), and revoked by the next removal or
+reset, which is the only way to stop having one.
+
+### 6.2 The check at every request
+
+Every credential of a person's that the API or MCP takes (a browser or CLI
+session, a personal token, an MCP connection) passes one check, in the
+statement that already reads it, with a primary-key join on the passkey it
+names and an indexed `EXISTS` on the person's live passkeys:
+
+| Policy | It names a passkey | It names none |
 |---|---|---|
 | `off` | taken | taken |
-| `optional` | taken if that passkey is live, the person's, at their generation | taken if the person has had no passkey since it was made |
-| `required` | taken if that passkey is live, the person's, at their generation | refused |
-
-"Has had no passkey since it was made" reads the passkeys of the person's
-generation, removed ones included, since rows are never deleted: none was
-live at any moment after the credential's `created_at`, that is, none is
-live now and none was removed after it. So a credential that no passkey
-confirmed dies for good the moment its person has one: Bob's terminal from
-before Bob's first passkey stays refused after an Owner resets Bob's passkeys,
-while a session Bob signs in to after the reset, with GitHub alone under
-`optional`, is taken. The fact is derived from rows coffre keeps anyway; no
-epoch is stored.
+| `optional` | taken if that passkey is live | taken if the person has no live passkey |
+| `required` | taken if that passkey is live | refused |
 
 A credential refused so gets `401 passkey_required`. A browser page goes to
 `/auth/passkey?step-up=1`, where a touch issues a new, confirmed session
 (rule 1); the CLI says to `coffre login` again; a personal token or an MCP
 client is made again by its person.
 
-That one rule covers every way a person could hold a credential no live
-passkey stands behind:
+With 6.1, the check refuses what the revocations have already ended; it is
+there for what no change marks: sessions made before the deployment turned
+`required` on, and sessions made while `off` for a person who has a passkey.
 
-- sessions made before the deployment turned passkeys on, or before Bob
-  added a first one, whatever happens to Bob's passkeys later;
-- anything made while the policy was `off`, once it is back;
-- anything a removed or reset passkey confirmed, even one a sweep missed or
-  that raced the removal.
+### 6.3 Handles
 
-The sweeps still run, so the Sessions page shows such credentials ended
-rather than merely refused: adding a first passkey revokes the person's
-credentials that name none, and removing or resetting one revokes those
-that name it.
+Handles are the one kind not checked per request: they reach `/use` only,
+which R44 and R58 keep to one statement. So the revocations of 6.1 carry
+them, which needs every handle issue under the person's lock. Today a
+handle is issued by the vault's own statement (`vault.issueToken`, with
+the app's audited transaction as the fallback) and records only its person,
+in `created_by`; signing out does not end it. The vault's issue contract
+grows: it takes the person's lock, checks under it that the session or
+personal token issuing the handle is still unrevoked (6.1 revokes those
+first), and copies that credential's `passkey_id` onto the handle. Its
+statement and its model change with it (R45). A handle is then either ended
+by a change or made after it, from a credential the change left alive.
 
-**Handles** are the one kind not checked per request: they reach `/use`
-only, which R44 and R58 keep to one statement. So the sweeps carry them. A
-handle names a passkey too, copied from the session or personal token that
-issued it (today a handle records only its person, in `created_by`, and
-signing out does not end it). Adding a first passkey revokes the person's
-handles that name none; removing or resetting a passkey revokes the handles
-that name it. A handle's issue takes the same lock as the sweep that could
-end it (the passkey's row for one that names a passkey, the person's audit
-head for one that names none), so a handle is either swept or made after
-the sweep, naming what stands behind it. What escapes: a handle made while
-the policy was `off` lives out its lifetime (12 hours unless asked, a week
-at most); the recovery steps revoke the person's handles.
+What escapes: a handle made while the policy was `off` lives out its
+lifetime, 12 hours unless asked and a week at most, unless a removal or a
+reset ends it.
 
-**Named reveals.** A reveal of one key (`POST /api/reveals` with one key, a
-plugin's read) goes to the vault first and checks its credential after, on
-the rows the vault answered (`useByName`, `packages/server/src/named-use.ts`),
-which holds that whatever the app refuses of a credential, the vault
-refuses first. The passkey check is not one the vault makes. So while
-passkeys are not `off`, a person's credentials (browser, CLI, personal)
-leave that path: they take the ordinary one, the check above first, then
-the vault. That costs a person's one-key reveal the vault call it saves
-today, and never `/use`: handles and services keep the named path. Teaching
-the vault's named statement the check, with its `Probing.tla` invariant, is
-the later way back.
+### 6.4 Named reveals
+
+A reveal of one key (`POST /api/reveals` with one key, a plugin's read)
+goes to the vault first, by name, and checks its credential on the rows the
+vault answers (`useByName`, `packages/server/src/named-use.ts`). That path
+holds that whatever the app refuses of a credential, the vault refuses
+first, before anything that hangs on the key, and its one answer for every
+refusal (D153, `formal/Probing.tla`). The ordinary path does not: it
+resolves the key before it decides on the caller.
+
+So the named path stays, for people too, and the passkey check goes before
+it: for a person's credential, while passkeys are not `off`, the app runs
+the check of 6.2 in one statement before the vault call. The statement
+reads the credential and the person's passkeys, nothing about the key, so
+a refusal says nothing about the key and costs the same whatever was
+asked. A passkey removed between that statement and the vault's call
+revoked the credential (6.1), which the vault checks itself
+(`credentialStill`). The cost is one statement before a person's one-key
+reveal; the later way to save it is to teach the vault's named statement
+the check, through `accepts`, as `named-use.ts` asks of any new check, with
+`Probing.tla`'s `AcceptedFirst`.
+
+### 6.5 Fresh, and replacing a session
 
 **Fresh** is `confirmed_at` within five minutes. Only a touch sets it, on a
 credential that touch issued: a browser session at sign-in, at a step-up, a
@@ -754,7 +802,7 @@ once.
 **Why not a separate "fresh" cookie** (a sealed `coffre_fresh` cookie bound
 to the session): it would need no new credential per check, but it does
 not reach the CLI, and it cannot answer "which passkey confirmed this
-credential", which removal and the check above need.
+credential", which the check above needs.
 
 ## 7. The ceremony, checked
 
@@ -860,10 +908,9 @@ No row: replayed, overtaken by a newer challenge, a counter that did not
 move (a possible clone, logged as such), or a passkey removed meanwhile; all
 refused. Two tabs asking at once: the older one's touch is refused and it
 asks again. The statement is the write the counter needs anyway, so replay
-costs nothing extra. Removal updates the same row, so a removal and a use
-of the same passkey take turns on its lock: either the removal comes first
-and the use matches no row, or the use comes first and the removal's sweep
-ends what it made.
+costs nothing extra. A use and a removal of the same passkey both hold the
+person's lock (section 6.1): either the removal comes first and the use
+matches no row, or the use comes first and the removal ends what it made.
 
 ### 7.4 User verification
 
@@ -995,9 +1042,9 @@ person.
 **Every other request**: no query more. The statement that reads the
 credential gains a primary-key join on `passkeys` and an indexed `NOT
 EXISTS`, for the four kinds of section 6 only; the decision is a
-comparison. The exception: a person's one-key reveal leaves the named path
-(section 6), so it asks the vault twice, as an environment's reveal does
-today.
+comparison. The exception: a person's one-key reveal runs that check as a
+statement of its own before its named vault call (section 6.4). Issues take
+the person's lock, an advisory lock no other request waits on.
 
 **`/use`, CI and workload sign-in**: nothing. Their statements do not
 change.
@@ -1071,16 +1118,22 @@ running `passkeys: 'required'`:
 17. A CLI session made before a first passkey stays `401` after that
     passkey is reset.
 18. A handle made by a session no passkey confirmed is `401` at `/use`
-    once its person adds a first passkey; one a removed passkey confirmed,
-    too.
-19. A one-key reveal by a credential the passkey check refuses gets `401`,
-    and the log holds no use of the key.
+    once its person adds a first passkey; every handle of a person's is,
+    once they remove a passkey.
+19. A one-key reveal by a credential the passkey check refuses gets the
+    same `401` whether the key exists, is sensitive or was never made, and
+    the log holds no use of it.
 20. Two fresh checks on one session: one new session, one `401`.
 21. A session made at a fresh check expires when the one before it would
     have.
-22. Under `required`, on an empty database, the Owner the config names
-    signs in, adds a passkey and lands; a provider sign-in that stops at
-    the passkey admits no one.
+22. Under `required`, on an empty database and on a cold vault, the Owner
+    the config names signs in, adds a passkey and lands; a provider sign-in
+    that stops at the passkey admits no one and writes nothing.
+23. A device code approved without a passkey redeems nothing once its
+    person adds a first passkey, whatever happens to that passkey after.
+24. `?dryRun=1` on a route that takes none, from a session not confirmed in
+    the last five minutes, is `403 fresh_check_required` and changes
+    nothing.
 
 ## 14. Build plan (phase 2, after 0.15)
 
@@ -1091,9 +1144,10 @@ running `passkeys: 'required'`:
    test:schema` and the backup grant.
 3. **Sign-in**: `signin({ passkeys })`, the callback's split, `/auth/passkey`
    and its page, enrolling under `required`, the configured Owner's first
-   sign-in, the per-request check of section 6, handles' provenance and the
-   sweeps, named reveals off the named path, the step-up, the seed's
-   authenticator. Waits for #436 and
+   sign-in and `vault.configuredOwners()`, the person's lock and the
+   revocations of section 6.1, the per-request check, the vault's handle
+   issue under the lock (and its model), the check before named reveals,
+   the step-up, the seed's authenticator. Waits for #436 and
    T171, which touch the callback.
 4. **Fresh checks**: `FRESH_ROUTES`, the challenges and checks routes, the
    dialog, the device ceremony, the CLI's step-up through the device flow,
@@ -1136,12 +1190,14 @@ Each PR leaves `main` shippable: until PR 3, nothing is reachable.
    Access deployments use Access's own MFA policies. Option: a sealed
    cookie bound to the Access identity for the browser, and browser-only
    for risky acts.
-7. **Does adding a first passkey under `optional` end the person's other
-   credentials?** Proposed: yes, at their next request (section 3.3): a
-   person with a passkey holds nothing it does not stand behind. It means
-   Bob's terminals log in again and Bob's personal tokens are made again.
-   Option: let credentials made before the first passkey run out on their
-   own, which keeps a stolen GitHub account's earlier sessions alive.
+7. **How much do passkey changes sign out?** Proposed (section 6.1):
+   adding a first passkey ends everything no passkey confirmed, and
+   removing one signs the person out everywhere else. Bob's terminals log
+   in again and Bob's tokens are made again; in exchange nothing a stolen
+   GitHub account made earlier survives, and no rule has to work out what a
+   removed passkey once confirmed. Option: end only what the removed
+   passkey confirmed, which needs that lineage tracked exactly, the source
+   of three rounds of review findings.
 8. **The vault (section 8).** Proposed: A now, C designed with the vault's
    next model for Owner-level acts. Option: C in phase 2 for promotion to
    Owner only.
