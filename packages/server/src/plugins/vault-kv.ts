@@ -247,5 +247,5 @@ function failure(status: number, message = '', retryAfter?: string): Response {
 function refused(error: CoffreError): Response {
   if (error.status === 401 || error.status === 403 || error.code === 'not_available') return failure(403, `permission denied: ${error.message}`);
   // coffre not answering for a moment says when to ask again, as the API does.
-  return failure(error.status, error.message, error.status === 503 && error.code === 'unavailable' && error.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
+  return failure(error.status, error.message, error.status !== 503 || error.code !== 'unavailable' ? undefined : error.retryAfter ?? (error.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined));
 }

@@ -46,7 +46,15 @@ export type CutoverRuntime = {
  * lives: done, or held, with why not, until a time. Settled values only, as
  * an isolate keeps (AGENTS.md).
  */
-export type CutoverKnown = { done: boolean; held?: { why: string; until: number } };
+export type CutoverKnown = { done: boolean; held?: CutoverHeld & { until: number } };
+
+/**
+ * Why the door is held: a try under way, a refusal, or, `failed`, a
+ * question that did not answer at all (a lock that timed out, a database or
+ * a checkpointer gone), which says nothing of whether a cutover is due: an
+ * instance made on 0.15 asks it too, of its own cutover's seal.
+ */
+export type CutoverHeld = { why: string; failed?: true };
 
 /** Times the app vouches again for what a 0.14 write moved meanwhile, before it leaves it to the next request. */
 const TRIES = 3;
@@ -62,7 +70,10 @@ export const HOLD_MS = 5_000;
 export const CUTTING_OVER_NOW = 'another request is cutting over';
 
 /** Why the door is held now, if it is. */
-const heldOf = (known: CutoverKnown): string | null => (known.held !== undefined && Date.now() < known.held.until ? known.held.why : null);
+function heldOf(known: CutoverKnown): CutoverHeld | null {
+  if (known.held === undefined || Date.now() >= known.held.until) return null;
+  return known.held.failed ? { why: known.held.why, failed: true } : { why: known.held.why };
+}
 
 /**
  * Null once the log is cut over, or kept by 0.14 alone; otherwise why not,
@@ -71,7 +82,7 @@ const heldOf = (known: CutoverKnown): string | null => (known.held !== undefined
  * the others meanwhile answer from the hold, as they do from a refusal or a
  * failure until it lapses.
  */
-export async function cutoverReady(runtime: CutoverRuntime): Promise<string | null> {
+export async function cutoverReady(runtime: CutoverRuntime): Promise<CutoverHeld | null> {
   const known = runtime.cutover;
   if (known === undefined || known.done) return null;
   const held = heldOf(known);
@@ -86,11 +97,11 @@ export async function cutoverReady(runtime: CutoverRuntime): Promise<string | nu
     mine = { why: CUTTING_OVER_NOW, until: Date.now() + HOLD_MS };
     known.held = mine;
     const why = await cutOver(runtime, asked);
-    return why === null || known.done ? finish(known) : hold(known, mine, why);
+    return why === null || known.done ? finish(known) : hold(known, mine, { why });
   } catch (error) {
     // A failure (a lock that timed out, a database gone) holds the door as a refusal does, and is said here in full.
     console.error("0.15's log could not be cut over from 0.14", logged(error));
-    return known.done ? null : hold(known, mine, `the cutover failed: ${error instanceof Error ? error.message : String(error)}`);
+    return known.done ? null : hold(known, mine, { why: `the cutover failed: ${error instanceof Error ? error.message : String(error)}`, failed: true });
   }
 }
 
@@ -102,9 +113,9 @@ function finish(known: CutoverKnown): null {
 }
 
 /** A try's refusal, held, unless another try holds the door since this one's hold lapsed (review r8). */
-function hold(known: CutoverKnown, mine: CutoverKnown['held'], why: string): string {
-  if (known.held === mine || heldOf(known) === null) known.held = { why, until: Date.now() + HOLD_MS };
-  return why;
+function hold(known: CutoverKnown, mine: CutoverKnown['held'], held: CutoverHeld): CutoverHeld {
+  if (known.held === mine || heldOf(known) === null) known.held = { ...held, until: Date.now() + HOLD_MS };
+  return held;
 }
 
 /** The vault's first answer, if a cutover is due: none while 0.14 keeps the log alone, or once it is cut over. */
