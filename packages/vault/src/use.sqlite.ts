@@ -9,7 +9,7 @@ import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
-import type { Resolved, UseCall, UseRow } from './use.ts';
+import type { Cover, Resolved, UseCall, UseRow } from './use.ts';
 
 /**
  * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
@@ -20,17 +20,26 @@ import type { Resolved, UseCall, UseRow } from './use.ts';
  * It has no sequence: an entry's number is one past the log's highest.
  */
 export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
-  return (db as Database).transaction((tx) => useOnce(tx, call));
+  return (db as Database).transaction((tx) => useOnce(tx, call, direct(tx)));
 }
 
 /**
  * `use_batch` (0048) on SQLite: each key's use as `callUse` makes it, in order, in one transaction. Its one writer at a
  * time makes the principal's lock, the batch's `lock`, implicit too.
+ *
+ * Each key is decided as `useOnce` decides it, on rows read for all the keys at once (`Batched`): what every key reads
+ * alike once, each key's own rows in a few statements of all their ids, and the principal's cap rows once, counted in
+ * memory as the keys before it enter them. Its entries and cap rows are written together, last. A thousand keys are
+ * then some 30 statements where they were 30,000 (W281), and none counts the cap's set again.
  */
 export async function callBatch(db: Queryable, calls: readonly UseCall[], _lock: string | null): Promise<UseRow[]> {
   return (db as Database).transaction(async (tx) => {
+    const batched = await Batched.read(tx, calls);
     const rows: UseRow[] = [];
-    for (const call of calls) rows.push(await useOnce(tx, call));
+    for (const call of calls) rows.push(await useOnce(tx, call, batched));
+    await batched.write();
+    // Past the deadline once written, as each key's use is past it at its end: the whole batch rolls back.
+    if (rows.some((row) => row.state === null) && Date.now() > calls[0]!.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
     return rows;
   });
 }
@@ -38,8 +47,253 @@ export async function callBatch(db: Queryable, calls: readonly UseCall[], _lock:
 /** A change's number as text: SQLite's integers are 64 bits, a JavaScript number's exact ones 53. */
 type Changed = { number: string; mac: Buffer; seal: Buffer | null; payload: string };
 
-async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
+type SecretRow = { id: string; project_id: string; environment_id: string; current_version_id: string | null; seal: Buffer | null; key: string };
+type ReferenceRow = { source_secret_id: string | null; id: string | null };
+type VersionRow = {
+  envelope_version: number; ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; wrapped_dek: Buffer; kek_provider: string; kek_id: string; kek_version: string; sensitive: number; plaintext: string | null;
+};
+type EnvironmentRow = { project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: number | null; archived: number; project_archived: number; seal: Buffer | null };
+
+// The columns a key's rows are read with, alone (`useOnce`) or a batch's at once (`Batched`): the same rows either way.
+const SECRET = sql.raw('id, project_id, environment_id, current_version_id, seal, key');
+const REFERENCE = sql.raw('CASE WHEN ended_at IS NULL THEN source_secret_id END AS source_secret_id, CASE WHEN ended_at IS NULL THEN id END AS id');
+const VERSION = sql.raw('envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, sensitive, plaintext');
+const ENVIRONMENT = sql.raw('e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal');
+
+/**
+ * What a use reads and writes beside the named call's own reads: `read`, a row no use writes, by a key naming what the
+ * query reads; the principal's cap rows; its entry, numbered; and its key's cap row entered or moved on.
+ */
+type Rows = {
+  read<T>(key: string, load: () => Promise<T>): Promise<T>;
+  /**
+   * The principal's row for `secret`. `since`: the bound `others` counts from, before which a row decides nothing (it
+   * is in no set, is never fresh and holds no cover), so that a batch may read none from before it.
+   */
+  bulk(principal: string, secret: string, since: number): Promise<{ last: number } | undefined>;
+  /** How many of the principal's keys but `secret` count since `since`, up to `count`. */
+  others(principal: string, secret: string | null, since: number, count: number): Promise<number>;
+  /** Whether the entry the call's cover names is its request's: the same key, way in, purpose and place. */
+  cover(call: UseCall & { cover: Cover }): Promise<boolean>;
+  /** The use's entry, written; its number. */
+  use(call: UseCall): Promise<bigint>;
+  enter(principal: string, secret: string | null, period: number): Promise<void>;
+};
+
+/** A lone use's: each read and write a statement, made as it is asked. */
+function direct(tx: Queryable): Rows {
   const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
+  return {
+    read: (_key, load) => load(),
+    bulk: (principal, secret) => one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${principal} AND secret = ${secret}`),
+    others: async (principal, secret, since, count) => Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
+      SELECT 1 FROM log_bulk WHERE principal = ${principal} AND secret <> ${secret} AND last > ${since} LIMIT ${count})`))!.n),
+    cover: async ({ cover, ...call }) => (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
+      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined,
+    use: async (call) => {
+      const next = BigInt((await one<{ n: string }>(NEXT))!.n);
+      await insertUses(tx, [{ number: next, call }]);
+      return next;
+    },
+    enter: async (principal, secret, period) => {
+      await rowsOf(tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${principal}, ${secret}, ${period})
+        ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
+    },
+  };
+}
+
+/** The next entry's number: one past the log's highest. */
+const NEXT = sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`;
+
+async function insertUses(tx: Queryable, uses: readonly { number: bigint; call: UseCall }[]): Promise<void> {
+  for (let start = 0; start < uses.length; start += CHUNK) {
+    const values = uses.slice(start, start + CHUNK).map(({ number, call }) =>
+      sql`(${number}, ${call.at}, ${BigInt(call.requestId)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.mac}, ${call.place})`);
+    try {
+      await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ${sql.join(values, sql`, `)}`);
+    } catch (error) {
+      // The unique (at, request_id), as Postgres says it.
+      if (/UNIQUE constraint failed: log_uses/.test(`${String(error)} ${String((error as { cause?: unknown }).cause)}`)) throw Object.assign(new Error('a replayed use'), { code: '23505' });
+      throw error;
+    }
+  }
+}
+
+/** Rows or ids a statement lists at most: 4,000 parameters at most, well under SQLite's bound of 32,766. */
+const CHUNK = 500;
+
+/** A principal's cap rows in a batch: each key's `last`, every one since `since`; those it entered; how many count since each bound asked. */
+type Bulk = { since: number; rows: Map<string, number>; entered: Set<string>; above: Map<number, number> };
+
+/**
+ * A batch's rows (`callBatch`): every key's own rows read up front, a statement for all the keys' ids at a time, and
+ * any other read once for the batch, by its key; a key whose row was not read up front (a personal config's parent, a
+ * reference's source's source) reads it as alone, once. No use writes what these read but its entry and its cap row:
+ * the entries are numbered on from the log's highest, and the principal's cap rows are kept here as each key enters
+ * or moves on, counted in memory; both are written once every key is decided (`write`).
+ */
+class Batched implements Rows {
+  readonly #tx: Queryable;
+  readonly #read = new Map<string, Promise<unknown>>();
+  /** Per principal, the cap rows read (`#bulkOf`) and those the batch's keys entered. */
+  readonly #bulk = new Map<string, Bulk>();
+  readonly #uses: { number: bigint; call: UseCall }[] = [];
+  /** The same, by number. */
+  readonly #numbered = new Map<string, UseCall>();
+  /** The calls whose cover names an entry the log held when the batch began. */
+  readonly #covered = new Set<UseCall>();
+  #next: bigint | undefined;
+
+  private constructor(tx: Queryable) {
+    this.#tx = tx;
+  }
+
+  /** The batch's keys' rows, each kind read for all their ids at once: secrets, their references and sources, versions, places, newest changes, covers. */
+  static async read(tx: Queryable, calls: readonly UseCall[]): Promise<Batched> {
+    const batch = new Batched(tx);
+    const ids = (list: Iterable<string | null | undefined>) => [...new Set([...list].filter((id): id is string => typeof id === 'string'))];
+    const secrets = new Map<string, SecretRow>();
+    const readSecrets = async (wanted: string[]) => {
+      for (const row of await batch.#in<SecretRow>(wanted, (list) => sql`SELECT ${SECRET} FROM secrets WHERE id IN (${list}) AND archived_at IS NULL`)) secrets.set(row.id, row);
+      for (const id of wanted) batch.#set(`secret\n${id}`, secrets.get(id));
+      // The newest reference row of each, which a key without a version of its own reads.
+      const held = wanted.filter((id) => secrets.get(id)?.current_version_id === null);
+      const references = new Map<string, ReferenceRow>();
+      for (const { of, ...row } of await batch.#in<ReferenceRow & { of: string }>(held, (list) => sql`SELECT r.secret_id AS of, ${REFERENCE} FROM secret_references r
+          WHERE r.secret_id IN (${list}) AND r.created_seq = (SELECT max(created_seq) FROM secret_references WHERE secret_id = r.secret_id)`)) references.set(of, row);
+      for (const id of held) batch.#set(`reference\n${id}`, references.get(id));
+      return [...references.values()].map((row) => row.source_secret_id);
+    };
+    const asked = new Set(ids(calls.map((call) => call.secretId)));
+    const sources = ids(await readSecrets([...asked]));
+    await readSecrets(sources.filter((id) => !secrets.has(id) && !asked.has(id)));
+    const versions = ids([...secrets.values()].map((row) => row.current_version_id));
+    const rows = await batch.#in<VersionRow & { of: string }>(versions, (list) => sql`SELECT id AS of, ${VERSION} FROM secret_versions WHERE id IN (${list})`);
+    batch.#all('version', versions, rows);
+    const places = ids([...calls.map((call) => call.place), ...[...secrets.values()].map((row) => row.environment_id)]);
+    batch.#all('environment', places, await batch.#in<EnvironmentRow & { of: string }>(places, (list) => sql`SELECT e.id AS of, ${ENVIRONMENT}
+        FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id IN (${list})`));
+    const objects = [...ids([...asked, ...sources]).map((id) => objectKey({ kind: 'secret', id })), ...places.map((id) => objectKey({ kind: 'environment', id }))];
+    batch.#all('newest', objects, await batch.#in<Changed & { of: string }>(objects, (list) => sql`SELECT c.object AS of, CAST(c.number AS TEXT) AS number, c.seal, c.payload
+        FROM log_changes c WHERE c.object IN (${list}) AND c.number = (SELECT max(number) FROM log_changes WHERE object = c.object)`));
+    const covered = calls.filter((call) => call.cover !== undefined);
+    for (let start = 0; start < covered.length; start += CHUNK) {
+      const some = covered.slice(start, start + CHUNK);
+      const values = some.map(({ cover, ...call }, k) => sql`(${k}, ${cover!.at}, ${BigInt(cover!.requestId)}, ${BigInt(cover!.number)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.place})`);
+      const found = new Set((await rowsOf<{ k: number }>(tx, sql`WITH v (k, at, request_id, number, credential, secret, purpose, place) AS (VALUES ${sql.join(values, sql`, `)})
+        SELECT v.k FROM v JOIN log_uses u ON u.at = v.at AND u.request_id = v.request_id AND u.number = v.number AND u.credential = v.credential
+          AND u.secret = v.secret AND u.purpose = v.purpose AND u.place IS v.place`)).map((row) => Number(row.k)));
+      for (const [k, call] of some.entries()) if (found.has(k)) batch.#covered.add(call);
+    }
+    return batch;
+  }
+
+  read<T>(key: string, load: () => Promise<T>): Promise<T> {
+    if (!this.#read.has(key)) this.#read.set(key, load());
+    return this.#read.get(key) as Promise<T>;
+  }
+
+  async bulk(principal: string, secret: string, since: number): Promise<{ last: number } | undefined> {
+    const last = (await this.#bulkOf(principal, since)).rows.get(secret);
+    return last === undefined ? undefined : { last };
+  }
+
+  async others(principal: string, secret: string | null, since: number, count: number): Promise<number> {
+    // As SQL counts them: `secret <> NULL` holds for no row, and a negative LIMIT is none.
+    if (secret === null) return 0;
+    const bulk = await this.#bulkOf(principal, since);
+    let above = bulk.above.get(since);
+    if (above === undefined) {
+      above = 0;
+      for (const last of bulk.rows.values()) if (last > since) above += 1;
+      bulk.above.set(since, above);
+    }
+    const n = above - ((bulk.rows.get(secret) ?? -Infinity) > since ? 1 : 0);
+    return count < 0 ? n : Math.min(n, count);
+  }
+
+  async cover(call: UseCall & { cover: Cover }): Promise<boolean> {
+    if (this.#covered.has(call)) return true;
+    // Or an entry of the batch's own, made before it, as alone the use would find it written (SQL's `=` holds for no null).
+    const { cover } = call;
+    const made = this.#numbered.get(String(BigInt(cover.number)));
+    return made !== undefined && made.at === cover.at && BigInt(made.requestId) === BigInt(cover.requestId)
+      && call.credential !== null && made.credential === call.credential && call.secretId !== null && made.secretId === call.secretId
+      && made.purpose === call.purpose && made.place === call.place;
+  }
+
+  async use(call: UseCall): Promise<bigint> {
+    this.#next ??= BigInt((await rowsOf<{ n: string }>(this.#tx, NEXT))[0]!.n);
+    const number = this.#next++;
+    this.#uses.push({ number, call });
+    this.#numbered.set(String(number), call);
+    return number;
+  }
+
+  async enter(principal: string, secret: string | null, period: number): Promise<void> {
+    // A use with no key has no row to enter: its entry, queued before, fails to write first (its key NOT NULL), as alone.
+    if (secret === null) return;
+    // A key enters once its row was read (`bulk`).
+    const bulk = this.#bulk.get(principal);
+    if (bulk === undefined) throw new Error('a cap row entered unread');
+    const old = bulk.rows.get(secret) ?? -Infinity;
+    const last = Math.max(old, period);
+    bulk.rows.set(secret, last);
+    bulk.entered.add(secret);
+    // Each count kept moves with it.
+    for (const [since, n] of bulk.above) if (old <= since && last > since) bulk.above.set(since, n + 1);
+  }
+
+  /** The batch's entries and cap rows, each as a lone use writes it: a statement for many at a time. */
+  async write(): Promise<void> {
+    await insertUses(this.#tx, this.#uses);
+    for (const [principal, { rows, entered }] of this.#bulk) {
+      const all = [...entered];
+      for (let start = 0; start < all.length; start += CHUNK) {
+        const values = all.slice(start, start + CHUNK).map((secret) => sql`(${principal}, ${secret}, ${rows.get(secret)!})`);
+        await rowsOf(this.#tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES ${sql.join(values, sql`, `)}
+          ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
+      }
+    }
+  }
+
+  /** The principal's cap rows since `since`, read once, and again from further back should a key count from there. */
+  async #bulkOf(principal: string, since: number): Promise<Bulk> {
+    const known = this.#bulk.get(principal);
+    if (known !== undefined && known.since <= since) return known;
+    const bulk: Bulk = known ?? { since, rows: new Map(), entered: new Set(), above: new Map() };
+    const read = await rowsOf<{ secret: string; last: number }>(this.#tx, sql`SELECT secret, last FROM log_bulk WHERE principal = ${principal} AND last > ${since}`);
+    // A row the batch entered keeps the greater `last`, as its write will.
+    for (const row of read) bulk.rows.set(row.secret, Math.max(bulk.rows.get(row.secret) ?? -Infinity, Number(row.last)));
+    bulk.since = since;
+    bulk.above.clear();
+    this.#bulk.set(principal, bulk);
+    return bulk;
+  }
+
+  #set(key: string, value: unknown): void {
+    this.#read.set(key, Promise.resolve(value));
+  }
+
+  /** Each of `ids`' row, keyed `<kind>\n<id>`, by the `of` column it was read with; none for an id with no row. */
+  #all<T extends { of: string }>(kind: string, ids: readonly string[], rows: readonly T[]): void {
+    const by = new Map(rows.map(({ of, ...row }) => [of, row]));
+    for (const id of ids) this.#set(`${kind}\n${id}`, by.get(id));
+  }
+
+  /** A query over `ids`, `CHUNK` of them a statement. */
+  async #in<T>(ids: readonly string[], query: (list: SQL) => SQL): Promise<T[]> {
+    const rows: T[] = [];
+    for (let start = 0; start < ids.length; start += CHUNK) {
+      rows.push(...await rowsOf<T>(this.#tx, query(sql.join(ids.slice(start, start + CHUNK).map((id) => sql`${id}`), sql`, `))));
+    }
+    return rows;
+  }
+}
+
+async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow> {
+  const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
+  const once = <T>(key: string, query: SQL) => rows.read(key, () => one<T>(query));
   const now = Date.now();
   const nothing = (state: string): UseRow => ({ state } as UseRow);
   if (call.deadline > call.at + USE_DEADLINE_MS) return nothing('late');
@@ -52,11 +306,11 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   if (names !== undefined && (credential === undefined || !names.accepts.signin
     || (credential.kind === 'browser' && !names.accepts.issuers.includes(`${credential.provider}:${credential.issuer_hash}`)))) return nothing('unknown');
   const newestOf = (kind: Kind, id: string | null) =>
-    id === null ? Promise.resolve(undefined) : one<Changed>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal, c.payload FROM log_changes c WHERE c.object = ${objectKey({ kind, id })} ORDER BY c.number DESC LIMIT 1`);
-  const n = await one<{ number: string; mac: Buffer }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.mac FROM log_changes c ORDER BY c.number DESC LIMIT 1`);
+    id === null ? Promise.resolve(undefined) : once<Changed>(`newest\n${objectKey({ kind, id })}`, sql`SELECT CAST(c.number AS TEXT) AS number, c.seal, c.payload FROM log_changes c WHERE c.object = ${objectKey({ kind, id })} ORDER BY c.number DESC LIMIT 1`);
+  const n = await once<{ number: string; mac: Buffer }>('head', sql`SELECT CAST(c.number AS TEXT) AS number, c.mac FROM log_changes c ORDER BY c.number DESC LIMIT 1`);
   const known = call.known;
   let cached = n !== undefined && known !== undefined && n.number === known.newest && Buffer.from(n.mac).equals(known.newestMac);
-  const floor = await one<{ at_floor: number }>(sql`SELECT at_floor FROM log_fence WHERE only_row`);
+  const floor = await once<{ at_floor: number }>('floor', sql`SELECT at_floor FROM log_fence WHERE only_row`);
   if (floor === undefined || call.at < floor.at_floor || Date.now() > call.deadline) return nothing('late');
   const policy = await newestOf('policy', 'instance');
   const logged = policy === undefined ? {} : (JSON.parse(policy.payload) as { value?: { bulk?: { count?: number; windowMs?: number } } }).value?.bulk ?? {};
@@ -102,28 +356,26 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   const c: WayRow | undefined = way === 'access'
     ? { principal: call.principal!, kind: null, scope: null, revoked_at: null, expires_at: null, not_after: null, seal: null, generation: null, token_hash: null }
     : way === 'connection'
-      ? await one<WayRow>(sql`SELECT principal, NULL AS kind, NULL AS scope, revoked_at, expires_at, NULL AS not_after, seal, generation, NULL AS token_hash FROM mcp_connections WHERE id = ${read.credential}`)
+      ? await once<WayRow>(`way\n${way}\n${read.credential}`, sql`SELECT principal, NULL AS kind, NULL AS scope, revoked_at, expires_at, NULL AS not_after, seal, generation, NULL AS token_hash FROM mcp_connections WHERE id = ${read.credential}`)
       : way === 'binding'
-        ? await one<WayRow>(sql`SELECT principal, NULL AS kind, scope, revoked_at, NULL AS expires_at, NULL AS not_after, seal, generation, NULL AS token_hash FROM service_bindings WHERE id = ${read.credential}`)
-        : await one<WayRow>(sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation, token_hash FROM credentials WHERE id = ${read.credential}`);
-  const wRow = way !== 'binding' || c === undefined ? null : (await one<Record<string, unknown>>(sql`SELECT principal, generation, profile, issuer, origin, jwks_uri, claims, scope, policy, revoked_at FROM service_bindings WHERE id = ${read.credential}`)) ?? null;
-  const m = c === undefined ? undefined : await one<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null; generation: number }>(
-    sql`SELECT status, owner, role, scope, seal, generation FROM vault_members WHERE principal = ${c.principal}`);
-  const grants = m === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
+        ? await once<WayRow>(`way\n${way}\n${read.credential}`, sql`SELECT principal, NULL AS kind, scope, revoked_at, NULL AS expires_at, NULL AS not_after, seal, generation, NULL AS token_hash FROM service_bindings WHERE id = ${read.credential}`)
+        : await once<WayRow>(`way\n${way}\n${read.credential}`, sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation, token_hash FROM credentials WHERE id = ${read.credential}`);
+  const wRow = way !== 'binding' || c === undefined ? null : (await once<Record<string, unknown>>(`binding\n${read.credential}`, sql`SELECT principal, generation, profile, issuer, origin, jwks_uri, claims, scope, policy, revoked_at FROM service_bindings WHERE id = ${read.credential}`)) ?? null;
+  const m = c === undefined ? undefined : await once<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null; generation: number }>(
+    `member\n${c.principal}`, sql`SELECT status, owner, role, scope, seal, generation FROM vault_members WHERE principal = ${c.principal}`);
+  const grants = m === undefined ? [] : await rows.read(`grants\n${c!.principal}`, () => rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
     sql`SELECT coalesce(g.project_id, ge.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
-          FROM vault_grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c!.principal}`);
-  const config = await rowsOf<{ name: string; value: string; seal: Buffer | null }>(tx, sql`SELECT name, value, seal FROM log_config`);
+          FROM vault_grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c!.principal}`));
+  const config = await rows.read('config', () => rowsOf<{ name: string; value: string; seal: Buffer | null }>(tx, sql`SELECT name, value, seal FROM log_config`));
   const roles = config.find((row) => row.name === 'roles');
   const policyRow = config.find((row) => row.name === 'policy');
-  type SecretRow = { id: string; project_id: string; environment_id: string; current_version_id: string | null; seal: Buffer | null; key: string };
   const secretOf = (id: string | null) => id === null
     ? Promise.resolve(undefined)
-    : one<SecretRow>(sql`SELECT id, project_id, environment_id, current_version_id, seal, key FROM secrets WHERE id = ${id} AND archived_at IS NULL`);
+    : once<SecretRow>(`secret\n${id}`, sql`SELECT ${SECRET} FROM secrets WHERE id = ${id} AND archived_at IS NULL`);
   // Its newest reference row's source and id, unless that row has ended.
   const referenceOf = async (secret: SecretRow | undefined) => secret === undefined || secret.current_version_id !== null
     ? undefined
-    : one<{ source_secret_id: string | null; id: string | null }>(sql`SELECT CASE WHEN ended_at IS NULL THEN source_secret_id END AS source_secret_id,
-        CASE WHEN ended_at IS NULL THEN id END AS id FROM secret_references WHERE secret_id = ${secret.id} ORDER BY created_seq DESC LIMIT 1`);
+    : once<ReferenceRow>(`reference\n${secret.id}`, sql`SELECT ${REFERENCE} FROM secret_references WHERE secret_id = ${secret.id} ORDER BY created_seq DESC LIMIT 1`);
   const s = await secretOf(read.secretId);
   const sReference = await referenceOf(s);
   const sSource = sReference?.source_secret_id ?? null;
@@ -131,15 +383,11 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   const xReference = await referenceOf(x);
   const xSource = xReference?.source_secret_id ?? null;
   const versionId = sSource === null ? s?.current_version_id ?? null : x?.current_version_id ?? null;
-  const v = versionId === null ? undefined : await one<{
-    envelope_version: number; ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; wrapped_dek: Buffer; kek_provider: string; kek_id: string; kek_version: string; sensitive: number; plaintext: string | null;
-  }>(sql`SELECT envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, sensitive, plaintext FROM secret_versions WHERE id = ${versionId}`);
-  type EnvironmentRow = { project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: number | null; archived: number; project_archived: number; seal: Buffer | null };
+  const v = versionId === null ? undefined : await once<VersionRow>(`version\n${versionId}`, sql`SELECT ${VERSION} FROM secret_versions WHERE id = ${versionId}`);
   // Its own archival and its project's, apart.
   const environmentOf = (id: string | null) => id === null
     ? Promise.resolve(undefined)
-    : one<EnvironmentRow>(sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
-        FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
+    : once<EnvironmentRow>(`environment\n${id}`, sql`SELECT ${ENVIRONMENT} FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
   // As 0024 names them: the place read through, the key's own, its value's elsewhere, a personal config's parent.
   const ids: (string | null)[] = [
     read.place !== null && read.place !== s?.environment_id ? read.place : null,
@@ -169,43 +417,28 @@ async function useOnce(tx: Queryable, call: UseCall): Promise<UseRow> {
   ]);
   const numbers = [lc, lm, lr, cached ? undefined : policy, ls, lx, ...le].flatMap((change) => (change === undefined ? [] : [BigInt(change.number)]));
   const inputs = numbers.length === 0 ? null : numbers.reduce((a, b) => (b > a ? b : a));
-  const access = c === undefined ? undefined : await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${c.principal}
+  const access = c === undefined ? undefined : await once<{ seq: string }>(`access\n${c.principal}`, sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${c.principal}
     AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
 
   // The cap's rule (bulk.ts, as 0022 and 0024 write it): the key's row, and the others only for a key not in the set.
   const refresh = refreshMs(limit);
   const period = periodOf(call.at, refresh);
-  const b = c === undefined || read.secretId === null ? undefined : await one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${c.principal} AND secret = ${read.secretId}`);
+  const since = call.at - limit.windowMs - refresh - USE_DEADLINE_MS - USE_AHEAD_MS;
+  const b = c === undefined || read.secretId === null ? undefined : await rows.bulk(c.principal, read.secretId, since);
   const inSet = b !== undefined && b.last > call.at - limit.windowMs - refresh;
   const stale = b === undefined || b.last < period;
-  const others = c === undefined || inSet ? 0 : Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
-    SELECT 1 FROM log_bulk WHERE principal = ${c.principal} AND secret <> ${read.secretId} AND last > ${call.at - limit.windowMs - refresh - USE_DEADLINE_MS - USE_AHEAD_MS} LIMIT ${limit.count})`))!.n);
+  const others = c === undefined || inSet ? 0 : await rows.others(c.principal, read.secretId, since, limit.count);
   const cover = call.cover;
   const covered = cover !== undefined && b !== undefined && b.last >= period && (cached || BigInt(cover.number) > (inputs ?? 0n))
-    && (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
-      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined;
+    && await rows.cover(call as UseCall & { cover: Cover });
   // A use whose key would take its principal's lock, to enter the cap's set or move on in it, named or by ids, takes it
   // only in the call the vault makes once it has decided the use (0045, T158, D153): else `decide`, nothing written, its
   // rows for the vault to decide on. SQLite's one writer at a time makes the lock implicit; the call is the same, so
   // that both engines answer alike.
   const decide = c !== undefined && uses && stale && call.decided !== true;
   let number: string | null = null;
-  if (!covered && uses && !decide) {
-    const next = BigInt((await one<{ n: string }>(sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`))!.n);
-    try {
-      await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
-        VALUES (${next}, ${call.at}, ${BigInt(call.requestId)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.mac}, ${call.place})`);
-    } catch (error) {
-      // The unique (at, request_id), as Postgres says it.
-      if (/UNIQUE constraint failed: log_uses/.test(`${String(error)} ${String((error as { cause?: unknown }).cause)}`)) throw Object.assign(new Error('a replayed use'), { code: '23505' });
-      throw error;
-    }
-    number = String(next);
-  }
-  if (c !== undefined && uses && !decide && !covered && stale && (inSet || others < limit.count)) {
-    await rowsOf(tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${c.principal}, ${call.secretId}, ${period})
-      ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
-  }
+  if (!covered && uses && !decide) number = String(await rows.use(call));
+  if (c !== undefined && uses && !decide && !covered && stale && (inSet || others < limit.count)) await rows.enter(c.principal, call.secretId, period);
   // Past its deadline by the end, the call rolls back and writes nothing (DeadlineChecked), as Postgres's does.
   if (!decide && namedState === null && Date.now() > call.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
   const blob = (value: Buffer | Uint8Array | null | undefined) => (value == null ? null : Buffer.from(value));
