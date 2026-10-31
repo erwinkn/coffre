@@ -536,6 +536,9 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
 /** How many objects one statement of `objects` asks for. */
 const OBJECTS_AT_ONCE = 200;
 
+/** How many rows one statement of the projector's write on SQLite inserts: 14 parameters a read, well under SQLite's 32,766. */
+const SQLITE_ROWS = 500;
+
 function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 'writeReads' | 'listing'> & { makeDays(days: readonly string[]): Promise<void>; dropDay(day: string): Promise<void> } {
   const postgres = engineOf(db) === 'postgres';
   const made = new Set<string>();
@@ -580,25 +583,32 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         await rowsOf(db, sql`SELECT project_reads(${json(wire)}::jsonb, ${json(places)}::jsonb, ${String(cursor.through)}::bigint, ${String(cursor.pair)}::bigint, ${cursor.at}::bigint, ${cursor.mac}::bytea)`);
         return;
       }
+      // A few statements however many reads, rows by the hundred: the transaction holds the file's one writer as briefly as
+      // it can, so that neither the vault's own transactions, queued behind it, nor the app's, waiting on its lock, are kept.
+      // One read and its places were a statement each (review r5's CI: a run of a thousand held the writer for seconds).
+      const values = <T>(rows: readonly T[], size: number) => Array.from({ length: Math.ceil(rows.length / size) }, (_, i) => rows.slice(i * size, (i + 1) * size));
+      const sets = [...new Map(places.map((place) => [`${place.environment}:${place.partners.join(',')}`, place])).values()];
       await db.transaction(async (raw) => {
         const tx = raw as unknown as Database;
         const [cut] = await rowsOf<{ sealed: string | number | null }>(tx, sql`SELECT max(upto) AS sealed FROM log_checkpoints`);
         if (cut?.sealed == null || cursor.through > BigInt(cut.sealed)) throw new Error(`reads through ${cursor.through} are past the newest pair`);
         // The projector's row over any other at its number (ReplaceOnConflict), each place once.
-        for (const row of reads) {
+        for (const rows of values(reads, SQLITE_ROWS)) {
           await rowsOf(tx, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
-            VALUES (${row.number}, ${row.at}, ${row.credential}, ${row.purpose}, ${row.principal}, ${row.secret}, ${row.environment}, ${row.project}, ${row.place}, ${row.source},
-              ${row.sourceEnvironment}, ${row.sourceProject}, ${row.version}, ${row.mac})
+            VALUES ${sql.join(rows.map((row) => sql`(${row.number}, ${row.at}, ${row.credential}, ${row.purpose}, ${row.principal}, ${row.secret}, ${row.environment}, ${row.project},
+              ${row.place}, ${row.source}, ${row.sourceEnvironment}, ${row.sourceProject}, ${row.version}, ${row.mac})`), sql`, `)}
             ON CONFLICT (at, number) DO UPDATE SET credential = excluded.credential, purpose = excluded.purpose, principal = excluded.principal, secret = excluded.secret,
               environment = excluded.environment, project = excluded.project, place = excluded.place, source = excluded.source, source_environment = excluded.source_environment,
               source_project = excluded.source_project, version = excluded.version, mac = excluded.mac`);
         }
-        for (const place of places) {
-          const partners = JSON.stringify(place.partners);
+        for (const rows of values(places, SQLITE_ROWS)) {
           await rowsOf(tx, sql`INSERT INTO log_read_places (environment, partners, at, number, principal, secret)
-            VALUES (${place.environment}, ${partners}, ${place.at}, ${place.number}, ${place.principal}, ${place.secret})
+            VALUES ${sql.join(rows.map((place) => sql`(${place.environment}, ${JSON.stringify(place.partners)}, ${place.at}, ${place.number}, ${place.principal}, ${place.secret})`), sql`, `)}
             ON CONFLICT (environment, partners, at, number, secret) DO UPDATE SET principal = excluded.principal`);
-          await rowsOf(tx, sql`INSERT INTO log_read_partners (environment, partners) VALUES (${place.environment}, ${partners}) ON CONFLICT DO NOTHING`);
+        }
+        for (const rows of values(sets, SQLITE_ROWS)) {
+          await rowsOf(tx, sql`INSERT INTO log_read_partners (environment, partners)
+            VALUES ${sql.join(rows.map((place) => sql`(${place.environment}, ${JSON.stringify(place.partners)})`), sql`, `)} ON CONFLICT DO NOTHING`);
         }
         await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
       });

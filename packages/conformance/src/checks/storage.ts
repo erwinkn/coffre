@@ -97,11 +97,20 @@ export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
  * `work` with a log refusing appends, as a full disk or a lost connection
  * would, without changing the deployment's code: a trigger, dropped after.
  * 0.14's, `audit_log`, of one action or all; or 0.15's uses, `log_uses`.
+ *
+ * On Postgres, each statement first locks the table itself, as every reader
+ * does: `log_uses` is partitioned by day, and a trigger on it is one on each
+ * day, which `DROP TRIGGER` locks newest first, while a query reading several
+ * days locks them oldest first. A use, or the reads' projector, holding one
+ * day and waiting on the next deadlocked with the drop (seen in CI; 15 in 50
+ * drops against uses and the projector, none in 2,703 with the table locked
+ * first).
  */
 export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: string, table: 'audit_log' | 'log_uses' = 'audit_log'): Promise<T> {
   const when = action === undefined ? '' : ` WHEN (NEW.action = '${action}')`;
   const create = sql.engine === 'postgres'
-    ? `CREATE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
+    ? `LOCK TABLE ${table} IN SHARE ROW EXCLUSIVE MODE;
+       CREATE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
        BEGIN RAISE EXCEPTION '${LOG_REFUSAL}'; END $$;
        CREATE TRIGGER conformance_refuse BEFORE INSERT ON ${table} FOR EACH ROW${when} EXECUTE FUNCTION conformance_refuse();`
     : `CREATE TRIGGER conformance_refuse BEFORE INSERT ON ${table}${when}
@@ -111,7 +120,7 @@ export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: s
     return await work();
   } finally {
     await sql.exec(sql.engine === 'postgres'
-      ? `DROP TRIGGER conformance_refuse ON ${table}; DROP FUNCTION conformance_refuse();`
+      ? `LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE; DROP TRIGGER conformance_refuse ON ${table}; DROP FUNCTION conformance_refuse();`
       : 'DROP TRIGGER conformance_refuse;');
   }
 }
