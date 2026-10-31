@@ -1884,8 +1884,11 @@ function of the use); and who sees which rows (`formal/lean`'s access model).
 "As built: T166"):
 - The code is `ReadsProbe`: every protection but InputsInUseMac.
   Covering each input's seal in the use's MAC would change the hot path
-  (R50). A sealed change deleted after its seal is D145's class, seen by
-  Seal's full verifier and an offline scan, not by the projector.
+  (R50). Each change the projector derives from is held to its MAC, so a
+  payload edited since its seal stops it. A sealed change deleted after
+  its seal, or a genuine older one copied or renumbered under the use, is
+  D145's class: Seal's full verifier and an offline scan see it, the
+  projector does not.
 - WindowChecked is `sealedRange`. Each range is read whole and rebuilt
   into both trees, from the pair under it, to the heads of the pair over
   it (core's `verifyLog`), before anything is derived from it. A range
