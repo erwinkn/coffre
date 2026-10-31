@@ -29,7 +29,7 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
 import { readsByStanding, readsStanding } from '../db/reads.ts';
-import { readsListed, type ReadsListed } from './audit.ts';
+import { readsReported, type ReadsListed } from './audit.ts';
 import {
   priorConnections,
   revokePriorMembership,
@@ -409,7 +409,7 @@ export async function listMembers(
   // And how far their reads are listed under 0.15's log, which their counts are as of (T166).
   const [activity, standing] = removed.length === 0 ? [[], null] : await ctx.db.transaction((tx) => Promise.all([memberActivity(tx, removed.map((m) => m.id)), readsStanding(tx)]), SNAPSHOT);
   const exposed = exposure(removed, activity);
-  const reads = standing === null ? null : readsListed(standing, false, { strict: true });
+  const reads = standing === null ? null : await readsReported(ctx, standing);
   return {
     members,
     removed: removed.map((member) => ({
@@ -514,7 +514,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   const [everyone, known, owners, references, { reads: used, standing }] = await Promise.all([
     directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsByStanding(ctx.db, [formatMember(member)]),
   ]);
-  const reads = readsListed(standing, false, { strict: true });
+  const reads = await readsReported(ctx, standing);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;

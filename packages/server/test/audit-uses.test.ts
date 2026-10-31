@@ -256,6 +256,9 @@ test('a read the vault does not vouch for is shown forged: edited, renumbered, o
   await db.owner.update(logReadsCursor).set({ through: 1_000_000n });
   const { reads } = await root.audit.list({ sealed: '1', limit: 10 });
   assert.deepEqual([reads?.forged, reads?.behind], [true, true]);
+  // Her report says so too, by the vault's word on the cursor, not its number (review r7).
+  const moved = await root.members.get(ADA);
+  assert.deepEqual([moved.reads?.forged, moved.reads?.behind], [true, true]);
   // Or deletes it: no page, report or check takes that for a projection yet to start (review r6).
   await db.owner.delete(logReadsCursor);
   const gone = await root.audit.list({ sealed: '1', limit: 10 });

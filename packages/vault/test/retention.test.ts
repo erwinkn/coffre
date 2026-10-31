@@ -19,7 +19,7 @@ import { logObject } from '../src/inputs.ts';
 import { DAYS_AHEAD, upkeep } from '../src/log-checkpointer.ts';
 import { authentic, logMacKey, RETENTION_OBJECT, retentionCut } from '../src/log-entry.ts';
 import { logStore, type LogStore } from '../src/log-store.ts';
-import { checkReads, projectReads } from '../src/reads.ts';
+import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
@@ -91,7 +91,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * A store whose reads' projection is past every cut, as these tests have no projector: retention waits on it otherwise
  * (T166). The T166 test below opens the store as it is (`projected` false).
  */
-const projected = (store: LogStore): LogStore => ({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: null }) });
+const projected = (store: LogStore): LogStore => ({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: cursorMac(macKey, { through: 2n ** 62n, pair: 0n, at: 0 }) }) });
 
 async function open(options: { projected?: boolean } = {}) {
   const alerts: string[] = [];
@@ -230,6 +230,13 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   const waiting = await retain(cp, store, { keepDays: 9, macKey, now });
   assert.deepEqual(waiting.dropped, []);
   assert.match(waiting.waiting?.reason ?? '', /the reads' projection \(through 0\) has not reached the cut/);
+  // Nor once a database writer moves the cursor past the cut around the projector: by its MAC, not its number (review r7).
+  const owner = ENGINE === 'sqlite' ? db.vault : db.owner;
+  await run(owner, sql`UPDATE log_reads_cursor SET through = 1000000000`);
+  const moved = await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual(moved.dropped, []);
+  assert.match(moved.waiting?.reason ?? '', /the reads' cursor, at 1000000000, is not the vault's/);
+  await run(owner, sql`UPDATE log_reads_cursor SET through = 0`);
   await projectedAll();
   assert.deepEqual(await checked(), []);
   // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.

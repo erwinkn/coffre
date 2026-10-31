@@ -2,6 +2,7 @@ import { leafData, openPair, proveConsistency, TREES, verifyConsistency, type Cu
 
 import type { Checkpointer, CheckpointStore } from './checkpointer.ts';
 import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload } from './log-entry.ts';
+import { cursorHolds, type ReadsCursor } from './reads.ts';
 
 /**
  * Retention (docs/design/0.15-plan.md, PR 7; formal/Seal.tla's retention):
@@ -40,8 +41,8 @@ import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPay
  * drops nothing a retention change it holds does not cut.
  */
 export type RetentionStore = {
-  /** How far the reads' projector has gone (reads.ts, T166): no day nor tile it has yet to read is dropped. */
-  readsCursor(): Promise<{ through: bigint }>;
+  /** How far the reads' projector has gone (reads.ts, T166), with its MAC: no day nor tile it has yet to read is dropped. */
+  readsCursor(): Promise<ReadsCursor>;
   /** The UTC days of uses the database holds, oldest first: YYYY-MM-DD. */
   days(): Promise<string[]>;
   /** Makes each day's partition of uses (`make_day`), once a store. */
@@ -113,7 +114,7 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
   }
   // The tiles below the newest cut, once its sealing is two freshness bounds past it, as a day goes (FreshBeforeDrop).
   const newest = await sealedCut(cp, store);
-  const projecting = newest === null ? null : await behindReads(store, newest.upto);
+  const projecting = newest === null ? null : await behindReads(store, options.macKey, newest.upto);
   if (projecting !== null) run.waiting ??= { day: null, lock: false, reason: `the tiles below ${newest!.upto}: ${projecting}` };
   else if (newest !== null && cp.pair.pair.at >= newest.at + 2 * cp.freshMs) {
     const tiles = await waitingOnLock(() => store.dropTiles(newest.uses.size));
@@ -176,7 +177,7 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   if (freshAt < bound) return { lock: false, reason: `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet` };
   // 4. Not before the reads' projector has read every use at or below the cut (T166): those it has yet to list would
   // otherwise never be, and the range it walks needs the tiles too.
-  const projecting = await behindReads(store, cut.upto);
+  const projecting = await behindReads(store, macKey, cut.upto);
   if (projecting !== null) return { lock: false, reason: projecting };
   // 5. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above). A reader
   // holding log_uses longer than `drop_day`'s lock_timeout (a backup, say) makes it give up: the next run tries again.
@@ -187,10 +188,17 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   return { change, detached: state === 'detached' };
 }
 
-/** Why a cut waits on the reads' projector (T166), or null once it has gone past it. */
-async function behindReads(store: RetentionStore, upto: bigint): Promise<string | null> {
-  const { through } = await store.readsCursor();
-  return through >= upto ? null : `the reads' projection (through ${through}) has not reached the cut (${upto}) yet`;
+/**
+ * Why a cut waits on the reads' projector (T166), or null once it has gone
+ * past it: by the cursor the vault's MAC holds, never a number a database
+ * writer moved on, which would drop uses the projector has yet to list
+ * (review r7). Such a cursor stops the projector too, so retention waits,
+ * and alarms once it has waited long.
+ */
+async function behindReads(store: RetentionStore, macKey: Buffer, upto: bigint): Promise<string | null> {
+  const cursor = await store.readsCursor();
+  if (!cursorHolds(macKey, cursor)) return `the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`;
+  return cursor.through >= upto ? null : `the reads' projection (through ${cursor.through}) has not reached the cut (${upto}) yet`;
 }
 
 /** What `work` answers, or, when the database gave up waiting for a lock (55P03, lock_timeout), why: no alarm. */

@@ -331,7 +331,8 @@ export async function listAudit(
   const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
 
   // The reads 0.15's log records, each a use, as the vault's projector lists them (T166), and how far they are listed:
-  // on the whole log and by member, as its other records, to whoever reads the whole log; and to anyone, their own.
+  // on the whole log and by member, as its other records, to whoever reads the whole log; and to a reader of some places
+  // (`audit.read` somewhere, as above: one with none reads no audit page, as under 0.14), their own.
   // Not at a place: in 0.15 no page of a project, environment or key lists them (D160), and a reader of some places
   // sees no one's but their own. Never a refusal (one the vault refuses before it writes a use is the app's entry), nor
   // below its log's end.
@@ -541,6 +542,19 @@ async function vouched(
   });
   const cursorForged = forged.includes('cursor');
   return { forged: new Set(forged.flatMap((number) => (/^[0-9]{1,19}$/.test(number) ? [BigInt(number)] : []))), cursorForged };
+}
+
+/**
+ * How far a report's reads are listed (an offboarding report, the removed
+ * members' counts), strictly, with the vault's word on the cursor: a cursor
+ * moved on around the projector would otherwise have a report say none of
+ * its member's reads wait (review r7). Outside any transaction, as every
+ * vault call; nothing asked where the log has no signed pair.
+ */
+export async function readsReported(ctx: ApiContext, standing: ReadsStanding): Promise<ReadsListed | null> {
+  if (standing.sealed === null) return null;
+  const { cursorForged } = await vouched(ctx, [], [], standing);
+  return readsListed(standing, cursorForged, { strict: true });
 }
 
 /**

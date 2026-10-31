@@ -231,7 +231,8 @@
   whose read it was, of which key and version, where, through which
   reference or fork, all from the sealed log at the use's number, under a
   MAC over every column. In 0.15 reads are listed on the whole log and by
-  member, to whoever reads the whole log, and to anyone their own; a
+  member, to whoever reads the whole log, and to a reader of some places
+  their own (`audit.read` somewhere, as any audit page asks); a
   project's, environment's or key's page lists none and says so
   (`readsOmitted`), until pages by place in 0.15.x (D160). The projector runs apart from sealing: on
   Workers, an object of the checkpointer's class named `reads`, which the
