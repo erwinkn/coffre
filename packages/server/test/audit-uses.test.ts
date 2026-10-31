@@ -191,7 +191,7 @@ test('a read through a reference within one environment is in the logs of both i
   assert.equal((await ada.secrets.reveal('market/dev/HELD')).values.HELD, 'dev-key');
   for (const path of [undefined, 'market/dev', 'market/dev/HELD', 'market/dev/API_KEY']) {
     const shown = (await every(root, path === undefined ? {} : { path })).filter((entry) => entry.action === 'secret.read' && entry.metadata.via !== undefined);
-    assert.equal(shown.length, 1, path);
+    assert.equal(shown.length, 1, path ?? "the whole log");
   }
 });
 

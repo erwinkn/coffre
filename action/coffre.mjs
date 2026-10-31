@@ -18503,7 +18503,7 @@ async function verifyLog() {
 * an instance that keeps 0.14's log alone.
 */
 async function verifyReads(shown) {
-	const result = await client().audit.verifyReads((stretch) => {
+	const result = await client(target(), void 0, [404]).audit.verifyReads((stretch) => {
 		if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rreads verified through entry ${stretch.through}…`);
 	});
 	if (shown) process.stderr.write("\r\x1B[K");
