@@ -28,7 +28,7 @@ import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
-import { readsBy, readsStanding } from '../db/reads.ts';
+import { readsByStanding, readsStanding } from '../db/reads.ts';
 import { readsListed, type ReadsListed } from './audit.ts';
 import {
   priorConnections,
@@ -510,10 +510,9 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   // Everyone, not just them: the service tokens they issued belong to others. Beside it, every place (which whoever
   // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
   // And their reads under 0.15's log, as the vault's projection lists them (T166), which the report weighs below, and how
-  // far it lists them.
-  const [everyone, known, owners, references, used, standing] = await Promise.all([
-    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsBy(ctx.db, [formatMember(member)]),
-    readsStanding(ctx.db),
+  // far it lists them, in one statement, so as of one moment (review r5).
+  const [everyone, known, owners, references, { reads: used, standing }] = await Promise.all([
+    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsByStanding(ctx.db, [formatMember(member)]),
   ]);
   const reads = readsListed(standing, false, { strict: true });
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));

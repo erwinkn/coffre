@@ -288,8 +288,10 @@ async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly Log
   const problems: string[] = [];
   // Every time a use of the range may be at: none is below the floor the pair under it signed, nor, but for a clock
   // apart, past the time the pair over it was signed at.
-  const ats = reads.map((read) => read.at);
-  const listing = await store.listing({ after: range.after, upto: range.upto, from: Math.min(range.floor, ...ats), to: Math.max(range.signedAt, ...ats) }, places);
+  // A loop, not spread arguments: a range after an outage holds more uses than a call takes arguments (review r5).
+  let [from, to] = [range.floor, range.signedAt];
+  for (const read of reads) [from, to] = [Math.min(from, read.at), Math.max(to, read.at)];
+  const listing = await store.listing({ after: range.after, upto: range.upto, from, to }, places);
   const listed = new Map<bigint, ReadRow>();
   for (const read of listing.reads) {
     if (listed.has(read.number)) problems.push(`read ${read.number} is listed twice`);

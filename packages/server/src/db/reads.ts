@@ -299,3 +299,39 @@ export async function readsBy(db: Queryable, actors: readonly string[]): Promise
      GROUP BY r.principal, coalesce(r.source, r.secret), v.version`);
   return rows.map((row) => ({ actor: row.actor, secret: row.secret, version: Number(row.version), at: Number(row.at) }));
 }
+
+/**
+ * `readsBy` and `readsStanding` in one statement, so in one snapshot: an
+ * offboarding report's reads, and how far they are listed as it read them.
+ * Read apart, a projector's write between the two would have the report
+ * name none and say none wait (review r5).
+ */
+export async function readsByStanding(db: Queryable, actors: readonly string[]): Promise<{ reads: Awaited<ReturnType<typeof readsBy>>; standing: Awaited<ReturnType<typeof readsStanding>> }> {
+  const members = actors.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
+  const engine = dialect.engineOf(db);
+  const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
+  const reads = members.length === 0 ? sql`SELECT NULL AS actor, NULL AS secret, NULL AS version, NULL AS read_at WHERE FALSE` : sql`
+    SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
+      FROM log_reads r JOIN secret_versions v ON v.id = r.version
+     WHERE r.principal IN (${sql.join(members.map((member) => sql`${member}`), sql`, `)})
+     GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
+  const rows = await dialect.rowsOf<{
+    through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null; sealed: string | number | null; sealed_at: string | number | null;
+    actor: string | null; secret: string | null; version: number | string | null; read_at: string | number | null;
+  }>(db, sql`
+    SELECT s.through, s.pair, s.at, s.mac, s.sealed, s.sealed_at, g.actor, g.secret, g.version, g.read_at FROM (
+      SELECT c.through, c.pair, c.at, c.mac, k.upto AS sealed, k.at AS sealed_at FROM log_reads_cursor c
+        LEFT JOIN (SELECT upto, at FROM log_checkpoints ORDER BY upto DESC LIMIT 1) k ON TRUE WHERE c.only_row
+    ) s LEFT JOIN (${reads}) g ON TRUE`);
+  const [first] = rows;
+  const standing = first === undefined
+    ? { through: 0n, pair: 0n, at: 0, mac: null, sealed: null, sealedAt: null }
+    : {
+        through: BigInt(first.through), pair: BigInt(first.pair), at: Number(first.at), mac: first.mac === null ? null : Buffer.from(first.mac),
+        sealed: first.sealed === null ? null : BigInt(first.sealed), sealedAt: first.sealed_at === null ? null : Number(first.sealed_at),
+      };
+  return {
+    reads: rows.filter((row) => row.actor !== null).map((row) => ({ actor: row.actor!, secret: row.secret!, version: Number(row.version), at: Number(row.read_at) })),
+    standing,
+  };
+}

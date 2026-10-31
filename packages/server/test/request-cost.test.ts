@@ -639,13 +639,13 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does (T166), beside
-  // its first reads: two statements, no trip.
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 18, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  // its first reads: a statement, no trip.
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
   "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 2, vaultCalls: 3 } },
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 4, vaultCalls: 5 } },
   // Its report reads their reads too, and how far they are listed (T166), beside its first reads.
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 21, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
   "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 3, vaultCalls: 4 } },
   "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
