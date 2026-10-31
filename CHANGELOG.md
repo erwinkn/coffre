@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **0.15's uses: a busy isolate frees up, and a busy use says why.**
+  On real Cloudflare, after an overload, some vault isolates kept answering
+  `overloaded` to a lone use for minutes. A call whose request had ended
+  never settled, and it kept its place in the isolate's admission until
+  the isolate was recycled. On Workers, a use's connection now closes by
+  its deadline at the latest, and its place lapses 2 s after that (the hot
+  login's `statement_timeout`), settled or not. On Node, where a call
+  always settles, it keeps its place until it does. A call starts no
+  statement past its deadline, or once it has answered `late`. A use
+  that is not decided (`overloaded`, `late`, and the rest) now answers 503
+  with reason `busy` and a message that says which. It used to answer
+  "coffre cannot reach what it depends on". It keeps the vault's
+  `Retry-After`, through the credential proxy, MCP and the Vault KV plugin
+  too. A cutover check that does not answer, as on an instance made on
+  0.15 whose checkpointer is stuck, now says that coffre could not check
+  its audit log, not that coffre is moving it.
 - **0.15's read of several keys is one vault call and one statement, behind its switch.**
   A reveal of an environment, `coffre export` and the Action's `keys:`
   opened each value by a vault call of its own, about 3.5 ms of Workers

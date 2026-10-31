@@ -73,8 +73,9 @@ function oauthError(error: unknown): Response {
   // that gave up included, is the client's to ask again; a request that is wrong is the client's to fix.
   const { status, body } = toErrorBody(error);
   if (status === 503) {
-    const passing = body.error === 'unavailable' && body.reason === undefined;
-    return jsonResponse({ error: 'temporarily_unavailable', error_description: body.message }, 503, passing ? { ...NO_STORE, 'retry-after': UNAVAILABLE_RETRY_AFTER } : NO_STORE);
+    const own = error instanceof ApiError ? error.retryAfter : undefined;
+    const later = body.error !== 'unavailable' ? undefined : own ?? (body.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
+    return jsonResponse({ error: 'temporarily_unavailable', error_description: body.message }, 503, later === undefined ? NO_STORE : { ...NO_STORE, 'retry-after': later });
   }
   if (status === 400) return jsonResponse({ error: 'invalid_request', error_description: body.message }, 400, NO_STORE);
   // `toErrorBody` logged what it did not know; a refusal of the API's has no place here, and is logged as a failure.

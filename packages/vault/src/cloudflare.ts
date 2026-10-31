@@ -104,7 +104,11 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     }
   }
 
-  /** 0.15's use: one connection of the hot path's config, for its one statement. */
+  /**
+   * 0.15's use: one connection of the hot path's config, for its one statement. Closed once the call is done, and by
+   * its deadline at the latest, so that a call answered `late` lets go of Hyperdrive by then, as its place in admission
+   * lapses soon after (use.ts, `HELD_PAST_DEADLINE_MS`; T170).
+   */
   async use(input: UseInput) {
     const { prepared, hotDatabase } = await this.#ready();
     if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
@@ -113,7 +117,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).use!(input);
     } finally {
-      this.ctx.waitUntil(pool.end());
+      this.ctx.waitUntil(pool.end(closeBy(input)));
     }
   }
 
@@ -126,7 +130,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).useMany!(input);
     } finally {
-      this.ctx.waitUntil(pool.end());
+      this.ctx.waitUntil(pool.end(closeBy(input)));
     }
   }
 
@@ -139,7 +143,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).useNamed!(input);
     } finally {
-      this.ctx.waitUntil(pool.end());
+      this.ctx.waitUntil(pool.end(closeBy(input)));
     }
   }
 
@@ -149,7 +153,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const prepared = await prepareVault(resolveVaultConfig(config), { ...(config.uses === undefined ? {} : { uses: config.uses }), ...logOf(config) });
+      const prepared = await prepareVault(resolveVaultConfig(config), { ...(config.uses === undefined ? {} : { uses: config.uses }), ...logOf(config), callsEndWithRequest: true });
       // Calls that raced here each made one; the first kept serves them all from now on.
       entry = ready.get(env) ?? { database: config.database, ...(config.hotDatabase === undefined ? {} : { hotDatabase: config.hotDatabase }), prepared };
       ready.set(env, entry);
@@ -192,6 +196,11 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   fetch() {
     return new Response('not found', { status: 404 });
   }
+}
+
+/** When a use's connection closes at the latest: its deadline, if it names one (`checkInput` refuses it otherwise). */
+function closeBy(input: { deadline?: unknown } | undefined): number | undefined {
+  return typeof input?.deadline === 'number' && Number.isSafeInteger(input.deadline) ? input.deadline : undefined;
 }
 
 /** The log a configuration keeps (`WorkersVaultConfig.log`): 0.15's seals and remembers through its checkpointer's object. */

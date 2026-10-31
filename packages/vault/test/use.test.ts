@@ -25,7 +25,7 @@ import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { authentic } from '../src/log-entry.ts';
 import { purposeCode } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
-import { newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
+import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, MAC, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
@@ -613,6 +613,116 @@ test("the probe's MAC check runs within the use's admission and deadline: held u
   assert.deepEqual(await use(path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 }, 'the first, its check held up, keeps its place');
   assert.deepEqual(await first, { ok: false, busy: 'late', retryAfter: 1 });
   release();
+});
+
+test("a call that never settles, as a Workers call whose request ended, gives its admission back on Workers once its deadline and the hot login's statement_timeout have passed; on Node it keeps it until it settles (T170)", async () => {
+  const w = await world();
+  const id = await w.key();
+  // Each first call's wait before its statement never ends (its I/O gone with its request); the next ones' does at once.
+  const pathFor = (lapses: boolean) => {
+    let readies = 0;
+    const path: UsePath = {
+      db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: lapses }),
+      ready: () => (readies++ === 0 ? new Promise<void>(() => {}) : Promise.resolve()),
+    };
+    return { path, readies: () => readies };
+  };
+  const workers = pathFor(true);
+  const node = pathFor(false);
+  const at = Date.now() - 2_900;
+  const late = await Promise.all([workers, node].map(({ path }) => use(path, ask(w, id, { at, deadline: at + 3_000 }))));
+  assert.deepEqual(late, [{ ok: false, busy: 'late', retryAfter: 1 }, { ok: false, busy: 'late', retryAfter: 1 }]);
+  // Its place is still taken while what it sent may still hold a connection.
+  assert.deepEqual(await use(workers.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(workers.readies(), 1, 'the call refused asked nothing');
+  await sleep(at + 3_000 + HELD_PAST_DEADLINE_MS + 50 - Date.now());
+  assert.equal(workers.path.cache.inFlight, 0, 'the place lapsed');
+  assert.ok(heard(await use(workers.path, ask(w, id))).ok, 'the isolate serves again');
+  // On Node a call's I/O is never torn down under it: it holds its place, as its pool's connection, until it settles.
+  assert.equal(node.path.cache.inFlight, 1);
+  assert.deepEqual(await use(node.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+});
+
+/** The hot database, everything a call asks of it counted, and a wait before its statement that ends when lifted. */
+function heldBack(callsEndWithRequest: boolean): { path: UsePath; asked: () => number; waiting: Promise<void>; lift: () => void } {
+  let asked = 0;
+  const counted = new Proxy(hot, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== 'function' || !['execute', 'all', 'get', 'run', 'transaction'].includes(String(key))) return value;
+      return (...args: unknown[]) => {
+        asked += 1;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  let lift = () => {};
+  let waits = () => {};
+  const waiting = new Promise<void>((resolve) => (waits = resolve));
+  const path: UsePath = {
+    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest }),
+    ready: () => new Promise<void>((resolve) => {
+      lift = resolve;
+      waits();
+    }),
+  };
+  return { path, asked: () => asked, waiting, lift: () => lift() };
+}
+
+test('a call whose wait before its statement ends past its deadline sends nothing, and gives its place back as it settles (T170)', async () => {
+  const w = await world();
+  const id = await w.key();
+  const { path, asked, lift } = heldBack(true);
+  const at = Date.now() - 2_900;
+  assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 3_000 })), { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(path.cache.inFlight, 1);
+  lift();
+  await sleep(50);
+  assert.equal(asked(), 0, 'no statement past the deadline');
+  assert.equal(path.cache.inFlight, 0, 'settled: its place given back, before it would lapse');
+});
+
+test('a call answered `late` by its timer while the clock is still short of its deadline sends nothing either (T170)', async (t) => {
+  const w = await world();
+  const id = await w.key();
+  const { path, asked, waiting, lift } = heldBack(false);
+  // The race's timer under the test's hand: it fires while the clock is seconds short of the deadline, as Node's may a
+  // ms or two before `Date.now()` reaches it. The clock alone would let the statement go.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const at = Date.now();
+  const answer = use(path, ask(w, id, { at, deadline: at + 3_000 }));
+  await waiting;
+  t.mock.timers.tick(3_000);
+  t.mock.timers.reset();
+  assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
+  lift();
+  await sleep(50);
+  assert.ok(Date.now() < at + 3_000);
+  assert.equal(asked(), 0, 'no statement once the use is answered `late`');
+  assert.equal(path.cache.inFlight, 0);
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
+});
+
+test('a call whose timer has not fired by its deadline, as under a blocked loop, sends nothing past it either (T170)', async (t) => {
+  const w = await world();
+  const id = await w.key();
+  const { path, asked, waiting, lift } = heldBack(false);
+  // The race's timer held back, never ticked: the clock alone passes the deadline, and the call has not lost its race.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const at = Date.now();
+  const answer = use(path, ask(w, id, { at, deadline: at + 100 }));
+  await waiting;
+  t.mock.timers.reset();
+  await sleep(at + 150 - Date.now());
+  lift();
+  assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(asked(), 0, 'no statement past the deadline');
+  assert.equal(path.cache.inFlight, 0);
+});
+
+test("a place lapses no sooner than Postgres has ended what its call sent: the hot login's statement_timeout (T170)", postgresOnly('the hot login'), async () => {
+  const [setting] = await rows<{ statement_timeout: string }>(hot, sql`SHOW statement_timeout`);
+  assert.equal(setting?.statement_timeout, `${HELD_PAST_DEADLINE_MS / 1000}s`);
 });
 
 test('admission: past its calls in flight, an isolate refuses at once, holding no connection', async () => {

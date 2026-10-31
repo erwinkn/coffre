@@ -41,9 +41,11 @@ const IPv6Reg = new RegExp(
  * With TLS to follow, it reads one chunk alone, the server's answer to the
  * SSLRequest, so that the reader is free for `startTls`.
  */
-class WorkerdSocket extends EventEmitter {
+export class WorkerdSocket extends EventEmitter {
   readyState = 'open';
   raw: RawSocket | null = null;
+  /** Destroyed before `connect` made its socket: closed as soon as it has. */
+  destroyed = false;
   writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
@@ -52,13 +54,14 @@ class WorkerdSocket extends EventEmitter {
       this.readyState = 'opening';
       const { connect } = (await import('cloudflare:sockets' as string)) as { connect: Connect };
       const raw = (this.raw = connect(host + ':' + port, tls ? { secureTransport: 'starttls' } : {}));
+      if (this.destroyed) return this.abort();
       raw.closed.then(
         () => {
           if (this.readyState !== 'upgrade') return this.close();
           this.readyState = 'open';
           this.emit('secureConnect');
         },
-        (error: unknown) => this.emit('error', error),
+        (error: unknown) => this.error(error),
       );
       this.writer = raw.writable.getWriter();
       this.reader = raw.readable.getReader();
@@ -81,8 +84,8 @@ class WorkerdSocket extends EventEmitter {
     // Upstream's option, which workerd reads as `expectedServerHostname`: the name is not checked here.
     const raw = (this.raw = this.raw!.startTls({ servername }));
     raw.closed.then(
-      () => this.emit('close'),
-      (error: unknown) => this.emit('error', error),
+      () => this.close(),
+      (error: unknown) => this.error(error),
     );
     this.writer = raw.writable.getWriter();
     this.reader = raw.readable.getReader();
@@ -102,8 +105,27 @@ class WorkerdSocket extends EventEmitter {
     return data ? this.write(data, () => void this.raw!.close()) : this.raw!.close();
   }
 
+  /**
+   * Closed at once, as Node's `destroy`, whatever it is still writing or opening: its writes aborted and its reads
+   * cancelled, so that nothing buffered is sent, then the raw socket closed, which on its own waits until the socket
+   * has opened and every write has gone (workerd's `Socket::close`). Upstream ended it, which waits for a write stuck
+   * under backpressure too (reviews r2 and r3 of #438). Its TCP connection workerd closes with the request, whose I/O
+   * it is: locally, not before (packages/vault/test/workers-socket.test.ts). Before `connect` has made the raw socket,
+   * it is made only to be closed. Says `close` once, a task later, as Node's does.
+   */
   destroy(): void {
-    this.end();
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (this.raw !== null) this.abort();
+    setTimeout(() => this.close(), 0);
+  }
+
+  /** The raw socket's streams torn down, then the socket closed (`destroy`). */
+  abort(): void {
+    const raw = this.raw!;
+    void (this.writer ?? raw.writable).abort().catch(() => {});
+    void (this.reader ?? raw.readable).cancel().catch(() => {});
+    void raw.close().catch(() => {});
   }
 
   async read(): Promise<void> {
@@ -118,9 +140,15 @@ class WorkerdSocket extends EventEmitter {
     }
   }
 
+  /** The server's answer to the SSLRequest; failed, or the socket closed or destroyed first, said as any read's end. */
   async readFirst(): Promise<void> {
-    const { value } = await this.reader!.read();
-    this.emit('data', Buffer.from(value!));
+    try {
+      const { done, value } = await this.reader!.read();
+      if (done) return this.close();
+      this.emit('data', Buffer.from(value));
+    } catch (error) {
+      this.error(error);
+    }
   }
 
   close(): void {
@@ -129,9 +157,11 @@ class WorkerdSocket extends EventEmitter {
     this.emit('close');
   }
 
+  /** Said once: past `close` (a `destroy`'s, whose aborted streams fail what was under way), nothing more. */
   error(error: unknown): void {
+    if (this.readyState === 'closed' || this.destroyed) return;
     this.emit('error', error);
-    this.emit('close');
+    this.close();
   }
 }
 

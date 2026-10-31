@@ -26,7 +26,9 @@ import { callBatch as batchSqlite, callUse as callSqlite } from './use.sqlite.ts
  * Around the call, what is per isolate (each a settled value, never work in
  * flight: vault.ts, `PreparedVault`):
  * - **admission:** at most `limit` calls in flight; the next is refused at
- *   once, `overloaded`, holding no connection (R44);
+ *   once, `overloaded`, holding no connection (R44). A call's place is
+ *   given back when it settles; on Workers, where a call may never settle,
+ *   at the latest `HELD_PAST_DEADLINE_MS` past its deadline (`UseCache`);
  * - **the deadline:** at most 3 s from the request's time (R53, R54). The
  *   call is raced against it and answered `late` when it loses; Postgres
  *   holds it too (DeadlineChecked), and a value whose call returns after
@@ -97,9 +99,29 @@ export function useLimits(connections: number, set: Partial<UseLimits> = {}): Us
   return { inFlight: set.inFlight ?? Math.max(1, connections), coverMs: set.coverMs ?? 60_000, names: set.names ?? 10_000, batch: Math.max(1, set.batch ?? 100) };
 }
 
-/** An isolate's admission count, seal cache and covers. Bounded: past `max` entries, a map starts over. */
+/**
+ * How long past its deadline a call keeps its place at most where places lapse (`UseCache`, Workers): the hot login's
+ * `statement_timeout` (`coffre setup`'s HOT_SETTINGS, `migrate`). On Workers a call's connection is its own, closed
+ * at its deadline at the latest (cloudflare.ts, `HyperdrivePool.end`), or with its request if that ends first: what
+ * the call asked and Hyperdrive had not sent goes with it, and what reached Postgres by then Postgres ends within its
+ * `statement_timeout`. So by this long past the deadline nothing of the call's holds a connection, whether its
+ * promise ever settles or not, which on Workers it may never do: its I/O is gone with its request (AGENTS.md, "What
+ * an isolate keeps"). Counted until it settled, each such call kept its place until the isolate was recycled (T170).
+ */
+export const HELD_PAST_DEADLINE_MS = 2_000;
+
+/**
+ * An isolate's admission, seal cache and covers. Bounded: past `max` entries, a map starts over.
+ *
+ * A call holds its place in admission until it settles. With `callsEndWithRequest` (Workers), at most until `HELD_PAST_DEADLINE_MS`
+ * past its deadline, settled or not; without (Node), until it settles, as it always does there, its I/O never torn
+ * down under it: a call stuck queued for the hot pool or reading past its deadline (`oldWrite`) holds the pool too,
+ * and counts until it lets go, so that no call abandoned piles more on the pool (review r1 of #438).
+ */
 export class UseCache {
-  inFlight = 0;
+  /** Each call admitted and not settled, by when its place lapses (`admit`): a time, never work in flight. */
+  readonly #admitted = new Set<{ until: number }>();
+  readonly #lapses: boolean;
   readonly seals = new Map<string, CachedSeals>();
   readonly covers = new Map<string, Cover>();
   /**
@@ -116,9 +138,29 @@ export class UseCache {
   readonly limits: UseLimits;
   readonly max: number;
 
-  constructor(limits: UseLimits, max = 10_000) {
+  constructor(limits: UseLimits, { max = 10_000, callsEndWithRequest = false }: { max?: number; callsEndWithRequest?: boolean } = {}) {
     this.limits = limits;
     this.max = max;
+    this.#lapses = callsEndWithRequest;
+  }
+
+  /** How many calls hold a place now: admitted, not settled, and not lapsed. */
+  get inFlight(): number {
+    const now = Date.now();
+    for (const slot of this.#admitted) if (slot.until <= now) this.#admitted.delete(slot);
+    return this.#admitted.size;
+  }
+
+  /** Whether the next call is refused, `overloaded`. */
+  full(): boolean {
+    return this.inFlight >= this.limits.inFlight;
+  }
+
+  /** A place for a call due by `deadline`, given back once it settles (what this answers), unless it lapsed first. */
+  admit(deadline: number): () => void {
+    const slot = { until: this.#lapses ? deadline + HELD_PAST_DEADLINE_MS : Infinity };
+    this.#admitted.add(slot);
+    return () => this.#admitted.delete(slot);
   }
 
   keep<T>(map: Map<string, T>, key: string, value: T): void {
@@ -253,7 +295,10 @@ export type UsePath = {
   macKey: Buffer;
   keks: KekRegistry;
   cache: UseCache;
-  /** What a call waits for first, within its admission (`inFlight`): an isolate's first, the log's cutover (vault.ts, `#cutOverYet`). */
+  /**
+   * What a call waits for first, within its admission: an isolate's first, the log's cutover (vault.ts, `#cutOverYet`).
+   * Within it, as on Workers it reads on the call's one connection; however long it waits, its place lapses as any does.
+   */
   ready?: () => Promise<void>;
   /**
    * Whether `principal`'s newest 0.14 access entry that carries the vault's
@@ -351,13 +396,13 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
     const decided = round > 1;
     if (round > 2) throw new Error('use_batch answered `decide` to a call of keys it was decided for');
     if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busy('late');
-    if (path.cache.inFlight >= path.cache.limits.inFlight) return busy('overloaded');
+    if (path.cache.full()) return busy('overloaded');
     const made = pending.map((index) => ready(path, each[index]!, requestOf(each[index]!, undefined), undefined, decided, seals));
     // Round 2's keys, each decided on round 1's rows, take their principal's lock: exclusive, first. Rows that name two
     // principals for one credential were written around the log: no lock first, and Postgres ends a wait cycle (40P01).
     const principals = new Set(decided ? pending.map((index) => (settled[index] as Extract<Used, { again: Ids }>).row.c_principal) : []);
     const lock = principals.size === 1 ? [...principals][0] ?? null : null;
-    const answered = await raced(path, input.deadline, () => inStatements(path, made.map((one) => one.call), lock, input.deadline), async (rows) => {
+    const answered = await raced(path, input.deadline, (sends) => inStatements(path, made.map((one) => one.call), lock, sends), async (rows) => {
       if (rows.length !== made.length) throw new Error(`use_batch answered ${rows.length} rows for ${made.length} keys`);
       const forged = new Map<string, Promise<boolean>>();
       // One check a principal and entry, as every key's row reads the same (`oldWrite`), in turn on the call's connection.
@@ -402,13 +447,13 @@ function refusedAt(index: number, used: Used | Allowed | Uncovered): Extract<Use
  * A round's calls, `limits.batch` keys a statement, in turn, under the round's one admission and deadline: each its own
  * transaction and fence span, a locked round's each taking the principal's lock exclusive before its first key.
  */
-async function inStatements(path: UsePath, calls: readonly UseCall[], lock: string | null, deadline: number): Promise<UseRow[]> {
+async function inStatements(path: UsePath, calls: readonly UseCall[], lock: string | null, sends: () => void): Promise<UseRow[]> {
   const rows: UseRow[] = [];
   const size = path.cache.limits.batch;
   for (let start = 0; start < calls.length; start += size) {
     // Past the deadline, the round is answered `late` (`raced`): no statement more is sent, and the call lets go of its
     // admission and connection with the one in flight (review r3 of #433). As Postgres's own past-deadline refusal.
-    if (start > 0 && Date.now() >= deadline) throw Object.assign(new Error('a batch past its deadline sends no more statements'), { code: '57014' });
+    if (start > 0) sends();
     rows.push(...await batchOf(path.db)(path.db, calls.slice(start, start + size), lock));
   }
   return rows;
@@ -449,7 +494,7 @@ async function useOnce(path: UsePath, input: Asked, names?: Names, decided = fal
   const request = requestOf(input, names);
   // A deadline the database would refuse (deadline_max) is refused here at no cost; one already past, too.
   if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return { outcome: busy('late'), row: null, checked: null, request };
-  if (path.cache.inFlight >= path.cache.limits.inFlight) return { outcome: busy('overloaded'), row: null, checked: null, request };
+  if (path.cache.full()) return { outcome: busy('overloaded'), row: null, checked: null, request };
   const made = ready(path, input, request, names, decided);
   // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
   // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
@@ -636,7 +681,7 @@ export async function useNamed(path: UsePath, input: NamedUseInput): Promise<Nam
   const tokenHash = Buffer.from(input.tokenHash, 'base64');
   const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
   if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
-  if (cache.inFlight >= cache.limits.inFlight) return busyFor(busy('overloaded'));
+  if (cache.full()) return busyFor(busy('overloaded'));
   const at = `${input.tokenHash}\n${input.place?.project ?? ''}\n${input.place?.environment ?? ''}`;
   const found = cache.named(at);
   const keyed = found === undefined || input.key === null ? undefined : cache.keyed(found.environment, input.key);
@@ -765,23 +810,39 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
 /**
  * The call, then `then` on its row (or a batch's rows), raced against the
  * deadline (WorkerHonoursDeadline): lost, the use is answered `late`, and
- * the call's row, if it ever comes, is dropped. Both count against
- * admission until they settle, holding the call's connection until then:
- * what the vault reads after the statement (`oldWrite`) is within the same
- * place and deadline. A round of a batch is one call, its statements made in turn within it.
+ * the call's row, if it ever comes, is dropped. Both hold one place in
+ * admission, as they hold the call's connection: what the vault reads
+ * after the statement (`oldWrite`) is within the same place and deadline.
+ * Past the deadline, or the race lost, the call starts nothing more, neither the statement
+ * after `ready` (nor a batch's next, `sends`) nor, the race lost, the reads after it: its
+ * answer has gone. One it had started may still reach Postgres (on Node, its bytes leave on
+ * the next turn of the loop), which refuses it past the deadline, and its row is dropped.
+ * A round of a batch is one call, its statements made in turn within it.
  */
-async function raced<R, T>(path: UsePath, deadline: number, call: () => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
-  const { cache } = path;
-  cache.inFlight += 1;
+async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => void) => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
+  const release = path.cache.admit(deadline);
+  // Whether the race is lost: once it is, `then` starts nothing. The timer alone says so, never the clock, so that a
+  // statement that answered first is decided on, its entry written (Fable's review of #438).
+  let lost = false;
+  // Before each statement: none past the deadline, nor once the race is lost. Both, as they disagree: a timer can fire
+  // a ms or two before `Date.now()` reaches the deadline (Node measures it from the loop's cached time), and a call
+  // answered `late` would still send its statement and write its use.
+  const sends = () => {
+    if (lost || Date.now() >= deadline) throw Object.assign(new Error('a use past its deadline sends nothing more'), { code: '57014' });
+  };
   const running = (async () => {
     await path.ready?.();
-    return then(await call());
-  })().finally(() => {
-    cache.inFlight -= 1;
-  });
+    sends();
+    const row = await call(sends);
+    if (lost) throw Object.assign(new Error('a use that lost its race starts nothing more'), { code: '57014' });
+    return then(row);
+  })().finally(release);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<'late'>((resolve) => {
-    timer = setTimeout(() => resolve('late'), Math.max(0, deadline - Date.now()));
+    timer = setTimeout(() => {
+      lost = true;
+      resolve('late');
+    }, Math.max(0, deadline - Date.now()));
   });
   try {
     const first = await Promise.race([running, late]);

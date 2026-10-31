@@ -272,6 +272,15 @@ before(async () => {
   await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
   if (POSTGRES) {
+    // No autovacuum on this database's tables: a row's refusals are weighed on statistics only the row's own ANALYZE
+    // refreshes, before it is weighed, never while it is, as use.matrix.ts weighs its cells. An autoanalyze landing
+    // mid-row (of `environments`, `vault_members`) had one cell's runs plan `use_credential`'s statements anew, and that
+    // cell read 60 to 260 buffers above the rest of its row, whatever its key (CI, T170: auto_explain showed the
+    // planning, and the places' statement turned from a nested loop to a hash join for every cell after).
+    await rowsOf(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
+      FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
+        EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
+      END LOOP; END $$`));
     hot = await relay(hotDatabaseUrl());
     // The app's own database through a relay too, at no delay: its statements counted as the hot path's are.
     app = await relay(TEST_RUNTIME_DATABASE_URL);
@@ -489,6 +498,9 @@ test(`through the app, a person is answered alike for every key they may not hav
         // every key (BUFFER_SLACK, the run's noise). Standing: a key's may cost what its shape does, a key they may know
         // of (R6), never what their asking before left (`histories`, below).
         if (POSTGRES && row.admission === 'as asked') {
+          // The statistics as the row's cells left them, and none changing while they are weighed (autovacuum is off,
+          // `before`): every cell's statements planned on the same.
+          await rowsOf(db.owner, sql`ANALYZE`);
           for (const via of ['api', 'proxy'] as const) {
             const cached = refused.filter((a) => a.sent[via] !== undefined && a.sent[via]!.args[11] !== null);
             if (cached.length > 0) differing.push(`${label}: ${via}, the cached form for ${cached.map((a) => a.key).join(', ')}`);

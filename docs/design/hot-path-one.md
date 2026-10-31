@@ -240,6 +240,17 @@ allowed on objects that the change path has sealed.
    - The limit is `uses.inFlight`. By default it is the hot pool's
      `connections`: the pg pool's `max` on Node, a setting on Workers.
    - T112 measures the right number on Workers.
+   - A call gives its place back when it settles. On Workers, a call whose
+     request has ended may never settle; counted until it did, each such
+     call kept its place until the isolate was recycled (T170). So there a
+     place lapses 2 s past the call's deadline (`HELD_PAST_DEADLINE_MS`, the
+     login's `statement_timeout`), settled or not. The call's own
+     connection is closed by its deadline at the latest, which drops what
+     Hyperdrive had not sent, and Postgres ends within 2 s what it had.
+     On Node a call always settles, so its place is held until it does,
+     as its pool connection is. That bounds the pool, not time: a read on
+     the vault's main login (`oldWrite`) or the cutover's seal wait holds
+     its place until its own timeouts end it.
 2. **The call.**
    - The isolate MACs the request as the checkpointer checks it: `entryMac`
      over the uses tree and the row's columns, under the log's one MAC key
@@ -251,8 +262,9 @@ allowed on objects that the change path has sealed.
    - It makes one call of `use_credential` as `coffre_vault_hot`, which has
      timeouts of its own (lock 1 s, statement 2 s) and generic plans. On Workers
      this goes through a Hyperdrive config of its own, `hotDatabase`.
-   - The call races the deadline. If the deadline wins, the use answers `late`
-     and the call's row is dropped whenever it arrives (WorkerHonoursDeadline).
+   - The call races the deadline. If the deadline wins, the use answers `late`,
+     the call's statement goes out no more if it has not yet, and its row is
+     dropped whenever it arrives (WorkerHonoursDeadline).
    - Postgres holds the deadline too, with `clock_timestamp()`: `late`, or a
      rollback with 57014 (DeadlineChecked).
 3. **The decision.**
@@ -889,8 +901,10 @@ use's number is unique by the sequence alone (the verifier checks it).
 
 ### Admission control
 
-- **Per isolate:** a counter of uses with a call in flight. Above the cap, a
-  use is refused at once (503, `Retry-After: 1`), without a connection.
+- **Per isolate:** a counter of uses with a call in flight, each place held
+  until its call settles (on Workers, at most 2 s past its deadline). Above
+  the cap, a use is refused at once (503, `Retry-After: 1`), without a
+  connection.
 - **The deadline**, above: the Worker answers 503 at its deadline, and the
   call it leaves behind does nothing when Hyperdrive finally runs it.
 - **On the vault login:** `lock_timeout = 1s` and `statement_timeout = 2s`,

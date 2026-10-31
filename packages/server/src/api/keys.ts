@@ -9,6 +9,7 @@ import {
   type Refusal,
   type SecretRef,
   type Through,
+  type UseBusy,
   type UsedValue,
   type UseOutcome,
   type UseRecord,
@@ -321,11 +322,11 @@ const changed = () => new ApiError('conflict', 'a key this read names was change
 /**
  * A use refused, as the API answers it: the rules' refusals as 0.14's
  * (`vaultRefused`); a credential ended, 401; a key gone since the app read
- * it, 409, to be asked again; no cap logged yet, or a use not decided
- * (busy), 503 with the vault's `Retry-After`.
+ * it, 409, to be asked again; no cap logged yet, 503; a use not decided,
+ * 503 `busy`, which says why (`BUSY`), with the vault's `Retry-After`.
  */
 export function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError {
-  if ('busy' in outcome) return new ApiError('unavailable', UNAVAILABLE, undefined, String(outcome.retryAfter));
+  if ('busy' in outcome) return new ApiError('unavailable', BUSY[outcome.busy], 'busy', String(outcome.retryAfter));
   switch (outcome.code) {
     case 'credential':
       return new ApiError('unauthenticated', useRefusalMessage('credential'));
@@ -337,6 +338,19 @@ export function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError
       return vaultRefused({ code: outcome.code, message: useRefusalMessage(outcome.code) });
   }
 }
+
+/**
+ * Why a use was not decided, said to its caller (T170): never that coffre cannot reach what it depends on, which
+ * hides an isolate's admission full or a deadline lost. The reason stays `busy`, which clients already ask again on
+ * (the CLI's `momentary`), as for a change refused busy.
+ */
+const BUSY: Record<UseBusy, string> = {
+  overloaded: 'coffre is busy: it has as many uses under way as it can take; try again in a moment',
+  late: 'coffre is busy: the use did not finish within its deadline; try again in a moment',
+  replayed: 'coffre is busy: the vault has seen this use\'s request already; try again',
+  ahead: "coffre is busy: this server's clock is ahead of its database's; try again in a moment",
+  unconfigured: 'coffre is busy: its vault has no access policy logged yet; try again in a moment',
+};
 
 /**
  * The app's entry of a use, as the vault appends it (`UnwrapInput.use`): its

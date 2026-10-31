@@ -50,8 +50,8 @@ export interface Connection {
   end(): Promise<void>;
   /** Given back by what held it: closed if it was asked to end meanwhile, or the pool's again. */
   release(): void;
-  /** Close it now, failing what it was sent. */
-  terminate(): void;
+  /** Close it now, failing what it was sent: with `force`, the socket destroyed, whatever it is still writing or opening. */
+  terminate(force?: boolean): void;
 }
 
 export interface Events {
@@ -101,6 +101,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   let serverSignature: string | null = null;
   let nextWriteTimer: unknown = null;
   let terminated = false;
+  /** A dial asked for after a close (`reconnect`), not made yet: a forced terminate takes it back. */
+  let redial: ReturnType<typeof setTimeout> | null = null;
   let initial: Waiting | null = null;
   let ending: Promise<void> | null = null;
   let chunk: Buffer | null = null;
@@ -342,7 +344,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function reconnect(): void {
-    setTimeout(() => void connect(), closedTime ? Math.max(0, closedTime + delay - platform.now()) : 0);
+    redial = setTimeout(() => {
+      redial = null;
+      void connect();
+    }, closedTime ? Math.max(0, closedTime + delay - platform.now()) : 0);
   }
 
   function connected(): void {
@@ -416,7 +421,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     else onopen(connection);
   }
 
-  function terminate(): void {
+  function terminate(force = false): void {
     terminated = true;
     if (query || initial || sent.length) error(Errors.connection('CONNECTION_DESTROYED', options));
 
@@ -424,7 +429,15 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (socket) {
       socket.removeListener('data', data);
       socket.removeListener('connect', connected);
-      if (socket.readyState === 'open') socket.end(b.typed('X').end());
+      // Coffre: forced (`end`'s timeout), destroyed, opening or not; upstream wrote Terminate first, which a write stuck
+      // under backpressure holds back, and left a socket still opening alone (review r2 of #438).
+      if (force) socket.destroy();
+      else if (socket.readyState === 'open') socket.end(b.typed('X').end());
+    }
+    // Coffre: and no dial a close asked for, waiting out its backoff, opens the connection again after (Fable's review of #438).
+    if (force && redial !== null) {
+      clearTimeout(redial);
+      redial = null;
     }
     if (ended) {
       ended();

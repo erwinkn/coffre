@@ -204,6 +204,12 @@ export type VaultOptions = {
    * default the hot path's pool, `connections`, and how long a cover holds.
    */
   uses?: Partial<UseLimits> & { connections?: number };
+  /**
+   * Whether a call's I/O ends with its request, as on Workers, where a call whose request has ended may never settle:
+   * then a use's place in admission lapses past its deadline, settled or not (use.ts, `HELD_PAST_DEADLINE_MS`), its
+   * connection closed by then (cloudflare.ts). Not a deployment's to set.
+   */
+  callsEndWithRequest?: boolean;
 };
 
 
@@ -225,7 +231,7 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'uses' | 'callsEndWithRequest'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
@@ -280,7 +286,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     cutover: false,
     marked: false,
     verifier: null,
-    uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses)),
+    uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses), { callsEndWithRequest: options.callsEndWithRequest === true }),
     verified: START,
     reported: new Set(),
     since: null,

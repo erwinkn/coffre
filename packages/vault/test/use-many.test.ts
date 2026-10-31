@@ -287,6 +287,41 @@ test('past its deadline, a batch sends none of its statements left, and lets go 
   assert.equal(await count('log_uses'), 0, 'its one statement, past the deadline by Postgres\'s clock, wrote nothing');
 });
 
+test('a batch answered `late` by its timer while the clock is still short of its deadline sends no statement after the one in flight (T170)', postgresOnly('the hot pool counted'), async (t) => {
+  const w = await world();
+  const ids: string[] = [];
+  for (let i = 0; i < 3; i += 1) ids.push(await w.key());
+  // Its first statement held until the race's timer, under the test's hand, has fired: seconds before the clock
+  // reaches the deadline, as Node's may a ms or two before. The clock alone would let the next statements go.
+  let sending = () => {};
+  const sent = new Promise<void>((resolve) => (sending = resolve));
+  let go = () => {};
+  const held = new Promise<void>((resolve) => (go = resolve));
+  const isolate = await counted({ batch: 1, before: async (n) => {
+    if (n !== 1) return;
+    sending();
+    await held;
+  } });
+  try {
+    const before = isolate.statements();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const at = Date.now();
+    const answer = isolate.useMany(many(w, ids, { at, deadline: at + 3_000 }));
+    await sent;
+    t.mock.timers.tick(3_000);
+    t.mock.timers.reset();
+    assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
+    go();
+    // Settled once the statement in flight has answered: its place given back, and whatever it would send after, sent.
+    for (const until = Date.now() + 2_000; isolate.cache.inFlight > 0 && Date.now() < until;) await sleep(10);
+    assert.equal(isolate.cache.inFlight, 0);
+    assert.ok(Date.now() < at + 3_000);
+    assert.equal(isolate.statements() - before, 1, 'the statement in flight, and none after it');
+  } finally {
+    await isolate.close();
+  }
+});
+
 test('a batch refused on its second call\'s rows (her grant revoked between the calls) is refused there, each key\'s request logged and counted in the set, as lone uses would be', postgresOnly('the hot pool counted'), async () => {
   const w = await world();
   const ids = [await w.key(), await w.key()];

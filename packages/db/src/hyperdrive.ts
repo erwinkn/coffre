@@ -53,7 +53,9 @@ const UNSENT = new Set(['GROUP_UNTYPED', 'MAX_PARAMETERS_EXCEEDED', 'UNDEFINED_V
  * still go in the order they are asked.
  *
  * Closed by `end`, once what was asked has answered; asked again after, as
- * a call's background work may, it opens a connection again.
+ * a call's background work may, it opens a connection again. Unless `end`
+ * was given a time to close by and reached it: then the connection closes
+ * at once, failing what is still asked, and nothing opens it again.
  */
 export class HyperdrivePool implements Client {
   readonly #connectionString: string;
@@ -71,6 +73,8 @@ export class HyperdrivePool implements Client {
   readonly #groupReads: boolean;
   /** The reads that will take the next group's turn, while it has not started: what a read asked now joins. */
   #gathering: Gathered[] | null = null;
+  /** Closed at the time `end` was given, with turns still asked: none opens a connection again. */
+  #cut = false;
 
   /**
    * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
@@ -159,17 +163,26 @@ export class HyperdrivePool implements Client {
     return new Promise((resolve, reject) => members.push({ ...read, resolve, reject }));
   }
 
-  /** Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. */
-  async end(): Promise<void> {
+  /**
+   * Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. By
+   * `by` (ms since the epoch) at the latest, if given: then at once, what is still asked failing, the statement under
+   * way included, and none of it sent again. A use's call past its deadline, whose answer has gone, so lets go of
+   * Hyperdrive: what it asked and Hyperdrive had not sent goes with the connection (use.ts, `HELD_PAST_DEADLINE_MS`).
+   */
+  async end(by?: number): Promise<void> {
     // A statement awaited just before reaches the pool a few promise steps later, through Drizzle's session: a task
     // later, every one has taken its turn, and none opens a connection that this would leave open.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    while (this.#busy > 0) {
-      await new Promise<void>((resolve) => this.#idle.push(resolve));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const reached = by === undefined ? null : new Promise<'cut'>((resolve) => (timer = setTimeout(() => resolve('cut'), Math.max(0, by - Date.now()))));
+    while (this.#busy > 0 && !this.#cut) {
+      const idle = new Promise<void>((resolve) => this.#idle.push(resolve));
+      if ((await (reached === null ? idle : Promise.race([idle, reached]))) === 'cut') this.#cut = true;
     }
+    clearTimeout(timer);
     const client = this.#client;
     this.#client = null;
-    await client?.end().catch(() => {});
+    await client?.end(this.#cut ? { timeout: 0 } : undefined).catch(() => {});
   }
 
   /** `go` once every turn asked before it is done. Anything but a group's closes the group gathering: it goes after. */
@@ -192,6 +205,7 @@ export class HyperdrivePool implements Client {
 
   /** The call's client, made the first time. postgres.js opens its connection again when one is lost. */
   #connected(): PostgresClient {
+    if (this.#cut) throw new Error("the call's connection was closed at the time it was given (`end`): nothing more is sent");
     this.#client ??= textTypes(postgresClient(this.#connectionString, {
       max: 1,
       idle_timeout: this.#closeIdleMs === undefined ? undefined : this.#closeIdleMs / 1000,
