@@ -195,9 +195,10 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
   const atOnce = options.atOnce ?? PROJECTED_AT_ONCE;
   let cursor = await store.readsCursor();
   if (!cursorHolds(keys.mac, cursor)) throw new Error(`the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`);
-  const newest = await store.newest();
-  const head = newest === null ? null : await openPair(newest.notes, keys.verifiers);
-  if (head === null) return { through: cursor.through, sealed: cursor.through, projected: 0 };
+  const newest = await newestHeld(store, keys.verifiers, cursor);
+  if (typeof newest === 'string') throw new Error(newest);
+  if (newest === null) return { through: cursor.through, sealed: cursor.through, projected: 0 };
+  const head = newest;
   // Retention drops no day, nor tile, the projector has yet to read (retention.ts): below its cut it goes on as anywhere,
   // and a range gone all the same stops it, never skipped (review r4).
   let projected = 0;
@@ -223,6 +224,23 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
     projected += reads.length;
   }
   return { through: cursor.through, sealed: head.upto, projected };
+}
+
+/**
+ * The newest signed pair, opened under the vault's keys; null for a log that
+ * has none yet, while the cursor is still at the start; otherwise why it
+ * cannot be read: no pair under a cursor moved on, a pair whose signatures
+ * fail, or a cursor past it (pairs deleted under it). Never taken for a log
+ * with nothing to project or check (review r12: a newest pair edited had
+ * the check answer ok, and the projector caught up, unsaid).
+ */
+async function newestHeld(store: ReadsStore, verifiers: PairVerifiers, cursor: ReadsCursor): Promise<Pair | null | string> {
+  const newest = await store.newest();
+  if (newest === null) return cursor.through === 0n ? null : `the reads are listed through ${cursor.through}, but the log holds no signed pair`;
+  const head = await openPair(newest.notes, verifiers);
+  if (head === null) return `the newest pair, through ${newest.upto}, does not hold to the vault's signatures`;
+  if (cursor.through > head.upto) return `the reads are listed through ${cursor.through}, past the newest pair, through ${head.upto}`;
+  return head;
 }
 
 /** The most problems a stretch names; more are counted. */
@@ -252,10 +270,10 @@ export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerif
   }
   const stop = (problem: string) => ({ problems: [problem], through: from, listed: cursor.through, next: null });
   if (!cursorHolds(keys.mac, cursor)) return stop(`the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`);
-  // From the retention cut, when it is past `from`.
-  const newest = await store.newest();
-  const head = newest === null ? null : await openPair(newest.notes, keys.verifiers);
+  const head = await newestHeld(store, keys.verifiers, cursor);
+  if (typeof head === 'string') return stop(head);
   if (head === null) return { problems: [], through: from, listed: cursor.through, next: null };
+  // From the retention cut, when it is past `from`.
   let cut;
   try {
     cut = await sealedCut(store, head);

@@ -128,6 +128,26 @@ test("a projector another overtook writes nothing: never the reads retention has
   }
 });
 
+test("a newest pair whose signatures fail, none under a cursor moved on, or one below the cursor: the check names it, the projector stops (review r12)", async () => {
+  const tick = await signer();
+  await reads(3);
+  await tick();
+  await projectReads(logStore(db.vault), await keys());
+  assert.deepEqual(await checked(), []);
+  const [newest] = await rows<{ upto: string | number; size: string | number }>(db.owner, sql`SELECT upto, uses_size AS size FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
+  const upto = BigInt(newest!.upto);
+  // Whoever owns the database edits the newest pair's uses note (its size), which its signature no longer holds.
+  const nl = sql.raw(ENGINE === 'postgres' ? 'chr(10)' : 'char(10)');
+  await run(db.owner, sql`UPDATE log_checkpoints SET uses_note = replace(uses_note, ${nl} || ${String(newest!.size)} || ${nl}, ${nl} || '999999' || ${nl}) WHERE upto = ${upto}`);
+  assert.deepEqual(await checked(), [`the newest pair, through ${upto}, does not hold to the vault's signatures`]);
+  await assert.rejects(projectReads(logStore(db.vault), await keys()), /does not hold to the vault's signatures/);
+  // Or deletes every pair, under a cursor moved on.
+  const cursor = (await rows<{ through: string | number }>(db.owner, sql`SELECT through FROM log_reads_cursor`))[0]!.through;
+  await run(db.owner, sql`DELETE FROM log_checkpoints`);
+  assert.deepEqual(await checked(), [`the reads are listed through ${cursor}, but the log holds no signed pair`]);
+  await assert.rejects(projectReads(logStore(db.vault), await keys()), /holds no signed pair/);
+});
+
 test("the whole log's check holds the range the projector stopped in, as far as it went: a read deleted there is named", async () => {
   const tick = await signer();
   await reads(3);
