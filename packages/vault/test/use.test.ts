@@ -643,10 +643,8 @@ test("a call that never settles, as a Workers call whose request ended, gives it
   assert.deepEqual(await use(node.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
 });
 
-test('a call whose wait before its statement ends past its deadline sends nothing, and gives its place back as it settles (T170)', async () => {
-  const w = await world();
-  const id = await w.key();
-  // Everything the call would ask of its database, counted.
+/** The hot database, everything a call asks of it counted, and a wait before its statement that ends when lifted. */
+function heldBack(callsEndWithRequest: boolean): { path: UsePath; asked: () => number; waiting: Promise<void>; lift: () => void } {
   let asked = 0;
   const counted = new Proxy(hot, {
     get(target, key) {
@@ -659,17 +657,50 @@ test('a call whose wait before its statement ends past its deadline sends nothin
     },
   });
   let lift = () => {};
+  let waits = () => {};
+  const waiting = new Promise<void>((resolve) => (waits = resolve));
   const path: UsePath = {
-    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: true }),
-    ready: () => new Promise<void>((resolve) => (lift = resolve)),
+    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest }),
+    ready: () => new Promise<void>((resolve) => {
+      lift = resolve;
+      waits();
+    }),
   };
+  return { path, asked: () => asked, waiting, lift: () => lift() };
+}
+
+test('a call whose wait before its statement ends past its deadline sends nothing, and gives its place back as it settles (T170)', async () => {
+  const w = await world();
+  const id = await w.key();
+  const { path, asked, lift } = heldBack(true);
   const at = Date.now() - 2_900;
   assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 3_000 })), { ok: false, busy: 'late', retryAfter: 1 });
   assert.equal(path.cache.inFlight, 1);
   lift();
   await sleep(50);
-  assert.equal(asked, 0, 'no statement past the deadline');
+  assert.equal(asked(), 0, 'no statement past the deadline');
   assert.equal(path.cache.inFlight, 0, 'settled: its place given back, before it would lapse');
+});
+
+test('a call answered `late` by its timer while the clock is still short of its deadline sends nothing either (T170)', async (t) => {
+  const w = await world();
+  const id = await w.key();
+  const { path, asked, waiting, lift } = heldBack(false);
+  // The race's timer under the test's hand: it fires while the clock is seconds short of the deadline, as Node's may a
+  // ms or two before `Date.now()` reaches it. The clock alone would let the statement go.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const at = Date.now();
+  const answer = use(path, ask(w, id, { at, deadline: at + 3_000 }));
+  await waiting;
+  t.mock.timers.tick(3_000);
+  t.mock.timers.reset();
+  assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
+  lift();
+  await sleep(50);
+  assert.ok(Date.now() < at + 3_000);
+  assert.equal(asked(), 0, 'no statement once the use is answered `late`');
+  assert.equal(path.cache.inFlight, 0);
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
 
 test('admission: past its calls in flight, an isolate refuses at once, holding no connection', async () => {

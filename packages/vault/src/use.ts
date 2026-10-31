@@ -402,7 +402,7 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
     // principals for one credential were written around the log: no lock first, and Postgres ends a wait cycle (40P01).
     const principals = new Set(decided ? pending.map((index) => (settled[index] as Extract<Used, { again: Ids }>).row.c_principal) : []);
     const lock = principals.size === 1 ? [...principals][0] ?? null : null;
-    const answered = await raced(path, input.deadline, () => inStatements(path, made.map((one) => one.call), lock, input.deadline), async (rows) => {
+    const answered = await raced(path, input.deadline, (sends) => inStatements(path, made.map((one) => one.call), lock, sends), async (rows) => {
       if (rows.length !== made.length) throw new Error(`use_batch answered ${rows.length} rows for ${made.length} keys`);
       const forged = new Map<string, Promise<boolean>>();
       // One check a principal and entry, as every key's row reads the same (`oldWrite`), in turn on the call's connection.
@@ -447,13 +447,13 @@ function refusedAt(index: number, used: Used | Allowed | Uncovered): Extract<Use
  * A round's calls, `limits.batch` keys a statement, in turn, under the round's one admission and deadline: each its own
  * transaction and fence span, a locked round's each taking the principal's lock exclusive before its first key.
  */
-async function inStatements(path: UsePath, calls: readonly UseCall[], lock: string | null, deadline: number): Promise<UseRow[]> {
+async function inStatements(path: UsePath, calls: readonly UseCall[], lock: string | null, sends: () => void): Promise<UseRow[]> {
   const rows: UseRow[] = [];
   const size = path.cache.limits.batch;
   for (let start = 0; start < calls.length; start += size) {
     // Past the deadline, the round is answered `late` (`raced`): no statement more is sent, and the call lets go of its
     // admission and connection with the one in flight (review r3 of #433). As Postgres's own past-deadline refusal.
-    if (start > 0) sendsBy(deadline);
+    if (start > 0) sends();
     rows.push(...await batchOf(path.db)(path.db, calls.slice(start, start + size), lock));
   }
   return rows;
@@ -813,19 +813,25 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
  * the call's row, if it ever comes, is dropped. Both hold one place in
  * admission, as they hold the call's connection: what the vault reads
  * after the statement (`oldWrite`) is within the same place and deadline.
- * Past the deadline, the call starts nothing more, neither the statement
- * after `ready` nor, the race lost, the reads after it: its answer has gone. A round of a
- * batch is one call, its statements made in turn within it.
+ * Past the deadline, or the race lost, the call starts nothing more, neither the statement
+ * after `ready` (nor a batch's next, `sends`) nor, the race lost, the reads after it: its
+ * answer has gone. A round of a batch is one call, its statements made in turn within it.
  */
-async function raced<R, T>(path: UsePath, deadline: number, call: () => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
+async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => void) => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const release = path.cache.admit(deadline);
   // Whether the race is lost: once it is, `then` starts nothing. The timer alone says so, never the clock, so that a
   // statement that answered first is decided on, its entry written (Fable's review of #438).
   let lost = false;
+  // Before each statement: none past the deadline, nor once the race is lost. Both, as they disagree: a timer can fire
+  // a ms or two before `Date.now()` reaches the deadline (Node measures it from the loop's cached time), and a call
+  // answered `late` would still send its statement and write its use.
+  const sends = () => {
+    if (lost || Date.now() >= deadline) throw Object.assign(new Error('a use past its deadline sends nothing more'), { code: '57014' });
+  };
   const running = (async () => {
     await path.ready?.();
-    sendsBy(deadline);
-    const row = await call();
+    sends();
+    const row = await call(sends);
     if (lost) throw Object.assign(new Error('a use that lost its race starts nothing more'), { code: '57014' });
     return then(row);
   })().finally(release);
@@ -857,11 +863,6 @@ async function raced<R, T>(path: UsePath, deadline: number, call: () => Promise<
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** Past `deadline`, a call sends nothing more: refused as Postgres refuses it past its deadline, `late` (57014). */
-function sendsBy(deadline: number): void {
-  if (Date.now() >= deadline) throw Object.assign(new Error('a use past its deadline sends nothing more'), { code: '57014' });
 }
 
 /** The engine's `use_credential`. */

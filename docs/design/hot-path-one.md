@@ -262,8 +262,9 @@ allowed on objects that the change path has sealed.
    - It makes one call of `use_credential` as `coffre_vault_hot`, which has
      timeouts of its own (lock 1 s, statement 2 s) and generic plans. On Workers
      this goes through a Hyperdrive config of its own, `hotDatabase`.
-   - The call races the deadline. If the deadline wins, the use answers `late`
-     and the call's row is dropped whenever it arrives (WorkerHonoursDeadline).
+   - The call races the deadline. If the deadline wins, the use answers `late`,
+     the call's statement goes out no more if it has not yet, and its row is
+     dropped whenever it arrives (WorkerHonoursDeadline).
    - Postgres holds the deadline too, with `clock_timestamp()`: `late`, or a
      rollback with 57014 (DeadlineChecked).
 3. **The decision.**
