@@ -150,6 +150,11 @@ test('a read on a kept answer makes one vault call, which checks it', async () =
 test("0.15: a read of one key keeps and recalls nothing: the vault's one use by name decides on the reader as they are", { skip: LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap" }, async () => {
   named = true;
   const reader = await readerSession();
+  // Both reads in one of the cap's refresh periods (a minute, at the default window), with time to spare: a repeat
+  // rides its cover only while its key's bulk row is of the period it is in (CoverFresh), and two reads either side of
+  // a minute's turn write a use each (seen in CI on T158's branch and on #438's).
+  const left = 60_000 - (Date.now() % 60_000);
+  if (left < 5_000) await new Promise((resolve) => setTimeout(resolve, left + 50));
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
