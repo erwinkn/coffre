@@ -27,8 +27,8 @@ import { callBatch as batchSqlite, callUse as callSqlite } from './use.sqlite.ts
  * flight: vault.ts, `PreparedVault`):
  * - **admission:** at most `limit` calls in flight; the next is refused at
  *   once, `overloaded`, holding no connection (R44). A call's place is
- *   given back when it settles, or at the latest once Postgres has ended
- *   what it sent (`HELD_PAST_DEADLINE_MS`), whether it ever settles or not;
+ *   given back when it settles; on Workers, where a call may never settle,
+ *   at the latest `HELD_PAST_DEADLINE_MS` past its deadline (`UseCache`);
  * - **the deadline:** at most 3 s from the request's time (R53, R54). The
  *   call is raced against it and answered `late` when it loses; Postgres
  *   holds it too (DeadlineChecked), and a value whose call returns after
@@ -100,19 +100,28 @@ export function useLimits(connections: number, set: Partial<UseLimits> = {}): Us
 }
 
 /**
- * How long past its deadline a call admitted keeps its place at most, settled or not: the hot login's
- * `statement_timeout` (`coffre setup`'s HOT_SETTINGS, `migrate`), by which Postgres has ended any statement the call
- * sent, as it sends none past its deadline (`raced`). So a call answered `late` still counts while what it sent may
- * hold a connection, and no call abandoned piles more on the pool; but its place never waits on it settling, which
- * on Workers a call whose request has ended may never do: its I/O is gone with it (AGENTS.md, "What an isolate
- * keeps"). Counted until it settled, each such call kept its place until the isolate was recycled (T170).
+ * How long past its deadline a call keeps its place at most where places lapse (`UseCache`, Workers): the hot login's
+ * `statement_timeout` (`coffre setup`'s HOT_SETTINGS, `migrate`). On Workers a call's connection is its own, closed
+ * at its deadline at the latest (cloudflare.ts, `HyperdrivePool.end`), or with its request if that ends first: what
+ * the call asked and Hyperdrive had not sent goes with it, and what reached Postgres by then Postgres ends within its
+ * `statement_timeout`. So by this long past the deadline nothing of the call's holds a connection, whether its
+ * promise ever settles or not, which on Workers it may never do: its I/O is gone with its request (AGENTS.md, "What
+ * an isolate keeps"). Counted until it settled, each such call kept its place until the isolate was recycled (T170).
  */
 export const HELD_PAST_DEADLINE_MS = 2_000;
 
-/** An isolate's admission, seal cache and covers. Bounded: past `max` entries, a map starts over. */
+/**
+ * An isolate's admission, seal cache and covers. Bounded: past `max` entries, a map starts over.
+ *
+ * A call holds its place in admission until it settles. With `lapses` (Workers), at most until `HELD_PAST_DEADLINE_MS`
+ * past its deadline, settled or not; without (Node), until it settles, as it always does there, its I/O never torn
+ * down under it: a call stuck queued for the hot pool or reading past its deadline (`oldWrite`) holds the pool too,
+ * and counts until it lets go, so that no call abandoned piles more on the pool (review r1 of #438).
+ */
 export class UseCache {
   /** Each call admitted and not settled, by when its place lapses (`admit`): a time, never work in flight. */
   readonly #admitted = new Set<{ until: number }>();
+  readonly #lapses: boolean;
   readonly seals = new Map<string, CachedSeals>();
   readonly covers = new Map<string, Cover>();
   /**
@@ -129,9 +138,10 @@ export class UseCache {
   readonly limits: UseLimits;
   readonly max: number;
 
-  constructor(limits: UseLimits, max = 10_000) {
+  constructor(limits: UseLimits, max = 10_000, lapses = false) {
     this.limits = limits;
     this.max = max;
+    this.#lapses = lapses;
   }
 
   /** How many calls hold a place now: admitted, not settled, and not lapsed. */
@@ -146,9 +156,9 @@ export class UseCache {
     return this.inFlight >= this.limits.inFlight;
   }
 
-  /** A place for a call due by `deadline`, which `release` gives back once it settles, if it has not lapsed by then. */
+  /** A place for a call due by `deadline`, given back once it settles (what this answers), unless it lapsed first. */
   admit(deadline: number): () => void {
-    const slot = { until: deadline + HELD_PAST_DEADLINE_MS };
+    const slot = { until: this.#lapses ? deadline + HELD_PAST_DEADLINE_MS : Infinity };
     this.#admitted.add(slot);
     return () => this.#admitted.delete(slot);
   }
@@ -287,7 +297,7 @@ export type UsePath = {
   cache: UseCache;
   /**
    * What a call waits for first, within its admission: an isolate's first, the log's cutover (vault.ts, `#cutOverYet`).
-   * Within it, as on Workers it reads on the call's one connection; however long it waits, the place lapses as any does.
+   * Within it, as on Workers it reads on the call's one connection; however long it waits, its place lapses as any does.
    */
   ready?: () => Promise<void>;
   /**
@@ -803,10 +813,9 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
  * the call's row, if it ever comes, is dropped. Both hold one place in
  * admission, as they hold the call's connection: what the vault reads
  * after the statement (`oldWrite`) is within the same place and deadline.
- * Past the deadline, nothing more is sent, neither the statement after
- * `ready` nor the reads after it, so that the place lapses once Postgres
- * has ended what was (`HELD_PAST_DEADLINE_MS`). A round of a batch is one
- * call, its statements made in turn within it.
+ * Past the deadline, the call starts nothing more, neither the statement
+ * after `ready` nor the reads after it: its answer has gone. A round of a
+ * batch is one call, its statements made in turn within it.
  */
 async function raced<R, T>(path: UsePath, deadline: number, call: () => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const release = path.cache.admit(deadline);

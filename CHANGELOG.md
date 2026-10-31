@@ -6,9 +6,11 @@
   On real Cloudflare, after an overload, some vault isolates kept answering
   `overloaded` to a lone use for minutes. A call whose request had ended
   never settled, and it kept its place in the isolate's admission until
-  the isolate was recycled. A call now gives its place back when it settles,
-  or at the latest 2 s past its deadline (the hot login's
-  `statement_timeout`), and it sends no statement past its deadline. A use
+  the isolate was recycled. On Workers, a use's connection now closes by
+  its deadline at the latest, and its place lapses 2 s after that (the hot
+  login's `statement_timeout`), settled or not. On Node, where a call
+  always settles, it keeps its place until it does. A call starts no
+  statement past its deadline. A use
   that is not decided (`overloaded`, `late`, and the rest) now answers 503
   with reason `busy` and a message that says which. It used to answer
   "coffre cannot reach what it depends on". It keeps the vault's

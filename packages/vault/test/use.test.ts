@@ -615,23 +615,32 @@ test("the probe's MAC check runs within the use's admission and deadline: held u
   release();
 });
 
-test("a call that never settles, as a Workers call whose request ended, gives its admission back once its deadline and the hot login's statement_timeout have passed (T170)", async () => {
+test("a call that never settles, as a Workers call whose request ended, gives its admission back on Workers once its deadline and the hot login's statement_timeout have passed; on Node it keeps it until it settles (T170)", async () => {
   const w = await world();
   const id = await w.key();
-  // The first call's wait before its statement never ends (its I/O gone with its request); the next ones' does at once.
-  let readies = 0;
-  const path: UsePath = {
-    db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 })),
-    ready: () => (readies++ === 0 ? new Promise<void>(() => {}) : Promise.resolve()),
+  // Each first call's wait before its statement never ends (its I/O gone with its request); the next ones' does at once.
+  const pathFor = (lapses: boolean) => {
+    let readies = 0;
+    const path: UsePath = {
+      db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), undefined, lapses),
+      ready: () => (readies++ === 0 ? new Promise<void>(() => {}) : Promise.resolve()),
+    };
+    return { path, readies: () => readies };
   };
+  const workers = pathFor(true);
+  const node = pathFor(false);
   const at = Date.now() - 2_900;
-  assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 3_000 })), { ok: false, busy: 'late', retryAfter: 1 });
+  const late = await Promise.all([workers, node].map(({ path }) => use(path, ask(w, id, { at, deadline: at + 3_000 }))));
+  assert.deepEqual(late, [{ ok: false, busy: 'late', retryAfter: 1 }, { ok: false, busy: 'late', retryAfter: 1 }]);
   // Its place is still taken while what it sent may still hold a connection.
-  assert.deepEqual(await use(path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
-  assert.equal(readies, 1, 'the call refused asked nothing');
+  assert.deepEqual(await use(workers.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(workers.readies(), 1, 'the call refused asked nothing');
   await sleep(at + 3_000 + HELD_PAST_DEADLINE_MS + 50 - Date.now());
-  assert.equal(path.cache.inFlight, 0, 'the place lapsed');
-  assert.ok(heard(await use(path, ask(w, id))).ok, 'the isolate serves again');
+  assert.equal(workers.path.cache.inFlight, 0, 'the place lapsed');
+  assert.ok(heard(await use(workers.path, ask(w, id))).ok, 'the isolate serves again');
+  // On Node a call's I/O is never torn down under it: it holds its place, as its pool's connection, until it settles.
+  assert.equal(node.path.cache.inFlight, 1);
+  assert.deepEqual(await use(node.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
 });
 
 test('a call whose wait before its statement ends past its deadline sends nothing, and gives its place back as it settles (T170)', async () => {
@@ -651,7 +660,7 @@ test('a call whose wait before its statement ends past its deadline sends nothin
   });
   let lift = () => {};
   const path: UsePath = {
-    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 })),
+    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), undefined, true),
     ready: () => new Promise<void>((resolve) => (lift = resolve)),
   };
   const at = Date.now() - 2_900;

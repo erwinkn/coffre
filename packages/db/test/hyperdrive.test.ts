@@ -236,6 +236,33 @@ test('closing waits for what is under way; a connection lost or closed is opened
   await pool.end();
 });
 
+test("closing by a time: what is under way then fails, what waits for its turn is never sent, and nothing opens the connection again (T170)", { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url);
+  const db = createDatabase(pool);
+  // A use's call past its deadline: its statement still running, another asked behind it.
+  const slow = db.execute(sql`select pg_sleep(5), 1 as n`).then(n);
+  const behind = db.execute(sql`select 2 as n`).then(n);
+  const started = Date.now();
+  const closed = pool.end(Date.now() + 100);
+  await assert.rejects(slow);
+  await assert.rejects(behind);
+  await closed;
+  assert.ok(Date.now() - started < 2_000, `closed after ${Date.now() - started} ms`);
+  // Asked again after, as the call's work left behind may: refused, never a connection again.
+  await assert.rejects(db.execute(sql`select 3 as n`), (error: Error) => /closed at the time it was given/.test(String((error.cause as Error | undefined)?.message)));
+  assert.equal(proxy.opened, 1);
+  for (let tries = 0; proxy.open > 0; tries += 1) {
+    assert.ok(tries < 100, 'the connection was left open');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  // Done before its time, a call closes as ever: its statements answered, and none failed.
+  const next = new HyperdrivePool(proxy.url);
+  const answered = createDatabase(next).execute(sql`select 4 as n`).then(n);
+  await next.end(Date.now() + 5_000);
+  assert.equal(await answered, 4);
+});
+
 test('a query on the database from inside its own transaction is refused at once, not left to wait for itself', { skip, timeout: 10_000 }, async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
