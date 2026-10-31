@@ -83,8 +83,15 @@ export type CheckpointStore = LogReader & {
    * last barrier set it. `floor.ceiling` is the database's clock less the
    * use deadline, read once the barrier has run: the highest floor any
    * barrier before it can have left (HotPathOne.tla's BarrierAcceptsLate).
+   *
+   * With `limit` (T169), the window's first `limit` entries by number, and
+   * `more` when there were more: `more.above`, the lowest `at` of the uses
+   * the window holds above the last of them, from `from` on (null: none).
    */
-  close(after: bigint, from: number): Promise<{ upto: bigint; newest: StoredPair | null; entries: LogEntry[]; floor: { found: number | null; set: number; ceiling: number } }>;
+  close(after: bigint, from: number, limit?: number): Promise<{
+    upto: bigint; newest: StoredPair | null; entries: LogEntry[]; floor: { found: number | null; set: number; ceiling: number };
+    more?: { above: number | null } | null;
+  }>;
   /**
    * The newest pair: each tree's own newest note, `upto` the larger of theirs
    * (Seal.tla's PairChecked). Stored as one row a pair, that is the newest
@@ -203,6 +210,14 @@ export function sealingOf(state: { open: boolean; failed: string | null; last: {
   return { ok: true };
 }
 
+/**
+ * The most entries a tick seals (T169): a window past it is sealed a part
+ * at a time, each part a pair, the next tick at once. After a stall of
+ * minutes at R44's rate, the backlog is hundreds of thousands: read and
+ * sealed whole, it would run past `TICK_BOUND_MS` and stall again, for good.
+ */
+export const WINDOW_MAX = 10_000;
+
 /** A wait past its bound (`within`). */
 export class TimedOut extends Error {}
 
@@ -268,7 +283,19 @@ export class Fence {
     if (this.#closed !== null) throw new Error(`this checkpointer was closed (${this.#closed}): another holds its memory`);
   }
 
-  /** The store, each of its calls refused once the fence is closed. */
+  /**
+   * `answer`, refused if the fence closed while it was awaited: what a call sent before the fence closed answers too
+   * late to be read, so that a checkpointer given up on never acts on it, nor alarms on it (review r1).
+   */
+  #late<T>(answer: T): T {
+    if (!(answer instanceof Promise)) return answer;
+    return answer.then((value: unknown) => {
+      this.#check();
+      return value;
+    }) as T;
+  }
+
+  /** The store, each of its calls refused once the fence is closed, and each answer that comes after. */
   store<T extends object>(store: T): T {
     return new Proxy(store, {
       get: (target, key) => {
@@ -276,7 +303,7 @@ export class Fence {
         if (typeof value !== 'function') return value;
         return (...args: unknown[]) => {
           this.#check();
-          return (value as (...a: unknown[]) => unknown).apply(target, args);
+          return this.#late((value as (...a: unknown[]) => unknown).apply(target, args));
         };
       },
     });
@@ -287,7 +314,7 @@ export class Fence {
     return {
       last: () => {
         this.#check();
-        return memory.last();
+        return this.#late(memory.last());
       },
       remember: (record) => {
         this.#check();
@@ -316,6 +343,8 @@ export type Tick = {
   /** Database time: the barrier and window, then the write. */
   closeMs: number;
   writeMs: number;
+  /** Whether the window held more than this tick sealed (`WINDOW_MAX`): its host ticks again at once. */
+  more: boolean;
 };
 
 export type Sealed = {
@@ -395,9 +424,10 @@ type Options = {
    * passes its own, to close it if the open stalls. One is made otherwise.
    */
   fence?: Fence;
-  /** `TICK_BOUND_MS` and `SEAL_WAIT_MS`, for the tests. */
+  /** `TICK_BOUND_MS`, `SEAL_WAIT_MS` and `WINDOW_MAX`, for the tests. */
   tickBoundMs?: number;
   sealWaitMs?: number;
+  windowMax?: number;
 };
 
 export class Checkpointer {
@@ -450,6 +480,7 @@ export class Checkpointer {
       now: options.now ?? Date.now,
       tickBoundMs: options.tickBoundMs ?? TICK_BOUND_MS,
       sealWaitMs: options.sealWaitMs ?? SEAL_WAIT_MS,
+      windowMax: options.windowMax ?? WINDOW_MAX,
     };
     this.edges = edges;
     this.head = head;
@@ -581,6 +612,8 @@ export class Checkpointer {
   private closed = false;
   /** Why it stalled (T169): a tick past its bound. */
   private stalled: string | null = null;
+  /** What the tick in flight awaits, which a stall says, so that an operator sees what stalled. */
+  private phase: 'finish' | 'barrier' | 'sign' | 'remember' | 'write' = 'barrier';
 
   /**
    * A tick: the one queued behind the running one, if there is one yet,
@@ -597,7 +630,7 @@ export class Checkpointer {
       // Bounded (T169): past it the checkpointer stalls, its fence closed, whatever the tick still awaits.
       const ms = this.options.tickBoundMs;
       return within(this.tickNow(), ms, 'a tick', () => {
-        this.stalled ??= `a tick ran past ${ms} ms: the database stalled under it`;
+        this.stalled ??= `a tick ran past ${ms} ms in its ${this.phase}: the database stalled under it`;
         this.closed = true;
         void this.fence.close(this.stalled);
       }).catch((error: unknown) => {
@@ -616,12 +649,14 @@ export class Checkpointer {
     if (this.closed) throw new Error('this checkpointer was closed: another took over its memory');
     let finished = false;
     if (this.pending !== null) {
+      this.phase = 'finish';
       await this.finish(this.pending);
       finished = true;
     }
     const { pair } = this.head;
     const t0 = performance.now();
-    const { upto, newest, entries, floor } = await this.store.close(pair.upto, this.floor);
+    this.phase = 'barrier';
+    const { upto, newest, entries, floor, more = null } = await this.store.close(pair.upto, this.floor, this.options.windowMax);
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
     // The floor is an unsigned row (HotPathOne.tla's BarrierChecksFloor): a writer who lowered it would let a use in
@@ -663,10 +698,13 @@ export class Checkpointer {
     // until real time caught up. So it is the signer's clock, held to at most the bound past the window's newest entry
     // (stamped within seconds of its number): a clock ahead moves it one bound at most, a signer that stalled on a
     // quiet log still seals, and a window of gaps alone, with no entry to hold the clock against, keeps the last time.
+    // A part of the window (T169) is held to its own newest entry, no further: the rest of a backlog may be stamped long
+    // before now, and is no replay.
     const newestAt = entries.reduce((max, e) => Math.max(max, e.at), -Infinity);
-    const at = entries.length === 0 ? pair.at : Math.max(pair.at, Math.min(this.options.now(), newestAt + this.options.freshMs));
+    const at = entries.length === 0 ? pair.at : Math.max(pair.at, Math.min(this.options.now(), newestAt + (more === null ? this.options.freshMs : 0)));
     const result = (signed: boolean, writeMs = 0): Tick => ({
       signed: signed || finished, upto: this.head.pair.upto, sizes: sizes(this.head.pair), entries: entries.length, failures, closeMs, writeMs,
+      more: signed && more !== null,
     });
     if (failures.length > 0) {
       const said = failures.join('\n');
@@ -687,13 +725,23 @@ export class Checkpointer {
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
     // The pair carries the floor this barrier left, which the signer reads from once the pair is written, and the floor
     // of the pair before it: so the pair's own note says whether it is the first past a time (retention's cut).
-    const next = await signPair(this.signers, upto, at, heads, floor.set, pair.floor);
+    // A part of the window (T169) ends at its last entry, every number below it read, and carries the lowest `at` of the
+    // uses left above it, if below the barrier's floor (HotPathOne.tla's ChunkFloor): the next window is read from it,
+    // and the rest of a backlog may be stamped long before the barrier. Its own uses sit within 63 s of it
+    // (CeilingHolds): each was numbered before the barrier and before any use left above it, within [at − 60 s,
+    // at + 3 s] by Postgres's clock (`ahead`, the deadline).
+    const place = more === null ? upto : entries.at(-1)!.number;
+    const signedFloor = more === null ? floor.set : Math.max(this.floor, Math.min(floor.set, more.above ?? floor.set));
+    this.phase = 'sign';
+    const next = await signPair(this.signers, place, at, heads, signedFloor, pair.floor);
     this.pending = { next, edges, tiles };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.
+    this.phase = 'remember';
     await this.options.memory.remember(encodePair(next.notes));
     const t1 = performance.now();
-    await this.store.write({ upto, notes: next.notes }, tiles);
+    this.phase = 'write';
+    await this.store.write({ upto: place, notes: next.notes }, tiles);
     const writeMs = performance.now() - t1;
     this.commit(this.pending);
     return result(true, writeMs);
@@ -791,25 +839,8 @@ export class Checkpointer {
     return this.proveAt(number, this.head, options);
   }
 
-  private async proveAt(number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
-    if (number > pair.upto) return null;
-    const found = await this.store.locate(number, options);
-    if (found === null) return null;
-    const { entry, index } = found;
-    if (options.tree !== undefined && entry.tree !== options.tree) throw misplaced(entry, options.tree);
-    if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
-      throw new Refused(`the database answered for another entry than ${number}`);
-    }
-    // An entry numbered at or below the pair's place is in its tree by construction: an index past the tree is the
-    // database's answer, not the tree's.
-    const size = pair[entry.tree].size;
-    if (index >= size) throw new Refused(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
-    const nodes = nodesFrom(tileMap(await this.store.tiles(entry.tree, tilesFor((n) => inclusionProof(n, index, size)))));
-    const proof = inclusionProof(nodes, index, size);
-    if (!verifyInclusion(entryLeaf(entry.tree, entry.number, entry.columns), index, size, proof, pair[entry.tree].root)) {
-      throw new Refused(`entry ${number} is not at ${index} of the ${entry.tree} tree the signer signed: the database changed it`);
-    }
-    return { number, tree: entry.tree, index, size, leaf: leafData(entry.tree, entry.number, entry.columns), proof, notes };
+  private proveAt(number: bigint, head: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
+    return proveIn(this.store, number, head, options);
   }
 
   /** Each witness's pump: one publication in flight at a time, always of the newest pair (a witness needs only that). */
@@ -891,6 +922,32 @@ export class Checkpointer {
     }));
     return answers.filter((a): a is string => a !== null);
   }
+}
+
+/**
+ * Entry `number`'s inclusion proof against the pair `head`, checked before it is handed out; null if not sealed. The
+ * checkpointer's (`prove`, a change's seal), and the vault's, which proves the cutover's change from its database
+ * alone (T169): a pair covering a number may cover the gap a writer moved an entry into, so the entry is proved.
+ */
+export async function proveIn(store: Pick<CheckpointStore, 'locate' | 'tiles'>, number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
+  if (number > pair.upto) return null;
+  const found = await store.locate(number, options);
+  if (found === null) return null;
+  const { entry, index } = found;
+  if (options.tree !== undefined && entry.tree !== options.tree) throw misplaced(entry, options.tree);
+  if (entry.number !== number || !TREES.includes(entry.tree) || !Number.isSafeInteger(index) || index < 0) {
+    throw new Refused(`the database answered for another entry than ${number}`);
+  }
+  // An entry numbered at or below the pair's place is in its tree by construction: an index past the tree is the
+  // database's answer, not the tree's.
+  const size = pair[entry.tree].size;
+  if (index >= size) throw new Refused(`the database places entry ${number} at ${index}, past the ${entry.tree} tree the signer signed (${size})`);
+  const nodes = nodesFrom(tileMap(await store.tiles(entry.tree, tilesFor((n) => inclusionProof(n, index, size)))));
+  const proof = inclusionProof(nodes, index, size);
+  if (!verifyInclusion(entryLeaf(entry.tree, entry.number, entry.columns), index, size, proof, pair[entry.tree].root)) {
+    throw new Refused(`entry ${number} is not at ${index} of the ${entry.tree} tree the signer signed: the database changed it`);
+  }
+  return { number, tree: entry.tree, index, size, leaf: leafData(entry.tree, entry.number, entry.columns), proof, notes };
 }
 
 /** An in-process witness: what the witness's Durable Object does, without the network. */

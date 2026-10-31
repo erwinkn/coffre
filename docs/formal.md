@@ -1405,6 +1405,8 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | the barrier under the fence exclusive; the floor of `at` | `CheckpointsHold` |
 | the barrier checks the floor is the one it last wrote (BarrierChecksFloor), against a writer who lowers it. The model shows the barrier signing nothing past a lowered floor; the alarm PR 6 raises is not modelled | `CheckpointsHold` |
 | ... or above it, no higher than its own clock less D: a late barrier's, of a checkpointer given up on (BarrierAcceptsLate; `HotPathOneStallLive`, T169) | `CheckpointsGoOn`: one late barrier stops every checkpoint after it |
+| a checkpoint sealing only a prefix of its barrier's window signs the lowest `at` of the uses left above it, if below the barrier's floor (ChunkFloor; `HotPathOneChunks`, T169) | `CheckpointsHold`: signed the barrier's floor, the next window misses the rest of a backlog stamped before it |
+| a use whose `at` is more than MaxSkew past Postgres's clock writes nothing (AheadChecked, `ahead`); with the deadline, its number is taken within [at − MaxSkew, at + D] | `CeilingHolds`: a checkpoint's use stamped past its floor + D + MaxSkew, where the verifier's, locate's and retention's reads stop |
 | each input sealed (`Unsealed={"credential"}` …) | `ReplaySound`: allowed live, refused by the replay |
 | seals checked before what the rows say (StaleFirst) | `TamperVisible` |
 | the seal cache valid only while the newest change is the one it was read at (CacheChecked, CacheSameChange) | `ReplaySound`, `RepeatsAreTheirCover`, after a restore |
@@ -1432,6 +1434,20 @@ back before the next barrier reads it, and the uses let in below it go
 unsealed (`CheckpointsHold`), as a writer who put it back itself would
 have. BarrierChecksFloor sees a floor left lowered, not one lowered and
 restored.
+
+**Chunks (T169; `HotPathOneChunks`, `HotPathOneChunksClock`).** A tick
+seals at most `WINDOW_MAX` entries of its barrier's window: a checkpoint
+may seal a prefix, and the next barrier closes the rest. Its floor is the
+lowest `at` of the uses left above it if that is below the barrier's
+floor (ChunkFloor), which makes the next window exact by construction, on
+any clock. What rests on clocks is the ceiling (`CeilingHolds`): each use a
+checkpoint seals is stamped within D + MaxSkew of its floor, since every
+use is numbered within [at − MaxSkew, at + D] by Postgres's clock, which
+reads both ends (AheadChecked, DeadlineChecked). `EXPECTED`: with that
+clock stepping back, a use may sit past its checkpoint's ceiling
+(`HotPathOneChunksClock`). Every use is still sealed; a read bounded by
+that ceiling (a proof, retention's) finds nothing there and hands out no
+proof: it fails closed.
 
 **HotPathOneStaleBulk** checks the two halves together: a use refused
 `stale` still moves the cap's row exactly as the replay does, and a repeat

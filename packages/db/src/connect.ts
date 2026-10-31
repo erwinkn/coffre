@@ -16,14 +16,15 @@ export { postgresClient, postgresOptions, postgresSession, quoteIdentifier, quot
  *
  * The SQLite driver loads only when asked for. The Worker does not
  * come through here; it builds its Postgres database from the Hyperdrive
- * pool with createDatabase.
+ * pool with createDatabase. `max`, for a pool of its own beside another,
+ * as the vault's checkpointer has (T169).
  */
-export async function openDatabase(url: string): Promise<OpenDatabase> {
+export async function openDatabase(url: string, options: { max?: number } = {}): Promise<OpenDatabase> {
   switch (engineOfUrl(url)) {
     case 'postgres': {
       // As node-postgres's pool was: 10 connections, each closed after 10 s idle.
-      const client = postgresClient(url, { max: 10, idle_timeout: 10 });
-      return { engine: 'postgres', db: createDatabase(client), close: () => client.end() };
+      const client = postgresClient(url, { max: options.max ?? 10, idle_timeout: 10 });
+      return { engine: 'postgres', db: createDatabase(client), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
     }
     case 'sqlite': {
       const [{ createClient }, { drizzle }, schema] = await Promise.all([
@@ -35,12 +36,13 @@ export async function openDatabase(url: string): Promise<OpenDatabase> {
       const client = createClient({ url, timeout: 5_000, intMode: 'bigint' });
       if (url.startsWith('file:')) await client.execute('PRAGMA journal_mode = WAL');
       const db = drizzle({ client: oneTransactionAtATime(client, writeQueueFor(url)), schema });
-      return { engine: 'sqlite', db: asPostgresDatabase(db), close: async () => client.close() };
+      return { engine: 'sqlite', db: asPostgresDatabase(db), close: async () => client.close(), cut: async () => client.close() };
     }
   }
 }
 
-export type OpenDatabase = { engine: Engine; db: Database; close: () => Promise<void> };
+/** `close` once what was asked has answered; `cut` at once, what is in flight failing (T169). */
+export type OpenDatabase = { engine: Engine; db: Database; close: () => Promise<void>; cut: () => Promise<void> };
 
 export function engineOfUrl(url: string): Engine {
   const scheme = url.slice(0, url.indexOf(':'));

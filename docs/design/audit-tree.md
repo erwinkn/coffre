@@ -503,6 +503,23 @@ cutover's seal. Now:
   the object answers from its own state and clock, in at most 2 s, or the
   answer is no; `/readyz` gives the vault 3 s. Red within seconds of a
   stall, green again once a tick seals.
+- **A tick seals at most `WINDOW_MAX` (10,000) entries** of its barrier's
+  window, read by number, the next tick at once while more remains, the
+  upkeep once it has caught up. After a stall the backlog is hundreds of
+  thousands of uses; sealed whole, a tick would run past its bound and
+  stall again, for good. A part ends at its last entry and signs as its
+  floor the lowest `at` of the uses left above it, if below the barrier's
+  (HotPathOne's `ChunkFloor`), found by a probe of the uses' index; its
+  time is its newest entry's, so the rest of the backlog is no replay.
+  Every pair still has its uses within 63 s of its floor (`CeilingHolds`),
+  by the `ahead` rule and the deadline on Postgres's clock. Measured
+  (`packages/vault/scripts/chunk-bench.ts`, Postgres 16.14 on Debian, a
+  20 ms round trip added each statement): 240,000 uses drain in 24 ticks,
+  7.4 s, each tick at most 403 ms (its window read 89 ms, the probe
+  2 ms); 1,000,000 in 100 ticks, 56 s, the first and slowest 1.6 s. The
+  window read sorts what is left by number (the uses have no index by
+  number), so it grows with the backlog: an hour's at 1,000 a second
+  would take some 5 s a tick, inside the bound.
 - **A late barrier is no alarm.** A barrier sent by a checkpointer given
   up on may run in the database after the next one has opened and ticked,
   raising the floor past where that one's last barrier left it. The next
@@ -618,6 +635,7 @@ the code holds it and the tests that break it.
 | NumberUnderLock, CloseLocks | `CheckpointStore.close`: the barrier (`close_one`) | 6b, over migration 0022 |
 | BarrierChecksFloor (`HotPathOne.tla`) | `tick`: the floor `close_one` found must be exactly where this process's last barrier left it (after a restart, no lower than the newest pair's), else every tick refuses until reopened; each pair signs its floor, and windows are read from the newest pair's | "BarrierChecksFloor: …", "review r9–r10, BarrierChecksFloor: …" |
 | BarrierAcceptsLate (`HotPathOne.tla`, T169) | `tick`: a floor above the last barrier's no higher than `floor.ceiling` is a late barrier's | "T169: a tick whose barrier never answers…"; stall.test.ts |
+| ChunkFloor, CeilingHolds (`HotPathOne.tla`, T169) | `tick`: a part of the window ends at its last entry and signs `max(floor held, min(barrier's floor, lowest at left above))`; its time its newest entry's | "T169: a backlog far past the window…" and the clock stepping back, log-store.test.ts |
 | Fenced (T169) | `Fence`: every store call and memory write of a checkpointer closed or stalled refused; `close` waits for its memory writes in flight | "T169: …", stall.test.ts, log-hosts.test.ts and workers-stall.test.ts |
 | RememberFirst | `tick`: `memory.remember` before `store.write` | (e) |
 | SignerMemory | `open()`: memory equal, a prefix in both trees, or re-derived; else refused | (b), (c), (g), (j), "a memory restored…" |

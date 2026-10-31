@@ -14,9 +14,13 @@ import { isUnsealed } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
+import { openDatabase } from '@coffre/db/connect';
+
 import { SEAL_WAIT_MS } from '../src/checkpointer.ts';
 import { keepCheckpointer, type KeptCheckpointer } from '../src/checkpointer-node.ts';
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { CUTOVER_OBJECT } from '../src/cutover.ts';
+import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { stallProxy } from './stall-proxy.ts';
 import { ask, change, emptyLog, isolate, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -170,5 +174,61 @@ test('T169, Node, Postgres: a barrier that waits in the database past its bound 
     release();
     await holding.catch(() => {});
     await kept.stop();
+  }
+});
+
+test('T169, review r1, Postgres: a cutover change a writer moved into a gap a signed pair covers is no shortcut: a fresh isolate asks for its seal, which proves it', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a gap in the sequence', timeout: 60_000 }, async () => {
+  const w = await world();
+  const id = await w.key('postgres://prod');
+  const { kept, vault } = await opened(db.vault, join(dir, 'memory-postgres-3'));
+  try {
+    await until(() => kept.sealing().ok, 5000, 'sealing at first');
+    // A number handed out and never used, then a change past it, sealed: a signed pair covers the gap.
+    const [gap] = await rows<{ n: string }>(db.owner, sql`SELECT nextval('log_number')::text AS n`);
+    const number = await commitChange(w);
+    assert.ok((await vault.waitSealed!({ number: String(number) })).ok);
+    // The cutover's change moved into the gap: its MAC holds, the number is not under it, and the pair covers it.
+    await run(db.owner, sql`UPDATE log_changes SET number = ${BigInt(gap!.n)} WHERE object = ${CUTOVER_OBJECT}`);
+    const asked: bigint[] = [];
+    const fresh = await isolate({
+      sealThrough: async (n) => {
+        asked.push(n);
+        throw new Error('refused: the change is not in the signed changes tree');
+      },
+      heldOutside: kept.heldOutside,
+    });
+    await fresh.use(ask(w, id)).catch(() => null);
+    assert.deepEqual(asked, [BigInt(gap!.n)], 'the shortcut proved nothing, so the seal was asked');
+  } finally {
+    await kept.stop();
+  }
+});
+
+test('T169, review r1, Node, Postgres: stall after stall, each on a connection of its own, which it cuts: none is left holding one; answered again, it seals', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a connection to cut', timeout: 60_000 }, async () => {
+  const w = await world();
+  const proxy = await stallProxy(VAULT_URL);
+  const kept = await keepCheckpointer({
+    connect: async () => {
+      const { db: session, cut } = await openDatabase(proxy.url, { max: 2 });
+      return { db: session, cut };
+    },
+    seed: SIGNING_KEY, memory: join(dir, 'memory-postgres-4'), intervalMs: 20, retryMs: 50, tickBoundMs: 200,
+  });
+  const { vault } = await isolate({ sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing });
+  try {
+    await until(() => kept.sealing().ok, 5000, 'sealing at first');
+    proxy.hold();
+    // Many stalls and opens over three seconds, each a session that gets no answer, each cut once given up on.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    assert.ok(!kept.sealing().ok);
+    assert.ok(proxy.clients() <= 3, `${proxy.clients()} connections left open`);
+    proxy.release();
+    await until(() => kept.sealing().ok, 10_000, 'sealing again');
+    const number = await commitChange(w);
+    assert.ok((await vault.waitSealed!({ number: String(number) })).ok);
+  } finally {
+    proxy.release();
+    await kept.stop();
+    await proxy.close();
   }
 });

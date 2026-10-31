@@ -231,14 +231,14 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
 }
 
 /** Postgres's read of the entries in (after, upto], by number, uses from `floor` to `ceiling`: the window's rows (`postgresStore`). */
-export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number): SQL {
+export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number, byNumber = false): SQL {
   return sql`
       ${first(sql`SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac,
              NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place
         FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
       ${first(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
-        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.at`, limit)}
+        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, byNumber ? sql`u.number` : sql`u.at`, limit)}
       ORDER BY n${limitOf(limit)}`;
 }
 
@@ -253,11 +253,17 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
    * The window as rows, by number: the tick's read, 500 entries every 500 ms at R44's rate, so no JSON is built
    * for it (measured: the window read 6.0 ms p50 as JSON).
    */
-  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling?: SQL, limit?: number) => rowsOf<WindowRow>(db, postgresWindow(after, upto, floor, ceiling, limit));
+  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling?: SQL, limit?: number, byNumber = false) =>
+    rowsOf<WindowRow>(db, postgresWindow(after, upto, floor, ceiling, limit, byNumber));
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
   // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
   const made = new Set<number>();
   const madeDays = new Set<string>();
+  /** The lowest `at` of the uses in (after, upto] from `from` on, null for none: the index by `at`, to the first in range. */
+  const lowestAbove = async (after: bigint, upto: bigint, from: number) => {
+    const at = await one<string | null>(db, sql`SELECT min(u.at)::text AS v FROM log_uses u WHERE u.at >= ${from}::bigint AND u.number > ${after} AND u.number <= ${upto}`);
+    return at === null ? null : Number(at);
+  };
   const tiles: LogStore['tiles'] = async (tree, keys) => {
     if (keys.length === 0) return [];
     const rows = await rowsOf<{ level: number; leaf: string; hashes: Buffer }>(db, sql`
@@ -265,7 +271,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
     return rows.map((r) => ({ level: r.level, index: indexOf(r.level, Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
   };
   return {
-    async close(after, from) {
+    async close(after, from, limit) {
       // The barrier, and the newest pair with it: only the checkpointer writes that row, so a snapshot from before the
       // barrier's lock holds it. The window comes in the next statement, a snapshot after the lock.
       // The ceiling is the clock less the deadline once close_one has run, as close_one raises the floor to it: no
@@ -276,11 +282,17 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
                (SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1) AS newest
           FROM close_one() b`);
       const upto = BigInt(barrier?.upto ?? '0');
+      // The window by number, its first `limit` (T169): every use of the window read, sorted by number, which costs the
+      // window's size; past the limit, the lowest `at` of the uses left above it, which the index finds past those read.
+      const read = (await rows(after, upto, sql`${from}::bigint`, undefined, limit === undefined ? undefined : limit + 1, true)).map(fromRow);
+      const entries = limit === undefined || read.length <= limit ? read : read.slice(0, limit);
+      const more = entries === read ? null : { above: await lowestAbove(entries.at(-1)!.number, upto, from) };
       return {
         upto,
         newest: toPair(barrier?.newest),
-        entries: (await rows(after, upto, sql`${from}::bigint`)).map(fromRow),
+        entries,
         floor: { found: barrier?.floor_found == null ? null : Number(barrier.floor_found), set: Number(barrier?.at_floor ?? 0), ceiling: Number(barrier?.ceiling) },
+        more,
       };
     },
     async newest() {
@@ -396,10 +408,10 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
     'credential', u.credential, 'secret', u.secret, 'purpose', u.purpose, 'mac', hex(u.mac), 'place', u.place)`);
   const PAIR = sql.raw(`json_object('upto', CAST(k.upto AS TEXT), 'changes', k.changes_note, 'uses', k.uses_note)`);
-  const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
+  const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number, byNumber = false) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
       ${first(sql`SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
-      ${first(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.at`, limit)}
+      ${first(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, byNumber ? sql`u.number` : sql`u.at`, limit)}
       ORDER BY 1${limitOf(limit)}
     ) e)`;
   const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
@@ -412,7 +424,7 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
     return rows.map((r) => ({ level: Number(r.level), index: indexOf(Number(r.level), Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
   };
   return {
-    async close(after, from) {
+    async close(after, from, limit) {
       // One writer: every number committed is final. The barrier only moves the floor, as close_one does.
       const barrier = await db.transaction(async (tx) => {
         const [fence] = await rowsOf<{ at_floor: number }>(tx, sql`SELECT at_floor FROM log_fence WHERE only_row`);
@@ -424,12 +436,20 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
       });
       const read = await one<{ newest: RawPair | null; entries: RawEntry[] }>(db, sql`SELECT json_object(
           'newest', json((SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)),
-          'entries', json(${window(after, barrier.upto, sql`${from}`)})) AS v`);
+          'entries', json(${window(after, barrier.upto, sql`${from}`, undefined, limit === undefined ? undefined : limit + 1, true)})) AS v`);
+      const all = read.entries.map(toEntry);
+      const entries = limit === undefined || all.length <= limit ? all : all.slice(0, limit);
+      let more: { above: number | null } | null = null;
+      if (entries !== all) {
+        const at = await one<number | null>(db, sql`SELECT min(u.at) AS v FROM log_uses u WHERE u.at >= ${from} AND u.number > ${entries.at(-1)!.number} AND u.number <= ${barrier.upto}`);
+        more = { above: at === null ? null : Number(at) };
+      }
       return {
         upto: barrier.upto,
         newest: toPair(read.newest),
-        entries: read.entries.map(toEntry),
+        entries,
         floor: { found: barrier.found === null ? null : Number(barrier.found), set: barrier.set, ceiling: barrier.ceiling },
+        more,
       };
     },
     async newest() {

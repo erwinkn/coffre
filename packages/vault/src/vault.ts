@@ -153,7 +153,7 @@ import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
 import { bindingObject, credentialObject } from './objects.ts';
-import type { SealThrough } from './checkpointer.ts';
+import { proveIn, type SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
@@ -3587,12 +3587,19 @@ class VaultService implements Vault {
     return true;
   }
 
-  /** Whether the database's newest checkpoint is a pair this vault's key signed, at or past `number`. */
+  /**
+   * Whether the database's newest checkpoint is a pair this vault's key signed in whose changes tree change `number`
+   * is proved, as its seal proves it: a pair covering its number may cover a gap a writer moved the change into
+   * (review r1). Anything short of that goes to the seal, which alarms on what it refuses.
+   */
   async #signedPast(number: bigint): Promise<boolean> {
-    const newest = await logStore(this.#db).newest();
+    const store = logStore(this.#db);
+    const newest = await store.newest();
     if (newest === null || newest.upto < number) return false;
     const pair = await openPair(newest.notes, (await this.#verifierKeys()).verifiers);
-    return pair !== null && pair.upto === newest.upto;
+    if (pair === null || pair.upto !== newest.upto) return false;
+    const proof = await proveIn(store, number, { pair, notes: newest.notes }, { tree: 'changes' }).catch(() => null);
+    return proof !== null;
   }
 
   /**

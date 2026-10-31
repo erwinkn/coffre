@@ -384,10 +384,13 @@ const SEALING_ASKED_MS = 3000;
 /** Why 0.15's checkpointer does not seal, said in the server's log once while it stands; null when it does (T169). */
 async function unsealing(runtime: CoffreRuntime): Promise<string | null> {
   const { vault } = runtime;
-  if (vault.sealing === undefined || !(await vaultSaysSealing(vault))) return null;
+  if (vault.sealing === undefined) return null;
+  const sealing = vault.sealing.bind(vault);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // The vault's word on what it has, its `about`, inside the same bound (review r1): a vault that does not answer is red.
   const said = await Promise.race([
-    vault.sealing().catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : String(error) })),
+    (async () => ((await vaultSaysSealing(vault)) ? await sealing() : ({ ok: true } as const)))()
+      .catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : String(error) })),
     new Promise<{ ok: false; reason: string }>((resolve) => {
       timer = setTimeout(() => resolve({ ok: false, reason: `the vault did not say within ${SEALING_ASKED_MS} ms` }), SEALING_ASKED_MS);
     }),

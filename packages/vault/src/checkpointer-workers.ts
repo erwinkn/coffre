@@ -292,6 +292,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
 
     async alarm(): Promise<void> {
       if (await this.#isProjector()) return this.#project();
+      // A window sealed only in part (T169, WINDOW_MAX): the next alarm at once, its upkeep once it has caught up.
+      let more = false;
       try {
         const checkpointer = await this.#open();
         if (checkpointer === null) return await this.#makeDays();
@@ -301,16 +303,17 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         this.#ticks.push({ ...t, wallMs: performance.now() - t0, at: Date.now() });
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
+        more = t.more;
         // On the same connection, cut past its bound: the checkpointer goes with it.
         const pool = this.#pool;
-        if (this.#upkeep !== null) await within(this.#upkeep(), UPKEEP_BOUND_MS, "the log's upkeep", () => pool?.destroy());
+        if (this.#upkeep !== null && !more) await within(this.#upkeep(), UPKEEP_BOUND_MS, "the log's upkeep", () => pool?.destroy());
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
         await this.#failure(`a checkpoint failed: ${reasonOf(error)}`);
         await this.#reset();
         await this.#makeDays();
       } finally {
-        await this.#state.storage.setAlarm(Date.now() + TICK_MS);
+        await this.#state.storage.setAlarm(Date.now() + (more ? 0 : TICK_MS));
       }
     }
 

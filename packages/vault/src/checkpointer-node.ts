@@ -65,15 +65,22 @@ export type RunningCheckpointer = {
 const OPEN_BOUND_MS = TICK_BOUND_MS;
 const UPKEEP_BOUND_MS = 60_000;
 
+/** A connection of the checkpointer's own (T169), which its runner cuts once it stalls: `openDatabase(url, { max })`. */
+export type Session = { db: Database; cut(): Promise<void> };
+
 /**
  * Opens the checkpointer over `database` (the vault's login) and ticks it
  * every `intervalMs`, a tick after the last one ends, each followed by the
  * log's upkeep (days made ahead, retention past `retainDays`, the bulk
  * cap's rows pruned). Each alarm is appended to `<memory>.alarms`, one JSON
- * line each.
+ * line each. Given `connect` instead, over a session of its own, cut once
+ * it stalls or stops, so that what it still awaits holds no connection of
+ * the vault's (review r1).
  */
 export async function runCheckpointer(options: {
-  database: Database;
+  /** The vault's database, or `connect`, a session of its own. */
+  database?: Database;
+  connect?: () => Promise<Session>;
   seed: Uint8Array;
   /** The memory's file. */
   memory: string;
@@ -84,17 +91,18 @@ export async function runCheckpointer(options: {
   retainDays?: number | null;
   /** Told once its checkpointer stalls (T169), which ticks no more: `keepCheckpointer` opens another. */
   stalled?: (why: string) => void;
-  /** `TICK_BOUND_MS`, for the tests. */
+  /** `TICK_BOUND_MS`, which bounds the open and the next days too: for the tests. */
   tickBoundMs?: number;
 }): Promise<RunningCheckpointer> {
   const alarmsPath = `${options.memory}.alarms`;
   let appending: Promise<void> = Promise.resolve();
-  const store = logStore(options.database, { tileRange: options.tileRange });
+  if ((options.connect === undefined) === (options.database === undefined)) throw new Error('the checkpointer runs over its database or a session it connects, one of the two');
+  const session = options.connect === undefined ? null : await within(options.connect(), options.tickBoundMs ?? OPEN_BOUND_MS, 'connecting');
+  const store = logStore(session?.db ?? options.database!, { tileRange: options.tileRange });
+  const fence = new Fence();
   // The next days of uses first: a use needs its day's partition even if the checkpointer then refuses to open. Each
   // bounded (T169); an open past its bound fenced, so that it does nothing more once another opens.
-  await within(store.makeDays(daysAround(Date.now())), OPEN_BOUND_MS, 'making the next days of uses');
-  const fence = new Fence();
-  const checkpointer = await within(openLogCheckpointer({
+  const checkpointer = await within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses').then(() => within(openLogCheckpointer({
     store,
     seed: options.seed,
     memory: fileMemory(options.memory),
@@ -102,7 +110,13 @@ export async function runCheckpointer(options: {
     record: (alarm) => record(alarm),
     fence,
     ...(options.tickBoundMs === undefined ? {} : { tickBoundMs: options.tickBoundMs }),
-  }), OPEN_BOUND_MS, 'the open', () => void fence.close('its open stalled'));
+  }), options.tickBoundMs ?? OPEN_BOUND_MS, 'the open')).catch(async (error: unknown) => {
+    // Fenced, its session cut, and its memory write in flight landed, before the keeper may open another over the same
+    // file (review r1).
+    await session?.cut().catch(() => {});
+    await fence.close('its open failed');
+    throw error;
+  });
   /** In order, one after the other; a file grown past a megabyte keeps its last 30 days. */
   function record(alarm: Alarm): Promise<void> {
     appending = appending.then(async () => {
@@ -151,13 +165,17 @@ export async function runCheckpointer(options: {
     await within(run, UPKEEP_BOUND_MS, "the log's upkeep").catch((error: Error) => console.warn(`coffre audit: ${error.message}`));
   };
   // The upkeep after a tick that held; after one refused, only the next days (retention would fail on it, alarmed again).
+  // A window sealed only in part (T169, WINDOW_MAX): the next tick at once, the upkeep once it has caught up.
+  let more = false;
   const loop = () => {
     ticking = checkpointer.tick().then((t) => {
       failed = null;
       last = { at: Date.now(), failures: t.failures };
       projector.kick();
-      return upkeepOnce();
+      more = t.more;
+      return more ? undefined : upkeepOnce();
     }, async (error: Error) => {
+      more = false;
       const message = `a checkpoint failed: ${reasonOf(error)}`;
       if (message !== failed) {
         failed = message;
@@ -166,10 +184,10 @@ export async function runCheckpointer(options: {
       }
       // A checkpointer that stalled (T169) ticks no more: its keeper opens another.
       if (error instanceof Stalled) stalled = true;
-      await within(store.makeDays(daysAround(Date.now())), OPEN_BOUND_MS, 'making the next days of uses').catch(() => {});
+      await within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses').catch(() => {});
     }).finally(() => {
       if (stalled) options.stalled?.(failed!);
-      else if (!stopped) timer = setTimeout(loop, interval);
+      else if (!stopped) timer = setTimeout(loop, more ? 0 : interval);
     });
   };
   loop();
@@ -198,10 +216,13 @@ export async function runCheckpointer(options: {
     async stop() {
       stopped = true;
       clearTimeout(timer);
+      // A stalled one's session cut first, so that what its tick awaits fails now (T169).
+      if (stalled) await session?.cut().catch(() => {});
       await ticking;
       await projector.stop();
       // Closed, so that a handle kept after stop() never ticks beside a runner started over the same memory.
       await checkpointer.close();
+      await session?.cut().catch(() => {});
     },
   };
 }

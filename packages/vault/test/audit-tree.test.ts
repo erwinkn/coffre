@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 import { isUnsealed } from '@coffre/core/vault';
 
-import { Checkpointer, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, Fence, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, type Witness } from '../src/checkpointer.ts';
 import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
 
@@ -283,7 +283,8 @@ test('review r3: a memory behind the database is checked by a consistency proof,
   store.rollBack(0n);
   const forked = await open({ memory: variableMemory() });
   for (let i = 0; i < 65_792; i += 1) store.append('uses', `fork-${i}`);
-  assert.ok((await forked.tick()).signed);
+  // A part of the window a tick (T169, WINDOW_MAX), until it is all sealed.
+  for (let t = await forked.tick(); t.more; t = await forked.tick()) assert.ok(t.signed);
   const tile = Buffer.from(store.tileStore.uses.get('1/0')!);
   mine.uses.root.copy(tile, 0);
   store.tileStore.uses.set('1/0', tile);
@@ -764,8 +765,12 @@ test('6b review r3: a closed checkpointer ends its tick in flight, then refuses 
   const closing = cp.close().then(() => (closed = true));
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(closed, false, 'close waits for the tick in flight');
+  // Its write lands, and its answer, come after the fence closed, is not read (T169): the tick fails, and the next
+  // checkpointer finds the pair it remembered in the database.
+  const writes = store.writes;
   release();
-  assert.ok((await ticking).signed);
+  await assert.rejects(ticking, /was closed/);
+  assert.equal(store.writes, writes + 1, 'the write landed');
   await closing;
   await assert.rejects(cp.tick(), /was closed/);
   await assert.rejects(cp.sealThrough(store.append('changes', 'c')), /was closed/);
@@ -915,11 +920,12 @@ test('T169: a tick whose barrier never answers stalls within its bound; a change
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(memory.record, record, 'its memory is the new checkpointer\'s');
   assert.equal(store.writes, writes, 'nothing written');
-  // The floor it raised is no higher than the next barrier's own: no alarm, and the next tick seals.
+  // The floor it raised is no higher than the next barrier's own, and the answer it got came too late to be read: no
+  // alarm of any kind (review r1), and the next tick seals.
   store.append('uses', 'after');
   const t = await next.tick();
   assert.ok(t.signed, t.failures.join('; '));
-  assert.deepEqual(alerts.filter((a) => /floor/.test(a)), []);
+  assert.deepEqual(alerts, []);
   const v = await verify(store, k, { anchors: [decodePair(memory.record!)!] });
   assert.ok(v.ok, v.problems.join('\n'));
 });
@@ -943,4 +949,27 @@ test('T169: a seal waits at most its bound on ticks that do not end, and a tick 
   t0 = performance.now();
   await cp.close();
   assert.ok(performance.now() - t0 < 100);
+});
+
+test('T169, review r1: a fence closed refuses every call after it and every answer that comes after it, and its close waits for the memory writes already sent', async () => {
+  const fence = new Fence();
+  let answer!: (value: string) => void;
+  const store = fence.store({ newest: () => new Promise<string>((resolve) => (answer = resolve)), now: async () => 'now' });
+  let landed!: () => void;
+  let wrote = false;
+  const memory = fence.memory({ last: async () => null, remember: () => new Promise<void>((resolve) => (landed = () => ((wrote = true), resolve()))) });
+  const asked = store.newest();
+  const remembering = memory.remember('pair');
+  let closed = false;
+  const closing = fence.close('stalled').then(() => (closed = true));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(closed, false, 'the memory write already sent has not landed');
+  landed();
+  await closing;
+  assert.ok(wrote && closed);
+  await remembering;
+  answer('late');
+  await assert.rejects(asked, /closed \(stalled\)/);
+  assert.throws(() => store.now(), /closed \(stalled\)/);
+  assert.throws(() => memory.remember('another'), /closed \(stalled\)/);
 });

@@ -10,7 +10,7 @@ import { coffreRoute, respond, runScheduled } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { appendAudit } from '../src/db/audit.ts';
 import { auditLog } from './db/tables.ts';
 
@@ -209,7 +209,7 @@ test("the door says what holds it: a cutover held moves the log; a question that
   }
 });
 
-test("T169: under 0.15's log, readiness is red while the vault's checkpointer does not seal, or does not say within its bound, and green again once it seals", async () => {
+test("T169: under 0.15's log, readiness is red while the vault's checkpointer does not seal, or does not say within its bound, and green again once it seals", { skip: LOG === '0.15' ? false : "0.14's log seals nothing: readiness asks no checkpointer" }, async () => {
   await resetDatabase(db.owner);
   const why = 'a tick ran past 10000 ms: the database stalled under it';
   let sealing: Sealing | null = { ok: false, reason: why };

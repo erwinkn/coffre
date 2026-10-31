@@ -50,7 +50,8 @@ export interface Connection {
   end(): Promise<void>;
   /** Given back by what held it: closed if it was asked to end meanwhile, or the pool's again. */
   release(): void;
-  /** Close it now, failing what it was sent: with `force`, the socket destroyed, whatever it is still writing or opening. */
+  /** Close it now, failing what it was sent: with `force`, the socket destroyed, whatever it is still writing or opening, for a peer
+   * that may never answer. */
   terminate(force?: boolean): void;
 }
 
@@ -429,10 +430,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     if (socket) {
       socket.removeListener('data', data);
       socket.removeListener('connect', connected);
-      // Coffre: forced (`end`'s timeout), destroyed, opening or not; upstream wrote Terminate first, which a write stuck
-      // under backpressure holds back, and left a socket still opening alone (review r2 of #438).
-      if (force) socket.destroy();
-      else if (socket.readyState === 'open') socket.end(b.typed('X').end());
+      // Coffre: ended with a Terminate when open; destroyed when forced (`end`'s timeout, a call cut: #438, T169), opening or
+      // not, or when not open: upstream wrote Terminate first, which a write stuck under backpressure holds back, left a
+      // socket still opening alone, and an end waits on a peer that may never answer (review r2 of #438, T169).
+      if (socket.readyState === 'open' && !force) socket.end(b.typed('X').end());
+      else socket.destroy();
     }
     // Coffre: and no dial a close asked for, waiting out its backoff, opens the connection again after (Fable's review of #438).
     if (force && redial !== null) {

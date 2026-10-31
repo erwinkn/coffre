@@ -215,6 +215,11 @@ REMOVALS=(
   "HotPathOneFloor BarrierChecksFloor CheckpointsHold"
   # A barrier of a checkpointer given up on lands late (T169): the next one accepts the floor it raised, or none signs again.
   "HotPathOneStallLive BarrierAcceptsLate CheckpointsGoOn"
+  # A tick's window capped (T169): a checkpoint sealing a prefix signs the floor of what is left above it.
+  "HotPathOneChunks ChunkFloor CheckpointsHold"
+  # ... whose uses sit within D + MaxSkew of it: both ends of their numbering held to Postgres's clock.
+  "HotPathOneChunks AheadChecked CeilingHolds"
+  "HotPathOneChunks DeadlineChecked CeilingHolds"
   "HotPathOneRestoreCovers CoverExists RepeatsAreTheirCover"
   "HotPathOneRestoreCovers CoverExists DurableBeforeRelease"
   "HotPathOneClock FloorChecked CheckpointsHold"
@@ -436,6 +441,9 @@ EXPECTED=(
   # unsealed, which BarrierChecksFloor cannot see; a late barrier of a checkpointer given up on (T169) can put it back
   # as well (HotPathOne.tla).
   "HotPathOneStall CheckpointsHold"
+  # Postgres's clock stepping back: a use may sit past its checkpoint's ceiling, which the verifier's bounded read
+  # misses, and alarms on: fail closed (HotPathOne.tla's CeilingHolds).
+  "HotPathOneChunksClock CeilingHolds"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

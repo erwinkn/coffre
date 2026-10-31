@@ -20,7 +20,7 @@ import { Agent, createServer, request as httpRequest, type IncomingMessage } fro
 
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
+import { engineOfUrl, openDatabase } from '@coffre/db/connect';
 
 import { keepCheckpointer } from './checkpointer-node.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
@@ -100,7 +100,11 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
     const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
     if (own) {
-      const kept = (checkpointer = await keepCheckpointer({ database: db, seed: resolved.signingKeys[0]!, memory: config.checkpointer!.memory }));
+      // On Postgres, a connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of
+      // the vault's. On SQLite, the vault's one: two to one file wait on each other's writes.
+      const url = typeof config.database === 'string' && engineOfUrl(config.database) === 'postgres' ? config.database : null;
+      const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: 2 }) };
+      const kept = (checkpointer = await keepCheckpointer({ ...where, seed: resolved.signingKeys[0]!, memory: config.checkpointer!.memory }));
       options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing };
     }
     return await openLocalVault(db, resolved, { ...options, uses }, close, hot);

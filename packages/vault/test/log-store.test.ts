@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
-import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import { leafHash, pairSigners, pairVerifiers, parseCheckpoint, splitNote, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
 import { sql } from 'drizzle-orm';
 
 import { Checkpointer } from '../src/checkpointer.ts';
@@ -40,13 +40,16 @@ before(async () => {
 after(() => db?.close());
 beforeEach(() => log.empty());
 
+/** The floor a pair signed. */
+const decodeFloor = (notes: PairNotes) => parseCheckpoint(splitNote(notes.changes).text).floor;
+
 /** Ranges of 512 leaves, so that a test crosses some; one size for the file, whose database keeps the ranges made. */
 const RANGE = 512;
 
-async function open(memory = variableMemory()) {
+async function open(memory = variableMemory(), windowMax?: number) {
   const alerts: string[] = [];
   const store = logStore(db.vault, { tileRange: RANGE });
-  const cp = await Checkpointer.open(store, signers, { memory, authentic: authentic(macKey), alert: (m) => alerts.push(m) });
+  const cp = await Checkpointer.open(store, signers, { memory, authentic: authentic(macKey), alert: (m) => alerts.push(m), ...(windowMax === undefined ? {} : { windowMax }) });
   return { cp, store, memory, alerts };
 }
 
@@ -261,3 +264,62 @@ test('PR 8 review r3 (W240): a bounded read stops at its limit in the database t
   assert.ok(bounded < 200 && bounded * 10 < whole, `${bounded} buffers bounded, ${whole} whole`);
 });
 
+
+test('T169: a backlog far past the window drains a part a tick, each part a pair whose floor is the lowest `at` left above it, and the whole log verifies, every entry provable', async () => {
+  const { cp, store, memory, alerts } = await open(variableMemory(), 200);
+  await use();
+  assert.ok((await cp.tick()).signed);
+  // A backlog as a stall leaves: 1,050 uses and some changes, each use stamped at or above the floor the last barrier
+  // left (FloorChecked), then a barrier well after them, whose floor is above most: each part signs the lowest `at`
+  // left above it.
+  const numbers: bigint[] = [];
+  const t0 = cp.pair.pair.floor + 100;
+  for (let i = 0; i < 1050; i += 1) {
+    numbers.push(await use(t0 + i * 2));
+    if (i % 100 === 0) numbers.push(await change());
+  }
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const parts: { entries: number; more: boolean }[] = [];
+  for (;;) {
+    const t = await cp.tick();
+    assert.ok(t.signed && t.failures.length === 0, t.failures.join('; '));
+    parts.push({ entries: t.entries, more: t.more });
+    if (!t.more) break;
+  }
+  assert.deepEqual(parts.map((p) => p.entries), [200, 200, 200, 200, 200, 61]);
+  assert.equal(cp.pair.pair.upto, numbers.at(-1));
+  assert.deepEqual(alerts, []);
+  const v = await verifyLog(store, { verifiers, anchors: [JSON.parse(memory.record!)], check: (e) => (authentic(macKey)(e) ? null : 'mac') });
+  assert.ok(v.ok && v.sealed === 1 + numbers.length, v.problems.join('\n'));
+  for (const number of [numbers[0]!, numbers[300]!, numbers[700]!, numbers.at(-1)!]) assert.ok(await cp.prove(number), `${number} provable`);
+  // Each part's floor is the lowest `at` left above it, below the barrier's: the next part was read from it.
+  const floors = (await store.pairs(0n, 100)).map((p) => decodeFloor(p.notes));
+  assert.ok(floors.every((f, i) => i === 0 || f >= floors[i - 1]!), 'floors never come down');
+  assert.ok(new Set(floors).size >= 4, `the parts signed floors of their own: ${floors.join(', ')}`);
+});
+
+test("T169: Postgres's clock stepping back under a capped window (a later use stamped two minutes low): every use is sealed and the walk verifies; a use past its pair's ceiling gets no proof, never a wrong one", async () => {
+  // From the genesis pair, whose floor is the schema's: the first part's floor is then the low use's `at`.
+  const { cp, store, memory, alerts } = await open(variableMemory(), 200);
+  const now = Date.now();
+  const numbers: bigint[] = [];
+  for (let i = 0; i < 300; i += 1) numbers.push(await use(now));
+  // Numbered after them, stamped as if the database's clock had stepped back by two minutes.
+  const low = await use(now - 120_000);
+  for (;;) {
+    const t = await cp.tick();
+    assert.ok(t.signed && t.failures.length === 0, t.failures.join('; '));
+    if (!t.more) break;
+  }
+  assert.equal(cp.pair.pair.upto, low, 'every number sealed, the low one included');
+  assert.deepEqual(alerts, []);
+  // The first part signed the low use's `at` as its floor, so its own uses sit past its ceiling (63 s; CeilingHolds
+  // broken, as HotPathOneChunksClock expects). The walk reads the log in batches to a later pair's ceiling, and finds
+  // every entry where its pair says. A proof of one, which reads to its own pair's ceiling, finds nothing: no proof is
+  // handed out, and none that is wrong.
+  const v = await verifyLog(store, { verifiers, anchors: [JSON.parse(memory.record!)], check: (e) => (authentic(macKey)(e) ? null : 'mac') });
+  assert.ok(v.ok && v.sealed === 1 + numbers.length, v.problems.join('\n'));
+  const proof = await cp.prove(numbers[0]!).catch((error: Error) => error);
+  assert.ok(proof === null || proof instanceof Error, 'no proof of a use past its pair\'s ceiling');
+  assert.ok(await cp.prove(low), 'the low use is proved where its pair says');
+});

@@ -9,14 +9,19 @@ export type StallProxy = {
   url: string;
   hold(): void;
   release(): void;
+  /** The clients connected now. */
+  clients(): number;
   close(): Promise<void>;
 };
 
-export async function stallProxy(url: string): Promise<StallProxy> {
+/** `delayMs`: each chunk held that long each way, as a round trip of twice it (Hyperdrive's ~20 ms, the bench). */
+export async function stallProxy(url: string, options: { delayMs?: number } = {}): Promise<StallProxy> {
+  const delay = options.delayMs ?? 0;
   const target = new URL(url);
   let held = false;
   const waiting: (() => void)[] = [];
   const sockets = new Set<Socket>();
+  const clients = new Set<Socket>();
   const track = (socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
@@ -28,6 +33,7 @@ export async function stallProxy(url: string): Promise<StallProxy> {
     const kept: Buffer[] = [];
     from.on('data', (chunk: Buffer) => {
       if (held) kept.push(chunk);
+      else if (delay > 0) setTimeout(() => to.write(chunk), delay);
       else to.write(chunk);
     });
     from.on('close', () => to.destroy());
@@ -37,9 +43,18 @@ export async function stallProxy(url: string): Promise<StallProxy> {
   };
   const server = createServer((client) => {
     track(client);
+    clients.add(client);
+    client.on('close', () => clients.delete(client));
+    // Read from the first byte, kept until the upstream is there, so that a client that goes away is heard while held.
+    const early: Buffer[] = [];
+    const keep = (chunk: Buffer) => early.push(chunk);
+    client.on('data', keep);
     const go = () => {
+      if (client.destroyed) return;
+      client.removeListener('data', keep);
       const upstream = connect(Number(target.port), target.hostname);
       track(upstream);
+      for (const chunk of early.splice(0)) upstream.write(chunk);
       forward(client, upstream);
       forward(upstream, client);
     };
@@ -56,6 +71,7 @@ export async function stallProxy(url: string): Promise<StallProxy> {
     hold: () => {
       held = true;
     },
+    clients: () => clients.size,
     release: () => {
       held = false;
       for (const flush of flushes) flush();
