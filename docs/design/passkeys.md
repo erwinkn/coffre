@@ -31,7 +31,7 @@ Erwin's decisions, from a team request on 2026-10-31:
 | Connecting an MCP client, linking an account, managing passkeys | as today | a touch in the last 5 minutes, if you have a passkey | a touch in the last 5 minutes |
 | Approving a terminal | as today | a touch for that terminal, if you have a passkey | a touch for that terminal |
 | Reading values | as today | as today | as today |
-| Reading a protected environment's values, with `protectedReveals` | as today | a touch in the last 5 minutes | a touch in the last 5 minutes |
+| Reading a protected environment's values, with `protectedReveals` (phase 3) | as today | a touch in the last 5 minutes | a touch in the last 5 minutes |
 | `/use`, CI and workload sign-in, services | untouched | untouched | untouched |
 
 Three rules carry it:
@@ -536,6 +536,17 @@ vault's own read, fenced like any other change of the policy.
 input, the use matrices gain its cases, and the unwrap's policy fence holds
 on all-encrypted reads too, on each of those calls.
 
+**An older vault cannot enforce it, so the app asks for proof.** The type
+binds the app, not the vault running beside it: Workers Builds may deploy
+either Worker first (`docs/deploy.md`), and a vault of the previous release
+ignores a field it does not know. So every answer that releases values says
+it decided `fresh` (`freshDecided: true`), and with `protectedReveals` on,
+the app releases nothing from an answer that does not say so: a person's
+read on such a vault is refused `503 vault_upgrade_needed`, on every path,
+until the vault is upgraded too. Services and handles, whose `fresh` is
+always true, read as before. Conformance runs it against the previous
+release's vault.
+
 **Asking before reading.** A refusal that looks like any other cannot ask
 for a touch, so the clients ask first, from what is no secret: `GET
 /api/me` lists the environments the caller reaches, each with whether it is
@@ -545,7 +556,12 @@ dialog, and the CLI starts its step-up (section 3.5), then reads. A
 protection that lands in between gets the plain refusal; the client reads
 `/api/me` again, sees it, confirms and retries once.
 
-`protectedReveals` ships in a PR of its own, after the rest (section 14).
+**Phase 3, reviewed on its own.** Four review rounds of this design found a
+hole here each time, every one in how the check meets the vault's read
+paths, none in the passkeys themselves. So `protectedReveals` is out of
+phase 2: the policy and the rule above stay as decided, and its build
+starts with a design review of its own against the vault's read paths as
+they are then (open question 4).
 
 ### 4.4 Who is never asked, and who cannot be
 
@@ -1230,13 +1246,15 @@ running `passkeys: 'required'`:
    the link checks, MCP approvals that stay pending.
 5. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
-6. **`protectedReveals`**: `fresh`, required on every value-releasing call
-   of the `Vault` interface (`useNamed`, `use`, `useMany`, `unwrap`),
-   decided under the policy fence, `Probing.tla` and the use matrices, the
-   clients asking first from `GET /api/me`.
-7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
+6. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
    (the policy, `rpId`, recovery and its log review) and
    `docs/offboarding.md`.
+
+7. **Phase 3, `protectedReveals`**, after a design review of its own:
+   `fresh`, required on every value-releasing call of the `Vault` interface
+   (`useNamed`, `use`, `useMany`, `unwrap`), decided under the policy fence
+   and acknowledged in every answer, `Probing.tla` and the use matrices,
+   the clients asking first from `GET /api/me`.
 
 Each PR leaves `main` shippable: until PR 3, nothing is reachable.
 
@@ -1258,11 +1276,14 @@ Each PR leaves `main` shippable: until PR 3, nothing is reachable.
    without one and makes them add a new one. Proposed: `off`, documented,
    for its simplicity; the exemption if you would rather not drop the
    factor for everyone.
-4. **`protectedReveals` and tokens.** Under it, personal tokens and MCP
-   connections read no protected environment's values (they cannot touch a
-   passkey); their `/use` is untouched. Option: let a personal token made
-   inside a fresh window read them until it expires. Proposed: refuse, and
-   leave `protectedReveals` off by default.
+4. **`protectedReveals`: phase 3, and what tokens may do under it.** It is
+   the one part review kept finding holes in (section 4.3), all where a
+   check meets the vault's several read paths, so I moved it out of phase 2
+   behind a review of its own. Under it, personal tokens and MCP
+   connections read no protected environment's values (they cannot touch
+   a passkey); their `/use` is untouched. Option: let a personal token
+   made inside a fresh window read them until it expires. Proposed: phase
+   3; refuse tokens; off by default.
 5. **User verification: `required` or `preferred`?** Proposed `required`:
    a touch then means the person, not someone at their unlocked laptop.
    `preferred` would let PIN-less security keys work without setup.
