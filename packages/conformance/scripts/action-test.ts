@@ -72,6 +72,10 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     appendFileSync(environmentFile, `ACTION_TEST_URL=${deployment.origin}\nACTION_TEST_TOKEN=${token}\n`);
     writeFileSync(readyFile, String(process.pid), { mode: 0o600 });
     await stopped;
+  } catch (error) {
+    // The setup step prints this log when the fixture stops: what the deployment's processes said goes with it.
+    console.error(`The deployment's output, last lines:\n${deployment.output(8000)}`);
+    throw error;
   } finally {
     await deployment.stop();
   }
