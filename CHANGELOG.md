@@ -2,6 +2,115 @@
 
 ## Unreleased
 
+- **0.15's log is the default: every deployment keeps it.** The switch
+  the entries below say they were behind is gone from the deployments:
+  `vault(…)` on Workers and `localVault`/`serveVault` on Node keep 0.15's
+  log, with no way back, since once cut over the database refuses 0.14's
+  writes. What it brings:
+  - A use (`/use`, a reveal, an export, a CI run's read) is one statement
+    of the vault's, through a login and a Hyperdrive config of its own
+    (`coffre_vault_hot`), never behind a change, a sign-in or the audit
+    head. On the Workers bench (`pnpm bench:workers`, Postgres 16.14 on
+    Debian, warm, against the same release on 0.14's log), a one-key reveal
+    costs 12.0 ms of CPU against 18.9, an export of 30 keys 21.6 against
+    25.3, a reveal of 30 keys 21.3 against 19.0 (one vault call, below),
+    and the audit page 53.7 against 68.6; a sign-in 28.8 against 17.7. Wall
+    time, locally, is longer: 56 against 45 ms for one key, 80 to 83
+    against 47 to 48 for 30, as each vault call there opens a Postgres
+    connection of its own, which Hyperdrive keeps open between calls.
+  - Every change answers once a checkpoint the vault's key signs seals it,
+    within about half a second: the checkpointer, a Durable Object beside
+    the vault on Workers (`CoffreCheckpointer`, which the vault starts), or
+    in the vault's process on Node. It remembers the newest checkpoint it
+    signed where whoever writes the database cannot reach (its object's
+    storage; `CHECKPOINTER_MEMORY`, a file, on Node), and every check of the
+    log holds to it.
+  - A vault missing what 0.15 needs refuses to start, saying which: on
+    Workers, `hotDatabase` and `checkpointer` in `vault(…)`; on Node,
+    `hotDatabase` and `checkpointer: { memory }`. Nothing falls back to
+    0.14's way of opening values.
+
+  What changes for whoever runs it:
+  - **Deploy 0.15 at once, never gradually.** After the cutover, 0.14's
+    writes are refused (below), and a 0.15 vault decides nothing until a
+    0.15 app has cut it over. On Workers, `pnpm run deploy` now builds the
+    app first, then deploys the vault and the app back to back: requests
+    in the seconds between the two fail, and clients ask again. With
+    Workers Builds, which builds each Worker apart, start both together. On
+    Node, stop every 0.14 process, then start the vault, then the servers:
+    no rolling update across replicas.
+  - **Some people sign in again.** A session an old isolate renews after
+    the cutover is refused once.
+  - **The bulk cap counts differently.** It counts the distinct keys a
+    principal asks for, under the principal's lock, whether or not they
+    were released: a token probing keys it cannot read spends its budget,
+    and a key stays counted up to a minute past its window. 0.14 counted
+    releases, in `vault_releases`, which 0.15 does not read: across the
+    deploy, a principal may read up to twice the cap within one window,
+    once. `bulkLimit` keeps its meaning otherwise (default 1,000 keys in
+    15 minutes).
+  - **Uses are kept by day.** Each use is a row of `log_uses`, in one
+    partition per UTC day, which the checkpointer makes ahead; none is
+    dropped (retention keeps every day).
+  - **On Node, one vault process per database.** Two would each sign, and
+    refuse each other's checkpoints.
+  - **A restore resets the checkpointer's memory**, once, by hand
+    (`docs/restore.md`, "On 0.15's log").
+  - **Do not rotate the vault's signing key on 0.15, nor a local vault
+    key,** until 0.15.1. 0.15's checkpoints, and the MACs of its log's
+    entries, are under the vault's first signing key alone: after a rotation
+    that changes it, the checkpointer refuses the log, and every change
+    fails at its seal (uses go on). A local vault key derives the signing
+    key, so rotating it changes the signing key too. With AWS KMS and a
+    `signingKey` of its own, the KEK alone may rotate, as before.
+
+  Upgrading a deployment from 0.14 (for Equisafe, on Workers: steps 1 to 5,
+  in order; nothing serves 0.15 before step 4):
+  1. **Back the database up** (`coffre backup`). Once 0.15 has cut over,
+     0.14.5 deployed again serves reads only: every write it tries is
+     refused (above), a sign-in, a token's exchange and a session's renewal
+     included, so a rollback keeps values readable to the sessions and
+     tokens already held while the cause
+     is fixed, and only restoring this backup brings 0.14 writes back,
+     losing what was written since.
+  2. **Update the code.** `pnpm exec coffre update` moves the pins to 0.15;
+     then bring the vault to what `coffre init` writes now
+     (`examples/workers`): in `vault/src/worker.ts`, `hotDatabase:
+     postgres(env.HOT_HYPERDRIVE)`, `checkpointer: env.CHECKPOINTER` and
+     `export const CoffreCheckpointer = checkpointer()`; in
+     `vault/wrangler.jsonc`, the `HOT_HYPERDRIVE` Hyperdrive binding, the
+     `CHECKPOINTER` Durable Object and its migration (tag `checkpointer`,
+     `new_sqlite_classes`); in `package.json`, the new `deploy` script. On
+     Node, `src/vault.ts` takes `hotDatabase: env('HOT_DATABASE_URL')` and
+     `checkpointer: { memory: env('CHECKPOINTER_MEMORY') }`. Commit, but do
+     not push yet where a push deploys (the deploy workflow `coffre init`
+     writes), nor deploy.
+  3. **Migrate, and give the hot path its login,** before any deploy, as
+     every release migrates: `pnpm exec coffre setup` in the deployment's
+     directory, as the database's administrator (it needs `CREATEROLE`).
+     Answer "No, I'll do Cloudflare myself", since setup's Cloudflare
+     path ends with a deploy, and "No" to new passwords for the logins
+     that exist. It migrates (0022 makes `coffre_vault_hot`), gives
+     `coffre_vault_hot`, which cannot log in yet, a password unasked,
+     checks every login's rights, and shows the hot database URL with the
+     `wrangler hyperdrive create coffre-vault-hot --caching-disabled …`
+     command. Run it and put the id it prints under `HOT_HYPERDRIVE` in
+     `vault/wrangler.jsonc`; on Node, the URL is `HOT_DATABASE_URL`. The
+     database's connections are now split three ways: check each config's
+     `--origin-connection-limit`. 0.14.5 keeps serving on the migrated
+     schema, and ignores the new login and config.
+  4. **Deploy both Workers at once** (`pnpm run deploy`, or the deploy
+     workflow), at a quiet moment. On Node: stop the servers and the vault,
+     set `HOT_DATABASE_URL` and `CHECKPOINTER_MEMORY` (a path on
+     persistent storage the vault's user alone writes) in `vault.env`,
+     start the vault, then the servers. The first request cuts over, in
+     seconds, answering 503 with Retry-After meanwhile; the vault starts its
+     checkpointer from its first call.
+  5. **Check it:** `/readyz` green; `coffre verify instance` (0.15's log
+     verified from its newest checkpoint); the audit page's sealed log; a
+     `/use` through the proxy.
+  `docs/design/0.15-plan.md`, "As built: PR 10".
+
 - **0.15's read of several keys is one vault call and one statement, behind its switch.**
   A reveal of an environment, `coffre export` and the Action's `keys:`
   opened each value by a vault call of its own, about 3.5 ms of Workers
@@ -37,9 +146,8 @@
   `HOT_DATABASE_URL`, the same `file:` URL as `DATABASE_URL` on SQLite.
   Conformance on Workers takes `--hot-runtime <coffre_vault_hot URL>`, and
   its `hot login` check holds that login to the vault's rights and the hot
-  path's timeouts. The
-  hot path stays unused until 0.15's log is the default: a deployment sees
-  no change but the login and its config. To have them, run `coffre setup`
+  path's timeouts. Every use takes the hot path now that 0.15's log is
+  the default (above). To have the login and its config, run `coffre setup`
   again in the deployment's directory; a deployment made before passes
   `hotDatabase` in its vault's entry as the examples now do.
 - **A role's card shows every permission, in the same place on every card.**

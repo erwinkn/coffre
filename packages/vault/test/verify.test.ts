@@ -17,7 +17,7 @@ import { eq } from 'drizzle-orm';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 
 import { ISSUER, KEYS, ORIGIN, proofKey, testIssuer, type TestIssuer } from './issuer.ts';
-import { emptyDatabase, newProject, openLocalVault, openTestDatabase, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, newProject, openLocalVault, openTestDatabase, sealed, nothingHeld, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
@@ -59,7 +59,7 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log, the test issuer, and a service account that views a project. */
 async function world() {
   const issuer = testIssuer();
-  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed });
+  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);

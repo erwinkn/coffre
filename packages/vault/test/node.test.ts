@@ -9,8 +9,10 @@ import { join } from 'node:path';
 import { isUnavailable } from '@coffre/db/dialect';
 
 import { failureOf } from '../src/failure.ts';
-import { connectVault, serveVault } from '../src/node.ts';
-import { openTestDatabase } from './database.ts';
+import { resolveVaultConfig } from '../src/config.ts';
+import { connectVault, localVault, serveVault } from '../src/node.ts';
+import { prepareVault } from '../src/vault.ts';
+import { openTestDatabase, sealed } from './database.ts';
 
 // The vault as a process of its own, which the server reaches over a Unix
 // socket (src/node.ts).
@@ -33,6 +35,9 @@ test('the vault leaves an idle connection open for the server to reuse: it never
   const vault = await serveVault({
     socket: join(dir, 'vault.sock'),
     database: db.vault,
+    // As a deployment serves it: its uses' own login, and its checkpointer, its memory a file here.
+    hotDatabase: await db.hot(),
+    checkpointer: { memory: join(dir, 'memory') },
     kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
     owners: ['root@acme.example'],
   });
@@ -85,5 +90,19 @@ test("the vault's database not answering crosses the socket as the outage it is,
     assert.equal(isUnavailable(gone), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a vault on 0.15's log, the default, refuses a configuration without what it needs, by name", async () => {
+  const db = await openTestDatabase();
+  const keys = { kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'] };
+  try {
+    await assert.rejects(localVault({ database: db.vault, checkpointer: { memory: '/nowhere' }, ...keys }), /set hotDatabase .*coffre_vault_hot/);
+    await assert.rejects(localVault({ database: db.vault, hotDatabase: db.vault, ...keys }), /set checkpointer: \{ memory \}/);
+    // Below the deployment's entries, the vault itself: sealed and verified through a checkpointer, or not at all (T151).
+    await assert.rejects(prepareVault(resolveVaultConfig(keys), { log: '0.15' }), /sealThrough/);
+    await assert.rejects(prepareVault(resolveVaultConfig(keys), { log: '0.15', sealThrough: sealed }), /heldOutside/);
+  } finally {
+    await db.close();
   }
 });

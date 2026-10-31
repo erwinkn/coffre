@@ -13,7 +13,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { decodePair, encodePair, leafHash, openPair, pairSigners, pairVerifiers, proveConsistency, signPair, verifyInclusion, type PairNotes } from '@coffre/core/merkle';
 
 import { Checkpointer, logOrigin, type Witness } from '../src/checkpointer.ts';
-import { runCheckpointer } from '../src/checkpointer-node.ts';
+import { keepCheckpointer, runCheckpointer } from '../src/checkpointer-node.ts';
 import { checkpointerAlarms, checkpointerObject, durableSealThrough, startCheckpointer, type ObjectNamespace, type ObjectState } from '../src/checkpointer-workers.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { durableWitness, r2Archive, witnessObject } from '../src/witness-workers.ts';
@@ -110,6 +110,37 @@ test('on Node: ticks every interval, a change sealed through it, its memory a sy
     assert.equal((await again.sealThrough(n)).proof.number, n);
   } finally {
     await again.stop();
+  }
+});
+
+test("on Node, as the vault keeps it: a refused open is one alarm, a change's seal fails with why, and it opens once the log is put right", async () => {
+  // Another signer's genesis in the database: this signer refuses it, as it refuses a restore made under another key.
+  const other = await runCheckpointer({ database: db.vault, seed: randomBytes(32), memory: join(dir, `other-${randomBytes(4).toString('hex')}`), intervalMs: 3_600_000 });
+  await other.stop();
+  const memory = join(dir, `kept-${randomBytes(4).toString('hex')}`);
+  const kept = await keepCheckpointer({ database: db.vault, seed, memory, intervalMs: 20, retryMs: 50 });
+  try {
+    const change = await log.change();
+    await assert.rejects(kept.sealThrough(change), /the checkpointer cannot open: .*not a pair signed by this log/);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const alarms = await kept.alarms();
+    assert.equal(alarms.filter((a) => /cannot open/.test(a.message)).length, 1, JSON.stringify(alarms));
+    assert.deepEqual(await kept.heldOutside(), [], 'it signed nothing');
+    // The other signer's log gone: the next try opens over it, and seals.
+    await log.empty();
+    for (let waited = 0; ; waited += 25) {
+      const n = await log.change();
+      const sealed = await kept.sealThrough(n).catch(() => null);
+      if (sealed !== null) {
+        assert.equal(sealed.proof.number, n);
+        break;
+      }
+      assert.ok(waited < 5000, 'it never opened');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal((await kept.heldOutside()).length, 1, 'the pair it signed, in its file');
+  } finally {
+    await kept.stop();
   }
 });
 

@@ -47,7 +47,7 @@ for (const log of ['0.14', '0.15'] as const) {
   // The seed the vault signs with, from its KEK, as the vault derives it.
   const probe = testVault([ROOT], {}, { kek });
   const checkpointer = log === '0.15' ? await runCheckpointer({ database: createDatabase(pool), seed: probe.signingKey, memory: join(dir, 'memory') }) : null;
-  const vault = testVault([ROOT], {}, { kek }, {}, checkpointer === null ? {} : { log: '0.15', sealThrough: checkpointer.sealThrough });
+  const vault = testVault([ROOT], {}, { kek }, {}, checkpointer === null ? { log: '0.14' } : { log: '0.15', sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
   deps.signin = signin;

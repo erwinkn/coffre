@@ -10,7 +10,7 @@
     "dev": "vite dev app",
     "typecheck": "tsc --noEmit",
     "build": "wrangler deploy --dry-run -c vault/wrangler.jsonc && vite build app && wrangler deploy --dry-run -c app/dist/server/wrangler.json",
-    "deploy": "wrangler deploy -c vault/wrangler.jsonc && vite build app && wrangler deploy -c app/dist/server/wrangler.json",
+    "deploy": "vite build app && wrangler deploy -c vault/wrangler.jsonc && wrangler deploy -c app/dist/server/wrangler.json",
     "conformance": "coffre-conformance workers"
   },
   "dependencies": {

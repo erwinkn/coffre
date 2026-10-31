@@ -8,19 +8,22 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
 import { deriveLogKey } from '@coffre/core/audit';
-import { defineSignin, github, google, hashToken } from '@coffre/core/identity';
+import { defineSignin, github, google, hashToken, signin } from '@coffre/core/identity';
 import { newUseRequestId, type NamedUseOutcome, type UseOutcome } from '@coffre/core/vault';
 import { appendEntries } from '@coffre/db/log';
 import { asc, eq, like, sql, type SQL } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { runScheduled } from '../src/app.ts';
+import { resolveConfig } from '../src/config.ts';
 import { CUTTING_OVER_NOW, cutoverReady, type CutoverKnown } from '../src/cutover.ts';
 import { finishRotation, rotateStep } from '../src/key-rotation.ts';
 import { resolvePath } from '../src/db/queries.ts';
+import { createRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, identities, logChanges, logFence, projects, secrets, vaultGrants, vaultMembers } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const PUBLIC_URL = 'https://secrets.acme.example';
@@ -48,7 +51,7 @@ beforeEach(async () => {
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
   }
-  const vault = testVault([ROOT], {}, undefined, {}, {});
+  const vault = testVault([ROOT], {}, undefined, {}, { log: '0.14' });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
   old = { vault, deps, root: clientFor(deps, ROOT) };
@@ -58,7 +61,7 @@ beforeEach(async () => {
 /** The deploy: a vault of 0.15's log on the same keys, not cut over, and the app over it, whose door cuts it over. */
 function deploy(signin = SIGNIN, config: { bulkLimit?: { count: number; windowMinutes: number } } = {}) {
   const hotDatabase = TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
-  const vault = testVault([ROOT], { hotDatabase, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, cutover: 'app' });
+  const vault = testVault([ROOT], { hotDatabase, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, cutover: 'app' });
   // The same app, its key the same: a deploy changes neither.
   const deps = testDeps(db.runtime, [ROOT], { vault, chainKey: old.deps.chainKey });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
@@ -530,4 +533,16 @@ test("an access entry forged in the vault's name holds no use: its check writes 
   // The next decision about the account, the head free, reports it.
   await now.vault.access(CI);
   assert.equal(await reports(), 1);
+});
+
+test("the scheduled job, run before any request, as a Node server runs it at its start, cuts over first, then checkpoints", async () => {
+  await old.root.projects.create('market');
+  const now = deploy();
+  const config = resolveConfig({ publicUrl: PUBLIC_URL, vault: now.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: now.deps.chainKey.toString('base64') });
+  const runtime = createRuntime(config, now.deps.db, now.vault, { json: async () => assert.fail('the job fetches nothing') });
+  await runScheduled(runtime);
+  assert.equal(runtime.cutover?.done, true);
+  assert.ok((await db.owner.select({ number: logChanges.number }).from(logChanges)).length > 0, "0.15's log holds the cutover");
+  // And it runs as it did, once cut over.
+  await runScheduled(runtime);
 });

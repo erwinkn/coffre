@@ -20,7 +20,7 @@ import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { credentialObject } from '../src/objects.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, withLogUnlocked, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
@@ -62,7 +62,7 @@ async function bindingOf(id: string): Promise<SignInInput['binding']> {
 /** A vault keeping 0.15's log, the service account CI a viewer of a project, and a binding of CI's the Owner made: what a CI run signs in through. */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, principal: CI })).ok);

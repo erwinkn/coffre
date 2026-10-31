@@ -8,7 +8,7 @@ export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdriv
 /** Postgres through Hyperdrive, the one database a Worker runs on, the app's and the vault's. */
 export function postgres(hyperdrive: { readonly connectionString: string }): PostgresDatabase {
   if (typeof hyperdrive?.connectionString !== 'string') {
-    throw new Error('postgres() takes the Hyperdrive binding, e.g. postgres(env.HYPERDRIVE)');
+    throw new Error('postgres() was given no Hyperdrive binding: one the code names (HYPERDRIVE, VAULT_HYPERDRIVE, HOT_HYPERDRIVE) is missing from its wrangler.jsonc, or bound under another name');
   }
   return { engine: 'postgres', hyperdrive };
 }

@@ -5,7 +5,7 @@
 // same vault key and audit key, and the tunnel's admission, rechecks and log
 // entries run here, as deployed.
 import { github, signin } from '@coffre/core/identity';
-import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
+import { checkpointer, postgres as vaultDatabase, vault, type ObjectNamespace } from '@coffre/vault/cloudflare';
 
 import { createCoffre, postgres, type SocketsNamespace, type Vault as VaultBinding } from '../../src/cloudflare.ts';
 import { credentialProxy, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
@@ -13,6 +13,8 @@ import { credentialProxy, postgres as tunnel } from '../../src/plugins/credentia
 type Env = {
   HYPERDRIVE: { connectionString: string };
   VAULT_HYPERDRIVE: { connectionString: string };
+  HOT_HYPERDRIVE: { connectionString: string };
+  CHECKPOINTER: ObjectNamespace;
   APP_KEY: string;
   VAULT_KEY: string;
   VAULT: VaultBinding;
@@ -21,9 +23,12 @@ type Env = {
 
 export const Vault = vault((env: Env) => ({
   database: vaultDatabase(env.VAULT_HYPERDRIVE as never),
+  hotDatabase: vaultDatabase(env.HOT_HYPERDRIVE as never),
+  checkpointer: env.CHECKPOINTER,
   kek: { id: 'test-kek-1', key: env.VAULT_KEY },
   owners: ['admin@acme.example'],
 }));
+export const CoffreCheckpointer = checkpointer();
 
 const coffre = createCoffre((env: Env) => ({
   publicUrl: 'https://secrets.acme.example',
