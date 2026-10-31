@@ -28,28 +28,40 @@ Erwin's decisions, from a team request on 2026-10-31:
 | Sign-in, no passkey yet | provider only | provider only, then a prompt to add one | provider, then add one before any session exists |
 | Sign-in, has a passkey | provider only | provider + passkey | provider + passkey |
 | Changing access, issuing service credentials | as today | a touch in the last 5 minutes; no passkey yet: add one first | a touch in the last 5 minutes |
-| Approving a terminal or an MCP client, linking an account, managing passkeys | as today | a touch, if you have a passkey | a touch |
+| Connecting an MCP client, linking an account, managing passkeys | as today | a touch in the last 5 minutes, if you have a passkey | a touch in the last 5 minutes |
+| Approving a terminal | as today | a touch for that terminal, if you have a passkey | a touch for that terminal |
 | Reading values | as today | as today | as today |
 | Reading a protected environment's values, with `protectedReveals` | as today | a touch in the last 5 minutes | a touch in the last 5 minutes |
 | `/use`, CI and workload sign-in, services | untouched | untouched | untouched |
 
+Three rules carry it:
+
+1. **A touch issues a new session.** Every passkey touch in a browser (at
+   sign-in, at a fresh check, at a step-up) issues a new session to the
+   browser that touched, and ends the one it came in on. A copy of the old
+   cookie, wherever it went, stops working.
+2. **Every credential a person holds names the passkey that confirmed it,
+   and every request checks that the passkey is still live.** Removing or
+   resetting a passkey ends what it confirmed, at the next request.
+3. **The app enforces it; the vault does not** (section 8). The vault could
+   verify passkey signatures itself later, for Owner-level acts.
+
 The pieces:
 
-- **One new table**, `passkeys`, and two nullable columns on `credentials`
-  (`passkey_id`, `confirmed_at`) and one on `device_authorizations`
-  (`passkey_id`). All additive: one migration per engine.
-- **Two new sign-in routes**, `GET` and `POST /auth/passkey`, between the
-  provider's callback and the session. Until the passkey answers, coffre
-  writes nothing: what the provider vouched for waits in a sealed cookie,
+- **One new table**, `passkeys`, and nullable columns: `passkey_id` and
+  `confirmed_at` on `credentials`, `passkey_id` on `device_authorizations`
+  and `mcp_connections`. All additive: one migration per engine.
+- **Sign-in routes**: `GET` and `POST /auth/passkey`, between the provider's
+  callback and the session. Until the passkey answers, coffre writes
+  nothing: what the provider vouched for waits in a small sealed cookie,
   as `PendingSignin` does today.
-- **Five API routes**: `GET`, `POST`, `PATCH` and `DELETE
-  /api/members/:member/passkeys[/:id]`, and `POST /api/passkeys/checks`.
+- **API routes**: `POST /api/passkeys/challenges`, `POST
+  /api/passkeys/checks`, and `GET`, `POST`, `PATCH` and `DELETE
+  /api/members/:member/passkeys[/:id]`.
 - **A table typed over the route table**, `FRESH_ROUTES`, like
   `PERSONAL_TOKEN_ROUTES`: every route says whether it needs a fresh check,
-  so a new route fails the typecheck until it says.
-- **The app enforces it, the vault does not** (section 8). The vault could
-  verify passkey signatures itself later, for Owner-level acts, which would
-  close the gap `architecture.md` names under "What the vault stops".
+  so a new route fails the typecheck until it says. The sign-in routes
+  outside the table check for themselves (section 4.5).
 - **A verifier of our own**, about 300 lines in `@coffre/core/identity`,
   over WebCrypto, rather than `@simplewebauthn/server` (section 9).
 
@@ -69,11 +81,12 @@ Bob's GitHub sign-in and asks for Bob's passkey. The browser refuses: a
 passkey for `secrets.acme.example` answers only that origin. This is what
 TOTP cannot give, and why passkeys only.
 
-**A stolen session cookie.** Malware lifts Ada's cookie and replays it from
-elsewhere. It can read what Ada reads, as today. It cannot promote itself
-an Owner, issue a service token, approve a terminal or connect an MCP
-client, each of which would outlive the cookie: those need a touch within
-five minutes, which the thief cannot make.
+**A stolen session cookie.** Malware lifts Ada's cookie at 09:00 and replays
+it from elsewhere. It can read what Ada reads, as today. It cannot promote
+anyone, issue a service token, approve a terminal or connect an MCP client:
+those need a session touched in the last five minutes. And when Ada next
+touches a passkey, at 10:02, that browser gets a new session and the
+stolen one ends (rule 1): the thief cannot ride Ada's touch.
 
 **What it does not stop:**
 
@@ -84,9 +97,12 @@ five minutes, which the thief cannot make.
   which narrows a stolen cookie's chance to add one (section 3.3).
 - **An app fully taken over.** It can skip its own checks. The vault does
   not see passkeys in this design (section 8).
-- **A cookie stolen inside a fresh window.** A thief who takes Ada's cookie
+- **A cookie stolen after the touch.** A thief who copies Ada's new cookie
   in the five minutes after Ada's touch gets the rest of that window. The
   window is the price of not touching per act.
+- **Malware that stays.** Software on Ada's machine that reads every new
+  cookie gets every new session. A passkey proves a touch, not a clean
+  device.
 - **Reads.** Revealing a value needs no passkey (Erwin's call), unless the
   deployment turns on `protectedReveals` for protected environments.
 - **Cloudflare Access.** Behind Access, coffre has no session of its own;
@@ -141,37 +157,43 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
 1. `/login` → Continue with GitHub → GitHub → `GET /auth/callback/github`,
    as today.
 2. The callback verifies GitHub's answer, then reads, in one statement, the
-   identity, its member and that member's live passkeys (today's
-   `findIdentity`, joined). Ada has passkeys, so no session yet. It clears
-   the provider's pending cookie and sets another, `__Host-coffre_passkey`,
-   sealed like `PendingSignin` and five minutes long:
+   identity, its member, and whether that member has a live passkey
+   (today's `findIdentity`, joined). Ada has one, so no session yet. The
+   callback clears the provider's pending cookie and sets another,
+   `__Host-coffre_passkey`, sealed like `PendingSignin`, five minutes long,
+   and small:
 
    ```ts
    type PendingFactor = {
      purpose: 'signin' | 'enroll';
-     account: SignedInAccount;      // what GitHub vouched for: provider, subject, emails, name
+     // What GitHub vouched for: the account, and for a first sign-in the one verified email that
+     // matched an invitation. Never the whole list: the cookie stays under 1 KB sealed.
+     account: { provider: string; subject: string; email: string | null; name: string | null }; // name cut to 100 characters
      principal: string;             // 'user:admin@acme.example'
      generation: number;
-     next: string;                  // where to land
+     next: string;                  // where to land, a path of at most 512 characters, or '/projects'
      challenge: string;             // 32 random bytes, base64url
      issuedAt: number;              // ms; also the replay guard (section 7.3)
-     allow: { id: string; transports: string[] }[]; // the person's live passkeys, at most 10
    };
    ```
 
-   and redirects to `/auth/passkey`.
-3. The page, "Confirm it's you", renders from the cookie (no query), and its
-   button calls `navigator.credentials.get` with that challenge, `rpId:
-   'secrets.acme.example'`, `allowCredentials` from `allow`, and
+   and redirects to `/auth/passkey`. Sealing refuses a value over 3 KB, so
+   no input can make a cookie a browser drops.
+3. The page, "Confirm it's you", reads the cookie and Ada's live passkeys in
+   its render (one query: IDs and transports), and its button calls
+   `navigator.credentials.get` with that challenge, `rpId:
+   'secrets.acme.example'`, those passkeys as `allowCredentials`, and
    `userVerification: 'required'`. Ada touches the YubiKey.
 4. `POST /auth/passkey` with the assertion, a browser post held to the
-   same origin as every other. coffre opens the cookie, checks
-   the assertion (section 7), moves the passkey's counter and replay mark in
-   one conditional statement, and then runs today's `completeSignin` from
-   the cookie's `account`, which re-reads and re-checks everything it
-   decides on. The session it issues carries `passkey_id` = the YubiKey and
-   `confirmed_at` = now. The cookie is cleared, the session cookie set, and
-   Ada lands on `next`.
+   same origin as every other. coffre opens the cookie, reads the passkey
+   the assertion names (its key and counter), checks the assertion (section
+   7), and runs today's `completeSignin` from the cookie's `account`, which
+   re-reads and re-checks everything it decides on. Inside its transaction,
+   before the session is written, it moves the passkey's counter and replay
+   mark (section 7.3), conditional on the passkey still being live and
+   still Ada's, at the generation `completeSignin` resolved. The session
+   carries `passkey_id` = the YubiKey and `confirmed_at` = now. The cookie
+   is cleared, the session cookie set, and Ada lands on `next`.
 
 The cookie carries what GitHub vouched for and nothing coffre decided.
 Someone who passed GitHub but not the passkey leaves no row behind, and an
@@ -204,6 +226,13 @@ its audit entries: link the GitHub account (today's first-sign-in path),
 insert the passkey, issue the session confirmed by it. Entries:
 `account.link`, `passkey.add`, `sign_in`.
 
+**An `enroll` state adds a first passkey only.** The transaction, under the
+audit head that already serializes bindings to one person, checks that the
+person has no live passkey, and refuses otherwise ("You already have a
+passkey: sign in with it"). So a second use of the same sealed state, or two
+tabs racing, adds one passkey at most, and nobody adds a second key through
+the door meant for the first.
+
 `user.id` is no secret and no email: 16 bytes of HKDF over the member and
 generation, derived each time and never stored. It stays the same across a
 person's passkeys, so a keychain that already holds one for Bob replaces it
@@ -221,13 +250,15 @@ Adding the first passkey needs a session signed in within the last ten
 minutes; otherwise "Sign in again to add your first passkey". A stolen
 cookie is rarely that young, and adding a passkey to someone else's account
 is the one way a cookie thief could make their access outlive the cookie.
+It takes the same "still first" check as section 3.2.
 
 Adding a first passkey changes three things for Bob:
 
-- this session is confirmed by it (`passkey_id`, `confirmed_at`);
-- Bob's other browser and CLI sessions, which no passkey confirmed, are
-  signed out (one statement, today's revocation by principal and kind), so
-  "has a passkey" means every live session of Bob's had one; and
+- this browser gets a new session confirmed by it (rule 1);
+- Bob's other credentials, which no passkey confirmed, stop working at their
+  next request (section 6): another browser is asked to touch the passkey,
+  a terminal to `coffre login` again, a personal token or MCP client is
+  refused until made again; and
 - Bob's next sign-in asks for it.
 
 ### 3.4 A fresh check in the browser
@@ -236,13 +267,15 @@ Ada promotes Bob to Owner at 10:02. Ada's session was confirmed at 08:15, at
 sign-in.
 
 1. Users → Bob → Change global role → Owner → Save. The page knows from
-   `GET /api/me` that the session is confirmed until 08:20, so before it
+   `GET /api/me` that the session was confirmed until 08:20, so before it
    sends anything, it opens "Confirm it's you" with what Ada is about to
    do: "Make bob@acme.example an Owner".
-2. Use passkey → `POST /api/passkeys/checks {}` answers the request options
-   and a sealed state bound to the session's credential; Ada touches the YubiKey;
-   `POST /api/passkeys/checks { state, assertion }` checks it and sets the
-   session's `confirmed_at` to 10:02.
+2. Use passkey → `POST /api/passkeys/challenges { purpose: 'check' }`
+   answers the request options and a sealed state bound to the session's
+   credential; Ada touches the YubiKey; `POST /api/passkeys/checks { state,
+   assertion }` checks it and, in one transaction, moves the passkey's
+   replay mark, issues a new session (`passkey_id` = YubiKey, `confirmed_at`
+   = 10:02) and ends the old one. The response sets the new cookie.
 3. The page sends the change, `PATCH /api/access/user:bob@acme.example`. The
    router finds the route in `FRESH_ROUTES`, finds the session confirmed
    within five minutes, and runs it. The `access.set` entry names the
@@ -258,19 +291,34 @@ send), the API answers `403 fresh_check_required`, and the page opens the
 same dialog and resends once.
 
 If Ada had no passkey under `optional`, step 1's dialog would be "Add a
-passkey to change roles": one `create`, which also confirms the session,
-then the change goes. The ten-minute rule of section 3.3 holds here too: in
-an older session the dialog says "Sign in again to add your first passkey".
+passkey to change roles": one `create`, which also issues a confirmed
+session, then the change goes. The ten-minute rule of section 3.3 holds
+here too: in an older session the dialog says "Sign in again to add your
+first passkey".
+
+A fresh check is a session issue, so it costs what a sign-in's issue costs
+(section 10). Risky acts are rare; a window means one per five minutes at
+most.
 
 ### 3.5 The CLI
 
-**Signing in.** `coffre login` stays a device login. The approval page
-needs a touch of its own for anyone with a passkey, not the window: the
-terminal gets a credential that lasts 30 days, and the touch is the moment
-Ada says yes to this terminal and this code. The approval records which
-passkey (`device_authorizations.passkey_id`); the CLI session the poll
-issues carries it as its `passkey_id`, and the approval's `decided_at` as
-its `confirmed_at`. So a terminal starts with a five-minute window too.
+**Approving a terminal.** `coffre login` stays a device login. Approving it
+takes a touch for that terminal, not the browser's window: the terminal gets
+a credential that lasts 30 days, and the touch is the moment Ada says yes to
+this code. So the approval page asks `POST /api/passkeys/challenges {
+purpose: 'device', code: 'QJXM-4WTP' }`, whose sealed state names that
+device authorization and the approving session, and Approve sends `POST
+/api/device-logins/QJXM-4WTP { approve: true, state, assertion }`. The
+decision's transaction checks the assertion, moves the replay mark, and
+records the passkey (`device_authorizations.passkey_id`) with the decision.
+A fresh browser session alone approves nothing; one touch approves one
+code.
+
+The poll that redeems the code issues the CLI session with that
+`passkey_id`, and the approval's `decided_at` as its `confirmed_at`. Its
+transaction checks that the passkey is still live and still the person's,
+at the generation it issues in, so a passkey removed between approval and
+poll redeems nothing. A terminal starts with a five-minute window too.
 
 **A fresh check.** Ada runs, an hour later:
 
@@ -290,18 +338,18 @@ On `403 fresh_check_required` the CLI starts a device login of its own,
 labelled with the command it is running ("coffre CLI: access set
 bob@acme.example --role owner"), prints the link, and polls. Ada opens it in
 the signed-in browser, sees the command and the code, touches a passkey,
-and approves. The poll returns a new CLI session, confirmed now; the CLI
+and approves. The poll returns a new CLI session, confirmed then; the CLI
 swaps it in, signs the old one out, and retries the command. The second
 command runs inside the new window without asking.
 
 This reuses the device flow whole: its table, its page, its rate limits,
-its audit entries. Nothing new is stored for a CLI fresh check. The cost is
-a new CLI credential per step-up, which is a row and a `sign_in`-like
-entry; risky commands are rare.
+its audit entries. The cost is a new CLI credential per step-up, which is a
+row and a `sign_in`-like entry; risky commands are rare.
 
 **What the CLI never needs.** `coffre run`, `export`, `set`, handles and
 personal tokens. A personal token made from the CLI needs no check: it holds
-at most what the CLI session holds, which a passkey confirmed.
+at most what the CLI session holds, which a passkey confirmed, and it names
+that passkey (section 6).
 
 ### 3.6 Adding, renaming and removing passkeys
 
@@ -309,27 +357,30 @@ Account → Passkeys lists one's own: name, kind (synced or this device
 only, from the authenticator's backup flags), added, last used. Each row has
 Rename and Remove.
 
-- **Add another**: a touch of an existing passkey within five minutes, then
+- **Add another**: a session confirmed in the last five minutes, then
   `create` with `excludeCredentials` listing the existing ones. The default
   name comes from the authenticator's AAGUID where it names one ("iCloud
   Keychain", "1Password", "YubiKey 5 Series"), else "Passkey 3".
 - **Rename**: no check. A name grants nothing and sits outside every MAC.
-- **Remove**: a touch. It also signs out every session that passkey last
-  confirmed: "Removing YubiKey 5C signs out 2 sessions it confirmed." Under
-  `required`, the last passkey cannot be removed: add another first.
-- **At most 10** per person, which keeps the sealed sign-in cookie small.
+- **Remove**: a session confirmed in the last five minutes. Everything the
+  passkey confirmed ends: the sessions, the personal tokens made from them,
+  the MCP clients connected through them. The dialog says how many:
+  "Removing YubiKey 5C ends 2 sessions and 1 personal token it confirmed."
+  Under `required`, the last passkey cannot be removed: add another first.
+- **At most 10** per person: a list a person can still read.
 
 ### 3.7 Recovery
 
 **One of two lost.** Ada signs in with iCloud Keychain and removes the
-YubiKey. Its sessions end with it.
+YubiKey. What it confirmed ends with it.
 
 **All lost.** Bob asks an Owner. Ada opens Users → Bob → ⋯ → Reset
-passkeys..., and the dialog says what happens: "Removes Bob's 2 passkeys
-and signs out their 3 browser and CLI sessions. Their personal tokens (1) and
-connected apps (0) stay unless you check them." Ada touches a passkey to
-confirm. Bob's next sign-in under `required` asks for a new one, as a
-first sign-in does; the page says "Ada reset your passkeys on 31 Oct".
+passkeys..., and the dialog says what happens: "Removes Bob's 2 passkeys.
+Their 3 sessions, 1 personal token and 1 connected app, which those
+passkeys confirmed, end with them." Ada touches a passkey to confirm. Bob's
+next sign-in under `required` asks for a new one, as a first sign-in does;
+under `optional`, GitHub alone signs Bob in again. Either way the page says
+"Ada reset your passkeys on 31 Oct".
 
 Who may reset whose, mirroring R1:
 
@@ -339,7 +390,7 @@ Who may reset whose, mirroring R1:
   themselves through this route (they remove their own, with a touch).
 - Owners the deployment names (`owners`, R3) are reset like any Owner.
 - Every reset is a fresh check, an audited `passkey.reset` naming the
-  passkeys and sessions it ended, and a banner at the target's next
+  passkeys and what ended with them, and a banner at the target's next
   sign-in.
 
 **The last Owner, every passkey lost.** No one can reset Ada's. Whoever
@@ -349,22 +400,34 @@ deployer puts the policy back; under `required` Ada adds a passkey at the
 next sign-in. While it is `off`, a provider account is enough for everyone,
 so the window should be minutes. A narrower lever is open question 3.
 
+What `off` leaves behind when it ends: sessions, terminals, personal
+tokens and MCP clients made while it lasted name no passkey, so for anyone
+who has a passkey they stop at their next request once the policy is back
+(section 6). What `off` cannot undo by itself is what such a session did:
+service tokens issued, bindings made, access changed. The recovery steps in
+`docs/deployment-auth.md` end with reading the log for the `off` window.
+
 `off` keeps the rows. Passkeys are not deleted when a deployment turns
 them off, so turning them back on restores everyone's.
 
 ## 4. What needs a fresh check
 
-A fresh check is a touch of one of your passkeys within the last five
-minutes, on the session making the request. The rule: **it guards what
-widens someone's reach, mints a credential, or cannot be undone.** Removing
-access, revoking, freezing and protecting never need one: in an incident
-they must be quick.
+A fresh check means the session making the request was confirmed by a
+passkey touch in the last five minutes: `confirmed_at` within five minutes,
+on a session that rule 1 issued at that touch. The rule for what needs one:
+**it guards what widens someone's reach, mints a credential, or cannot be
+undone.** Removing access, revoking, freezing and protecting never need one:
+in an incident they must be quick.
 
-Three answers per route:
+Four answers per route:
 
-- **always**: the caller touches a passkey. No passkey under `optional`:
-  add one first (section 3.4). Under `off`: no check.
-- **holder**: a touch if the caller has a passkey; nothing otherwise.
+- **always**: a fresh session. No passkey under `optional`: add one first
+  (section 3.4). Under `off`: no check.
+- **holder**: a fresh session if the caller has a passkey; nothing
+  otherwise.
+- **ceremony**: the request carries its own assertion, for that request's
+  target alone (section 3.5); a fresh session is not enough. Nothing for a
+  caller without a passkey under `optional`.
 - **never**.
 
 ### 4.1 always
@@ -389,16 +452,16 @@ Three answers per route:
 
 `?dryRun=1` of any of these needs nothing: it changes nothing.
 
-### 4.2 holder
+### 4.2 holder and ceremony
 
-| Route | Why |
-|---|---|
-| `POST /api/device-logins/:code` with `approve: true` | a 30-day CLI session; a touch of its own, not the window (section 3.5) |
-| `POST /api/oauth/authorizations` with `approve: true` | an MCP client's refresh token |
-| `POST /api/members/user:<self>/tokens` from a browser session | a personal token outlives a 12-hour browser session; from a CLI session, never |
-| `GET /auth/signin/:provider?link=1` | another provider account that signs in as you |
-| `POST /api/members/user:<self>/passkeys`, a second one onward | a new factor |
-| `DELETE /api/members/user:<self>/passkeys/:id` | removing a factor |
+| Route | Answer | Why |
+|---|---|---|
+| `POST /api/device-logins/:code` with `approve: true` | ceremony | a 30-day CLI session (section 3.5) |
+| `POST /api/oauth/authorizations` with `approve: true` | holder | an MCP client's refresh token |
+| `POST /api/members/user:<self>/tokens` from a browser session | holder | a personal token outlives a 12-hour browser session; from a CLI session, never |
+| `GET /auth/signin/:provider?link=1`, and its callback | holder | another provider account that signs in as you (section 4.5) |
+| `POST /api/members/user:<self>/passkeys`, a second one onward | holder | a new factor |
+| `DELETE /api/members/user:<self>/passkeys/:id` | holder | removing a factor |
 
 ### 4.3 Reads, and `protectedReveals`
 
@@ -411,7 +474,7 @@ A personal token or an MCP connection cannot touch a passkey, so under
 `protectedReveals` they read no protected environment's values; their
 `/use` is untouched. Open question 4.
 
-### 4.4 Who is never asked
+### 4.4 Who is never asked, and who cannot be
 
 - **Services**: service tokens, CI exchanges, workload sessions. They hold
   no passkey. What a service may do was fixed when its token or binding was
@@ -421,22 +484,27 @@ A personal token or an MCP connection cannot touch a passkey, so under
   already (`PERSONAL_TOKEN_ROUTES`, `ROUTE_SCOPES`). Where a token could
   reach a case that turns **always** by its input (unprotecting, loosening
   a key's nature), it is refused `fresh_check_required`, and its person does
-  it signed in. A change an MCP client asks for is approved on
-  `/approvals/:id`, and its Approve makes the change in process, in the
-  approving browser's request: the check applies to that session. PR 4
-  confirms the in-process call carries the approving session's credential
-  to the router, and makes it if not.
+  it signed in.
+- **An MCP client's change** is approved on `/approvals/:id`, and its
+  Approve makes the change in process, in the approving browser's request,
+  so the router's check applies to that session. Today's `#decide` commits
+  the approval before it makes the change and records `failed` if the
+  change throws, which would spend the approval on a mere prompt. So
+  Approve asks `FRESH_ROUTES` about the change's own route first, and
+  answers `403 fresh_check_required` with the approval still pending; the
+  page confirms and approves again. The inner check stays.
 - **Handles and `/use`**: never.
 
-### 4.5 In code
+### 4.5 In code, and the routes outside the table
 
 ```ts
 // packages/server/src/api/fresh-routes.ts, typed over the route table as PERSONAL_TOKEN_ROUTES is.
-type Fresh = 'always' | 'holder' | 'never';
+type Fresh = 'always' | 'holder' | 'ceremony' | 'never';
 export const FRESH_ROUTES: { [K in RouteKey]: Fresh | ((input: RouteInput<K>, ctx: ApiContext) => Fresh) } = {
   'PATCH /access/:member': 'always',
   'PATCH /projects/:project/:environment': (input) => (input.protected === false ? 'always' : 'never'),
   'POST /members/:member/tokens': (input, ctx) => …, // service: always; personal from a browser: holder; else never
+  'POST /device-logins/:code': (input) => (input.approve ? 'ceremony' : 'never'),
   'POST /reveals': (input, ctx) => …,               // protectedReveals and a protected place: always
   'GET /me': 'never',
   // … every route
@@ -444,9 +512,26 @@ export const FRESH_ROUTES: { [K in RouteKey]: Fresh | ((input: RouteInput<K>, ct
 ```
 
 The router checks it after the body parses and before the handler runs,
-from the request's credential, which it read already. A refusal is `403
-fresh_check_required`, with `{ add: true }` when the caller has no passkey
-yet, and is not logged: it is a prompt, not an attempt.
+from the request's credential, which it read already. A **ceremony** route
+checks its assertion in its own handler, inside the transaction that makes
+its change. A refusal is `403 fresh_check_required`, with `{ add: true }`
+when the caller has no passkey yet, and is not logged: it is a prompt, not
+an attempt.
+
+The sign-in routes are protocols beside the table (`auth-routes.ts`), so
+they check for themselves:
+
+| Route | Check |
+|---|---|
+| `GET /auth/signin/:provider?link=1` | holder, at the start, before leaving for the provider |
+| `GET /auth/callback/:provider` for a link | holder again, before `linkIdentity` commits: the browser's session must still be the one the link started from and still fresh; if the window ran out at the provider, "Confirm again and link" |
+| `POST /api/auth/device/token` (the poll) | the approving passkey still live, inside the issuing transaction (section 3.5) |
+| `POST /api/oauth/token` (an MCP refresh) | the connection's passkey still live (section 6) |
+| `POST /auth/signout`, `POST /api/auth/logout` | never |
+| `POST /api/auth/oidc`, `POST /api/auth/workload` | never: services |
+
+Conformance checks the link and the poll (section 13), since no type holds
+them.
 
 ## 5. Storage
 
@@ -484,9 +569,10 @@ export const passkeys = pgTable('passkeys', {
   unique('passkeys_credential_id_key').on(table.credentialId),
   check('passkeys_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
   check('passkeys_algorithm_check', sql`${table.algorithm} IN (-8, -7, -257)`),
+  check('passkeys_credential_id_check', sql`octet_length(${table.credentialId}) BETWEEN 16 AND 1023`),
   check('passkeys_principal_check', sql`${table.principal} LIKE 'user:%'`),
   foreignKey({ name: 'passkeys_principal_fkey', columns: [table.principal], foreignColumns: [vaultMembers.principal] }).onDelete('restrict'),
-  // A person's live passkeys: the sign-in's read and the Passkeys tab.
+  // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
   index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
 ]);
 ```
@@ -501,7 +587,7 @@ could let a captured assertion through again; under R64 that is a state
 forged by a direct write, and it reveals nothing such a writer cannot
 already read. A removed row put back with its old MAC is the same case.
 
-Rows are never deleted: a removed passkey keeps its row, so a session can
+Rows are never deleted: a removed passkey keeps its row, so a credential can
 still name the passkey that confirmed it, and the log's entries keep
 resolving to a name.
 
@@ -510,40 +596,46 @@ their identities: someone removed and added back starts with none.
 
 `APP_KEY` rotation (R41) re-signs these rows with the others.
 
-### 5.2 `credentials` and `device_authorizations`
+### 5.2 The columns that name a passkey
 
 ```ts
-// credentials: the passkey that last confirmed this session, and when. Null on every other kind.
+// credentials: the passkey that confirmed this credential, and when it was touched.
+// Set on browser and CLI sessions, and on personal tokens (copied from the session that made them; no confirmed_at).
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
 
 // device_authorizations: the passkey that approved this terminal; its decided_at is when.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
+
+// mcp_connections: the passkey that confirmed the session that connected it.
+passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 ```
 
-The credential's tuple gains a kind that covers both fields when
+Each row's MAC tuple gains a kind that covers these fields when
 `passkey_id` is set, as a scope or a handle's places make a kind of their
 own today. Rows without one keep the tuple they were signed with, so the
-migration re-signs nothing. A device authorization does the same with
-`passkey_id`.
+migration re-signs nothing. The fields are written once, when the row is
+made: rule 1 means a touch issues a new credential, never updates one, so
+no MAC is re-signed on a check.
 
-What a session's row says, for Ada at 10:03:
+What Ada's credentials say at 10:03:
 
-| Session | `kind` | `passkey_id` | `confirmed_at` | Fresh? |
+| Credential | `kind` | `passkey_id` | `confirmed_at` | Fresh? |
 |---|---|---|---|---|
-| Firefox, laptop | browser | YubiKey 5C | 10:02 | yes, until 10:07 |
-| Safari, phone | browser | iCloud Keychain | 07:40 | no; confirmed at sign-in |
+| Firefox, laptop, issued at the 10:02 check | browser | YubiKey 5C | 10:02 | yes, until 10:07 |
+| Firefox, laptop, the one before it | browser | YubiKey 5C | 08:15 | ended at 10:02 |
+| Safari, phone | browser | iCloud Keychain | 07:40 | no |
 | CLI, laptop | cli | YubiKey 5C | 09:15 | no |
-| Chrome, before the upgrade | browser | null | null | under `required`: refused until a passkey touch |
+| `cursor-agent` personal token | personal | YubiKey 5C | null | never needs to be |
+| Chrome, made before the upgrade | browser | null | null | refused: asks for a touch (section 6) |
 
-Fresh is derived, never stored: `confirmed_at > now - 5 minutes`. Removing
-a passkey signs out the sessions whose `passkey_id` names it.
+Fresh is derived, never stored: `confirmed_at > now - 5 minutes`.
 
 ### 5.3 Migrations
 
 One per engine (`packages/db/src/migrations/postgres`, `…/sqlite`), the
 next in each sequence, additive only, as AGENTS.md's expand and contract
-asks: a table, three nullable columns, two foreign keys on columns that are
+asks: a table, four nullable columns, four foreign keys on columns that are
 null everywhere, and grants: `SELECT, INSERT, UPDATE` on `passkeys` to
 `coffre_app`, `SELECT` to `coffre_backup` (or `pnpm test:schema` fails),
 nothing to the vault's logins. The previous release ignores all of it and
@@ -553,33 +645,57 @@ keeps working while the migration runs ahead of the deploy.
 
 ## 6. The session model
 
-Two facts, both on the credential, both read in the statement that already
-reads it on every request, so no request reads anything more:
+Every credential of a person's that the API or MCP takes (a browser or CLI
+session, a personal token, an MCP connection) passes one check at every
+request, in the statement that already reads it, with a join on the
+passkey it names and an `EXISTS` on the person's live passkeys, both on
+indexes:
 
-- **Signed in with a passkey**: `passkey_id` is set. A browser session gets
-  it at sign-in, or at a step-up; a CLI session from the approval that made
-  it.
-- **Fresh**: `confirmed_at` within five minutes. Set at sign-in, at each
-  fresh check, at a step-up, and from the device approval for a terminal.
+| Policy | The credential names a passkey | It names none |
+|---|---|---|
+| `off` | taken | taken |
+| `optional` | taken if that passkey is live, the person's, at their generation | taken if the person has no live passkey |
+| `required` | taken if that passkey is live, the person's, at their generation | refused |
 
-Under `required`, a browser or CLI session with no `passkey_id` reaches only
-`GET /api/me`, the passkey routes and sign-out. A page redirects to
-`/auth/passkey?step-up=1`, which confirms the existing session (no new
-one); the CLI is told to `coffre login` again. That covers sessions issued
-before the deployment turned `required` on: they are asked once, not ended.
+A credential refused so gets `401 passkey_required`. A browser page goes to
+`/auth/passkey?step-up=1`, where a touch issues a new, confirmed session
+(rule 1); the CLI says to `coffre login` again; a personal token or an MCP
+client is made again by its person.
 
-Under `optional`, the check is not needed per request: a person with a
-passkey has no live session without one, because their sign-ins ask for it
-and adding the first one signs out the rest (section 3.3).
+That one rule covers every way a person could hold a credential no live
+passkey stands behind:
+
+- sessions made before the deployment turned passkeys on, or before Bob
+  added a first one;
+- anything made while the policy was `off`, once it is back;
+- anything a removed or reset passkey confirmed, even one a sweep missed or
+  that raced the removal.
+
+Removal still ends what the passkey confirmed, in its own transaction, so
+the Sessions page shows them ended rather than refused.
+
+Handles are not checked: they reach `/use` only, which R44 and R58 keep to
+one statement, and a handle lasts at most a week. Removing a passkey revokes
+the handles of the sessions it confirmed, as signing out does.
+
+**Fresh** is `confirmed_at` within five minutes. Only a touch sets it, on a
+credential that touch issued: a browser session at sign-in, at a step-up or
+a fresh check; a CLI session from its device approval.
 
 `GET /api/me` answers `passkeys: { policy, enrolled, confirmedUntil }`, which
 the pages read to decide when to open the dialog before sending.
 
-A cookie-only window (a sealed `coffre_fresh` cookie bound to the session)
-would need no write per check. It was the first design. It does not reach
-the CLI, so the CLI would need a mechanism of its own, and it cannot
-answer "which passkey confirmed this session", which removal needs. One
-column read with the credential does all three.
+**Why a new session per touch, not a column updated in place.** Updating
+the session's `confirmed_at` would refresh every copy of its token: a
+cookie stolen at 09:00 would wait for Ada's touch at 10:02 and promote
+someone at 10:03. A new token, set only in the response to the browser that
+touched, leaves the copy behind, ended. It also keeps every MAC written
+once.
+
+**Why not a separate "fresh" cookie** (a sealed `coffre_fresh` cookie bound
+to the session): it would need no new credential per check, but it does
+not reach the CLI, and it cannot answer "which passkey confirmed this
+credential", which removal and the check above need.
 
 ## 7. The ceremony, checked
 
@@ -604,61 +720,91 @@ column read with the credential does all three.
   the origin check as it fails sign-in today.
 - **The dev stack**: `127.0.0.1` is not a valid RP ID; browsers refuse
   WebAuthn there. `dev/start.sh` would print `http://localhost:<port>`
-  (a secure context, and a valid RP ID) when passkeys are on, and the
-  dev deployment keeps `optional`, so the seed's personas sign in without
-  any. Through a tunnel (`COFFRE_DEV_PUBLIC_URL`), the RP ID is the
-  tunnel's host: a passkey added there does not work on `localhost`, and
-  the reverse. Dev passkeys are throwaway; Chrome's DevTools virtual
-  authenticator is enough for manual tests.
+  (a secure context, and a valid RP ID) for a person's browser. Through a
+  tunnel (`COFFRE_DEV_PUBLIC_URL`), the RP ID is the tunnel's host: a
+  passkey added there does not work on `localhost`, and the reverse. Dev
+  passkeys are throwaway; Chrome's DevTools virtual authenticator is
+  enough for manual tests.
+- **The seed** (`dev/seed.mjs`) adds members, changes access and issues a
+  service token, all **always**, so under the dev deployment's `optional` it
+  needs a passkey too. `dev/browser.mjs`, which the seed and the restore
+  drill share, gains the software authenticator of section 9: each persona
+  it signs in adds a passkey at its first risky act, and touches it at
+  each check. The dev stack keeps the policy people will run, and the seed
+  exercises the passkey path every time it runs.
 
-### 7.2 What each assertion must hold
+### 7.2 What each response must hold
 
-In order, any failure refusing:
+The W3C's relying-party algorithms, [Registering a new
+credential](https://www.w3.org/TR/webauthn-3/#sctn-registering-a-new-credential)
+and [Verifying an authentication
+assertion](https://www.w3.org/TR/webauthn-3/#sctn-verifying-assertion),
+are the checklist. Each of their steps maps to a line of the verifier and a
+negative fixture that fails it. What applies here, in order, any failure
+refusing:
+
+For an assertion:
 
 1. The sealed state opens, is unexpired, and is for this purpose (`signin`,
-   `enroll`, `check`) and, for a check, this credential. Each purpose has
-   its own HKDF key, so a sign-in's state never opens as a check's.
-2. `clientDataJSON.type` is `webauthn.get` (`webauthn.create` to add);
-   `challenge` equals the state's; origin as above.
-3. `authenticatorData.rpIdHash` is SHA-256 of the `rpId`; flags: UP set, UV
-   set, and BE/BS read for `synced`.
-4. The credential ID is a live passkey of this principal and generation:
-   another member's passkey is unknown here.
-5. The signature verifies over `authenticatorData ‖ SHA-256(clientDataJSON)`
+   `check`, `device`) and, for `check` and `device`, this credential, and for
+   `device` this device authorization. Each purpose has its own HKDF key,
+   so one purpose's state never opens as another's.
+2. The response is well formed: `type` is `public-key`, `id` is the
+   base64url of `rawId`, every field decodes, nothing trails.
+3. The credential ID is a live passkey of this principal and generation,
+   read now: another member's passkey, or one removed since the options
+   were sent, is unknown here.
+4. `userHandle`, when the authenticator returns one, equals this person's
+   derived `user.id`.
+5. `clientDataJSON.type` is `webauthn.get`; `challenge` equals the
+   state's; origin and `crossOrigin` as in 7.1.
+6. `authenticatorData` is at least 37 bytes; `rpIdHash` is SHA-256 of the
+   `rpId`; flags: UP set, UV set, BS set only with BE set; AT clear; ED, if
+   set, followed by well-formed CBOR, whose extensions are ignored.
+7. The signature verifies over `authenticatorData ‖ SHA-256(clientDataJSON)`
    with the stored key and algorithm. ES256 signatures arrive DER-encoded
    and are turned into the raw form WebCrypto takes.
-6. The counter: if the stored one or the new one is non-zero, the new must
-   be larger; otherwise refused and logged as a possible clone.
-7. The replay mark moves (7.3).
+8. The counter and the replay mark move, in one statement (7.3).
 
-To add one: steps 1 to 3 on the attestation's client data and
-authenticator data, attested credential data present, algorithm one of the
-three, credential ID unused across the instance. Attestation is `none`: the
-attestation statement is ignored, whatever its format. Coffre trusts the
-browser for which key was made, as every relying party that does not
-restrict authenticator models does.
+For a registration, steps 1, 2 and 5 (with `webauthn.create`), then:
+`authenticatorData` with AT set, UP and UV set, BS only with BE; the
+attested credential ID 16 to 1023 bytes and unused across the instance and
+by this person (`excludeCredentials` is the browser's courtesy, not a
+check); the COSE key one of the three algorithms asked for, with valid
+parameters (EC2 on P-256, OKP Ed25519, RSA of at least 2048 bits), its
+`alg` matching; and the `enroll` or add rules of sections 3.2 and 3.6.
+Attestation is `none`: the attestation statement is ignored, whatever its
+format. Coffre trusts the browser for which key was made, as every relying
+party that does not restrict authenticator models does.
 
 ### 7.3 Challenges and replay
 
 Challenges are 32 random bytes in a sealed value: a cookie at sign-in, where
-there is no session yet, and a field of the JSON for an API check, bound to
-the session's credential ID. Nothing is stored for a challenge.
+there is no session yet, and a field of the JSON for a check or a device
+approval, bound to the session's credential ID. Nothing is stored for a
+challenge.
 
 Stateless challenges can be answered twice within their five minutes, so
 the passkey's row holds the issue time of the newest challenge it answered,
-and an assertion is taken only by moving it forward:
+and an assertion is taken only by moving it forward, with the counter, in
+one statement inside the transaction that makes what the touch is for:
 
 ```sql
 UPDATE passkeys
    SET last_challenge_at = $issued, sign_count = $count, last_used_at = now()
- WHERE id = $id AND removed_at IS NULL
+ WHERE id = $id AND principal = $principal AND generation = $generation AND removed_at IS NULL
    AND (last_challenge_at IS NULL OR last_challenge_at < $issued)
+   AND (sign_count < $count OR ($count = 0 AND sign_count = 0))
 ```
 
-No row: replayed, or overtaken by a newer challenge, and refused. Two tabs
-asking at once: the older one's touch is refused and it asks again. The
-statement is the write the counter needs anyway, so replay costs nothing
-extra.
+No row: replayed, overtaken by a newer challenge, a counter that did not
+move (a possible clone, logged as such), or a passkey removed meanwhile; all
+refused. Two tabs asking at once: the older one's touch is refused and it
+asks again. The statement is the write the counter needs anyway, so replay
+costs nothing extra. Removal updates the same row, so a removal and a use
+of the same passkey take turns on its lock: either the removal comes first
+and the use matches no row, or the use comes first and the removal's sweep
+ends what it made.
 
 ### 7.4 User verification
 
@@ -682,21 +828,21 @@ time it confirmed.
 - Catches: stolen provider accounts, phishing, stolen cookies (section 1).
 - Misses: an app that forgets the check. `FRESH_ROUTES` is typed over the
   route table, so a new route cannot forget silently; conformance checks
-  each **always** route without a confirmation.
+  each **always** route without a confirmation, and the sign-in routes the
+  table does not cover.
 - Misses: an app taken over. It can skip the check.
 
 **B. The app's claim, sealed for the vault.** The credential's
-`confirmed_at` becomes part of its sealed object, written through a vault
-change, and the vault refuses `setAccess`, issues and role changes without
-it.
+`confirmed_at` becomes part of its sealed object (in 0.15, credentials are
+sealed objects of the log already), and the vault refuses `setAccess`,
+issues and role changes without it.
 
 - Catches: an app bug that skips the router's check, as the vault catches
   permission bugs today.
-- Misses: an app taken over, which writes the vault change "confirmed now"
-  itself. The vault cannot tell a touch happened.
-- Costs: a vault change per fresh check, waiting on the checkpoint (R51),
-  the credential's sealed object and the TLA+ and Lean models grow (R45),
-  and a second copy of the rule.
+- Misses: an app taken over, which issues itself a credential "confirmed
+  now". The vault cannot tell a touch happened.
+- Costs: the vault's decisions read one more field, the TLA+ and Lean
+  models grow (R45), and the rule lives in two places.
 
 **C. The vault verifies the passkey.** Passkey public keys become part of
 the member's sealed object, added through vault changes. A guarded act
@@ -718,7 +864,8 @@ change what roles mean.** B buys little: it guards against a bug that the
 typed table already makes hard, and not against the attacker the vault
 exists for. C is the real step and should be designed with the vault's
 next model, not bolted on here. A builds everything C needs: the table, the
-verifier in `@coffre/core`, passkeys bound to members and generations.
+verifier in `@coffre/core`, passkeys bound to members and generations, and
+the device ceremony's shape (an assertion bound to one target).
 
 ## 9. The verifier: our own, not `@simplewebauthn/server`
 
@@ -739,17 +886,20 @@ What coffre needs fits in about 300 lines in `@coffre/core/identity`:
 - a CBOR decoder for the subset WebAuthn uses (unsigned and negative
   integers, byte and text strings, arrays, maps; definite lengths only;
   anything else refused);
-- `authenticatorData` and `clientDataJSON` parsing, and the checks of 7.2;
+- `authenticatorData` and `clientDataJSON` parsing, and the checks of 7.2,
+  step by step against the W3C's algorithms;
 - COSE keys to WebCrypto: EC2 P-256, OKP Ed25519, RSA; and ES256's DER
   signatures to raw;
 - `crypto.subtle.verify`, which both runtimes have; core already verifies
   DPoP proofs this way.
 
 It is held by: the W3C spec's examples and SimpleWebAuthn's own test
-fixtures, copied as data; a software authenticator (P-256 and Ed25519, in
-the test helpers and in `@coffre/conformance`) that makes real
-registrations and assertions; and property tests where a flipped bit in any
-signed byte, a changed origin or a changed RP ID must fail.
+fixtures, copied as data; one negative fixture per step of 7.2; a software
+authenticator (P-256 and Ed25519, in the test helpers, `dev/browser.mjs`
+and `@coffre/conformance`) that makes real registrations and assertions; and
+property tests where a flipped bit in any signed byte, a changed origin or
+a changed RP ID must fail. The choice is worth revisiting if that checklist
+grows past what 300 lines hold; the library stays the fallback.
 
 The browser side needs no library:
 `PublicKeyCredential.parseRequestOptionsFromJSON`, `parseCreationOptionsFromJSON`
@@ -758,22 +908,40 @@ helper of a dozen lines where it does not.
 
 ## 10. Cost
 
-Measured against R42 (a handful of queries, no chain of round trips), R27
-(well under 10 ms CPU at p50) and R44/R58 (the hot paths).
+Against R42 (a handful of queries, no chain of round trips), R27 (well under
+10 ms CPU at p50) and R44/R58 (the hot paths). These are counts from the
+design and estimates, not measurements: PR 3 measures sign-in and a check
+with `pnpm bench:workers` before it merges.
 
-| Flow | Queries | CPU added | Round trips added |
-|---|---|---|---|
-| Sign-in callback | 1: identity, member and passkeys in one statement; the session's writes move to the passkey POST | one seal | none |
-| `GET /auth/passkey` | 0: renders from the cookie | one unseal | the page, one |
-| `POST /auth/passkey` | 1 for the passkey (7.3), then today's `completeSignin` | one signature check, CBOR parsing | one |
-| Fresh check | options: 1 (the person's passkeys); verify: one transaction, the passkey's statement, the credential's update and its entry | one signature check | two requests, plus the touch |
-| Every other request | 0: two more columns of the row already read | a comparison | none |
-| `/use`, CI and workload sign-in | 0: never consulted | none | none |
+**Signing in with a passkey**, against today's sign-in:
 
-A P-256 or Ed25519 verification costs well under a millisecond of WebCrypto
-in either runtime; the first PR measures it with `pnpm bench:workers`
-before merging. A sign-in with a passkey is two more browser round trips
-than today, one of them the person's touch.
+| Step | Queries | CPU |
+|---|---|---|
+| Callback | 1: identity, member and "has a live passkey", one statement. Today's `completeSignin` no longer runs here. | one seal |
+| `/auth/passkey` page | 1: the person's live passkeys (IDs, transports), in the render | one unseal |
+| `POST /auth/passkey` | 1: the passkey the assertion names (key, counter); then today's `completeSignin` (its reads, the vault's `access`, its prepared change, its transaction), with the replay statement inside that transaction | one signature check, CBOR parsing, one unseal |
+
+So two statements and one read more than today, none of them chained to
+another but the passkey read before the signature check, plus two more
+browser round trips (the page and its post), one of them the person's touch.
+
+**A fresh check**: `POST /api/passkeys/challenges` reads the person's live
+passkeys (1 query); `POST /api/passkeys/checks` reads the passkey (1), checks
+the signature, then issues the new session as a sign-in does (the vault's
+prepared change for the new credential and the old one's end, and one
+transaction: the replay statement, the insert, the revocation, the
+entries). About a sign-in's issue; at most once per five minutes per
+person.
+
+**Every other request**: no query more. The statement that reads the
+credential gains a primary-key join on `passkeys` and an indexed `EXISTS`,
+for the four kinds of section 6 only; the decision is a comparison.
+
+**`/use`, CI and workload sign-in**: nothing. Their statements do not
+change.
+
+A P-256 or Ed25519 verification should cost well under a millisecond of
+WebCrypto in either runtime; that is the number to measure.
 
 ## 11. Audit
 
@@ -781,10 +949,10 @@ New actions, in the shared log as `account.link` and `device.approve` are:
 
 | Action | When | Metadata |
 |---|---|---|
-| `passkey.add` | a passkey is added: at a first sign-in, from Account | passkey ID, name, AAGUID, synced, sessions signed out (first one) |
-| `passkey.remove` | its person removes one | passkey ID, sessions signed out |
-| `passkey.reset` | an Owner resets someone's | target, passkey IDs, sessions signed out, tokens and apps revoked |
-| `passkey.check` | a fresh check, allowed or denied | passkey ID, purpose; on deny, the reason: `origin`, `rp_id`, `challenge`, `replay`, `unknown_credential`, `signature`, `counter`, `user_verification` |
+| `passkey.add` | a passkey is added: at a first sign-in, from Account | passkey ID, name, AAGUID, synced |
+| `passkey.remove` | its person removes one | passkey ID, credentials and apps ended |
+| `passkey.reset` | an Owner resets someone's | target, passkey IDs, credentials and apps ended |
+| `passkey.check` | a fresh check or a step-up, allowed or denied | passkey ID, purpose, the session ended and the one issued; on deny, the reason: `origin`, `rp_id`, `challenge`, `replay`, `unknown_credential`, `user_handle`, `signature`, `counter`, `user_verification`, `malformed` |
 
 Changed:
 
@@ -794,7 +962,7 @@ Changed:
 - Every **always** act names, in its own entry, the passkey and time that
   confirmed the session (`confirmedBy`, `confirmedAt`).
 
-A `403 fresh_check_required` is not logged.
+A `403 fresh_check_required` or `401 passkey_required` is not logged.
 
 ## 12. Behind Cloudflare Access
 
@@ -817,34 +985,47 @@ running `passkeys: 'required'`:
 3. The same assertion, sent twice with its sealed state, signs in once.
 4. An assertion by another member's passkey, for this member's pending
    sign-in or fresh check, is refused.
-5. A sign-in state cannot complete a fresh check, nor the reverse.
-6. An assertion without UV is refused.
+5. One purpose's state completes no other: a sign-in's no check, a check's
+   no device approval, a device approval's no other code.
+6. An assertion without UV, or with BS set and BE clear, is refused.
 7. A provider sign-in that stops before the passkey sets no session cookie,
    and the next request with what it did set is `401`.
 8. A browser session with no passkey reaches nothing but `GET /api/me`, the
    passkey routes and sign-out.
 9. Every **always** route answers `403 fresh_check_required` to a session
    confirmed more than five minutes ago, and none of them changes anything.
-10. A removed passkey signs nobody in, and the sessions it confirmed are
+10. After a fresh check, the session it came in on is `401`.
+11. A fresh session approves no device code without that code's own
+    assertion.
+12. A device code approved with a passkey, then the passkey removed, redeems
+    nothing.
+13. A second `enroll` with the same sealed state adds nothing.
+14. Linking another provider account from a session not confirmed in the
+    last five minutes is refused, at the start and at the callback.
+15. A removed passkey signs nobody in, and every credential it confirmed is
     `401`.
-11. `/use` and `POST /api/auth/workload` answer as they did, with no
+16. `/use` and `POST /api/auth/workload` answer as they did, with no
     passkey anywhere.
 
 ## 14. Build plan (phase 2, after 0.15)
 
-1. **The verifier**, in `@coffre/core/identity`, with its vectors, the
-   software authenticator and property tests. No wiring.
+1. **The verifier**, in `@coffre/core/identity`, with its vectors, a
+   negative fixture per step of 7.2, the software authenticator and
+   property tests. No wiring.
 2. **Storage**: the migrations, the schema, the MAC kinds, `pnpm
    test:schema` and the backup grant.
 3. **Sign-in**: `signin({ passkeys })`, the callback's split, `/auth/passkey`
-   and its page, enrolling under `required`, the step-up. Waits for #436 and
+   and its page, enrolling under `required`, the per-request check of
+   section 6 and the step-up, the seed's authenticator. Waits for #436 and
    T171, which touch the callback.
-4. **Fresh checks**: `FRESH_ROUTES`, `POST /api/passkeys/checks`, the
-   dialog, the CLI's step-up through the device flow.
+4. **Fresh checks**: `FRESH_ROUTES`, the challenges and checks routes, the
+   dialog, the device ceremony, the CLI's step-up through the device flow,
+   the link checks, MCP approvals that stay pending.
 5. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`, `protectedReveals`.
 6. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md`
-   (the policy, `rpId`, recovery) and `docs/offboarding.md`.
+   (the policy, `rpId`, recovery and its log review) and
+   `docs/offboarding.md`.
 
 Each PR leaves `main` shippable: until PR 3, nothing is reachable.
 
@@ -878,10 +1059,12 @@ Each PR leaves `main` shippable: until PR 3, nothing is reachable.
    Access deployments use Access's own MFA policies. Option: a sealed
    cookie bound to the Access identity for the browser, and browser-only
    for risky acts.
-7. **Does an Owner reset also revoke the person's personal tokens and
-   connected apps?** Proposed: the dialog offers both, unchecked; sessions
-   always end. Option: always revoke all of it, as an offboarding does
-   short of removal.
+7. **Does adding a first passkey under `optional` end the person's other
+   credentials?** Proposed: yes, at their next request (section 3.3): a
+   person with a passkey holds nothing it does not stand behind. It means
+   Bob's terminals log in again and Bob's personal tokens are made again.
+   Option: let credentials made before the first passkey run out on their
+   own, which keeps a stolen GitHub account's earlier sessions alive.
 8. **The vault (section 8).** Proposed: A now, C designed with the vault's
    next model for Owner-level acts. Option: C in phase 2 for promotion to
    Owner only.

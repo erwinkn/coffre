@@ -280,7 +280,7 @@ const SCREENS = [
         <td class="col-actions"><span class="acts"><button class="act" type="button">${icon('Pencil', 13)}Rename</button><button class="act act-danger" type="button" data-to="${i === 0 ? 'remove' : ''}">${icon('Trash2', 13)}Remove</button></span></td></tr>`).join('');
       const remove = s !== 'remove' ? '' : dialog(`
         <h2 class="dialog-title">Remove <span class="mono">YubiKey 5C</span>?</h2>
-        <p class="dialog-body">It will no longer sign you in or confirm changes, and the 2 sessions it confirmed are signed out, this one included. You keep iCloud Keychain.</p>
+        <p class="dialog-body">It will no longer sign you in or confirm changes. What it confirmed ends with it: 2 sessions, this one included, and 1 personal token. You keep iCloud Keychain.</p>
         <div class="dialog-actions"><button type="button" class="btn" data-to="list">Cancel</button><button type="button" class="btn btn-danger">${icon('Fingerprint', 14)}Confirm with a passkey and remove</button></div>`);
       return shell('', pageHead('Account', { actions: `<button class="btn" type="submit">${icon('LogOut', 14)}Sign out</button>` })
         + tabs('Account sections', ACCOUNT_TABS, 'Passkeys')
@@ -313,7 +313,7 @@ const SCREENS = [
           ${row('Terminal', 'coffre CLI on ada-mbp', 'approved in Firefox on macOS', 'YubiKey 5C', '12 min ago', 'in 29d')}
           ${row('Monitor', 'Chrome on Linux', 'via GitHub · <span class="mono">81.65.12.4</span>', '<span class="tag tag-amber">No passkey</span>', '3d ago', 'in 9h')}
           </tbody></table></div></section>
-          <p class="hint section-foot">A session no passkey confirmed was signed in before passkeys were required; it asks for one at its next page.</p>`);
+          <p class="hint section-foot">A session no passkey confirmed was signed in before you added one; it asks for a touch at its next page. Each touch here gives this browser a new session and ends the one before.</p>`);
     },
     states: ['list'],
   },
@@ -322,10 +322,8 @@ const SCREENS = [
     title: '8 · Owner: reset someone’s passkeys',
     render: (s) => bobPage(s === 'menu' ? '' : s === 'done' ? '' : dialog(`
       <h2 class="dialog-title">Reset <span class="mono">bob@acme.example</span>’s passkeys?</h2>
-      <p class="dialog-body">For someone who lost theirs. Removes their 2 passkeys and signs out their 3 browser and CLI sessions. At their next sign-in with GitHub, they add a new passkey and see that you reset them.</p>
+      <p class="dialog-body">For someone who lost theirs. Removes their 2 passkeys, and everything those passkeys confirmed ends with them: 3 sessions, 1 personal token and 1 connected app. At their next sign-in with GitHub, they add a new passkey and see that you reset them.</p>
       <ul class="pk-list"><li>${icon('Usb', 14)}YubiKey 5C <span class="cell-muted">· last used 2 days ago</span></li><li>${icon('Cloud', 14)}1Password <span class="cell-muted">· last used 3 weeks ago</span></li></ul>
-      <label class="check-row"><input type="checkbox">Also revoke their 1 personal token</label>
-      <label class="check-row"><input type="checkbox">Also disconnect their 1 connected app</label>
       <div class="dialog-actions"><button type="button" class="btn" data-to="menu">Cancel</button>
         <button type="button" class="btn btn-danger" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
           ${s === 'waiting' ? `${spinner()}Waiting for your passkey…` : `${icon('Fingerprint', 14)}Confirm with your passkey and reset`}</button></div>`), { menu: s === 'menu', confirmed: s === 'done' ? '5 min' : null }),
@@ -347,7 +345,7 @@ ${s === 'done' ? 'Waiting for approval... approved.\nbob@acme.example is now an 
           ? `<div class="signin-head"><div class="pk-touch is-good">${icon('CircleCheck', 26)}</div><h1 class="signin-title" id="t">Approved</h1>
              <p class="signin-lede">Your terminal goes on with its command. For the next 5 minutes, its changes that need a passkey go without asking.</p></div>`
           : `<div class="signin-head"><h1 class="signin-title" id="t">Approve this terminal?</h1>
-            <p class="signin-lede">Only if you just ran this yourself and it shows this code. It gets your access for 30 days, and for 5 minutes, changes that need a passkey.</p></div>
+            <p class="signin-lede">Only if you just ran this yourself and it shows this code. Your passkey approves this code alone. The terminal gets your access for 30 days, and for 5 minutes, changes that need a passkey.</p></div>
           <p class="device-code" aria-label="Code">QJXM-4WTP</p>
           <dl class="facts device-facts">
             <div class="fact"><dt>To run</dt><dd class="mono">coffre access set bob@acme.example --role owner</dd></div>
