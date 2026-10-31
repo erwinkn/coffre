@@ -2084,7 +2084,8 @@ async function verifyLog(): Promise<void> {
  * an instance that keeps 0.14's log alone.
  */
 async function verifyReads(shown: boolean): Promise<void> {
-  const result = await client().audit.verifyReads((stretch) => {
+  // A server older than 0.15 has no such route: its 404 is the client's to take for no reads to check.
+  const result = await client(target(), undefined, [404]).audit.verifyReads((stretch) => {
     if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rreads verified through entry ${stretch.through}…`);
   });
   if (shown) process.stderr.write('\r\x1b[K');

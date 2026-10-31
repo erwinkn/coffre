@@ -1880,6 +1880,22 @@ HotPathOne's; retention of `log_reads` with its day (a unique key on a
 partitioned table must include the partition column: the day, which is a
 function of the use); and who sees which rows (`formal/lean`'s access model).
 
+**As built** (`packages/vault/src/reads.ts`; `docs/design/0.15-plan.md`,
+"As built: T166"):
+- The code is `ReadsProbe`: every protection but InputsInUseMac.
+  Covering each input's seal in the use's MAC would change the hot path
+  (R50). A sealed change deleted after its seal is D145's class, seen by
+  Seal's full verifier and an offline scan, not by the projector.
+- WindowChecked is `sealedRange`. Each range is read whole and rebuilt
+  into both trees, from the pair under it, to the heads of the pair over
+  it (core's `verifyLog`), before anything is derived from it. A range
+  that does not hold stops the projector.
+- CountChecked is `checkReads`, behind `GET /api/audit/reads` (`coffre
+  verify log`). CursorMac is `cursorMac`, ReplaceOnConflict and
+  IdempotentByNumber `project_reads`' upsert, CursorAfterRows its single
+  transaction. ProjectorApart is the `reads` object on Workers and an
+  unawaited kick on Node.
+
 ## TLC
 
 [TLC](https://github.com/tlaplus/tlaplus) is the TLA+ tools' explicit-state

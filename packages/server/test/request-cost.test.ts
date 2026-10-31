@@ -1408,7 +1408,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await db.owner.execute(sql`
       INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
       SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * ${every}, gen_random_uuid(), 1, ${principal}, (${array(secretIds)})[1 + g % ${secretIds.length}],
-             ${environment}::uuid, gen_random_uuid(), ${options.fork ?? null}::uuid, ${options.source?.key ?? null}::uuid, ${options.source?.environment ?? null}::uuid,
+             ${environment}::uuid, ${[e, quiet, fork].includes(environment) ? project : market}::uuid, ${options.fork ?? null}::uuid, ${options.source?.key ?? null}::uuid, ${options.source?.environment ?? null}::uuid,
              ${options.source === undefined ? null : market}::uuid, NULL, decode(repeat('00', 16), 'hex')
         FROM generate_series(1, ${count}) g`);
     const other = options.fork ?? options.source?.environment ?? null;

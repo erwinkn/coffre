@@ -248,6 +248,31 @@ test('coffre verify instance without a session says to sign in first, and checks
   assert.equal(nowhere.stdout + elsewhere.stdout + named.stdout + access.stdout + noUrl.stdout, '');
 });
 
+test("coffre verify log holds the reads listed to the uses sealed, a stretch a request, after the chain: OK, or BROKEN with each problem (T166)", async (t) => {
+  const chain = { ok: true, entries: 12, through: 11, checkpoint: null, remaining: 0 };
+  const cases: [Record<string, unknown>, number, RegExp][] = [
+    [{ start: { kept: true, ok: true, problems: [], through: '40', listed: '90', next: '40' }, 40: { kept: true, ok: true, problems: [], through: '90', listed: '90', next: null } }, 0, /reads OK: every read sealed through entry 90 listed as the log sealed it/],
+    [{ start: { kept: true, ok: false, problems: ['read 7 is sealed but not listed'], through: '40', listed: '90', next: '40' } }, 2, /reads BROKEN, found by the vault's check \(verified through entry 40\):\n {2}read 7 is sealed but not listed/],
+    // An instance before 0.15: no such route, and nothing more said.
+    [{}, 0, /^$/],
+  ];
+  for (const [stretches, code, said] of cases) {
+    let seen: { url: string }[] = [];
+    const instance = await fakeInstance(t, (method, path) => {
+      if (method !== 'GET') return undefined;
+      if (path === '/api/audit/verification') return chain;
+      if (path !== '/api/audit/reads') return undefined;
+      return stretches[new URL(seen.at(-1)!.url, 'http://x').searchParams.get('from')!];
+    });
+    seen = instance.seen;
+    const { home } = signedInHome(t, instance.origin);
+    const run = await coffre(['verify', 'log'], home);
+    assert.equal(run.code, code, run.stderr);
+    assert.match(code === 0 ? run.stdout.split('\n').slice(2).join('\n') : run.stderr, said);
+    assert.match(run.stdout, /^audit log OK: verified from the first entry through entry 11, 12 entries/);
+  }
+});
+
 test('coffre verify alone, without a terminal, lists the checks and exits 2', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'coffre-verify-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));

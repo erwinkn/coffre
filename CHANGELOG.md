@@ -226,25 +226,27 @@
 - **0.15's reads are on the audit pages, behind its switch.** Under the
   switch a read (a reveal, a run, the proxy's use, a read through a
   reference or in a fork) writes no `secret.read` entry: its use, a slim
-  row of 0.15's log, is the record (R53). The audit page, a member's
-  Activity, `coffre audit`, MCP's `read_audit_log`, `GET /api/audit?sealed=1`,
-  the offboarding report and `coffre verify instance` now list each where
-  that entry stood: who read which key, of which version, for what, through
-  which credential, reference or fork, at the places the caller reads and
-  the path names, by the members asked for. A run of several keys is an
-  entry a key, and the app's request and operation, which the row does not
-  keep, are not shown. A use is the request: one the vault refused after
-  logging it (the bulk cap's) shows as a read too. The vault vouches for
-  each entry of 0.15's log a page lists, by its MAC (`Vault.vouch`), and a
-  page marks one it does not as forged, the changes a read's version came
-  from included. A member's page held to places reads each way in no
-  further than 1,000 uses past those it keeps, and may then show fewer than
-  it asks, its `next` set. `GET /api/me` names the request's credential
-  (`credentialId`). Migration 0049 adds three indexes
-  of `log_uses` (a use writes three more index entries, no statement
-  more), one of `credentials`, and the functions the pages read them
-  through, a page at a time however long the log. `docs/design/0.15-plan.md`,
-  "As built: T166".
+  row of 0.15's log, is the record (R53). The vault now projects each use
+  a checkpoint seals into a row of its own (`log_reads`, migration 0049):
+  whose read it was, of which key and version, where, through which
+  reference or fork, all from the sealed log at the use's number, under a
+  MAC over every column. The projector runs apart from sealing: on
+  Workers, an object of the checkpointer's class named `reads`, which the
+  vault starts beside it; on Node, after each tick. It derives nothing
+  from a range that does not hold to the pair that sealed it. The audit
+  page, a member's Activity, `coffre audit`, MCP's `read_audit_log`,
+  `GET /api/audit?sealed=1`, the offboarding report and `coffre verify
+  instance` list each where 0.14's entry stood. Each is vouched for by the
+  vault (`Vault.vouch`) and marked forged when it fails. When the
+  projection is behind, the pages say how far reads are listed (`reads`).
+  `coffre verify log`, the audit page's whole-log check and conformance
+  hold the listing to the sealed uses (`GET /api/audit/reads`), a
+  checkpoint's range a request. A run of several keys is an entry a key,
+  and the app's request and operation, which the use does not keep, are
+  not shown. A use is the request: one the vault refused after logging it
+  (the bulk cap's) shows as a read too. `GET /api/me` names the request's
+  credential (`credentialId`). About 1.3 KB of projection a read.
+  `docs/design/0.15-plan.md`, "As built: T166".
 - **0.15's token issues, revokes and sign-outs are on the audit pages,
   behind its switch.** Under the switch the vault writes no `token.create`,
   `token.revoke` or `sign_out` entry; its change is the record (D147). The
