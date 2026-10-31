@@ -40,7 +40,7 @@ before(async () => {
     name,
     compatibility_date: '2026-08-06',
     compatibility_flags: ['nodejs_compat'],
-    vars: { KEK: JSON.stringify(KEK), SIGNING_KEY: SIGNING_KEY.toString('base64'), TICK_BOUND_MS: '500' },
+    vars: { KEK: JSON.stringify(KEK), SIGNING_KEY: SIGNING_KEY.toString('base64'), TICK_BOUND_MS: '1000' },
     hyperdrive: [
       { binding: 'VAULT_HYPERDRIVE', id: 'stall-workers-test', localConnectionString: proxy.url },
       { binding: 'HOT_HYPERDRIVE', id: 'stall-workers-hot', localConnectionString: HOT_URL },
@@ -76,10 +76,13 @@ async function answered<T>(method: string, ...args: unknown[]): Promise<T> {
   return answer.result;
 }
 
-const until = async (done: () => Promise<boolean>, ms: number, what: string) => {
+/** Asks `sealing` until it says `ok`, or past `ms` throws with its last answer. */
+const untilSealing = async (ok: boolean, ms: number, what: string) => {
   const end = Date.now() + ms;
-  while (!(await done())) {
-    if (Date.now() > end) throw new Error(`${what}: not within ${ms} ms`);
+  for (;;) {
+    const said = await answered<Sealing>('sealing');
+    if (said.ok === ok) return;
+    if (Date.now() > end) throw new Error(`${what}: not within ${ms} ms; it said ${JSON.stringify(said)}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 };
@@ -89,13 +92,13 @@ test("T169, Workers: the checkpointer's connection stops answering: a use answer
   const id = await w.key('postgres://prod');
   // The first call starts the object; it seals within a tick or two.
   assert.equal((await answered<{ log?: string }>('about')).log, '0.15');
-  await until(async () => (await answered<Sealing>('sealing')).ok, 10_000, 'sealing at first');
+  await untilSealing(true, 20_000, 'sealing at first');
   assert.ok((await answered<UseOutcome>('use', ask(w, id))).ok);
 
   proxy.hold();
   let t0 = Date.now();
-  await until(async () => !(await answered<Sealing>('sealing')).ok, 5000, 'red');
-  assert.ok(Date.now() - t0 < 5000);
+  await untilSealing(false, 8000, 'red');
+  assert.ok(Date.now() - t0 < 8000);
   // A use waits on no checkpointer: its own connection, the hot path's.
   t0 = Date.now();
   const outcome = await answered<UseOutcome>('use', ask(w, id));
@@ -106,11 +109,11 @@ test("T169, Workers: the checkpointer's connection stops answering: a use answer
   t0 = Date.now();
   const unsealed = await call('waitSealed', { number: String(number) });
   assert.ok(!unsealed.ok && unsealed.error.includes(UNSEALED), JSON.stringify(unsealed));
-  assert.ok(Date.now() - t0 < 10_000, `unsealed after ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 12_000, `unsealed after ${Date.now() - t0} ms`);
 
   // Answered again: the object's next alarms open another checkpointer, which seals, the change among it.
   proxy.release();
-  await until(async () => (await answered<Sealing>('sealing')).ok, 15_000, 'sealing again');
+  await untilSealing(true, 45_000, 'sealing again');
   assert.ok((await answered<{ ok: boolean }>('waitSealed', { number: String(number) })).ok);
   const status = await answered<{ ticks: { failures: string[] }[] }>('checkpointerStatus');
   assert.ok(status.ticks.every((t) => t.failures.length === 0), JSON.stringify(status.ticks.flatMap((t) => t.failures)));

@@ -281,7 +281,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
     return rows.map((r) => ({ level: r.level, index: indexOf(r.level, Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
   };
   return {
-    async close(after, from, limit) {
+    async close(after, from, limit, told) {
       // The barrier, and the newest pair with it: only the checkpointer writes that row, so a snapshot from before the
       // barrier's lock holds it. The window comes in the next statement, a snapshot after the lock.
       // The ceiling is the clock less the deadline once close_one has run, as close_one raises the floor to it: no
@@ -292,6 +292,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
                (SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1) AS newest
           FROM close_one() b`);
       const upto = BigInt(barrier?.upto ?? '0');
+      told?.(upto);
       // The window by number, its first `limit` (T169): every use of the window read, sorted by number, which costs the
       // window's size; past the limit, the lowest `at` of the uses left above it, which the index finds past those read.
       const read = (await rows(after, upto, sql`${from}::bigint`, undefined, limit === undefined ? undefined : limit + 1, true)).map(fromRow);
@@ -434,7 +435,7 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
     return rows.map((r) => ({ level: Number(r.level), index: indexOf(Number(r.level), Number(r.leaf)), hashes: Buffer.from(r.hashes) }));
   };
   return {
-    async close(after, from, limit) {
+    async close(after, from, limit, told) {
       // One writer: every number committed is final. The barrier only moves the floor, as close_one does.
       const barrier = await db.transaction(async (tx) => {
         const [fence] = await rowsOf<{ at_floor: number }>(tx, sql`SELECT at_floor FROM log_fence WHERE only_row`);
@@ -444,6 +445,7 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
                  max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS upto`);
         return { found: fence?.at_floor ?? null, set: Number(now!.at_floor), ceiling: Number(now!.ceiling), upto: BigInt(now!.upto ?? 0) };
       });
+      told?.(barrier.upto);
       const read = await one<{ newest: RawPair | null; entries: RawEntry[] }>(db, sql`SELECT json_object(
           'newest', json((SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)),
           'entries', json(${window(after, barrier.upto, sql`${from}`, undefined, limit === undefined ? undefined : limit + 1, true)})) AS v`);

@@ -87,8 +87,9 @@ export type CheckpointStore = LogReader & {
    * With `limit` (T169), the window's first `limit` entries by number, and
    * `more` when there were more: `more.above`, the lowest `at` of the uses
    * the window holds above the last of them, from `from` on (null: none).
+   * `barrier`, told the barrier's `upto` before the window is read.
    */
-  close(after: bigint, from: number, limit?: number): Promise<{
+  close(after: bigint, from: number, limit?: number, barrier?: (upto: bigint) => void): Promise<{
     upto: bigint; newest: StoredPair | null; entries: LogEntry[]; floor: { found: number | null; set: number; ceiling: number };
     more?: { above: number | null } | null;
   }>;
@@ -218,8 +219,22 @@ export function sealingOf(state: { open: boolean; failed: string | null; last: {
  */
 export const WINDOW_MAX = 10_000;
 
+/**
+ * How much longer than `TICK_BOUND_MS` a tick may run for each number its
+ * barrier's window spans (review by Fable): its read sorts the window's
+ * uses by number, which have no index by number, so it costs the whole
+ * backlog left, 1.4 µs a use measured (1.6 s at a million). A tick is
+ * bounded by the work asked of it, never by a clock alone: a drain of
+ * millions goes on, a few times slower than measured, and a stall is
+ * still one.
+ */
+export const WINDOW_ENTRY_MS = 0.01;
+
 /** A wait past its bound (`within`). */
 export class TimedOut extends Error {}
+
+/** What a fence closed refuses: no alarm, since another checkpointer holds its memory and does the work. */
+export class FenceClosed extends Error {}
 
 /** A tick past `TICK_BOUND_MS`: the checkpointer stalled, and is closed for good. */
 export class Stalled extends Error {}
@@ -243,13 +258,23 @@ export class Unsealed extends Error {
  * refuses.
  */
 export function within<T>(work: Promise<T>, ms: number, what: string, expired?: () => void): Promise<T> {
+  const until = performance.now() + ms;
+  return withinUntil(work, () => until, () => `${what} did not end within ${ms} ms`, expired);
+}
+
+/** `within`, its deadline `until()` read again when it comes: one that moved on is waited for. */
+function withinUntil<T>(work: Promise<T>, until: () => number, said: () => string, expired?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const past = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      expired?.();
-      reject(new TimedOut(`${what} did not end within ${ms} ms`));
-    }, Math.max(0, ms));
-    (timer as { unref?: () => void }).unref?.();
+    const arm = () => {
+      timer = setTimeout(() => {
+        if (performance.now() < until()) return arm();
+        expired?.();
+        reject(new TimedOut(said()));
+      }, Math.max(0, until() - performance.now()));
+      (timer as { unref?: () => void }).unref?.();
+    };
+    arm();
   });
   return Promise.race([work, past]).finally(() => clearTimeout(timer));
 }
@@ -280,7 +305,7 @@ export class Fence {
   }
 
   #check(): void {
-    if (this.#closed !== null) throw new Error(`this checkpointer was closed (${this.#closed}): another holds its memory`);
+    if (this.#closed !== null) throw new FenceClosed(`this checkpointer was closed (${this.#closed}): another holds its memory`);
   }
 
   /**
@@ -612,6 +637,8 @@ export class Checkpointer {
   private closed = false;
   /** Why it stalled (T169): a tick past its bound. */
   private stalled: string | null = null;
+  /** When the tick in flight stalls: `TICK_BOUND_MS` after it started, and more for a long window. */
+  private until = 0;
   /** What the tick in flight awaits, which a stall says, so that an operator sees what stalled. */
   private phase: 'finish' | 'barrier' | 'sign' | 'remember' | 'write' = 'barrier';
 
@@ -627,10 +654,12 @@ export class Checkpointer {
     if (this.queued !== null) return this.queued;
     const run = this.running.then(() => {
       this.queued = null;
-      // Bounded (T169): past it the checkpointer stalls, its fence closed, whatever the tick still awaits.
-      const ms = this.options.tickBoundMs;
-      return within(this.tickNow(), ms, 'a tick', () => {
-        this.stalled ??= `a tick ran past ${ms} ms in its ${this.phase}: the database stalled under it`;
+      // Bounded (T169): past it the checkpointer stalls, its fence closed, whatever the tick still awaits. Its window,
+      // once the barrier has said how far, adds to the bound (`WINDOW_ENTRY_MS`).
+      const t0 = performance.now();
+      this.until = t0 + this.options.tickBoundMs;
+      return withinUntil(this.tickNow(), () => this.until, () => `a tick did not end within ${Math.round(this.until - t0)} ms`, () => {
+        this.stalled ??= `a tick ran past ${Math.round(this.until - t0)} ms in its ${this.phase}: the database stalled under it`;
         this.closed = true;
         void this.fence.close(this.stalled);
       }).catch((error: unknown) => {
@@ -656,7 +685,9 @@ export class Checkpointer {
     const { pair } = this.head;
     const t0 = performance.now();
     this.phase = 'barrier';
-    const { upto, newest, entries, floor, more = null } = await this.store.close(pair.upto, this.floor, this.options.windowMax);
+    const { upto, newest, entries, floor, more = null } = await this.store.close(pair.upto, this.floor, this.options.windowMax, (upto) => {
+      if (upto > pair.upto) this.until += Number(upto - pair.upto) * WINDOW_ENTRY_MS;
+    });
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
     // The floor is an unsigned row (HotPathOne.tla's BarrierChecksFloor): a writer who lowered it would let a use in
@@ -669,8 +700,10 @@ export class Checkpointer {
     // Above where its last barrier left it is a barrier of a checkpointer given up on, landing late (T169), so long as it
     // is no higher than this barrier's own clock less the deadline, which this barrier raised it past anyway
     // (HotPathOne.tla's BarrierAcceptsLate): higher, a writer raised it.
+    // The first barrier after an open too (review by Fable): the barriers whose pairs went unsigned left the floor at
+    // most at their own clock less the deadline, which this barrier's ceiling is past; higher, a writer raised it.
     const expected = this.barrier ?? this.floor;
-    const raised = floor.found !== null && this.barrier !== null && floor.found > this.barrier && floor.found > floor.ceiling;
+    const raised = floor.found !== null && floor.found > (this.barrier ?? -Infinity) && floor.found > floor.ceiling;
     if (floor.found === null || floor.found < expected || raised) {
       this.floorAlarm ??= `the floor of at is ${floor.found ?? 'gone'}, not the ${expected} the signer's barrier set: ${floor.found !== null && floor.found > expected ? 'raised' : 'lowered'} by a writer; reopen the checkpointer once it is put right`;
     } else {

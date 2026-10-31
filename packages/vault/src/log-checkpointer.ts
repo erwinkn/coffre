@@ -1,6 +1,6 @@
 import { pairSigners } from '@coffre/core/merkle';
 
-import { Checkpointer, logOrigin, type Alarm, type CheckpointStore, type Fence, type Memory, type Witness } from './checkpointer.ts';
+import { Checkpointer, FenceClosed, logOrigin, type Alarm, type CheckpointStore, type Fence, type Memory, type Witness } from './checkpointer.ts';
 import { authentic, logMacKey } from './log-entry.ts';
 import type { LogStore } from './log-store.ts';
 import { DAY_MS, dayOf, retain } from './retention.ts';
@@ -105,6 +105,9 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       }
       failed = null;
     } catch (error) {
+      // Its checkpointer closed under it, given up on or replaced: the next one's upkeep does the work, and this is no
+      // alarm (review by Fable).
+      if (error instanceof FenceClosed || (error as { cause?: unknown })?.cause instanceof FenceClosed) return;
       const message = `the log's upkeep failed: ${reasonOf(error)}`;
       if (message !== failed) options.alert(message);
       failed = message;

@@ -135,6 +135,15 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #daysFor: string | null = null;
     #daysTried = -Infinity;
     #daysFailed: string | null = null;
+    /** Whether the upkeep after a tick that held runs now (`alarm`), which readiness counts as the tick's time. */
+    #upkeeping = false;
+
+    /** The last tick as readiness reads it: during the upkeep after it, as if it had just ended. */
+    #lastSeen(): { at: number; failures: readonly string[] } | null {
+      const last = this.#ticks.at(-1) ?? null;
+      return last === null || !this.#upkeeping ? last : { at: Date.now(), failures: last.failures };
+    }
+
     /** The last ticks, newest last, with their wall time in the object: `status`. */
     readonly #ticks: (Tick & { wallMs: number; at: number })[] = [];
 
@@ -304,9 +313,19 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         if (this.#ticks.length > 64) this.#ticks.shift();
         this.#failed = null;
         more = t.more;
-        // On the same connection, cut past its bound: the checkpointer goes with it.
+        // On the same connection, cut past its bound: the checkpointer goes with it. Meanwhile readiness counts the
+        // checkpointer as sealing (review by Fable): its last tick was good, and the upkeep is bounded.
         const pool = this.#pool;
-        if (this.#upkeep !== null && !more) await within(this.#upkeep(), UPKEEP_BOUND_MS, "the log's upkeep", () => pool?.destroy());
+        if (this.#upkeep !== null && !more) {
+          this.#upkeeping = true;
+          try {
+            await within(this.#upkeep(), UPKEEP_BOUND_MS, "the log's upkeep", () => pool?.destroy());
+          } finally {
+            this.#upkeeping = false;
+            const last = this.#ticks.at(-1);
+            if (last !== undefined) last.at = Date.now();
+          }
+        }
       } catch (error) {
         // A write that failed may be a tamper signal (a tile changed under the signer): an alarm, kept once.
         await this.#failure(`a checkpoint failed: ${reasonOf(error)}`);
@@ -355,7 +374,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             open: this.#checkpointer !== null,
             failed: this.#failed,
             // By the object's clock, as its ticks' times are.
-            sealing: sealingOf({ open: this.#checkpointer !== null, failed: this.#failed, last: this.#ticks.at(-1) ?? null }),
+            sealing: sealingOf({ open: this.#checkpointer !== null, failed: this.#failed, last: this.#lastSeen() }),
             upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
             ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
           });

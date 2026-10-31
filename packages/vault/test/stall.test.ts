@@ -218,7 +218,8 @@ test('T169, review r1, Node, Postgres: stall after stall, each on a connection o
   try {
     await until(() => kept.sealing().ok, 5000, 'sealing at first');
     proxy.hold();
-    // Many stalls and opens over three seconds, each a session that gets no answer, each cut once given up on.
+    // Many stalls and opens, each a session that gets no answer, each cut once given up on.
+    await until(() => !kept.sealing().ok, 10_000, 'red');
     await new Promise((resolve) => setTimeout(resolve, 3000));
     assert.ok(!kept.sealing().ok);
     assert.ok(proxy.clients() <= 3, `${proxy.clients()} connections left open`);

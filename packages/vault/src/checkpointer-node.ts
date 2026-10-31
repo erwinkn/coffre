@@ -156,8 +156,8 @@ export async function runCheckpointer(options: {
   // The last tick that ended, for readiness; and whether the checkpointer stalled, which ends the loop.
   let last: { at: number; failures: string[] } | null = null;
   let stalled = false;
-  // The upkeep, bounded: one past its bound goes on behind the next ticks, and none starts beside it. Its connection
-  // is the vault's pool's, which the runner does not cut.
+  // The upkeep, bounded, beside the ticks: one past its bound goes on behind them, and none starts beside it. Its
+  // store is behind the checkpointer's fence, and its connection the runner's own session's, where it has one.
   let upkeeping: Promise<void> | null = null;
   const upkeepOnce = async () => {
     if (upkeeping !== null) return;
@@ -175,7 +175,9 @@ export async function runCheckpointer(options: {
       last = { at: Date.now(), failures: t.failures };
       projector.kick();
       more = t.more;
-      return more ? undefined : upkeepOnce();
+      // Beside the ticks, never ahead of them: an upkeep that waits on its database holds no tick back (CI, review of
+      // the stall tests), and none starts beside another (`upkeepOnce`).
+      if (!more) void upkeepOnce();
     }, async (error: Error) => {
       more = false;
       const message = `a checkpoint failed: ${reasonOf(error)}`;

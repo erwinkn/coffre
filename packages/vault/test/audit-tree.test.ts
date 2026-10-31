@@ -7,7 +7,8 @@ import { test } from 'node:test';
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 import { isUnsealed } from '@coffre/core/vault';
 
-import { Checkpointer, Fence, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, Fence, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, WINDOW_ENTRY_MS, type Witness } from '../src/checkpointer.ts';
+import { upkeep } from '../src/log-checkpointer.ts';
 import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
 
@@ -972,4 +973,55 @@ test('T169, review r1: a fence closed refuses every call after it and every answ
   await assert.rejects(asked, /closed \(stalled\)/);
   assert.throws(() => store.now(), /closed \(stalled\)/);
   assert.throws(() => memory.remember('another'), /closed \(stalled\)/);
+});
+
+test('T169, review by Fable: a tick is bounded by the work its window asks, so a long drain goes on where a short window that took as long stalls', async () => {
+  const { k, store, memory, alerts } = await setup();
+  const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 100 });
+  const cp = await open();
+  await traffic(store, cp, 1);
+  // A window read that sorts what is left, 3 µs a number: 300 ms for a backlog of 100,000, past the bound alone, and
+  // inside it with the window's own allowance (WINDOW_ENTRY_MS); each part sealed is WINDOW_MAX of it.
+  let fixed: number | null = null;
+  const close = store.close.bind(store);
+  store.close = async (after, from, limit, barrier) => {
+    const read = await close(after, from, limit, barrier);
+    await new Promise((resolve) => setTimeout(resolve, fixed ?? Number(read.upto - after) * 0.003));
+    return read;
+  };
+  for (let i = 0; i < 100_000; i += 1) store.append('uses', `drain-${i}`);
+  assert.ok(100_000 * 0.003 > 100 && 0.003 < WINDOW_ENTRY_MS);
+  const t = await cp.tick();
+  assert.ok(t.signed && t.more, t.failures.join('; '));
+  while ((await cp.tick()).more);
+  assert.equal(cp.pair.pair.uses.size, 100_000 + 20);
+  // One entry whose read takes as long: no window asks for that, and the tick stalls.
+  fixed = 300;
+  store.append('uses', 'one');
+  await assert.rejects(cp.tick(), Stalled);
+});
+
+test('T169, review by Fable: the first barrier after an open refuses a floor raised past its own clock less the deadline, as every barrier after does', async () => {
+  const { store, open, alerts } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  await cp.close();
+  store.floor = Date.now() + 3_600_000;
+  const reopened = await open();
+  store.append('uses', 'after');
+  const t = await reopened.tick();
+  assert.ok(!t.signed && /floor of at is .* raised by a writer/.test(t.failures.join()), t.failures.join());
+  assert.ok(alerts.some((a) => /raised by a writer/.test(a)));
+});
+
+test('T169, review by Fable: an upkeep whose checkpointer was closed under it raises no alarm: the next one does the work', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  const fence = new Fence();
+  await fence.close('replaced');
+  const alerts: string[] = [];
+  const keep = upkeep(cp, fence.store({ ...store, makeDays: async () => {}, pruneBulk: async () => 0 } as never), { keepDays: 1, seed: Buffer.alloc(32, 9), alert: (m) => alerts.push(m) });
+  await keep();
+  assert.deepEqual(alerts, []);
 });

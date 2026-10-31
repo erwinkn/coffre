@@ -519,7 +519,16 @@ cutover's seal. Now:
   2 ms); 1,000,000 in 100 ticks, 56 s, the first and slowest 1.6 s. The
   window read sorts what is left by number (the uses have no index by
   number), so it grows with the backlog: an hour's at 1,000 a second
-  would take some 5 s a tick, inside the bound.
+  takes some 5 s a tick. So a tick's bound grows with its window
+  (`WINDOW_ENTRY_MS`, 10 µs a number the barrier's window spans, some
+  seven times the measured sort): a drain of millions goes on, and a
+  read that takes that long for a few entries is still a stall
+  (review by Fable).
+- **The first barrier after an open is held to its ceiling too**: the
+  barriers whose pairs went unsigned left the floor at most at their own
+  clock less the deadline. An upkeep whose checkpointer was closed under
+  it raises no alarm; on Node it runs beside the ticks, and on Workers
+  readiness counts the bounded upkeep after a good tick as its time.
 - **A late barrier is no alarm.** A barrier sent by a checkpointer given
   up on may run in the database after the next one has opened and ticked,
   raising the floor past where that one's last barrier left it. The next
