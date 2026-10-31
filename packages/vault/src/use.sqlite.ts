@@ -9,7 +9,7 @@ import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
-import type { Resolved, UseCall, UseRow } from './use.ts';
+import type { Cover, Resolved, UseCall, UseRow } from './use.ts';
 
 /**
  * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
@@ -73,6 +73,8 @@ type Rows = {
   bulk(principal: string, secret: string, since: number): Promise<{ last: number } | undefined>;
   /** How many of the principal's keys but `secret` count since `since`, up to `count`. */
   others(principal: string, secret: string | null, since: number, count: number): Promise<number>;
+  /** Whether the entry the call's cover names is its request's: the same key, way in, purpose and place. */
+  cover(call: UseCall & { cover: Cover }): Promise<boolean>;
   /** The use's entry, written; its number. */
   use(call: UseCall): Promise<bigint>;
   enter(principal: string, secret: string | null, period: number): Promise<void>;
@@ -86,6 +88,8 @@ function direct(tx: Queryable): Rows {
     bulk: (principal, secret) => one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${principal} AND secret = ${secret}`),
     others: async (principal, secret, since, count) => Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
       SELECT 1 FROM log_bulk WHERE principal = ${principal} AND secret <> ${secret} AND last > ${since} LIMIT ${count})`))!.n),
+    cover: async ({ cover, ...call }) => (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
+      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined,
     use: async (call) => {
       const next = BigInt((await one<{ n: string }>(NEXT))!.n);
       await insertUses(tx, [{ number: next, call }]);
@@ -121,12 +125,6 @@ const CHUNK = 500;
 /** A principal's cap rows in a batch: each key's `last`, every one since `since`; those it entered; how many count since each bound asked. */
 type Bulk = { since: number; rows: Map<string, number>; entered: Set<string>; above: Map<number, number> };
 
-/** What a cover's check reads, by its request and the use's. */
-function coverKey(call: UseCall): string {
-  const { cover } = call;
-  return `cover\n${cover?.at}\n${cover?.requestId}\n${cover?.number}\n${call.credential}\n${call.secretId}\n${call.purpose}\n${call.place}`;
-}
-
 /**
  * A batch's rows (`callBatch`): every key's own rows read up front, a statement for all the keys' ids at a time, and
  * any other read once for the batch, by its key; a key whose row was not read up front (a personal config's parent, a
@@ -140,6 +138,10 @@ class Batched implements Rows {
   /** Per principal, the cap rows read (`#bulkOf`) and those the batch's keys entered. */
   readonly #bulk = new Map<string, Bulk>();
   readonly #uses: { number: bigint; call: UseCall }[] = [];
+  /** The same, by number. */
+  readonly #numbered = new Map<string, UseCall>();
+  /** The calls whose cover names an entry the log held when the batch began. */
+  readonly #covered = new Set<UseCall>();
   #next: bigint | undefined;
 
   private constructor(tx: Queryable) {
@@ -181,7 +183,7 @@ class Batched implements Rows {
       const found = new Set((await rowsOf<{ k: number }>(tx, sql`WITH v (k, at, request_id, number, credential, secret, purpose, place) AS (VALUES ${sql.join(values, sql`, `)})
         SELECT v.k FROM v JOIN log_uses u ON u.at = v.at AND u.request_id = v.request_id AND u.number = v.number AND u.credential = v.credential
           AND u.secret = v.secret AND u.purpose = v.purpose AND u.place IS v.place`)).map((row) => Number(row.k)));
-      for (const [k, call] of some.entries()) batch.#set(coverKey(call), found.has(k));
+      for (const [k, call] of some.entries()) if (found.has(k)) batch.#covered.add(call);
     }
     return batch;
   }
@@ -210,17 +212,30 @@ class Batched implements Rows {
     return count < 0 ? n : Math.min(n, count);
   }
 
+  async cover(call: UseCall & { cover: Cover }): Promise<boolean> {
+    if (this.#covered.has(call)) return true;
+    // Or an entry of the batch's own, made before it, as alone the use would find it written (SQL's `=` holds for no null).
+    const { cover } = call;
+    const made = this.#numbered.get(String(BigInt(cover.number)));
+    return made !== undefined && made.at === cover.at && BigInt(made.requestId) === BigInt(cover.requestId)
+      && call.credential !== null && made.credential === call.credential && call.secretId !== null && made.secretId === call.secretId
+      && made.purpose === call.purpose && made.place === call.place;
+  }
+
   async use(call: UseCall): Promise<bigint> {
     this.#next ??= BigInt((await rowsOf<{ n: string }>(this.#tx, NEXT))[0]!.n);
     const number = this.#next++;
     this.#uses.push({ number, call });
+    this.#numbered.set(String(number), call);
     return number;
   }
 
   async enter(principal: string, secret: string | null, period: number): Promise<void> {
-    // A key enters once its row was read (`bulk`), which a use with no key never reads, nor writes, as its entry cannot.
+    // A use with no key has no row to enter: its entry, queued before, fails to write first (its key NOT NULL), as alone.
+    if (secret === null) return;
+    // A key enters once its row was read (`bulk`).
     const bulk = this.#bulk.get(principal);
-    if (secret === null || bulk === undefined) throw new Error('a cap row entered unread');
+    if (bulk === undefined) throw new Error('a cap row entered unread');
     const old = bulk.rows.get(secret) ?? -Infinity;
     const last = Math.max(old, period);
     bulk.rows.set(secret, last);
@@ -415,8 +430,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   const others = c === undefined || inSet ? 0 : await rows.others(c.principal, read.secretId, since, limit.count);
   const cover = call.cover;
   const covered = cover !== undefined && b !== undefined && b.last >= period && (cached || BigInt(cover.number) > (inputs ?? 0n))
-    && await rows.read(coverKey(call), async () => (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
-      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined);
+    && await rows.cover(call as UseCall & { cover: Cover });
   // A use whose key would take its principal's lock, to enter the cap's set or move on in it, named or by ids, takes it
   // only in the call the vault makes once it has decided the use (0045, T158, D153): else `decide`, nothing written, its
   // rows for the vault to decide on. SQLite's one writer at a time makes the lock implicit; the call is the same, so

@@ -139,6 +139,12 @@ test('a batch answers each key as its use alone does, row for row, and writes th
     // Its first key counts from the shorter window's bound, a later one from the policy's, further back.
     ['keys of two caps in one batch', calls(() => true, (i) => (i % 2 === 0 ? { ...cached, cap: { count: 5, windowMs: 5 * 60_000 } } : undefined))],
   ];
+  // One key twice, the second's cover naming the entry the first makes (review r1): alone, it finds it written.
+  const one = (secretId: string | null, extra: Partial<UseCall> = {}): UseCall => ({
+    credential: w.credentialId, secretId, requestId: newRequestId(), at, purpose: 1, place: null, mac: randomBytes(16), deadline: at + 3000, way: 0, principal: null, decided: true, ...extra,
+  });
+  const first = one(fresh2);
+  cases.push(['a cover of an entry the batch made before it', [first, one(fresh2, { cover: { number: String(Number(entry.number) + 1), at, requestId: first.requestId, until: at + 60_000 } })]]);
   for (const [name, batch] of cases) {
     await start();
     const alone: UseRow[] = [];
@@ -148,6 +154,25 @@ test('a batch answers each key as its use alone does, row for row, and writes th
     const together = await callBatch(db.vault, batch, null);
     assert.deepEqual(together, alone, name);
     assert.deepEqual(await written(), wroteAlone, name);
+  }
+  assert.equal((await written()).uses.length, 2, 'the cover held: one entry of the two');
+  // Calls no batch of the vault's makes fail as alone, first failure first: a key of none (its entry's key NOT NULL),
+  // and a replayed request before it (23505).
+  const failure = async (call: () => Promise<unknown>) => {
+    await start();
+    try {
+      await call();
+    } catch (error) {
+      const { code, message } = error as { code?: string; message: string };
+      return { code, message };
+    }
+    assert.fail('no failure');
+  };
+  for (const batch of [[one(null)], [one(fresh1, { at: entry.at, requestId: entry.requestId }), one(null)]]) {
+    const alone = await failure(async () => {
+      for (const call of batch) await callUse(db.vault, call);
+    });
+    assert.deepEqual(await failure(() => callBatch(db.vault, batch, null)), alone);
   }
   // What the decided batch did, as the cap's rule has it: the first new key entered, the rest over the cap.
   await start();
