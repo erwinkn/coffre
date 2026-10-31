@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { decodePair, encodePair, leafHash, noteSigner, openPair, proveConsistency, signPair, verifyInclusion, verifyLog, type PairNotes } from '@coffre/core/merkle';
 import { isUnsealed } from '@coffre/core/vault';
 
-import { Checkpointer, Fence, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, WINDOW_ENTRY_MS, type Witness } from '../src/checkpointer.ts';
+import { Checkpointer, Fence, FenceClosed, FRESH_MS, heldIn, localWitness, Refused, Stalled, Unsealed, WINDOW_ENTRY_MS, type Witness } from '../src/checkpointer.ts';
 import { upkeep } from '../src/log-checkpointer.ts';
 import { checkpointerObject, durableHeldOutside } from '../src/checkpointer-workers.ts';
 import { authentic, entry, keys, MemoryStore, variableMemory, type Keys } from './audit-tree.ts';
@@ -1024,4 +1024,35 @@ test('T169, review by Fable: an upkeep whose checkpointer was closed under it ra
   const keep = upkeep(cp, fence.store({ ...store, makeDays: async () => {}, pruneBulk: async () => 0 } as never), { keepDays: 1, seed: Buffer.alloc(32, 9), alert: (m) => alerts.push(m) });
   await keep();
   assert.deepEqual(alerts, []);
+});
+
+test('T169, review r6: a tick that throws, a change\'s as well as its host\'s, stands against sealing until one ends well', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  assert.equal(cp.standing, null);
+  // A change's seal ticks the checkpointer, and its write fails: the change is unsealed, and that stands.
+  store.beforeWrite = () => {
+    throw new Error('Connection terminated unexpectedly');
+  };
+  const change = store.append('changes', 'revoke');
+  await assert.rejects(cp.sealThrough(change), (error: Error) => error instanceof Unsealed);
+  assert.match(cp.standing ?? '', /a checkpoint failed: Connection terminated unexpectedly/);
+  store.beforeWrite = null;
+  assert.ok((await cp.tick()).signed);
+  assert.equal(cp.standing, null);
+});
+
+test('T169, review r6: a call that fails after its fence closed fails as the fence\'s, its cause kept, so that nothing alarms on a connection its host cut', async () => {
+  const fence = new Fence();
+  let fail!: (error: Error) => void;
+  const store = fence.store({ pruneBulk: () => new Promise<number>((_, reject) => (fail = reject)) });
+  const asked = store.pruneBulk();
+  await fence.close('retired');
+  const cut = new Error('connection was destroyed');
+  fail(cut);
+  await assert.rejects(asked, (error: Error) => error instanceof FenceClosed && error.cause === cut);
+  // Open, a failure is its own.
+  const open = new Fence().store({ pruneBulk: () => Promise.reject(cut) });
+  await assert.rejects(open.pruneBulk(), (error: Error) => error === cut);
 });

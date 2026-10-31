@@ -314,10 +314,18 @@ export class Fence {
    */
   #late<T>(answer: T): T {
     if (!(answer instanceof Promise)) return answer;
-    return answer.then((value: unknown) => {
-      this.#check();
-      return value;
-    }) as T;
+    return answer.then(
+      (value: unknown) => {
+        this.#check();
+        return value;
+      },
+      (error: unknown) => {
+        // Failed after the fence closed, its connection cut by its host as like as not: the fence's, no answer of the
+        // database's, so that nothing alarms on it (review r6).
+        if (this.#closed !== null) throw new FenceClosed(`this checkpointer was closed (${this.#closed}): another holds its memory`, { cause: error });
+        throw error;
+      },
+    ) as T;
   }
 
   /** The store, each of its calls refused once the fence is closed, and each answer that comes after. */
@@ -517,8 +525,11 @@ export class Checkpointer {
    * its last tick; null when its last tick held. Readiness reads it beside its host's own view (T169, review r5).
    */
   get standing(): string | null {
-    return this.stalled ?? (this.closed ? 'this checkpointer was closed' : this.refused);
+    return this.stalled ?? (this.closed ? 'this checkpointer was closed' : (this.refused ?? this.thrown));
   }
+
+  /** Why its last tick threw, whichever tick it was, a change's or its host's; null once one ends well (review r6). */
+  private thrown: string | null = null;
 
   /** The newest pair the signer signed and the database holds. */
   get pair(): { pair: Pair; notes: PairNotes } {
@@ -670,8 +681,13 @@ export class Checkpointer {
         this.stalled ??= `a tick ran past ${Math.round(this.until - t0)} ms in its ${this.phase}: the database stalled under it`;
         this.closed = true;
         void this.fence.close(this.stalled);
-      }).catch((error: unknown) => {
-        throw error instanceof TimedOut ? new Stalled(this.stalled!) : error;
+      }).then((t) => {
+        this.thrown = null;
+        return t;
+      }, (error: unknown) => {
+        const thrown = error instanceof TimedOut ? new Stalled(this.stalled!) : error;
+        this.thrown = `a checkpoint failed: ${(thrown as Error).message}`;
+        throw thrown;
       });
     });
     this.queued = run;
